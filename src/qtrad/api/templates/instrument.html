@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% block title %}{{ detail.instrument.display_name }} · q-trad{% endblock %}
+{% block content %}
+<h1>{{ detail.instrument.display_name }}</h1>
+<p><code>{{ detail.instrument.instrument_id }}</code></p>
+<section class="grid">
+  <div class="card"><div class="muted">Bid</div><strong>{{ detail.instrument.bid or "—" }}</strong></div>
+  <div class="card"><div class="muted">Ask</div><strong>{{ detail.instrument.ask or "—" }}</strong></div>
+  <div class="card"><div class="muted">Quality</div><strong>{{ detail.instrument.quality or "NO DATA" }}</strong></div>
+  <div class="card"><div class="muted">As of</div><strong>{{ detail.instrument.quote_event_time or "—" }}</strong></div>
+</section>
+<h2>Recent one-minute bars</h2>
+<table>
+  <thead><tr><th>Start</th><th>Basis</th><th>O</th><th>H</th><th>L</th><th>C</th><th>Revision</th><th>Source</th></tr></thead>
+  <tbody>
+    {% for bar in detail.bars %}
+    <tr>
+      <td>{{ bar.interval_start }}</td><td>{{ bar.basis }}</td>
+      <td>{{ bar.open }}</td><td>{{ bar.high }}</td><td>{{ bar.low }}</td><td>{{ bar.close }}</td>
+      <td>{{ bar.revision }}</td><td>{{ bar.provenance }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>
+{% endblock %}

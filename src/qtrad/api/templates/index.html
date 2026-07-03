@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}q-trad data health{% endblock %}
+{% block content %}
+<h1>Data foundation</h1>
+<p class="muted">Read-only operational view. Values include their source time and quality.</p>
+<div hx-get="/console/overview" hx-trigger="every 5s" hx-swap="innerHTML">
+{% include "_overview.html" %}
+</div>
+{% endblock %}

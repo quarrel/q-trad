@@ -1,0 +1,76 @@
+# Implemented architecture
+
+**Status:** data foundation implemented; credential-dependent IG verification pending.
+
+This document describes implemented reality, not the complete aspiration in `PREPLAN.md`.
+
+## System boundary
+
+The current deployment is one modular Python application with several command roles and one PostgreSQL instance. Parquet files form the research data store.
+
+```mermaid
+flowchart LR
+    SRC["Fixture or IG demo"] --> ADAPTER["Market-data adapter"]
+    ADAPTER --> RAW["Raw audit record"]
+    RAW --> NORMALISE["Canonical normalisation"]
+    NORMALISE --> EVENTS["Canonical event store"]
+    EVENTS --> BARS["One-minute bar builder"]
+    EVENTS --> PROJ["Operational projections"]
+    BARS --> EVENTS
+    EVENTS --> EXPORT["Parquet exporter"]
+    EXPORT --> REPLAY["Deterministic replay"]
+    PROJ --> API["Read-only API"]
+    API --> CONSOLE["Operator console"]
+```
+
+## Dependency direction
+
+```text
+domain ← ports ← application ← adapters/runtime/API
+```
+
+- `domain`: immutable values and deterministic transformations.
+- `ports`: provider-agnostic I/O contracts.
+- `application`: ingestion, bar, replay, projection and export workflows.
+- `adapters`: IG, PostgreSQL, fixtures and Parquet.
+- `runtime/API`: configuration, composition, commands and read-only presentation.
+
+Only these data-phase packages exist. Strategy, allocation, risk and execution
+packages are intentionally absent.
+
+## Data stores
+
+- PostgreSQL `raw` schema: redacted provider input.
+- PostgreSQL `canonical` schema: immutable domain events.
+- PostgreSQL `reference` schema: instrument and provider-listing projections.
+- PostgreSQL `read_model` schema: rebuildable quote, bar, health and gap views.
+- PostgreSQL `ops` schema: runs, quotas, checkpoints and manifests.
+- Parquet filesystem: versioned research/replay datasets.
+
+Raw messages and their canonical event or quarantine result are committed in
+one PostgreSQL transaction. Each canonical stream uses optimistic versions and
+an advisory transaction lock. Projection checkpoints advance in the same
+transaction as event projection.
+
+## Market-data semantics
+
+- Quotes preserve provider event time and q-trad receive time.
+- One-minute intervals are UTC and half-open: `[start, end)`.
+- Bid, ask and midpoint bars are separate.
+- Midpoint samples require bid and ask timestamps within five seconds.
+- A five-second watermark closes a bar.
+- Late samples create a later revision.
+- Missing prices are not forward-filled.
+- A healthy-stream silence over two minutes creates a gap event.
+- IG historical bars retain `IG_HISTORICAL` provenance.
+
+## Public surfaces
+
+- Standard-library CLI under `python -m qtrad`.
+- Read-only FastAPI endpoints under `/api/v1`.
+- Jinja/HTMX operator console at `/`.
+- No order, fill, position or broker-execution interface.
+
+## Safety boundary
+
+Only IG demo market-data surfaces are in scope. There is no canonical order port, broker execution adapter or live IG endpoint.

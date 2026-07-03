@@ -1,0 +1,21 @@
+<section class="grid">
+  {% for name, value in system.counts.items() %}
+  <div class="card"><div class="muted">{{ name }}</div><strong>{{ value or 0 }}</strong></div>
+  {% endfor %}
+</section>
+<h2>Instruments</h2>
+<table>
+  <thead><tr><th>Instrument</th><th>Bid</th><th>Ask</th><th>Quality</th><th>As of</th><th>Listing</th></tr></thead>
+  <tbody>
+    {% for item in instruments %}
+    <tr>
+      <td><a href="/console/instruments/{{ item.instrument_id }}">{{ item.display_name }}</a><br><code>{{ item.instrument_id }}</code></td>
+      <td>{{ item.bid if item.bid is not none else "—" }}</td>
+      <td>{{ item.ask if item.ask is not none else "—" }}</td>
+      <td><span class="badge {{ (item.quality or 'STALE')|lower }}">{{ item.quality or "NO DATA" }}</span></td>
+      <td>{{ item.quote_event_time or "—" }}</td>
+      <td>{{ item.external_id or "unmapped" }}</td>
+    </tr>
+    {% endfor %}
+  </tbody>
+</table>

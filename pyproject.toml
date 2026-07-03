@@ -1,0 +1,63 @@
+[project]
+name = "q-trad"
+version = "0.1.0"
+description = "Broker-neutral intraday trading data foundation"
+readme = "README.md"
+requires-python = ">=3.13,<3.14"
+dependencies = [
+    "alembic>=1.16,<2",
+    "asyncpg>=0.30,<1",
+    "fastapi>=0.116,<1",
+    "jinja2>=3.1,<4",
+    "polars>=1.31,<2",
+    "psycopg[binary]>=3.2,<4",
+    "pydantic>=2.11,<3",
+    "pydantic-settings>=2.10,<3",
+    "sqlalchemy>=2.0,<3",
+    "trading-ig>=0.0.24,<0.1",
+    "uvicorn>=0.35,<1",
+]
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28,<1",
+    "hypothesis>=6.135,<7",
+    "pyright>=1.1.402,<2",
+    "pytest>=8.4,<9",
+    "pytest-asyncio>=1.0,<2",
+    "ruff>=0.12,<1",
+]
+
+[project.scripts]
+qtrad = "qtrad.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/qtrad"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.pyright]
+include = ["src", "tests"]
+exclude = ["src/qtrad/adapters/ig"]
+pythonVersion = "3.13"
+typeCheckingMode = "standard"
+strict = ["src/qtrad/domain", "src/qtrad/ports", "src/qtrad/application"]
+venvPath = "."
+venv = ".venv"
+
+[tool.coverage.run]
+source = ["qtrad"]

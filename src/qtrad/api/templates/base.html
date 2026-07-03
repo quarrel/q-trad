@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en-GB">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{% block title %}q-trad{% endblock %}</title>
+    <script src="https://unpkg.com/htmx.org@2.0.4"></script>
+    <style>
+      :root { color-scheme: dark; font-family: system-ui, sans-serif; }
+      body { margin: 0; background: #101418; color: #e7edf2; }
+      header, main { max-width: 1200px; margin: auto; padding: 1rem 1.5rem; }
+      header { display: flex; justify-content: space-between; align-items: center; }
+      a { color: #7fc8ff; text-decoration: none; }
+      table { width: 100%; border-collapse: collapse; background: #171d22; }
+      th, td { padding: .6rem; border-bottom: 1px solid #303942; text-align: left; }
+      .badge { padding: .2rem .45rem; border-radius: .25rem; background: #274860; }
+      .stale, .gapped, .degraded { background: #714d14; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit,minmax(210px,1fr)); gap: 1rem; }
+      .card { background: #171d22; padding: 1rem; border: 1px solid #303942; border-radius: .4rem; }
+      .muted { color: #9ba8b3; }
+      code { color: #c7e6ff; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <a href="/"><strong>q-trad</strong></a>
+      <span class="badge">DATA ONLY · IG_DEMO</span>
+    </header>
+    <main>{% block content %}{% endblock %}</main>
+  </body>
+</html>

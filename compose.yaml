@@ -1,0 +1,51 @@
+services:
+  db:
+    image: postgres:18
+    environment:
+      POSTGRES_DB: qtrad
+      POSTGRES_USER: qtrad
+      POSTGRES_PASSWORD: qtrad-dev-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qtrad -d qtrad"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    volumes:
+      - qtrad-postgres:/var/lib/postgresql
+
+  app:
+    image: qtrad-app:local
+    build:
+      context: .
+    profiles: ["tools"]
+    environment: &app_environment
+      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad
+      QTRAD_RESEARCH_ROOT: /app/data/research
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./data:/app/data
+
+  api:
+    image: qtrad-app:local
+    build:
+      context: .
+    command: ["python", "-m", "qtrad", "api", "--host", "0.0.0.0", "--port", "8000"]
+    environment: *app_environment
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "${QTRAD_API_PORT:-8080}:8000"
+    volumes:
+      - ./data:/app/data
+
+volumes:
+  qtrad-postgres:
