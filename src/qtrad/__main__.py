@@ -51,6 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     ingest = subparsers.add_parser("ingest", help="run IG demo ingestion")
     ingest.add_argument("--environment", choices=["ig-demo"], default="ig-demo")
+    ingest.add_argument("--max-seconds", type=float)
 
     backfill = subparsers.add_parser("backfill", help="bounded IG demo backfill")
     backfill.add_argument("--max-points", type=int, default=1000)
@@ -86,7 +87,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "instruments" and args.instrument_command == "sync":
         asyncio.run(_sync_instruments(settings))
     elif args.command == "ingest":
-        asyncio.run(_ingest(settings))
+        asyncio.run(_ingest(settings, maximum_seconds=args.max_seconds))
     elif args.command == "backfill":
         asyncio.run(
             _backfill(
@@ -158,7 +159,9 @@ async def _sync_instruments(settings: Settings) -> None:
         await engine.dispose()
 
 
-async def _ingest(settings: Settings) -> None:
+async def _ingest(settings: Settings, *, maximum_seconds: float | None = None) -> None:
+    if maximum_seconds is not None and maximum_seconds <= 0:
+        raise ValueError("maximum seconds must be positive")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     adapter = _ig_adapter(settings)
@@ -177,11 +180,23 @@ async def _ingest(settings: Settings) -> None:
         await adapter.connect()
         await adapter.subscribe(listings)
         await store.record_adapter_health(await adapter.health())
-        async for record in adapter.records():
-            await service.process(record)
-            await service.advance_bars(SystemClock().now())
-            await store.record_adapter_health(await adapter.health())
-        terminal_status = "COMPLETED"
+        async def consume() -> None:
+            async for record in adapter.records():
+                await service.process(record)
+                await service.advance_bars(SystemClock().now())
+                await store.record_adapter_health(await adapter.health())
+
+        if maximum_seconds is None:
+            await consume()
+            terminal_status = "COMPLETED"
+        else:
+            try:
+                async with asyncio.timeout(maximum_seconds):
+                    await consume()
+            except TimeoutError:
+                terminal_status = "STOPPED"
+            else:
+                terminal_status = "COMPLETED"
     except (KeyboardInterrupt, asyncio.CancelledError):
         terminal_status = "STOPPED"
     finally:
@@ -287,9 +302,14 @@ async def _export(settings: Settings) -> None:
     try:
         rows = await store.query(
             """
-            SELECT DISTINCT ON (instrument_id, basis, interval_start)
-                * FROM read_model.market_bars
-            ORDER BY instrument_id, basis, interval_start, revision DESC
+                SELECT DISTINCT ON (
+                    instrument_id, basis, interval_start, provenance,
+                    source_provider, source_environment, source_external_id
+                )
+                    * FROM read_model.market_bars
+                ORDER BY instrument_id, basis, interval_start, provenance,
+                         source_provider, source_environment, source_external_id,
+                         revision DESC
             """
         )
         bars = tuple(_bar_from_projection(row) for row in rows)

@@ -569,7 +569,10 @@ class PostgresAuditStore(AuditStore):
                         :provenance, :quality, :source_provider, :source_environment,
                         :source_external_id, :global_position
                     )
-                    ON CONFLICT (instrument_id, basis, interval_start, revision) DO NOTHING
+                    ON CONFLICT (
+                        instrument_id, basis, interval_start, revision,
+                        provenance, source_provider, source_environment, source_external_id
+                    ) DO NOTHING
                     """
                 ),
                 {

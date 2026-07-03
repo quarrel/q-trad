@@ -1,6 +1,7 @@
 # Implemented architecture
 
-**Status:** data foundation implemented; credential-dependent IG verification pending.
+**Status:** data foundation and IG PRICE streaming verified; historical backfill,
+resilience and operational soak pending.
 
 This document describes implemented reality, not the complete aspiration in `PREPLAN.md`.
 
@@ -63,6 +64,8 @@ transaction as event projection.
 - Missing prices are not forward-filled.
 - A healthy-stream silence over two minutes creates a gap event.
 - IG historical bars retain `IG_HISTORICAL` provenance.
+- Market-bar projection identity includes provenance and the complete source listing,
+  so overlapping quote-derived and historical series remain distinct.
 
 ## Public surfaces
 
@@ -74,3 +77,14 @@ transaction as event projection.
 ## Safety boundary
 
 Only IG demo market-data surfaces are in scope. There is no canonical order port, broker execution adapter or live IG endpoint.
+
+IG listing discovery remains fail-closed. Candidates must use the canonical
+instrument's quote currency, and the adapter validates an explicit standard-contract
+preference for each instrument rather than selecting a mini or alternate-currency
+contract from minimum size alone.
+
+The seven-instrument stream uses one Lightstreamer connection with seven
+`PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
+The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are
+required at the provider boundary but are removed from persisted subscription labels.
+Concurrent streaming connections for the same IG API key are an operational safety violation.

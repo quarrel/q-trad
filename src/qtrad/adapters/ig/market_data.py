@@ -37,6 +37,15 @@ from qtrad.ports.market_data import BackfillRequest, MarketDataRecord
 
 LOGGER = logging.getLogger(__name__)
 _ROLLING_EXPIRIES = {"-", "DFB", "DAILY", "CASH", "ROLLING"}
+_PREFERRED_EPICS = {
+    InstrumentId("fx:aud-usd"): "CS.D.AUDUSD.CFD.IP",
+    InstrumentId("fx:eur-usd"): "CS.D.EURUSD.CFD.IP",
+    InstrumentId("fx:usd-jpy"): "CS.D.USDJPY.CFD.IP",
+    InstrumentId("fx:gbp-usd"): "CS.D.GBPUSD.CFD.IP",
+    InstrumentId("index:australia-200"): "IX.D.ASX.IFD.IP",
+    InstrumentId("index:us-500"): "IX.D.SPTRD.IFD.IP",
+    InstrumentId("index:ftse-100"): "IX.D.FTSE.CFD.IP",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -73,7 +82,9 @@ class IgDemoMarketDataAdapter:
         self._config = config
         self._clock = clock
         self._service: Any = None
-        self._stream_service: Any = None
+        self._session_details: Mapping[str, Any] | None = None
+        self._stream_client: Any = None
+        self._stream_account_id: str | None = None
         self._subscriptions: list[Any] = []
         self._queue: asyncio.Queue[MarketDataRecord] = asyncio.Queue(
             maxsize=config.queue_capacity
@@ -101,17 +112,18 @@ class IgDemoMarketDataAdapter:
                 acc_number=self._config.account_id,
                 use_rate_limiter=True,
             )
-            await asyncio.to_thread(self._service.create_session)
+            session_details = await asyncio.to_thread(self._service.create_session)
+            self._session_details = _single_record(session_details)
             self._status = HealthStatus.HEALTHY
         except Exception:
             self._status = HealthStatus.DISCONNECTED
             raise
 
     async def disconnect(self) -> None:
-        if self._stream_service is not None:
-            client = getattr(self._stream_service, "ls_client", None)
-            if client is not None:
-                await asyncio.to_thread(client.disconnect)
+        if self._stream_client is not None:
+            for subscription in self._subscriptions:
+                await asyncio.to_thread(self._stream_client.unsubscribe, subscription)
+            await asyncio.to_thread(self._stream_client.disconnect)
         if self._service is not None:
             try:
                 await asyncio.to_thread(self._service.logout)
@@ -119,7 +131,9 @@ class IgDemoMarketDataAdapter:
                 LOGGER.warning("ig_logout_failed", exc_info=True)
         self._subscriptions.clear()
         self._service = None
-        self._stream_service = None
+        self._session_details = None
+        self._stream_client = None
+        self._stream_account_id = None
         self._status = HealthStatus.STOPPED
 
     async def discover_listings(
@@ -134,7 +148,11 @@ class IgDemoMarketDataAdapter:
                 response = await asyncio.to_thread(self._service.search_markets, alias)
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
-                    if not epic or epic in by_epic:
+                    if (
+                        not epic
+                        or epic in by_epic
+                        or not _search_row_can_match(search_row, instrument)
+                    ):
                         continue
                     detail_response = await asyncio.to_thread(
                         self._service.fetch_market_by_epic, epic
@@ -144,7 +162,11 @@ class IgDemoMarketDataAdapter:
                     if candidate is not None:
                         by_epic[epic] = candidate
 
-            candidate = _select_candidate(tuple(by_epic.values()), instrument)
+            candidate = _select_candidate(
+                tuple(by_epic.values()),
+                instrument,
+                preferred_epic=_PREFERRED_EPICS[instrument_id],
+            )
             metadata_json = json.dumps(
                 candidate.metadata, sort_keys=True, separators=(",", ":")
             )
@@ -165,23 +187,61 @@ class IgDemoMarketDataAdapter:
 
     async def subscribe(self, listings: Sequence[ProviderListing]) -> None:
         self._require_connected()
-        from trading_ig.lightstreamer import Subscription
-        from trading_ig.stream import IGStreamService
+        from lightstreamer.client import (
+            LightstreamerClient,
+            Subscription,
+            SubscriptionListener,
+        )
 
-        if self._stream_service is None:
-            self._stream_service = IGStreamService(self._service)
-            await asyncio.to_thread(self._stream_service.create_session)
+        adapter = self
+
+        class PriceListener(SubscriptionListener):
+            def __init__(self, epic: str) -> None:
+                self._epic = epic
+
+            def onItemUpdate(self, update: Any) -> None:
+                adapter._on_update(self._epic, update)
+
+        if self._stream_client is None:
+            if self._session_details is None:
+                raise RuntimeError("IG REST session details are unavailable")
+            endpoint = _string(self._session_details, "lightstreamerEndpoint")
+            account_id = (
+                _string(self._session_details, "currentAccountId") or self._config.account_id
+            )
+            cst = self._service.session.headers.get("CST")
+            security_token = self._service.session.headers.get("X-SECURITY-TOKEN")
+            if not endpoint or not account_id or not cst or not security_token:
+                raise RuntimeError("IG REST session lacks Lightstreamer connection details")
+            self._stream_account_id = account_id
+            self._stream_client = LightstreamerClient(endpoint, None)
+            self._stream_client.connectionDetails.setUser(account_id)
+            self._stream_client.connectionDetails.setPassword(
+                f"CST-{cst}|XST-{security_token}"
+            )
+            await asyncio.to_thread(self._stream_client.connect)
+        if self._stream_account_id is None:
+            raise RuntimeError("IG streaming account identifier is unavailable")
 
         for listing in listings:
             epic = listing.listing_id.external_id
             self._listings_by_epic[epic] = listing
             subscription = Subscription(
                 mode="MERGE",
-                items=[f"MARKET:{epic}"],
-                fields=["UTM", "BID", "OFFER", "MARKET_STATE"],
+                items=[f"PRICE:{self._stream_account_id}:{epic}"],
+                fields=[
+                    "TIMESTAMP",
+                    "BIDPRICE1",
+                    "ASKPRICE1",
+                    "BIDSIZE1",
+                    "ASKSIZE1",
+                    "DLG_FLAG",
+                    "DELAY",
+                ],
             )
-            subscription.addlistener(_Listener(self, epic))
-            await asyncio.to_thread(self._stream_service.ls_client.subscribe, subscription)
+            subscription.setDataAdapter("Pricing")
+            subscription.addListener(PriceListener(epic))
+            await asyncio.to_thread(self._stream_client.subscribe, subscription)
             self._subscriptions.append(subscription)
 
     async def records(self) -> AsyncIterator[MarketDataRecord]:
@@ -231,35 +291,43 @@ class IgDemoMarketDataAdapter:
         received = self._clock.now()
         raw = {
             field: update.getValue(field)
-            for field in ("UTM", "BID", "OFFER", "MARKET_STATE")
+            for field in (
+                "TIMESTAMP",
+                "BIDPRICE1",
+                "ASKPRICE1",
+                "BIDSIZE1",
+                "ASKSIZE1",
+                "DLG_FLAG",
+                "DELAY",
+            )
             if update.getValue(field) is not None
         }
         state = self._field_state.setdefault(epic, {})
         state.update({key: str(value) for key, value in raw.items()})
-        utm = state.get("UTM")
+        timestamp = state.get("TIMESTAMP")
         digest = hashlib.sha256(
             json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
         ).hexdigest()[:16]
-        deduplication_key = f"{epic}:{utm or 'missing'}:{digest}"
+        deduplication_key = f"{epic}:{timestamp or 'missing'}:{digest}"
         quote: MarketQuote | None = None
         error_code: str | None = None
         error_detail: str | None = None
         try:
-            if utm is None:
-                raise ValueError("IG streaming update has no UTM timestamp")
-            event_time = datetime.fromtimestamp(int(utm) / 1000, tz=UTC)
+            if timestamp is None:
+                raise ValueError("IG PRICE update has no TIMESTAMP")
+            event_time = datetime.fromtimestamp(int(timestamp) / 1000, tz=UTC)
             side_times = self._side_times.setdefault(epic, {})
-            if "BID" in raw:
+            if "BIDPRICE1" in raw:
                 side_times["BID"] = event_time
-            if "OFFER" in raw:
+            if "ASKPRICE1" in raw:
                 side_times["OFFER"] = event_time
-            bid = _decimal_or_none(state.get("BID"))
-            ask = _decimal_or_none(state.get("OFFER"))
+            bid = _decimal_or_none(state.get("BIDPRICE1"))
+            ask = _decimal_or_none(state.get("ASKPRICE1"))
             listing = self._listings_by_epic[epic]
-            market_state = state.get("MARKET_STATE", "")
+            dealing_flag = state.get("DLG_FLAG", "").strip().upper()
             quality = (
                 DataQuality.HEALTHY
-                if market_state.upper() in {"TRADEABLE", "OPEN"}
+                if dealing_flag in {"DEAL", "DEALNOEDIT"}
                 else DataQuality.PARTIAL
             )
             quote = MarketQuote(
@@ -269,10 +337,12 @@ class IgDemoMarketDataAdapter:
                 received_time=received,
                 bid=bid,
                 ask=ask,
+                bid_size=_decimal_or_none(state.get("BIDSIZE1")),
+                ask_size=_decimal_or_none(state.get("ASKSIZE1")),
                 bid_time=side_times.get("BID"),
                 ask_time=side_times.get("OFFER"),
                 quality=quality,
-                source_sequence=utm,
+                source_sequence=timestamp,
             )
         except (KeyError, TypeError, ValueError) as error:
             error_code = "IG_NORMALISATION_FAILED"
@@ -284,7 +354,7 @@ class IgDemoMarketDataAdapter:
         record = MarketDataRecord(
             provider="ig",
             environment="demo",
-            subscription=f"MARKET:{epic}",
+            subscription=f"PRICE:{epic}",
             deduplication_key=deduplication_key,
             received_time=received,
             raw_payload=serialised_raw,
@@ -305,17 +375,6 @@ class IgDemoMarketDataAdapter:
     def _require_connected(self) -> None:
         if self._service is None or self._status is not HealthStatus.HEALTHY:
             raise RuntimeError("IG demo adapter is not connected")
-
-
-class _Listener:
-    def __init__(self, adapter: IgDemoMarketDataAdapter, epic: str) -> None:
-        self._adapter = adapter
-        self._epic = epic
-
-    def onItemUpdate(self, update: Any) -> None:
-        self._adapter._on_update(self._epic, update)
-
-
 def _records(value: Any) -> list[Mapping[str, Any]]:
     if value is None:
         return []
@@ -381,8 +440,23 @@ def _candidate(
     )
 
 
+def _search_row_can_match(search_row: Mapping[str, Any], instrument: Instrument) -> bool:
+    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    instrument_type = (_string(search_row, "instrumentType") or "").upper()
+    expiry = (_string(search_row, "expiry") or "").upper()
+    market_status = (_string(search_row, "marketStatus") or "").upper()
+    return (
+        (not instrument_type or instrument_type == expected_type)
+        and (not expiry or expiry in _ROLLING_EXPIRIES)
+        and market_status not in {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+    )
+
+
 def _select_candidate(
-    candidates: Sequence[_Candidate], instrument: Instrument
+    candidates: Sequence[_Candidate],
+    instrument: Instrument,
+    *,
+    preferred_epic: str | None = None,
 ) -> _Candidate:
     expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
     matches = [
@@ -390,13 +464,21 @@ def _select_candidate(
         for candidate in candidates
         if candidate.instrument_type.upper() == expected_type
         and candidate.expiry.upper() in _ROLLING_EXPIRIES
-        and candidate.market_status.upper()
-        not in {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+        and candidate.market_status.upper() not in {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+        and candidate.currency.upper() == instrument.quote_currency.upper()
     ]
     if not matches:
         raise RuntimeError(
             f"no tradeable rolling IG demo listing for {instrument.instrument_id}"
         )
+    if preferred_epic is not None:
+        preferred = [candidate for candidate in matches if candidate.epic == preferred_epic]
+        if len(preferred) != 1:
+            raise RuntimeError(
+                f"preferred IG demo listing {preferred_epic} was not returned "
+                f"for {instrument.instrument_id}"
+            )
+        return preferred[0]
     smallest = min(item.minimum_deal_size for item in matches)
     selected = [item for item in matches if item.minimum_deal_size == smallest]
     if len(selected) != 1:

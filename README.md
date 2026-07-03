@@ -42,9 +42,18 @@ docker compose run --rm app python -m qtrad instruments sync
 docker compose run --rm app python -m qtrad ingest --environment ig-demo
 ```
 
-Instrument synchronisation fails closed if IG returns no unique rolling/cash
-listing for a canonical instrument. Review the candidate report rather than
-hard-coding an unverified EPIC.
+For a bounded smoke run that closes the broker session and finalises run tracking:
+
+```bash
+docker compose run --rm app python -m qtrad ingest --environment ig-demo --max-seconds 60
+```
+
+Ingestion carries all seven `PRICE` subscriptions on one Lightstreamer connection.
+Do not run concurrent ingestion processes for the same IG API key.
+
+Instrument synchronisation validates the configured standard-contract preference,
+canonical quote currency and rolling/cash metadata for every instrument. It fails
+closed if a preferred listing is missing or invalid.
 
 Bounded backfill and research export are separate commands:
 

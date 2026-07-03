@@ -88,13 +88,19 @@ class OperatorQueries:
     ) -> list[dict[str, Any]]:
         return await self._store.query(
             """
-            SELECT DISTINCT ON (instrument_id, basis, interval_start)
-                instrument_id, basis, interval_start, interval_end,
-                open, high, low, close, sample_count, revision,
-                provenance, quality, global_position
-            FROM read_model.market_bars
-            WHERE (:instrument_id IS NULL OR instrument_id = :instrument_id)
-            ORDER BY instrument_id, basis, interval_start DESC, revision DESC
+                SELECT DISTINCT ON (
+                    instrument_id, basis, interval_start, provenance,
+                    source_provider, source_environment, source_external_id
+                )
+                    instrument_id, basis, interval_start, interval_end,
+                    open, high, low, close, sample_count, revision,
+                    provenance, quality, source_provider, source_environment,
+                    source_external_id, global_position
+                FROM read_model.market_bars
+                WHERE (:instrument_id IS NULL OR instrument_id = :instrument_id)
+                ORDER BY instrument_id, basis, interval_start DESC, provenance,
+                         source_provider, source_environment, source_external_id,
+                         revision DESC
             LIMIT :limit
             """,
             {"instrument_id": instrument_id, "limit": limit},

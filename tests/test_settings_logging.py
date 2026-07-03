@@ -4,7 +4,7 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from qtrad.runtime.logging import JsonFormatter
+from qtrad.runtime.logging import JsonFormatter, configure_logging
 from qtrad.runtime.settings import Settings
 
 
@@ -26,3 +26,13 @@ def test_logging_redacts_secret_named_fields() -> None:
     record.api_key = "secret"
     payload = json.loads(JsonFormatter().format(record))
     assert payload["api_key"] == "[REDACTED]"
+
+
+def test_trading_ig_info_logs_are_suppressed() -> None:
+    logger = logging.getLogger("trading_ig")
+    original_level = logger.level
+    try:
+        configure_logging("INFO")
+        assert logger.level == logging.WARNING
+    finally:
+        logger.setLevel(original_level)

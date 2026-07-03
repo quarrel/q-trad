@@ -30,12 +30,12 @@ A work package is `DONE` only when:
 |---|---|---|
 | WP0 — documentation and repository scaffold | DONE | image built; migration and static checks passed |
 | WP1 — canonical domain and ports | DONE | core tests and strict type checks passed |
-| WP2 — PostgreSQL audit spine | IN PROGRESS | integration passed before latest additions; full rerun pending |
+| WP2 — PostgreSQL audit spine | DONE | migration 0002 applied; full PostgreSQL suite passed |
 | WP3 — fixture adapter, bars and replay | DONE | deterministic Parquet/replay hash verified |
-| WP4 — IG demo adapter | BLOCKED | implementation present; credentials and smoke test pending |
+| WP4 — IG demo adapter | IN PROGRESS | PRICE smoke passed; reconnect/backoff hardening pending |
 | WP5 — backfill and research data | IN PROGRESS | export/replay verified; live backfill pending |
-| WP6 — API and operator console | IN PROGRESS | API contracts passed; port fix needs startup verification |
-| WP7 — failure testing and soak | BLOCKED | requires credentials and elapsed operational time |
+| WP6 — API and operator console | DONE | API and rendered console returned HTTP 200 |
+| WP7 — failure testing and soak | IN PROGRESS | credentials verified; resilience work and 24-hour soak pending |
 
 ## WP0 — documentation and scaffold
 
@@ -73,7 +73,11 @@ A work package is `DONE` only when:
 - Wrap `trading-ig` behind canonical ports.
 - Support demo authentication, metadata/history and Lightstreamer prices only.
 - Bound queues and implement reconnect, refresh, backoff, quota and staleness state.
+- Use one Lightstreamer connection for all seven subscriptions; never run concurrent
+  streaming connections for the same API key.
 - Discover provider listings from configured aliases and validate all metadata.
+- Require the canonical quote currency and select the validated standard contract
+  preference for each instrument.
 - Fail closed on ambiguity.
 - Reject production URLs and expose no order API.
 
@@ -100,7 +104,10 @@ per_instrument_points =
 ## WP7 — hardening and soak
 
 - Test duplicates, reordering, malformed/partial updates, precision, DST, quotas, disconnects, database interruption, queue saturation, restarts, secret redaction and production-route rejection.
-- Run IG demo ingestion for at least 24 hours and until an active session for Australia 200, FTSE 100 and US 500 has been observed.
+- Run all seven starting instruments continuously for at least 24 hours:
+  AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100.
+- Keep all seven subscriptions on one Lightstreamer connection.
+- Ensure the soak includes an active session for Australia 200, FTSE 100 and US 500.
 - Force one reconnect and one application restart.
 
 ## Public commands
@@ -109,6 +116,7 @@ per_instrument_points =
 python -m qtrad db upgrade
 python -m qtrad instruments sync
 python -m qtrad ingest --environment ig-demo
+python -m qtrad ingest --environment ig-demo --max-seconds 60
 python -m qtrad backfill --max-points 1000
 python -m qtrad research export
 python -m qtrad replay --manifest PATH
@@ -120,9 +128,18 @@ python -m qtrad api
 
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
-- Current framework-independent suite: 25 passed.
-- Docker Python 3.13/PostgreSQL 18 suite before the final persistence additions: 25 passed.
-- PostgreSQL 18 migration applied successfully.
+- Current PostgreSQL-backed suite: 35 passed.
+- PostgreSQL 18 migrations 0001 and 0002 applied successfully.
 - Atomic ingestion, duplicate suppression, stream conflicts, projection rebuild and read-only API were exercised against PostgreSQL.
+- IG demo authentication passed.
+- IG discovery now filters irrelevant search results before detail requests.
+- Initial discovery stopped fail-closed on ambiguous USD/JPY and FTSE 100 variants.
+- The operator selected standard rather than mini or alternate-currency contracts;
+  all seven preferred listings were then validated and persisted.
+- The API health endpoint and rendered operator console returned HTTP 200 on a configurable
+  local port.
+- A bounded all-seven PRICE streaming smoke persisted 537 raw updates and seven healthy
+  latest-quote projections, then finalised its run as `STOPPED`.
 - Parquet manifest `85570db93ecb060eb3da6105` replayed to SHA-256 `85570db93ecb060eb3da61054b56b28a1befe8e4ee5f6aef53ddbfa9270f9ef1`.
-- Credential-gated tests and the 24-hour soak remain pending and must not be reported as passed.
+- Historical backfill, reconnect/backoff hardening and the 24-hour soak remain pending
+  and must not be reported as passed.
