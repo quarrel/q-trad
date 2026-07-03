@@ -303,7 +303,15 @@ For later live submission, persist the approved order command and an outbox/disp
 - **State owned:** dataset versions, partitions, lineage, quality results and feature definitions.
 - **Failure modes:** silent mutation, partition overlap, leakage, mixed schemas, missing lineage.
 - **Implement now:** local Parquet partitioned by provider/data type/instrument/date, queried with DuckDB or Polars; manifest hashes and coverage reports.
-- **Stub/open:** object storage, catalog service and licensed third-party history.
+- **Stub/open:** object storage, catalog service, licensed third-party history and
+  candle-outlier detection.
+
+**OPEN:** detect implausible candle spikes before datasets are approved for backtesting.
+The quality result should retain enough tick-level lineage to identify whether a minute's
+high or low came from a single anomalous tick rather than sustained prices. Detection
+must not rewrite raw capture or canonical events. If normalised data is later justified,
+publish it as a separate versioned derived dataset with the detection rule, affected
+observations and source lineage recorded in its manifest.
 
 ### 5.6 Instrument master and symbol mapping
 
