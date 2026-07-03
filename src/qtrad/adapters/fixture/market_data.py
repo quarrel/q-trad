@@ -63,7 +63,5 @@ class FixtureMarketDataAdapter:
             environment=BrokerEnvironment.NONE,
             status=HealthStatus.HEALTHY if self._connected else HealthStatus.STOPPED,
             observed_at=now,
-            last_message_at=max(
-                (record.received_time for record in self._records), default=None
-            ),
+            last_message_at=max((record.received_time for record in self._records), default=None),
         )

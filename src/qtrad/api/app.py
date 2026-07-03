@@ -11,8 +11,8 @@ from fastapi.responses import HTMLResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from qtrad.adapters.postgres.queries import OperatorQueries
 from qtrad.adapters.postgres.store import PostgresAuditStore
-from qtrad.application.queries import OperatorQueries
 from qtrad.runtime.settings import Settings
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")

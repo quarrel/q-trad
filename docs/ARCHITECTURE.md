@@ -32,12 +32,14 @@ domain ← ports ← application ← adapters/runtime/API
 
 - `domain`: immutable values and deterministic transformations.
 - `ports`: provider-agnostic I/O contracts.
-- `application`: ingestion, bar, replay, projection and export workflows.
-- `adapters`: IG, PostgreSQL, fixtures and Parquet.
+- `application`: ingestion, bar, gap, quota and replay workflows.
+- `adapters`: IG, PostgreSQL persistence and read-model queries, fixtures and Parquet.
 - `runtime/API`: configuration, composition, commands and read-only presentation.
 
 Only these data-phase packages exist. Strategy, allocation, risk and execution
 packages are intentionally absent.
+Automated architecture tests enforce that domain, ports and application modules do not
+reverse this dependency direction.
 
 ## Data stores
 

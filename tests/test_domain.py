@@ -42,8 +42,9 @@ def test_quote_enforces_utc_spread_and_decimal_precision() -> None:
     assert quote.ask is not None
     assert quote.bid is not None
     assert quote.ask - quote.bid == Decimal("0.002")
+    field_name = "bid"
     with pytest.raises(FrozenInstanceError):
-        quote.bid = Decimal("1")  # type: ignore[misc]
+        setattr(quote, field_name, Decimal("1"))
 
 
 def test_quote_rejects_naive_time_and_crossed_market() -> None:

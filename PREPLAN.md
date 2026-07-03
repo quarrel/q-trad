@@ -1427,7 +1427,7 @@ For the first developer run, roles 1–4 may run in one process profile. The mod
 | Operator console | Jinja/HTMX + Plotly initially | One deployable Python-first UI with adequate drill-down. |
 | Metrics | Prometheus client + structured logs; optional Grafana | Infrastructure health; domain facts remain queryable events. |
 | Tests | pytest, Hypothesis, time-machine/freezegun equivalent, testcontainers | Example, property, clock and real-database contract testing. |
-| Static quality | Ruff, Pyright or mypy, pre-commit | Fast, enforceable checks. |
+| Static quality | Ruff, Pyright and ty | Fast, enforceable checks with two independent type checkers. |
 | Local deployment | Docker Compose for PostgreSQL and optional app profiles | Reproducible without microservice theatre. |
 | IG connectivity | `trading-ig` behind an adapter, subject to spike | Useful seed, replaceable and unofficial. |
 | Future IBKR | `ib_async` spike; retain alternative path | Modern async API, but no early dependency. |

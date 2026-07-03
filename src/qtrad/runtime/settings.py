@@ -8,14 +8,10 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(
-        env_prefix="QTRAD_", env_file=".env", extra="ignore"
-    )
+    model_config = SettingsConfigDict(env_prefix="QTRAD_", env_file=".env", extra="ignore")
 
     database_url: str = "postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad"
-    migration_database_url: str = (
-        "postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad"
-    )
+    migration_database_url: str = "postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad"
     research_root: Path = Path("data/research")
     log_level: str = "INFO"
 
@@ -35,8 +31,7 @@ class Settings(BaseSettings):
     def require_ig_credentials(self) -> tuple[str, str, str, str | None]:
         if self.ig_username is None or self.ig_password is None or self.ig_api_key is None:
             raise ValueError(
-                "IG demo requires QTRAD_IG_USERNAME, QTRAD_IG_PASSWORD "
-                "and QTRAD_IG_API_KEY"
+                "IG demo requires QTRAD_IG_USERNAME, QTRAD_IG_PASSWORD and QTRAD_IG_API_KEY"
             )
         return (
             self.ig_username,

@@ -35,9 +35,7 @@ class ParquetResearchStore:
         configuration_hash: str,
         metadata: Mapping[str, JsonValue],
     ) -> ResearchManifest:
-        return await asyncio.to_thread(
-            self._write_bars_sync, bars, configuration_hash, metadata
-        )
+        return await asyncio.to_thread(self._write_bars_sync, bars, configuration_hash, metadata)
 
     def _write_bars_sync(
         self,
@@ -56,14 +54,10 @@ class ParquetResearchStore:
         )
         groups: dict[tuple[str, str], list[MarketBar]] = defaultdict(list)
         for bar in ordered:
-            groups[(str(bar.instrument_id), bar.interval_start.date().isoformat())].append(
-                bar
-            )
+            groups[(str(bar.instrument_id), bar.interval_start.date().isoformat())].append(bar)
 
         serialised = [_bar_row(bar) for bar in ordered]
-        semantic_bytes = json.dumps(
-            serialised, sort_keys=True, separators=(",", ":")
-        ).encode()
+        semantic_bytes = json.dumps(serialised, sort_keys=True, separators=(",", ":")).encode()
         content_hash = hashlib.sha256(semantic_bytes).hexdigest()
         manifest_id = content_hash[:24]
         files: list[str] = []
@@ -87,9 +81,7 @@ class ParquetResearchStore:
             created_at=created_at,
             schema_version=1,
             row_count=len(ordered),
-            minimum_event_time=min(
-                (bar.interval_start for bar in ordered), default=None
-            ),
+            minimum_event_time=min((bar.interval_start for bar in ordered), default=None),
             maximum_event_time=max((bar.interval_end for bar in ordered), default=None),
             content_sha256=content_hash,
             configuration_hash=configuration_hash,
@@ -176,14 +168,10 @@ def _manifest_row(manifest: ResearchManifest) -> dict[str, object]:
         "schema_version": manifest.schema_version,
         "row_count": manifest.row_count,
         "minimum_event_time": (
-            manifest.minimum_event_time.isoformat()
-            if manifest.minimum_event_time
-            else None
+            manifest.minimum_event_time.isoformat() if manifest.minimum_event_time else None
         ),
         "maximum_event_time": (
-            manifest.maximum_event_time.isoformat()
-            if manifest.maximum_event_time
-            else None
+            manifest.maximum_event_time.isoformat() if manifest.maximum_event_time else None
         ),
         "content_sha256": manifest.content_sha256,
         "configuration_hash": manifest.configuration_hash,

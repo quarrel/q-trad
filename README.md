@@ -23,9 +23,12 @@ Docker and Docker Compose are the supported local runtime.
 docker compose build app
 docker compose up -d db
 docker compose run --rm app python -m qtrad db upgrade
-docker compose run --rm app pytest
-docker compose run --rm app ruff check .
+docker compose run --rm app coverage run -m pytest
+docker compose run --rm app coverage report
+docker compose run --rm app ruff format --check src tests
+docker compose run --rm app ruff check src tests
 docker compose run --rm app pyright
+docker compose run --rm app ty check
 docker compose up api
 ```
 

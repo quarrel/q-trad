@@ -45,3 +45,12 @@ Do not scaffold future strategy/execution packages until their phase begins.
 - PostgreSQL integration tests use the real supported major version.
 - Replay tests compare stable hashes, not incidental row order.
 - Credential-gated and soak tests are never reported as passing when skipped.
+- Measure branch coverage against the PostgreSQL-backed suite; use it to find untested
+  operational paths rather than as a substitute for scenario quality.
+
+## Static quality gates
+
+- `uv run ruff format --check src tests`
+- `uv run ruff check src tests`
+- `uv run pyright`
+- `uv run ty check`

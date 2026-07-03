@@ -303,9 +303,7 @@ class PostgresAuditStore(AuditStore):
             raw_id, _ = await self._capture(connection, message)
             return raw_id
 
-    async def quarantine(
-        self, message: RawMessage, *, reason_code: str, detail: str
-    ) -> int:
+    async def quarantine(self, message: RawMessage, *, reason_code: str, detail: str) -> int:
         async with self._engine.begin() as connection:
             raw_id, _ = await self._capture(connection, message)
             await connection.execute(
@@ -338,9 +336,7 @@ class PostgresAuditStore(AuditStore):
             )
             return int(result.scalar_one())
 
-    async def append(
-        self, event: EventEnvelope, *, expected_stream_version: int
-    ) -> EventEnvelope:
+    async def append(self, event: EventEnvelope, *, expected_stream_version: int) -> EventEnvelope:
         async with self._engine.begin() as connection:
             return await self._append(
                 connection,
@@ -368,9 +364,7 @@ class PostgresAuditStore(AuditStore):
             )
             return AppendResult(event=persisted, raw_record_id=raw_id, duplicate=False)
 
-    async def _capture(
-        self, connection: AsyncConnection, message: RawMessage
-    ) -> tuple[int, bool]:
+    async def _capture(self, connection: AsyncConnection, message: RawMessage) -> tuple[int, bool]:
         safe_payload = _redact_mapping(message.payload)
         payload_text = json.dumps(safe_payload, sort_keys=True, separators=(",", ":"))
         payload_hash = hashlib.sha256(payload_text.encode()).hexdigest()
@@ -730,8 +724,7 @@ def _redact_mapping(value: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
             redacted[key] = _redact_mapping(item)
         elif isinstance(item, list):
             redacted[key] = [
-                _redact_mapping(child) if isinstance(child, dict) else child
-                for child in item
+                _redact_mapping(child) if isinstance(child, dict) else child for child in item
             ]
         else:
             redacted[key] = item

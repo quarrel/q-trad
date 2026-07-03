@@ -50,9 +50,7 @@ class AuditStore(RawCapture, EventStore, Protocol):
         expected_stream_version: int,
     ) -> AppendResult: ...
 
-    async def quarantine(
-        self, message: RawMessage, *, reason_code: str, detail: str
-    ) -> int: ...
+    async def quarantine(self, message: RawMessage, *, reason_code: str, detail: str) -> int: ...
 
 
 @dataclass(frozen=True, slots=True)

@@ -1,4 +1,4 @@
-"""Read-model queries for the operator API."""
+"""PostgreSQL read-model queries for the operator API."""
 
 from typing import Any
 
@@ -20,9 +20,7 @@ class OperatorQueries:
                 (SELECT MAX(global_position) FROM canonical.events) AS global_position
             """
         )
-        health = await self._store.query(
-            "SELECT * FROM ops.adapter_health ORDER BY adapter_name"
-        )
+        health = await self._store.query("SELECT * FROM ops.adapter_health ORDER BY adapter_name")
         checkpoints = await self._store.query(
             "SELECT * FROM ops.projection_checkpoints ORDER BY projection_name"
         )
@@ -112,9 +110,7 @@ class OperatorQueries:
         )
 
     async def runs(self) -> list[dict[str, Any]]:
-        return await self._store.query(
-            "SELECT * FROM ops.runs ORDER BY started_at DESC LIMIT 100"
-        )
+        return await self._store.query("SELECT * FROM ops.runs ORDER BY started_at DESC LIMIT 100")
 
     async def manifests(self) -> list[dict[str, Any]]:
         return await self._store.query(

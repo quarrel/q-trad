@@ -20,9 +20,7 @@ class _Bucket:
     instrument_id: InstrumentId
     listing_id: ProviderListingId
     interval_start: datetime
-    samples: dict[PriceBasis, list[tuple[datetime, Decimal]]] = field(
-        default_factory=lambda: {}
-    )
+    samples: dict[PriceBasis, list[tuple[datetime, Decimal]]] = field(default_factory=lambda: {})
     revisions: dict[PriceBasis, int] = field(default_factory=lambda: {})
     closed: bool = False
 

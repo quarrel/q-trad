@@ -20,12 +20,14 @@ dependencies = [
 
 [dependency-groups]
 dev = [
+    "coverage>=7.15,<8",
     "httpx>=0.28,<1",
     "hypothesis>=6.135,<7",
     "pyright>=1.1.402,<2",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.0,<2",
     "ruff>=0.12,<1",
+    "ty>=0.0.56,<0.1",
 ]
 
 [project.scripts]
@@ -60,4 +62,8 @@ venvPath = "."
 venv = ".venv"
 
 [tool.coverage.run]
+branch = true
 source = ["qtrad"]
+
+[tool.coverage.report]
+show_missing = true

@@ -48,7 +48,7 @@ A work package is `DONE` only when:
 
 - Implement the seven canonical instrument IDs and effective provider listings.
 - Implement immutable quotes, bars, modes, health, gaps, runs and event envelopes.
-- Define `Clock`, `RawCapture`, `EventStore`, `MarketDataAdapter`, `ResearchStore` and projection ports.
+- Define `Clock`, `RawCapture`, `EventStore`, `MarketDataAdapter` and `ResearchStore` ports.
 - Enforce UTC, `Decimal`, immutability and strict dependency direction.
 
 ## WP2 — PostgreSQL audit spine
@@ -129,7 +129,12 @@ python -m qtrad api
 
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
-- Current PostgreSQL-backed suite: 48 passed.
+- Current `ty` check: passed.
+- Current PostgreSQL-backed suite: 68 passed.
+- PostgreSQL-backed branch coverage: 65% overall; replay is 100%, bars 95%, gaps 89%,
+  ingestion 82%, the IG adapter 56% and CLI orchestration 18%.
+- Architecture tests enforce the declared dependency direction; PostgreSQL read-model
+  queries reside in the PostgreSQL adapter rather than the application layer.
 - PostgreSQL 18 migrations 0001 and 0002 applied successfully.
 - Atomic ingestion, duplicate suppression, stream conflicts, projection rebuild and read-only API were exercised against PostgreSQL.
 - IG demo authentication passed.

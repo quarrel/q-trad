@@ -94,8 +94,7 @@ def test_discovery_fails_closed_on_ambiguous_candidates() -> None:
 
 def test_discovery_rejects_dated_or_closed_candidates() -> None:
     instrument = next(
-        item for item in INITIAL_INSTRUMENTS
-        if str(item.instrument_id) == "index:australia-200"
+        item for item in INITIAL_INSTRUMENTS if str(item.instrument_id) == "index:australia-200"
     )
     with pytest.raises(RuntimeError, match="no tradeable"):
         _select_candidate(

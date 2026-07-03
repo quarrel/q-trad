@@ -30,9 +30,7 @@ def to_json_value(value: object) -> JsonValue:
     if isinstance(value, (InstrumentId, RunId)):
         return str(value)
     if is_dataclass(value) and not isinstance(value, type):
-        return to_json_value(
-            {field.name: getattr(value, field.name) for field in fields(value)}
-        )
+        return to_json_value({field.name: getattr(value, field.name) for field in fields(value)})
     if isinstance(value, Mapping):
         mapping = cast(Mapping[object, object], value)
         return {str(key): to_json_value(item) for key, item in mapping.items()}
@@ -104,5 +102,5 @@ class EventEnvelope:
             causation_id=causation_id,
             producer=producer,
             producer_version=producer_version,
-            payload=cast(dict[str, JsonValue], serialised),
+            payload=serialised,
         )

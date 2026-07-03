@@ -49,14 +49,21 @@
 - A forced reconnect resumed all seven subscriptions with one connection and no dropped
   records; a subsequent fresh-process restart also restored all seven subscriptions.
 - The final 222-row research export replayed deterministically.
+- The pre-soak architecture review moved PostgreSQL read-model SQL out of the application
+  layer, added dependency-direction tests and removed an unused projection port.
+- Ruff formatting was applied consistently across source and tests; Ruff, Pyright and
+  `ty` are reproducible development gates.
 
 ## Verification evidence
 
 - Ruff: passed on current source.
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
-- Current PostgreSQL-backed suite: 48 passed, including Hypothesis OHLC invariants,
-  lifecycle/failure cases
-  and four database/API integration tests.
+- `ty`: passed on current source.
+- Current PostgreSQL-backed suite: 68 passed, including dependency-direction checks,
+  Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
+  four database/API integration tests.
+- PostgreSQL-backed branch coverage: 65% overall. Core deterministic workflows range
+  from 82% to 100%; the main gaps are CLI orchestration at 18% and the IG adapter at 56%.
 - Migrations `0001` and `0002`: applied successfully to PostgreSQL 18.
 - The API health endpoint and rendered console returned HTTP 200.
 - Research export: 222 bars, manifest `b2b9d83c91a0fb97fc1e245e`.
@@ -64,6 +71,9 @@
 
 ## Pending verification
 
+- Add focused automated coverage for CLI dispatch/orchestration and remaining provider
+  error branches after the soak; the live smoke evidence covers the critical happy path
+  but does not replace those tests.
 - Run AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100
   continuously for at least 24 hours.
 - Ensure that run covers active Australia 200, FTSE 100 and US 500 sessions.
