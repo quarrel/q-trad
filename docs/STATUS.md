@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-03
-**Current milestone:** IG historical backfill, resilience and operational soak
+**Current milestone:** 24-hour seven-instrument operational soak
 **State:** IN PROGRESS
 
 ## Completed
@@ -37,24 +37,32 @@
 - A 60-second all-seven streaming smoke persisted 537 raw updates, produced healthy
   latest quotes for every instrument and terminated cleanly.
 - Persisted subscription labels exclude the account identifier.
+- The adapter retries REST authentication with bounded exponential backoff and refreshes
+  the REST session before rebuilding a terminally disconnected or stale stream.
+- Queue saturation drops and counts the newest update without blocking the Lightstreamer
+  callback thread, then recovers health after the queue drains.
+- A conservative live backfill produced bid, ask and midpoint bars for all seven
+  instruments with `IG_HISTORICAL` provenance and correct one-minute bounds.
+- An overlapping live backfill appended zero duplicate canonical events.
+- IG's provider-reported remaining historical allowance is persisted separately from the
+  operator-supplied allowance.
+- A forced reconnect resumed all seven subscriptions with one connection and no dropped
+  records; a subsequent fresh-process restart also restored all seven subscriptions.
+- The final 222-row research export replayed deterministically.
 
 ## Verification evidence
 
 - Ruff: passed on current source.
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
-- Current PostgreSQL-backed suite: 35 passed, including Hypothesis OHLC invariants
-  and three database/API integration tests.
+- Current PostgreSQL-backed suite: 48 passed, including Hypothesis OHLC invariants,
+  lifecycle/failure cases
+  and four database/API integration tests.
 - Migrations `0001` and `0002`: applied successfully to PostgreSQL 18.
 - The API health endpoint and rendered console returned HTTP 200.
-- Research export: 3 integration bars, manifest `85570db93ecb060eb3da6105`.
-- Replay hash: `85570db93ecb060eb3da61054b56b28a1befe8e4ee5f6aef53ddbfa9270f9ef1`.
+- Research export: 222 bars, manifest `b2b9d83c91a0fb97fc1e245e`.
+- Replay hash: `b2b9d83c91a0fb97fc1e245e108afa67128d72e58a3243d62b6f02a350158ee8`.
 
 ## Pending verification
-
-- Run credential-gated IG historical backfill.
-- Implement and verify reconnect, refresh and backoff behaviour before the soak.
-
-## External gates
 
 - Run AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100
   continuously for at least 24 hours.

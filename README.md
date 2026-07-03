@@ -51,6 +51,13 @@ docker compose run --rm app python -m qtrad ingest --environment ig-demo --max-s
 Ingestion carries all seven `PRICE` subscriptions on one Lightstreamer connection.
 Do not run concurrent ingestion processes for the same IG API key.
 
+To exercise a bounded token refresh and stream rebuild:
+
+```bash
+docker compose run --rm app python -m qtrad ingest --environment ig-demo \
+  --max-seconds 90 --force-reconnect-after-seconds 20
+```
+
 Instrument synchronisation validates the configured standard-contract preference,
 canonical quote currency and rolling/cash metadata for every instrument. It fails
 closed if a preferred listing is missing or invalid.
@@ -63,8 +70,9 @@ docker compose run --rm app python -m qtrad research export
 docker compose run --rm app python -m qtrad replay --manifest /app/data/research/manifests/MANIFEST.json
 ```
 
-The backfill command treats the supplied allowance as operator-reported and
-reserves at least 20%. Verify the current IG allowance before invoking it.
+The backfill command treats the supplied allowance as operator-reported and reserves
+at least 20%. It records IG's provider-reported remaining allowance separately when
+the response supplies it. Verify the current IG allowance before invoking it.
 
 ## Documentation
 

@@ -8,7 +8,8 @@ import asyncio
 import hashlib
 import json
 import logging
-from collections.abc import AsyncIterator, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -55,10 +56,25 @@ class IgDemoConfig:
     api_key: str
     account_id: str | None = None
     queue_capacity: int = 10_000
+    connect_attempts: int = 3
+    reconnect_attempts: int = 4
+    initial_backoff_seconds: float = 5.0
+    maximum_backoff_seconds: float = 30.0
+    stale_after_seconds: float = 30.0
 
     @property
     def account_type(self) -> str:
         return "DEMO"
+
+    def __post_init__(self) -> None:
+        if self.queue_capacity <= 0:
+            raise ValueError("queue capacity must be positive")
+        if self.connect_attempts <= 0 or self.reconnect_attempts <= 0:
+            raise ValueError("connection attempts must be positive")
+        if self.initial_backoff_seconds <= 0 or self.maximum_backoff_seconds <= 0:
+            raise ValueError("backoff intervals must be positive")
+        if self.stale_after_seconds <= 0:
+            raise ValueError("stale threshold must be positive")
 
 
 @dataclass(frozen=True, slots=True)
@@ -78,62 +94,64 @@ class IgDemoMarketDataAdapter:
     environment = "demo"
     version = "0.1.0"
 
-    def __init__(self, config: IgDemoConfig, clock: Clock) -> None:
+    def __init__(
+        self,
+        config: IgDemoConfig,
+        clock: Clock,
+        *,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        service_factory: Callable[[IgDemoConfig], Any] | None = None,
+    ) -> None:
         self._config = config
         self._clock = clock
+        self._sleep = sleep
+        self._service_factory = service_factory
         self._service: Any = None
         self._session_details: Mapping[str, Any] | None = None
         self._stream_client: Any = None
         self._stream_account_id: str | None = None
         self._subscriptions: list[Any] = []
-        self._queue: asyncio.Queue[MarketDataRecord] = asyncio.Queue(
-            maxsize=config.queue_capacity
-        )
+        self._queue: asyncio.Queue[MarketDataRecord] = asyncio.Queue(maxsize=config.queue_capacity)
         self._listings_by_epic: dict[str, ProviderListing] = {}
         self._field_state: dict[str, dict[str, str]] = {}
         self._side_times: dict[str, dict[str, datetime]] = {}
         self._last_message_at: datetime | None = None
+        self._stream_connected_at: datetime | None = None
         self._status = HealthStatus.STOPPED
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._desired_listings: tuple[ProviderListing, ...] = ()
+        self._reconnecting = False
+        self._reconnect_task: asyncio.Task[None] | None = None
+        self._stopping = False
+        self._reconnect_count = 0
+        self._dropped_records = 0
+        self._queue_saturated = False
+        self._historical_allowance_remaining: int | None = None
 
     async def connect(self) -> None:
-        if self._status is not HealthStatus.STOPPED:
+        if self._status in {
+            HealthStatus.STARTING,
+            HealthStatus.HEALTHY,
+            HealthStatus.DEGRADED,
+        }:
             return
+        self._stopping = False
         self._status = HealthStatus.STARTING
         self._loop = asyncio.get_running_loop()
-        try:
-            from trading_ig.rest import IGService
-
-            self._service = IGService(
-                self._config.username,
-                self._config.password,
-                self._config.api_key,
-                acc_type=self._config.account_type,
-                acc_number=self._config.account_id,
-                use_rate_limiter=True,
-            )
-            session_details = await asyncio.to_thread(self._service.create_session)
-            self._session_details = _single_record(session_details)
-            self._status = HealthStatus.HEALTHY
-        except Exception:
-            self._status = HealthStatus.DISCONNECTED
-            raise
+        await self._establish_rest_session()
 
     async def disconnect(self) -> None:
-        if self._stream_client is not None:
-            for subscription in self._subscriptions:
-                await asyncio.to_thread(self._stream_client.unsubscribe, subscription)
-            await asyncio.to_thread(self._stream_client.disconnect)
-        if self._service is not None:
-            try:
-                await asyncio.to_thread(self._service.logout)
-            except Exception:
-                LOGGER.warning("ig_logout_failed", exc_info=True)
-        self._subscriptions.clear()
-        self._service = None
-        self._session_details = None
-        self._stream_client = None
-        self._stream_account_id = None
+        self._stopping = True
+        reconnect_task = self._reconnect_task
+        if reconnect_task is not None and reconnect_task is not asyncio.current_task():
+            reconnect_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await reconnect_task
+        await self._close_stream()
+        await self._logout_rest_session()
+        self._desired_listings = ()
+        self._reconnecting = False
+        self._reconnect_task = None
         self._status = HealthStatus.STOPPED
 
     async def discover_listings(
@@ -167,9 +185,7 @@ class IgDemoMarketDataAdapter:
                 instrument,
                 preferred_epic=_PREFERRED_EPICS[instrument_id],
             )
-            metadata_json = json.dumps(
-                candidate.metadata, sort_keys=True, separators=(",", ":")
-            )
+            metadata_json = json.dumps(candidate.metadata, sort_keys=True, separators=(",", ":"))
             listing = ProviderListing(
                 listing_id=ProviderListingId("ig", "demo", candidate.epic),
                 instrument_id=instrument_id,
@@ -187,7 +203,23 @@ class IgDemoMarketDataAdapter:
 
     async def subscribe(self, listings: Sequence[ProviderListing]) -> None:
         self._require_connected()
+        if not listings:
+            raise ValueError("at least one listing is required")
+        self._desired_listings = tuple(listings)
+        await self._open_stream(self._desired_listings)
+
+    async def force_reconnect(self) -> None:
+        """Refresh the REST session and rebuild the single desired stream."""
+        if not self._desired_listings:
+            raise RuntimeError("subscribe before forcing a reconnect")
+        if self._reconnecting:
+            raise RuntimeError("IG stream reconnect is already in progress")
+        self._reconnecting = True
+        await self._reconnect_stream()
+
+    async def _open_stream(self, listings: Sequence[ProviderListing]) -> None:
         from lightstreamer.client import (
+            ClientListener,
             LightstreamerClient,
             Subscription,
             SubscriptionListener,
@@ -202,26 +234,30 @@ class IgDemoMarketDataAdapter:
             def onItemUpdate(self, update: Any) -> None:
                 adapter._on_update(self._epic, update)
 
-        if self._stream_client is None:
-            if self._session_details is None:
-                raise RuntimeError("IG REST session details are unavailable")
-            endpoint = _string(self._session_details, "lightstreamerEndpoint")
-            account_id = (
-                _string(self._session_details, "currentAccountId") or self._config.account_id
-            )
-            cst = self._service.session.headers.get("CST")
-            security_token = self._service.session.headers.get("X-SECURITY-TOKEN")
-            if not endpoint or not account_id or not cst or not security_token:
-                raise RuntimeError("IG REST session lacks Lightstreamer connection details")
-            self._stream_account_id = account_id
-            self._stream_client = LightstreamerClient(endpoint, None)
-            self._stream_client.connectionDetails.setUser(account_id)
-            self._stream_client.connectionDetails.setPassword(
-                f"CST-{cst}|XST-{security_token}"
-            )
-            await asyncio.to_thread(self._stream_client.connect)
-        if self._stream_account_id is None:
-            raise RuntimeError("IG streaming account identifier is unavailable")
+            def onSubscriptionError(self, code: int, message: str) -> None:
+                adapter._on_subscription_error(self._epic, code)
+
+        class StatusListener(ClientListener):
+            def onStatusChange(self, status: str) -> None:
+                adapter._on_stream_status(status)
+
+        if self._stream_client is not None:
+            raise RuntimeError("refusing to create a concurrent IG stream connection")
+        if self._session_details is None:
+            raise RuntimeError("IG REST session details are unavailable")
+        endpoint = _string(self._session_details, "lightstreamerEndpoint")
+        account_id = _string(self._session_details, "currentAccountId") or self._config.account_id
+        cst = self._service.session.headers.get("CST")
+        security_token = self._service.session.headers.get("X-SECURITY-TOKEN")
+        if not endpoint or not account_id or not cst or not security_token:
+            raise RuntimeError("IG REST session lacks Lightstreamer connection details")
+        self._stream_account_id = account_id
+        client = LightstreamerClient(endpoint, None)
+        self._stream_client = client
+        client.connectionDetails.setUser(account_id)
+        client.connectionDetails.setPassword(f"CST-{cst}|XST-{security_token}")
+        client.addListener(StatusListener())
+        await asyncio.to_thread(client.connect)
 
         for listing in listings:
             epic = listing.listing_id.external_id
@@ -241,13 +277,23 @@ class IgDemoMarketDataAdapter:
             )
             subscription.setDataAdapter("Pricing")
             subscription.addListener(PriceListener(epic))
-            await asyncio.to_thread(self._stream_client.subscribe, subscription)
+            await asyncio.to_thread(client.subscribe, subscription)
             self._subscriptions.append(subscription)
+        self._stream_connected_at = self._clock.now()
+        self._status = HealthStatus.HEALTHY
 
     async def records(self) -> AsyncIterator[MarketDataRecord]:
         self._require_connected()
         while self._status not in {HealthStatus.STOPPED, HealthStatus.DISCONNECTED}:
-            yield await self._queue.get()
+            try:
+                record = await asyncio.wait_for(self._queue.get(), timeout=1)
+                if self._queue_saturated:
+                    self._queue_saturated = False
+                    if not self._reconnecting:
+                        self._status = HealthStatus.HEALTHY
+                yield record
+            except TimeoutError:
+                self._check_staleness()
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
         self._require_connected()
@@ -255,9 +301,13 @@ class IgDemoMarketDataAdapter:
             self._service.fetch_historical_prices_by_epic_and_date_range,
             request.listing.listing_id.external_id,
             "MINUTE",
-            request.start.strftime("%Y-%m-%dT%H:%M:%S"),
-            request.end.strftime("%Y-%m-%dT%H:%M:%S"),
+            _historical_query_time(request.start),
+            _historical_query_time(request.end),
         )
+        allowance = _mapping(_mapping(response).get("allowance"))
+        remaining = _integer_or_none(allowance.get("remainingAllowance"))
+        if remaining is not None:
+            self._historical_allowance_remaining = remaining
         count = 0
         for row in _historical_rows(response):
             if count >= request.maximum_points:
@@ -269,22 +319,24 @@ class IgDemoMarketDataAdapter:
                 yield bar
             count += 1
 
+    @property
+    def historical_allowance_remaining(self) -> int | None:
+        return self._historical_allowance_remaining
+
     async def health(self) -> AdapterHealth:
+        self._check_staleness()
         status = self._status
         now = self._clock.now()
-        if (
-            status is HealthStatus.HEALTHY
-            and self._last_message_at is not None
-            and now - self._last_message_at > timedelta(seconds=30)
-        ):
-            status = HealthStatus.DEGRADED
         return AdapterHealth(
             adapter_name="ig-market-data",
             environment=BrokerEnvironment.IG_DEMO,
             status=status,
             observed_at=now,
             last_message_at=self._last_message_at,
-            detail="data only; production and order surfaces are unavailable",
+            detail=(
+                "data only; production and order surfaces are unavailable; "
+                f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}"
+            ),
         )
 
     def _on_update(self, epic: str, update: Any) -> None:
@@ -365,16 +417,198 @@ class IgDemoMarketDataAdapter:
         self._last_message_at = received
         if self._loop is None:
             raise RuntimeError("IG callback received before event loop registration")
-        future = asyncio.run_coroutine_threadsafe(self._queue.put(record), self._loop)
+        self._loop.call_soon_threadsafe(self._enqueue_record, record, epic)
+
+    def _enqueue_record(self, record: MarketDataRecord, epic: str) -> None:
         try:
-            future.result(timeout=5)
-        except TimeoutError:
+            self._queue.put_nowait(record)
+        except asyncio.QueueFull:
+            self._dropped_records += 1
+            self._queue_saturated = True
             self._status = HealthStatus.DEGRADED
-            LOGGER.error("ig_queue_blocked", extra={"epic": epic})
+            LOGGER.error(
+                "ig_queue_saturated",
+                extra={"epic": epic, "dropped_records": self._dropped_records},
+            )
+
+    def _check_staleness(self) -> None:
+        if self._status is not HealthStatus.HEALTHY or not self._desired_listings:
+            return
+        anchor = self._last_message_at or self._stream_connected_at
+        if anchor is None:
+            return
+        if self._clock.now() - anchor <= timedelta(seconds=self._config.stale_after_seconds):
+            return
+        self._status = HealthStatus.DEGRADED
+        LOGGER.warning("ig_stream_stale")
+        self._schedule_reconnect()
+
+    def _on_stream_status(self, status: str) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._handle_stream_status, status)
+
+    def _handle_stream_status(self, status: str) -> None:
+        normalised = status.upper()
+        if normalised.startswith("CONNECTED:"):
+            self._status = HealthStatus.HEALTHY
+        elif normalised == "DISCONNECTED:WILL-RETRY":
+            self._status = HealthStatus.DEGRADED
+        elif normalised == "DISCONNECTED" and not self._stopping:
+            self._status = HealthStatus.DEGRADED
+            self._schedule_reconnect()
+
+    def _on_subscription_error(self, epic: str, code: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._handle_subscription_error, epic, code)
+
+    def _handle_subscription_error(self, epic: str, code: int) -> None:
+        self._status = HealthStatus.DEGRADED
+        LOGGER.error("ig_subscription_error", extra={"epic": epic, "code": code})
+
+    def _schedule_reconnect(self) -> None:
+        if self._stopping or self._reconnecting or not self._desired_listings:
+            return
+        self._reconnecting = True
+        task = asyncio.create_task(self._reconnect_stream())
+        task.add_done_callback(self._reconnect_done)
+        self._reconnect_task = task
+
+    def _reconnect_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            LOGGER.error(
+                "ig_reconnect_exhausted",
+                extra={"error_type": type(error).__name__},
+            )
+
+    async def _reconnect_stream(self) -> None:
+        last_error: Exception | None = None
+        try:
+            for attempt in range(1, self._config.reconnect_attempts + 1):
+                try:
+                    await self._close_stream()
+                    await self._logout_rest_session()
+                    await self._establish_rest_session(attempts=1)
+                    await self._open_stream(self._desired_listings)
+                    self._reconnect_count += 1
+                    return
+                except asyncio.CancelledError:
+                    raise
+                except Exception as error:
+                    last_error = error
+                    self._status = HealthStatus.DEGRADED
+                    if attempt == self._config.reconnect_attempts:
+                        break
+                    delay = _backoff_seconds(self._config, attempt)
+                    LOGGER.warning(
+                        "ig_reconnect_retry",
+                        extra={
+                            "attempt": attempt,
+                            "delay_seconds": delay,
+                            "error_type": type(error).__name__,
+                        },
+                    )
+                    await self._sleep(delay)
+            self._status = HealthStatus.DISCONNECTED
+            if last_error is not None:
+                raise last_error
+        finally:
+            self._reconnecting = False
+            self._reconnect_task = None
+
+    async def _establish_rest_session(self, *, attempts: int | None = None) -> None:
+        maximum_attempts = attempts or self._config.connect_attempts
+        last_error: Exception | None = None
+        for attempt in range(1, maximum_attempts + 1):
+            try:
+                self._service = self._new_service()
+                session_details = await asyncio.to_thread(self._service.create_session)
+                self._session_details = _single_record(session_details)
+                self._status = HealthStatus.HEALTHY
+                return
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                last_error = error
+                await self._logout_rest_session()
+                if attempt == maximum_attempts:
+                    break
+                delay = _backoff_seconds(self._config, attempt)
+                LOGGER.warning(
+                    "ig_connect_retry",
+                    extra={
+                        "attempt": attempt,
+                        "delay_seconds": delay,
+                        "error_type": type(error).__name__,
+                    },
+                )
+                await self._sleep(delay)
+        self._status = HealthStatus.DISCONNECTED
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("IG session establishment failed")
+
+    def _new_service(self) -> Any:
+        if self._service_factory is not None:
+            return self._service_factory(self._config)
+        from trading_ig.rest import IGService
+
+        return IGService(
+            self._config.username,
+            self._config.password,
+            self._config.api_key,
+            acc_type=self._config.account_type,
+            acc_number=self._config.account_id,
+            use_rate_limiter=True,
+        )
+
+    async def _close_stream(self) -> None:
+        client = self._stream_client
+        subscriptions = tuple(self._subscriptions)
+        self._stream_client = None
+        self._stream_account_id = None
+        self._stream_connected_at = None
+        self._subscriptions.clear()
+        if client is None:
+            return
+        for subscription in subscriptions:
+            try:
+                await asyncio.to_thread(client.unsubscribe, subscription)
+            except Exception:
+                LOGGER.warning("ig_unsubscribe_failed")
+        try:
+            await asyncio.to_thread(client.disconnect)
+        except Exception:
+            LOGGER.warning("ig_stream_disconnect_failed")
+
+    async def _logout_rest_session(self) -> None:
+        service = self._service
+        self._service = None
+        self._session_details = None
+        if service is None:
+            return
+        try:
+            await asyncio.to_thread(service.logout)
+        except Exception:
+            LOGGER.warning("ig_logout_failed")
 
     def _require_connected(self) -> None:
-        if self._service is None or self._status is not HealthStatus.HEALTHY:
+        if self._service is None or self._status not in {
+            HealthStatus.HEALTHY,
+            HealthStatus.DEGRADED,
+        }:
             raise RuntimeError("IG demo adapter is not connected")
+
+
+def _backoff_seconds(config: IgDemoConfig, failed_attempt: int) -> float:
+    return min(
+        config.initial_backoff_seconds * (2 ** (failed_attempt - 1)),
+        config.maximum_backoff_seconds,
+    )
+
+
 def _records(value: Any) -> list[Mapping[str, Any]]:
     if value is None:
         return []
@@ -402,9 +636,7 @@ def _single_record(value: Any) -> Mapping[str, Any]:
     return records[0]
 
 
-def _candidate(
-    search_row: Mapping[str, Any], detail: Mapping[str, Any]
-) -> _Candidate | None:
+def _candidate(search_row: Mapping[str, Any], detail: Mapping[str, Any]) -> _Candidate | None:
     instrument = _mapping(detail.get("instrument"))
     snapshot = _mapping(detail.get("snapshot"))
     dealing_rules = _mapping(detail.get("dealingRules"))
@@ -418,21 +650,13 @@ def _candidate(
         return None
     return _Candidate(
         epic=epic,
-        name=(
-            _string(search_row, "instrumentName")
-            or _string(instrument, "name")
-            or epic
-        ),
+        name=(_string(search_row, "instrumentName") or _string(instrument, "name") or epic),
         instrument_type=(
-            _string(search_row, "instrumentType")
-            or _string(instrument, "type")
-            or ""
+            _string(search_row, "instrumentType") or _string(instrument, "type") or ""
         ),
         expiry=_string(search_row, "expiry") or _string(instrument, "expiry") or "",
         market_status=(
-            _string(search_row, "marketStatus")
-            or _string(snapshot, "marketStatus")
-            or ""
+            _string(search_row, "marketStatus") or _string(snapshot, "marketStatus") or ""
         ),
         currency=currency,
         minimum_deal_size=minimum,
@@ -468,9 +692,7 @@ def _select_candidate(
         and candidate.currency.upper() == instrument.quote_currency.upper()
     ]
     if not matches:
-        raise RuntimeError(
-            f"no tradeable rolling IG demo listing for {instrument.instrument_id}"
-        )
+        raise RuntimeError(f"no tradeable rolling IG demo listing for {instrument.instrument_id}")
     if preferred_epic is not None:
         preferred = [candidate for candidate in matches if candidate.epic == preferred_epic]
         if len(preferred) != 1:
@@ -483,14 +705,16 @@ def _select_candidate(
     selected = [item for item in matches if item.minimum_deal_size == smallest]
     if len(selected) != 1:
         epics = ", ".join(sorted(item.epic for item in selected))
-        raise RuntimeError(
-            f"ambiguous IG demo listings for {instrument.instrument_id}: {epics}"
-        )
+        raise RuntimeError(f"ambiguous IG demo listings for {instrument.instrument_id}: {epics}")
     return selected[0]
 
 
 def _historical_rows(value: Any) -> list[Mapping[str, Any]]:
     return _records(value)
+
+
+def _historical_query_time(value: datetime) -> str:
+    return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
 def _historical_time(row: Mapping[str, Any]) -> datetime | None:
@@ -566,6 +790,12 @@ def _decimal_or_none(value: Any) -> Decimal | None:
     if value in (None, ""):
         return None
     return Decimal(str(value))
+
+
+def _integer_or_none(value: Any) -> int | None:
+    if value in (None, ""):
+        return None
+    return int(str(value))
 
 
 def _currency(instrument: Mapping[str, Any]) -> str:

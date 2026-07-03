@@ -32,10 +32,10 @@ A work package is `DONE` only when:
 | WP1 — canonical domain and ports | DONE | core tests and strict type checks passed |
 | WP2 — PostgreSQL audit spine | DONE | migration 0002 applied; full PostgreSQL suite passed |
 | WP3 — fixture adapter, bars and replay | DONE | deterministic Parquet/replay hash verified |
-| WP4 — IG demo adapter | IN PROGRESS | PRICE smoke passed; reconnect/backoff hardening pending |
-| WP5 — backfill and research data | IN PROGRESS | export/replay verified; live backfill pending |
+| WP4 — IG demo adapter | DONE | reconnect/refresh/backoff and failure handling verified |
+| WP5 — backfill and research data | DONE | live backfill, quota, export and replay verified |
 | WP6 — API and operator console | DONE | API and rendered console returned HTTP 200 |
-| WP7 — failure testing and soak | IN PROGRESS | credentials verified; resilience work and 24-hour soak pending |
+| WP7 — failure testing and soak | IN PROGRESS | actionable hardening passed; 24-hour soak pending |
 
 ## WP0 — documentation and scaffold
 
@@ -117,6 +117,7 @@ python -m qtrad db upgrade
 python -m qtrad instruments sync
 python -m qtrad ingest --environment ig-demo
 python -m qtrad ingest --environment ig-demo --max-seconds 60
+python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-after-seconds 20
 python -m qtrad backfill --max-points 1000
 python -m qtrad research export
 python -m qtrad replay --manifest PATH
@@ -128,7 +129,7 @@ python -m qtrad api
 
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
-- Current PostgreSQL-backed suite: 35 passed.
+- Current PostgreSQL-backed suite: 48 passed.
 - PostgreSQL 18 migrations 0001 and 0002 applied successfully.
 - Atomic ingestion, duplicate suppression, stream conflicts, projection rebuild and read-only API were exercised against PostgreSQL.
 - IG demo authentication passed.
@@ -140,6 +141,17 @@ python -m qtrad api
   local port.
 - A bounded all-seven PRICE streaming smoke persisted 537 raw updates and seven healthy
   latest-quote projections, then finalised its run as `STOPPED`.
-- Parquet manifest `85570db93ecb060eb3da6105` replayed to SHA-256 `85570db93ecb060eb3da61054b56b28a1befe8e4ee5f6aef53ddbfa9270f9ef1`.
-- Historical backfill, reconnect/backoff hardening and the 24-hour soak remain pending
-  and must not be reported as passed.
+- Bounded exponential REST retries, fresh-session stream reconnect, stale-stream
+  detection, terminal disconnect handling and queue-saturation recovery passed
+  deterministic tests.
+- Live backfill returned five one-minute points for each instrument and persisted 105
+  bid/ask/midpoint bars with `IG_HISTORICAL` provenance; an overlapping rerun wrote
+  zero duplicate events.
+- A minimal follow-up persisted IG's provider-reported remaining historical allowance.
+- Parquet manifest `b2b9d83c91a0fb97fc1e245e` replayed 222 rows to SHA-256
+  `b2b9d83c91a0fb97fc1e245e108afa67128d72e58a3243d62b6f02a350158ee8`.
+- A forced live reconnect refreshed the REST session, retained one Lightstreamer
+  connection, resumed all seven subscriptions and reported zero dropped records.
+- A fresh-process restart then received 229 updates across all seven subscriptions and
+  terminated cleanly.
+- The elapsed 24-hour soak remains pending and must not be reported as passed.

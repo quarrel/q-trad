@@ -1,7 +1,7 @@
 # Implemented architecture
 
-**Status:** data foundation and IG PRICE streaming verified; historical backfill,
-resilience and operational soak pending.
+**Status:** data foundation, IG PRICE streaming, historical backfill and resilience
+verified; 24-hour operational soak pending.
 
 This document describes implemented reality, not the complete aspiration in `PREPLAN.md`.
 
@@ -88,3 +88,13 @@ The seven-instrument stream uses one Lightstreamer connection with seven
 The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are
 required at the provider boundary but are removed from persisted subscription labels.
 Concurrent streaming connections for the same IG API key are an operational safety violation.
+
+The adapter treats Lightstreamer's `DISCONNECTED:WILL-RETRY` as an in-client retry and
+does not create another connection. A terminal `DISCONNECTED` or a stale healthy stream
+closes the old client, refreshes the IG REST session and rebuilds one stream with bounded
+exponential backoff. Queue insertion is non-blocking; overflow is counted and reported
+as degraded health without blocking the provider callback.
+
+Historical requests use IG's v2 UTC date format. Each source, interval and price basis
+has a deterministic canonical stream identity, making overlapping backfills idempotent.
+Operator-supplied and provider-reported historical allowances are stored separately.

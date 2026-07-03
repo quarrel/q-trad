@@ -7,12 +7,19 @@ import httpx
 import pytest
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from qtrad.__main__ import _append_bar
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app, engine_from_app
 from qtrad.application.ingestion import IngestionService
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.market_data import MarketQuote
+from qtrad.domain.market_data import (
+    BarProvenance,
+    DataQuality,
+    MarketBar,
+    MarketQuote,
+    PriceBasis,
+)
 from qtrad.ports.market_data import MarketDataRecord
 from qtrad.runtime.settings import Settings
 
@@ -51,9 +58,7 @@ async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
         },
         quote=quote,
     )
-    service = IngestionService(
-        store, producer="integration-test", producer_version="1"
-    )
+    service = IngestionService(store, producer="integration-test", producer_version="1")
     first = await service.process(record)
     duplicate = await service.process(record)
     bar_events = await service.advance_bars(now + timedelta(minutes=1, seconds=5))
@@ -135,6 +140,47 @@ async def test_stream_version_conflict_fails_closed() -> None:
             ),
             expected_stream_version=0,
         )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_historical_bar_append_is_idempotent() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    await store.seed_instruments()
+    external_id = f"AUDUSD-HIST-{uuid4().hex}"
+    interval_start = datetime(2026, 7, 2, 9, 0, tzinfo=UTC)
+    bar = MarketBar(
+        instrument_id=InstrumentId("fx:aud-usd"),
+        basis=PriceBasis.BID,
+        interval_start=interval_start,
+        interval_end=interval_start + timedelta(minutes=1),
+        open=Decimal("0.65000"),
+        high=Decimal("0.65010"),
+        low=Decimal("0.64990"),
+        close=Decimal("0.65005"),
+        sample_count=1,
+        revision=1,
+        provenance=BarProvenance.IG_HISTORICAL,
+        source_listing_id=ProviderListingId("ig", "demo", external_id),
+        quality=DataQuality.HEALTHY,
+    )
+
+    first = await _append_bar(store, bar, received_time=interval_start)
+    duplicate = await _append_bar(store, bar, received_time=interval_start)
+
+    assert first is not None
+    assert duplicate is None
+    rows = await store.query(
+        """
+        SELECT count(*) AS event_count
+        FROM canonical.events
+        WHERE stream_id LIKE :stream_prefix
+        """,
+        {"stream_prefix": f"historical-bar:fx:aud-usd:BID:ig:demo:{external_id}:%"},
+    )
+    assert rows[0]["event_count"] == 1
     await engine.dispose()
 
 

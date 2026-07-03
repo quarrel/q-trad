@@ -5,6 +5,7 @@ import asyncio
 import json
 import os
 from collections.abc import Sequence
+from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -17,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from qtrad.adapters.clock import SystemClock
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.store import ParquetResearchStore
-from qtrad.adapters.postgres.store import PostgresAuditStore
+from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.quota import points_per_instrument
@@ -52,6 +53,7 @@ def build_parser() -> argparse.ArgumentParser:
     ingest = subparsers.add_parser("ingest", help="run IG demo ingestion")
     ingest.add_argument("--environment", choices=["ig-demo"], default="ig-demo")
     ingest.add_argument("--max-seconds", type=float)
+    ingest.add_argument("--force-reconnect-after-seconds", type=float)
 
     backfill = subparsers.add_parser("backfill", help="bounded IG demo backfill")
     backfill.add_argument("--max-points", type=int, default=1000)
@@ -65,9 +67,7 @@ def build_parser() -> argparse.ArgumentParser:
     replay.add_argument("--manifest", required=True)
 
     projections = subparsers.add_parser("projections", help="projection operations")
-    projection_sub = projections.add_subparsers(
-        dest="projection_command", required=True
-    )
+    projection_sub = projections.add_subparsers(dest="projection_command", required=True)
     projection_sub.add_parser("rebuild", help="rebuild projections from events")
 
     api = subparsers.add_parser("api", help="run the read-only operator API")
@@ -87,7 +87,13 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "instruments" and args.instrument_command == "sync":
         asyncio.run(_sync_instruments(settings))
     elif args.command == "ingest":
-        asyncio.run(_ingest(settings, maximum_seconds=args.max_seconds))
+        asyncio.run(
+            _ingest(
+                settings,
+                maximum_seconds=args.max_seconds,
+                force_reconnect_after_seconds=args.force_reconnect_after_seconds,
+            )
+        )
     elif args.command == "backfill":
         asyncio.run(
             _backfill(
@@ -159,9 +165,19 @@ async def _sync_instruments(settings: Settings) -> None:
         await engine.dispose()
 
 
-async def _ingest(settings: Settings, *, maximum_seconds: float | None = None) -> None:
+async def _ingest(
+    settings: Settings,
+    *,
+    maximum_seconds: float | None = None,
+    force_reconnect_after_seconds: float | None = None,
+) -> None:
     if maximum_seconds is not None and maximum_seconds <= 0:
         raise ValueError("maximum seconds must be positive")
+    if force_reconnect_after_seconds is not None:
+        if force_reconnect_after_seconds <= 0:
+            raise ValueError("forced reconnect interval must be positive")
+        if maximum_seconds is not None and force_reconnect_after_seconds >= maximum_seconds:
+            raise ValueError("forced reconnect must occur before maximum seconds")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     adapter = _ig_adapter(settings)
@@ -173,6 +189,8 @@ async def _ingest(settings: Settings, *, maximum_seconds: float | None = None) -
         started_at=SystemClock().now(),
     )
     terminal_status = "FAILED"
+    reconnect_task: asyncio.Task[None] | None = None
+    reconnect_error: Exception | None = None
     try:
         listings = await store.active_provider_listings()
         if len(listings) != len(INITIAL_INSTRUMENTS):
@@ -180,6 +198,16 @@ async def _ingest(settings: Settings, *, maximum_seconds: float | None = None) -
         await adapter.connect()
         await adapter.subscribe(listings)
         await store.record_adapter_health(await adapter.health())
+
+        async def force_reconnect() -> None:
+            assert force_reconnect_after_seconds is not None
+            await asyncio.sleep(force_reconnect_after_seconds)
+            await adapter.force_reconnect()
+            await store.record_adapter_health(await adapter.health())
+
+        if force_reconnect_after_seconds is not None:
+            reconnect_task = asyncio.create_task(force_reconnect())
+
         async def consume() -> None:
             async for record in adapter.records():
                 await service.process(record)
@@ -200,20 +228,35 @@ async def _ingest(settings: Settings, *, maximum_seconds: float | None = None) -
     except (KeyboardInterrupt, asyncio.CancelledError):
         terminal_status = "STOPPED"
     finally:
+        if reconnect_task is not None:
+            if reconnect_task.done():
+                try:
+                    reconnect_task.result()
+                except Exception as error:
+                    reconnect_error = error
+                    terminal_status = "FAILED"
+            else:
+                reconnect_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reconnect_task
         await adapter.disconnect()
-        await store.record_adapter_health(await adapter.health())
+        final_health = await adapter.health()
+        await store.record_adapter_health(final_health)
         await store.finish_run(
             run_id,
             status=terminal_status,
             finished_at=SystemClock().now(),
-            detail={},
+            detail={
+                "adapter_health": final_health.detail,
+                "forced_reconnect": force_reconnect_after_seconds is not None,
+            },
         )
         await engine.dispose()
+        if reconnect_error is not None:
+            raise reconnect_error
 
 
-async def _backfill(
-    settings: Settings, *, maximum_points: int, remaining_allowance: int
-) -> None:
+async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowance: int) -> None:
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     adapter = _ig_adapter(settings)
@@ -225,6 +268,7 @@ async def _backfill(
     )
     terminal_status = "FAILED"
     written = 0
+    received_points: set[tuple[str, datetime]] = set()
     try:
         listings = await store.active_provider_listings()
         if len(listings) != len(INITIAL_INSTRUMENTS):
@@ -255,37 +299,81 @@ async def _backfill(
                 maximum_points=points,
             )
             async for bar in adapter.backfill(request):
-                await _append_bar(store, bar, received_time=SystemClock().now())
-                written += 1
+                received_points.add((str(bar.source_listing_id), bar.interval_start))
+                event = await _append_bar(store, bar, received_time=SystemClock().now())
+                if event is not None:
+                    written += 1
+        provider_remaining = adapter.historical_allowance_remaining
+        if provider_remaining is not None:
+            await store.record_quota_state(
+                provider="ig",
+                environment="demo",
+                allowance_name="historical_points_weekly_provider_reported",
+                remaining=provider_remaining,
+                observed_at=SystemClock().now(),
+            )
         terminal_status = "COMPLETED"
-        print(json.dumps({"per_instrument_points": points, "bars_written": written}))
+        print(
+            json.dumps(
+                {
+                    "per_instrument_points": points,
+                    "points_received": len(received_points),
+                    "bars_written": written,
+                    "provider_remaining_allowance": provider_remaining,
+                }
+            )
+        )
     finally:
         await adapter.disconnect()
         await store.finish_run(
             run_id,
             status=terminal_status,
             finished_at=SystemClock().now(),
-            detail={"bars_written": written},
+            detail={
+                "bars_written": written,
+                "points_received": len(received_points),
+                "provider_remaining_allowance": adapter.historical_allowance_remaining,
+            },
         )
         await engine.dispose()
 
 
 async def _append_bar(
     store: PostgresAuditStore, bar: MarketBar, *, received_time: datetime
-) -> EventEnvelope:
-    stream_id = f"market-bar:{bar.instrument_id}:{bar.basis}"
+) -> EventEnvelope | None:
+    source = bar.source_listing_id
+    stream_id = (
+        f"historical-bar:{bar.instrument_id}:{bar.basis}:"
+        f"{source.provider}:{source.environment}:{source.external_id}:"
+        f"{bar.interval_start.isoformat()}"
+    )
     previous = await store.latest_stream_version(stream_id)
+    if previous:
+        rows = await store.query(
+            """
+            SELECT payload FROM canonical.events
+            WHERE stream_id = :stream_id AND stream_version = 1
+            """,
+            {"stream_id": stream_id},
+        )
+        payload = to_json_value(bar)
+        if len(rows) != 1 or rows[0]["payload"] != payload:
+            raise RuntimeError(f"historical bar conflict for {stream_id}")
+        return None
     event = EventEnvelope.create(
         stream_id=stream_id,
-        stream_version=previous + 1,
-        event_type="MarketBarClosed" if bar.revision == 1 else "MarketBarCorrected",
+        stream_version=1,
+        event_type="MarketBarClosed",
         event_time=bar.interval_end,
         received_time=received_time,
         producer="ig-demo-backfill",
         producer_version="0.1.0",
         payload=bar,
     )
-    return await store.append(event, expected_stream_version=previous)
+    try:
+        return await store.append(event, expected_stream_version=0)
+    except StreamVersionConflict:
+        return await _append_bar(store, bar, received_time=received_time)
 
 
 async def _export(settings: Settings) -> None:
@@ -357,11 +445,7 @@ async def _replay(settings: Settings, manifest_path: Path) -> None:
         if first_hash != second_hash:
             raise RuntimeError("replay hashes differ")
         terminal_status = "COMPLETED"
-        print(
-            json.dumps(
-                {"manifest_id": manifest_id, "rows": len(first), "sha256": first_hash}
-            )
-        )
+        print(json.dumps({"manifest_id": manifest_id, "rows": len(first), "sha256": first_hash}))
     finally:
         await audit.finish_run(
             run_id,
