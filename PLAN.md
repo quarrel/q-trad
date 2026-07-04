@@ -12,6 +12,13 @@ Deliver a deterministic, inspectable data path:
 
 The fixed universe is AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100.
 
+## Future-facing research record
+
+`RESEARCH-INTRADAY-STRATEGY.md` records a public-literature survey and prioritised
+research backlog for a later strategy phase. It does not admit strategy, allocation,
+risk, paper-execution or order implementation into the current data-only phase. This is a preliminary
+investigation and should not be treated as comprehensive.
+
 ## Completion rules
 
 Statuses are `NOT STARTED`, `IN PROGRESS`, `BLOCKED`, or `DONE`.
@@ -173,4 +180,7 @@ python -m qtrad api
   export/replay verification and the runtime freeze boundary.
 - The pre-soak rehearsal passed formatting, Ruff, Pyright, `ty`, all 86 PostgreSQL-backed
   tests, migration application and read-only health/system/instrument API checks.
+- The future-facing intraday-strategy research dossier records a recency-weighted public
+  evidence survey, validation standard, market-state assessment, risk review, source
+  ledger and prioritised experiment backlog without changing the current phase boundary.
 - The elapsed 24-hour soak remains pending and must not be reported as passed.

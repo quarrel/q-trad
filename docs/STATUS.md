@@ -61,6 +61,9 @@
 - The application and Dev Container use Debian Trixie base images. The Dev Container
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
+- A future-facing intraday-strategy research dossier now surveys public FX and
+  equity-index evidence, validation quality, market-state/regime research, adaptive risk,
+  reported success and candidate experiments. It changes no current implementation scope.
 
 ## Verification evidence
 
@@ -82,6 +85,8 @@
   the server shut down cleanly.
 - Pre-soak runbook and evidence template: prepared with objective pass/fail criteria,
   candidate freeze rules and reconnect/restart/export/replay evidence fields.
+- Intraday strategy research: initial recency-weighted survey completed with 40-source
+  ledger and explicit future research priorities.
 - Research export: 222 bars, manifest `b2b9d83c91a0fb97fc1e245e`.
 - Replay hash: `b2b9d83c91a0fb97fc1e245e108afa67128d72e58a3243d62b6f02a350158ee8`.
 
