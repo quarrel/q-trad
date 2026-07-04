@@ -71,21 +71,26 @@
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
-- Current PostgreSQL-backed suite: 68 passed, including dependency-direction checks,
+- Current PostgreSQL-backed suite: 86 passed, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
   four database/API integration tests.
-- PostgreSQL-backed branch coverage: 65% overall. Core deterministic workflows range
-  from 82% to 100%; the main gaps are CLI orchestration at 18% and the IG adapter at 56%.
+- PostgreSQL-backed branch coverage: 70% overall. Core deterministic workflows range
+  from 82% to 100%; CLI orchestration is 40% and the IG adapter is 61%.
 - Migrations `0001` and `0002`: applied successfully to PostgreSQL 18.
 - The API health endpoint and rendered console returned HTTP 200.
+- Pre-soak API rehearsal: health, system and instrument endpoints returned HTTP 200 and
+  the server shut down cleanly.
+- Pre-soak runbook and evidence template: prepared with objective pass/fail criteria,
+  candidate freeze rules and reconnect/restart/export/replay evidence fields.
 - Research export: 222 bars, manifest `b2b9d83c91a0fb97fc1e245e`.
 - Replay hash: `b2b9d83c91a0fb97fc1e245e108afa67128d72e58a3243d62b6f02a350158ee8`.
 
 ## Pending verification
 
-- Add focused automated coverage for CLI dispatch/orchestration and remaining provider
-  error branches after the soak; the live smoke evidence covers the critical happy path
-  but does not replace those tests.
+- Continue adding provider error-branch coverage after the soak where operational
+  evidence identifies risk; the focused pre-soak suite now covers CLI dispatch and the
+  highest-value deterministic authentication, reconnect, subscription and callback
+  failures.
 - Run AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100
   continuously for at least 24 hours.
 - Ensure that run covers active Australia 200, FTSE 100 and US 500 sessions.

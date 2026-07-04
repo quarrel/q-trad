@@ -122,6 +122,8 @@ the response supplies it. Verify the current IG allowance before invoking it.
 - [Agent instructions](AGENTS.md)
 - [Implementation plan](PLAN.md)
 - [Current status](docs/STATUS.md)
+- [Seven-instrument soak runbook](docs/SOAK_RUNBOOK.md)
+- [Soak evidence record](docs/SOAK_EVIDENCE.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Engineering rules](docs/ENGINEERING.md)
 - [Long-term preplan](PREPLAN.md)

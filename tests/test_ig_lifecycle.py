@@ -155,6 +155,31 @@ async def test_connect_retries_with_bounded_exponential_backoff() -> None:
 
 
 @pytest.mark.asyncio
+async def test_connect_exhaustion_disconnects_and_reraises_last_failure() -> None:
+    services = [
+        FakeService(failure=ConnectionError("first")),
+        FakeService(failure=ConnectionError("last")),
+    ]
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    adapter = IgDemoMarketDataAdapter(
+        config(connect_attempts=2),
+        MutableClock(),
+        sleep=sleep,
+        service_factory=lambda _: services.pop(0),
+    )
+
+    with pytest.raises(ConnectionError, match="last"):
+        await adapter.connect()
+
+    assert sleeps == [1]
+    assert (await adapter.health()).status is HealthStatus.DISCONNECTED
+
+
+@pytest.mark.asyncio
 async def test_reconnect_refreshes_session_without_concurrent_streams() -> None:
     created_services: list[FakeService] = []
 
@@ -178,6 +203,48 @@ async def test_reconnect_refreshes_session_without_concurrent_streams() -> None:
     assert adapter.maximum_active_streams == 1
     assert "reconnects=1" in ((await adapter.health()).detail or "")
     await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_forced_reconnect_requires_subscription_and_rejects_overlap() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+
+    with pytest.raises(RuntimeError, match="subscribe before"):
+        await adapter.force_reconnect()
+
+    adapter._desired_listings = (listing(),)
+    adapter._reconnecting = True
+    with pytest.raises(RuntimeError, match="already in progress"):
+        await adapter.force_reconnect()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_exhaustion_marks_adapter_disconnected() -> None:
+    services = [
+        FakeService(),
+        FakeService(failure=ConnectionError("retry one")),
+        FakeService(failure=ConnectionError("retry two")),
+    ]
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    adapter = FakeStreamAdapter(
+        config(reconnect_attempts=2),
+        MutableClock(),
+        sleep=sleep,
+        service_factory=lambda _: services.pop(0),
+    )
+    await adapter.connect()
+    await adapter.subscribe((listing(),))
+
+    with pytest.raises(ConnectionError, match="retry two"):
+        await adapter.force_reconnect()
+
+    assert sleeps == [1]
+    assert adapter.active_streams == 0
+    assert (await adapter.health()).status is HealthStatus.DISCONNECTED
 
 
 @pytest.mark.asyncio
@@ -208,6 +275,15 @@ async def test_lightstreamer_terminal_disconnect_schedules_one_reconnect() -> No
 
     adapter._handle_stream_status("DISCONNECTED")
     assert adapter.scheduled_reconnects == 1
+
+
+def test_subscription_error_degrades_health_without_exposing_message() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_subscription_error("CS.D.AUDUSD.CFD.IP", 19)
+
+    assert adapter._status is HealthStatus.DEGRADED
 
 
 @pytest.mark.asyncio
@@ -281,6 +357,23 @@ async def test_malformed_price_update_is_quarantinable_without_callback_failure(
     assert record.quote is None
     assert record.error_code == "IG_NORMALISATION_FAILED"
     assert record.subscription == "PRICE:CS.D.AUDUSD.CFD.IP"
+
+
+def test_price_callback_before_loop_registration_fails_explicitly() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._listings_by_epic["CS.D.AUDUSD.CFD.IP"] = listing()
+
+    with pytest.raises(RuntimeError, match="before event loop registration"):
+        adapter._on_update(
+            "CS.D.AUDUSD.CFD.IP",
+            FakeUpdate(
+                {
+                    "TIMESTAMP": "1783065600000",
+                    "BIDPRICE1": "0.65000",
+                    "ASKPRICE1": "0.65010",
+                }
+            ),
+        )
 
 
 @pytest.mark.asyncio

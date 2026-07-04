@@ -135,9 +135,9 @@ python -m qtrad api
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
-- Current PostgreSQL-backed suite: 68 passed.
-- PostgreSQL-backed branch coverage: 65% overall; replay is 100%, bars 95%, gaps 89%,
-  ingestion 82%, the IG adapter 56% and CLI orchestration 18%.
+- Current PostgreSQL-backed suite: 86 passed.
+- PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
+  ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model
   queries reside in the PostgreSQL adapter rather than the application layer.
 - PostgreSQL 18 migrations 0001 and 0002 applied successfully.
@@ -164,4 +164,13 @@ python -m qtrad api
   connection, resumed all seven subscriptions and reported zero dropped records.
 - A fresh-process restart then received 229 updates across all seven subscriptions and
   terminated cleanly.
+- CLI dispatch, argument forwarding and invalid ingestion timing bounds are covered for
+  every public command without contacting IG.
+- Authentication exhaustion, forced-reconnect preconditions and exhaustion, subscription
+  degradation and callback lifecycle failure have focused deterministic coverage.
+- The seven-instrument soak runbook and evidence record define preflight, objective
+  pass/fail conditions, observation points, reconnect/restart procedure, redaction review,
+  export/replay verification and the runtime freeze boundary.
+- The pre-soak rehearsal passed formatting, Ruff, Pyright, `ty`, all 86 PostgreSQL-backed
+  tests, migration application and read-only health/system/instrument API checks.
 - The elapsed 24-hour soak remains pending and must not be reported as passed.
