@@ -23,9 +23,13 @@
   "customizations": {
     "vscode": {
       "settings": {
+        "python-envs.alwaysUseUv": true,
         "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
         "python.terminal.activateEnvironment": true,
-        "terminal.integrated.defaultProfile.linux": "bash"
+        "terminal.integrated.defaultProfile.linux": "bash",
+        "chatgpt.openOnStartup": true,
+        "terminal.integrated.defaultLocation": "view",
+        "workbench.startupEditor": "none"
       },
       "extensions": [
         "openai.chatgpt",
@@ -33,7 +37,8 @@
         "astral-sh.ty",
         "tamasfe.even-better-toml",
         "esbenp.prettier-vscode",
-        "ms-python.python"
+        "ms-python.python",
+        "ms-python.vscode-python-envs"
       ]
     }
   }
