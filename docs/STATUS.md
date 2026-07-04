@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-03
+**Updated:** 2026-07-04
 **Current milestone:** 24-hour seven-instrument operational soak
 **State:** IN PROGRESS
 
@@ -53,12 +53,24 @@
   layer, added dependency-direction tests and removed an unused projection port.
 - Ruff formatting was applied consistently across source and tests; Ruff, Pyright and
   `ty` are reproducible development gates.
+- A VS Code Dev Container now provides Python 3.13, `uv`, Codex and the PostgreSQL 18
+  sidecar without mounting the host Docker socket or sharing its virtual environment
+  with WSL.
+- The Dev Container provisions pinned Tilth and remote Context7 MCP servers in its
+  persistent container-local Codex configuration.
+- The application and Dev Container use Debian Trixie base images. The Dev Container
+  copies the host's global Codex guidance without copying credentials or other Codex
+  state.
 
 ## Verification evidence
 
 - Ruff: passed on current source.
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
 - `ty`: passed on current source.
+- Dev Container image: built successfully; Codex CLI `0.142.2` available.
+- Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
+- Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
+- Dev Container PostgreSQL-backed suite: 68 passed.
 - Current PostgreSQL-backed suite: 68 passed, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
   four database/API integration tests.

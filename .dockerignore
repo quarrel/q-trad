@@ -1,7 +1,12 @@
 .git
+.codex
+.devcontainer/local
 .venv
+.uv-cache
 .env
+.coverage
 data
+tmp
 __pycache__
 .pytest_cache
 .ruff_cache
@@ -9,3 +14,5 @@ __pycache__
 *.pyc
 dist
 build
+node_modules
+.pnpm-store

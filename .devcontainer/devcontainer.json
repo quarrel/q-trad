@@ -1,0 +1,40 @@
+{
+  "name": "q-trad",
+  "dockerComposeFile": [
+    "../compose.yaml",
+    "compose.devcontainer.yaml"
+  ],
+  "service": "dev",
+  "runServices": [
+    "db",
+    "dev"
+  ],
+  "workspaceFolder": "/workspace",
+  "shutdownAction": "none",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": true,
+  "initializeCommand": [
+    "bash",
+    "-lc",
+    "mkdir -p .devcontainer/local && if [ -f \"$HOME/.codex/AGENTS.md\" ]; then cp \"$HOME/.codex/AGENTS.md\" .devcontainer/local/AGENTS.md; else : > .devcontainer/local/AGENTS.md; fi"
+  ],
+  "postCreateCommand": "python3 .devcontainer/post_install.py && uv sync --frozen",
+  "waitFor": "postCreateCommand",
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "python.defaultInterpreterPath": "/workspace/.venv/bin/python",
+        "python.terminal.activateEnvironment": true,
+        "terminal.integrated.defaultProfile.linux": "bash"
+      },
+      "extensions": [
+        "openai.chatgpt",
+        "charliermarsh.ruff",
+        "astral-sh.ty",
+        "tamasfe.even-better-toml",
+        "esbenp.prettier-vscode",
+        "ms-python.python"
+      ]
+    }
+  }
+}

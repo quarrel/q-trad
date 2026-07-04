@@ -43,6 +43,8 @@ A work package is `DONE` only when:
 - Record modular-monolith, Docker, event-storage and bar decisions.
 - Use Python 3.13, PostgreSQL 18, `uv`, Ruff, Pyright and pytest.
 - Supply a secret-free Docker-first workflow.
+- Supply a VS Code Dev Container that isolates Codex and development tooling from WSL
+  without exposing the host Docker socket.
 
 ## WP1 — canonical domain and ports
 
@@ -130,6 +132,9 @@ python -m qtrad api
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Current `ty` check: passed.
+- Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
+- Dev Container Trixie image and isolated host-global Codex guidance copy verified.
+- Application image rebuilt successfully on the Python 3.13 Trixie base.
 - Current PostgreSQL-backed suite: 68 passed.
 - PostgreSQL-backed branch coverage: 65% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 56% and CLI orchestration 18%.

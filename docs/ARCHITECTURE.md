@@ -9,6 +9,14 @@ This document describes implemented reality, not the complete aspiration in `PRE
 
 The current deployment is one modular Python application with several command roles and one PostgreSQL instance. Parquet files form the research data store.
 
+The supported VS Code development environment uses a Compose-backed Dev Container.
+The source tree is the only host bind mount; PostgreSQL, the Python virtual environment,
+dependency caches and Codex state use named volumes. At initialisation, the host's global
+Codex `AGENTS.md` is copied through a gitignored workspace staging file into the
+container-local Codex state. No credentials or other host Codex state are copied. The host
+Docker socket is not mounted. PostgreSQL runs as the existing `db` sidecar on the private
+Compose network.
+
 ```mermaid
 flowchart LR
     SRC["Fixture or IG demo"] --> ADAPTER["Market-data adapter"]

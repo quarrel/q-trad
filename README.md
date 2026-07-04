@@ -37,6 +37,46 @@ The operator console is then available at `http://localhost:8080`. Set
 
 Copy `.env.example` to `.env` only when running credential-gated IG demo integration. `.env` is ignored by Git. Never commit credentials.
 
+### VS Code Dev Container
+
+The repository includes a Dev Container for running the Codex extension and development
+tools inside Docker rather than directly in WSL.
+
+1. Install the VS Code Dev Containers extension.
+2. Run **Dev Containers: Reopen in Container**.
+3. Sign in to Codex when prompted inside the container.
+
+The Debian Trixie container uses Python 3.13 and `uv`, starts the PostgreSQL 18 `db`
+service, installs the Codex, Python and Ruff extensions, and configures the Tilth and
+Context7 MCP servers. Tilth is installed from a pinned npm package and release binary.
+The container
+keeps its virtual environment, dependency cache and Codex state in named volumes. It
+copies the host's global `~/.codex/AGENTS.md` through a gitignored staging file, without
+copying other Codex state. It does not mount the host Docker socket or any directory
+outside this repository.
+
+Docker is the outer isolation boundary, so the container-local Codex configuration uses
+full access without approval prompts. Codex can modify anything in the repository,
+including `.git` and `.env`, but cannot use Docker to reach other WSL containers or
+filesystems. The Dev Container has unrestricted outbound internet access.
+
+Run project commands directly in the container:
+
+```bash
+uv run python -m qtrad db upgrade
+uv run pytest
+uv run ruff check src tests
+uv run pyright
+uv run ty check
+```
+
+Closing VS Code does not stop the container or database, which allows a `tmux`-hosted
+soak to continue. Stop them explicitly from WSL when required:
+
+```bash
+docker compose -f compose.yaml -f .devcontainer/compose.devcontainer.yaml down
+```
+
 ## First data run
 
 ```bash

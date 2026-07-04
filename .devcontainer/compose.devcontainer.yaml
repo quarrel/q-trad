@@ -1,0 +1,31 @@
+services:
+  dev:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile
+    command: ["sleep", "infinity"]
+    init: true
+    environment:
+      CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
+      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad
+      QTRAD_RESEARCH_ROOT: /workspace/data/research
+      TMPDIR: /workspace/tmp
+      UV_CACHE_DIR: /home/vscode/.cache/uv
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/workspace
+      - qtrad-codex-home:/home/vscode/.codex
+      - qtrad-command-history:/commandhistory
+      - qtrad-uv-cache:/home/vscode/.cache/uv
+      - qtrad-venv:/workspace/.venv
+
+volumes:
+  qtrad-codex-home:
+  qtrad-command-history:
+  qtrad-uv-cache:
+  qtrad-venv:
