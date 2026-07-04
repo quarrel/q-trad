@@ -53,6 +53,12 @@
   layer, added dependency-direction tests and removed an unused projection port.
 - Ruff formatting was applied consistently across source and tests; Ruff, Pyright and
   `ty` are reproducible development gates.
+- The IG adapter is now included in strict Pyright checking. Minimal local stubs describe
+  the consumed `trading-ig` and Lightstreamer APIs, boundary protocols type the injected
+  clients and callbacks, and production IG adapter code contains no explicit `Any` or
+  type-ignore suppression.
+- CLI composition now injects one shared clock per command invocation into the IG adapter
+  and all ingestion, backfill, export and replay timestamp paths.
 - A VS Code Dev Container now provides Python 3.13, `uv`, Codex and the PostgreSQL 18
   sidecar without mounting the host Docker socket or sharing its virtual environment
   with WSL.
@@ -69,6 +75,7 @@
 
 - Ruff: passed on current source.
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
+- IG adapter focused static check: included in strict Pyright with no diagnostics.
 - `ty`: passed on current source.
 - Dev Container image: built successfully; Codex CLI `0.142.2` available.
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.

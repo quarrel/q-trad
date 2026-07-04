@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from qtrad import __main__ as cli
+from qtrad.ports.clock import Clock
 from qtrad.runtime.settings import Settings
 
 
@@ -16,6 +17,13 @@ def cli_environment(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(cli, "configure_logging", Mock())
     return settings
+
+
+@pytest.fixture
+def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
+    clock = Mock(spec=Clock)
+    monkeypatch.setattr(cli, "SystemClock", Mock(return_value=clock))
+    return cast(Clock, clock)
 
 
 @pytest.mark.parametrize(
@@ -40,6 +48,7 @@ def cli_environment(monkeypatch: pytest.MonkeyPatch) -> Settings:
 def test_async_command_dispatch(
     monkeypatch: pytest.MonkeyPatch,
     cli_environment: Settings,
+    cli_clock: Clock,
     arguments: list[str],
     target: str,
     expected: tuple[tuple[str, object], ...],
@@ -50,6 +59,8 @@ def test_async_command_dispatch(
     cli.main(arguments)
 
     positional: list[object] = [cli_environment]
+    if target != "_rebuild":
+        positional.append(cli_clock)
     if target == "_replay":
         positional.append(Path("research/manifests/example.json"))
     operation.assert_awaited_once_with(*positional, **dict(expected))
@@ -100,6 +111,7 @@ async def test_ingestion_rejects_invalid_time_bounds_before_io(
     with pytest.raises(ValueError, match=message):
         await cli._ingest(
             cast(Settings, SimpleNamespace()),
+            Mock(spec=Clock),
             maximum_seconds=maximum_seconds,
             force_reconnect_after_seconds=reconnect_seconds,
         )

@@ -54,10 +54,15 @@ select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
 
 [tool.pyright]
 include = ["src", "tests"]
-exclude = ["src/qtrad/adapters/ig"]
 pythonVersion = "3.13"
 typeCheckingMode = "standard"
-strict = ["src/qtrad/domain", "src/qtrad/ports", "src/qtrad/application"]
+strict = [
+    "src/qtrad/domain",
+    "src/qtrad/ports",
+    "src/qtrad/application",
+    "src/qtrad/adapters/ig",
+]
+stubPath = "typings"
 venvPath = "."
 venv = ".venv"
 

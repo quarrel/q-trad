@@ -2,7 +2,6 @@ import asyncio
 from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -19,6 +18,14 @@ from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.operations import HealthStatus
 from qtrad.ports.market_data import BackfillRequest, MarketDataRecord
+
+
+class FakeSession:
+    def __init__(self) -> None:
+        self.headers = {
+            "CST": "not-a-real-token",
+            "X-SECURITY-TOKEN": "not-a-real-token",
+        }
 
 
 class MutableClock:
@@ -38,9 +45,7 @@ class FakeService:
     ) -> None:
         self.failure = failure
         self.historical_response = historical_response
-        self.session = SimpleNamespace(
-            headers={"CST": "not-a-real-token", "X-SECURITY-TOKEN": "not-a-real-token"}
-        )
+        self.session = FakeSession()
         self.logged_out = False
 
     def create_session(self) -> dict[str, str]:
@@ -53,6 +58,12 @@ class FakeService:
 
     def logout(self) -> None:
         self.logged_out = True
+
+    def search_markets(self, search_term: str) -> object:
+        raise AssertionError(f"unexpected search for {search_term}")
+
+    def fetch_market_by_epic(self, epic: str) -> object:
+        raise AssertionError(f"unexpected market fetch for {epic}")
 
     def fetch_historical_prices_by_epic_and_date_range(
         self, epic: str, resolution: str, start: str, end: str
@@ -251,7 +262,7 @@ async def test_reconnect_exhaustion_marks_adapter_disconnected() -> None:
 async def test_stale_stream_degrades_and_schedules_reconnect() -> None:
     clock = MutableClock()
     adapter = StaleAdapter(config(), clock)
-    adapter._service = object()
+    adapter._service = FakeService()
     adapter._status = HealthStatus.HEALTHY
     adapter._desired_listings = (listing(),)
     adapter._stream_connected_at = clock.now()
@@ -290,7 +301,7 @@ def test_subscription_error_degrades_health_without_exposing_message() -> None:
 async def test_queue_saturation_drops_new_record_and_recovers_after_drain() -> None:
     clock = MutableClock()
     adapter = IgDemoMarketDataAdapter(config(queue_capacity=1), clock)
-    adapter._service = object()
+    adapter._service = FakeService()
     adapter._status = HealthStatus.HEALTHY
     record = MarketDataRecord(
         provider="ig",

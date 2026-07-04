@@ -16,6 +16,13 @@
 - Pydantic for settings and HTTP models, not as the domain model.
 - Async functions are for I/O or orchestration, not ordinary calculations.
 - Structured logs use stable event names and exclude secrets.
+- Construct one clock at the runtime composition root for each command invocation and
+  inject that instance through the operation. Call `now()` at each event boundary; sharing
+  a clock source does not mean freezing one timestamp for the whole operation.
+- Contain untyped third-party libraries behind small local protocols and committed,
+  version-matched `.pyi` stubs for only the APIs used. Do not exclude first-party adapter
+  directories from static analysis or let provider-facing `Any` values cross the adapter
+  boundary.
 
 ## Reuse
 

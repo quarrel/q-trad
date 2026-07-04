@@ -138,6 +138,12 @@ python -m qtrad api
 
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
+- Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and
+  Lightstreamer stubs plus adapter-boundary protocols; the former directory-wide
+  exclusion and consequential production `Any` types were removed.
+- CLI orchestration now creates one `SystemClock` per command invocation and injects it
+  through IG ingestion, backfill, export and replay instead of constructing clocks at
+  individual timestamp sites.
 - Current `ty` check: passed.
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.

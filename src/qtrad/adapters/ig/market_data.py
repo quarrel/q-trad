@@ -13,7 +13,7 @@ from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, cast
+from typing import Protocol, cast, runtime_checkable
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -47,6 +47,69 @@ _PREFERRED_EPICS = {
     InstrumentId("index:us-500"): "IX.D.SPTRD.IFD.IP",
     InstrumentId("index:ftse-100"): "IX.D.FTSE.CFD.IP",
 }
+
+
+class _HttpSession(Protocol):
+    @property
+    def headers(self) -> Mapping[str, str]: ...
+
+
+class _IgRestService(Protocol):
+    @property
+    def session(self) -> _HttpSession: ...
+
+    def create_session(self) -> object: ...
+
+    def search_markets(self, search_term: str) -> object: ...
+
+    def fetch_market_by_epic(self, epic: str) -> object: ...
+
+    def fetch_historical_prices_by_epic_and_date_range(
+        self,
+        epic: str,
+        resolution: str,
+        start_date: str,
+        end_date: str,
+        /,
+    ) -> object: ...
+
+    def logout(self) -> object: ...
+
+
+class _ItemUpdate(Protocol):
+    def getValue(self, field: str, /) -> object | None: ...
+
+
+@runtime_checkable
+class _ToDict(Protocol):
+    def to_dict(self, *args: object, **kwargs: object) -> object: ...
+
+
+class _ConnectionDetails(Protocol):
+    def setUser(self, user: str) -> None: ...
+
+    def setPassword(self, password: str) -> None: ...
+
+
+class _Subscription(Protocol):
+    def setDataAdapter(self, data_adapter: str) -> None: ...
+
+    def addListener(self, listener: object) -> None: ...
+
+
+class _StreamClient(Protocol):
+    @property
+    def connectionDetails(self) -> _ConnectionDetails: ...
+
+    def addListener(self, listener: object) -> None: ...
+
+    def connect(self) -> None: ...
+
+    def subscribe(self, subscription: _Subscription) -> None: ...
+
+    def unsubscribe(self, subscription: _Subscription) -> None: ...
+
+    def disconnect(self) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -100,17 +163,17 @@ class IgDemoMarketDataAdapter:
         clock: Clock,
         *,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
-        service_factory: Callable[[IgDemoConfig], Any] | None = None,
+        service_factory: Callable[[IgDemoConfig], object] | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
         self._sleep = sleep
         self._service_factory = service_factory
-        self._service: Any = None
-        self._session_details: Mapping[str, Any] | None = None
-        self._stream_client: Any = None
+        self._service: _IgRestService | None = None
+        self._session_details: Mapping[str, object] | None = None
+        self._stream_client: _StreamClient | None = None
         self._stream_account_id: str | None = None
-        self._subscriptions: list[Any] = []
+        self._subscriptions: list[_Subscription] = []
         self._queue: asyncio.Queue[MarketDataRecord] = asyncio.Queue(maxsize=config.queue_capacity)
         self._listings_by_epic: dict[str, ProviderListing] = {}
         self._field_state: dict[str, dict[str, str]] = {}
@@ -157,13 +220,13 @@ class IgDemoMarketDataAdapter:
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
     ) -> Sequence[ProviderListing]:
-        self._require_connected()
+        service = self._require_connected()
         listings: list[ProviderListing] = []
         for instrument_id in instrument_ids:
             instrument = INSTRUMENTS_BY_ID[instrument_id]
             by_epic: dict[str, _Candidate] = {}
             for alias in instrument.search_aliases:
-                response = await asyncio.to_thread(self._service.search_markets, alias)
+                response = await asyncio.to_thread(service.search_markets, alias)
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
                     if (
@@ -172,9 +235,7 @@ class IgDemoMarketDataAdapter:
                         or not _search_row_can_match(search_row, instrument)
                     ):
                         continue
-                    detail_response = await asyncio.to_thread(
-                        self._service.fetch_market_by_epic, epic
-                    )
+                    detail_response = await asyncio.to_thread(service.fetch_market_by_epic, epic)
                     detail = _single_record(detail_response)
                     candidate = _candidate(search_row, detail)
                     if candidate is not None:
@@ -220,18 +281,20 @@ class IgDemoMarketDataAdapter:
     async def _open_stream(self, listings: Sequence[ProviderListing]) -> None:
         from lightstreamer.client import (
             ClientListener,
+            ItemUpdate,
             LightstreamerClient,
             Subscription,
             SubscriptionListener,
         )
 
+        service = self._require_connected()
         adapter = self
 
         class PriceListener(SubscriptionListener):
             def __init__(self, epic: str) -> None:
                 self._epic = epic
 
-            def onItemUpdate(self, update: Any) -> None:
+            def onItemUpdate(self, update: ItemUpdate) -> None:
                 adapter._on_update(self._epic, update)
 
             def onSubscriptionError(self, code: int, message: str) -> None:
@@ -247,12 +310,12 @@ class IgDemoMarketDataAdapter:
             raise RuntimeError("IG REST session details are unavailable")
         endpoint = _string(self._session_details, "lightstreamerEndpoint")
         account_id = _string(self._session_details, "currentAccountId") or self._config.account_id
-        cst = self._service.session.headers.get("CST")
-        security_token = self._service.session.headers.get("X-SECURITY-TOKEN")
+        cst = service.session.headers.get("CST")
+        security_token = service.session.headers.get("X-SECURITY-TOKEN")
         if not endpoint or not account_id or not cst or not security_token:
             raise RuntimeError("IG REST session lacks Lightstreamer connection details")
         self._stream_account_id = account_id
-        client = LightstreamerClient(endpoint, None)
+        client = cast(_StreamClient, LightstreamerClient(endpoint, None))
         self._stream_client = client
         client.connectionDetails.setUser(account_id)
         client.connectionDetails.setPassword(f"CST-{cst}|XST-{security_token}")
@@ -262,18 +325,21 @@ class IgDemoMarketDataAdapter:
         for listing in listings:
             epic = listing.listing_id.external_id
             self._listings_by_epic[epic] = listing
-            subscription = Subscription(
-                mode="MERGE",
-                items=[f"PRICE:{self._stream_account_id}:{epic}"],
-                fields=[
-                    "TIMESTAMP",
-                    "BIDPRICE1",
-                    "ASKPRICE1",
-                    "BIDSIZE1",
-                    "ASKSIZE1",
-                    "DLG_FLAG",
-                    "DELAY",
-                ],
+            subscription = cast(
+                _Subscription,
+                Subscription(
+                    mode="MERGE",
+                    items=[f"PRICE:{self._stream_account_id}:{epic}"],
+                    fields=[
+                        "TIMESTAMP",
+                        "BIDPRICE1",
+                        "ASKPRICE1",
+                        "BIDSIZE1",
+                        "ASKSIZE1",
+                        "DLG_FLAG",
+                        "DELAY",
+                    ],
+                ),
             )
             subscription.setDataAdapter("Pricing")
             subscription.addListener(PriceListener(epic))
@@ -296,9 +362,9 @@ class IgDemoMarketDataAdapter:
                 self._check_staleness()
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
-        self._require_connected()
+        service = self._require_connected()
         response = await asyncio.to_thread(
-            self._service.fetch_historical_prices_by_epic_and_date_range,
+            service.fetch_historical_prices_by_epic_and_date_range,
             request.listing.listing_id.external_id,
             "MINUTE",
             _historical_query_time(request.start),
@@ -339,7 +405,7 @@ class IgDemoMarketDataAdapter:
             ),
         )
 
-    def _on_update(self, epic: str, update: Any) -> None:
+    def _on_update(self, epic: str, update: _ItemUpdate) -> None:
         received = self._clock.now()
         raw = {
             field: update.getValue(field)
@@ -523,8 +589,9 @@ class IgDemoMarketDataAdapter:
         last_error: Exception | None = None
         for attempt in range(1, maximum_attempts + 1):
             try:
-                self._service = self._new_service()
-                session_details = await asyncio.to_thread(self._service.create_session)
+                service = self._new_service()
+                self._service = service
+                session_details = await asyncio.to_thread(service.create_session)
                 self._session_details = _single_record(session_details)
                 self._status = HealthStatus.HEALTHY
                 return
@@ -550,18 +617,21 @@ class IgDemoMarketDataAdapter:
             raise last_error
         raise RuntimeError("IG session establishment failed")
 
-    def _new_service(self) -> Any:
+    def _new_service(self) -> _IgRestService:
         if self._service_factory is not None:
-            return self._service_factory(self._config)
+            return cast(_IgRestService, self._service_factory(self._config))
         from trading_ig.rest import IGService
 
-        return IGService(
-            self._config.username,
-            self._config.password,
-            self._config.api_key,
-            acc_type=self._config.account_type,
-            acc_number=self._config.account_id,
-            use_rate_limiter=True,
+        return cast(
+            _IgRestService,
+            IGService(
+                self._config.username,
+                self._config.password,
+                self._config.api_key,
+                acc_type=self._config.account_type,
+                acc_number=self._config.account_id,
+                use_rate_limiter=True,
+            ),
         )
 
     async def _close_stream(self) -> None:
@@ -594,12 +664,13 @@ class IgDemoMarketDataAdapter:
         except Exception:
             LOGGER.warning("ig_logout_failed")
 
-    def _require_connected(self) -> None:
+    def _require_connected(self) -> _IgRestService:
         if self._service is None or self._status not in {
             HealthStatus.HEALTHY,
             HealthStatus.DEGRADED,
         }:
             raise RuntimeError("IG demo adapter is not connected")
+        return self._service
 
 
 def _backoff_seconds(config: IgDemoConfig, failed_attempt: int) -> float:
@@ -609,34 +680,37 @@ def _backoff_seconds(config: IgDemoConfig, failed_attempt: int) -> float:
     )
 
 
-def _records(value: Any) -> list[Mapping[str, Any]]:
+def _records(value: object) -> list[Mapping[str, object]]:
     if value is None:
         return []
-    if hasattr(value, "to_dict"):
+    if isinstance(value, _ToDict):
         try:
             converted = value.to_dict(orient="records")
         except TypeError:
             converted = value.to_dict()
         return _records(converted)
     if isinstance(value, Mapping):
+        mapping = cast(Mapping[object, object], value)
         for key in ("markets", "prices"):
-            nested = value.get(key)
+            nested = mapping.get(key)
             if isinstance(nested, Sequence) and not isinstance(nested, (str, bytes)):
-                return [cast(Mapping[str, Any], item) for item in nested]
-        return [cast(Mapping[str, Any], value)]
+                sequence = cast(Sequence[object], nested)
+                return [cast(Mapping[str, object], item) for item in sequence]
+        return [cast(Mapping[str, object], mapping)]
     if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
-        return [cast(Mapping[str, Any], item) for item in value]
+        sequence = cast(Sequence[object], value)
+        return [cast(Mapping[str, object], item) for item in sequence]
     raise TypeError(f"unsupported IG response type: {type(value).__name__}")
 
 
-def _single_record(value: Any) -> Mapping[str, Any]:
+def _single_record(value: object) -> Mapping[str, object]:
     records = _records(value)
     if len(records) != 1:
         raise ValueError(f"expected one IG record, received {len(records)}")
     return records[0]
 
 
-def _candidate(search_row: Mapping[str, Any], detail: Mapping[str, Any]) -> _Candidate | None:
+def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -> _Candidate | None:
     instrument = _mapping(detail.get("instrument"))
     snapshot = _mapping(detail.get("snapshot"))
     dealing_rules = _mapping(detail.get("dealingRules"))
@@ -664,7 +738,7 @@ def _candidate(search_row: Mapping[str, Any], detail: Mapping[str, Any]) -> _Can
     )
 
 
-def _search_row_can_match(search_row: Mapping[str, Any], instrument: Instrument) -> bool:
+def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrument) -> bool:
     expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     expiry = (_string(search_row, "expiry") or "").upper()
@@ -709,7 +783,7 @@ def _select_candidate(
     return selected[0]
 
 
-def _historical_rows(value: Any) -> list[Mapping[str, Any]]:
+def _historical_rows(value: object) -> list[Mapping[str, object]]:
     return _records(value)
 
 
@@ -717,7 +791,7 @@ def _historical_query_time(value: datetime) -> str:
     return value.astimezone(UTC).strftime("%Y-%m-%d %H:%M:%S")
 
 
-def _historical_time(row: Mapping[str, Any]) -> datetime | None:
+def _historical_time(row: Mapping[str, object]) -> datetime | None:
     raw = row.get("snapshotTimeUTC") or row.get("snapshotTime")
     if raw is None:
         return None
@@ -734,7 +808,7 @@ def _historical_time(row: Mapping[str, Any]) -> datetime | None:
 
 
 def _historical_bars(
-    listing: ProviderListing, interval_start: datetime, row: Mapping[str, Any]
+    listing: ProviderListing, interval_start: datetime, row: Mapping[str, object]
 ) -> tuple[MarketBar, ...]:
     values: dict[PriceBasis, tuple[Decimal, Decimal, Decimal, Decimal]] = {}
     for basis, key in ((PriceBasis.BID, "bid"), (PriceBasis.ASK, "ask")):
@@ -773,34 +847,34 @@ def _historical_bars(
     )
 
 
-def _mapping(value: Any) -> Mapping[str, Any]:
-    return cast(Mapping[str, Any], value) if isinstance(value, Mapping) else {}
+def _mapping(value: object) -> Mapping[str, object]:
+    return cast(Mapping[str, object], value) if isinstance(value, Mapping) else {}
 
 
-def _string(value: Mapping[str, Any], key: str) -> str | None:
+def _string(value: Mapping[str, object], key: str) -> str | None:
     item = value.get(key)
     return str(item) if item not in (None, "") else None
 
 
-def _nested_decimal(value: Mapping[str, Any], outer: str, inner: str) -> Decimal | None:
+def _nested_decimal(value: Mapping[str, object], outer: str, inner: str) -> Decimal | None:
     return _decimal_or_none(_mapping(value.get(outer)).get(inner))
 
 
-def _decimal_or_none(value: Any) -> Decimal | None:
+def _decimal_or_none(value: object) -> Decimal | None:
     if value in (None, ""):
         return None
     return Decimal(str(value))
 
 
-def _integer_or_none(value: Any) -> int | None:
+def _integer_or_none(value: object) -> int | None:
     if value in (None, ""):
         return None
     return int(str(value))
 
 
-def _currency(instrument: Mapping[str, Any]) -> str:
+def _currency(instrument: Mapping[str, object]) -> str:
     currencies = instrument.get("currencies")
     if isinstance(currencies, Sequence) and currencies:
-        first = _mapping(currencies[0])
+        first = _mapping(cast(Sequence[object], currencies)[0])
         return _string(first, "code") or _string(first, "name") or ""
     return _string(instrument, "currency") or ""

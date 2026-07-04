@@ -33,6 +33,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
+from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
@@ -79,17 +80,19 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     settings = Settings()
+    clock = SystemClock()
     configure_logging(settings.log_level)
 
     if args.command == "db" and args.db_command == "upgrade":
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
     elif args.command == "instruments" and args.instrument_command == "sync":
-        asyncio.run(_sync_instruments(settings))
+        asyncio.run(_sync_instruments(settings, clock))
     elif args.command == "ingest":
         asyncio.run(
             _ingest(
                 settings,
+                clock,
                 maximum_seconds=args.max_seconds,
                 force_reconnect_after_seconds=args.force_reconnect_after_seconds,
             )
@@ -98,14 +101,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(
             _backfill(
                 settings,
+                clock,
                 maximum_points=args.max_points,
                 remaining_allowance=args.remaining_allowance,
             )
         )
     elif args.command == "research" and args.research_command == "export":
-        asyncio.run(_export(settings))
+        asyncio.run(_export(settings, clock))
     elif args.command == "replay":
-        asyncio.run(_replay(settings, Path(args.manifest)))
+        asyncio.run(_replay(settings, clock, Path(args.manifest)))
     elif args.command == "projections" and args.projection_command == "rebuild":
         asyncio.run(_rebuild(settings))
     elif args.command == "api":
@@ -123,7 +127,7 @@ def _engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(settings.database_url, pool_pre_ping=True)
 
 
-def _ig_adapter(settings: Settings) -> IgDemoMarketDataAdapter:
+def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
     username, password, api_key, account_id = settings.require_ig_credentials()
     return IgDemoMarketDataAdapter(
         IgDemoConfig(
@@ -132,7 +136,7 @@ def _ig_adapter(settings: Settings) -> IgDemoMarketDataAdapter:
             api_key=api_key,
             account_id=account_id,
         ),
-        SystemClock(),
+        clock,
     )
 
 
@@ -144,9 +148,9 @@ async def _seed(settings: Settings) -> None:
         await engine.dispose()
 
 
-async def _sync_instruments(settings: Settings) -> None:
+async def _sync_instruments(settings: Settings, clock: Clock) -> None:
     engine = _engine(settings)
-    adapter = _ig_adapter(settings)
+    adapter = _ig_adapter(settings, clock)
     store = PostgresAuditStore(engine)
     try:
         await store.seed_instruments()
@@ -167,6 +171,7 @@ async def _sync_instruments(settings: Settings) -> None:
 
 async def _ingest(
     settings: Settings,
+    clock: Clock,
     *,
     maximum_seconds: float | None = None,
     force_reconnect_after_seconds: float | None = None,
@@ -180,13 +185,13 @@ async def _ingest(
             raise ValueError("forced reconnect must occur before maximum seconds")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
-    adapter = _ig_adapter(settings)
+    adapter = _ig_adapter(settings, clock)
     service = IngestionService(store, producer="ig-demo-adapter", producer_version="0.1.0")
     run_id = await store.start_run(
         kind=RunKind.INGESTION,
         environment=BrokerEnvironment.IG_DEMO,
         configuration_hash=_configuration_hash(),
-        started_at=SystemClock().now(),
+        started_at=clock.now(),
     )
     terminal_status = "FAILED"
     reconnect_task: asyncio.Task[None] | None = None
@@ -211,7 +216,7 @@ async def _ingest(
         async def consume() -> None:
             async for record in adapter.records():
                 await service.process(record)
-                await service.advance_bars(SystemClock().now())
+                await service.advance_bars(clock.now())
                 await store.record_adapter_health(await adapter.health())
 
         if maximum_seconds is None:
@@ -245,7 +250,7 @@ async def _ingest(
         await store.finish_run(
             run_id,
             status=terminal_status,
-            finished_at=SystemClock().now(),
+            finished_at=clock.now(),
             detail={
                 "adapter_health": final_health.detail,
                 "forced_reconnect": force_reconnect_after_seconds is not None,
@@ -256,15 +261,21 @@ async def _ingest(
             raise reconnect_error
 
 
-async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowance: int) -> None:
+async def _backfill(
+    settings: Settings,
+    clock: Clock,
+    *,
+    maximum_points: int,
+    remaining_allowance: int,
+) -> None:
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
-    adapter = _ig_adapter(settings)
+    adapter = _ig_adapter(settings, clock)
     run_id = await store.start_run(
         kind=RunKind.BACKFILL,
         environment=BrokerEnvironment.IG_DEMO,
         configuration_hash=_configuration_hash(),
-        started_at=SystemClock().now(),
+        started_at=clock.now(),
     )
     terminal_status = "FAILED"
     written = 0
@@ -285,10 +296,10 @@ async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowa
             environment="demo",
             allowance_name="historical_points_weekly_operator_reported",
             remaining=remaining_allowance,
-            observed_at=SystemClock().now(),
+            observed_at=clock.now(),
         )
         await adapter.connect()
-        end = SystemClock().now().replace(second=0, microsecond=0)
+        end = clock.now().replace(second=0, microsecond=0)
         start = end - timedelta(minutes=points)
         for listing in listings:
             request = BackfillRequest(
@@ -300,7 +311,7 @@ async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowa
             )
             async for bar in adapter.backfill(request):
                 received_points.add((str(bar.source_listing_id), bar.interval_start))
-                event = await _append_bar(store, bar, received_time=SystemClock().now())
+                event = await _append_bar(store, bar, received_time=clock.now())
                 if event is not None:
                     written += 1
         provider_remaining = adapter.historical_allowance_remaining
@@ -310,7 +321,7 @@ async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowa
                 environment="demo",
                 allowance_name="historical_points_weekly_provider_reported",
                 remaining=provider_remaining,
-                observed_at=SystemClock().now(),
+                observed_at=clock.now(),
             )
         terminal_status = "COMPLETED"
         print(
@@ -328,7 +339,7 @@ async def _backfill(settings: Settings, *, maximum_points: int, remaining_allowa
         await store.finish_run(
             run_id,
             status=terminal_status,
-            finished_at=SystemClock().now(),
+            finished_at=clock.now(),
             detail={
                 "bars_written": written,
                 "points_received": len(received_points),
@@ -376,15 +387,15 @@ async def _append_bar(
         return await _append_bar(store, bar, received_time=received_time)
 
 
-async def _export(settings: Settings) -> None:
+async def _export(settings: Settings, clock: Clock) -> None:
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
-    research = ParquetResearchStore(settings.research_root, SystemClock())
+    research = ParquetResearchStore(settings.research_root, clock)
     run_id = await store.start_run(
         kind=RunKind.EXPORT,
         environment=BrokerEnvironment.NONE,
         configuration_hash=_configuration_hash(),
-        started_at=SystemClock().now(),
+        started_at=clock.now(),
     )
     terminal_status = "FAILED"
     try:
@@ -414,27 +425,27 @@ async def _export(settings: Settings) -> None:
         await store.finish_run(
             run_id,
             status=terminal_status,
-            finished_at=SystemClock().now(),
+            finished_at=clock.now(),
             detail={},
         )
         await engine.dispose()
 
 
-async def _replay(settings: Settings, manifest_path: Path) -> None:
+async def _replay(settings: Settings, clock: Clock, manifest_path: Path) -> None:
     manifest_id = manifest_path.stem
     root = (
         manifest_path.parent.parent
         if manifest_path.parent.name == "manifests"
         else settings.research_root
     )
-    store = ParquetResearchStore(root, SystemClock())
+    store = ParquetResearchStore(root, clock)
     engine = _engine(settings)
     audit = PostgresAuditStore(engine)
     run_id = await audit.start_run(
         kind=RunKind.REPLAY,
         environment=BrokerEnvironment.NONE,
         configuration_hash=_configuration_hash(),
-        started_at=SystemClock().now(),
+        started_at=clock.now(),
     )
     terminal_status = "FAILED"
     try:
@@ -450,7 +461,7 @@ async def _replay(settings: Settings, manifest_path: Path) -> None:
         await audit.finish_run(
             run_id,
             status=terminal_status,
-            finished_at=SystemClock().now(),
+            finished_at=clock.now(),
             detail={"manifest_id": manifest_id},
         )
         await engine.dispose()
