@@ -42,7 +42,7 @@ A work package is `DONE` only when:
 | WP4 — IG demo adapter | DONE | reconnect/refresh/backoff and failure handling verified |
 | WP5 — backfill and research data | DONE | live backfill, quota, export and replay verified |
 | WP6 — API and operator console | DONE | API and rendered console returned HTTP 200 |
-| WP7 — failure testing and soak | IN PROGRESS | actionable hardening passed; 24-hour soak pending |
+| WP7 — failure testing and soak | BLOCKED | first soak failed during forced reconnect; remediation and fresh 24-hour run required |
 
 ## WP0 — documentation and scaffold
 
@@ -148,7 +148,7 @@ python -m qtrad api
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
-- Current PostgreSQL-backed suite: 86 passed.
+- Current PostgreSQL-backed suite: 94 passed.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model
@@ -190,3 +190,14 @@ python -m qtrad api
   evidence survey, validation standard, market-state assessment, risk review, source
   ledger and prioritised experiment backlog without changing the current phase boundary.
 - The elapsed 24-hour soak remains pending and must not be reported as passed.
+- The first 24-hour soak attempt failed after about 77 minutes: the forced reconnect did
+  not restore all seven subscriptions, subsequent stale reconnects exhausted, the run was
+  incorrectly recorded as `COMPLETED`, and ingestion processes remained resident. WP7
+  requires remediation and a fresh frozen-candidate soak.
+- ADR 0010 lifecycle remediation is implemented. Deterministic coverage now distinguishes
+  transport from all-subscription data readiness, rejects superseded-generation callbacks,
+  escalates stalled SDK retries, classifies fatal provider errors, propagates terminal
+  recovery failure and verifies disconnect completion. A 126-second live candidate smoke
+  recovered after one retryable reconnect error, restored all seven healthy quotes,
+  recorded one reconnect and zero drops, stopped cleanly and left no ingestion process.
+  Repeated-reconnect and two-hour qualification remain required before the fresh soak.

@@ -1133,6 +1133,11 @@ Before any live route is enabled, require at least:
 
 All items in this section are genuinely **OPEN**. `PLAN.md` must either resolve them, assign a research spike, or explicitly defer them.
 
+**Post-data-foundation review (2026-07-06):** for the no-live-order paper vertical slice,
+`docs/PAPER_SLICE_DECISIONS.md` resolves or defers these items under accepted ADRs
+0005–0009. Questions remain globally open where that register says `DEFERRED`; they must
+not leak back into the paper phase as implicit decisions.
+
 ### 12.1 Broker semantics
 
 - **OPEN-B01:** Which Australian IG legal entity, account type, base currency and demo/live API capabilities apply?

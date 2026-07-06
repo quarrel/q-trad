@@ -55,6 +55,25 @@ Do not scaffold future strategy/execution packages until their phase begins.
 - Measure branch coverage against the PostgreSQL-backed suite; use it to find untested
   operational paths rather than as a substitute for scenario quality.
 
+## External connection lifecycle
+
+- Model authentication, transport connection, subscription, data readiness, degradation,
+  retry, failure and shutdown as separate states.
+- Define readiness from observable application evidence. For a seven-instrument stream,
+  every subscription must acknowledge and deliver a fresh valid update.
+- Attach a generation to clients, callbacks and queued work so late callbacks cannot
+  revive or contaminate a replacement connection.
+- Apply deadlines independently to authentication, connection, subscription, first data,
+  library-managed retry and shutdown.
+- Keep one retry budget and rate limiter outside disposable provider client instances.
+  Use classified failures, exponential full jitter, a cap and circuit-breaker cooldown.
+- Emit bounded structured state transitions and provider error codes. Logs must establish
+  why recovery was attempted without exposing response bodies, account data or tokens.
+- Treat cleanup as behaviour to test: all callbacks quiesce, transports close, background
+  tasks/threads end and the process exits.
+- Stage operational validation: deterministic lifecycle tests, repeated credential-gated
+  reconnects, a shorter endurance run, then the full soak.
+
 ## Static quality gates
 
 - `uv run ruff format --check src tests`

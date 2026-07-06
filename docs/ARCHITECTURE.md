@@ -1,7 +1,7 @@
 # Implemented architecture
 
-**Status:** data foundation, IG PRICE streaming, historical backfill and resilience
-verified; 24-hour operational soak pending.
+**Status:** data foundation, IG PRICE streaming and historical backfill implemented;
+reconnect lifecycle remediation implemented and awaiting endurance qualification.
 
 This document describes implemented reality, not the complete aspiration in `PREPLAN.md`.
 
@@ -99,11 +99,23 @@ The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers
 required at the provider boundary but are removed from persisted subscription labels.
 Concurrent streaming connections for the same IG API key are an operational safety violation.
 
-The adapter treats Lightstreamer's `DISCONNECTED:WILL-RETRY` as an in-client retry and
-does not create another connection. A terminal `DISCONNECTED` or a stale healthy stream
-closes the old client, refreshes the IG REST session and rebuilds one stream with bounded
-exponential backoff. Queue insertion is non-blocking; overflow is counted and reported
-as degraded health without blocking the provider callback.
+The adapter owns one explicit, generation-tagged connection lifecycle. Transport
+`CONNECTED` is not readiness: `READY` additionally requires every expected subscription
+to acknowledge and deliver a healthy quote. Callbacks from superseded generations are
+ignored and per-generation partial quote state is reset. A prolonged
+`DISCONNECTED:WILL-RETRY` has an application watchdog; terminal disconnect and staleness
+close the old client, refresh the IG REST session and rebuild one stream.
+
+REST connection and stream recovery share capped exponential full-jitter retries across
+recreated client objects. Fatal credential/API-key codes fail closed, while retryable
+failure cycles use a cooldown rather than hammering the provider. Exhausted recovery is
+propagated through the record iterator and finalises the ingestion run as `FAILED`;
+natural completion is invalid for an unbounded stream. Shutdown invalidates the active
+generation, unsubscribes, disconnects and waits for confirmed transport closure. The
+pinned Lightstreamer 1.0.3 disposal defect is repaired narrowly at the adapter boundary
+because IG's deployed server is not compatible with an unverified client upgrade.
+Queue insertion remains non-blocking; overflow is counted and reported as degraded
+health without blocking the provider callback. ADR 0010 records these decisions.
 
 Historical requests use IG's v2 UTC date format. Each source, interval and price basis
 has a deterministic canonical stream identity, making overlapping backfills idempotent.

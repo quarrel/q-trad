@@ -1,0 +1,19 @@
+from collections.abc import Awaitable, Callable
+
+class _Response:
+    def close(self) -> Awaitable[object]: ...
+
+class _CancellationToken:
+    def done(self) -> bool: ...
+    def result(self) -> _Response: ...
+    def add_done_callback(self, callback: Callable[[object], object]) -> None: ...
+
+class WsClientPy:
+    isCanceled: bool
+    cancellationToken: _CancellationToken
+    def dispose(self) -> None: ...
+
+class _IoThread:
+    def submit_coro(self, coroutine: Awaitable[object]) -> object: ...
+
+ls_io_thread: _IoThread

@@ -196,6 +196,7 @@ async def _ingest(
     terminal_status = "FAILED"
     reconnect_task: asyncio.Task[None] | None = None
     reconnect_error: Exception | None = None
+    disconnect_error: Exception | None = None
     try:
         listings = await store.active_provider_listings()
         if len(listings) != len(INITIAL_INSTRUMENTS):
@@ -221,7 +222,7 @@ async def _ingest(
 
         if maximum_seconds is None:
             await consume()
-            terminal_status = "COMPLETED"
+            raise RuntimeError("unbounded IG ingestion iterator ended unexpectedly")
         else:
             try:
                 async with asyncio.timeout(maximum_seconds):
@@ -229,7 +230,7 @@ async def _ingest(
             except TimeoutError:
                 terminal_status = "STOPPED"
             else:
-                terminal_status = "COMPLETED"
+                raise RuntimeError("bounded IG ingestion iterator ended before its timeout")
     except (KeyboardInterrupt, asyncio.CancelledError):
         terminal_status = "STOPPED"
     finally:
@@ -244,7 +245,11 @@ async def _ingest(
                 reconnect_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconnect_task
-        await adapter.disconnect()
+        try:
+            await adapter.disconnect()
+        except Exception as error:
+            disconnect_error = error
+            terminal_status = "FAILED"
         final_health = await adapter.health()
         await store.record_adapter_health(final_health)
         await store.finish_run(
@@ -259,6 +264,8 @@ async def _ingest(
         await engine.dispose()
         if reconnect_error is not None:
             raise reconnect_error
+        if disconnect_error is not None:
+            raise disconnect_error
 
 
 async def _backfill(

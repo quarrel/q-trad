@@ -48,6 +48,23 @@ The fixed canonical universe is:
 - No production IG endpoint or order-submission command may exist during this phase.
 - Secrets and session tokens must never enter events, raw capture, logs, fixtures or version control.
 
+## External I/O safety
+
+- Treat broker, streaming and database connections as explicit state machines, not
+  booleans.
+- A successful method return, socket connection or subscription request is not readiness.
+  Readiness requires bounded, domain-relevant evidence from every required channel.
+- Tag callbacks and queued records with a connection generation and ignore superseded
+  generations.
+- Give library-managed retries an application watchdog; no degraded or retrying state may
+  suppress staleness detection indefinitely.
+- Share retry budgets across recreated client objects, classify provider failures and use
+  capped jittered backoff with a circuit-breaker cooldown.
+- Do not report an unbounded process as `COMPLETED` because an external iterator ended.
+  Recovery exhaustion is `FAILED`; an explicit clean stop is `STOPPED`.
+- Verify transport tasks, threads, sessions and processes have ended before declaring
+  disconnect or restart complete.
+
 ## Terminology
 
 Use the vocabulary in `PREPLAN.md`. In particular:
@@ -104,6 +121,10 @@ Before marking work complete:
 3. Update `docs/STATUS.md`.
 4. Update `docs/ARCHITECTURE.md` if implemented structure or flow changed.
 5. Add or supersede an ADR if an architectural decision changed.
+
+For long-running external I/O, also prove readiness, degraded recovery, retry exhaustion,
+clean shutdown and process exit. A short happy-path smoke cannot substitute for those
+lifecycle gates.
 
 Stop and report rather than guess if:
 

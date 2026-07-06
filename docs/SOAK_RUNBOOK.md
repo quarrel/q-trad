@@ -71,6 +71,37 @@ uv run python -m qtrad ingest --environment ig-demo \
   --max-seconds 90 --force-reconnect-after-seconds 20
 ```
 
+## Candidate lifecycle qualification
+
+Do not start another 24-hour soak until the same frozen runtime candidate passes both
+qualification stages.
+
+First, run deterministic tests that cover:
+
+- transport connected without subscription acknowledgement;
+- partial subscription acknowledgement and subscription error;
+- no first update, stale updates and prolonged `DISCONNECTED:WILL-RETRY`;
+- authentication, allowance, network and server error classification;
+- late callbacks from a superseded connection generation;
+- retry exhaustion without iterator completion;
+- clean stop during connection, subscription, retry and healthy streaming;
+- no surviving transport task, thread, session or process.
+
+Then run credential-gated IG demo qualification:
+
+1. Perform three sequential forced reconnects, spaced by at least five minutes.
+2. For each generation, require one connection, seven acknowledged subscriptions and a
+   fresh healthy update from every instrument within the declared readiness deadline.
+3. Confirm bounded state-transition/error-code evidence, no queue drops and verified
+   cleanup of each superseded client.
+4. Run the candidate continuously for two hours with one additional forced reconnect and
+   one fresh-process restart.
+5. Confirm the old process and connection have ended before starting the replacement.
+
+Any false `HEALTHY`, natural `COMPLETED` status, un-awaited coroutine, resident client
+thread/process, missing instrument or unexplained gap fails qualification. Fix and repeat
+qualification before spending another 24-hour window.
+
 ## Preflight
 
 Record UTC time, candidate identifiers and operator in `docs/SOAK_EVIDENCE.md`, then:
@@ -129,6 +160,12 @@ Record, without pasting raw credentials or tokens:
 - projection checkpoint/lag and open gaps;
 - raw and canonical growth since the previous observation;
 - relevant bounded log event names and error types.
+
+Also verify that API health is not being mistaken for ingestion readiness. The API may
+remain available while ingestion is stopped. Readiness requires a running ingestion run,
+an adapter state of `READY`, a current projection checkpoint and fresh quotes for all
+seven instruments. Configure an independent stale/stopped alert before leaving the soak
+unattended.
 
 ## Required fresh-process restart
 

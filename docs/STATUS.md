@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-04
+**Updated:** 2026-07-06
 **Current milestone:** 24-hour seven-instrument operational soak
-**State:** IN PROGRESS
+**State:** BLOCKED — remediation implemented; endurance qualification pending
 
 ## Completed
 
@@ -70,6 +70,16 @@
 - A future-facing intraday-strategy research dossier now surveys public FX and
   equity-index evidence, validation quality, market-state/regime research, adaptive risk,
   reported success and candidate experiments. It changes no current implementation scope.
+- Reconnect lifecycle remediation now requires generation-scoped all-seven data
+  readiness, ignores superseded callbacks, escalates prolonged library-managed retries,
+  applies shared capped full-jitter recovery with a cooldown, and propagates terminal
+  failure instead of allowing natural iterator completion.
+- The pinned IG-compatible Lightstreamer client has a narrow disposal repair for its
+  un-awaited WebSocket close callback. Shutdown now waits for confirmed disconnect and
+  invalidates the old callback generation.
+- A bounded live remediation smoke recovered after one retryable session-refresh
+  rejection, restored healthy quotes for all seven instruments, reported one reconnect
+  and zero dropped records, finalised as `STOPPED`, and left no ingestion process resident.
 
 ## Verification evidence
 
@@ -81,7 +91,7 @@
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
-- Current PostgreSQL-backed suite: 86 passed, including dependency-direction checks,
+- Current PostgreSQL-backed suite: 94 passed, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
   four database/API integration tests.
 - PostgreSQL-backed branch coverage: 70% overall. Core deterministic workflows range
@@ -99,6 +109,10 @@
 
 ## Pending verification
 
+- Complete the repeated-reconnect and two-hour credential-gated qualification for the
+  remediated candidate. The first bounded live reconnect smoke passed, but it is not the
+  endurance gate or soak evidence.
+- Repeat the complete frozen-candidate rehearsal and 24-hour soak after remediation.
 - Continue adding provider error-branch coverage after the soak where operational
   evidence identifies risk; the focused pre-soak suite now covers CLI dispatch and the
   highest-value deterministic authentication, reconnect, subscription and callback
@@ -109,3 +123,19 @@
 - Use one Lightstreamer connection carrying all seven subscriptions; do not run
   concurrent ingestion connections for the same API key.
 - Force one Lightstreamer reconnect and one process restart during the soak.
+
+## Next-phase preparation
+
+Preparation may proceed while the frozen data-foundation candidate soaks, but paper
+runtime implementation remains gated on a conclusive WP7 `PASS`.
+
+- ADR 0005 accepts the no-live-order paper vertical-slice boundary.
+- ADRs 0006 and 0007 define causal top-of-book paper fills, session handling, fixed
+  allocation, shadow isolation and AUD weighted-average virtual accounting.
+- ADR 0010 requires evidence-based external connection readiness, generation isolation,
+  watchdogs, shared retry policy and verified shutdown before another full soak.
+- `docs/PAPER_SLICE_DECISIONS.md` resolves or defers the blocking PREPLAN questions.
+- `docs/PAPER_SLICE_ACCEPTANCE.md` defines the executable causal, safety, accounting,
+  determinism and operator scenarios.
+- `docs/PAPER_SLICE_RESEARCH.md` records bounded bar, session, fill, product-economics and
+  historical-data outcomes. The complete-soak analysis remains pending.
