@@ -80,6 +80,16 @@
 - A bounded live remediation smoke recovered after one retryable session-refresh
   rejection, restored healthy quotes for all seven instruments, reported one reconnect
   and zero dropped records, finalised as `STOPPED`, and left no ingestion process resident.
+- The repeated-reconnect qualification exposed a second shutdown defect: cancellation of
+  a synchronous provider call left asyncio executor and `trading-ig` rate-limiter threads
+  resident after the run had been recorded `STOPPED`.
+- Provider calls now have named bounded operation lifecycles outside asyncio's default
+  executor. Unresolved calls fail the adapter, client ownership is retained until
+  confirmed disconnect, local rate-limiter cleanup is unconditional, and forced
+  reconnect completion is recorded separately from the request.
+- Lightstreamer `STALLED`, `DISCONNECTED:WILL-RETRY` and
+  `DISCONNECTED:TRYING-RECOVERY` states now require fresh healthy updates from all seven
+  instruments before readiness can recover.
 
 ## Verification evidence
 
@@ -91,9 +101,10 @@
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
-- Current PostgreSQL-backed suite: 94 passed, including dependency-direction checks,
+- Current PostgreSQL-backed suite: 101 passed, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
-  four database/API integration tests.
+  four database/API integration tests. A subprocess regression also proves that a timed
+  out provider operation does not keep the command resident.
 - PostgreSQL-backed branch coverage: 70% overall. Core deterministic workflows range
   from 82% to 100%; CLI orchestration is 40% and the IG adapter is 61%.
 - Migrations `0001` and `0002`: applied successfully to PostgreSQL 18.
@@ -110,8 +121,9 @@
 ## Pending verification
 
 - Complete the repeated-reconnect and two-hour credential-gated qualification for the
-  remediated candidate. The first bounded live reconnect smoke passed, but it is not the
-  endurance gate or soak evidence.
+  newly remediated candidate. The prior sequence passed `reconnect-2`, then stalled while
+  shutting down `reconnect-3`; it is failed diagnostic evidence, not an endurance gate or
+  soak result.
 - Repeat the complete frozen-candidate rehearsal and 24-hour soak after remediation.
 - Continue adding provider error-branch coverage after the soak where operational
   evidence identifies risk; the focused pre-soak suite now covers CLI dispatch and the

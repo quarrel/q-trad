@@ -197,6 +197,8 @@ async def _ingest(
     reconnect_task: asyncio.Task[None] | None = None
     reconnect_error: Exception | None = None
     disconnect_error: Exception | None = None
+    forced_reconnect_completed = False
+    bounded_deadline_reached = False
     try:
         listings = await store.active_provider_listings()
         if len(listings) != len(INITIAL_INSTRUMENTS):
@@ -228,6 +230,7 @@ async def _ingest(
                 async with asyncio.timeout(maximum_seconds):
                     await consume()
             except TimeoutError:
+                bounded_deadline_reached = True
                 terminal_status = "STOPPED"
             else:
                 raise RuntimeError("bounded IG ingestion iterator ended before its timeout")
@@ -241,7 +244,14 @@ async def _ingest(
                 except Exception as error:
                     reconnect_error = error
                     terminal_status = "FAILED"
+                else:
+                    forced_reconnect_completed = True
             else:
+                if bounded_deadline_reached:
+                    reconnect_error = RuntimeError(
+                        "forced reconnect did not complete before the ingestion deadline"
+                    )
+                    terminal_status = "FAILED"
                 reconnect_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await reconnect_task
@@ -258,7 +268,8 @@ async def _ingest(
             finished_at=clock.now(),
             detail={
                 "adapter_health": final_health.detail,
-                "forced_reconnect": force_reconnect_after_seconds is not None,
+                "forced_reconnect_requested": force_reconnect_after_seconds is not None,
+                "forced_reconnect_completed": forced_reconnect_completed,
             },
         )
         await engine.dispose()

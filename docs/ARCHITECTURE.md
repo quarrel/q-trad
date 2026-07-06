@@ -108,10 +108,21 @@ close the old client, refresh the IG REST session and rebuild one stream.
 
 REST connection and stream recovery share capped exponential full-jitter retries across
 recreated client objects. Fatal credential/API-key codes fail closed, while retryable
-failure cycles use a cooldown rather than hammering the provider. Exhausted recovery is
+failure cycles use a finite retry budget and cooldown rather than hammering the provider.
+`STALLED`, `DISCONNECTED:WILL-RETRY` and `DISCONNECTED:TRYING-RECOVERY` all degrade the
+connection and require fresh healthy updates from every instrument before readiness is
+restored. Exhausted recovery is
 propagated through the record iterator and finalises the ingestion run as `FAILED`;
 natural completion is invalid for an unbounded stream. Shutdown invalidates the active
-generation, unsubscribes, disconnects and waits for confirmed transport closure. The
+generation, retains client ownership while unsubscribing, disconnects and waits for
+confirmed transport closure.
+
+Synchronous provider calls run as named daemon operations with explicit deadlines rather
+than in asyncio's default executor. An unresolved timeout poisons the lifecycle and
+prevents another connection from being created in that process. Local HTTP and
+`trading-ig` rate-limiter resources are stopped even if remote logout fails, and a
+process-level regression proves an abandoned provider call cannot keep the command
+resident. ADR 0011 records this containment decision. The
 pinned Lightstreamer 1.0.3 disposal defect is repaired narrowly at the adapter boundary
 because IG's deployed server is not compatible with an unverified client upgrade.
 Queue insertion remains non-blocking; overflow is counted and reported as degraded

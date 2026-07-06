@@ -16,6 +16,7 @@ from qtrad.adapters.ig.market_data import (
     _historical_query_time,
     _historical_time,
     _is_fatal_provider_error,
+    _ProviderOperationTimeout,
     _safe_error_code,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -31,6 +32,10 @@ class FakeSession:
             "CST": "not-a-real-token",
             "X-SECURITY-TOKEN": "not-a-real-token",
         }
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class MutableClock:
@@ -75,6 +80,18 @@ class FakeService:
     ) -> dict[str, Any]:
         assert epic and resolution == "MINUTE" and start < end
         return self.historical_response or {"prices": []}
+
+
+class FailingLogoutService(FakeService):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rate_limiter_stopped = False
+
+    def logout(self) -> None:
+        raise ConnectionError("logout unavailable")
+
+    def _exit_bucket_threads(self) -> None:
+        self.rate_limiter_stopped = True
 
 
 class FakeStreamAdapter(IgDemoMarketDataAdapter):
@@ -180,6 +197,11 @@ class FakeStreamClient:
 
     def getStatus(self) -> str:
         return "DISCONNECTED" if self.disconnected else "CONNECTED:WS-STREAMING"
+
+
+class UnconfirmedDisconnectClient(FakeStreamClient):
+    def disconnect(self) -> None:
+        pass
 
 
 def config(**overrides: Any) -> IgDemoConfig:
@@ -321,10 +343,12 @@ async def test_fatal_authentication_error_is_not_retried() -> None:
 
 def test_provider_error_classification_is_bounded_and_secret_free() -> None:
     assert _safe_error_code(TimeoutError("sensitive detail")) == "TIMEOUT"
+    assert _safe_error_code(_ProviderOperationTimeout("logout")) == "OPERATION_TIMEOUT"
     assert _safe_error_code(ConnectionError("sensitive detail")) == "CONNECTION_ERROR"
     code = _safe_error_code(RuntimeError("request failed: error.security.api-key-invalid"))
     assert code == "error.security.api-key-invalid"
     assert _is_fatal_provider_error(code) is True
+    assert _is_fatal_provider_error("OPERATION_TIMEOUT") is True
     assert _is_fatal_provider_error("error.public-api.exceeded-api-key-allowance") is False
 
 
@@ -509,6 +533,37 @@ async def test_will_retry_watchdog_escalates_stalled_sdk_recovery() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    ["STALLED", "DISCONNECTED:WILL-RETRY", "DISCONNECTED:TRYING-RECOVERY"],
+)
+async def test_library_managed_recovery_requires_fresh_healthy_update(status: str) -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    selected_listing = listing()
+    epic = selected_listing.listing_id.external_id
+    adapter._generation = 4
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_stream_status(status, generation=4)
+    adapter._handle_stream_status("CONNECTED:WS-STREAMING", generation=4)
+
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._updated_epics == set()
+
+    adapter._accept_update(market_record(clock), epic, generation=4)
+
+    assert adapter._status is HealthStatus.HEALTHY
+    assert adapter._connection_state is _ConnectionState.READY
+    await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
 async def test_records_propagates_terminal_adapter_failure() -> None:
     adapter = IgDemoMarketDataAdapter(config(), MutableClock())
     adapter._service = FakeService()
@@ -535,6 +590,39 @@ async def test_close_stream_waits_for_confirmed_disconnect() -> None:
     assert client.disconnected is True
     assert adapter._stream_client is None
     assert adapter._generation == original_generation + 1
+
+
+@pytest.mark.asyncio
+async def test_close_stream_retains_client_when_disconnect_is_not_confirmed() -> None:
+    adapter = IgDemoMarketDataAdapter(
+        config(shutdown_timeout_seconds=0.01),
+        MutableClock(),
+    )
+    client = UnconfirmedDisconnectClient()
+    adapter._stream_client = client
+
+    with pytest.raises(TimeoutError, match="did not confirm disconnect"):
+        await adapter.disconnect()
+
+    assert adapter._stream_client is client
+    assert adapter._connection_state is _ConnectionState.FAILED
+
+
+@pytest.mark.asyncio
+async def test_logout_failure_still_stops_rate_limiter_and_closes_session() -> None:
+    service = FailingLogoutService()
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: service,
+    )
+    await adapter.connect()
+
+    await adapter.disconnect()
+
+    assert service.rate_limiter_stopped is True
+    assert service.session.closed is True
+    assert (await adapter.health()).status is HealthStatus.STOPPED
 
 
 def test_subscription_error_degrades_health_without_exposing_message() -> None:

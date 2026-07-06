@@ -148,7 +148,7 @@ python -m qtrad api
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
-- Current PostgreSQL-backed suite: 94 passed.
+- Current PostgreSQL-backed suite: 101 passed.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model
@@ -200,4 +200,13 @@ python -m qtrad api
   recovery failure and verifies disconnect completion. A 126-second live candidate smoke
   recovered after one retryable reconnect error, restored all seven healthy quotes,
   recorded one reconnect and zero drops, stopped cleanly and left no ingestion process.
-  Repeated-reconnect and two-hour qualification remain required before the fresh soak.
+  The subsequent repeated-reconnect sequence passed its first stage but exposed an
+  executor and `trading-ig` rate-limiter thread leak while shutting down its second stage.
+- ADR 0011 contains synchronous provider calls behind named deadlines, treats unresolved
+  calls as terminal, retains stream ownership until disconnect is confirmed, stops local
+  rate-limiter resources independently of remote logout, bounds reconnect cycles and
+  records forced-reconnect request and completion separately. Deterministic coverage
+  includes all Lightstreamer degraded states, fresh post-recovery readiness, failed
+  disconnect ownership and subprocess exit after a timed-out provider call.
+- Repeated-reconnect and two-hour qualification remain required for the newly remediated
+  candidate before the fresh soak.

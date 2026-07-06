@@ -16,7 +16,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
-from typing import Protocol, cast, runtime_checkable
+from threading import Thread
+from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from qtrad.adapters.ig.lightstreamer_compat import install_lightstreamer_compatibility
 from qtrad.domain.events import JsonValue, to_json_value
@@ -41,6 +42,7 @@ from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest, MarketDataRecord
 
 LOGGER = logging.getLogger(__name__)
+_T = TypeVar("_T")
 _ROLLING_EXPIRIES = {"-", "DFB", "DAILY", "CASH", "ROLLING"}
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
@@ -50,6 +52,7 @@ _FATAL_PROVIDER_ERRORS = {
     "error.security.api-key-restricted",
     "error.security.api-key-revoked",
     "error.security.too-many-failed-attempts",
+    "OPERATION_TIMEOUT",
 }
 _PREFERRED_EPICS = {
     InstrumentId("fx:aud-usd"): "CS.D.AUDUSD.CFD.IP",
@@ -65,6 +68,13 @@ _PREFERRED_EPICS = {
 class _HttpSession(Protocol):
     @property
     def headers(self) -> Mapping[str, str]: ...
+
+    def close(self) -> None: ...
+
+
+@runtime_checkable
+class _RateLimiterControl(Protocol):
+    def _exit_bucket_threads(self) -> None: ...
 
 
 class _IgRestService(Protocol):
@@ -139,11 +149,12 @@ class IgDemoConfig:
     initial_backoff_seconds: float = 5.0
     maximum_backoff_seconds: float = 120.0
     reconnect_cooldown_seconds: float = 300.0
-    maximum_reconnect_cycles: int | None = None
+    maximum_reconnect_cycles: int = 3
     stale_after_seconds: float = 30.0
     readiness_timeout_seconds: float = 60.0
     retry_watchdog_seconds: float = 60.0
     shutdown_timeout_seconds: float = 10.0
+    provider_operation_timeout_seconds: float = 30.0
 
     @property
     def account_type(self) -> str:
@@ -158,13 +169,14 @@ class IgDemoConfig:
             raise ValueError("backoff intervals must be positive")
         if self.reconnect_cooldown_seconds <= 0:
             raise ValueError("reconnect cooldown must be positive")
-        if self.maximum_reconnect_cycles is not None and self.maximum_reconnect_cycles <= 0:
+        if self.maximum_reconnect_cycles <= 0:
             raise ValueError("maximum reconnect cycles must be positive")
         if (
             self.stale_after_seconds <= 0
             or self.readiness_timeout_seconds <= 0
             or self.retry_watchdog_seconds <= 0
             or self.shutdown_timeout_seconds <= 0
+            or self.provider_operation_timeout_seconds <= 0
         ):
             raise ValueError("lifecycle timeouts must be positive")
 
@@ -180,6 +192,12 @@ class _ConnectionState(StrEnum):
     BACKING_OFF = "BACKING_OFF"
     FAILED = "FAILED"
     STOPPING = "STOPPING"
+
+
+class _ProviderOperationTimeout(TimeoutError):
+    def __init__(self, operation: str) -> None:
+        self.operation = operation
+        super().__init__(f"IG provider operation timed out: {operation}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -244,6 +262,8 @@ class IgDemoMarketDataAdapter:
         self._ready_event = asyncio.Event()
         self._readiness_error: Exception | None = None
         self._fatal_error: Exception | None = None
+        self._provider_threads: dict[Thread, str] = {}
+        self._abandoned_provider_operation = False
 
     async def connect(self) -> None:
         if self._status in {
@@ -274,11 +294,23 @@ class IgDemoMarketDataAdapter:
             with suppress(asyncio.CancelledError):
                 await reconnect_task
         try:
-            await self._close_stream()
+            await self._wait_for_provider_operations()
         except Exception as error:
             close_error = error
         try:
-            await self._logout_rest_session()
+            if close_error is None:
+                await self._close_stream()
+        except Exception as error:
+            close_error = error
+        try:
+            if self._active_provider_operation_names():
+                service = self._service
+                if service is not None:
+                    self._stop_rate_limiter(service)
+            else:
+                await self._logout_rest_session()
+        except Exception as error:
+            close_error = close_error or error
         finally:
             self._desired_listings = ()
             self._reconnecting = False
@@ -303,7 +335,10 @@ class IgDemoMarketDataAdapter:
             instrument = INSTRUMENTS_BY_ID[instrument_id]
             by_epic: dict[str, _Candidate] = {}
             for alias in instrument.search_aliases:
-                response = await asyncio.to_thread(service.search_markets, alias)
+                response = await self._run_provider_operation(
+                    "search_markets",
+                    lambda alias=alias: service.search_markets(alias),
+                )
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
                     if (
@@ -312,7 +347,10 @@ class IgDemoMarketDataAdapter:
                         or not _search_row_can_match(search_row, instrument)
                     ):
                         continue
-                    detail_response = await asyncio.to_thread(service.fetch_market_by_epic, epic)
+                    detail_response = await self._run_provider_operation(
+                        "fetch_market",
+                        lambda epic=epic: service.fetch_market_by_epic(epic),
+                    )
                     detail = _single_record(detail_response)
                     candidate = _candidate(search_row, detail)
                     if candidate is not None:
@@ -417,7 +455,7 @@ class IgDemoMarketDataAdapter:
         client.connectionDetails.setUser(account_id)
         client.connectionDetails.setPassword(f"CST-{cst}|XST-{security_token}")
         client.addListener(StatusListener())
-        await asyncio.to_thread(client.connect)
+        await self._run_provider_operation("stream_connect", client.connect)
 
         self._connection_state = _ConnectionState.SUBSCRIBING
         for listing in listings:
@@ -441,7 +479,10 @@ class IgDemoMarketDataAdapter:
             )
             subscription.setDataAdapter("Pricing")
             subscription.addListener(PriceListener(epic))
-            await asyncio.to_thread(client.subscribe, subscription)
+            await self._run_provider_operation(
+                "stream_subscribe",
+                lambda subscription=subscription: client.subscribe(subscription),
+            )
             self._subscriptions.append(subscription)
         self._stream_connected_at = self._clock.now()
         try:
@@ -475,12 +516,14 @@ class IgDemoMarketDataAdapter:
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
         service = self._require_connected()
-        response = await asyncio.to_thread(
-            service.fetch_historical_prices_by_epic_and_date_range,
-            request.listing.listing_id.external_id,
-            "MINUTE",
-            _historical_query_time(request.start),
-            _historical_query_time(request.end),
+        response = await self._run_provider_operation(
+            "fetch_historical_prices",
+            lambda: service.fetch_historical_prices_by_epic_and_date_range(
+                request.listing.listing_id.external_id,
+                "MINUTE",
+                _historical_query_time(request.start),
+                _historical_query_time(request.end),
+            ),
         )
         allowance = _mapping(_mapping(response).get("allowance"))
         remaining = _integer_or_none(allowance.get("remainingAllowance"))
@@ -516,7 +559,8 @@ class IgDemoMarketDataAdapter:
                 f"state={self._connection_state}; generation={self._generation}; "
                 f"subscriptions={len(self._subscribed_epics)}/{len(self._expected_epics)}; "
                 f"updates={len(self._updated_epics)}/{len(self._expected_epics)}; "
-                f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}"
+                f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}; "
+                f"provider_operations={len(self._provider_threads)}"
             ),
         )
 
@@ -657,17 +701,27 @@ class IgDemoMarketDataAdapter:
         )
         if normalised.startswith("CONNECTED:"):
             self._transport_connected = True
+            self._stream_connected_at = self._clock.now()
             self._mark_ready_if_complete(observed_generation)
-        elif normalised == "DISCONNECTED:WILL-RETRY":
-            self._transport_connected = False
-            self._status = HealthStatus.DEGRADED
-            self._connection_state = _ConnectionState.DEGRADED
+        elif normalised in {
+            "STALLED",
+            "DISCONNECTED:WILL-RETRY",
+            "DISCONNECTED:TRYING-RECOVERY",
+        }:
+            self._mark_transport_degraded()
             self._start_retry_watchdog(observed_generation)
         elif normalised == "DISCONNECTED" and not self._stopping:
-            self._transport_connected = False
-            self._status = HealthStatus.DEGRADED
-            self._connection_state = _ConnectionState.DEGRADED
+            self._mark_transport_degraded()
             self._schedule_reconnect()
+
+    def _mark_transport_degraded(self) -> None:
+        self._transport_connected = False
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        self._updated_epics.clear()
+        self._field_state.clear()
+        self._side_times.clear()
+        self._last_message_at = None
 
     def _on_subscription(self, epic: str, generation: int) -> None:
         if self._loop is not None:
@@ -827,10 +881,7 @@ class IgDemoMarketDataAdapter:
                             },
                         )
                         await self._sleep(delay)
-                if (
-                    self._config.maximum_reconnect_cycles is not None
-                    and cycle >= self._config.maximum_reconnect_cycles
-                ):
+                if cycle >= self._config.maximum_reconnect_cycles:
                     if last_error is not None:
                         raise last_error
                     raise RuntimeError("IG reconnect attempts exhausted")
@@ -874,7 +925,10 @@ class IgDemoMarketDataAdapter:
             try:
                 service = self._new_service()
                 self._service = service
-                session_details = await asyncio.to_thread(service.create_session)
+                session_details = await self._run_provider_operation(
+                    "create_session",
+                    service.create_session,
+                )
                 self._session_details = _single_record(session_details)
                 self._status = HealthStatus.STARTING
                 self._connection_state = _ConnectionState.AUTHENTICATED
@@ -883,6 +937,13 @@ class IgDemoMarketDataAdapter:
                 raise
             except Exception as error:
                 last_error = error
+                if isinstance(error, _ProviderOperationTimeout):
+                    current_service = self._service
+                    if current_service is not None:
+                        self._stop_rate_limiter(current_service)
+                    self._status = HealthStatus.DISCONNECTED
+                    self._connection_state = _ConnectionState.FAILED
+                    raise
                 await self._logout_rest_session()
                 if _is_fatal_provider_error(_safe_error_code(error)):
                     break
@@ -928,6 +989,175 @@ class IgDemoMarketDataAdapter:
         subscriptions = tuple(self._subscriptions)
         if client is not None:
             self._generation += 1
+        self._transport_connected = False
+        self._updated_epics.clear()
+        watchdog_task = self._retry_watchdog_task
+        if watchdog_task is not None and watchdog_task is not asyncio.current_task():
+            watchdog_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await watchdog_task
+        self._retry_watchdog_task = None
+        if client is None:
+            self._clear_stream_state()
+            return
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._config.shutdown_timeout_seconds
+        for subscription in subscriptions:
+            try:
+                await self._run_provider_operation(
+                    "stream_unsubscribe",
+                    lambda subscription=subscription: client.unsubscribe(subscription),
+                    timeout=self._remaining_shutdown_time(deadline),
+                )
+            except _ProviderOperationTimeout:
+                raise
+            except Exception:
+                LOGGER.warning("ig_unsubscribe_failed")
+        try:
+            await self._run_provider_operation(
+                "stream_disconnect",
+                client.disconnect,
+                timeout=self._remaining_shutdown_time(deadline),
+            )
+        except Exception:
+            LOGGER.warning("ig_stream_disconnect_failed")
+            raise
+        while loop.time() < deadline:
+            status = await self._run_provider_operation(
+                "stream_status",
+                client.getStatus,
+                timeout=self._remaining_shutdown_time(deadline),
+            )
+            if status.upper() == "DISCONNECTED":
+                self._clear_stream_state()
+                return
+            await asyncio.sleep(0.05)
+        raise TimeoutError("IG Lightstreamer client did not confirm disconnect")
+
+    async def _logout_rest_session(self) -> None:
+        service = self._service
+        if service is None:
+            return
+        try:
+            await self._run_provider_operation("logout", service.logout)
+        except _ProviderOperationTimeout:
+            raise
+        except Exception:
+            LOGGER.warning("ig_logout_failed")
+        finally:
+            self._stop_rate_limiter(service)
+        await self._run_provider_operation("http_session_close", service.session.close)
+        self._service = None
+        self._session_details = None
+
+    async def _run_provider_operation(
+        self,
+        operation_name: str,
+        operation: Callable[[], _T],
+        *,
+        timeout: float | None = None,
+    ) -> _T:
+        """Run one synchronous provider call without owning a non-daemon executor thread."""
+        loop = asyncio.get_running_loop()
+        result: asyncio.Future[_T] = loop.create_future()
+        started = loop.time()
+
+        def run() -> None:
+            try:
+                value = operation()
+            except BaseException as error:
+
+                def complete_error(captured_error: BaseException = error) -> None:
+                    self._provider_threads.pop(thread, None)
+                    if not result.done():
+                        result.set_exception(captured_error)
+
+                completion = complete_error
+            else:
+
+                def complete_value() -> None:
+                    self._provider_threads.pop(thread, None)
+                    if not result.done():
+                        result.set_result(value)
+
+                completion = complete_value
+            try:
+                loop.call_soon_threadsafe(completion)
+            except RuntimeError:
+                return
+
+        thread = Thread(
+            target=run,
+            name=f"qtrad-ig-{operation_name}",
+            daemon=True,
+        )
+        self._provider_threads[thread] = operation_name
+        LOGGER.info(
+            "ig_provider_operation_started",
+            extra={"operation": operation_name, "generation": self._generation},
+        )
+        thread.start()
+        maximum_seconds = timeout or self._config.provider_operation_timeout_seconds
+        try:
+            async with asyncio.timeout(maximum_seconds):
+                value = await asyncio.shield(result)
+        except TimeoutError as error:
+            result.cancel()
+            self._abandoned_provider_operation = True
+            LOGGER.error(
+                "ig_provider_operation_timed_out",
+                extra={
+                    "operation": operation_name,
+                    "generation": self._generation,
+                    "duration_seconds": loop.time() - started,
+                },
+            )
+            raise _ProviderOperationTimeout(operation_name) from error
+        except asyncio.CancelledError:
+            result.cancel()
+            if thread.is_alive():
+                self._abandoned_provider_operation = True
+                LOGGER.error(
+                    "ig_provider_operation_cancelled",
+                    extra={"operation": operation_name, "generation": self._generation},
+                )
+            raise
+        LOGGER.info(
+            "ig_provider_operation_completed",
+            extra={
+                "operation": operation_name,
+                "generation": self._generation,
+                "duration_seconds": loop.time() - started,
+            },
+        )
+        return value
+
+    async def _wait_for_provider_operations(self) -> None:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + self._config.shutdown_timeout_seconds
+        while (
+            any(thread.is_alive() for thread in self._provider_threads) and loop.time() < deadline
+        ):
+            await asyncio.sleep(0.05)
+        active = self._active_provider_operation_names()
+        if active:
+            raise RuntimeError(
+                "IG provider operations did not stop before shutdown: " + ",".join(active)
+            )
+        self._abandoned_provider_operation = False
+
+    def _active_provider_operation_names(self) -> list[str]:
+        return sorted(
+            {operation for thread, operation in self._provider_threads.items() if thread.is_alive()}
+        )
+
+    def _remaining_shutdown_time(self, deadline: float) -> float:
+        remaining = deadline - asyncio.get_running_loop().time()
+        if remaining <= 0:
+            raise TimeoutError("IG Lightstreamer shutdown deadline expired")
+        return remaining
+
+    def _clear_stream_state(self) -> None:
         self._stream_client = None
         self._stream_account_id = None
         self._stream_connected_at = None
@@ -939,43 +1169,16 @@ class IgDemoMarketDataAdapter:
         self._ready_event = asyncio.Event()
         self._readiness_error = None
         self._subscriptions.clear()
-        watchdog_task = self._retry_watchdog_task
-        if watchdog_task is not None and watchdog_task is not asyncio.current_task():
-            watchdog_task.cancel()
-            with suppress(asyncio.CancelledError):
-                await watchdog_task
-        self._retry_watchdog_task = None
-        if client is None:
-            return
-        for subscription in subscriptions:
-            try:
-                await asyncio.to_thread(client.unsubscribe, subscription)
-            except Exception:
-                LOGGER.warning("ig_unsubscribe_failed")
-        try:
-            await asyncio.to_thread(client.disconnect)
-        except Exception:
-            LOGGER.warning("ig_stream_disconnect_failed")
-            raise
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._config.shutdown_timeout_seconds
-        while loop.time() < deadline:
-            status = await asyncio.to_thread(client.getStatus)
-            if status.upper() == "DISCONNECTED":
-                return
-            await asyncio.sleep(0.05)
-        raise TimeoutError("IG Lightstreamer client did not confirm disconnect")
 
-    async def _logout_rest_session(self) -> None:
-        service = self._service
-        self._service = None
-        self._session_details = None
-        if service is None:
+    @staticmethod
+    def _stop_rate_limiter(service: _IgRestService) -> None:
+        if not isinstance(service, _RateLimiterControl):
             return
         try:
-            await asyncio.to_thread(service.logout)
+            # trading-ig exposes no public local-only rate-limiter shutdown hook.
+            service._exit_bucket_threads()  # pyright: ignore[reportPrivateUsage]
         except Exception:
-            LOGGER.warning("ig_logout_failed")
+            LOGGER.warning("ig_rate_limiter_stop_failed")
 
     def _require_connected(self) -> _IgRestService:
         if self._service is None or self._connection_state in {
@@ -995,6 +1198,8 @@ def _backoff_seconds(config: IgDemoConfig, failed_attempt: int) -> float:
 
 
 def _safe_error_code(error: BaseException) -> str:
+    if isinstance(error, _ProviderOperationTimeout):
+        return "OPERATION_TIMEOUT"
     if isinstance(error, TimeoutError):
         return "TIMEOUT"
     if isinstance(error, ConnectionError):
