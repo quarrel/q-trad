@@ -43,7 +43,8 @@ RUN apt-get update \
 COPY .devcontainer/codex-install /opt/codex-install
 
 RUN cd /opt/codex-install \
-    && corepack pnpm install --frozen-lockfile --ignore-scripts \
+    && corepack pnpm install --no-frozen-lockfile --ignore-scripts \
+    && npm install --prefix /opt/codex-latest --ignore-scripts @openai/codex@latest \
     && case "$(dpkg --print-architecture)" in \
         amd64) tilth_target="x86_64-unknown-linux-musl" ;; \
         arm64) tilth_target="aarch64-unknown-linux-musl" ;; \
@@ -54,7 +55,7 @@ RUN cd /opt/codex-install \
         "https://github.com/jahala/tilth/releases/download/v0.9.0/tilth-${tilth_target}.tar.gz" \
         | tar xz -C node_modules/tilth/bin \
     && chmod 0755 node_modules/tilth/bin/tilth \
-    && ln -s /opt/codex-install/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
+    && ln -s /opt/codex-latest/node_modules/@openai/codex/bin/codex.js /usr/local/bin/codex
 
 USER vscode
 WORKDIR /workspace

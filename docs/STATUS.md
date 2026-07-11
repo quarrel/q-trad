@@ -107,8 +107,10 @@
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
 - IG adapter focused static check: included in strict Pyright with no diagnostics.
 - `ty`: passed on current source.
-- Dev Container image: built successfully; Codex CLI `0.142.2` available.
-- Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
+- Dev Container image: rebuilt without cache; Codex CLI `0.144.1` matches npm's
+  `@openai/codex` `latest` dist-tag.
+- Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled after the rebuild.
+- Dev Container static gates after the rebuild: Ruff, Pyright and `ty` passed.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
 - Current PostgreSQL-backed suite: 104 passed, including dependency-direction checks,

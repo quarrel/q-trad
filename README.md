@@ -48,8 +48,10 @@ tools inside Docker rather than directly in WSL.
 
 The Debian Trixie container uses Python 3.13 and `uv`, starts the PostgreSQL 18 `db`
 service, installs the Codex, Python and Ruff extensions, and configures the Tilth and
-Context7 MCP servers. Tilth is installed from a pinned npm package and release binary.
-The container
+Context7 MCP servers. Codex is resolved from npm's `latest` release when the container
+image is rebuilt without cache; Tilth is installed from a pinned npm package and release
+binary. To update Codex, run **Dev Containers: Rebuild Container Without Cache** rather
+than a cached rebuild. The container
 keeps its virtual environment, dependency cache and Codex state in named volumes. It
 copies the host's global `~/.codex/AGENTS.md` through a gitignored staging file, without
 copying other Codex state. It does not mount the host Docker socket or any directory
