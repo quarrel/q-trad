@@ -1,7 +1,8 @@
 # Implemented architecture
 
 **Status:** data foundation, IG PRICE streaming and historical backfill implemented;
-reconnect lifecycle remediation implemented and awaiting endurance qualification.
+reconnect lifecycle remediation implemented and qualified by a 24-hour seven-instrument
+soak.
 
 This document describes implemented reality, not the complete aspiration in `PREPLAN.md`.
 
@@ -101,28 +102,32 @@ Concurrent streaming connections for the same IG API key are an operational safe
 
 The adapter owns one explicit, generation-tagged connection lifecycle. Transport
 `CONNECTED` is not readiness: `READY` additionally requires every expected subscription
-to acknowledge and deliver a healthy quote. Callbacks from superseded generations are
-ignored and per-generation partial quote state is reset. A prolonged
-`DISCONNECTED:WILL-RETRY` has an application watchdog; terminal disconnect and staleness
-close the old client, refresh the IG REST session and rebuild one stream.
+to acknowledge and deliver a recently received healthy quote. Readiness and staleness are
+tracked per required subscription so an active instrument cannot mask a silent one, while
+quiet overnight sessions have bounded grace before degradation. Callbacks from superseded
+generations are ignored and per-generation partial quote state is reset. A prolonged
+`DISCONNECTED:WILL-RETRY` has an application watchdog; terminal disconnect and prolonged
+staleness close the old client, refresh the IG REST session and rebuild one stream.
 
 REST connection and stream recovery share capped exponential full-jitter retries across
 recreated client objects. Fatal credential/API-key codes fail closed, while retryable
 failure cycles use a finite retry budget and cooldown rather than hammering the provider.
 `STALLED`, `DISCONNECTED:WILL-RETRY` and `DISCONNECTED:TRYING-RECOVERY` all degrade the
-connection and require fresh healthy updates from every instrument before readiness is
-restored. Exhausted recovery is
+connection, preserve current channel evidence while the library attempts recovery, and
+require fresh healthy updates from every instrument before readiness is restored.
+Exhausted recovery is
 propagated through the record iterator and finalises the ingestion run as `FAILED`;
 natural completion is invalid for an unbounded stream. Shutdown invalidates the active
 generation, retains client ownership while unsubscribing, disconnects and waits for
 confirmed transport closure.
 
 Synchronous provider calls run as named daemon operations with explicit deadlines rather
-than in asyncio's default executor. An unresolved timeout poisons the lifecycle and
-prevents another connection from being created in that process. Local HTTP and
-`trading-ig` rate-limiter resources are stopped even if remote logout fails, and a
-process-level regression proves an abandoned provider call cannot keep the command
-resident. ADR 0011 records this containment decision. The
+than in asyncio's default executor, and adapter-owned REST requests have bounded default
+HTTP connect/read timeouts unless a call explicitly overrides them. An unresolved timeout
+poisons the lifecycle and prevents another connection from being created in that process.
+Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
+fails, and a process-level regression proves an abandoned provider call cannot keep the
+command resident. ADR 0011 records this containment decision. The
 pinned Lightstreamer 1.0.3 disposal defect is repaired narrowly at the adapter boundary
 because IG's deployed server is not compatible with an unverified client upgrade.
 Queue insertion remains non-blocking; overflow is counted and reported as degraded

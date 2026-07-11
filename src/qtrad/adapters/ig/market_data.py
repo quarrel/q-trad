@@ -72,6 +72,10 @@ class _HttpSession(Protocol):
     def close(self) -> None: ...
 
 
+class _ConfigurableHttpSession(_HttpSession, Protocol):
+    request: Callable[..., object]
+
+
 @runtime_checkable
 class _RateLimiterControl(Protocol):
     def _exit_bucket_threads(self) -> None: ...
@@ -150,11 +154,14 @@ class IgDemoConfig:
     maximum_backoff_seconds: float = 120.0
     reconnect_cooldown_seconds: float = 300.0
     maximum_reconnect_cycles: int = 3
-    stale_after_seconds: float = 30.0
+    stale_after_seconds: float = 300.0
+    stale_reconnect_after_seconds: float = 1800.0
     readiness_timeout_seconds: float = 60.0
     retry_watchdog_seconds: float = 60.0
     shutdown_timeout_seconds: float = 10.0
     provider_operation_timeout_seconds: float = 30.0
+    http_connect_timeout_seconds: float = 5.0
+    http_read_timeout_seconds: float = 15.0
 
     @property
     def account_type(self) -> str:
@@ -173,12 +180,17 @@ class IgDemoConfig:
             raise ValueError("maximum reconnect cycles must be positive")
         if (
             self.stale_after_seconds <= 0
+            or self.stale_reconnect_after_seconds <= self.stale_after_seconds
             or self.readiness_timeout_seconds <= 0
             or self.retry_watchdog_seconds <= 0
             or self.shutdown_timeout_seconds <= 0
             or self.provider_operation_timeout_seconds <= 0
+            or self.http_connect_timeout_seconds <= 0
+            or self.http_read_timeout_seconds <= 0
         ):
-            raise ValueError("lifecycle timeouts must be positive")
+            raise ValueError(
+                "lifecycle timeouts must be positive and stale reconnect must exceed staleness"
+            )
 
 
 class _ConnectionState(StrEnum):
@@ -258,6 +270,8 @@ class IgDemoMarketDataAdapter:
         self._expected_epics: set[str] = set()
         self._subscribed_epics: set[str] = set()
         self._updated_epics: set[str] = set()
+        self._quote_received_times: dict[str, datetime] = {}
+        self._stale_epics: set[str] = set()
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error: Exception | None = None
@@ -441,6 +455,8 @@ class IgDemoMarketDataAdapter:
         self._expected_epics = {listing.listing_id.external_id for listing in listings}
         self._subscribed_epics.clear()
         self._updated_epics.clear()
+        self._quote_received_times.clear()
+        self._stale_epics.clear()
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
@@ -655,7 +671,9 @@ class IgDemoMarketDataAdapter:
         if generation != self._generation or self._stopping:
             return
         self._last_message_at = record.received_time
-        if record.quote is not None and record.quote.quality is DataQuality.HEALTHY:
+        quote = record.quote
+        if quote is not None and quote.quality is DataQuality.HEALTHY:
+            self._quote_received_times[epic] = record.received_time
             self._updated_epics.add(epic)
         self._mark_ready_if_complete(generation)
         self._enqueue_record(record, epic)
@@ -675,15 +693,46 @@ class IgDemoMarketDataAdapter:
     def _check_staleness(self) -> None:
         if self._stopping or self._reconnecting or not self._desired_listings:
             return
-        anchor = self._last_message_at or self._stream_connected_at
-        if anchor is None:
-            return
-        if self._clock.now() - anchor <= timedelta(seconds=self._config.stale_after_seconds):
-            return
+        now = self._clock.now()
+        stale_channels = ""
+        stale_epics: set[str] = set()
+        reconnect_required = False
+        if self._expected_epics:
+            current_epics = {
+                epic
+                for epic, received_time in self._quote_received_times.items()
+                if now - received_time <= timedelta(seconds=self._config.stale_after_seconds)
+            }
+            if current_epics == self._expected_epics:
+                self._stale_epics.clear()
+                return
+            channel_evidence: list[str] = []
+            stale_epics = self._expected_epics - current_epics
+            for epic in sorted(stale_epics):
+                listing = self._listings_by_epic.get(epic)
+                label = str(listing.instrument_id) if listing is not None else epic
+                received_time = self._quote_received_times.get(epic)
+                age = f"{(now - received_time).total_seconds():.1f}" if received_time else "missing"
+                channel_evidence.append(f"{label}:{age}")
+                if received_time is None or now - received_time > timedelta(
+                    seconds=self._config.stale_reconnect_after_seconds
+                ):
+                    reconnect_required = True
+            stale_channels = ",".join(channel_evidence)
+        else:
+            anchor = self._last_message_at or self._stream_connected_at
+            if anchor is None:
+                return
+            if now - anchor <= timedelta(seconds=self._config.stale_after_seconds):
+                return
+            reconnect_required = True
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
-        LOGGER.warning("ig_stream_stale")
-        self._schedule_reconnect()
+        if stale_epics != self._stale_epics or reconnect_required:
+            LOGGER.warning("ig_stream_stale", extra={"stale_channels": stale_channels})
+        self._stale_epics = stale_epics
+        if reconnect_required or not self._expected_epics:
+            self._schedule_reconnect()
 
     def _on_stream_status(self, status: str, generation: int | None = None) -> None:
         observed_generation = self._generation if generation is None else generation
@@ -708,20 +757,23 @@ class IgDemoMarketDataAdapter:
             "DISCONNECTED:WILL-RETRY",
             "DISCONNECTED:TRYING-RECOVERY",
         }:
-            self._mark_transport_degraded()
+            self._mark_transport_degraded(clear_channel_evidence=False)
             self._start_retry_watchdog(observed_generation)
         elif normalised == "DISCONNECTED" and not self._stopping:
             self._mark_transport_degraded()
             self._schedule_reconnect()
 
-    def _mark_transport_degraded(self) -> None:
+    def _mark_transport_degraded(self, *, clear_channel_evidence: bool = True) -> None:
         self._transport_connected = False
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
         self._updated_epics.clear()
-        self._field_state.clear()
-        self._side_times.clear()
-        self._last_message_at = None
+        if clear_channel_evidence:
+            self._quote_received_times.clear()
+            self._stale_epics.clear()
+            self._field_state.clear()
+            self._side_times.clear()
+            self._last_message_at = None
 
     def _on_subscription(self, epic: str, generation: int) -> None:
         if self._loop is not None:
@@ -781,6 +833,11 @@ class IgDemoMarketDataAdapter:
             not self._transport_connected
             or self._subscribed_epics != self._expected_epics
             or self._updated_epics != self._expected_epics
+            or any(
+                self._clock.now() - self._quote_received_times[epic]
+                > timedelta(seconds=self._config.stale_after_seconds)
+                for epic in self._expected_epics
+            )
         ):
             return
         watchdog_task = self._retry_watchdog_task
@@ -972,7 +1029,7 @@ class IgDemoMarketDataAdapter:
             return cast(_IgRestService, self._service_factory(self._config))
         from trading_ig.rest import IGService
 
-        return cast(
+        service = cast(
             _IgRestService,
             IGService(
                 self._config.username,
@@ -983,6 +1040,14 @@ class IgDemoMarketDataAdapter:
                 use_rate_limiter=True,
             ),
         )
+        _install_default_http_timeout(
+            cast(_ConfigurableHttpSession, service.session),
+            (
+                self._config.http_connect_timeout_seconds,
+                self._config.http_read_timeout_seconds,
+            ),
+        )
+        return service
 
     async def _close_stream(self) -> None:
         client = self._stream_client
@@ -1166,6 +1231,8 @@ class IgDemoMarketDataAdapter:
         self._expected_epics.clear()
         self._subscribed_epics.clear()
         self._updated_epics.clear()
+        self._quote_received_times.clear()
+        self._stale_epics.clear()
         self._ready_event = asyncio.Event()
         self._readiness_error = None
         self._subscriptions.clear()
@@ -1188,6 +1255,20 @@ class IgDemoMarketDataAdapter:
         }:
             raise RuntimeError("IG demo adapter is not connected")
         return self._service
+
+
+def _install_default_http_timeout(
+    session: _ConfigurableHttpSession,
+    timeout: tuple[float, float],
+) -> None:
+    """Bound trading-ig HTTP calls while preserving explicit request timeouts."""
+    request = session.request
+
+    def request_with_timeout(method: str, url: str, **kwargs: object) -> object:
+        kwargs.setdefault("timeout", timeout)
+        return request(method, url, **kwargs)
+
+    session.request = request_with_timeout
 
 
 def _backoff_seconds(config: IgDemoConfig, failed_attempt: int) -> float:

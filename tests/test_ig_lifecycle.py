@@ -12,9 +12,11 @@ from qtrad.adapters.ig.market_data import (
     IgDemoConfig,
     IgDemoMarketDataAdapter,
     _backoff_seconds,
+    _ConfigurableHttpSession,
     _ConnectionState,
     _historical_query_time,
     _historical_time,
+    _install_default_http_timeout,
     _is_fatal_provider_error,
     _ProviderOperationTimeout,
     _safe_error_code,
@@ -36,6 +38,16 @@ class FakeSession:
 
     def close(self) -> None:
         self.closed = True
+
+
+class RecordingRequestSession(FakeSession):
+    def __init__(self) -> None:
+        super().__init__()
+        self.requests: list[dict[str, object]] = []
+
+    def request(self, method: str, url: str, **kwargs: object) -> object:
+        self.requests.append({"method": method, "url": url, **kwargs})
+        return object()
 
 
 class MutableClock:
@@ -215,12 +227,34 @@ def config(**overrides: Any) -> IgDemoConfig:
         "reconnect_cooldown_seconds": 3,
         "maximum_reconnect_cycles": 1,
         "stale_after_seconds": 5,
+        "stale_reconnect_after_seconds": 120,
         "readiness_timeout_seconds": 1,
         "retry_watchdog_seconds": 1,
         "shutdown_timeout_seconds": 1,
     }
     values.update(overrides)
     return IgDemoConfig(**values)
+
+
+def test_trading_ig_http_session_has_bounded_defaults_and_allows_override() -> None:
+    session = RecordingRequestSession()
+    _install_default_http_timeout(cast(_ConfigurableHttpSession, session), (5.0, 15.0))
+
+    session.request("GET", "https://example.invalid/default")
+    session.request("GET", "https://example.invalid/override", timeout=(1.0, 2.0))
+
+    assert session.requests == [
+        {
+            "method": "GET",
+            "url": "https://example.invalid/default",
+            "timeout": (5.0, 15.0),
+        },
+        {
+            "method": "GET",
+            "url": "https://example.invalid/override",
+            "timeout": (1.0, 2.0),
+        },
+    ]
 
 
 def listing() -> ProviderListing:
@@ -443,13 +477,24 @@ async def test_stale_stream_degrades_and_schedules_reconnect() -> None:
     adapter = StaleAdapter(config(), clock)
     adapter._service = FakeService()
     adapter._status = HealthStatus.HEALTHY
-    adapter._desired_listings = (listing(),)
+    adapter._connection_state = _ConnectionState.READY
+    selected_listing = listing()
+    epic = selected_listing.listing_id.external_id
+    adapter._desired_listings = (selected_listing,)
+    adapter._listings_by_epic[epic] = selected_listing
+    adapter._expected_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
     adapter._stream_connected_at = clock.now()
 
     clock.current += timedelta(seconds=6)
     health = await adapter.health()
 
     assert health.status is HealthStatus.DEGRADED
+    assert adapter.scheduled_reconnects == 0
+
+    clock.current += timedelta(seconds=115)
+    await adapter.health()
+
     assert adapter.scheduled_reconnects == 1
 
 
@@ -492,6 +537,33 @@ def test_connected_transport_is_not_ready_without_subscription_and_healthy_updat
     adapter._accept_update(market_record(clock), epic, generation=3)
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
+
+
+@pytest.mark.asyncio
+async def test_one_active_channel_cannot_mask_another_required_channel_staleness() -> None:
+    clock = MutableClock()
+    adapter = StaleAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    other_epic = "IX.D.ASX.IFD.IP"
+    adapter._generation = 3
+    adapter._desired_listings = (listing(),)
+    adapter._expected_epics = {epic, other_epic}
+    adapter._subscribed_epics = {epic, other_epic}
+    adapter._updated_epics = {epic, other_epic}
+    adapter._quote_received_times = {
+        epic: clock.now(),
+        other_epic: clock.now(),
+    }
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    clock.current += timedelta(seconds=6)
+    adapter._accept_update(market_record(clock), epic, generation=3)
+    health = await adapter.health()
+
+    assert health.status is HealthStatus.DEGRADED
+    assert adapter.scheduled_reconnects == 0
 
 
 def test_superseded_generation_callbacks_cannot_change_current_readiness() -> None:
@@ -561,6 +633,38 @@ async def test_library_managed_recovery_requires_fresh_healthy_update(status: st
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
     await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_library_managed_recovery_preserves_staleness_grace_window() -> None:
+    clock = MutableClock()
+    adapter = StaleAdapter(config(), clock)
+    selected_listing = listing()
+    epic = selected_listing.listing_id.external_id
+    adapter._generation = 4
+    adapter._desired_listings = (selected_listing,)
+    adapter._listings_by_epic[epic] = selected_listing
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_stream_status("DISCONNECTED:TRYING-RECOVERY", generation=4)
+    clock.current += timedelta(seconds=6)
+    await adapter.health()
+
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._updated_epics == set()
+    assert adapter._quote_received_times[epic] == datetime(2026, 7, 3, tzinfo=UTC)
+    assert adapter.scheduled_reconnects == 0
+
+    clock.current += timedelta(seconds=115)
+    await adapter.health()
+
+    assert adapter.scheduled_reconnects == 1
 
 
 @pytest.mark.asyncio

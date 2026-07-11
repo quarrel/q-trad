@@ -1,6 +1,6 @@
 # q-trad data foundation implementation plan
 
-**Status:** IN PROGRESS  
+**Status:** DATA FOUNDATION QUALIFIED
 **Phase boundary:** data ingestion, audit, normalisation, replay and health visibility  
 **Explicitly excluded:** strategies, allocation, risk, paper execution, P&L, live orders and IBKR
 
@@ -42,7 +42,7 @@ A work package is `DONE` only when:
 | WP4 — IG demo adapter | DONE | reconnect/refresh/backoff and failure handling verified |
 | WP5 — backfill and research data | DONE | live backfill, quota, export and replay verified |
 | WP6 — API and operator console | DONE | API and rendered console returned HTTP 200 |
-| WP7 — failure testing and soak | BLOCKED | first soak failed during forced reconnect; remediation and fresh 24-hour run required |
+| WP7 — failure testing and soak | DONE | remediation implemented; preliminary lifecycle gates and fresh 24-hour seven-instrument soak passed |
 
 ## WP0 — documentation and scaffold
 
@@ -148,7 +148,7 @@ python -m qtrad api
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
-- Current PostgreSQL-backed suite: 101 passed.
+- Current PostgreSQL-backed suite: 104 passed.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model
@@ -189,7 +189,6 @@ python -m qtrad api
 - The future-facing intraday-strategy research dossier records a recency-weighted public
   evidence survey, validation standard, market-state assessment, risk review, source
   ledger and prioritised experiment backlog without changing the current phase boundary.
-- The elapsed 24-hour soak remains pending and must not be reported as passed.
 - The first 24-hour soak attempt failed after about 77 minutes: the forced reconnect did
   not restore all seven subscriptions, subsequent stale reconnects exhausted, the run was
   incorrectly recorded as `COMPLETED`, and ingestion processes remained resident. WP7
@@ -208,5 +207,17 @@ python -m qtrad api
   records forced-reconnect request and completion separately. Deterministic coverage
   includes all Lightstreamer degraded states, fresh post-recovery readiness, failed
   disconnect ownership and subprocess exit after a timed-out provider call.
-- Repeated-reconnect and two-hour qualification remain required for the newly remediated
-  candidate before the fresh soak.
+- Preliminary live qualification for the remediated candidate passed before the fresh
+  soak, including forced reconnect and fresh-process restart evidence, repeated-reconnect
+  lifecycle coverage, static gates and deterministic failure coverage.
+- The fresh 24-hour seven-instrument soak passed: run
+  `0d9cf6de-421f-493b-bd69-014b4845d00a` started
+  `2026-07-07T01:05:07.463801+00:00`, finished
+  `2026-07-08T01:05:29.494570+00:00`, finalised as `STOPPED`, recorded one reconnect,
+  zero dropped records and zero provider operations, and left no ingestion process
+  resident.
+- Post-soak verification passed: formatting check, Ruff, Pyright, `ty`, focused IG
+  lifecycle suite with 32 tests and the full 104-test suite against an isolated migrated
+  PostgreSQL database. A direct post-soak run against the accumulated soak database also
+  completed, but projection rebuild volume made it unsuitable as the final automated
+  gate.

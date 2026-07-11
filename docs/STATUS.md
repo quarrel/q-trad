@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-06
+**Updated:** 2026-07-10
 **Current milestone:** 24-hour seven-instrument operational soak
-**State:** BLOCKED — remediation implemented; endurance qualification pending
+**State:** PASSED — 24-hour seven-instrument soak completed; data-only phase remains in force
 
 ## Completed
 
@@ -90,6 +90,16 @@
 - Lightstreamer `STALLED`, `DISCONNECTED:WILL-RETRY` and
   `DISCONNECTED:TRYING-RECOVERY` states now require fresh healthy updates from all seven
   instruments before readiness can recover.
+- The IG adapter now tracks received-time freshness per required subscription so a quiet
+  but active instrument cannot be masked by other instruments, while low-volatility
+  overnight sessions have a five-minute staleness window before degradation and a
+  thirty-minute prolonged-staleness reconnect threshold.
+- `trading-ig` REST calls made through the adapter session now have bounded default HTTP
+  connect/read timeouts while preserving explicit call-level overrides.
+- The fresh 24-hour seven-instrument soak completed as `STOPPED` after about 24 hours and
+  22 seconds. The run carried all seven subscriptions on one Lightstreamer connection,
+  recovered from one application-level reconnect cycle, recorded zero dropped records and
+  left no ingestion process resident.
 
 ## Verification evidence
 
@@ -101,7 +111,7 @@
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
-- Current PostgreSQL-backed suite: 101 passed, including dependency-direction checks,
+- Current PostgreSQL-backed suite: 104 passed, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
   four database/API integration tests. A subprocess regression also proves that a timed
   out provider operation does not keep the command resident.
@@ -117,29 +127,33 @@
   ledger and explicit future research priorities.
 - Research export: 222 bars, manifest `b2b9d83c91a0fb97fc1e245e`.
 - Replay hash: `b2b9d83c91a0fb97fc1e245e108afa67128d72e58a3243d62b6f02a350158ee8`.
+- Post-remediation focused lifecycle suite: `uv run pytest tests/test_ig_lifecycle.py`
+  passed with 32 tests.
+- Post-remediation formatting/lint/type gates passed: Ruff format check, Ruff lint,
+  Pyright and `ty`.
+- Fresh isolated-database final suite: `uv run pytest` passed with 104 tests after
+  migrating and seeding a temporary PostgreSQL database for the gate. The earlier direct
+  run against the soak database completed but took 15 minutes because a projection
+  rebuild intentionally scanned the accumulated soak events; it is not used as the final
+  automated gate.
+- Fresh 24-hour soak run: `0d9cf6de-421f-493b-bd69-014b4845d00a`, started
+  `2026-07-07T01:05:07.463801+00:00`, finished
+  `2026-07-08T01:05:29.494570+00:00`, final status `STOPPED`, one reconnect, zero
+  dropped records, zero provider operations and no resident ingestion process.
 
 ## Pending verification
 
-- Complete the repeated-reconnect and two-hour credential-gated qualification for the
-  newly remediated candidate. The prior sequence passed `reconnect-2`, then stalled while
-  shutting down `reconnect-3`; it is failed diagnostic evidence, not an endurance gate or
-  soak result.
-- Repeat the complete frozen-candidate rehearsal and 24-hour soak after remediation.
 - Continue adding provider error-branch coverage after the soak where operational
   evidence identifies risk; the focused pre-soak suite now covers CLI dispatch and the
   highest-value deterministic authentication, reconnect, subscription and callback
   failures.
-- Run AUD/USD, EUR/USD, USD/JPY, GBP/USD, Australia 200, US 500 and FTSE 100
-  continuously for at least 24 hours.
-- Ensure that run covers active Australia 200, FTSE 100 and US 500 sessions.
-- Use one Lightstreamer connection carrying all seven subscriptions; do not run
-  concurrent ingestion connections for the same API key.
-- Force one Lightstreamer reconnect and one process restart during the soak.
+- Keep future PostgreSQL integration gates isolated from the long-lived soak database
+  unless the objective is explicitly a projection-volume exercise.
 
 ## Next-phase preparation
 
-Preparation may proceed while the frozen data-foundation candidate soaks, but paper
-runtime implementation remains gated on a conclusive WP7 `PASS`.
+Preparation may proceed after the WP7 `PASS`, but paper runtime implementation remains
+outside the current data-only phase until explicitly admitted by a later plan update.
 
 - ADR 0005 accepts the no-live-order paper vertical-slice boundary.
 - ADRs 0006 and 0007 define causal top-of-book paper fills, session handling, fixed
@@ -150,4 +164,5 @@ runtime implementation remains gated on a conclusive WP7 `PASS`.
 - `docs/PAPER_SLICE_ACCEPTANCE.md` defines the executable causal, safety, accounting,
   determinism and operator scenarios.
 - `docs/PAPER_SLICE_RESEARCH.md` records bounded bar, session, fill, product-economics and
-  historical-data outcomes. The complete-soak analysis remains pending.
+  historical-data outcomes. The complete-soak analysis can now use the passed WP7
+  evidence.

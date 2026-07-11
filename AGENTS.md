@@ -54,6 +54,9 @@ The fixed canonical universe is:
   booleans.
 - A successful method return, socket connection or subscription request is not readiness.
   Readiness requires bounded, domain-relevant evidence from every required channel.
+- Measure stream freshness per required channel from received transport evidence, not from
+  price movement or aggregate stream activity. Quiet markets are not, by themselves,
+  transport failures.
 - Tag callbacks and queued records with a connection generation and ignore superseded
   generations.
 - Give library-managed retries an application watchdog; no degraded or retrying state may
@@ -125,6 +128,10 @@ Before marking work complete:
 For long-running external I/O, also prove readiness, degraded recovery, retry exhaustion,
 clean shutdown and process exit. A short happy-path smoke cannot substitute for those
 lifecycle gates.
+
+Run projection rebuild and other whole-store integration tests against an isolated,
+migrated database by default. Use a long-lived soak database only when measuring its
+accumulated-data behaviour is the explicit objective.
 
 Stop and report rather than guess if:
 
