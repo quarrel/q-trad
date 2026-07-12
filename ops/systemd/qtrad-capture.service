@@ -1,0 +1,17 @@
+[Unit]
+Description=q-trad demo market-data collector
+Requires=docker.service
+RequiresMountsFor=/srv/qtrad/postgres/data
+After=docker.service remote-fs.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/qtrad-capture
+ExecStart=/usr/bin/docker compose --project-directory /opt/qtrad-capture -f compose.capture.yaml up -d --remove-orphans
+ExecStop=/usr/bin/docker compose --project-directory /opt/qtrad-capture -f compose.capture.yaml down
+TimeoutStartSec=120
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

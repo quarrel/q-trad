@@ -1,0 +1,9 @@
+[Unit]
+Description=q-trad collector readiness publication
+After=qtrad-capture.service
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qtrad-capture
+EnvironmentFile=/etc/qtrad/capture-monitor.env
+ExecStart=/opt/qtrad-capture/ops/capture/healthwatch.sh

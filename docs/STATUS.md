@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-10
-**Current milestone:** 24-hour seven-instrument operational soak
-**State:** PASSED — 24-hour seven-instrument soak completed; data-only phase remains in force
+**Updated:** 2026-07-12
+**Current milestone:** capture operations release
+**State:** IN PROGRESS — data foundation qualified; persistent demo-only collection is being prepared
 
 ## Completed
 
@@ -67,6 +67,10 @@
 - The application and Dev Container use Debian Trixie base images. The Dev Container
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
+- The Dev Container includes the compiler, database client, SSH, IPv6, DNS, socket,
+  packet, file and shell diagnostics needed for local and OCI operations. Its only host
+  bind mount is the q-trad repository; it does not mount the host Docker socket, home
+  directory, SSH agent or WSL/cloud filesystem.
 - A future-facing intraday-strategy research dossier now surveys public FX and
   equity-index evidence, validation quality, market-state/regime research, adaptive risk,
   reported success and candidate experiments. It changes no current implementation scope.
@@ -113,7 +117,7 @@
 - Dev Container static gates after the rebuild: Ruff, Pyright and `ty` passed.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
-- Current PostgreSQL-backed suite: 104 passed, including dependency-direction checks,
+- Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`, including dependency-direction checks,
   Hypothesis OHLC invariants, lifecycle/failure cases, deterministic replay cases and
   four database/API integration tests. A subprocess regression also proves that a timed
   out provider operation does not keep the command resident.
@@ -168,3 +172,16 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - `docs/PAPER_SLICE_RESEARCH.md` records bounded bar, session, fill, product-economics and
   historical-data outcomes. The complete-soak analysis can now use the passed WP7
   evidence.
+
+## Capture operations preparation
+
+- `capture-v1` is a versioned TOML configuration for the qualified seven-instrument
+  collector; the candidate 20-instrument expansion is not admitted until IG mappings and
+  a separate 72-hour qualification pass.
+- The repository now contains immutable-image Compose, systemd, backup, healthwatch and
+  OCI operator-runbook assets. OCI resources, credentials, registry image publication and
+  runtime qualification still require operator execution.
+- The initial OCI ARM64 collector host is provisioned and hardened with its dedicated
+  PostgreSQL block volume, restricted IPv6 SSH, Docker Engine and OCI tooling. The capture
+  deployment now binds PostgreSQL to that required mount and validates backups with the
+  pinned PostgreSQL container's client version.

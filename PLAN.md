@@ -43,6 +43,19 @@ A work package is `DONE` only when:
 | WP5 — backfill and research data | DONE | live backfill, quota, export and replay verified |
 | WP6 — API and operator console | DONE | API and rendered console returned HTTP 200 |
 | WP7 — failure testing and soak | DONE | remediation implemented; preliminary lifecycle gates and fresh 24-hour seven-instrument soak passed |
+| WP8 — capture operations release | IN PROGRESS | versioned capture-v1 configuration, collector deployment assets and cloud qualification pending |
+
+## WP8 — capture operations release
+
+- Keep collection data-only and start the OCI host on the qualified seven-instrument
+  `capture-v1` universe.
+- Make universe identity part of run, listing-validation, backfill and export evidence.
+- Persist bounded listing economics and event-backed effective listing validation.
+- Provide planned historical coverage/backfill, a machine-readable collector readiness
+  contract, immutable multi-architecture releases, backup/restore and OCI monitoring
+  runbooks.
+- Require 72-hour cloud qualification before a separately validated 20-instrument universe
+  is admitted.
 
 ## WP0 — documentation and scaffold
 
@@ -147,8 +160,15 @@ python -m qtrad api
 - Current `ty` check: passed.
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
+- Dev Container configuration now provisions the local/OCI compiler, database, SSH and
+  network-diagnostic toolchain through its multi-architecture Trixie image while retaining
+  the repository-only host bind mount and no Docker-socket access. Package availability,
+  JSON configuration and the uv-based bootstrap command were verified before rebuild.
+- The initial Oracle Linux ARM64 collector host has restricted IPv6 SSH, a dedicated XFS
+  PostgreSQL volume, Docker Engine and OCI CLI. Capture Compose binds PostgreSQL to the
+  required host mount, and backup validation uses the pinned database container's client.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
-- Current PostgreSQL-backed suite: 104 passed.
+- Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model

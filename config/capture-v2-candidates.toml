@@ -1,0 +1,12 @@
+# Candidate universe only. Do not use for ingestion until every preferred_epic has been
+# selected from IG demo discovery and the file is promoted to an approved capture release.
+name = "capture-v2-candidates"
+
+# Candidate IDs: fx:aud-usd, fx:eur-usd, fx:usd-jpy, fx:gbp-usd, fx:usd-chf,
+# fx:usd-cad, fx:nzd-usd, fx:eur-jpy, fx:eur-gbp, fx:usd-cnh; index:australia-200,
+# index:us-500, index:ftse-100, index:us-tech-100, index:wall-street,
+# index:germany-40, index:france-40, index:japan-225, index:hong-kong-hs50,
+# index:eu-stocks-50.
+#
+# This intentionally is not loadable: an approved capture universe requires explicit,
+# reviewed provider epics and never selects a market automatically.

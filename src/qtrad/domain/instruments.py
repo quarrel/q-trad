@@ -1,10 +1,13 @@
 """Canonical instruments and effective provider listings."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
+from typing import cast
 
+from qtrad.domain.events import JsonValue
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.time import require_utc
 
@@ -48,6 +51,9 @@ class ProviderListing:
     valid_from: datetime
     valid_to: datetime | None
     metadata_version: str
+    economics: Mapping[str, JsonValue] = field(
+        default_factory=lambda: cast(Mapping[str, JsonValue], {})
+    )
 
     def __post_init__(self) -> None:
         require_utc(self.valid_from, "valid_from")

@@ -234,12 +234,16 @@ class IgDemoMarketDataAdapter:
         config: IgDemoConfig,
         clock: Clock,
         *,
+        instruments_by_id: Mapping[InstrumentId, Instrument] = INSTRUMENTS_BY_ID,
+        preferred_epics: Mapping[InstrumentId, str] = _PREFERRED_EPICS,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         jitter: Callable[[float, float], float] = random.uniform,
         service_factory: Callable[[IgDemoConfig], object] | None = None,
     ) -> None:
         self._config = config
         self._clock = clock
+        self._instruments_by_id = instruments_by_id
+        self._preferred_epics = preferred_epics
         self._sleep = sleep
         self._jitter = jitter
         self._service_factory = service_factory
@@ -346,7 +350,13 @@ class IgDemoMarketDataAdapter:
         service = self._require_connected()
         listings: list[ProviderListing] = []
         for instrument_id in instrument_ids:
-            instrument = INSTRUMENTS_BY_ID[instrument_id]
+            try:
+                instrument = self._instruments_by_id[instrument_id]
+                preferred_epic = self._preferred_epics[instrument_id]
+            except KeyError as error:
+                raise RuntimeError(
+                    f"capture universe has no explicit IG listing preference for {instrument_id}"
+                ) from error
             by_epic: dict[str, _Candidate] = {}
             for alias in instrument.search_aliases:
                 response = await self._run_provider_operation(
@@ -373,7 +383,7 @@ class IgDemoMarketDataAdapter:
             candidate = _select_candidate(
                 tuple(by_epic.values()),
                 instrument,
-                preferred_epic=_PREFERRED_EPICS[instrument_id],
+                preferred_epic=preferred_epic,
             )
             metadata_json = json.dumps(candidate.metadata, sort_keys=True, separators=(",", ":"))
             listing = ProviderListing(
@@ -387,6 +397,7 @@ class IgDemoMarketDataAdapter:
                 valid_from=self._clock.now(),
                 valid_to=None,
                 metadata_version=hashlib.sha256(metadata_json.encode()).hexdigest()[:16],
+                economics=_bounded_economics(candidate.metadata),
             )
             listings.append(listing)
         return tuple(listings)
@@ -1485,6 +1496,27 @@ def _integer_or_none(value: object) -> int | None:
     if value in (None, ""):
         return None
     return int(str(value))
+
+
+def _bounded_economics(metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:
+    """Keep only paper-relevant market detail; never persist the raw response."""
+
+    instrument = _mapping(metadata.get("instrument"))
+    dealing_rules = _mapping(metadata.get("dealingRules"))
+    return {
+        "quantity_unit": _string(instrument, "unit"),
+        "contract_size": _decimal_text(instrument.get("contractSize")),
+        "lot_size": _decimal_text(instrument.get("lotSize")),
+        "one_pip_means": _decimal_text(instrument.get("onePipMeans")),
+        "value_of_one_pip": _decimal_text(instrument.get("valueOfOnePip")),
+        "minimum_quantity": _decimal_text(_nested_decimal(dealing_rules, "minDealSize", "value")),
+        "price_increment": _decimal_text(instrument.get("scalingFactor")),
+    }
+
+
+def _decimal_text(value: object) -> str | None:
+    decimal = _decimal_or_none(value)
+    return str(decimal) if decimal is not None else None
 
 
 def _currency(instrument: Mapping[str, object]) -> str:

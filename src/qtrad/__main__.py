@@ -25,7 +25,6 @@ from qtrad.application.quota import points_per_instrument
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.domain.events import EventEnvelope, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS
 from qtrad.domain.market_data import (
     BarProvenance,
     DataQuality,
@@ -37,6 +36,7 @@ from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
+from qtrad.runtime.universe import CaptureUniverse, load_capture_universe
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -129,6 +129,7 @@ def _engine(settings: Settings) -> AsyncEngine:
 
 def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
     username, password, api_key, account_id = settings.require_ig_credentials()
+    universe = _capture_universe(settings)
     return IgDemoMarketDataAdapter(
         IgDemoConfig(
             username=username,
@@ -137,13 +138,15 @@ def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
             account_id=account_id,
         ),
         clock,
+        instruments_by_id=universe.instruments_by_id,
+        preferred_epics=universe.preferred_epics,
     )
 
 
 async def _seed(settings: Settings) -> None:
     engine = _engine(settings)
     try:
-        await PostgresAuditStore(engine).seed_instruments()
+        await PostgresAuditStore(engine).seed_instruments(_capture_universe(settings).instruments)
     finally:
         await engine.dispose()
 
@@ -153,16 +156,16 @@ async def _sync_instruments(settings: Settings, clock: Clock) -> None:
     adapter = _ig_adapter(settings, clock)
     store = PostgresAuditStore(engine)
     try:
-        await store.seed_instruments()
+        universe = _capture_universe(settings)
+        await store.seed_instruments(universe.instruments)
         await adapter.connect()
         listings = await adapter.discover_listings(
-            [instrument.instrument_id for instrument in INITIAL_INSTRUMENTS]
+            [instrument.instrument_id for instrument in universe.instruments]
         )
         for listing in listings:
-            metadata = to_json_value(listing)
-            if not isinstance(metadata, dict):
-                raise TypeError("listing metadata did not serialise to an object")
-            await store.upsert_provider_listing(listing, metadata)
+            await store.validate_provider_listing(
+                listing, universe_hash=universe.configuration_hash, observed_at=clock.now()
+            )
         print(json.dumps({"listings": [str(item.listing_id) for item in listings]}))
     finally:
         await adapter.disconnect()
@@ -187,10 +190,11 @@ async def _ingest(
     store = PostgresAuditStore(engine)
     adapter = _ig_adapter(settings, clock)
     service = IngestionService(store, producer="ig-demo-adapter", producer_version="0.1.0")
+    universe = _capture_universe(settings)
     run_id = await store.start_run(
         kind=RunKind.INGESTION,
         environment=BrokerEnvironment.IG_DEMO,
-        configuration_hash=_configuration_hash(),
+        configuration_hash=universe.configuration_hash,
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
@@ -200,8 +204,10 @@ async def _ingest(
     forced_reconnect_completed = False
     bounded_deadline_reached = False
     try:
-        listings = await store.active_provider_listings()
-        if len(listings) != len(INITIAL_INSTRUMENTS):
+        listings = await store.active_provider_listings(
+            [instrument.instrument_id for instrument in universe.instruments]
+        )
+        if len(listings) != len(universe.instruments):
             raise RuntimeError("run 'qtrad instruments sync' before ingestion")
         await adapter.connect()
         await adapter.subscribe(listings)
@@ -289,18 +295,21 @@ async def _backfill(
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     adapter = _ig_adapter(settings, clock)
+    universe = _capture_universe(settings)
     run_id = await store.start_run(
         kind=RunKind.BACKFILL,
         environment=BrokerEnvironment.IG_DEMO,
-        configuration_hash=_configuration_hash(),
+        configuration_hash=universe.configuration_hash,
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
     written = 0
     received_points: set[tuple[str, datetime]] = set()
     try:
-        listings = await store.active_provider_listings()
-        if len(listings) != len(INITIAL_INSTRUMENTS):
+        listings = await store.active_provider_listings(
+            [instrument.instrument_id for instrument in universe.instruments]
+        )
+        if len(listings) != len(universe.instruments):
             raise RuntimeError("run 'qtrad instruments sync' before backfill")
         points = points_per_instrument(
             remaining_allowance=remaining_allowance,
@@ -412,7 +421,7 @@ async def _export(settings: Settings, clock: Clock) -> None:
     run_id = await store.start_run(
         kind=RunKind.EXPORT,
         environment=BrokerEnvironment.NONE,
-        configuration_hash=_configuration_hash(),
+        configuration_hash=_configuration_hash(settings),
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
@@ -430,11 +439,14 @@ async def _export(settings: Settings, clock: Clock) -> None:
             """
         )
         bars = tuple(_bar_from_projection(row) for row in rows)
-        configuration_hash = _configuration_hash()
+        configuration_hash = _configuration_hash(settings)
         manifest = await research.write_bars(
             bars,
             configuration_hash=configuration_hash,
-            metadata={"universe_size": len(INITIAL_INSTRUMENTS), "gap_count": 0},
+            metadata={
+                "universe_size": len(_capture_universe(settings).instruments),
+                "gap_count": 0,
+            },
         )
         await store.record_manifest(manifest)
         terminal_status = "COMPLETED"
@@ -462,7 +474,7 @@ async def _replay(settings: Settings, clock: Clock, manifest_path: Path) -> None
     run_id = await audit.start_run(
         kind=RunKind.REPLAY,
         environment=BrokerEnvironment.NONE,
-        configuration_hash=_configuration_hash(),
+        configuration_hash=_configuration_hash(settings),
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
@@ -522,11 +534,12 @@ def _as_utc(value: object) -> datetime:
     return value.astimezone(UTC)
 
 
-def _configuration_hash() -> str:
-    import hashlib
+def _capture_universe(settings: Settings) -> CaptureUniverse:
+    return load_capture_universe(settings.capture_universe_path)
 
-    values = [str(instrument.instrument_id) for instrument in INITIAL_INSTRUMENTS]
-    return hashlib.sha256(json.dumps(values, separators=(",", ":")).encode()).hexdigest()
+
+def _configuration_hash(settings: Settings) -> str:
+    return _capture_universe(settings).configuration_hash
 
 
 if __name__ == "__main__":

@@ -10,6 +10,15 @@ This document describes implemented reality, not the complete aspiration in `PRE
 
 The current deployment is one modular Python application with several command roles and one PostgreSQL instance. Parquet files form the research data store.
 
+The in-progress capture-operations release keeps the same image and modular monolith but
+adds a dedicated demo-only collector deployment. Its PostgreSQL volume is capture-only;
+development, tests, research and later paper workloads must not write to it. Its approved
+instrument set is a hashed runtime capture-universe configuration rather than an implicit
+hard-coded deployment selection.
+On the OCI collector, PostgreSQL bind-mounts a dedicated iSCSI-backed XFS filesystem at
+`/srv/qtrad/postgres`; systemd requires that mount before starting capture services, so a
+storage connection failure cannot redirect database writes onto the boot volume.
+
 The supported VS Code development environment uses a Compose-backed Dev Container.
 The source tree is the only host bind mount; PostgreSQL, the Python virtual environment,
 dependency caches and Codex state use named volumes. At initialisation, the host's global

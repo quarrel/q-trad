@@ -1,0 +1,46 @@
+services:
+  db:
+    image: ${QTRAD_POSTGRES_IMAGE:?set an immutable PostgreSQL 18 image digest}
+    restart: unless-stopped
+    env_file: /etc/qtrad/capture.env
+    environment:
+      POSTGRES_DB: qtrad_capture
+      POSTGRES_USER: qtrad_capture
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qtrad_capture -d qtrad_capture"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+    volumes:
+      - /srv/qtrad/postgres/data:/var/lib/postgresql:Z
+
+  ingest:
+    image: ${QTRAD_IMAGE:?set an immutable q-trad application image digest}
+    restart: unless-stopped
+    command: ["python", "-m", "qtrad", "ingest", "--environment", "ig-demo"]
+    env_file: /etc/qtrad/capture.env
+    depends_on:
+      db:
+        condition: service_healthy
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+
+  api:
+    image: ${QTRAD_IMAGE:?set an immutable q-trad application image digest}
+    restart: unless-stopped
+    command: ["python", "-m", "qtrad", "api", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: /etc/qtrad/capture.env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${QTRAD_API_PORT:-8000}:8000"
+    read_only: true
+    tmpfs: ["/tmp"]
+    security_opt: ["no-new-privileges:true"]
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"from urllib.request import urlopen; urlopen('http://127.0.0.1:8000/health', timeout=5)\""]
+      interval: 30s
+      timeout: 10s
+      retries: 3

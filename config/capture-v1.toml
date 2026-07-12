@@ -1,0 +1,61 @@
+name = "capture-v1"
+
+[[instrument]]
+id = "fx:aud-usd"
+display_name = "AUD/USD"
+asset_class = "FX"
+base_currency = "AUD"
+quote_currency = "USD"
+search_aliases = ["AUD/USD", "AUDUSD"]
+preferred_epic = "CS.D.AUDUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:eur-usd"
+display_name = "EUR/USD"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["EUR/USD", "EURUSD"]
+preferred_epic = "CS.D.EURUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:usd-jpy"
+display_name = "USD/JPY"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "JPY"
+search_aliases = ["USD/JPY", "USDJPY"]
+preferred_epic = "CS.D.USDJPY.CFD.IP"
+
+[[instrument]]
+id = "fx:gbp-usd"
+display_name = "GBP/USD"
+asset_class = "FX"
+base_currency = "GBP"
+quote_currency = "USD"
+search_aliases = ["GBP/USD", "GBPUSD"]
+preferred_epic = "CS.D.GBPUSD.CFD.IP"
+
+[[instrument]]
+id = "index:australia-200"
+display_name = "Australia 200"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["Australia 200", "ASX 200"]
+preferred_epic = "IX.D.ASX.IFD.IP"
+
+[[instrument]]
+id = "index:us-500"
+display_name = "US 500"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["US 500", "S&P 500"]
+preferred_epic = "IX.D.SPTRD.IFD.IP"
+
+[[instrument]]
+id = "index:ftse-100"
+display_name = "FTSE 100"
+asset_class = "INDEX"
+quote_currency = "GBP"
+search_aliases = ["FTSE 100", "UK 100"]
+preferred_epic = "IX.D.FTSE.CFD.IP"

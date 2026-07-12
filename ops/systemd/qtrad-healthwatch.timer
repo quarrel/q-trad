@@ -1,0 +1,10 @@
+[Unit]
+Description=Run q-trad collector readiness publication every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+Unit=qtrad-healthwatch.service
+
+[Install]
+WantedBy=timers.target

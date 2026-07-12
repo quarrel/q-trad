@@ -11,6 +11,7 @@ import pytest
 from qtrad import __main__ as cli
 from qtrad.ports.clock import Clock
 from qtrad.runtime.settings import Settings
+from qtrad.runtime.universe import load_capture_universe
 
 
 @pytest.fixture
@@ -140,7 +141,8 @@ async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
             del kwargs
             return "not-a-real-run"
 
-        async def active_provider_listings(self) -> list[object]:
+        async def active_provider_listings(self, instrument_ids: object) -> list[object]:
+            del instrument_ids
             return [object() for _ in range(7)]
 
         async def record_adapter_health(self, health: object) -> None:
@@ -178,6 +180,11 @@ async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
     monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: store)
     monkeypatch.setattr(cli, "_ig_adapter", lambda settings, selected_clock: adapter)
+    monkeypatch.setattr(
+        cli,
+        "_capture_universe",
+        lambda settings: load_capture_universe(Path("config/capture-v1.toml")),
+    )
 
     with pytest.raises(RuntimeError, match="did not complete"):
         await cli._ingest(

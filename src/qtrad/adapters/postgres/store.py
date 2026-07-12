@@ -2,7 +2,7 @@
 
 import hashlib
 import json
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -13,9 +13,9 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
-from qtrad.domain.events import EventEnvelope, JsonValue
+from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS, ProductType, ProviderListing
+from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.operations import AdapterHealth
 from qtrad.ports.storage import (
@@ -34,7 +34,9 @@ class PostgresAuditStore(AuditStore):
     def __init__(self, engine: AsyncEngine) -> None:
         self._engine = engine
 
-    async def seed_instruments(self) -> None:
+    async def seed_instruments(
+        self, instruments: Sequence[Instrument] = INITIAL_INSTRUMENTS
+    ) -> None:
         statement = text(
             """
             INSERT INTO reference.instruments (
@@ -53,7 +55,7 @@ class PostgresAuditStore(AuditStore):
             """
         )
         async with self._engine.begin() as connection:
-            for instrument in INITIAL_INSTRUMENTS:
+            for instrument in instruments:
                 await connection.execute(
                     statement,
                     {
@@ -67,21 +69,43 @@ class PostgresAuditStore(AuditStore):
                 )
 
     async def upsert_provider_listing(
-        self, listing: ProviderListing, metadata: Mapping[str, JsonValue]
+        self,
+        listing: ProviderListing,
+        metadata: Mapping[str, JsonValue],
+        *,
+        universe_hash: str | None = None,
     ) -> None:
         async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    UPDATE reference.provider_listings SET valid_to = :valid_from
+                    WHERE provider = :provider AND environment = :environment
+                      AND external_id = :external_id AND valid_to IS NULL
+                      AND metadata_version <> :metadata_version
+                    """
+                ),
+                {
+                    "provider": listing.listing_id.provider,
+                    "environment": listing.listing_id.environment,
+                    "external_id": listing.listing_id.external_id,
+                    "valid_from": listing.valid_from,
+                    "metadata_version": listing.metadata_version,
+                },
+            )
             await connection.execute(
                 text(
                     """
                     INSERT INTO reference.provider_listings (
                         provider, environment, external_id, instrument_id,
                         display_name, product_type, currency, minimum_deal_size,
-                        price_increment, valid_from, valid_to, metadata_version, metadata
+                          price_increment, valid_from, valid_to, metadata_version, metadata,
+                          economics, universe_hash
                     ) VALUES (
                         :provider, :environment, :external_id, :instrument_id,
                         :display_name, :product_type, :currency, :minimum_deal_size,
-                        :price_increment, :valid_from, :valid_to, :metadata_version,
-                        CAST(:metadata AS jsonb)
+                          :price_increment, :valid_from, :valid_to, :metadata_version,
+                          CAST(:metadata AS jsonb), CAST(:economics AS jsonb), :universe_hash
                     )
                     ON CONFLICT (provider, environment, external_id, valid_from)
                     DO UPDATE SET
@@ -92,7 +116,9 @@ class PostgresAuditStore(AuditStore):
                         price_increment = EXCLUDED.price_increment,
                         valid_to = EXCLUDED.valid_to,
                         metadata_version = EXCLUDED.metadata_version,
-                        metadata = EXCLUDED.metadata
+                          metadata = EXCLUDED.metadata,
+                          economics = EXCLUDED.economics,
+                          universe_hash = EXCLUDED.universe_hash
                     """
                 ),
                 {
@@ -109,10 +135,64 @@ class PostgresAuditStore(AuditStore):
                     "valid_to": listing.valid_to,
                     "metadata_version": listing.metadata_version,
                     "metadata": json.dumps(metadata, sort_keys=True),
+                    "economics": json.dumps(listing.economics, sort_keys=True),
+                    "universe_hash": universe_hash,
                 },
             )
 
-    async def active_provider_listings(self) -> tuple[ProviderListing, ...]:
+    async def validate_provider_listing(
+        self, listing: ProviderListing, *, universe_hash: str, observed_at: datetime
+    ) -> EventEnvelope | None:
+        """Record a bounded listing-validation fact before changing its projection."""
+
+        existing = await self.query(
+            """
+            SELECT metadata_version, universe_hash FROM reference.provider_listings
+            WHERE provider = :provider AND environment = :environment AND external_id = :external_id
+              AND valid_to IS NULL ORDER BY valid_from DESC LIMIT 1
+            """,
+            {
+                "provider": listing.listing_id.provider,
+                "environment": listing.listing_id.environment,
+                "external_id": listing.listing_id.external_id,
+            },
+        )
+        if existing and (
+            existing[0]["metadata_version"] == listing.metadata_version
+            and existing[0]["universe_hash"] == universe_hash
+        ):
+            return None
+        stream_id = (
+            f"provider-listing:{listing.listing_id.provider}:{listing.listing_id.environment}:"
+            f"{listing.listing_id.external_id}"
+        )
+        previous = await self.latest_stream_version(stream_id)
+        event = EventEnvelope.create(
+            stream_id=stream_id,
+            stream_version=previous + 1,
+            event_type="ProviderListingValidated",
+            event_time=observed_at,
+            received_time=observed_at,
+            producer="ig-demo-discovery",
+            producer_version="0.1.0",
+            payload={"listing": listing, "universe_hash": universe_hash},
+        )
+        try:
+            persisted = await self.append(event, expected_stream_version=previous)
+        except StreamVersionConflict:
+            return await self.validate_provider_listing(
+                listing, universe_hash=universe_hash, observed_at=observed_at
+            )
+        metadata = to_json_value(listing)
+        if not isinstance(metadata, dict):
+            raise TypeError("provider listing did not serialise to an object")
+        await self.upsert_provider_listing(listing, metadata, universe_hash=universe_hash)
+        return persisted
+
+    async def active_provider_listings(
+        self, instrument_ids: Sequence[InstrumentId] | None = None
+    ) -> tuple[ProviderListing, ...]:
+        identifiers = [str(identifier) for identifier in instrument_ids] if instrument_ids else None
         rows = await self.query(
             """
             SELECT DISTINCT ON (provider, environment, external_id)
@@ -120,9 +200,14 @@ class PostgresAuditStore(AuditStore):
                 product_type, currency, minimum_deal_size, price_increment,
                 valid_from, valid_to, metadata_version
             FROM reference.provider_listings
-            WHERE valid_to IS NULL OR valid_to > clock_timestamp()
+              WHERE (valid_to IS NULL OR valid_to > clock_timestamp())
+                AND (CAST(:instrument_ids AS jsonb) IS NULL
+                     OR instrument_id IN (
+                         SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                     ))
             ORDER BY provider, environment, external_id, valid_from DESC
-            """
+            """,
+            {"instrument_ids": json.dumps(identifiers) if identifiers is not None else None},
         )
         return tuple(
             ProviderListing(

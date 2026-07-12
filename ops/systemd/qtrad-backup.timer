@@ -1,0 +1,10 @@
+[Unit]
+Description=Run q-trad PostgreSQL backup daily
+
+[Timer]
+OnCalendar=*-*-* 03:30:00 UTC
+Persistent=true
+Unit=qtrad-backup.service
+
+[Install]
+WantedBy=timers.target

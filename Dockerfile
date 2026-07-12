@@ -17,9 +17,15 @@ COPY pyproject.toml uv.lock README.md ./
 COPY src ./src
 COPY tests ./tests
 COPY migrations ./migrations
+COPY config ./config
 COPY alembic.ini ./
 
 RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen
+
+RUN useradd --create-home --uid 10001 qtrad \
+    && chown -R qtrad:qtrad /app
+
+USER qtrad
 
 ENTRYPOINT ["uv", "run", "--frozen"]
 CMD ["python", "-m", "qtrad", "--help"]

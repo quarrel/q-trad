@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     database_url: str = "postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad"
     migration_database_url: str = "postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad"
     research_root: Path = Path("data/research")
+    capture_universe_path: Path = Path("config/capture-v1.toml")
     log_level: str = "INFO"
 
     ig_username: str | None = None

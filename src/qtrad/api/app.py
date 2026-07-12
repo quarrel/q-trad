@@ -7,13 +7,14 @@ from typing import Any
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import HTMLResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from qtrad.adapters.postgres.queries import OperatorQueries
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.runtime.settings import Settings
+from qtrad.runtime.universe import load_capture_universe
 
 TEMPLATES = Jinja2Templates(directory=Path(__file__).parent / "templates")
 
@@ -23,6 +24,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_async_engine(configuration.database_url, pool_pre_ping=True)
     store = PostgresAuditStore(engine)
     queries = OperatorQueries(store)
+    universe = load_capture_universe(configuration.capture_universe_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -41,6 +43,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def health() -> dict[str, str]:
         await queries.system()
         return {"status": "ok", "mode": "data-only", "broker_environment": "IG_DEMO"}
+
+    @app.get("/health/ready")
+    async def readiness() -> JSONResponse:
+        result = await queries.readiness(
+            tuple(str(instrument.instrument_id) for instrument in universe.instruments)
+        )
+        status_code = 200 if result["ready"] else 503
+        return JSONResponse(content=jsonable_encoder(result), status_code=status_code)
 
     @app.get("/api/v1/system")
     async def system() -> Any:

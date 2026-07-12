@@ -1,5 +1,6 @@
 """PostgreSQL read-model queries for the operator API."""
 
+import json
 from typing import Any
 
 from qtrad.adapters.postgres.store import PostgresAuditStore
@@ -32,6 +33,65 @@ class OperatorQueries:
             "adapter_health": health,
             "projection_checkpoints": checkpoints,
             "quotas": quotas,
+        }
+
+    async def readiness(self, expected_instrument_ids: tuple[str, ...]) -> dict[str, Any]:
+        """Return collector readiness rather than API/database liveness."""
+
+        if not expected_instrument_ids:
+            raise ValueError("collector readiness requires expected instruments")
+        rows = await self._store.query(
+            """
+            SELECT
+                EXISTS (
+                    SELECT 1 FROM ops.runs
+                    WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                ) AS ingestion_running,
+                EXISTS (
+                    SELECT 1 FROM ops.adapter_health
+                    WHERE adapter_name = 'ig-demo' AND environment = 'IG_DEMO'
+                      AND status = 'HEALTHY'
+                ) AS adapter_healthy,
+                (
+                    SELECT COUNT(*) FROM read_model.latest_quotes
+                    WHERE instrument_id IN (
+                        SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                    )
+                    AND received_time >= clock_timestamp() - INTERVAL '5 minutes'
+                ) AS fresh_quote_count,
+                COALESCE((SELECT MAX(global_position) FROM canonical.events), 0) AS global_position,
+                COALESCE((
+                    SELECT global_position FROM ops.projection_checkpoints
+                    WHERE projection_name = 'core'
+                ), 0) AS checkpoint_position,
+                (
+                    SELECT updated_at FROM ops.projection_checkpoints
+                    WHERE projection_name = 'core'
+                ) AS checkpoint_updated_at
+            """,
+            {"instrument_ids": json.dumps(expected_instrument_ids)},
+        )
+        row = rows[0]
+        reasons: list[str] = []
+        if not row["ingestion_running"]:
+            reasons.append("ingestion is not running")
+        if not row["adapter_healthy"]:
+            reasons.append("IG adapter is not healthy")
+        if int(row["fresh_quote_count"]) != len(expected_instrument_ids):
+            reasons.append("not every required instrument has fresh quote evidence")
+        if int(row["global_position"]) - int(row["checkpoint_position"]) > 100:
+            reasons.append("projection is more than 100 events behind")
+        checkpoint_updated_at = row["checkpoint_updated_at"]
+        if checkpoint_updated_at is None:
+            reasons.append("projection checkpoint is unknown")
+        return {
+            "ready": not reasons,
+            "reasons": reasons,
+            "expected_instruments": len(expected_instrument_ids),
+            "fresh_quote_count": int(row["fresh_quote_count"]),
+            "global_position": int(row["global_position"]),
+            "checkpoint_position": int(row["checkpoint_position"]),
+            "checkpoint_updated_at": checkpoint_updated_at,
         }
 
     async def instruments(self) -> list[dict[str, Any]]:
