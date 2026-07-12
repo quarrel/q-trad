@@ -6,8 +6,8 @@ paper-execution or production-provider operation.
 ## OCI operator steps
 
 1. Create a dedicated capture compartment in Sydney and require MFA for the operator.
-2. Create an Ampere A1 instance with 4 OCPUs and 24 GB RAM on Oracle Linux. Attach a
-   separate PostgreSQL block volume; begin with 200 GB and review measured growth after
+2. Create an Ampere A1 instance with 2 OCPUs and 12 GB RAM on Oracle Linux. Attach a
+   separate PostgreSQL block volume; begin with 100 GB and review measured growth after
    the first cloud week.
 3. Configure private IPv4 with NAT egress. Enable public IPv6 ingress only for TCP/22
    from the operator's delegated stable IPv6 prefix; do not assign a public IPv4 address.
