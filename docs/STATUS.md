@@ -185,3 +185,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   PostgreSQL block volume, restricted IPv6 SSH, Docker Engine and OCI tooling. The capture
   deployment now binds PostgreSQL to that required mount and validates backups with the
   pinned PostgreSQL container's client version.
+- The slim application image for commit `dd9a2d0` is published privately to Sydney OCIR
+  for `linux/amd64` and `linux/arm64` with SBOM/provenance attestations at OCI index digest
+  `sha256:cebdde74e02240e2210985cbc927c7744f7b7007d36c7a20f501418710400633`.
+  The collector authenticates without stored credentials through its instance principal,
+  and an ARM64 pull-by-digest round trip ran successfully as UID 10001.

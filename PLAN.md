@@ -167,6 +167,10 @@ python -m qtrad api
 - The initial Oracle Linux ARM64 collector host has restricted IPv6 SSH, a dedicated XFS
   PostgreSQL volume, Docker Engine and OCI CLI. Capture Compose binds PostgreSQL to the
   required host mount, and backup validation uses the pinned database container's client.
+- Commit `dd9a2d0` produced and ARM-qualified one slim `linux/amd64`/`linux/arm64` OCI
+  image with attestations. Sydney OCIR publication and pull-by-digest verification passed
+  at `sha256:cebdde74e02240e2210985cbc927c7744f7b7007d36c7a20f501418710400633`
+  using passwordless instance-principal authentication.
 - Application image rebuilt successfully on the Python 3.13 Trixie base.
 - Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,

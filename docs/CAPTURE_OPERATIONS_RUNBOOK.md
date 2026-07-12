@@ -26,6 +26,10 @@ paper-execution or production-provider operation.
    Place the reviewed release checkout at `/opt/qtrad-capture`; create root-owned
    `/etc/qtrad/capture.env`, `/etc/qtrad/capture-backup.env` and
    `/etc/qtrad/capture-monitor.env` with mode `0600`.
+7. Configure `docker-credential-ocir` for `syd.ocir.io` using the collector's instance
+   principal. Grant that instance only repository read and image create/update permissions
+   for `qtrad/qtrad-app`; do not store an operator auth token on the host. The helper is
+   built from reviewed commit `e2411c3c86c633537a8f10113c96c99c2fc71e5e`.
 
 The PostgreSQL container bind-mounts `/srv/qtrad/postgres/data`, which must reside on the
 dedicated iSCSI block volume mounted at `/srv/qtrad/postgres`. The capture systemd unit
@@ -47,6 +51,10 @@ to a workstation, log, image or repository.
 4. Roll back only by restoring the previous digest/configuration and restarting Compose.
    Migrations are expand-only; canonical events and PostgreSQL volumes are never rolled
    back by deployment.
+
+OCI Container Registry in Sydney currently rejects repository-level immutability. Publish
+each release once under a unique `git-<commit>` tag, never publish `latest` or reuse a tag,
+and deploy only the returned OCI index digest.
 
 ## Operations
 
