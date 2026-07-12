@@ -21,15 +21,31 @@ RUN apt-get update \
         build-essential \
         ca-certificates \
         curl \
+        dnsutils \
+        fd-find \
+        file \
         git \
-        vim \
+        iproute2 \
         jq \
         less \
         libatomic1 \
+        lsof \
+        netcat-openbsd \
+        openssh-client \
         postgresql-client \
         procps \
+        ripgrep \
+        rsync \
+        shellcheck \
+        socat \
         sudo \
+        tcpdump \
         tmux \
+        traceroute \
+        unzip \
+        vim \
+        zip \
+    && ln -s /usr/bin/fdfind /usr/local/bin/fd \
     && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && ln -s /usr/local/lib/node_modules/corepack/dist/corepack.js /usr/local/bin/corepack \

@@ -1,4 +1,8 @@
 services:
+  db:
+    networks:
+      - qtrad-dev
+
   dev:
     build:
       context: .
@@ -23,6 +27,12 @@ services:
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv
+    networks:
+      - qtrad-dev
+
+networks:
+  qtrad-dev:
+    enable_ipv6: true
 
 volumes:
   qtrad-codex-home:
