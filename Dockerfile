@@ -27,5 +27,5 @@ RUN useradd --create-home --uid 10001 qtrad \
 
 USER qtrad
 
-ENTRYPOINT ["uv", "run", "--frozen", "--no-dev"]
+ENTRYPOINT ["uv", "run", "--frozen", "--no-dev", "--no-sync"]
 CMD ["python", "-m", "qtrad", "--help"]
