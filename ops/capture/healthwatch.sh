@@ -6,6 +6,7 @@ umask 077
 readonly endpoint="${QTRAD_READY_URL:-http://127.0.0.1:8000/health/ready}"
 readonly metric_namespace="${QTRAD_OCI_METRIC_NAMESPACE:?QTRAD_OCI_METRIC_NAMESPACE is required}"
 readonly compartment_id="${QTRAD_OCI_COMPARTMENT_ID:?QTRAD_OCI_COMPARTMENT_ID is required}"
+readonly telemetry_endpoint="${QTRAD_OCI_TELEMETRY_ENDPOINT:?QTRAD_OCI_TELEMETRY_ENDPOINT is required}"
 readonly status_dir="${QTRAD_STATUS_DIR:?QTRAD_STATUS_DIR is required}"
 readonly data_mount="${QTRAD_DATA_MOUNT:-/srv/qtrad/postgres}"
 readonly oci_auth="${QTRAD_OCI_AUTH:-instance_principal}"
@@ -80,7 +81,8 @@ jq -n \
     dimensions:{collector:"q-trad-capture"},
     datapoints:[{timestamp:$timestamp, value:.value}]})' > "$metrics"
 
-oci --auth "$oci_auth" monitoring metric-data post --metric-data "file://$metrics" > /dev/null
+oci --auth "$oci_auth" --endpoint "$telemetry_endpoint" \
+  monitoring metric-data post --metric-data "file://$metrics" > /dev/null
 
 healthy=1
 ((ready == 1)) || healthy=0

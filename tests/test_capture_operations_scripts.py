@@ -227,6 +227,7 @@ done
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "QTRAD_OCI_METRIC_NAMESPACE": "qtrad_capture",
             "QTRAD_OCI_COMPARTMENT_ID": "ocid1.compartment.example",
+            "QTRAD_OCI_TELEMETRY_ENDPOINT": "https://telemetry-ingestion.example.invalid",
             "QTRAD_STATUS_DIR": str(status_dir),
             "QTRAD_DATA_MOUNT": str(tmp_path),
         },

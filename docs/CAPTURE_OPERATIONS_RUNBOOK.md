@@ -119,6 +119,10 @@ IG or PostgreSQL credential: backup and restore use the host's instance principa
 running database container. Before enabling either timer, prove the policy with one manual
 backup and one manual restore verification.
 
+Install `capture-monitor.env.example` in the same way and replace its compartment OCID. Keep
+the explicit regional `telemetry-ingestion` endpoint: OCI custom-metric publication does not
+use the normal Monitoring query endpoint.
+
 The PostgreSQL container bind-mounts `/srv/qtrad/postgres/data`, which must reside on the
 dedicated iSCSI block volume mounted at `/srv/qtrad/postgres`. The capture systemd unit
 requires that mount and must fail rather than write database data to the boot volume.
