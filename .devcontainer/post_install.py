@@ -47,48 +47,10 @@ def configure_codex() -> None:
             """# Docker is the outer isolation boundary for this Dev Container.
 approval_policy = "never"
 sandbox_mode = "danger-full-access"
+personality = "pragmatic"
 """,
             encoding="utf-8",
         )
-
-    current = config.read_text(encoding="utf-8")
-    sections: list[str] = []
-    if "[mcp_servers.tilth]" not in current:
-        sections.append(
-            """
-[mcp_servers.tilth]
-command = "/opt/codex-install/node_modules/.bin/tilth"
-args = ["--mcp"]
-
-[mcp_servers.tilth.tools.tilth_search]
-approval_mode = "approve"
-
-[mcp_servers.tilth.tools.tilth_read]
-approval_mode = "approve"
-
-[mcp_servers.tilth.tools.tilth_diff]
-approval_mode = "approve"
-
-[mcp_servers.tilth.tools.tilth_files]
-approval_mode = "approve"
-
-[mcp_servers.tilth.tools.tilth_grok]
-approval_mode = "approve"
-
-[mcp_servers.tilth.tools.tilth_deps]
-approval_mode = "approve"
-"""
-        )
-    if "[mcp_servers.context7]" not in current:
-        sections.append(
-            """
-[mcp_servers.context7]
-url = "https://mcp.context7.com/mcp"
-"""
-        )
-    if sections:
-        with config.open("a", encoding="utf-8") as file:
-            file.write("".join(sections))
 
     host_agents = Path("/workspace/.devcontainer/local/AGENTS.md")
     if host_agents.is_file() and host_agents.stat().st_size:

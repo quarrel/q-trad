@@ -2,7 +2,8 @@ packages:
   - "."
 
 minimumReleaseAge: 10080
-minimumReleaseAgeExclude: []
+minimumReleaseAgeExclude:
+  - "@openai/codex"
 
 blockExoticSubdeps: true
 strictDepBuilds: true
