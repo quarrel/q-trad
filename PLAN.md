@@ -179,6 +179,9 @@ python -m qtrad api
   change the effective product version.
 - Capture readiness has regression coverage for the persisted `ig-market-data` adapter
   identity. The current suite contains 109 tests; Ruff, Pyright and `ty` pass.
+- Corrected dual-architecture release `d12217f` passed ARM cloud migration, idempotent
+  seven-listing validation, live readiness, bounded ingestion and clean-stop gates at OCI
+  index digest `sha256:c5e6a42f242c1cec38948c1798ad602878d3af1487bd4349aa11b457dac51828`.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model

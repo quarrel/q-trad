@@ -203,3 +203,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   seven instruments, reached the projection checkpoint, and stopped cleanly. Its
   readiness probe exposed a mismatched persisted adapter identity; readiness now queries
   the canonical `ig-market-data` identity written by ingestion.
+- The corrected `d12217f` release is published for `linux/amd64` and `linux/arm64` at OCI
+  index digest `sha256:c5e6a42f242c1cec38948c1798ad602878d3af1487bd4349aa11b457dac51828`.
+  A final bounded cloud run returned ready with seven fresh instruments and an exactly
+  caught-up projection, then stopped cleanly with 1,569 accumulated raw messages. The
+  capture stack remains stopped and disabled pending backup, monitoring and reboot gates.
