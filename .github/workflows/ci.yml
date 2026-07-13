@@ -18,7 +18,7 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:18@sha256:22c89e9d9c7845fdf6d2f02909e42f42684e4f01ec8a02c245224d1e3bf8f9a4
+        image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4
         env:
           POSTGRES_DB: qtrad_ci
           POSTGRES_USER: qtrad_ci
