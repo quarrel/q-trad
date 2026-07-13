@@ -35,6 +35,10 @@ services:
       timeout: 3s
       retries: 5
       start_period: 20s
+    sysctls:
+      - net.ipv4.tcp_keepalive_time=60
+      - net.ipv4.tcp_keepalive_intvl=15
+      - net.ipv4.tcp_keepalive_probes=4
 
   dev:
     build:
