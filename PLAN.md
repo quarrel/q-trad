@@ -62,9 +62,10 @@ Implementation status:
 - Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
   coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
   bounded-cloud qualification.
-- Complete locally: daily manifest/checksum backups, weekly isolated restore verification,
-  backup/restore/disk/readiness OCI metrics, and deterministic operations-script tests.
-- Complete locally: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
+- Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
+  isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
+  operations-script tests.
+- Complete: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.
 - Pending operator gate: create and authorise the private backup bucket, install the two

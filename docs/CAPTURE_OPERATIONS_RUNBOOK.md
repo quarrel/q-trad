@@ -18,9 +18,9 @@ paper-execution or production-provider operation.
    dedicated non-root administrator. Create an OCI Bastion in the same VCN as a
    break-glass route to the instance private address.
 5. Create a private Object Storage bucket with versioning for backups. Grant the instance
-   dynamic group bucket-scoped object read/write/delete access, custom-metric publication
-   and Notifications use permissions in this compartment. Create OCI Monitoring email
-   alarms for collector readiness, stale backup/restore and low disk.
+   dynamic group bucket-scoped object read/write/delete access and custom-metric publication
+   in this compartment. The instance does not need Notifications permission. Create OCI
+   Monitoring email alarms for collector readiness, stale backup/restore and low disk.
 6. Install Docker Engine, Docker Compose plugin and OCI CLI. Use the pinned PostgreSQL
    container's client tools so backup validation cannot drift from the server major version.
    Place the reviewed release checkout at `/opt/qtrad-capture`; create root-owned
@@ -98,6 +98,7 @@ second permits reading its bucket metadata.
 ```text
 Allow dynamic-group qtrad-capture-instances to manage objects in compartment id <collector-compartment-ocid> where target.bucket.name = 'qtrad-capture-backups'
 Allow dynamic-group qtrad-capture-instances to read buckets in compartment id <collector-compartment-ocid> where target.bucket.name = 'qtrad-capture-backups'
+Allow dynamic-group qtrad-capture-instances to use metrics in compartment id <collector-compartment-ocid> where target.metrics.namespace = 'qtrad_capture'
 ```
 
 Once GitHub publication succeeds, remove the collector instance's repository create/update

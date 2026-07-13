@@ -230,3 +230,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   sets, manifest-pinned restore verification, metric publication and unhealthy readiness.
   The collector remains stopped and disabled until the real bucket, IAM, backup/restore,
   alarm and reboot gates pass.
+- GitHub CI passed all static checks, migration and 113 tests against an isolated PostgreSQL
+  18 service. The `capture-release` environment exists with a main-only deployment policy;
+  its two OCIR secrets are not yet configured. Host metric publication now targets OCI's
+  required regional ingestion endpoint and correctly stops at the still-pending metric IAM
+  permission.
