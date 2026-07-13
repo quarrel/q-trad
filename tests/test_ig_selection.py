@@ -1,3 +1,4 @@
+from dataclasses import replace
 from decimal import Decimal
 
 import pytest
@@ -5,6 +6,7 @@ import pytest
 from qtrad.adapters.ig.market_data import (
     _bounded_economics,
     _Candidate,
+    _listing_metadata_version,
     _search_row_can_match,
     _select_candidate,
 )
@@ -140,3 +142,22 @@ def test_product_economics_preserves_currency_qualified_pip_meaning() -> None:
     assert economics["one_pip_means"] == "USD 10"
     assert economics["contract_size"] == "1"
     assert economics["minimum_quantity"] == "0.5"
+
+
+def test_listing_version_excludes_volatile_market_snapshot() -> None:
+    first = candidate("US500", "0.5")
+    second = candidate("US500", "0.5")
+    first = replace(
+        first,
+        metadata={"instrument": {"contractSize": "1"}, "snapshot": {"bid": 100}},
+    )
+    second = replace(
+        second,
+        metadata={"instrument": {"contractSize": "1"}, "snapshot": {"bid": 101}},
+    )
+
+    first_economics = _bounded_economics(first.metadata)
+    second_economics = _bounded_economics(second.metadata)
+    assert _listing_metadata_version(first, first_economics) == _listing_metadata_version(
+        second, second_economics
+    )

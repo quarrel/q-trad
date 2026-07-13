@@ -175,6 +175,8 @@ python -m qtrad api
 - Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`.
 - Capture bootstrap remediation suite: 107 passed, including currency-qualified IG pip
   economics at the adapter boundary; Ruff, Pyright and `ty` also passed.
+- Listing identity has deterministic coverage proving that volatile IG snapshots do not
+  change the effective product version.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model

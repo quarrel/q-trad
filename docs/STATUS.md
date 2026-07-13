@@ -195,3 +195,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
   model interpolation, and the read-only application services initialise uv's cache in
   their existing temporary filesystem. IG's currency-qualified `onePipMeans` product
   label is preserved as bounded provider semantics rather than coerced to a decimal.
+- Collector bootstrap also proved that the unbounded IG detail response contains volatile
+  snapshot data. Listing-version identity now hashes only bounded, stable selection and
+  product-economics facts, preventing price changes from creating false superseding
+  listing versions.

@@ -385,7 +385,8 @@ class IgDemoMarketDataAdapter:
                 instrument,
                 preferred_epic=preferred_epic,
             )
-            metadata_json = json.dumps(candidate.metadata, sort_keys=True, separators=(",", ":"))
+            economics = _bounded_economics(candidate.metadata)
+            metadata_version = _listing_metadata_version(candidate, economics)
             listing = ProviderListing(
                 listing_id=ProviderListingId("ig", "demo", candidate.epic),
                 instrument_id=instrument_id,
@@ -396,8 +397,8 @@ class IgDemoMarketDataAdapter:
                 price_increment=None,
                 valid_from=self._clock.now(),
                 valid_to=None,
-                metadata_version=hashlib.sha256(metadata_json.encode()).hexdigest()[:16],
-                economics=_bounded_economics(candidate.metadata),
+                metadata_version=metadata_version,
+                economics=economics,
             )
             listings.append(listing)
         return tuple(listings)
@@ -1516,6 +1517,22 @@ def _bounded_economics(metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue
         "minimum_quantity": _decimal_text(_nested_decimal(dealing_rules, "minDealSize", "value")),
         "price_increment": _decimal_text(instrument.get("scalingFactor")),
     }
+
+
+def _listing_metadata_version(candidate: _Candidate, economics: Mapping[str, JsonValue]) -> str:
+    """Hash stable listing facts, excluding volatile market snapshots."""
+
+    identity: dict[str, JsonValue] = {
+        "epic": candidate.epic,
+        "name": candidate.name,
+        "instrument_type": candidate.instrument_type,
+        "expiry": candidate.expiry,
+        "currency": candidate.currency,
+        "minimum_deal_size": str(candidate.minimum_deal_size),
+        "economics": dict(economics),
+    }
+    encoded = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
 
 
 def _decimal_text(value: object) -> str | None:
