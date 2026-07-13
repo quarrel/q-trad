@@ -146,8 +146,10 @@ resolved secrets.
    with only `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_TOKEN`; never add IG or database
    credentials to GitHub.
 2. Commit a reviewed deployment descriptor that pins only that digest and the approved
-   universe/configuration hash. On the host, use `git pull --ff-only`; never build or use
-   a mutable image tag there.
+   universe/configuration hash. The host has a repository-scoped, read-only GitHub deploy
+   key and checkout at `/home/opc/q-trad-source`. Run `git -C ~/q-trad-source pull
+   --ff-only`, archive that exact commit under `/opt/qtrad-releases/<full-commit>`, then
+   atomically repoint `/opt/qtrad-capture`. Never build or use a mutable image tag there.
 3. Run `qtrad db upgrade`, take a successful backup, start `qtrad-capture.service`, then
    require `GET /health/ready` to return HTTP 200 with all seven expected instruments.
 4. Roll back only by restoring the previous digest/configuration and restarting Compose.

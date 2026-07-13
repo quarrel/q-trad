@@ -235,3 +235,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
   its two OCIR secrets are not yet configured. Host metric publication now targets OCI's
   required regional ingestion endpoint and correctly stops at the still-pending metric IAM
   permission.
+- A repository-scoped, read-only GitHub deploy key now backs the host checkout at
+  `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
+  reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`
+  points to it, while the collector and all three operations timers remain disabled.
