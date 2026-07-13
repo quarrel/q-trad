@@ -216,3 +216,17 @@ outside the current data-only phase until explicitly admitted by a later plan up
   proxy. A separately constrained Beszel agent reports clean collector telemetry to the
   operator's local hub; application readiness and backup/restore monitoring remain
   separate qualification gates.
+- Daily backup tooling now writes a custom-format archive, checksum and manifest binding
+  the universe plus application/database image digests before bucket upload. Weekly restore
+  verification downloads the latest daily set, validates it and restores into a disposable,
+  networkless PostgreSQL container using the manifest-pinned image.
+- The host-local health watcher now publishes readiness, fresh-subscription count,
+  projection lag, backup age, restore evidence/age and database-volume free space as OCI
+  custom metrics, and fails closed when any required operational evidence is stale.
+- GitHub workflow definitions now provide push/pull-request static and isolated-PostgreSQL
+  gates plus manual commit-SHA-tagged dual-architecture publication to Sydney OCIR. The
+  repository release environment and its two OCIR secrets remain an operator gate.
+- Four deterministic command-level tests cover successful backup evidence, upload object
+  sets, manifest-pinned restore verification, metric publication and unhealthy readiness.
+  The collector remains stopped and disabled until the real bucket, IAM, backup/restore,
+  alarm and reboot gates pass.

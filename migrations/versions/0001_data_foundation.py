@@ -72,9 +72,7 @@ def upgrade() -> None:
         )
         """
     )
-    op.execute(
-        "CREATE INDEX events_type_time_idx ON canonical.events (event_type, event_time)"
-    )
+    op.execute("CREATE INDEX events_type_time_idx ON canonical.events (event_type, event_time)")
     op.execute(
         """
         CREATE TABLE reference.instruments (

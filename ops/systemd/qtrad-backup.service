@@ -7,3 +7,4 @@ Type=oneshot
 WorkingDirectory=/opt/qtrad-capture
 EnvironmentFile=/etc/qtrad/capture-backup.env
 ExecStart=/opt/qtrad-capture/ops/capture/backup.sh
+UMask=0077

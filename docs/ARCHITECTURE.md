@@ -35,6 +35,20 @@ allowed outbound connection to the operator's Beszel hub port. Beszel supplies
 supplemental host/container telemetry; application readiness, backup verification and OCI
 alarms remain independent operational evidence.
 
+Capture releases are built outside the collector. GitHub CI uses an isolated PostgreSQL
+service for migrations and integration tests; a separately protected manual workflow
+publishes one multi-platform application image under the source commit SHA and reports its
+OCI index digest. The collector's deployment descriptor consumes only that digest and its
+instance principal needs repository-read permission, not image-publication permission.
+
+The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
+checksum and a JSON manifest that binds the capture-universe hash and both deployed image
+digests. Object Storage lifecycle rules implement daily/weekly retention. A weekly verifier
+downloads the latest daily set and restores it into a networkless, tmpfs-backed PostgreSQL
+container selected by the manifest digest. Backup and restore status files are atomic local
+evidence inputs to the health watcher; they are not substitutes for the remote objects or a
+successful restore.
+
 ```mermaid
 flowchart LR
     SRC["Fixture or IG demo"] --> ADAPTER["Market-data adapter"]

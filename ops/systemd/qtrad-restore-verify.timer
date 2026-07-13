@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify q-trad PostgreSQL restore weekly
+
+[Timer]
+OnCalendar=Mon *-*-* 04:30:00 UTC
+Persistent=true
+Unit=qtrad-restore-verify.service
+
+[Install]
+WantedBy=timers.target

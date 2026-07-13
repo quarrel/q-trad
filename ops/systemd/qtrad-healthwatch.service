@@ -7,3 +7,4 @@ Type=oneshot
 WorkingDirectory=/opt/qtrad-capture
 EnvironmentFile=/etc/qtrad/capture-monitor.env
 ExecStart=/opt/qtrad-capture/ops/capture/healthwatch.sh
+UMask=0077

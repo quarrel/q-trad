@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18@sha256:22c89e9d9c7845fdf6d2f02909e42f42684e4f01ec8a02c245224d1e3bf8f9a4
+        env:
+          POSTGRES_DB: qtrad_ci
+          POSTGRES_USER: qtrad_ci
+          POSTGRES_PASSWORD: qtrad-ci-only
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U qtrad_ci -d qtrad_ci"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad_ci:qtrad-ci-only@127.0.0.1:5432/qtrad_ci
+      QTRAD_MIGRATION_DATABASE_URL: postgresql+psycopg://qtrad_ci:qtrad-ci-only@127.0.0.1:5432/qtrad_ci
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@557e51de59eb14aaaba2ed9621916900a91d50c6 # v6.6.1
+        with:
+          enable-cache: true
+          python-version: "3.13"
+
+      - name: Install locked dependencies
+        run: uv sync --frozen
+
+      - name: Check formatting
+        run: uv run ruff format --check .
+
+      - name: Lint
+        run: uv run ruff check .
+
+      - name: Type-check
+        run: uv run pyright
+
+      - name: Check shell scripts
+        run: shellcheck ops/capture/*.sh
+
+      - name: Migrate isolated database
+        run: uv run alembic upgrade head
+
+      - name: Test
+        run: uv run pytest

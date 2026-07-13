@@ -1,0 +1,11 @@
+[Unit]
+Description=q-trad PostgreSQL isolated restore verification
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/qtrad-capture
+EnvironmentFile=/etc/qtrad/capture-backup.env
+ExecStart=/opt/qtrad-capture/ops/capture/restore-verify.sh
+UMask=0077
