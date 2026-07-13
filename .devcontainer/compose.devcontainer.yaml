@@ -3,13 +3,45 @@ services:
     networks:
       - qtrad-dev
 
+  tailscale:
+    image: tailscale/tailscale:latest
+    hostname: qtrad-dev-container
+    restart: unless-stopped
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+      TS_EXTRA_ARGS: --accept-routes
+      TS_ACCENT_DNS: "true"
+      TS_SOCKET: /var/run/tailscale/tailscaled.sock
+      TS_AUTH_ONCE: "true"
+      TS_USERSPACE: "false"
+      TS_ENABLE_HEALTH_CHECK: "true"
+      TS_LOCAL_ADDR_PORT: "[::]:9002"
+    volumes:
+      - tailscale-state:/var/lib/tailscale
+      - tailscale-socket:/var/run/tailscale
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - MKNOD
+    networks:
+      - qtrad-dev
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9002/healthz"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 20s
+
   dev:
     build:
       context: .
       dockerfile: .devcontainer/Dockerfile
     command: ["sleep", "infinity"]
     init: true
-    hostname: qtrad-dev-container
     env_file:
       - path: .env
         required: false
@@ -19,9 +51,10 @@ services:
       QTRAD_RESEARCH_ROOT: /workspace/data/research
       TMPDIR: /workspace/tmp
       UV_CACHE_DIR: /home/vscode/.cache/uv
-      TS_AUTH_KEY: ${TS_AUTH_KEY}
     depends_on:
       db:
+        condition: service_healthy
+      tailscale:
         condition: service_healthy
     volumes:
       - .:/workspace
@@ -29,16 +62,8 @@ services:
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv
-    networks:
-      - qtrad-dev
-    sysctls:
-      - net.ipv6.conf.all.disable_ipv6=0
-      - net.ipv6.conf.default.disable_ipv6=0
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - MKNOD
+      - tailscale-socket:/var/run/tailscale
+    network_mode: service:tailscale
 
 networks:
   qtrad-dev:
@@ -49,3 +74,5 @@ volumes:
   qtrad-command-history:
   qtrad-uv-cache:
   qtrad-venv:
+  tailscale-state:
+  tailscale-socket:
