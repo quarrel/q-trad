@@ -5,6 +5,11 @@
     "compose.devcontainer.yaml"
   ],
   "service": "dev",
+  "features": {
+    "ghcr.io/tailscale/codespace/tailscale": {
+      "version": "latest"
+    }
+  },
   "runServices": [
     "db",
     "dev"

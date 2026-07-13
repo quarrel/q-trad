@@ -9,15 +9,17 @@ services:
       dockerfile: .devcontainer/Dockerfile
     command: ["sleep", "infinity"]
     init: true
+    hostname: qtrad-dev-container
+    env_file:
+      - path: .env
+        required: false
     environment:
       CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
       QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad
       QTRAD_RESEARCH_ROOT: /workspace/data/research
       TMPDIR: /workspace/tmp
       UV_CACHE_DIR: /home/vscode/.cache/uv
-    env_file:
-      - path: .env
-        required: false
+      TS_AUTH_KEY: ${TS_AUTH_KEY}
     depends_on:
       db:
         condition: service_healthy
@@ -32,6 +34,11 @@ services:
     sysctls:
       - net.ipv6.conf.all.disable_ipv6=0
       - net.ipv6.conf.default.disable_ipv6=0
+    devices:
+      - /dev/net/tun:/dev/net/tun
+    cap_add:
+      - NET_ADMIN
+      - MKNOD
 
 networks:
   qtrad-dev:
