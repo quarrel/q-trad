@@ -1,3 +1,5 @@
+name: qtrad-capture
+
 services:
   db:
     image: ${QTRAD_POSTGRES_IMAGE:?set an immutable PostgreSQL 18 image digest}
@@ -19,6 +21,8 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "qtrad", "ingest", "--environment", "ig-demo"]
     env_file: /etc/qtrad/capture.env
+    environment:
+      UV_CACHE_DIR: /tmp/uv-cache
     depends_on:
       db:
         condition: service_healthy
@@ -31,6 +35,8 @@ services:
     restart: unless-stopped
     command: ["python", "-m", "qtrad", "api", "--host", "0.0.0.0", "--port", "8000"]
     env_file: /etc/qtrad/capture.env
+    environment:
+      UV_CACHE_DIR: /tmp/uv-cache
     depends_on:
       db:
         condition: service_healthy

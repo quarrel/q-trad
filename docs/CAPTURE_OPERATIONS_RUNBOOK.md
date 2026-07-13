@@ -39,6 +39,11 @@ requires that mount and must fail rather than write database data to the boot vo
 approved `QTRAD_CAPTURE_UNIVERSE_PATH`, and immutable image references. It is never copied
 to a workstation, log, image or repository.
 
+Every Compose invocation must pass `--env-file /etc/qtrad/capture.env`. Compose's service
+`env_file` supplies the container environment but does not supply image references while
+interpolating the Compose model. Do not print the rendered model because it contains
+resolved secrets.
+
 ## Release and rollback
 
 1. From development, run all static gates and tests, build the `linux/amd64` and

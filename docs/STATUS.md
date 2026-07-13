@@ -190,3 +190,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   `sha256:cebdde74e02240e2210985cbc927c7744f7b7007d36c7a20f501418710400633`.
   The collector authenticates without stored credentials through its instance principal,
   and an ARM64 pull-by-digest round trip ran successfully as UID 10001.
+- Initial collector bootstrap exposed and corrected two release-path defects before any
+  unattended ingestion: Compose now receives the root-owned deployment environment for
+  model interpolation, and the read-only application services initialise uv's cache in
+  their existing temporary filesystem. IG's currency-qualified `onePipMeans` product
+  label is preserved as bounded provider semantics rather than coerced to a decimal.

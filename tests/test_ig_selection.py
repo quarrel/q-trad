@@ -3,6 +3,7 @@ from decimal import Decimal
 import pytest
 
 from qtrad.adapters.ig.market_data import (
+    _bounded_economics,
     _Candidate,
     _search_row_can_match,
     _select_candidate,
@@ -126,3 +127,16 @@ def test_discovery_prefilters_irrelevant_search_rows_before_detail_fetch() -> No
         },
         instrument,
     )
+
+
+def test_product_economics_preserves_currency_qualified_pip_meaning() -> None:
+    economics = _bounded_economics(
+        {
+            "instrument": {"onePipMeans": "USD 10", "contractSize": "1"},
+            "dealingRules": {"minDealSize": {"value": "0.5"}},
+        }
+    )
+
+    assert economics["one_pip_means"] == "USD 10"
+    assert economics["contract_size"] == "1"
+    assert economics["minimum_quantity"] == "0.5"

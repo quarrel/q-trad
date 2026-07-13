@@ -1507,7 +1507,11 @@ def _bounded_economics(metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue
         "quantity_unit": _string(instrument, "unit"),
         "contract_size": _decimal_text(instrument.get("contractSize")),
         "lot_size": _decimal_text(instrument.get("lotSize")),
-        "one_pip_means": _decimal_text(instrument.get("onePipMeans")),
+        # IG supplies this as a bounded semantic label for some markets (for
+        # example, a currency-qualified amount), not consistently as a bare
+        # decimal. Preserve the provider meaning without attempting a
+        # dimensionally unsafe numeric conversion.
+        "one_pip_means": _string(instrument, "onePipMeans"),
         "value_of_one_pip": _decimal_text(instrument.get("valueOfOnePip")),
         "minimum_quantity": _decimal_text(_nested_decimal(dealing_rules, "minDealSize", "value")),
         "price_increment": _decimal_text(instrument.get("scalingFactor")),
