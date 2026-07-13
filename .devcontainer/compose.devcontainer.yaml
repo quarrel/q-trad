@@ -67,7 +67,6 @@ services:
 
 networks:
   qtrad-dev:
-    enable_ipv6: true
 
 volumes:
   qtrad-codex-home:
