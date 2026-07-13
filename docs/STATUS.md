@@ -199,3 +199,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
   snapshot data. Listing-version identity now hashes only bounded, stable selection and
   product-economics facts, preventing price changes from creating false superseding
   listing versions.
+- The first cloud bounded ingest persisted 1,215 raw messages and fresh quotes for all
+  seven instruments, reached the projection checkpoint, and stopped cleanly. Its
+  readiness probe exposed a mismatched persisted adapter identity; readiness now queries
+  the canonical `ig-market-data` identity written by ingestion.

@@ -49,7 +49,7 @@ class OperatorQueries:
                 ) AS ingestion_running,
                 EXISTS (
                     SELECT 1 FROM ops.adapter_health
-                    WHERE adapter_name = 'ig-demo' AND environment = 'IG_DEMO'
+                    WHERE adapter_name = 'ig-market-data' AND environment = 'IG_DEMO'
                       AND status = 'HEALTHY'
                 ) AS adapter_healthy,
                 (

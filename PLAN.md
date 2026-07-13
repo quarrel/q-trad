@@ -177,6 +177,8 @@ python -m qtrad api
   economics at the adapter boundary; Ruff, Pyright and `ty` also passed.
 - Listing identity has deterministic coverage proving that volatile IG snapshots do not
   change the effective product version.
+- Capture readiness has regression coverage for the persisted `ig-market-data` adapter
+  identity. The current suite contains 109 tests; Ruff, Pyright and `ty` pass.
 - PostgreSQL-backed branch coverage: 70% overall; replay is 100%, bars 95%, gaps 89%,
   ingestion 82%, the IG adapter 61% and CLI orchestration 40%.
 - Architecture tests enforce the declared dependency direction; PostgreSQL read-model
