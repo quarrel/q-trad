@@ -25,7 +25,15 @@ dependency caches and Codex state use named volumes. At initialisation, the host
 Codex `AGENTS.md` is copied through a gitignored workspace staging file into the
 container-local Codex state. No credentials or other host Codex state are copied. The host
 Docker socket is not mounted. PostgreSQL runs as the existing `db` sidecar on the private
-Compose network.
+Compose network. Dev Container setup registers Tilth, Context7 and the repository-scoped
+GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
+
+The Dev Container and OCI collector are Tailscale peers. Tailscale ACLs allow the Dev
+Container to reach TCP/22 on the collector, exposed through MagicDNS as
+`q-trad-capture`, without a WSL socket proxy. The collector may make only the separately
+allowed outbound connection to the operator's Beszel hub port. Beszel supplies
+supplemental host/container telemetry; application readiness, backup verification and OCI
+alarms remain independent operational evidence.
 
 ```mermaid
 flowchart LR

@@ -65,8 +65,15 @@ and deploy only the returned OCI index digest.
 
 - Install and enable the capture, backup and healthwatch systemd units/timers from
   `ops/systemd/`. The collector must continue after SSH or Bastion disconnects.
-- Use direct IPv6 SSH for normal access. Use Bastion only for recovery or temporary local
+- From the authorised Dev Container, use Tailscale MagicDNS and
+  `ssh opc@q-trad-capture` for normal administration. The tailnet policy permits that peer
+  to reach only TCP/22 on the collector. Retain restricted direct IPv6 SSH as an
+  operator-controlled fallback and OCI Bastion for break-glass recovery or temporary
   port forwarding to the loopback-only console.
+- Run the Beszel agent as a separate container with tailnet policy allowing only its
+  outbound report to the operator's Beszel hub port. Beszel alerts supplement but do not
+  replace the collector readiness watcher, OCI alarms, backup-age checks or restore
+  evidence.
 - Run daily custom-format PostgreSQL backups, validate each archive with `pg_restore
   --list`, upload it with its checksum, retain 14 daily and 8 weekly copies, and perform a
   weekly restore into a disposable PostgreSQL container before recording success.

@@ -68,6 +68,20 @@ The fixed canonical universe is:
 - Verify transport tasks, threads, sessions and processes have ended before declaring
   disconnect or restart complete.
 
+## Repository synchronisation
+
+- The canonical private Git remote is `https://github.com/quarrel/q-trad.git` as
+  `origin`. Push reviewed, committed work to `origin` regularly in bounded batches so the
+  remote does not materially lag the development checkout.
+- Never push secrets, local credentials, generated capture data or unfinished operational
+  evidence. Check the worktree and outgoing commits before every push.
+
+## Code-intelligence safety
+
+- Tilth may index files ignored by Git. Restrict searches with a tracked-source glob such
+  as `*.py` or `*.md`; never search `.env`, `.devcontainer/local`, caches, captured data or
+  credential material through Tilth.
+
 ## Terminology
 
 Use the vocabulary in `PREPLAN.md`. In particular:

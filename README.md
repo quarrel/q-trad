@@ -47,8 +47,9 @@ tools inside Docker rather than directly in WSL.
 3. Sign in to Codex when prompted inside the container.
 
 The Debian Trixie container uses Python 3.13 and `uv`, starts the PostgreSQL 18 `db`
-service, installs the Codex, Python and Ruff extensions, and configures the Tilth and
-Context7 MCP servers. Codex is resolved from npm's `latest` release when the container
+service, installs the Codex, Python and Ruff extensions, and configures the Tilth,
+Context7 and repository-scoped GitHub MCP servers through the Codex CLI. Codex is resolved
+from npm's `latest` release when the container
 image is rebuilt without cache; Tilth is installed from a pinned npm package and release
 binary. To update Codex, run **Dev Containers: Rebuild Container Without Cache** rather
 than a cached rebuild. The container
@@ -61,6 +62,16 @@ Docker is the outer isolation boundary, so the container-local Codex configurati
 full access without approval prompts. Codex can modify anything in the repository,
 including `.git` and `.env`, but cannot use Docker to reach other WSL containers or
 filesystems. The Dev Container has unrestricted outbound internet access.
+
+The private canonical remote is `origin` at `https://github.com/quarrel/q-trad.git`.
+Review commits and the worktree before pushing, then synchronise completed work regularly
+rather than accumulating a large unpublished local history. GitHub MCP credentials are
+scoped to this repository; they do not belong in tracked files or command output.
+
+The Dev Container joins the operator's Tailscale network and may administer the collector
+over Tailscale SSH using `ssh opc@q-trad-capture`. Tailscale policy permits this container
+to reach only the collector's SSH service; it does not provide general access to the
+collector or the operator's other network services.
 
 Run project commands directly in the container:
 

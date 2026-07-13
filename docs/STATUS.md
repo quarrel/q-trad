@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-12
+**Updated:** 2026-07-13
 **Current milestone:** capture operations release
 **State:** IN PROGRESS — data foundation qualified; persistent demo-only collection is being prepared
 
@@ -64,6 +64,9 @@
   with WSL.
 - The Dev Container provisions pinned Tilth and remote Context7 MCP servers in its
   persistent container-local Codex configuration.
+- Dev Container setup now registers Tilth, remote Context7 and repository-scoped GitHub
+  MCP servers through the Codex CLI. The private GitHub repository is configured as
+  `origin` and is the regular synchronisation target for reviewed commits.
 - The application and Dev Container use Debian Trixie base images. The Dev Container
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
@@ -208,3 +211,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   A final bounded cloud run returned ready with seven fresh instruments and an exactly
   caught-up projection, then stopped cleanly with 1,569 accumulated raw messages. The
   capture stack remains stopped and disabled pending backup, monitoring and reboot gates.
+- Tailscale MagicDNS now provides direct Dev Container SSH access to
+  `opc@q-trad-capture` under a TCP/22-only peer policy, replacing the temporary WSL socket
+  proxy. A separately constrained Beszel agent reports clean collector telemetry to the
+  operator's local hub; application readiness and backup/restore monitoring remain
+  separate qualification gates.
