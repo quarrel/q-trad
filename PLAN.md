@@ -69,7 +69,11 @@ Implementation status:
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.
 - Pending operator gate: create and authorise the private backup bucket, install the two
-  non-secret operations environment files, configure alarms, and prove backup/restore.
+  non-secret operations environment files, and configure alarms. Bucket lifecycle,
+  instance-principal upload, isolated restore and custom-metric publication now pass.
+- Pending registry gate: the dedicated GitHub identity authenticates to OCIR, but two
+  cached multi-platform attempts were denied at image push; verify its group membership
+  and grant repository-scoped `use repos` before dispatching again.
 - Pending qualification: reboot/digest rollback gates followed by the 72-hour unattended
   `capture-v1` run. `capture-v2` remains excluded.
 

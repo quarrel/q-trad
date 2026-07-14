@@ -239,3 +239,18 @@ outside the current data-only phase until explicitly admitted by a later plan up
   `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
   reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`
   points to it, while the collector and all three operations timers remain disabled.
+- The private `qtrad-capture-backups` bucket is versioned with active 14-day daily,
+  56-day weekly and 7-day previous-version lifecycle rules. Instance-principal access
+  uploaded the first real archive/checksum/manifest set successfully.
+- The first isolated restore verification exposed and corrected the OCI CLI's direct
+  `data` array response shape. The retry verified the checksum, restored migration `0003`
+  into a networkless temporary PostgreSQL container and read 1,642 canonical events.
+  Backup and restore status evidence is fresh; their timers remain disabled until capture
+  starts.
+- OCI custom-metric ingestion now accepts the collector's instance-principal publication.
+  With capture deliberately stopped, healthwatch correctly publishes the available fresh
+  backup/restore/disk evidence and exits unhealthy because readiness is unavailable.
+- The dedicated GitHub publisher authenticates to Sydney OCIR, and Buildx completes both
+  architecture builds, but OCIR denied both manifest pushes. A delayed retry ruled out IAM
+  propagation; publisher group membership or its repository permission still needs
+  correction before an immutable digest can be deployed.
