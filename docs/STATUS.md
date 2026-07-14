@@ -289,6 +289,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
   Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
   no longer gate data collection, but remain operator hardening follow-ups.
+- The operator has independently verified the OCI Service Gateway path and successful access to
+  other Ksplice endpoints from the collector. The remaining repository-specific Ksplice failure is
+  being escalated to Oracle support and remains a non-blocking host-hardening follow-up rather than
+  a capture qualification failure.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
