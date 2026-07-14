@@ -405,6 +405,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
   qualification image remain unchanged.
 - GitHub CI run `29326440612` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 219 tests against PostgreSQL 18 at branch head `246855e`.
+- Storage comparison now fails closed across capture source, database, universe, configuration,
+  application-version or immutable-image drift. Its machine-readable gate requires six elapsed
+  hours and 100,000 new raw messages, marks index evidence unusable across a statistics reset and
+  keeps active-market representativeness as an operator review rather than an inferred fact.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

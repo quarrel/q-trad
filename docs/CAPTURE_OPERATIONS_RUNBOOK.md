@@ -350,6 +350,12 @@ or 100,000 new raw messages, whichever is longer, and reject a restart/statistic
 for index-usage conclusions. Do not remove an index or change payload representation from one small
 sample.
 
+The comparison command requires identical capture source, database, universe, configuration,
+application version and immutable image identity. Its `measurement_gate` requires both six elapsed
+hours and 100,000 new raw messages and separately reports whether index-scan evidence is usable.
+`operator_active_market_review_required` remains true because elapsed time and row count cannot
+establish representative market activity by themselves.
+
 ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
 the active qualification first; do not mix representations within its 72-hour evidence window.
 

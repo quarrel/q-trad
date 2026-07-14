@@ -170,6 +170,10 @@ scan deltas.
 Offline comparison derives raw, canonical and combined heap/index/auxiliary growth from those
 physical snapshots and reports both per-message and per-relation-row normalisation. It also exposes
 the canonical-event/raw-message ratio rather than assuming a one-to-one interval.
+Comparison rejects source, database, universe, configuration, application-version or immutable-image
+drift. Its machine-readable evidence gate requires both the minimum elapsed interval and raw-message
+volume, invalidates index usage across a statistics reset and retains an explicit active-market
+operator-review requirement.
 `docs/CAPTURE_STORAGE_AUDIT.md` keeps uniqueness and audit retention outside the optimisation
 boundary.
 

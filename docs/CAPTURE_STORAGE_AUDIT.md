@@ -47,6 +47,13 @@ index scan deltas unavailable rather than presenting reset counters as usage evi
 allocation occurs in pages, so use a representative active-market window rather than a handful of
 updates.
 
+Comparison fails closed if capture source, database, universe, configuration hash, application
+version or immutable image differs between the two snapshots. It emits a machine-readable
+measurement gate requiring both six elapsed hours and 100,000 new raw messages. These automated
+thresholds do not prove that the interval represents active market conditions, so operator review
+remains explicit. Index-scan evidence is usable only when both thresholds pass and PostgreSQL's
+statistics-reset timestamp is unchanged.
+
 ## Candidate decisions
 
 1. **Changed-field raw capture — implemented candidate.** This corrects raw semantics and normally

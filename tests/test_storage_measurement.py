@@ -99,6 +99,15 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
     assert comparison["canonical_events_delta"] == 3
     assert comparison["database_bytes_delta"] == 4_000
     assert comparison["statistics_reset_changed"] is False
+    assert comparison["measurement_gate"] == {
+        "minimum_elapsed_seconds": 21_600,
+        "elapsed_satisfied": False,
+        "minimum_raw_messages": 100_000,
+        "raw_volume_satisfied": False,
+        "representative_thresholds_satisfied": False,
+        "index_scan_evidence_usable": False,
+        "operator_active_market_review_required": True,
+    }
     assert comparison["bytes_per_raw_message"] == {
         "database": "2000.000",
         "raw_relation": "750.000",
@@ -206,6 +215,66 @@ def test_storage_comparison_fails_closed_on_identity_or_counter_drift() -> None:
     no_updates = _snapshot(replace(_measurement(), observed_at=NOW + timedelta(minutes=1)))
     with pytest.raises(ValueError, match="requires new raw messages"):
         compare_storage_snapshots(before, no_updates)
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("universe_name", "capture-v2", "different capture universes"),
+        ("configuration_hash", "c" * 64, "different capture configurations"),
+        ("application_version", "0.2.0", "different application versions"),
+        (
+            "application_image",
+            "syd.ocir.io/example/qtrad@sha256:" + "d" * 64,
+            "different application images",
+        ),
+    ],
+)
+def test_storage_comparison_rejects_release_identity_drift(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    before = _snapshot()
+    after = _snapshot(replace(_measurement(), observed_at=NOW + timedelta(hours=7)))
+    changed = after.model_copy(update={field: value})
+    identity = {
+        key: item
+        for key, item in changed.model_dump(mode="json").items()
+        if key != "snapshot_sha256"
+    }
+    changed = changed.model_copy(
+        update={
+            "snapshot_sha256": hashlib.sha256(
+                json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest()
+        }
+    )
+
+    with pytest.raises(ValueError, match=message):
+        compare_storage_snapshots(before, changed)
+
+
+def test_storage_comparison_reports_representative_measurement_gate() -> None:
+    before = _measurement()
+    after = replace(
+        before,
+        observed_at=NOW + timedelta(hours=7),
+        raw_message_count=100_100,
+        canonical_event_count=100_100,
+    )
+
+    comparison = compare_storage_snapshots(_snapshot(before), _snapshot(after))
+
+    assert comparison["measurement_gate"] == {
+        "minimum_elapsed_seconds": 21_600,
+        "elapsed_satisfied": True,
+        "minimum_raw_messages": 100_000,
+        "raw_volume_satisfied": True,
+        "representative_thresholds_satisfied": True,
+        "index_scan_evidence_usable": True,
+        "operator_active_market_review_required": True,
+    }
 
 
 def test_storage_snapshot_allows_schema_scoped_index_names_and_bounds_input(

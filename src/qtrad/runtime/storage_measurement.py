@@ -15,6 +15,8 @@ from qtrad.domain.events import JsonValue
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
 _MAX_RELATIONS = 500
 _MAX_INDEXES = 2_000
+_MIN_MEASUREMENT_SECONDS = 6 * 60 * 60
+_MIN_RAW_MESSAGES = 100_000
 
 
 class _StrictModel(BaseModel):
@@ -158,6 +160,14 @@ def compare_storage_snapshots(
         raise ValueError("storage snapshots have different capture sources")
     if before.database_name != after.database_name:
         raise ValueError("storage snapshots have different databases")
+    if before.universe_name != after.universe_name:
+        raise ValueError("storage snapshots have different capture universes")
+    if before.configuration_hash != after.configuration_hash:
+        raise ValueError("storage snapshots have different capture configurations")
+    if before.application_version != after.application_version:
+        raise ValueError("storage snapshots have different application versions")
+    if before.application_image != after.application_image:
+        raise ValueError("storage snapshots have different application images")
     if after.observed_at <= before.observed_at:
         raise ValueError("storage snapshot comparison is not chronological")
     raw_delta = after.raw_message_count - before.raw_message_count
@@ -239,6 +249,9 @@ def compare_storage_snapshots(
     elapsed_seconds = Decimal(elapsed.days * 86_400 + elapsed.seconds) + (
         Decimal(elapsed.microseconds) / Decimal(1_000_000)
     )
+    elapsed_satisfied = elapsed_seconds >= _MIN_MEASUREMENT_SECONDS
+    raw_volume_satisfied = raw_delta >= _MIN_RAW_MESSAGES
+    representative_thresholds_satisfied = elapsed_satisfied and raw_volume_satisfied
     return {
         "schema_version": 1,
         "capture_source_id": before.capture_source_id,
@@ -254,6 +267,17 @@ def compare_storage_snapshots(
         "canonical_events_delta": canonical_delta,
         "database_bytes_delta": after.database_bytes - before.database_bytes,
         "statistics_reset_changed": statistics_reset_changed,
+        "measurement_gate": {
+            "minimum_elapsed_seconds": _MIN_MEASUREMENT_SECONDS,
+            "elapsed_satisfied": elapsed_satisfied,
+            "minimum_raw_messages": _MIN_RAW_MESSAGES,
+            "raw_volume_satisfied": raw_volume_satisfied,
+            "representative_thresholds_satisfied": representative_thresholds_satisfied,
+            "index_scan_evidence_usable": (
+                representative_thresholds_satisfied and not statistics_reset_changed
+            ),
+            "operator_active_market_review_required": True,
+        },
         "raw_relation_bytes_delta": raw_relation_delta,
         "canonical_relation_bytes_delta": canonical_relation_delta,
         "canonical_events_per_raw_message": _ratio(canonical_delta, raw_delta),
