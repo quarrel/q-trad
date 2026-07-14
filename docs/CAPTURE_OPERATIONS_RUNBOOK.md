@@ -308,6 +308,49 @@ container restart and host reboot. The ingestion container must receive `SIGINT`
 configured 90-second grace period so the interrupted run is terminal before its replacement
 starts.
 
+At or after the recorded not-before time, create one non-overwriting automatic evidence snapshot
+from a reviewed detached checkout. This does not deploy that checkout: `QTRAD_CAPTURE_ROOT` remains
+the active pinned release, and the tool makes only loopback GET requests, Compose `ps`, one
+`SELECT` of the migration version, systemd reads and filesystem-capacity reads. First confirm the
+tool checkout is clean and at the reviewed PR commit. The evidence records the tool's own SHA-256.
+
+```bash
+TOOL_ROOT=/home/opc/q-trad-source
+git -C "$TOOL_ROOT" status --short
+git -C "$TOOL_ROOT" rev-parse HEAD
+
+CURRENT_IMAGE="$(sudo sed -n 's/^QTRAD_IMAGE=//p' /etc/qtrad/capture.env)"
+case "$CURRENT_IMAGE" in
+  *@sha256:3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80) ;;
+  *) printf 'unexpected qualification image: %s\n' "$CURRENT_IMAGE" >&2; exit 1 ;;
+esac
+
+sudo install -d -o root -g root -m 0700 /var/lib/qtrad-capture/qualification
+sudo env \
+  QTRAD_CAPTURE_ROOT=/opt/qtrad-capture \
+  QTRAD_CAPTURE_ENV=/etc/qtrad/capture.env \
+  QTRAD_STATUS_DIR=/var/lib/qtrad-capture \
+  QTRAD_DATA_MOUNT=/srv/qtrad/postgres \
+  QTRAD_QUALIFICATION_START=2026-07-14T03:05:33Z \
+  QTRAD_QUALIFICATION_NOT_BEFORE_END=2026-07-17T03:05:33Z \
+  QTRAD_QUALIFICATION_IMAGE="$CURRENT_IMAGE" \
+  QTRAD_QUALIFICATION_DESCRIPTOR_COMMIT=89c7553160705ca0fd859fbb0477163efc0e279d \
+  QTRAD_QUALIFICATION_DESCRIPTOR_SHA256=c686332b24eff24e57a3c7128279777e2c45882e18b9e15d3149797272d40d84 \
+  QTRAD_QUALIFICATION_SOURCE_ID=oci-sydney-capture-1 \
+  QTRAD_QUALIFICATION_CONFIGURATION_HASH=227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b \
+  QTRAD_QUALIFICATION_MIGRATION=0003 \
+  "$TOOL_ROOT/ops/capture/qualification-evidence.sh" \
+  /var/lib/qtrad-capture/qualification/capture-v1-final.json
+```
+
+The command exits non-zero but still writes reviewable evidence when an expected automatic gate
+fails, including an HTTP 503 readiness response or unreconciled pre-candidate run. A successful
+automatic result still reports `qualification_decision=PENDING_OPERATOR_REVIEW`: inspect and record
+candidate-gap classification, bounded container-log history, OCI/Beszel monitoring history and the
+representative storage interval in `docs/CAPTURE_V1_QUALIFICATION.md`. Never edit the generated JSON;
+copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered output
+name for a later retry; the helper will not overwrite the first attempt.
+
 Only after that evidence passes may the candidate 20-instrument universe receive reviewed
 IG epics and become a new capture configuration. It must pass its own 72-hour
 qualification. A failed or ambiguous mapping leaves the collector on `capture-v1`.

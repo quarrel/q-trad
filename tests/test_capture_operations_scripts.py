@@ -244,6 +244,287 @@ def test_storage_snapshot_rejects_unsafe_identity_before_docker(
     assert not docker_called.exists()
 
 
+def _qualification_environment(
+    tmp_path: Path,
+    *,
+    now: str,
+    include_pre_candidate_run: bool = False,
+    include_completed_run: bool = False,
+    ready: bool = True,
+) -> tuple[dict[str, str], Path, Path]:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "calls"
+    output = tmp_path / "qualification.json"
+    image = "example.invalid/qtrad@sha256:" + "1" * 64
+    source_id = "oci-sydney-capture-1"
+    configuration_hash = "a" * 64
+    compose_file = tmp_path / "compose.capture.yaml"
+    compose_file.write_text("services: {}\n")
+    descriptor_sha = subprocess.run(
+        ["sha256sum", str(compose_file)], check=True, capture_output=True, text=True
+    ).stdout.split()[0]
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text(
+        f"QTRAD_IMAGE={image}\n"
+        f"QTRAD_CAPTURE_SOURCE_ID={source_id}\n"
+        "QTRAD_DATABASE_PASSWORD=test-only\n"
+    )
+    status_dir = tmp_path / "status"
+    status_dir.mkdir()
+    (status_dir / "backup-status.json").write_text(
+        json.dumps({"success": True, "completed_at": "2026-07-17T03:30:00Z"})
+    )
+    (status_dir / "restore-status.json").write_text(
+        json.dumps({"success": True, "completed_at": "2026-07-17T03:00:00Z"})
+    )
+    readiness = {
+        "ready": ready,
+        "reasons": [] if ready else ["IG adapter is not healthy"],
+        "expected_instruments": 7,
+        "fresh_quote_count": 7,
+        "global_position": 500_001,
+        "checkpoint_position": 500_001,
+        "checkpoint_updated_at": "2026-07-17T04:05:30.123456+00:00",
+        "configuration_hash": configuration_hash,
+    }
+    system = {
+        "counts": {"raw_messages": 500_000, "canonical_events": 500_001},
+        "adapter_health": [
+            {
+                "adapter_name": "ig-market-data",
+                "environment": "IG_DEMO",
+                "status": "HEALTHY",
+                "detail": (
+                    "state=CONNECTED; subscriptions=7/7; updates=7/7; "
+                    "reconnects=2; dropped_records=0; provider_operations=0"
+                ),
+            }
+        ],
+        "projection_checkpoints": [],
+        "quotas": [],
+    }
+    runs = [
+        {
+            "run_id": "00000000-0000-0000-0000-000000000003",
+            "kind": "INGESTION",
+            "status": "RUNNING",
+            "started_at": "2026-07-15T00:00:00.123456+00:00",
+            "configuration_hash": configuration_hash,
+            "detail": {},
+        },
+        {
+            "run_id": "00000000-0000-0000-0000-000000000002",
+            "kind": "INGESTION",
+            "status": "STOPPED",
+            "started_at": "2026-07-14T06:00:00+00:00",
+            "configuration_hash": configuration_hash,
+            "detail": {"adapter_health": "state=STOPPED; dropped_records=0"},
+        },
+        {
+            "run_id": "00000000-0000-0000-0000-000000000001",
+            "kind": "INGESTION",
+            "status": "STOPPED",
+            "started_at": "2026-07-14T03:05:33+00:00",
+            "configuration_hash": configuration_hash,
+            "detail": {"adapter_health": "state=STOPPED; dropped_records=0"},
+        },
+    ]
+    if include_pre_candidate_run:
+        runs.append(
+            {
+                "run_id": "00000000-0000-0000-0000-000000000000",
+                "kind": "INGESTION",
+                "status": "RUNNING",
+                "started_at": "2026-07-13T00:00:00+00:00",
+                "configuration_hash": configuration_hash,
+                "detail": {},
+            }
+        )
+    if include_completed_run:
+        runs.append(
+            {
+                "run_id": "00000000-0000-0000-0000-000000000004",
+                "kind": "INGESTION",
+                "status": "COMPLETED",
+                "started_at": "2026-07-16T00:00:00+00:00",
+                "configuration_hash": configuration_hash,
+                "detail": {},
+            }
+        )
+    responses = {
+        "/health/ready": readiness,
+        "/api/v1/system": system,
+        "/api/v1/runs": runs,
+        "/api/v1/gaps": [],
+    }
+    response_case = "\n".join(
+        f"  *{path}) printf '%s\\n' '{json.dumps(value)}' > \"$output\"; "
+        f"http_code={'503' if path == '/health/ready' and not ready else '200'} ;;"
+        for path, value in responses.items()
+    )
+    _write_executable(
+        fake_bin / "curl",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "curl $*" >> '{calls}'
+output=''
+url=''
+http_code=200
+while (($#)); do
+  case "$1" in
+    --output) output=$2; shift 2 ;;
+    http://*) url=$1; shift ;;
+    *) shift ;;
+  esac
+done
+case "$url" in
+{response_case}
+  *) exit 70 ;;
+esac
+printf '%s' "$http_code"
+""",
+    )
+    _write_executable(
+        fake_bin / "systemctl",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "systemctl $*" >> '{calls}'
+case "$1" in
+  is-active) printf 'active\n' ;;
+  show) printf 'success\n' ;;
+  *) exit 70 ;;
+esac
+""",
+    )
+    mount_evidence = json.dumps(
+        {
+            "filesystems": [
+                {
+                    "target": str(tmp_path),
+                    "source": "/dev/sdb",
+                    "fstype": "xfs",
+                    "options": "rw,relatime",
+                }
+            ]
+        }
+    )
+    _write_executable(
+        fake_bin / "findmnt",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "findmnt $*" >> '{calls}'
+printf '%s\n' '{mount_evidence}'
+""",
+    )
+    compose_services = [
+        {"Service": "db", "State": "running", "Health": "healthy"},
+        {"Service": "ingest", "State": "running", "Health": ""},
+        {"Service": "api", "State": "running", "Health": "healthy"},
+    ]
+    _write_executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "docker $*" >> '{calls}'
+case "$*" in
+  *"exec -T db psql"*) printf '0003\n' ;;
+  *"ps --format json"*) printf '%s\n' '{json.dumps(compose_services)}' ;;
+  *) exit 70 ;;
+esac
+""",
+    )
+    environment = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "QTRAD_CAPTURE_ROOT": str(tmp_path),
+        "QTRAD_CAPTURE_ENV": str(capture_env),
+        "QTRAD_STATUS_DIR": str(status_dir),
+        "QTRAD_DATA_MOUNT": str(tmp_path),
+        "QTRAD_QUALIFICATION_START": "2026-07-14T03:05:33Z",
+        "QTRAD_QUALIFICATION_NOT_BEFORE_END": "2026-07-17T03:05:33Z",
+        "QTRAD_QUALIFICATION_NOW": now,
+        "QTRAD_QUALIFICATION_IMAGE": image,
+        "QTRAD_QUALIFICATION_DESCRIPTOR_COMMIT": "8" * 40,
+        "QTRAD_QUALIFICATION_DESCRIPTOR_SHA256": descriptor_sha,
+        "QTRAD_QUALIFICATION_SOURCE_ID": source_id,
+        "QTRAD_QUALIFICATION_CONFIGURATION_HASH": configuration_hash,
+        "QTRAD_QUALIFICATION_MIGRATION": "0003",
+    }
+    return environment, output, calls
+
+
+def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path: Path) -> None:
+    environment, output, calls = _qualification_environment(tmp_path, now="2026-07-17T04:05:33Z")
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(output.read_text())
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert evidence["schema"] == "qtrad-capture-qualification-v1"
+    assert evidence["automatic_checks_passed"] is True
+    assert len(evidence["release"]["evidence_tool_sha256"]) == 64
+    assert evidence["qualification_decision"] == "PENDING_OPERATOR_REVIEW"
+    assert evidence["operator_reviews"] == {
+        "candidate_gap_classification": "NOT_REQUIRED",
+        "container_log_history": "REQUIRED",
+        "monitoring_history": "REQUIRED",
+        "active_market_storage_interval": "REQUIRED",
+    }
+    identity = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
+    canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+    assert (
+        subprocess.run(
+            ["sha256sum"], input=canonical, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+        == evidence["evidence_sha256"]
+    )
+    recorded_calls = calls.read_text()
+    assert "exec -T db psql" in recorded_calls
+    assert "SELECT version_num FROM alembic_version" in recorded_calls
+    assert " ps --format json" in recorded_calls
+    assert "findmnt --json --target" in recorded_calls
+    assert " up " not in recorded_calls
+    assert " restart " not in recorded_calls
+    assert " stop " not in recorded_calls
+
+    repeated = _run("qualification-evidence.sh", environment, str(output))
+    assert repeated.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("now", "include_pre_candidate_run", "include_completed_run", "ready", "failed_check"),
+    [
+        ("2026-07-17T03:05:32Z", False, False, True, "now_at_or_after_end"),
+        ("2026-07-17T04:05:33Z", True, False, True, "pre_candidate_runs_reconciled"),
+        ("2026-07-17T04:05:33Z", False, True, True, "no_candidate_unexpected_statuses"),
+        ("2026-07-17T04:05:33Z", False, False, False, "readiness_http_200"),
+    ],
+)
+def test_qualification_evidence_fails_closed_with_reviewable_output(
+    tmp_path: Path,
+    now: str,
+    include_pre_candidate_run: bool,
+    include_completed_run: bool,
+    ready: bool,
+    failed_check: str,
+) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now=now,
+        include_pre_candidate_run=include_pre_candidate_run,
+        include_completed_run=include_completed_run,
+        ready=ready,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode != 0
+    evidence = json.loads(output.read_text())
+    assert evidence["automatic_checks_passed"] is False
+    assert evidence["automatic_checks"][failed_check] is False
+
+
 @pytest.mark.parametrize("manifest_version", [1, 2])
 def test_restore_verification_uses_manifest_pinned_postgres_image(
     tmp_path: Path, manifest_version: int

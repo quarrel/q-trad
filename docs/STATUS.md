@@ -441,6 +441,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   merged-state image and the later unchanged changed-field image each require their own accepted
   before/after interval; cross-image snapshots cannot be compared by weakening identity checks.
   Operational deletion or legacy-epoch archiving remains closed until both measurements exist.
+- Qualification closure is now reproducible locally without altering the frozen release. The new
+  host helper refuses overwrite, binds the exact candidate/release/configuration and its own tool
+  hash, and fails closed before 72 hours or on unhealthy readiness, lifecycle, backup/restore,
+  migration, unit, container or disk evidence. Its output always remains pending the documented
+  operator reviews; it has not been run against the collector.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

@@ -99,6 +99,13 @@ container selected by the manifest digest. Backup and restore status files are a
 evidence inputs to the health watcher; they are not substitutes for the remote objects or a
 successful restore.
 
+Qualification closure is a separate read-only snapshot rather than a mutable database status. A
+host-local tool binds the declared candidate window and immutable release/configuration to loopback
+readiness/system/run/gap responses, systemd and Compose state, backup/restore ages, migration and
+disk capacity, then writes a non-overwriting self-hashed JSON record. Automatic failure remains
+reviewable, while candidate-gap classification and full-window log/monitoring review stay explicit
+operator decisions; the tool cannot label the release qualified.
+
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one
 complete object set and import it only into a new local `qtrad_research_*` database. The importer

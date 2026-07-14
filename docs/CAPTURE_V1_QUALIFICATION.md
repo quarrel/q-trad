@@ -5,6 +5,8 @@
 **Universe:** `capture-v1`, seven IG demo instruments  
 **Application image:** `sha256:3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80`  
 **Deployment descriptor:** `89c7553160705ca0fd859fbb0477163efc0e279d`
+**Deployment descriptor SHA-256:** `c686332b24eff24e57a3c7128279777e2c45882e18b9e15d3149797272d40d84`
+**Configuration SHA-256:** `227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b`
 
 This record is the evidence ledger for the first persistent cloud collector. It does not
 admit `capture-v2`, paper execution, strategies or any production broker capability.
@@ -49,6 +51,13 @@ sign-off; they must not be silently deleted or presented as successful runs.
   backup and restore-verification service results were successful.
 
 ## Exit checks
+
+The reviewed `ops/capture/qualification-evidence.sh` command is prepared locally but is not part of
+the frozen collector release. At or after the not-before time it will create one self-hashed,
+root-only, non-overwriting snapshot binding the candidate window, release/configuration identity,
+readiness, adapter and run evidence, systemd/Compose state, backup/restore ages, migration and disk
+capacity. It cannot make the final decision: gap classification, full-window log and monitoring
+review, and active-market storage representativeness remain explicit operator judgements.
 
 At or after the candidate-window end, record and require:
 
