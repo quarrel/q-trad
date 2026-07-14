@@ -132,19 +132,19 @@ Implementation status:
   all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
   and rejects a representation-schema transition. GitHub CI run `29341678396` passed every static and
   shell gate, the real PostgreSQL representation probe and all 255 tests at branch head `6a84319`.
-  - Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
+- Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
   self-hashed release artifact retaining its snapshot and image identity. Offline `storage contrast`
   accepts only verified same-source/configuration artifacts from distinct immutable images, requires
   a merged-state baseline, all-`CHANGED_FIELDS` candidate and passed automated thresholds, and reports
   mechanical per-message change without claiming the required active-market reviews or accepting a
-    storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
-    `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
-  - Complete locally and undeployed, pending CI: bounded `storage review` inputs now become
-    self-hashed operator assertions bound to one exact comparison, release and interval. Offline
-    `storage qualify` verifies both reviews against their contrast, emits `PASS` only when both are
-    representative, preserves an honest negative `FAIL`, and cannot accept a storage decision. The
-    full local gate passes with 252 tests plus 12 isolated-PostgreSQL tests deferred to CI; the running
-    collector remains unchanged.
+  storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
+  `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
+- Complete locally and undeployed: bounded `storage review` inputs now become self-hashed operator
+  assertions bound to one exact comparison, release and interval. Offline `storage qualify` verifies
+  both reviews against their contrast, emits `PASS` only when both are representative, preserves an
+  honest negative `FAIL`, and cannot accept a storage decision. The running collector remains
+  unchanged. GitHub CI run `29344877350` passed every static and shell gate, migration through `0009`
+  and all 264 tests against PostgreSQL 18 at branch head `961d9d5`.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
@@ -362,10 +362,13 @@ python -m qtrad api
     255 tests against PostgreSQL 18 at branch head `6a84319`. It proves snapshot-v3 representation
     counts reconcile with the actual raw table and preserves deterministic pre-marker, changed-field,
     rollback-compatible and legacy snapshot behaviour.
-  - GitHub CI run `29343411122` passed every static and shell gate, migration through `0009` and all
-    258 tests against PostgreSQL 18 at branch head `8ff48cd`. It proves comparison artifacts are
-    non-overwriting and hash/semantics verified, while contrast rejects identity drift, sub-threshold
-    evidence and rollback-compatible candidate rows without accepting an operator decision.
+- GitHub CI run `29343411122` passed every static and shell gate, migration through `0009` and all
+  258 tests against PostgreSQL 18 at branch head `8ff48cd`. It proves comparison artifacts are
+  non-overwriting and hash/semantics verified, while contrast rejects identity drift, sub-threshold
+  evidence and rollback-compatible candidate rows without accepting an operator decision.
+- GitHub CI run `29344877350` passed every static and shell gate, migration through `0009` and all
+  264 tests against PostgreSQL 18 at branch head `961d9d5`. It proves exact review/contrast binding,
+  valid negative-review preservation, semantic tamper rejection and the no-storage-decision boundary.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
