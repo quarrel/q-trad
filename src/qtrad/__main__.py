@@ -107,7 +107,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     instruments = subparsers.add_parser("instruments", help="instrument operations")
     instrument_sub = instruments.add_subparsers(dest="instrument_command", required=True)
-    instrument_sub.add_parser("sync", help="discover and persist IG demo listings")
+    sync = instrument_sub.add_parser("sync", help="discover and persist IG demo listings")
+    sync.add_argument(
+        "--universe",
+        type=Path,
+        help="explicit reviewed universe; defaults to QTRAD_CAPTURE_UNIVERSE_PATH",
+    )
     review = instrument_sub.add_parser(
         "review", help="emit bounded IG demo listing candidates without selecting one"
     )
@@ -214,7 +219,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
     elif args.command == "instruments" and args.instrument_command == "sync":
-        asyncio.run(_sync_instruments(settings, clock))
+        asyncio.run(_sync_instruments(settings, clock, universe_path=args.universe))
     elif args.command == "instruments" and args.instrument_command == "review":
         asyncio.run(
             _review_instruments(
@@ -324,9 +329,11 @@ def _engine(settings: Settings) -> AsyncEngine:
     return create_async_engine(settings.database_url, pool_pre_ping=True)
 
 
-def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
+def _ig_adapter(
+    settings: Settings, clock: Clock, *, universe: CaptureUniverse | None = None
+) -> IgDemoMarketDataAdapter:
     username, password, api_key, account_id = settings.require_ig_credentials()
-    universe = _capture_universe(settings)
+    selected_universe = universe if universe is not None else _capture_universe(settings)
     return IgDemoMarketDataAdapter(
         IgDemoConfig(
             username=username,
@@ -335,8 +342,8 @@ def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
             account_id=account_id,
         ),
         clock,
-        instruments_by_id=universe.instruments_by_id,
-        preferred_epics=universe.preferred_epics,
+        instruments_by_id=selected_universe.instruments_by_id,
+        preferred_epics=selected_universe.preferred_epics,
     )
 
 
@@ -382,12 +389,18 @@ async def _seed(settings: Settings) -> None:
         await engine.dispose()
 
 
-async def _sync_instruments(settings: Settings, clock: Clock) -> None:
+async def _sync_instruments(
+    settings: Settings, clock: Clock, *, universe_path: Path | None
+) -> None:
+    universe = (
+        load_capture_universe(universe_path)
+        if universe_path is not None
+        else _capture_universe(settings)
+    )
     engine = _engine(settings)
-    adapter = _ig_adapter(settings, clock)
+    adapter = _ig_adapter(settings, clock, universe=universe)
     store = PostgresAuditStore(engine)
     try:
-        universe = _capture_universe(settings)
         await store.seed_instruments(universe.instruments)
         await adapter.connect()
         listings = await adapter.discover_listings(
@@ -397,7 +410,18 @@ async def _sync_instruments(settings: Settings, clock: Clock) -> None:
             await store.validate_provider_listing(
                 listing, universe_hash=universe.configuration_hash, observed_at=clock.now()
             )
-        print(json.dumps({"listings": [str(item.listing_id) for item in listings]}))
+        print(
+            json.dumps(
+                {
+                    "universe_name": universe.name,
+                    "configuration_hash": universe.configuration_hash,
+                    "listing_count": len(listings),
+                    "listings": [str(item.listing_id) for item in listings],
+                    "ingestion_started": False,
+                },
+                sort_keys=True,
+            )
+        )
     finally:
         await adapter.disconnect()
         await engine.dispose()

@@ -35,6 +35,12 @@ range. Identical returned bars remain idempotent. Changed provider bars append a
 Historical data can establish coverage for a historical dataset but must never overwrite
 raw input, canonical quotes, quote-derived bars or live-stream gap observations.
 
+Listing validation for a non-streaming universe is explicit: `instruments sync --universe PATH`
+loads that reviewed, epic-pinned universe for only the validation command. It does not change the
+runtime capture-universe setting or start ingestion. Run it against the same isolated writable
+database that will receive the planned historical coverage; never use candidate validation to
+replace effective listings underneath the persistent collector.
+
 ## Consequences
 
 New instruments can be listing-validated and backfilled before being admitted to a live

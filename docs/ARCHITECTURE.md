@@ -298,6 +298,10 @@ Historical requests use IG's v2 UTC date format, but the former implicit all-uni
 "last N minutes" command is no longer an operational surface. A strict non-overwriting plan
 binds an exact UTC `[start, end)` range to a capture-universe hash, configured and effective
 IG demo listing identity, one-minute resolution, request chunks and timestamped quota evidence.
+Before planning for a new non-streaming instrument, `instruments sync --universe PATH` validates
+the explicit reviewed universe into the selected writable database without changing ingestion's
+environment-selected capture universe or starting a stream. Candidate validation and backfill run
+on an isolated research database, not against the persistent collector.
 The operator must inspect the canonical JSON and repeat its SHA-256 before registration.
 Execution claims only that persisted hash and cannot rediscover a listing, change the range or
 silently substitute an instrument.

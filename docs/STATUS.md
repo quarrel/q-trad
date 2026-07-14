@@ -348,10 +348,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   half-open UTC range, the selected universe hash, configured and effective IG demo listing
   identity, one-minute resolution, chunks and timestamped quota evidence in canonical JSON.
   It makes no IG call and refuses to overwrite evidence.
-- `backfill register` requires the reviewed SHA-256 before it persists a plan and plan-scoped
-  BID/ASK/MID coverage attempts. `backfill execute` atomically claims only that persisted hash,
-  loads its exact listing versions and cannot rediscover or substitute them. Failed plans are
-  explicit retries; completion requires observations for every basis.
+  - `backfill register` requires the reviewed SHA-256 before it persists a plan and plan-scoped
+    BID/ASK/MID coverage attempts. `backfill execute` atomically claims only that persisted hash,
+    loads its exact listing versions and cannot rediscover or substitute them. Failed plans are
+    explicit retries; completion requires observations for every basis.
+  - Listing validation for a new non-streaming universe is now an explicit local command boundary.
+    `instruments sync --universe PATH` supplies the reviewed universe to the adapter and persists its
+    validation evidence without changing the environment-selected ingestion universe or starting a
+    stream. The documented path uses the same isolated writable database as candidate backfill.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical

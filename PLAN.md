@@ -181,12 +181,16 @@ Implementation status:
   catalogue identity and one manually selected eligible IG demo listing per instrument. It rejects
   stale, tampered, omitted, duplicate, unseen, reused or ineligible selections and deterministically
   renders a non-overwriting, undeployed TOML release bound to review and selection hashes.
-- Complete locally without IG or collector access: historical backfill is now an explicit
+  - Complete locally without IG or collector access: historical backfill is now an explicit
   plan/review/register/execute state machine. A canonical plan binds its exact UTC range,
   universe hash, configured listing and effective version, resolution, chunks and quota evidence;
   registration requires the operator-confirmed SHA-256. Plan-scoped BID/ASK/MID coverage attempts
   remain separate from live gaps, repeated plans preserve independent evidence, and changed
     provider bars append corrections. The bounded read-only API exposes this projection.
+  - Complete locally without provider access: `instruments sync --universe PATH` validates a
+    reviewed, epic-pinned non-streaming universe into the selected writable database without
+    changing ingestion's configured universe or starting a stream. This supplies the explicit
+    listing-validation step before candidate historical planning on an isolated database.
 - Complete locally without collector access: ADR 0017 and migration `0006` replace mutable
   content-prefix research manifests with schema-version-2 canonical manifest identity. Exports bind
   an explicit UTC range, the exact universe/configuration, application image/version, grouped
@@ -284,7 +288,7 @@ Implementation status:
 
 ```text
 python -m qtrad db upgrade
-python -m qtrad instruments sync
+python -m qtrad instruments sync [--universe PATH]
 python -m qtrad ingest --environment ig-demo
 python -m qtrad ingest --environment ig-demo --max-seconds 60
 python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-after-seconds 20
@@ -302,7 +306,7 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
-  233 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
+  234 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.

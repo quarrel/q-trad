@@ -262,6 +262,19 @@ Verify the current IG demo historical allowance, choose explicit instruments, an
 half-open UTC range plan. The selected universe may be an approved non-streaming candidate when
 exploring a new instrument, but its listings must already have passed the normal validation path.
 
+For a promoted, epic-pinned candidate, validate it explicitly against the isolated writable
+database that will receive the historical bars:
+
+```bash
+uv run qtrad instruments sync --universe tmp/capture-v2.toml
+```
+
+This command uses the supplied universe only for listing discovery/validation. It neither changes
+`QTRAD_CAPTURE_UNIVERSE_PATH` nor starts ingestion, so it does not admit the instrument to live
+capture. Do not run candidate-universe validation against the persistent collector: an effective
+listing change there could interfere with a later `capture-v1` restart. Keep the candidate universe,
+listing-validation events and historical plan in the same isolated database.
+
 ```bash
 uv run qtrad backfill plan \
   --universe config/capture-v1.toml \

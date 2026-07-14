@@ -11,6 +11,7 @@ import pytest
 
 from qtrad import __main__ as cli
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import Instrument
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import InstrumentListingReview
 from qtrad.runtime.settings import Settings
@@ -35,7 +36,11 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
 @pytest.mark.parametrize(
     ("arguments", "target", "expected"),
     [
-        (["instruments", "sync"], "_sync_instruments", ()),
+        (
+            ["instruments", "sync", "--universe", "candidate.toml"],
+            "_sync_instruments",
+            (("universe_path", Path("candidate.toml")),),
+        ),
         (
             [
                 "instruments",
@@ -188,6 +193,117 @@ def test_database_upgrade_dispatches_migration_and_seed(
 
     upgrade.assert_called_once_with(cli_environment)
     seed.assert_awaited_once_with(cli_environment)
+
+
+@pytest.mark.asyncio
+async def test_listing_sync_can_validate_an_explicit_non_streaming_universe(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    universe_path = tmp_path / "historical-candidate.toml"
+    universe_path.write_text(
+        """
+name = "historical-candidate"
+
+[[instrument]]
+id = "fx:nzd-usd"
+display_name = "NZD/USD"
+asset_class = "FX"
+base_currency = "NZD"
+quote_currency = "USD"
+search_aliases = ["NZD/USD", "NZDUSD"]
+preferred_epic = "CS.D.NZDUSD.CFD.IP"
+"""
+    )
+    selected_universe = load_capture_universe(universe_path)
+    listing = SimpleNamespace(listing_id="ig:demo:CS.D.NZDUSD.CFD.IP")
+
+    class FakeEngine:
+        def __init__(self) -> None:
+            self.disposed = False
+
+        async def dispose(self) -> None:
+            self.disposed = True
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.connected = False
+            self.disconnected = False
+            self.requested: list[InstrumentId] = []
+
+        async def connect(self) -> None:
+            self.connected = True
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+        async def discover_listings(self, instrument_ids: Sequence[InstrumentId]) -> list[object]:
+            self.requested = list(instrument_ids)
+            return [listing]
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.seeded: tuple[Instrument, ...] = ()
+            self.validated: list[tuple[object, str, datetime]] = []
+
+        async def seed_instruments(self, instruments: Sequence[Instrument]) -> None:
+            self.seeded = tuple(instruments)
+
+        async def validate_provider_listing(
+            self, selected_listing: object, *, universe_hash: str, observed_at: datetime
+        ) -> None:
+            self.validated.append((selected_listing, universe_hash, observed_at))
+
+    engine = FakeEngine()
+    adapter = FakeAdapter()
+    store = FakeStore()
+    clock = Mock(spec=Clock)
+    observed_at = datetime(2026, 7, 18, tzinfo=UTC)
+    clock.now.return_value = observed_at
+    adapter_universes: list[object] = []
+
+    def build_adapter(
+        settings: Settings, selected_clock: Clock, *, universe: object | None = None
+    ) -> FakeAdapter:
+        del settings
+        assert selected_clock is clock
+        adapter_universes.append(universe)
+        return adapter
+
+    def reject_runtime_universe(settings: Settings) -> object:
+        del settings
+        raise AssertionError("explicit listing validation read the runtime universe")
+
+    monkeypatch.setattr(cli, "_engine", lambda settings: engine)
+    monkeypatch.setattr(cli, "PostgresAuditStore", lambda selected_engine: store)
+    monkeypatch.setattr(cli, "_ig_adapter", build_adapter)
+    monkeypatch.setattr(
+        cli,
+        "_capture_universe",
+        reject_runtime_universe,
+    )
+
+    await cli._sync_instruments(
+        cast(Settings, SimpleNamespace()),
+        cast(Clock, clock),
+        universe_path=universe_path,
+    )
+
+    assert adapter_universes == [selected_universe]
+    assert [str(item.instrument_id) for item in store.seeded] == ["fx:nzd-usd"]
+    assert [str(item) for item in adapter.requested] == ["fx:nzd-usd"]
+    assert store.validated == [(listing, selected_universe.configuration_hash, observed_at)]
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    assert engine.disposed is True
+    assert json.loads(capsys.readouterr().out) == {
+        "configuration_hash": selected_universe.configuration_hash,
+        "ingestion_started": False,
+        "listing_count": 1,
+        "listings": ["ig:demo:CS.D.NZDUSD.CFD.IP"],
+        "universe_name": "historical-candidate",
+    }
 
 
 def test_universe_promotion_dispatches_without_settings_or_provider_io(
