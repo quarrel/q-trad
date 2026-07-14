@@ -275,7 +275,9 @@ async def test_listing_validation_atomically_supersedes_epics_and_rebuilds() -> 
             "universe_hash": "invalid",
         },
     )
-    with pytest.raises(ValueError, match="universe hash is invalid"):
+    with pytest.raises(
+        ValueError, match="provider listing event universe hash must be lower-case SHA-256"
+    ):
         await store.append(invalid_event, expected_stream_version=0)
     assert await store.query(
         "SELECT count(*) AS count FROM canonical.events WHERE event_id = :event_id",
