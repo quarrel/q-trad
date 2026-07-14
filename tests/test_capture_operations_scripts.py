@@ -11,6 +11,14 @@ REPOSITORY_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPOSITORY_ROOT / "ops" / "capture"
 
 
+def test_capture_ingest_has_graceful_stop_contract() -> None:
+    compose = (REPOSITORY_ROOT / "compose.capture.yaml").read_text()
+    ingest = compose.split("  ingest:\n", maxsplit=1)[1].split("  api:\n", maxsplit=1)[0]
+
+    assert "    stop_signal: SIGINT\n" in ingest
+    assert "    stop_grace_period: 90s\n" in ingest
+
+
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)
