@@ -384,6 +384,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   `0006` and all 211 tests against PostgreSQL 18 for branch head `e24ccc7`. This includes the
   read-only storage inspector's actual catalogue/JSONB queries. No image was published and the
   collector remains unchanged.
+- The local storage evidence has been extended without a schema migration: version-two snapshots
+  compare physical JSONB payloads with PostgreSQL's JSON text rendering; offline comparison now
+  decomposes each index's growth and scan-counter change per raw message. Saved version-one evidence
+  remains verifiable.
+- `docs/CAPTURE_STORAGE_AUDIT.md` records the current raw/canonical columns and query dependencies.
+  It retains raw/canonical facts, deduplication, primary keys and event/stream uniqueness. Only the
+  unused-by-current-code event-type/time index, payload representation and fixed-width hashes remain
+  evidence-gated candidates; no collector schema or retention policy changed.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

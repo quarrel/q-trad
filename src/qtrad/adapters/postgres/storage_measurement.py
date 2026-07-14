@@ -32,12 +32,14 @@ class IndexStorage:
 class PayloadSample:
     sample_rows: int
     average_payload_bytes: int
+    average_json_text_bytes: int
     average_payload_fields: int
 
 
 @dataclass(frozen=True, slots=True)
 class PostgresStorageMeasurement:
     observed_at: datetime
+    statistics_reset_at: datetime | None
     database_name: str
     database_bytes: int
     raw_message_count: int
@@ -67,6 +69,8 @@ class PostgresStorageInspector:
                             """
                             SELECT
                                 clock_timestamp() AS observed_at,
+                                (SELECT stats_reset FROM pg_stat_database
+                                 WHERE datname = current_database()) AS statistics_reset_at,
                                 current_database() AS database_name,
                                 pg_database_size(current_database()) AS database_bytes,
                                 (SELECT count(*) FROM raw.market_messages) AS raw_message_count,
@@ -138,6 +142,7 @@ class PostgresStorageInspector:
 
         return PostgresStorageMeasurement(
             observed_at=summary["observed_at"],
+            statistics_reset_at=summary["statistics_reset_at"],
             database_name=str(summary["database_name"]),
             database_bytes=int(summary["database_bytes"]),
             raw_message_count=int(summary["raw_message_count"]),
@@ -192,12 +197,15 @@ async def _payload_sample(
                 ), measured AS (
                     SELECT
                         pg_column_size(payload) AS payload_bytes,
+                        pg_column_size(payload::text) AS json_text_bytes,
                         (SELECT count(*) FROM jsonb_object_keys(payload)) AS payload_fields
                     FROM sample
                 )
                 SELECT
                     count(*) AS sample_rows,
                     COALESCE(round(avg(payload_bytes)), 0)::bigint AS average_payload_bytes,
+                    COALESCE(round(avg(json_text_bytes)), 0)::bigint
+                        AS average_json_text_bytes,
                     COALESCE(round(avg(payload_fields)), 0)::bigint AS average_payload_fields
                 FROM measured
                 """
@@ -210,5 +218,6 @@ async def _payload_sample(
     return PayloadSample(
         sample_rows=int(row["sample_rows"]),
         average_payload_bytes=int(row["average_payload_bytes"]),
+        average_json_text_bytes=int(row["average_json_text_bytes"]),
         average_payload_fields=int(row["average_payload_fields"]),
     )

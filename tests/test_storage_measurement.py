@@ -1,3 +1,4 @@
+import hashlib
 import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -24,6 +25,7 @@ NOW = datetime(2026, 7, 14, tzinfo=UTC)
 def _measurement() -> PostgresStorageMeasurement:
     return PostgresStorageMeasurement(
         observed_at=NOW,
+        statistics_reset_at=NOW - timedelta(days=1),
         database_name="qtrad_capture",
         database_bytes=10_000,
         raw_message_count=100,
@@ -36,8 +38,8 @@ def _measurement() -> PostgresStorageMeasurement:
             IndexStorage("canonical", "events", "events_pkey", 400, 100),
             IndexStorage("raw", "market_messages", "market_messages_pkey", 200, 100),
         ),
-        raw_payload_sample=PayloadSample(100, 139, 7),
-        canonical_payload_sample=PayloadSample(100, 420, 12),
+        raw_payload_sample=PayloadSample(100, 139, 128, 7),
+        canonical_payload_sample=PayloadSample(100, 420, 372, 12),
     )
 
 
@@ -83,7 +85,11 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
             RelationStorage("canonical", "events", 103, 1_800, 1_200, 3_500),
             RelationStorage("raw", "market_messages", 102, 1_000, 700, 2_500),
         ),
-        raw_payload_sample=PayloadSample(102, 61, 3),
+        indexes=(
+            IndexStorage("canonical", "events", "events_pkey", 700, 103),
+            IndexStorage("raw", "market_messages", "market_messages_pkey", 350, 102),
+        ),
+        raw_payload_sample=PayloadSample(102, 61, 52, 3),
     )
 
     comparison = compare_storage_snapshots(_snapshot(), _snapshot(after_measurement))
@@ -92,12 +98,29 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
     assert comparison["raw_messages_delta"] == 2
     assert comparison["canonical_events_delta"] == 3
     assert comparison["database_bytes_delta"] == 4_000
+    assert comparison["statistics_reset_changed"] is False
     assert comparison["bytes_per_raw_message"] == {
         "database": "2000.000",
         "raw_relation": "750.000",
         "canonical_relation": "750.000",
         "raw_and_canonical_relations": "1500.000",
     }
+    assert comparison["index_deltas"] == [
+        {
+            "index": "canonical.events_pkey",
+            "relation": "canonical.events",
+            "index_bytes": 300,
+            "scans_since_statistics_reset": 3,
+            "bytes_per_raw_message": "150.000",
+        },
+        {
+            "index": "raw.market_messages_pkey",
+            "relation": "raw.market_messages",
+            "index_bytes": 150,
+            "scans_since_statistics_reset": 2,
+            "bytes_per_raw_message": "75.000",
+        },
+    ]
 
 
 def test_storage_comparison_fails_closed_on_identity_or_counter_drift() -> None:
@@ -134,3 +157,44 @@ def test_storage_snapshot_allows_schema_scoped_index_names_and_bounds_input(
     oversized.write_bytes(b" " * (4 * 1024 * 1024 + 1))
     with pytest.raises(ValueError, match="maximum encoded size"):
         load_storage_snapshot(oversized)
+
+
+def test_legacy_storage_snapshot_hash_omits_version_two_payload_evidence(tmp_path: Path) -> None:
+    current_path = tmp_path / "current.json"
+    write_storage_snapshot(current_path, _snapshot())
+    payload = json.loads(current_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 1
+    payload.pop("statistics_reset_at")
+    payload["raw_payload_sample"].pop("average_json_text_bytes")
+    payload["canonical_payload_sample"].pop("average_json_text_bytes")
+    identity = {key: value for key, value in payload.items() if key != "snapshot_sha256"}
+    payload["snapshot_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    legacy_path = tmp_path / "legacy.json"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    legacy = load_storage_snapshot(legacy_path)
+
+    assert legacy.schema_version == 1
+    assert legacy.raw_payload_sample.average_json_text_bytes is None
+
+
+def test_storage_comparison_invalidates_scan_deltas_after_statistics_reset() -> None:
+    before = _measurement()
+    after = replace(
+        before,
+        observed_at=NOW + timedelta(minutes=1),
+        statistics_reset_at=NOW + timedelta(seconds=30),
+        raw_message_count=101,
+        canonical_event_count=101,
+    )
+
+    comparison = compare_storage_snapshots(_snapshot(before), _snapshot(after))
+
+    assert comparison["statistics_reset_changed"] is True
+    index_deltas = comparison["index_deltas"]
+    assert isinstance(index_deltas, list)
+    for row in index_deltas:
+        assert isinstance(row, dict)
+        assert row["scans_since_statistics_reset"] is None

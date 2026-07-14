@@ -30,6 +30,8 @@ and PostgreSQL's physical sizes need comparable observations over a non-trivial 
 - Provide an offline `storage compare` command. It requires chronological observations from the
   same capture source and database and reports physical byte deltas per newly persisted raw
   message. Relation-level measurements, not a JSON example, are the primary comparison.
+- Evolve snapshot evidence compatibly: version 2 adds JSONB-versus-JSON-text sample sizes and
+  per-index growth/scan deltas while the loader continues to verify version-one hashes.
 - Take measurements far enough apart to exceed PostgreSQL allocation noise. Treat whole-database
   growth as contextual because unrelated maintenance and relations may contribute.
 
@@ -44,4 +46,3 @@ measure the old representation, but this change is neither deployed nor mixed in
 window. A subsequent candidate release must pass the normal ARM, lifecycle, readiness and
 rollback gates. Before/after storage comparisons must identify their different application
 images and configuration hashes; they are not interpreted as a single uninterrupted release.
-

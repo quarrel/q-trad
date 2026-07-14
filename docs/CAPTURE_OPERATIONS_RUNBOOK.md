@@ -342,6 +342,12 @@ exact raw/canonical counts from one repeatable-read transaction plus observed ph
 Database-wide growth is contextual; raw and canonical relation deltas are the primary retention
 inputs.
 
+Current snapshot schema version 2 also reports JSON text-rendering sample size and individual index
+byte/scan deltas. Follow `docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or
+100,000 new raw messages, whichever is longer, and reject a restart/statistics-reset interval for
+index-usage conclusions. Do not remove an index or change payload representation from one small
+sample.
+
 ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
 the active qualification first; do not mix representations within its 72-hour evidence window.
 

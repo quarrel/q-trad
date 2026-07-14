@@ -163,6 +163,12 @@ A read-only PostgreSQL storage inspector can write bounded, hash-verified snapsh
 counts, physical relation/index sizes and recent JSONB payload samples. Offline comparison reports
 physical growth per new raw message while retaining database-wide and relation-specific deltas.
 It neither mutates the database nor replaces release qualification evidence.
+Snapshot schema version 2 remains compatible with saved version-one evidence and additionally
+compares JSONB payload size with PostgreSQL's JSON text rendering and reports per-index byte/scan
+deltas. These are decision inputs only; a changed PostgreSQL statistics-reset timestamp invalidates
+scan deltas.
+`docs/CAPTURE_STORAGE_AUDIT.md` keeps uniqueness and audit retention outside the optimisation
+boundary.
 
 ## Market-data semantics
 

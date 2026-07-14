@@ -41,13 +41,15 @@ class IndexStorageEvidence(_StrictModel):
 class PayloadSampleEvidence(_StrictModel):
     sample_rows: int = Field(ge=0, le=10_000)
     average_payload_bytes: int = Field(ge=0)
+    average_json_text_bytes: int | None = Field(default=None, ge=0)
     average_payload_fields: int = Field(ge=0)
 
 
 class StorageSnapshot(_StrictModel):
-    schema_version: Literal[1]
+    schema_version: Literal[1, 2]
     snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     observed_at: datetime
+    statistics_reset_at: datetime | None = None
     capture_source_id: str = Field(min_length=1, max_length=200)
     universe_name: str = Field(min_length=1, max_length=64)
     configuration_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
@@ -73,9 +75,10 @@ def build_storage_snapshot(
     application_image: str,
 ) -> StorageSnapshot:
     snapshot = StorageSnapshot(
-        schema_version=1,
+        schema_version=2,
         snapshot_sha256="0" * 64,
         observed_at=measurement.observed_at,
+        statistics_reset_at=measurement.statistics_reset_at,
         capture_source_id=capture_source_id,
         universe_name=universe_name,
         configuration_hash=configuration_hash,
@@ -109,11 +112,13 @@ def build_storage_snapshot(
         raw_payload_sample=PayloadSampleEvidence(
             sample_rows=measurement.raw_payload_sample.sample_rows,
             average_payload_bytes=measurement.raw_payload_sample.average_payload_bytes,
+            average_json_text_bytes=measurement.raw_payload_sample.average_json_text_bytes,
             average_payload_fields=measurement.raw_payload_sample.average_payload_fields,
         ),
         canonical_payload_sample=PayloadSampleEvidence(
             sample_rows=measurement.canonical_payload_sample.sample_rows,
             average_payload_bytes=measurement.canonical_payload_sample.average_payload_bytes,
+            average_json_text_bytes=measurement.canonical_payload_sample.average_json_text_bytes,
             average_payload_fields=measurement.canonical_payload_sample.average_payload_fields,
         ),
     )
@@ -178,6 +183,32 @@ def compare_storage_snapshots(
             }
         )
 
+    before_indexes = _index_map(before)
+    after_indexes = _index_map(after)
+    statistics_reset_changed = before.statistics_reset_at != after.statistics_reset_at
+    index_names = sorted(set(before_indexes) | set(after_indexes))
+    index_deltas: list[JsonValue] = []
+    for name in index_names:
+        previous = before_indexes.get(name)
+        current = after_indexes.get(name)
+        index_bytes_delta = _index_value(current, "index_bytes") - _index_value(
+            previous, "index_bytes"
+        )
+        index_deltas.append(
+            {
+                "index": name,
+                "relation": _index_relation(current or previous),
+                "index_bytes": index_bytes_delta,
+                "scans_since_statistics_reset": (
+                    None
+                    if statistics_reset_changed
+                    else _index_value(current, "scans_since_statistics_reset")
+                    - _index_value(previous, "scans_since_statistics_reset")
+                ),
+                "bytes_per_raw_message": _ratio(index_bytes_delta, raw_delta),
+            }
+        )
+
     raw_relation_delta = _total_delta(
         before_relations,
         after_relations,
@@ -206,6 +237,7 @@ def compare_storage_snapshots(
         "raw_messages_delta": raw_delta,
         "canonical_events_delta": canonical_delta,
         "database_bytes_delta": after.database_bytes - before.database_bytes,
+        "statistics_reset_changed": statistics_reset_changed,
         "raw_relation_bytes_delta": raw_relation_delta,
         "canonical_relation_bytes_delta": canonical_relation_delta,
         "bytes_per_raw_message": {
@@ -218,6 +250,7 @@ def compare_storage_snapshots(
             ),
         },
         "relation_deltas": relation_deltas,
+        "index_deltas": index_deltas,
         "before_payload_samples": _sample_summary(before),
         "after_payload_samples": _sample_summary(after),
     }
@@ -228,10 +261,23 @@ def _validate_snapshot(snapshot: StorageSnapshot) -> None:
         snapshot.observed_at
     ):
         raise ValueError("storage snapshot observed time must use UTC")
+    if snapshot.statistics_reset_at is not None:
+        _utc_text(snapshot.statistics_reset_at)
+    if snapshot.schema_version == 1 and snapshot.statistics_reset_at is not None:
+        raise ValueError("version-one storage snapshot has statistics-reset evidence")
     if len(snapshot.relations) > _MAX_RELATIONS:
         raise ValueError("storage snapshot contains too many relations")
     if len(snapshot.indexes) > _MAX_INDEXES:
         raise ValueError("storage snapshot contains too many indexes")
+    samples = (snapshot.raw_payload_sample, snapshot.canonical_payload_sample)
+    if snapshot.schema_version == 1 and any(
+        sample.average_json_text_bytes is not None for sample in samples
+    ):
+        raise ValueError("version-one storage snapshot has JSON-text evidence")
+    if snapshot.schema_version == 2 and any(
+        sample.average_json_text_bytes is None for sample in samples
+    ):
+        raise ValueError("version-two storage snapshot requires JSON-text evidence")
     relation_names = [
         f"{relation.schema_name}.{relation.relation_name}" for relation in snapshot.relations
     ]
@@ -260,7 +306,7 @@ def _snapshot_row(snapshot: StorageSnapshot) -> dict[str, JsonValue]:
 
 
 def _snapshot_identity(snapshot: StorageSnapshot) -> dict[str, JsonValue]:
-    return {
+    value: dict[str, JsonValue] = {
         "schema_version": snapshot.schema_version,
         "observed_at": _utc_text(snapshot.observed_at),
         "capture_source_id": snapshot.capture_source_id,
@@ -274,9 +320,20 @@ def _snapshot_identity(snapshot: StorageSnapshot) -> dict[str, JsonValue]:
         "canonical_event_count": snapshot.canonical_event_count,
         "relations": [relation.model_dump(mode="json") for relation in snapshot.relations],
         "indexes": [index.model_dump(mode="json") for index in snapshot.indexes],
-        "raw_payload_sample": snapshot.raw_payload_sample.model_dump(mode="json"),
-        "canonical_payload_sample": snapshot.canonical_payload_sample.model_dump(mode="json"),
+        "raw_payload_sample": _payload_sample_identity(
+            snapshot.raw_payload_sample, schema_version=snapshot.schema_version
+        ),
+        "canonical_payload_sample": _payload_sample_identity(
+            snapshot.canonical_payload_sample, schema_version=snapshot.schema_version
+        ),
     }
+    if snapshot.schema_version == 2:
+        value["statistics_reset_at"] = (
+            _utc_text(snapshot.statistics_reset_at)
+            if snapshot.statistics_reset_at is not None
+            else None
+        )
+    return value
 
 
 def _relation_map(snapshot: StorageSnapshot) -> dict[str, RelationStorageEvidence]:
@@ -284,6 +341,26 @@ def _relation_map(snapshot: StorageSnapshot) -> dict[str, RelationStorageEvidenc
         f"{relation.schema_name}.{relation.relation_name}": relation
         for relation in snapshot.relations
     }
+
+
+def _index_map(snapshot: StorageSnapshot) -> dict[str, IndexStorageEvidence]:
+    return {f"{index.schema_name}.{index.index_name}": index for index in snapshot.indexes}
+
+
+def _index_value(index: IndexStorageEvidence | None, field: str) -> int:
+    if index is None:
+        return 0
+    if field == "index_bytes":
+        return index.index_bytes
+    if field == "scans_since_statistics_reset":
+        return index.scans_since_statistics_reset
+    raise ValueError(f"unknown index storage field: {field}")
+
+
+def _index_relation(index: IndexStorageEvidence | None) -> str:
+    if index is None:
+        raise ValueError("storage index delta has no relation identity")
+    return f"{index.schema_name}.{index.relation_name}"
 
 
 def _value(relation: RelationStorageEvidence | None, field: str) -> int:
@@ -313,6 +390,23 @@ def _sample_summary(snapshot: StorageSnapshot) -> dict[str, JsonValue]:
         "raw": snapshot.raw_payload_sample.model_dump(mode="json"),
         "canonical": snapshot.canonical_payload_sample.model_dump(mode="json"),
     }
+
+
+def _payload_sample_identity(
+    sample: PayloadSampleEvidence,
+    *,
+    schema_version: int,
+) -> dict[str, JsonValue]:
+    value: dict[str, JsonValue] = {
+        "sample_rows": sample.sample_rows,
+        "average_payload_bytes": sample.average_payload_bytes,
+        "average_payload_fields": sample.average_payload_fields,
+    }
+    if schema_version == 2:
+        if sample.average_json_text_bytes is None:
+            raise ValueError("version-two storage sample requires JSON-text evidence")
+        value["average_json_text_bytes"] = sample.average_json_text_bytes
+    return value
 
 
 def _ratio(numerator: int, denominator: int) -> str:

@@ -94,6 +94,10 @@ Implementation status:
   compare` commands measure database/relation/index growth per raw message. This candidate is not
   introduced into the running 72-hour qualification. GitHub CI run `29322668979` passed all static,
   migration and PostgreSQL 18 gates with 211 tests at branch head `e24ccc7`.
+- Complete locally and undeployed: storage snapshot schema version 2 remains backward-readable and
+  adds JSON-text comparison plus per-index byte/scan deltas. The storage audit preserves raw and
+  canonical facts and all correctness indexes, and makes secondary-index, payload-representation
+  and hash-width changes conditional on representative measurements rather than estimates.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

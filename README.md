@@ -207,6 +207,11 @@ canonical relation bytes per new raw message; the relation figures are more usef
 JSON length alone. Do not run the changed-field candidate on the collector during its frozen
 qualification window.
 
+Snapshot version 2 also compares JSONB with PostgreSQL's JSON text rendering and reports per-index
+growth and scan deltas. The evidence thresholds and schema candidates are recorded in the
+[capture storage audit](docs/CAPTURE_STORAGE_AUDIT.md); no index or retention constraint is removed
+automatically.
+
 ## Documentation
 
 - [Agent instructions](AGENTS.md)
@@ -214,6 +219,7 @@ qualification window.
 - [Current status](docs/STATUS.md)
 - [Seven-instrument soak runbook](docs/SOAK_RUNBOOK.md)
 - [Research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md)
+- [Capture storage audit](docs/CAPTURE_STORAGE_AUDIT.md)
 - [Soak evidence record](docs/SOAK_EVIDENCE.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Engineering rules](docs/ENGINEERING.md)
