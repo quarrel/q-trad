@@ -72,8 +72,9 @@ Implementation status:
     configurations, research manifests, backfill plans and non-null provider-listing universes. Run
     and listing application boundaries reject malformed identity before database access; nullable
     legacy listing rows remain distinguishable. A read-only audit of the frozen collector found no
-    malformed identities in its 11 runs or seven listings. The local isolated suite passes 239 tests
-    with 12 PostgreSQL tests deferred to CI.
+    malformed identities in its 11 runs or seven listings. GitHub CI run `29339570739` applied migration
+    `0009`, exercised direct database rejection and passed all 251 tests against PostgreSQL 18 at branch
+    head `7437258`.
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
@@ -327,10 +328,13 @@ python -m qtrad api
   `335f089`.
 - GitHub CI run `29336513376` passed the same full gate set and all 244 tests at branch head
   `640caf7`, including explicit non-streaming universe validation without runtime-universe use.
-- GitHub CI run `29338222506` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
-  migration through `0008` and all 245 tests against isolated PostgreSQL 18 at branch head
-  `5467017`. It proves alternate-epic supersession, atomic failure rollback, the one-effective-listing
-  index and canonical projection rebuild.
+  - GitHub CI run `29338222506` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
+    migration through `0008` and all 245 tests against isolated PostgreSQL 18 at branch head
+    `5467017`. It proves alternate-epic supersession, atomic failure rollback, the one-effective-listing
+    index and canonical projection rebuild.
+  - GitHub CI run `29339570739` passed every static and shell gate, migration through `0009` and all
+    251 tests against PostgreSQL 18 at branch head `7437258`. It proves validated SHA-256 constraints
+    reject malformed new run, manifest, backfill-plan and non-null listing identities.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

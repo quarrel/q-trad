@@ -371,8 +371,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
       backfill plans and non-null provider listings; it also validates each backfill plan hash. Run and
       listing boundaries now reject malformed values before database access. Nullable listing identity
       remains confined to legacy pre-event rows. A read-only collector query found zero malformed values
-      across 11 runs and seven listings. Local static checks and 239 tests pass; the 12 PostgreSQL tests,
-      including direct constraint rejection, remain for isolated CI.
+      across 11 runs and seven listings. GitHub CI run `29339570739` passed migration through `0009`,
+      direct constraint rejection and all 251 tests against PostgreSQL 18 at branch head `7437258`.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical
