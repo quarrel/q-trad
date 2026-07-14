@@ -243,6 +243,11 @@ python -m qtrad api
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
   migrations through `0005`, including exact plan/coverage identity, repeated coverage attempts,
   append-only historical corrections, live-gap isolation and the bounded read-only API.
+- GitHub CI run `29320193656` passed formatting, linting, both strict type checkers, ShellCheck,
+  migration through `0006` and all 203 tests against PostgreSQL 18. It proves schema-version-2
+  manifest persistence, exact duplicate acceptance, conflicting identity rejection and the prior
+  application's legacy INSERT after the forward migration, alongside bounded range export,
+  per-partition reuse and tamper-failing replay.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and

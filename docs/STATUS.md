@@ -367,3 +367,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - Research export now requires an exact half-open UTC range and uses independent semantic identity
   for each instrument/day partition. Adding another day therefore reuses prior immutable files
   instead of rewriting every historical partition under a new whole-export hash.
+- GitHub CI run `29320193656` passed formatting, linting, Pyright, `ty`, ShellCheck, migration
+  through `0006` and all 203 tests on isolated PostgreSQL 18 for branch head `2fdac45`. This includes
+  schema-version-2 persistence/conflict checks and the prior application's legacy manifest INSERT
+  after the forward migration. No image was published and the collector remains unchanged.
