@@ -358,14 +358,21 @@ outside the current data-only phase until explicitly admitted by a later plan up
     stream. The documented path uses the same isolated writable database as candidate backfill.
     GitHub CI run `29336513376` passed all static, shell, migration and PostgreSQL 18 gates with 244
     tests at branch head `640caf7`.
-  - The subsequent identity audit found that ADR 0009's projection still treated the provider epic,
-    rather than provider/environment/instrument, as effective-selection identity. Local candidate code
-    now commits the validation event and projection atomically, closes a superseded epic at the new
-    event time, and rebuilds event-backed listings from canonical history. Migration `0008` adds the
-    one-open-selection constraint and intentionally fails if pre-existing ambiguity needs review.
-    The first PostgreSQL run exposed an integration fixture that added an eighth operator-visible
-    instrument; the isolated correction retained the canonical seven. GitHub CI run `29338222506`
-    then passed migration through `0008` and all 245 tests at branch head `5467017`.
+    - The subsequent identity audit found that ADR 0009's projection still treated the provider epic,
+      rather than provider/environment/instrument, as effective-selection identity. Local candidate code
+      now commits the validation event and projection atomically, closes a superseded epic at the new
+      event time, and rebuilds event-backed listings from canonical history. Migration `0008` adds the
+      one-open-selection constraint and intentionally fails if pre-existing ambiguity needs review.
+      The first PostgreSQL run exposed an integration fixture that added an eighth operator-visible
+      instrument; the isolated correction retained the canonical seven. GitHub CI run `29338222506`
+      then passed migration through `0008` and all 245 tests at branch head `5467017`.
+    - The persistence-identity audit is complete locally without changing the collector. Migration
+      `0009` validates lower-case SHA-256 configuration/universe identity on runs, research manifests,
+      backfill plans and non-null provider listings; it also validates each backfill plan hash. Run and
+      listing boundaries now reject malformed values before database access. Nullable listing identity
+      remains confined to legacy pre-event rows. A read-only collector query found zero malformed values
+      across 11 runs and seven listings. Local static checks and 239 tests pass; the 12 PostgreSQL tests,
+      including direct constraint rejection, remain for isolated CI.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical

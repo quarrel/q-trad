@@ -258,6 +258,14 @@ enforces one open-ended listing for that identity. Rebuild removes only event-ba
 and replays the canonical listing events, retaining legacy rows until a validation event supersedes
 them. An unchanged metadata version under a different universe hash remains a new validation fact.
 
+Configuration and universe identities are lower-case SHA-256 values at both the application and
+database boundaries. Runs reject malformed configuration identity before persistence; typed research
+manifests and backfill plans do the same, and listing validation rejects malformed universe identity
+before discovery evidence is queried or appended. Database checks validate the corresponding run,
+manifest, plan and non-null listing columns. A null listing universe remains permitted only for
+legacy reference rows that pre-date event-backed validation; it cannot be emitted by the accepted
+validation path.
+
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
 The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are

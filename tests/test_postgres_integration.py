@@ -850,3 +850,117 @@ async def test_storage_inspector_is_bounded_and_reports_capture_relations() -> N
     assert measurement.raw_payload_sample.sample_rows <= 10_000
     assert measurement.canonical_payload_sample.sample_rows <= 10_000
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_configuration_identity_constraints_are_validated_and_reject_bad_new_rows() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    await store.seed_instruments()
+
+    constraints = await store.query(
+        """
+        SELECT conname, convalidated
+        FROM pg_constraint
+        WHERE conname IN (
+            'ck_runs_configuration_hash',
+            'ck_research_manifests_configuration_hash',
+            'ck_backfill_plans_plan_hash',
+            'ck_backfill_plans_universe_hash',
+            'ck_provider_listings_universe_hash'
+        )
+        ORDER BY conname
+        """
+    )
+    assert constraints == [
+        {"conname": "ck_backfill_plans_plan_hash", "convalidated": True},
+        {"conname": "ck_backfill_plans_universe_hash", "convalidated": True},
+        {"conname": "ck_provider_listings_universe_hash", "convalidated": True},
+        {"conname": "ck_research_manifests_configuration_hash", "convalidated": True},
+        {"conname": "ck_runs_configuration_hash", "convalidated": True},
+    ]
+
+    suffix = uuid4().hex
+    invalid_statements = (
+        (
+            """
+            INSERT INTO ops.runs (
+                run_id, kind, status, environment, started_at, configuration_hash, detail
+            ) VALUES (
+                :run_id, 'INGESTION', 'RUNNING', 'IG_DEMO', :now, 'invalid', '{}'::jsonb
+            )
+            """,
+            {"run_id": uuid4(), "now": datetime(2026, 7, 14, tzinfo=UTC)},
+        ),
+        (
+            """
+            INSERT INTO ops.research_manifests (
+                manifest_id, created_at, schema_version, row_count,
+                content_sha256, configuration_hash, files, metadata
+            ) VALUES (
+                :manifest_id, :now, 1, 0, :content_sha256, 'invalid', '[]'::jsonb, '{}'::jsonb
+            )
+            """,
+            {
+                "manifest_id": suffix[:24],
+                "now": datetime(2026, 7, 14, tzinfo=UTC),
+                "content_sha256": "a" * 64,
+            },
+        ),
+        (
+            """
+            INSERT INTO ops.backfill_plans (
+                plan_id, plan_hash, universe_hash, status, plan, created_at
+            ) VALUES (
+                :plan_id, :plan_hash, 'invalid', 'PLANNED', '{}'::jsonb, :now
+            )
+            """,
+            {
+                "plan_id": uuid4(),
+                "plan_hash": "b" * 64,
+                "now": datetime(2026, 7, 14, tzinfo=UTC),
+            },
+        ),
+        (
+            """
+            INSERT INTO ops.backfill_plans (
+                plan_id, plan_hash, universe_hash, status, plan, created_at
+            ) VALUES (
+                :plan_id, 'invalid', :universe_hash, 'PLANNED', '{}'::jsonb, :now
+            )
+            """,
+            {
+                "plan_id": uuid4(),
+                "universe_hash": "c" * 64,
+                "now": datetime(2026, 7, 14, tzinfo=UTC),
+            },
+        ),
+        (
+            """
+            INSERT INTO reference.provider_listings (
+                provider, environment, external_id, instrument_id, display_name,
+                product_type, currency, minimum_deal_size, price_increment,
+                valid_from, valid_to, metadata_version, metadata, economics, universe_hash
+            ) VALUES (
+                'ig', 'demo', :external_id, :instrument_id, 'Invalid identity fixture',
+                'SPOT_FX', 'USD', 1, 0.0001,
+                :valid_from, :valid_to, 'fixture', '{}'::jsonb, '{}'::jsonb, 'invalid'
+            )
+            """,
+            {
+                "external_id": f"INVALID.{suffix}",
+                "instrument_id": str(INITIAL_INSTRUMENTS[0].instrument_id),
+                "valid_from": datetime(2026, 7, 14, tzinfo=UTC),
+                "valid_to": datetime(2026, 7, 14, 1, tzinfo=UTC),
+            },
+        ),
+    )
+    for statement, parameters in invalid_statements:
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            with pytest.raises(DBAPIError):
+                await connection.execute(text(statement), parameters)
+            await transaction.rollback()
+
+    await engine.dispose()

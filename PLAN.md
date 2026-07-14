@@ -68,6 +68,12 @@ Implementation status:
     preserving legacy rows. Migration preflight fails closed on existing ambiguity. GitHub CI run
     `29338222506` passed migration through `0008` and all 245 tests against PostgreSQL 18 at branch
     head `5467017`.
+  - Complete locally and undeployed: migration `0009` validates lower-case SHA-256 identity for run
+    configurations, research manifests, backfill plans and non-null provider-listing universes. Run
+    and listing application boundaries reject malformed identity before database access; nullable
+    legacy listing rows remain distinguishable. A read-only audit of the frozen collector found no
+    malformed identities in its 11 runs or seven listings. The local isolated suite passes 239 tests
+    with 12 PostgreSQL tests deferred to CI.
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
@@ -313,8 +319,9 @@ python -m qtrad api
 
 ## Verification evidence
 
-- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
-  234 tests pass with eleven PostgreSQL migration/integration tests deferred to isolated CI.
+- Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass; 239 tests pass
+  with 12 PostgreSQL migration/integration tests deferred to isolated CI. ShellCheck is unchanged
+  and is rerun as part of the branch completion gate.
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.

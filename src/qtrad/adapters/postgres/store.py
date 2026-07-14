@@ -79,6 +79,8 @@ class PostgresAuditStore(AuditStore):
         *,
         universe_hash: str | None = None,
     ) -> None:
+        if universe_hash is not None:
+            _require_sha256(universe_hash, "provider listing universe hash")
         async with self._engine.begin() as connection:
             await self._upsert_provider_listing_projection(
                 connection,
@@ -165,6 +167,7 @@ class PostgresAuditStore(AuditStore):
     ) -> EventEnvelope | None:
         """Record a bounded listing-validation fact before changing its projection."""
 
+        _require_sha256(universe_hash, "provider listing universe hash")
         existing = await self.query(
             """
             SELECT metadata_version, universe_hash FROM reference.provider_listings
@@ -284,6 +287,7 @@ class PostgresAuditStore(AuditStore):
         configuration_hash: str,
         started_at: datetime,
     ) -> RunId:
+        _require_sha256(configuration_hash, "run configuration hash")
         run_id = RunId.new()
         async with self._engine.begin() as connection:
             await connection.execute(
@@ -868,10 +872,7 @@ class PostgresAuditStore(AuditStore):
             payload = event.payload
             listing = _provider_listing_from_event(_mapping(payload["listing"]))
             universe_hash = str(payload["universe_hash"])
-            if len(universe_hash) != 64 or any(
-                character not in "0123456789abcdef" for character in universe_hash
-            ):
-                raise ValueError("provider listing event universe hash is invalid")
+            _require_sha256(universe_hash, "provider listing event universe hash")
             metadata = to_json_value(listing)
             if not isinstance(metadata, dict):
                 raise TypeError("provider listing did not serialise to an object")
@@ -1098,6 +1099,11 @@ def _event_from_row(row: RowMapping) -> EventEnvelope:
         global_position=int(row["global_position"]),
         raw_record_id=int(row["raw_record_id"]) if row["raw_record_id"] else None,
     )
+
+
+def _require_sha256(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field} must be lower-case SHA-256")
 
 
 def _utc(value: object) -> datetime:
