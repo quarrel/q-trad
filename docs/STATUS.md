@@ -355,3 +355,12 @@ outside the current data-only phase until explicitly admitted by a later plan up
   migration through `0005` and all 194 tests against isolated PostgreSQL 18. The initial run
   exposed an untyped optional query bind; the corrected query and a regression for its unfiltered
   bounded form passed. This feature branch remains undeployed during collector qualification.
+- ADR 0017 and migration `0006` now make local research exports independently verifiable. A
+  schema-version-2 manifest hash binds the exact universe/configuration, application image/version,
+  file hashes, semantic bars, coverage, provenance, observed live gaps and plan-scoped historical
+  coverage. Metadata or Parquet tampering fails before replay is accepted.
+- New partitions use `bars-v2/`, so the legacy exporter in a rolled-back application cannot
+  overwrite files referenced by a current manifest. Legacy manifests remain readable, and an
+  integration test executes the old INSERT shape after migration `0006` to prove forward-schema
+  application rollback compatibility. Export remains confined to an isolated writable database
+  copy and has not contacted IG, OCI or the collector.

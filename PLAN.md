@@ -129,7 +129,13 @@ Implementation status:
   universe hash, configured listing and effective version, resolution, chunks and quota evidence;
   registration requires the operator-confirmed SHA-256. Plan-scoped BID/ASK/MID coverage attempts
   remain separate from live gaps, repeated plans preserve independent evidence, and changed
-  provider bars append corrections. The bounded read-only API exposes this projection.
+    provider bars append corrections. The bounded read-only API exposes this projection.
+- Complete locally without collector access: ADR 0017 and migration `0006` replace mutable
+  content-prefix research manifests with schema-version-2 canonical manifest identity. Exports bind
+  the exact universe/configuration, application image/version, grouped coverage, provenance, live
+  gaps and historical-coverage attempts; replay verifies the manifest, every file hash and decoded
+  semantic content. `bars-v2/` isolates new partitions from a rolled-back legacy exporter, while
+  nullable forward columns preserve the prior application's INSERT contract.
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.
@@ -221,7 +227,7 @@ python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-
 python -m qtrad backfill plan --universe PATH --start UTC --end UTC --remaining-allowance N --output PATH INSTRUMENT...
 python -m qtrad backfill register --plan PATH --confirm-plan-hash SHA256
 python -m qtrad backfill execute --plan-hash SHA256
-python -m qtrad research export
+python -m qtrad research export --universe PATH
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
 python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...
@@ -232,7 +238,7 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass;
-  187 tests pass with seven PostgreSQL migration/integration tests deferred to isolated CI.
+  195 tests pass with eight PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
   migrations through `0005`, including exact plan/coverage identity, repeated coverage attempts,
   append-only historical corrections, live-gap isolation and the bounded read-only API.

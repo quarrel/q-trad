@@ -26,6 +26,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.ports.market_data import MarketDataRecord
+from qtrad.ports.storage import ResearchManifest
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_feed_page
 from qtrad.runtime.settings import Settings
 
@@ -390,6 +391,86 @@ async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write() 
                 await connection.execute(text(prohibited_statement))
             await transaction.rollback()
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_version_two_manifests_are_immutable_and_legacy_writer_remains_compatible() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    created_at = datetime(2026, 7, 14, tzinfo=UTC)
+    manifest = ResearchManifest(
+        manifest_id="c" * 24,
+        manifest_sha256="c" * 64,
+        created_at=created_at,
+        schema_version=2,
+        universe_name="integration-universe",
+        row_count=0,
+        minimum_event_time=None,
+        maximum_event_time=None,
+        content_sha256="d" * 64,
+        configuration_hash="a" * 64,
+        files=(),
+        file_sha256={},
+        metadata={"manifest_contract": "qtrad-research-bars-v2"},
+    )
+
+    await store.record_manifest(manifest)
+    await store.record_manifest(manifest)
+    with pytest.raises(RuntimeError, match="conflicts with its identity"):
+        await store.record_manifest(dataclasses.replace(manifest, configuration_hash="b" * 64))
+
+    legacy_content_hash = "e" * 64
+    legacy_manifest_id = legacy_content_hash[:24]
+    async with engine.begin() as connection:
+        await connection.execute(
+            text(
+                """
+                INSERT INTO ops.research_manifests (
+                    manifest_id, created_at, schema_version, row_count,
+                    minimum_event_time, maximum_event_time, content_sha256,
+                    configuration_hash, files, metadata
+                ) VALUES (
+                    :manifest_id, :created_at, 1, 0,
+                    NULL, NULL, :content_sha256, :configuration_hash,
+                    '[]'::jsonb, '{}'::jsonb
+                )
+                """
+            ),
+            {
+                "manifest_id": legacy_manifest_id,
+                "created_at": created_at,
+                "content_sha256": legacy_content_hash,
+                "configuration_hash": "a" * 64,
+            },
+        )
+
+    rows = await store.query(
+        """
+        SELECT manifest_id, schema_version, manifest_sha256, universe_name, file_sha256
+        FROM ops.research_manifests
+        WHERE manifest_id IN (:current_id, :legacy_id)
+        ORDER BY schema_version
+        """,
+        {"current_id": manifest.manifest_id, "legacy_id": legacy_manifest_id},
+    )
+    assert rows == [
+        {
+            "manifest_id": legacy_manifest_id,
+            "schema_version": 1,
+            "manifest_sha256": None,
+            "universe_name": None,
+            "file_sha256": None,
+        },
+        {
+            "manifest_id": manifest.manifest_id,
+            "schema_version": 2,
+            "manifest_sha256": manifest.manifest_sha256,
+            "universe_name": manifest.universe_name,
+            "file_sha256": {},
+        },
+    ]
     await engine.dispose()
 
 

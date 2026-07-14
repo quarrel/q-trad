@@ -16,6 +16,7 @@ from alembic import command
 from alembic.config import Config
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
+from qtrad import __version__
 from qtrad.adapters.clock import SystemClock
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.store import ParquetResearchStore
@@ -51,6 +52,7 @@ from qtrad.runtime.backfill_plan import (
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
+from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import (
     CaptureCandidates,
@@ -138,10 +140,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     research = subparsers.add_parser("research", help="research-store operations")
     research_sub = research.add_subparsers(dest="research_command", required=True)
-    research_sub.add_parser("export", help="export latest bar revisions to Parquet")
+    research_export = research_sub.add_parser(
+        "export", help="export latest bar revisions to an immutable Parquet manifest"
+    )
+    research_export.add_argument("--universe", type=Path)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
-    replay.add_argument("--manifest", required=True)
+    replay.add_argument("--manifest", type=Path, required=True)
 
     projections = subparsers.add_parser("projections", help="projection operations")
     projection_sub = projections.add_subparsers(dest="projection_command", required=True)
@@ -233,9 +238,9 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "backfill" and args.backfill_command == "execute":
         asyncio.run(_execute_backfill(settings, clock, plan_hash=args.plan_hash))
     elif args.command == "research" and args.research_command == "export":
-        asyncio.run(_export(settings, clock))
+        asyncio.run(_export(settings, clock, universe_path=args.universe))
     elif args.command == "replay":
-        asyncio.run(_replay(settings, clock, Path(args.manifest)))
+        asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
         asyncio.run(_rebuild(settings))
     elif args.command == "feed" and args.feed_command == "verify":
@@ -872,14 +877,22 @@ async def _append_bar(
         return await _append_bar(store, bar, received_time=received_time)
 
 
-async def _export(settings: Settings, clock: Clock) -> None:
+async def _export(
+    settings: Settings,
+    clock: Clock,
+    *,
+    universe_path: Path | None,
+) -> None:
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     research = ParquetResearchStore(settings.research_root, clock)
+    universe = load_capture_universe(universe_path or settings.capture_universe_path)
+    instrument_ids = tuple(str(instrument.instrument_id) for instrument in universe.instruments)
+    encoded_instruments = json.dumps(instrument_ids)
     run_id = await store.start_run(
         kind=RunKind.EXPORT,
         environment=BrokerEnvironment.NONE,
-        configuration_hash=_configuration_hash(settings),
+        configuration_hash=universe.configuration_hash,
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
@@ -891,48 +904,96 @@ async def _export(settings: Settings, clock: Clock) -> None:
                     source_provider, source_environment, source_external_id
                 )
                     * FROM read_model.market_bars
+                WHERE instrument_id IN (
+                    SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                )
                 ORDER BY instrument_id, basis, interval_start, provenance,
                          source_provider, source_environment, source_external_id,
                          revision DESC
-            """
+            """,
+            {"instrument_ids": encoded_instruments},
         )
         bars = tuple(_bar_from_projection(row) for row in rows)
-        configuration_hash = _configuration_hash(settings)
+        live_gaps = await store.query(
+            """
+            SELECT gap_id, instrument_id, interval_start, interval_end, reason,
+                   detected_at, repaired_at
+            FROM read_model.data_gaps
+            WHERE instrument_id IN (
+                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+            )
+            ORDER BY instrument_id, interval_start, gap_id
+            """,
+            {"instrument_ids": encoded_instruments},
+        )
+        historical_coverage = await store.query(
+            """
+            SELECT instrument_id, source_provider, source_environment, source_external_id,
+                   source_listing_valid_from, source_listing_metadata_version,
+                   provenance, basis, resolution, interval_start, interval_end,
+                   detected_at, detected_by_plan_hash, covered_at,
+                   covered_by_plan_hash, observed_points
+            FROM read_model.historical_coverage_gaps
+            WHERE instrument_id IN (
+                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+            )
+            ORDER BY instrument_id, interval_start, basis, detected_by_plan_hash
+            """,
+            {"instrument_ids": encoded_instruments},
+        )
+        metadata = research_export_metadata(
+            universe_name=universe.name,
+            configuration_hash=universe.configuration_hash,
+            instrument_ids=tuple(instrument.instrument_id for instrument in universe.instruments),
+            bars=bars,
+            live_gaps=live_gaps,
+            historical_coverage=historical_coverage,
+            application_version=__version__,
+            application_image=settings.image,
+        )
         manifest = await research.write_bars(
             bars,
-            configuration_hash=configuration_hash,
-            metadata={
-                "universe_size": len(_capture_universe(settings).instruments),
-                "gap_count": 0,
-            },
+            universe_name=universe.name,
+            configuration_hash=universe.configuration_hash,
+            metadata=metadata,
         )
         await store.record_manifest(manifest)
         terminal_status = "COMPLETED"
-        print(json.dumps({"manifest_id": manifest.manifest_id, "rows": manifest.row_count}))
+        print(
+            json.dumps(
+                {
+                    "manifest_id": manifest.manifest_id,
+                    "manifest_sha256": manifest.manifest_sha256,
+                    "universe_name": manifest.universe_name,
+                    "configuration_hash": manifest.configuration_hash,
+                    "rows": manifest.row_count,
+                },
+                sort_keys=True,
+            )
+        )
     finally:
         await store.finish_run(
             run_id,
             status=terminal_status,
             finished_at=clock.now(),
-            detail={},
+            detail={"universe_name": universe.name},
         )
         await engine.dispose()
 
 
 async def _replay(settings: Settings, clock: Clock, manifest_path: Path) -> None:
+    if manifest_path.parent.name != "manifests" or manifest_path.suffix != ".json":
+        raise ValueError("replay manifest must be a JSON file inside a manifests directory")
     manifest_id = manifest_path.stem
-    root = (
-        manifest_path.parent.parent
-        if manifest_path.parent.name == "manifests"
-        else settings.research_root
-    )
+    root = manifest_path.parent.parent
     store = ParquetResearchStore(root, clock)
+    manifest = await store.read_manifest(manifest_id)
     engine = _engine(settings)
     audit = PostgresAuditStore(engine)
     run_id = await audit.start_run(
         kind=RunKind.REPLAY,
         environment=BrokerEnvironment.NONE,
-        configuration_hash=_configuration_hash(settings),
+        configuration_hash=manifest.configuration_hash,
         started_at=clock.now(),
     )
     terminal_status = "FAILED"
@@ -944,13 +1005,27 @@ async def _replay(settings: Settings, clock: Clock, manifest_path: Path) -> None
         if first_hash != second_hash:
             raise RuntimeError("replay hashes differ")
         terminal_status = "COMPLETED"
-        print(json.dumps({"manifest_id": manifest_id, "rows": len(first), "sha256": first_hash}))
+        print(
+            json.dumps(
+                {
+                    "manifest_id": manifest_id,
+                    "manifest_sha256": manifest.manifest_sha256,
+                    "rows": len(first),
+                    "sha256": first_hash,
+                },
+                sort_keys=True,
+            )
+        )
     finally:
         await audit.finish_run(
             run_id,
             status=terminal_status,
             finished_at=clock.now(),
-            detail={"manifest_id": manifest_id},
+            detail={
+                "manifest_id": manifest_id,
+                "manifest_sha256": manifest.manifest_sha256,
+                "universe_name": manifest.universe_name,
+            },
         )
         await engine.dispose()
 

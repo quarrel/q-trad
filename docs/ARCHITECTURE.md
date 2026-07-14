@@ -50,6 +50,16 @@ cannot write. The operator creates and rotates a separate login member interacti
 application credentials are never reused. Immutable Parquet manifests and snapshots remain the
 normal research interface.
 
+Schema-version-2 research manifests are content-authenticated records rather than mutable export
+indexes. Their canonical hash binds the selected universe/configuration, application version and
+image identity, exact file set and hashes, semantic bar hash, grouped coverage and observed live
+and historical-coverage evidence. Replay verifies the manifest, file bytes, decoded bars, row/time
+bounds and partition ownership. New files live under `bars-v2/`; a rolled-back application that
+still writes the legacy `bars/` layout cannot overwrite them. Legacy manifests remain readable,
+and migration `0006` keeps its added columns nullable so the previous application INSERT remains
+valid after a forward migration. Export records a run and manifest and therefore executes only
+against an isolated writable database copy, not the collector or its read-only tunnel role.
+
 The loopback-only API also provides bounded canonical-event pages for later isolated consumers.
 Pages carry feed-schema, capture-source, universe, configuration and high-water identity while
 excluding raw records. Consumers connect through an SSH/Tailscale tunnel and maintain their own
@@ -127,7 +137,8 @@ reverse this dependency direction.
 - PostgreSQL `reference` schema: instrument and provider-listing projections.
 - PostgreSQL `read_model` schema: rebuildable quote, bar, health and gap views.
 - PostgreSQL `ops` schema: runs, quotas, checkpoints and manifests.
-- Parquet filesystem: versioned research/replay datasets.
+- Parquet filesystem: immutable, content-authenticated research/replay datasets with separate
+  legacy `bars/` and current `bars-v2/` namespaces.
 
 Raw messages and their canonical event or quarantine result are committed in
 one PostgreSQL transaction. Each canonical stream uses optimistic versions and
@@ -153,6 +164,8 @@ transaction as event projection.
 - Standard-library CLI under `python -m qtrad`.
 - `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
 - `instruments promote` verifies explicit review-bound selections and emits undeployed TOML.
+- `research export --universe PATH` writes a schema-version-2 manifest from an isolated writable
+  database copy; `replay --manifest PATH` verifies that identity before deterministic replay.
 - `feed verify` checks saved page sequences and reports the final cursor without network I/O.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
   its candidate cursor.

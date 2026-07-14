@@ -189,6 +189,27 @@ and deploy only the returned OCI index digest.
   against the capture database. Research consumes immutable Parquet manifests or a
   read-only snapshot over an SSH tunnel.
 
+### Immutable research export
+
+`research export` is not a read-only collector operation: it records an export run and manifest in
+the database. Restore a capture backup into an isolated local PostgreSQL instance with a writable
+application role, set a separate writable `QTRAD_RESEARCH_ROOT`, and select the exact universe
+explicitly:
+
+```bash
+uv run qtrad research export --universe config/capture-v1.toml
+uv run qtrad replay --manifest data/research/manifests/<manifest-id>.json
+```
+
+Do not point this command at the collector or the exceptional read-only tunnel. The current
+schema-version-2 manifest binds universe/configuration, application image/version, coverage, gaps,
+provenance, file hashes and semantic bar content. A release-quality export should set
+`QTRAD_IMAGE` to the immutable source image digest rather than a mutable tag. Replay validates all
+of that identity before accepting the bars. New partitions live under `bars-v2/`; rolling the
+application back to the legacy exporter can write only `bars/` and cannot overwrite them. Migration
+`0006` leaves its new columns nullable so the previous image can run after the forward migration;
+do not downgrade the database once a version-two manifest has been recorded.
+
 ### Exceptional read-only database access
 
 Prefer immutable Parquet manifests or a database snapshot. When direct inspection is necessary,

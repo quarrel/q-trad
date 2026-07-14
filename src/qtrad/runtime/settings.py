@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     research_root: Path = Path("data/research")
     capture_universe_path: Path = Path("config/capture-v1.toml")
     capture_source_id: str = "local-development"
+    image: str = "qtrad-app:local"
     log_level: str = "INFO"
 
     ig_username: str | None = None
@@ -39,6 +40,13 @@ class Settings(BaseSettings):
             raise ValueError(
                 "capture source ID must use lowercase letters, digits, '.', '_' or '-'"
             )
+        return value
+
+    @field_validator("image")
+    @classmethod
+    def valid_image_identity(cls, value: str) -> str:
+        if not value or len(value) > 500 or any(character.isspace() for character in value):
+            raise ValueError("application image identity must be a bounded non-whitespace value")
         return value
 
     def require_ig_credentials(self) -> tuple[str, str, str, str | None]:

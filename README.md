@@ -162,7 +162,8 @@ Only then execute the persisted plan by hash. This is the credential-gated provi
 docker compose run --rm app python -m qtrad backfill execute \
   --plan-hash <reviewed-sha256>
 
-docker compose run --rm app python -m qtrad research export
+docker compose run --rm app python -m qtrad research export \
+  --universe /app/config/capture-v1.toml
 docker compose run --rm app python -m qtrad replay --manifest /app/data/research/manifests/MANIFEST.json
 ```
 
@@ -170,6 +171,12 @@ Execution cannot rediscover or substitute listings, widen the range or alter liv
 Identical bars are idempotent; changed historical values append correction revisions. It records
 IG's provider-reported remaining allowance separately when available. Verify the current IG
 allowance before planning and again before execution.
+
+Research export records a run and manifest, so run it against an isolated restored database or
+another explicitly approved writable research copy—not the live collector or its read-only SSH
+tunnel role. Schema-version-2 manifests bind the selected universe/configuration, application
+identity, coverage, gaps, provenance and per-file hashes. Replay verifies that complete identity
+and the decoded semantic bars; legacy schema-version-1 manifests remain readable.
 
 ## Documentation
 

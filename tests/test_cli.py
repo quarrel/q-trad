@@ -102,7 +102,11 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             "_execute_backfill",
             (("plan_hash", "a" * 64),),
         ),
-        (["research", "export"], "_export", ()),
+        (
+            ["research", "export", "--universe", "config/capture-v1.toml"],
+            "_export",
+            (("universe_path", Path("config/capture-v1.toml")),),
+        ),
         (["replay", "--manifest", "research/manifests/example.json"], "_replay", ()),
         (["projections", "rebuild"], "_rebuild", ()),
     ],

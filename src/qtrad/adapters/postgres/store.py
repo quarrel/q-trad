@@ -535,34 +535,84 @@ class PostgresAuditStore(AuditStore):
 
     async def record_manifest(self, manifest: ResearchManifest) -> None:
         async with self._engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     INSERT INTO ops.research_manifests (
-                        manifest_id, created_at, schema_version, row_count,
+                        manifest_id, manifest_sha256, created_at, schema_version,
+                        universe_name, row_count,
                         minimum_event_time, maximum_event_time, content_sha256,
-                        configuration_hash, files, metadata
+                        configuration_hash, files, file_sha256, metadata
                     ) VALUES (
-                        :manifest_id, :created_at, :schema_version, :row_count,
+                        :manifest_id, :manifest_sha256, :created_at, :schema_version,
+                        :universe_name, :row_count,
                         :minimum_event_time, :maximum_event_time, :content_sha256,
-                        :configuration_hash, CAST(:files AS jsonb), CAST(:metadata AS jsonb)
+                        :configuration_hash, CAST(:files AS jsonb),
+                        CAST(:file_sha256 AS jsonb), CAST(:metadata AS jsonb)
                     )
                     ON CONFLICT (manifest_id) DO NOTHING
+                    RETURNING manifest_id
                     """
                 ),
                 {
                     "manifest_id": manifest.manifest_id,
+                    "manifest_sha256": manifest.manifest_sha256,
                     "created_at": manifest.created_at,
                     "schema_version": manifest.schema_version,
+                    "universe_name": manifest.universe_name,
                     "row_count": manifest.row_count,
                     "minimum_event_time": manifest.minimum_event_time,
                     "maximum_event_time": manifest.maximum_event_time,
                     "content_sha256": manifest.content_sha256,
                     "configuration_hash": manifest.configuration_hash,
                     "files": json.dumps(manifest.files),
+                    "file_sha256": (
+                        json.dumps(manifest.file_sha256, sort_keys=True)
+                        if manifest.schema_version == 2
+                        else None
+                    ),
                     "metadata": json.dumps(manifest.metadata, sort_keys=True),
                 },
             )
+            if result.scalar_one_or_none() is not None:
+                return
+            existing = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT manifest_sha256, created_at, schema_version, universe_name,
+                                   row_count, minimum_event_time, maximum_event_time,
+                                   content_sha256, configuration_hash, files,
+                                   file_sha256, metadata
+                            FROM ops.research_manifests
+                            WHERE manifest_id = :manifest_id
+                            """
+                        ),
+                        {"manifest_id": manifest.manifest_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            expected = {
+                "manifest_sha256": manifest.manifest_sha256,
+                "created_at": manifest.created_at,
+                "schema_version": manifest.schema_version,
+                "universe_name": manifest.universe_name,
+                "row_count": manifest.row_count,
+                "minimum_event_time": manifest.minimum_event_time,
+                "maximum_event_time": manifest.maximum_event_time,
+                "content_sha256": manifest.content_sha256,
+                "configuration_hash": manifest.configuration_hash,
+                "files": list(manifest.files),
+                "file_sha256": (
+                    dict(manifest.file_sha256) if manifest.schema_version == 2 else None
+                ),
+                "metadata": dict(manifest.metadata),
+            }
+            if dict(existing) != expected:
+                raise RuntimeError("persisted research manifest conflicts with its identity")
 
     async def record_quota_state(
         self,
