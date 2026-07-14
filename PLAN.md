@@ -92,7 +92,8 @@ Implementation status:
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
   compare` commands measure database/relation/index growth per raw message. This candidate is not
-  introduced into the running 72-hour qualification.
+  introduced into the running 72-hour qualification. GitHub CI run `29322668979` passed all static,
+  migration and PostgreSQL 18 gates with 211 tests at branch head `e24ccc7`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

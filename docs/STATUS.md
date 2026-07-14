@@ -380,3 +380,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
   payload samples. `storage compare` verifies two files offline and reports physical byte deltas
   per raw message, allowing the roughly 1,500-byte observation to be decomposed before retention
   or schema decisions are made.
+- GitHub CI run `29322668979` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
+  `0006` and all 211 tests against PostgreSQL 18 for branch head `e24ccc7`. This includes the
+  read-only storage inspector's actual catalogue/JSONB queries. No image was published and the
+  collector remains unchanged.
