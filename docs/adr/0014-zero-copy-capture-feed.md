@@ -14,8 +14,9 @@ schema privileges.
 
 Expose persisted canonical events through a bounded, cursor-based read API on the existing
 loopback-only collector service. Each page identifies the capture source, universe and
-configuration hash; reports its high-water position; and returns ordered canonical envelopes
-after the requested global position. Raw records and raw-record identifiers are not exposed.
+configuration hash and feed-schema version; reports its high-water position; and returns
+ordered canonical envelopes after the requested global position. Raw records and raw-record
+identifiers are not exposed.
 
 A cursor beyond the source high-water position fails closed. Consumers preserve source event
 identity and advance their own cursor only with their derived writes. The initial transport is

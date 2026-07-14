@@ -191,7 +191,12 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
             "/api/v1/feed/events",
             params={"after_position": first.global_position, "limit": 1000},
         )
+        empty_page = await client.get(
+            "/api/v1/feed/events",
+            params={"after_position": second.global_position},
+        )
         invalid_limit = await client.get("/api/v1/feed/events", params={"limit": 1001})
+        negative_cursor = await client.get("/api/v1/feed/events", params={"after_position": -1})
         invalid_cursor = await client.get(
             "/api/v1/feed/events",
             params={"after_position": second.global_position + 1},
@@ -200,6 +205,7 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
 
     assert first_page.status_code == 200
     first_payload = first_page.json()
+    assert first_payload["feed_schema_version"] == 1
     assert first_payload["source_id"] == "integration-capture"
     assert first_payload["universe_name"] == "capture-v1"
     assert first_payload["after_position"] == first.global_position - 1
@@ -212,7 +218,12 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
     second_payload = second_page.json()
     assert second_payload["events"][0]["event_id"] == str(second.event_id)
     assert second_payload["next_position"] >= second.global_position
+    assert empty_page.status_code == 200
+    assert empty_page.json()["events"] == []
+    assert empty_page.json()["next_position"] == second.global_position
+    assert empty_page.json()["has_more"] is False
     assert invalid_limit.status_code == 422
+    assert negative_cursor.status_code == 422
     assert invalid_cursor.status_code == 409
     assert write_probe.status_code == 405
     await engine_from_app(app).dispose()

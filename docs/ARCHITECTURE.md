@@ -44,9 +44,9 @@ Compose sends `SIGINT` to the unbounded ingestion role and allows a 90-second st
 the adapter can verify disconnect and persist a terminal run before restart or host shutdown.
 
 The loopback-only API also provides bounded canonical-event pages for later isolated consumers.
-Pages carry capture-source, universe, configuration and high-water identity while excluding raw
-records. Consumers connect through an SSH/Tailscale tunnel and maintain their own cursors; the
-collector does not host downstream write schemas or a second message-broker product.
+Pages carry feed-schema, capture-source, universe, configuration and high-water identity while
+excluding raw records. Consumers connect through an SSH/Tailscale tunnel and maintain their own
+cursors; the collector does not host downstream write schemas or a second message-broker product.
 
 The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
 checksum and a JSON manifest that binds the capture-universe hash and both deployed image

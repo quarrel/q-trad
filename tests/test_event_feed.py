@@ -37,6 +37,8 @@ def test_event_page_requires_ordered_persisted_events() -> None:
         EventPage(events=(second, first), high_water_position=12)
     with pytest.raises(ValueError, match="high-water"):
         EventPage(events=(second,), high_water_position=11)
+    with pytest.raises(ValueError, match="positive"):
+        EventPage(events=(_persisted_event(0),), high_water_position=0)
 
 
 def test_feed_response_excludes_raw_record_identity() -> None:

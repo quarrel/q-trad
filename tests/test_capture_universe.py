@@ -73,3 +73,23 @@ def test_capture_v2_candidates_are_hashable_but_cannot_authorise_ingestion() -> 
     assert len(candidates.configuration_hash) == 64
     with pytest.raises(ValueError, match="explicit preferred IG epic"):
         load_capture_universe(path)
+
+
+def test_capture_candidates_reject_provider_authority(tmp_path: Path) -> None:
+    path = tmp_path / "candidates.toml"
+    path.write_text(
+        """
+name = "unsafe-candidates"
+[[instrument]]
+id = "fx:eur-usd"
+display_name = "EUR/USD"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["EUR/USD"]
+preferred_epic = "must-not-be-accepted"
+"""
+    )
+
+    with pytest.raises(ValueError, match="must not contain preferred IG epics"):
+        load_capture_candidates(path)

@@ -4,7 +4,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from uuid import UUID
 
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -62,6 +62,7 @@ class FeedEventResponse(BaseModel):
 
 
 class FeedPageResponse(BaseModel):
+    feed_schema_version: Literal[1] = 1
     source_id: str
     universe_name: str
     configuration_hash: str
@@ -120,6 +121,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         events = [FeedEventResponse.from_event(event) for event in page.events]
         next_position = events[-1].global_position if events else after_position
         return FeedPageResponse(
+            feed_schema_version=1,
             source_id=configuration.capture_source_id,
             universe_name=universe.name,
             configuration_hash=universe.configuration_hash,

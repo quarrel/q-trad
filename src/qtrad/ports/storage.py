@@ -41,6 +41,8 @@ class EventPage:
         for event in self.events:
             if event.global_position is None or event.persisted_time is None:
                 raise ValueError("event pages require persisted events")
+            if event.global_position <= 0:
+                raise ValueError("event page positions must be positive")
             positions.append(event.global_position)
         if positions != sorted(set(positions)):
             raise ValueError("event page positions must be strictly increasing")
@@ -60,6 +62,8 @@ class EventStore(Protocol):
     ) -> EventEnvelope: ...
 
     def read_all(self, *, after_position: int = 0) -> AsyncIterator[EventEnvelope]: ...
+
+    async def read_page(self, *, after_position: int, limit: int) -> EventPage: ...
 
 
 class AuditStore(RawCapture, EventStore, Protocol):
