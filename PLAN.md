@@ -98,7 +98,9 @@ Implementation status:
     record. It verifies the automatic snapshot, exact operator-review binding, full-window log and
     monitoring coverage and one classification per candidate gap. Valid failed reviews are preserved;
     malformed, omitted, mismatched or tampered input cannot emit a decision. Active-market
-    representativeness is explicitly separate from the later physical-storage comparison.
+    representativeness is explicitly separate from the later physical-storage comparison. GitHub CI
+    run `29335826682` passed all static, shell, migration and PostgreSQL 18 gates with 243 tests at
+    branch head `335f089`.
 - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
@@ -301,6 +303,9 @@ python -m qtrad api
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
   233 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
+- GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
+  migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
+  `335f089`.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

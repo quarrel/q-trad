@@ -452,7 +452,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
     operator reviews of candidate gaps, full-window logs, monitoring and active-market
     representativeness. It preserves a self-hashed `FAIL`, refuses overwrite and emits no decision for
     malformed, incomplete, mismatched or tampered input. It performs no external I/O and remains
-    undeployed with the rest of the feature branch.
+    undeployed with the rest of the feature branch. GitHub CI run `29335826682` passed every static,
+    shell, migration and PostgreSQL 18 gate with all 243 tests at branch head `335f089`.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
