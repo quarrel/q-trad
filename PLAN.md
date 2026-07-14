@@ -114,14 +114,15 @@ Implementation status:
     representativeness is explicitly separate from the later physical-storage comparison. GitHub CI
     run `29335826682` passed all static, shell, migration and PostgreSQL 18 gates with 243 tests at
     branch head `335f089`.
-  - Complete locally and undeployed, pending CI: pre-candidate run reconciliation is now an explicit
+  - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
     Execution locks and rechecks the
     complete set atomically, marks only those rows `FAILED` with an asserted cutoff upper-bound basis,
     and cannot touch the current run or raw/canonical data. A guarded immutable one-shot helper is
-    prepared for use only after the candidate window. The full local gate passes with 262 tests and
-    13 isolated-PostgreSQL tests deferred to CI; the collector remains unchanged.
+    prepared for use only after the candidate window. GitHub CI run `29346869695` passed every static
+    and shell gate, migration through `0009` and all 275 tests against PostgreSQL 18 at branch head
+    `5ba0b07`; the collector remains unchanged.
 - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
@@ -355,7 +356,7 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and both ShellCheck sets
-  pass; 252 tests pass with 12 PostgreSQL migration/integration tests deferred to isolated CI.
+  pass; 262 tests pass with 13 PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.
@@ -379,6 +380,9 @@ python -m qtrad api
 - GitHub CI run `29344877350` passed every static and shell gate, migration through `0009` and all
   264 tests against PostgreSQL 18 at branch head `961d9d5`. It proves exact review/contrast binding,
   valid negative-review preservation, semantic tamper rejection and the no-storage-decision boundary.
+- GitHub CI run `29346869695` passed every static and shell gate, migration through `0009` and all
+  275 tests against PostgreSQL 18 at branch head `5ba0b07`. It proves exact stale-run set locking,
+  omitted-target rollback, current-run preservation and terminal-record immutability.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

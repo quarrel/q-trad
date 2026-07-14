@@ -298,8 +298,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   those abandoned rows
   as `FAILED` with the cutoff labelled an operator-asserted upper bound. It refuses a partial or
   changed set and cannot include the current run or alter raw/canonical data. The guarded helper uses
-  an immutable one-shot image without starting dependencies. The full local gate passes with 262
-  tests and 13 isolated PostgreSQL tests deferred to CI; the collector remains unchanged.
+  an immutable one-shot image without starting dependencies. GitHub CI run `29346869695` passed every
+  static and shell gate, migration through `0009` and all 275 tests against PostgreSQL 18 at branch
+  head `5ba0b07`; the collector remains unchanged.
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
   Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
   no longer gate data collection, but remain operator hardening follow-ups.
