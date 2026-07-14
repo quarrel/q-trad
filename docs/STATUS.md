@@ -439,8 +439,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   backward-readable with versions 1 and 2 while binding pre-marker/coded schema state and exact
   per-code counts. Comparison reports whether all new rows are `CHANGED_FIELDS`, exposes new
   `LEGACY_UNCLASSIFIED` rollback-compatible rows and rejects a representation-schema transition. The
-  active collector and its qualification image remain unchanged; isolated PostgreSQL verification is
-  pending CI.
+  active collector and its qualification image remain unchanged. GitHub CI run `29341678396` passed
+  the real PostgreSQL representation probe, migration through `0009` and all 255 tests at branch head
+  `6a84319`.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation

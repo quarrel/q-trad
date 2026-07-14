@@ -130,7 +130,8 @@ Implementation status:
   versions 1 and 2, records pre-marker versus coded raw-representation schema state and binds exact
   per-code row counts. Offline comparison derives interval representation deltas, proves an
   all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
-  and rejects a representation-schema transition. PostgreSQL verification remains pending CI.
+  and rejects a representation-schema transition. GitHub CI run `29341678396` passed every static and
+  shell gate, the real PostgreSQL representation probe and all 255 tests at branch head `6a84319`.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
@@ -340,6 +341,10 @@ python -m qtrad api
   - GitHub CI run `29339570739` passed every static and shell gate, migration through `0009` and all
     251 tests against PostgreSQL 18 at branch head `7437258`. It proves validated SHA-256 constraints
     reject malformed new run, manifest, backfill-plan and non-null listing identities.
+  - GitHub CI run `29341678396` passed every static and shell gate, migration through `0009` and all
+    255 tests against PostgreSQL 18 at branch head `6a84319`. It proves snapshot-v3 representation
+    counts reconcile with the actual raw table and preserves deterministic pre-marker, changed-field,
+    rollback-compatible and legacy snapshot behaviour.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
