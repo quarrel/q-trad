@@ -151,9 +151,12 @@ resolved secrets.
 ## Release and rollback
 
 1. GitHub Actions runs formatting, lint, type, shell and isolated PostgreSQL gates on every
-   main-branch push and pull request. The manually dispatched `Publish application image`
-    workflow builds `linux/amd64` and `linux/arm64`, publishes the commit-SHA tag and records
-    its immutable OCI index digest. Configure the protected `capture-release` environment
+     main-branch push and pull request. The manually dispatched `Publish application image`
+      workflow has an explicit `refs/heads/main` job gate: a branch dispatch must not publish.
+      After operator review, take the PR out of draft, merge it, require the resulting main-branch
+      CI run to pass, and dispatch publication from that exact `main` commit. The workflow builds
+      `linux/amd64` and `linux/arm64`, publishes the commit-SHA tag and records its immutable OCI
+      index digest. Configure the protected `capture-release` environment
     with only `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_TOKEN`; never add IG or database
     credentials to GitHub. The dedicated publisher requires `manage repos` in the capture
     compartment: `use repos` authenticates successfully but OCIR denies Buildx's
@@ -172,6 +175,11 @@ resolved secrets.
 OCI Container Registry in Sydney currently rejects repository-level immutability. Publish
 each release once under its unique full commit-SHA tag, never publish `latest` or reuse a tag,
 and deploy only the returned OCI index digest.
+
+Publishing does not authorise deployment. A newly published image may be used by the guarded
+`--no-deps --pull never` reconciliation or storage-inspector helpers after their documented gates;
+it must not replace the frozen ingestion/API roles before qualification evidence permits that
+release transition.
 
 Before deploying migration `0008`, run this bounded preflight against the target database. It must
 return no rows; do not let a migration or operator guess which epic is authoritative:

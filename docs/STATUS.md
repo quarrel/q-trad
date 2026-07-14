@@ -233,6 +233,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   18 service. The `capture-release` environment has a main-only deployment policy. Host metric
   publication targets OCI's required regional ingestion endpoint and passes with the scoped
   instance-principal permission.
+- The current release-boundary audit confirms `origin/main` is an ancestor of the clean feature
+  head and GitHub reports draft PR 1 as cleanly mergeable with its `verify` check passing. The
+  publication job itself also enforces `refs/heads/main`: operator review, removal of draft status,
+  merge and a green main-branch CI run must precede image dispatch. No feature-branch image was
+  published and the collector remains frozen.
 - A repository-scoped, read-only GitHub deploy key now backs the host checkout at
   `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
   reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`

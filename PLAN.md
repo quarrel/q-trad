@@ -241,9 +241,14 @@ Implementation status:
   every file hash and decoded semantic content. Per-instrument/day content identity reuses unchanged
   partitions as the store grows. `bars-v2/` isolates new partitions from a rolled-back legacy
   exporter, while nullable forward columns preserve the prior application's INSERT contract.
-- Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
-  shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
-  draft PR remains unmerged and cannot deploy the collector.
+  - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
+    shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
+    draft PR remains unmerged and cannot deploy the collector.
+  - Release-boundary audit complete: current `origin/main` is an ancestor of the clean feature head,
+    GitHub reports draft PR 1 as cleanly mergeable, and its required `verify` check passes. The image
+    workflow deliberately publishes only from `main`; operator review, removal of draft status,
+    merge and a green main-branch CI run must precede dispatch. No branch image was published and the
+    collector remains frozen.
 - Complete locally and undeployed: ADR 0019 adds a versioned backup-v2 identity and a
   non-overwriting snapshot-to-research importer. It verifies source, universe, images, migration,
   archive and restored counts before producing hash-verified import evidence. Research export can
