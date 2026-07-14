@@ -54,6 +54,11 @@ thresholds do not prove that the interval represents active market conditions, s
 remains explicit. Index-scan evidence is usable only when both thresholds pass and PostgreSQL's
 statistics-reset timestamp is unchanged.
 
+The output also reports observed raw-message, canonical-event and retained-relation byte rates per
+second, plus mechanical combined-relation extrapolations for one, 30 and 365 days. The basis is
+labelled `mechanical_continuation_of_observed_interval`; it is not a demand forecast. Use an interval
+only after its automated thresholds pass and the operator confirms representative market activity.
+
 ## Candidate decisions
 
 1. **Changed-field raw capture — implemented candidate.** This corrects raw semantics and normally
@@ -86,7 +91,8 @@ For both the pinned representation and the later changed-field candidate:
    canonical/raw row ratio and JSONB/text sample evidence;
 5. record database-wide growth only as context because backups, catalogues and unrelated relations
    may contribute; and
-6. make one schema decision at a time, with restore/replay and application rollback evidence.
+6. use the observed-rate extrapolation for capacity scenarios, not as an unqualified forecast; and
+7. make one schema decision at a time, with restore/replay and application rollback evidence.
 
 The first result may legitimately be “retain the schema”. Storage cost alone does not outweigh the
 audit, idempotency and deterministic-replay contracts.

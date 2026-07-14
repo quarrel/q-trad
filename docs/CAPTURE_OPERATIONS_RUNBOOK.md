@@ -356,6 +356,11 @@ hours and 100,000 new raw messages and separately reports whether index-scan evi
 `operator_active_market_review_required` remains true because elapsed time and row count cannot
 establish representative market activity by themselves.
 
+`observed_rate_extrapolation` reports the interval's raw/canonical rates and the combined capture
+relation bytes implied over one, 30 and 365 days if that exact rate continued. Treat it as a storage
+sizing scenario only after the evidence gate and active-market review pass; it deliberately excludes
+database-wide catalogue, backup and unrelated-relation growth.
+
 ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
 the active qualification first; do not mix representations within its 72-hour evidence window.
 

@@ -108,6 +108,22 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
         "index_scan_evidence_usable": False,
         "operator_active_market_review_required": True,
     }
+    assert comparison["observed_rate_extrapolation"] == {
+        "basis": "mechanical_continuation_of_observed_interval",
+        "representative_thresholds_satisfied": False,
+        "rates_per_second": {
+            "raw_messages": "0.033333",
+            "canonical_events": "0.050000",
+            "raw_relation_bytes": "25.000",
+            "canonical_relation_bytes": "25.000",
+            "combined_capture_relation_bytes": "50.000",
+        },
+        "combined_capture_relation_bytes": {
+            "one_day": "4320000.000",
+            "thirty_days": "129600000.000",
+            "three_hundred_sixty_five_days": "1576800000.000",
+        },
+    }
     assert comparison["bytes_per_raw_message"] == {
         "database": "2000.000",
         "raw_relation": "750.000",
@@ -275,6 +291,9 @@ def test_storage_comparison_reports_representative_measurement_gate() -> None:
         "index_scan_evidence_usable": True,
         "operator_active_market_review_required": True,
     }
+    extrapolation = comparison["observed_rate_extrapolation"]
+    assert isinstance(extrapolation, dict)
+    assert extrapolation["representative_thresholds_satisfied"] is True
 
 
 def test_storage_snapshot_allows_schema_scoped_index_names_and_bounds_input(

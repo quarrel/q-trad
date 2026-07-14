@@ -278,6 +278,40 @@ def compare_storage_snapshots(
             ),
             "operator_active_market_review_required": True,
         },
+        "observed_rate_extrapolation": {
+            "basis": "mechanical_continuation_of_observed_interval",
+            "representative_thresholds_satisfied": representative_thresholds_satisfied,
+            "rates_per_second": {
+                "raw_messages": _rate(raw_delta, elapsed_seconds, precision=6),
+                "canonical_events": _rate(canonical_delta, elapsed_seconds, precision=6),
+                "raw_relation_bytes": _rate(raw_relation_delta, elapsed_seconds, precision=3),
+                "canonical_relation_bytes": _rate(
+                    canonical_relation_delta, elapsed_seconds, precision=3
+                ),
+                "combined_capture_relation_bytes": _rate(
+                    raw_relation_delta + canonical_relation_delta,
+                    elapsed_seconds,
+                    precision=3,
+                ),
+            },
+            "combined_capture_relation_bytes": {
+                "one_day": _rate_projection(
+                    raw_relation_delta + canonical_relation_delta,
+                    elapsed_seconds,
+                    seconds=86_400,
+                ),
+                "thirty_days": _rate_projection(
+                    raw_relation_delta + canonical_relation_delta,
+                    elapsed_seconds,
+                    seconds=30 * 86_400,
+                ),
+                "three_hundred_sixty_five_days": _rate_projection(
+                    raw_relation_delta + canonical_relation_delta,
+                    elapsed_seconds,
+                    seconds=365 * 86_400,
+                ),
+            },
+        },
         "raw_relation_bytes_delta": raw_relation_delta,
         "canonical_relation_bytes_delta": canonical_relation_delta,
         "canonical_events_per_raw_message": _ratio(canonical_delta, raw_delta),
@@ -511,6 +545,14 @@ def _payload_sample_identity(
 
 def _ratio(numerator: int, denominator: int) -> str:
     return format(Decimal(numerator) / Decimal(denominator), ".3f")
+
+
+def _rate(numerator: int, elapsed_seconds: Decimal, *, precision: int) -> str:
+    return format(Decimal(numerator) / elapsed_seconds, f".{precision}f")
+
+
+def _rate_projection(numerator: int, elapsed_seconds: Decimal, *, seconds: int) -> str:
+    return format(Decimal(numerator) * Decimal(seconds) / elapsed_seconds, ".3f")
 
 
 def _utc_text(value: datetime) -> str:

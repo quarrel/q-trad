@@ -174,6 +174,9 @@ Comparison rejects source, database, universe, configuration, application-versio
 drift. Its machine-readable evidence gate requires both the minimum elapsed interval and raw-message
 volume, invalidates index usage across a statistics reset and retains an explicit active-market
 operator-review requirement.
+The same comparison emits explicitly mechanical observed-rate extrapolations for combined raw and
+canonical relation growth over one, 30 and 365 days. They are capacity-planning scenarios rather
+than forecasts and do not include database-wide or backup growth.
 `docs/CAPTURE_STORAGE_AUDIT.md` keeps uniqueness and audit retention outside the optimisation
 boundary.
 

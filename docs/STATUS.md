@@ -411,6 +411,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   keeps active-market representativeness as an operator review rather than an inferred fact.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
+- Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation
+  byte rates, plus explicitly mechanical combined-relation scenarios over one, 30 and 365 days.
+  The output binds its representative-threshold status and does not label those scenarios forecasts.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
