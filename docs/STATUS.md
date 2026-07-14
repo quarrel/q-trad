@@ -356,6 +356,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
     `instruments sync --universe PATH` supplies the reviewed universe to the adapter and persists its
     validation evidence without changing the environment-selected ingestion universe or starting a
     stream. The documented path uses the same isolated writable database as candidate backfill.
+    GitHub CI run `29336513376` passed all static, shell, migration and PostgreSQL 18 gates with 244
+    tests at branch head `640caf7`.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical

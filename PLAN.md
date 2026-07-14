@@ -190,7 +190,9 @@ Implementation status:
   - Complete locally without provider access: `instruments sync --universe PATH` validates a
     reviewed, epic-pinned non-streaming universe into the selected writable database without
     changing ingestion's configured universe or starting a stream. This supplies the explicit
-    listing-validation step before candidate historical planning on an isolated database.
+    listing-validation step before candidate historical planning on an isolated database. GitHub CI
+    run `29336513376` passed every static, shell, migration and PostgreSQL 18 gate with all 244 tests
+    at branch head `640caf7`.
 - Complete locally without collector access: ADR 0017 and migration `0006` replace mutable
   content-prefix research manifests with schema-version-2 canonical manifest identity. Exports bind
   an explicit UTC range, the exact universe/configuration, application image/version, grouped
@@ -310,6 +312,8 @@ python -m qtrad api
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.
+- GitHub CI run `29336513376` passed the same full gate set and all 244 tests at branch head
+  `640caf7`, including explicit non-streaming universe validation without runtime-universe use.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
