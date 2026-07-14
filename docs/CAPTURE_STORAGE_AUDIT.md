@@ -63,6 +63,13 @@ thresholds do not prove that the interval represents active market conditions, s
 remains explicit. Index-scan evidence is usable only when both thresholds pass and PostgreSQL's
 statistics-reset timestamp is unchanged.
 
+Comparison output is a bounded, non-overwriting, self-hashed artifact retaining both source snapshot
+hashes and the checked release identity. Once the merged-state and changed-field intervals each pass
+their automated gate, offline contrast verifies those artifacts, requires distinct digest-pinned
+images and computes mechanical per-message changes and reduction percentages. Contrast does not
+accept the storage decision or claim the intervals were representative; its artifact keeps both
+active-market reviews required.
+
 The output also reports observed raw-message, canonical-event and retained-relation byte rates per
 second, plus mechanical combined-relation extrapolations for one, 30 and 365 days. The basis is
 labelled `mechanical_continuation_of_observed_interval`; it is not a demand forecast. Use an interval
@@ -129,7 +136,9 @@ if its row counts were large enough. After the frozen qualification closes succe
    threshold, then take its closing snapshot; require its comparison to report only
    `CHANGED_FIELDS` new rows and zero new `LEGACY_UNCLASSIFIED` rows; and
 6. compare within each image pair first, then compare the two accepted interval results as evidence
-   from distinct release epochs rather than feeding cross-release snapshots to `storage compare`.
+   from distinct release epochs with `storage contrast` rather than feeding cross-release snapshots
+   to `storage compare`. Contrast remains decision-pending until both active-market reviews are
+   recorded.
 
 Do not implement operational deletion or an archive-out path before both intervals are accepted.
 Legacy data is a finite epoch: an archive proposal must show material benefit after permanent

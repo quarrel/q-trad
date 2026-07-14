@@ -15,9 +15,13 @@ from qtrad.adapters.postgres.storage_measurement import (
 )
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.runtime.storage_measurement import (
+    build_storage_comparison_artifact,
+    build_storage_contrast_artifact,
     build_storage_snapshot,
     compare_storage_snapshots,
+    load_storage_evidence_artifact,
     load_storage_snapshot,
+    write_storage_evidence_artifact,
     write_storage_snapshot,
 )
 
@@ -47,14 +51,18 @@ def _measurement() -> PostgresStorageMeasurement:
     )
 
 
-def _snapshot(measurement: PostgresStorageMeasurement | None = None):
+def _snapshot(
+    measurement: PostgresStorageMeasurement | None = None,
+    *,
+    application_image: str = "syd.ocir.io/example/qtrad@sha256:" + "b" * 64,
+):
     return build_storage_snapshot(
         measurement or _measurement(),
         capture_source_id="oci-sydney-capture-1",
         universe_name="capture-v1",
         configuration_hash="a" * 64,
         application_version="0.1.0",
-        application_image="syd.ocir.io/example/qtrad@sha256:" + "b" * 64,
+        application_image=application_image,
     )
 
 
@@ -107,6 +115,46 @@ def test_storage_snapshot_is_hash_verified_and_non_overwriting(tmp_path: Path) -
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="hash does not match"):
         load_storage_snapshot(path)
+
+
+def test_storage_comparison_artifact_is_hash_verified_and_non_overwriting(tmp_path: Path) -> None:
+    before = _snapshot()
+    after = _snapshot(
+        replace(
+            _measurement(),
+            observed_at=NOW + timedelta(minutes=1),
+            raw_message_count=101,
+            canonical_event_count=101,
+        )
+    )
+    artifact = build_storage_comparison_artifact(before, after)
+    path = tmp_path / "comparison.json"
+
+    write_storage_evidence_artifact(path, artifact)
+
+    assert load_storage_evidence_artifact(path) == artifact
+    assert artifact.artifact_kind == "STORAGE_COMPARISON"
+    assert artifact.payload["application_image"] == before.application_image
+    with pytest.raises(FileExistsError):
+        write_storage_evidence_artifact(path, artifact)
+
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["payload"]["raw_messages_delta"] = 2
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="artifact hash does not match"):
+        load_storage_evidence_artifact(path)
+
+    contradictory = artifact.model_dump(mode="json")
+    contradictory["payload"]["raw_representation_evidence"]["single_new_representation"] = (
+        "CHANGED_FIELDS"
+    )
+    identity = {key: value for key, value in contradictory.items() if key != "artifact_sha256"}
+    contradictory["artifact_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    path.write_text(json.dumps(contradictory), encoding="utf-8")
+    with pytest.raises(ValueError, match="pre-marker representation evidence is contradictory"):
+        load_storage_evidence_artifact(path)
 
 
 def test_storage_comparison_proves_changed_field_rows_and_exposes_rollback_rows() -> None:
@@ -414,6 +462,120 @@ def test_storage_comparison_reports_representative_measurement_gate() -> None:
     extrapolation = comparison["observed_rate_extrapolation"]
     assert isinstance(extrapolation, dict)
     assert extrapolation["representative_thresholds_satisfied"] is True
+
+
+def test_storage_contrast_is_release_bound_and_keeps_operator_review_explicit(
+    tmp_path: Path,
+) -> None:
+    baseline_before_measurement = _measurement()
+    baseline_after_measurement = replace(
+        baseline_before_measurement,
+        observed_at=NOW + timedelta(hours=7),
+        database_bytes=200_010_000,
+        raw_message_count=100_100,
+        canonical_event_count=100_100,
+        relations=(
+            RelationStorage("canonical", "events", 100_100, 40_001_000, 20_000_800, 70_002_000),
+            RelationStorage("raw", "market_messages", 100_100, 50_000_500, 20_000_400, 80_001_000),
+        ),
+    )
+    baseline = build_storage_comparison_artifact(
+        _snapshot(baseline_before_measurement),
+        _snapshot(baseline_after_measurement),
+    )
+
+    candidate_before_measurement = replace(
+        _coded_measurement(
+            observed_at=NOW + timedelta(hours=8),
+            legacy_rows=100_100,
+            changed_field_rows=0,
+        ),
+        database_bytes=200_010_000,
+        relations=baseline_after_measurement.relations,
+    )
+    candidate_after_measurement = replace(
+        _coded_measurement(
+            observed_at=NOW + timedelta(hours=15),
+            legacy_rows=100_100,
+            changed_field_rows=100_000,
+        ),
+        database_bytes=350_010_000,
+        relations=(
+            RelationStorage("canonical", "events", 200_100, 80_001_000, 40_000_800, 140_002_000),
+            RelationStorage("raw", "market_messages", 200_100, 68_000_500, 26_000_400, 110_001_000),
+        ),
+    )
+    candidate_image = "syd.ocir.io/example/qtrad@sha256:" + "c" * 64
+    candidate = build_storage_comparison_artifact(
+        _snapshot(candidate_before_measurement, application_image=candidate_image),
+        _snapshot(candidate_after_measurement, application_image=candidate_image),
+    )
+
+    contrast = build_storage_contrast_artifact(baseline, candidate)
+    contrast_path = tmp_path / "contrast.json"
+    write_storage_evidence_artifact(contrast_path, contrast)
+
+    assert contrast.artifact_kind == "STORAGE_CONTRAST"
+    assert load_storage_evidence_artifact(contrast_path) == contrast
+    assert contrast.payload["automated_thresholds_satisfied"] is True
+    assert contrast.payload["operator_active_market_reviews_required"] is True
+    assert contrast.payload["storage_decision_accepted"] is False
+    assert contrast.payload["baseline_new_representation"] == "PRE_MARKER_SCHEMA"
+    assert contrast.payload["candidate_new_representation"] == "CHANGED_FIELDS"
+    bytes_per_raw = contrast.payload["bytes_per_raw_message"]
+    assert isinstance(bytes_per_raw, dict)
+    assert bytes_per_raw["raw_relation"] == {
+        "baseline": "800.000",
+        "candidate": "300.000",
+        "candidate_change": "-500.000",
+        "candidate_reduction_percent": "62.500",
+    }
+    assert bytes_per_raw["raw_and_canonical_relations"] == {
+        "baseline": "1500.000",
+        "candidate": "1000.000",
+        "candidate_change": "-500.000",
+        "candidate_reduction_percent": "33.333",
+    }
+
+    same_image_candidate = build_storage_comparison_artifact(
+        _snapshot(candidate_before_measurement),
+        _snapshot(candidate_after_measurement),
+    )
+    with pytest.raises(ValueError, match="distinct immutable application images"):
+        build_storage_contrast_artifact(baseline, same_image_candidate)
+
+    short_candidate = build_storage_comparison_artifact(
+        _snapshot(candidate_before_measurement, application_image=candidate_image),
+        _snapshot(
+            replace(
+                candidate_after_measurement,
+                observed_at=NOW + timedelta(hours=9),
+            ),
+            application_image=candidate_image,
+        ),
+    )
+    with pytest.raises(ValueError, match="candidate storage comparison did not pass"):
+        build_storage_contrast_artifact(baseline, short_candidate)
+
+    rollback_after = replace(
+        candidate_after_measurement,
+        raw_payload_representation_counts=(
+            RawPayloadRepresentationCount(
+                RawPayloadRepresentation.LEGACY_UNCLASSIFIED,
+                100_101,
+            ),
+            RawPayloadRepresentationCount(
+                RawPayloadRepresentation.CHANGED_FIELDS,
+                99_999,
+            ),
+        ),
+    )
+    rollback_candidate = build_storage_comparison_artifact(
+        _snapshot(candidate_before_measurement, application_image=candidate_image),
+        _snapshot(rollback_after, application_image=candidate_image),
+    )
+    with pytest.raises(ValueError, match="non-changed-field raw rows"):
+        build_storage_contrast_artifact(baseline, rollback_candidate)
 
 
 def test_storage_snapshot_allows_schema_scoped_index_names_and_bounds_input(

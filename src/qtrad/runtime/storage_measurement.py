@@ -3,7 +3,7 @@
 import hashlib
 import json
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Literal
 
@@ -74,6 +74,13 @@ class StorageSnapshot(_StrictModel):
     indexes: tuple[IndexStorageEvidence, ...]
     raw_payload_sample: PayloadSampleEvidence
     canonical_payload_sample: PayloadSampleEvidence
+
+
+class StorageEvidenceArtifact(_StrictModel):
+    artifact_schema_version: Literal[1]
+    artifact_kind: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"]
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    payload: dict[str, JsonValue]
 
 
 def build_storage_snapshot(
@@ -168,6 +175,120 @@ def load_storage_snapshot(path: Path) -> StorageSnapshot:
     snapshot = StorageSnapshot.model_validate_json(encoded)
     _validate_snapshot(snapshot)
     return snapshot
+
+
+def build_storage_comparison_artifact(
+    before: StorageSnapshot,
+    after: StorageSnapshot,
+) -> StorageEvidenceArtifact:
+    return _build_storage_evidence_artifact(
+        "STORAGE_COMPARISON",
+        compare_storage_snapshots(before, after),
+    )
+
+
+def write_storage_evidence_artifact(path: Path, artifact: StorageEvidenceArtifact) -> None:
+    _validate_storage_evidence_artifact(artifact)
+    if not path.parent.is_dir():
+        raise FileNotFoundError(f"storage evidence output directory does not exist: {path.parent}")
+    encoded = json.dumps(artifact.model_dump(mode="json"), indent=2, sort_keys=True) + "\n"
+    if len(encoded.encode("utf-8")) > _MAX_SNAPSHOT_BYTES:
+        raise ValueError("storage evidence artifact exceeds the maximum encoded size")
+    with path.open("x", encoding="utf-8") as output:
+        output.write(encoded)
+
+
+def load_storage_evidence_artifact(path: Path) -> StorageEvidenceArtifact:
+    encoded = path.read_bytes()
+    if len(encoded) > _MAX_SNAPSHOT_BYTES:
+        raise ValueError("storage evidence artifact exceeds the maximum encoded size")
+    artifact = StorageEvidenceArtifact.model_validate_json(encoded)
+    _validate_storage_evidence_artifact(artifact)
+    return artifact
+
+
+def build_storage_contrast_artifact(
+    baseline: StorageEvidenceArtifact,
+    candidate: StorageEvidenceArtifact,
+) -> StorageEvidenceArtifact:
+    _require_artifact_kind(baseline, "STORAGE_COMPARISON")
+    _require_artifact_kind(candidate, "STORAGE_COMPARISON")
+    baseline_payload = baseline.payload
+    candidate_payload = candidate.payload
+    _validate_storage_comparison_payload(baseline_payload)
+    _validate_storage_comparison_payload(candidate_payload)
+    for field, description in (
+        ("capture_source_id", "capture source"),
+        ("database_name", "database"),
+        ("universe_name", "capture universe"),
+        ("configuration_hash", "capture configuration"),
+    ):
+        if _required_str(baseline_payload, field) != _required_str(candidate_payload, field):
+            raise ValueError(f"storage comparison artifacts have different {description}s")
+    baseline_image = _required_str(baseline_payload, "application_image")
+    candidate_image = _required_str(candidate_payload, "application_image")
+    _require_immutable_image(baseline_image, "baseline application image")
+    _require_immutable_image(candidate_image, "candidate application image")
+    if baseline_image == candidate_image:
+        raise ValueError("storage contrast requires distinct immutable application images")
+    if not _representative_thresholds_satisfied(baseline_payload):
+        raise ValueError("baseline storage comparison did not pass automated thresholds")
+    if not _representative_thresholds_satisfied(candidate_payload):
+        raise ValueError("candidate storage comparison did not pass automated thresholds")
+
+    baseline_representation = _required_dict(baseline_payload, "raw_representation_evidence")
+    candidate_representation = _required_dict(candidate_payload, "raw_representation_evidence")
+    baseline_single = _required_optional_str(baseline_representation, "single_new_representation")
+    if baseline_single not in {
+        "PRE_MARKER_SCHEMA",
+        RawPayloadRepresentation.LEGACY_UNCLASSIFIED.name,
+        RawPayloadRepresentation.MERGED_STATE.name,
+    }:
+        raise ValueError("baseline storage comparison is not a merged-state capture epoch")
+    if _required_str(candidate_representation, "status") != "CODED":
+        raise ValueError("candidate storage comparison lacks coded representation evidence")
+    if not _required_bool(candidate_representation, "all_new_rows_changed_fields"):
+        raise ValueError("candidate storage comparison contains non-changed-field raw rows")
+    if _required_int(candidate_representation, "legacy_unclassified_rows_delta") != 0:
+        raise ValueError("candidate storage comparison contains legacy-unclassified raw rows")
+
+    baseline_bytes = _required_dict(baseline_payload, "bytes_per_raw_message")
+    candidate_bytes = _required_dict(candidate_payload, "bytes_per_raw_message")
+    byte_contrast: dict[str, JsonValue] = {}
+    for field in ("raw_relation", "canonical_relation", "raw_and_canonical_relations", "database"):
+        baseline_value = _required_decimal(baseline_bytes, field)
+        candidate_value = _required_decimal(candidate_bytes, field)
+        change = candidate_value - baseline_value
+        reduction = baseline_value - candidate_value
+        byte_contrast[field] = {
+            "baseline": _decimal_text(baseline_value),
+            "candidate": _decimal_text(candidate_value),
+            "candidate_change": _decimal_text(change),
+            "candidate_reduction_percent": (
+                None
+                if baseline_value <= 0
+                else _decimal_text(reduction * Decimal(100) / baseline_value)
+            ),
+        }
+
+    payload: dict[str, JsonValue] = {
+        "schema_version": 1,
+        "capture_source_id": _required_str(baseline_payload, "capture_source_id"),
+        "database_name": _required_str(baseline_payload, "database_name"),
+        "universe_name": _required_str(baseline_payload, "universe_name"),
+        "configuration_hash": _required_str(baseline_payload, "configuration_hash"),
+        "baseline_comparison_sha256": baseline.artifact_sha256,
+        "candidate_comparison_sha256": candidate.artifact_sha256,
+        "baseline_application_image": baseline_image,
+        "candidate_application_image": candidate_image,
+        "baseline_new_representation": baseline_single,
+        "candidate_new_representation": RawPayloadRepresentation.CHANGED_FIELDS.name,
+        "automated_thresholds_satisfied": True,
+        "operator_active_market_reviews_required": True,
+        "storage_decision_accepted": False,
+        "bytes_per_raw_message": byte_contrast,
+    }
+    return _build_storage_evidence_artifact("STORAGE_CONTRAST", payload)
 
 
 def compare_storage_snapshots(
@@ -277,6 +398,12 @@ def compare_storage_snapshots(
         "schema_version": 2,
         "capture_source_id": before.capture_source_id,
         "database_name": before.database_name,
+        "universe_name": before.universe_name,
+        "configuration_hash": before.configuration_hash,
+        "application_version": before.application_version,
+        "application_image": before.application_image,
+        "before_snapshot_schema_version": before.schema_version,
+        "after_snapshot_schema_version": after.schema_version,
         "before_snapshot_sha256": before.snapshot_sha256,
         "after_snapshot_sha256": after.snapshot_sha256,
         "before_observed_at": _utc_text(before.observed_at),
@@ -370,6 +497,263 @@ def compare_storage_snapshots(
         "before_payload_samples": _sample_summary(before),
         "after_payload_samples": _sample_summary(after),
     }
+
+
+def _build_storage_evidence_artifact(
+    artifact_kind: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"],
+    payload: dict[str, JsonValue],
+) -> StorageEvidenceArtifact:
+    identity: dict[str, JsonValue] = {
+        "artifact_schema_version": 1,
+        "artifact_kind": artifact_kind,
+        "payload": payload,
+    }
+    artifact = StorageEvidenceArtifact(
+        artifact_schema_version=1,
+        artifact_kind=artifact_kind,
+        artifact_sha256=_sha256_json(identity),
+        payload=payload,
+    )
+    _validate_storage_evidence_artifact(artifact)
+    return artifact
+
+
+def _validate_storage_evidence_artifact(artifact: StorageEvidenceArtifact) -> None:
+    identity: dict[str, JsonValue] = {
+        "artifact_schema_version": artifact.artifact_schema_version,
+        "artifact_kind": artifact.artifact_kind,
+        "payload": artifact.payload,
+    }
+    if _sha256_json(identity) != artifact.artifact_sha256:
+        raise ValueError("storage evidence artifact hash does not match its canonical content")
+    if artifact.artifact_kind == "STORAGE_COMPARISON":
+        _validate_storage_comparison_payload(artifact.payload)
+    else:
+        _validate_storage_contrast_payload(artifact.payload)
+
+
+def _validate_storage_comparison_payload(payload: dict[str, JsonValue]) -> None:
+    if _required_int(payload, "schema_version") != 2:
+        raise ValueError("storage comparison schema version is unsupported")
+    for field in (
+        "capture_source_id",
+        "database_name",
+        "universe_name",
+        "application_version",
+        "application_image",
+    ):
+        _required_str(payload, field)
+    for field in (
+        "configuration_hash",
+        "before_snapshot_sha256",
+        "after_snapshot_sha256",
+    ):
+        _required_sha256(payload, field)
+    if _required_int(payload, "raw_messages_delta") <= 0:
+        raise ValueError("storage comparison raw-message delta must be positive")
+    gate = _required_dict(payload, "measurement_gate")
+    _required_bool(gate, "representative_thresholds_satisfied")
+    if not _required_bool(gate, "operator_active_market_review_required"):
+        raise ValueError("storage comparison must retain the operator-review requirement")
+    representation = _required_dict(payload, "raw_representation_evidence")
+    _validate_representation_evidence_payload(
+        representation,
+        raw_delta=_required_int(payload, "raw_messages_delta"),
+    )
+    bytes_per_raw = _required_dict(payload, "bytes_per_raw_message")
+    for field in ("raw_relation", "canonical_relation", "raw_and_canonical_relations", "database"):
+        _required_decimal(bytes_per_raw, field)
+
+
+def _validate_representation_evidence_payload(
+    representation: dict[str, JsonValue],
+    *,
+    raw_delta: int,
+) -> None:
+    usable = _required_bool(representation, "usable")
+    status = _required_str(representation, "status")
+    single = _required_optional_str(representation, "single_new_representation")
+    all_changed = representation["all_new_rows_changed_fields"]
+    legacy_delta = representation["legacy_unclassified_rows_delta"]
+    new_rows = representation["new_rows_by_representation"]
+    if status == "UNAVAILABLE_IN_LEGACY_SNAPSHOT":
+        if usable or any(
+            value is not None for value in (single, all_changed, legacy_delta, new_rows)
+        ):
+            raise ValueError("legacy snapshot representation evidence is contradictory")
+        return
+    if status == "PRE_MARKER_SCHEMA":
+        if (
+            not usable
+            or single != "PRE_MARKER_SCHEMA"
+            or all_changed is not None
+            or legacy_delta is not None
+            or new_rows != {"PRE_MARKER_SCHEMA": raw_delta}
+        ):
+            raise ValueError("pre-marker representation evidence is contradictory")
+        return
+    if status != "CODED" or not usable:
+        raise ValueError("coded representation evidence has an unsupported status")
+    if not isinstance(all_changed, bool):
+        raise TypeError("coded representation all-changed-field evidence is not a boolean")
+    if not isinstance(legacy_delta, int) or isinstance(legacy_delta, bool) or legacy_delta < 0:
+        raise TypeError("coded legacy-unclassified row delta is not a non-negative integer")
+    if not isinstance(new_rows, dict):
+        raise TypeError("coded new-row representation evidence is not an object")
+    allowed = {code.name for code in RawPayloadRepresentation}
+    counts: dict[str, int] = {}
+    for name, value in new_rows.items():
+        if name not in allowed:
+            raise ValueError("coded new-row representation evidence has an unknown code name")
+        if not isinstance(value, int) or isinstance(value, bool) or value <= 0:
+            raise TypeError("coded new-row representation count is not a positive integer")
+        counts[name] = value
+    if sum(counts.values()) != raw_delta:
+        raise ValueError("coded new-row representation counts do not match raw-message delta")
+    expected_single = next(iter(counts)) if len(counts) == 1 else None
+    if single != expected_single:
+        raise ValueError("coded single-representation evidence is contradictory")
+    expected_legacy = counts.get(RawPayloadRepresentation.LEGACY_UNCLASSIFIED.name, 0)
+    if legacy_delta != expected_legacy:
+        raise ValueError("coded legacy-unclassified evidence is contradictory")
+    expected_all_changed = counts == {RawPayloadRepresentation.CHANGED_FIELDS.name: raw_delta}
+    if all_changed != expected_all_changed:
+        raise ValueError("coded all-changed-field evidence is contradictory")
+
+
+def _validate_storage_contrast_payload(payload: dict[str, JsonValue]) -> None:
+    if _required_int(payload, "schema_version") != 1:
+        raise ValueError("storage contrast schema version is unsupported")
+    for field in (
+        "capture_source_id",
+        "database_name",
+        "universe_name",
+        "baseline_application_image",
+        "candidate_application_image",
+        "baseline_new_representation",
+        "candidate_new_representation",
+    ):
+        _required_str(payload, field)
+    baseline_image = _required_str(payload, "baseline_application_image")
+    candidate_image = _required_str(payload, "candidate_application_image")
+    _require_immutable_image(baseline_image, "baseline application image")
+    _require_immutable_image(candidate_image, "candidate application image")
+    if baseline_image == candidate_image:
+        raise ValueError("storage contrast must retain distinct application images")
+    if _required_str(payload, "candidate_new_representation") != (
+        RawPayloadRepresentation.CHANGED_FIELDS.name
+    ):
+        raise ValueError("storage contrast candidate representation must be changed fields")
+    for field in (
+        "configuration_hash",
+        "baseline_comparison_sha256",
+        "candidate_comparison_sha256",
+    ):
+        _required_sha256(payload, field)
+    if payload["baseline_comparison_sha256"] == payload["candidate_comparison_sha256"]:
+        raise ValueError("storage contrast must reference distinct comparison artifacts")
+    if not _required_bool(payload, "automated_thresholds_satisfied"):
+        raise ValueError("storage contrast must retain passed automated thresholds")
+    if not _required_bool(payload, "operator_active_market_reviews_required"):
+        raise ValueError("storage contrast must retain the operator-review requirement")
+    if _required_bool(payload, "storage_decision_accepted"):
+        raise ValueError("storage contrast cannot accept a storage decision")
+    byte_contrast = _required_dict(payload, "bytes_per_raw_message")
+    for field in ("raw_relation", "canonical_relation", "raw_and_canonical_relations", "database"):
+        row = _required_dict(byte_contrast, field)
+        for value_field in ("baseline", "candidate", "candidate_change"):
+            _required_decimal(row, value_field)
+        reduction = row["candidate_reduction_percent"]
+        if reduction is not None:
+            _decimal_value(reduction, f"{field}.candidate_reduction_percent")
+
+
+def _require_artifact_kind(
+    artifact: StorageEvidenceArtifact,
+    expected: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"],
+) -> None:
+    _validate_storage_evidence_artifact(artifact)
+    if artifact.artifact_kind != expected:
+        raise ValueError(f"expected {expected} storage evidence artifact")
+
+
+def _representative_thresholds_satisfied(payload: dict[str, JsonValue]) -> bool:
+    return _required_bool(
+        _required_dict(payload, "measurement_gate"),
+        "representative_thresholds_satisfied",
+    )
+
+
+def _required_dict(value: dict[str, JsonValue], field: str) -> dict[str, JsonValue]:
+    item = value[field]
+    if not isinstance(item, dict):
+        raise TypeError(f"storage evidence {field} is not an object")
+    return item
+
+
+def _required_str(value: dict[str, JsonValue], field: str) -> str:
+    item = value[field]
+    if not isinstance(item, str) or not item:
+        raise TypeError(f"storage evidence {field} is not a non-empty string")
+    return item
+
+
+def _required_optional_str(value: dict[str, JsonValue], field: str) -> str | None:
+    item = value[field]
+    if item is None:
+        return None
+    if not isinstance(item, str) or not item:
+        raise TypeError(f"storage evidence {field} is not a non-empty string or null")
+    return item
+
+
+def _required_int(value: dict[str, JsonValue], field: str) -> int:
+    item = value[field]
+    if not isinstance(item, int) or isinstance(item, bool):
+        raise TypeError(f"storage evidence {field} is not an integer")
+    return item
+
+
+def _required_bool(value: dict[str, JsonValue], field: str) -> bool:
+    item = value[field]
+    if not isinstance(item, bool):
+        raise TypeError(f"storage evidence {field} is not a boolean")
+    return item
+
+
+def _required_sha256(value: dict[str, JsonValue], field: str) -> str:
+    item = _required_str(value, field)
+    if len(item) != 64 or any(character not in "0123456789abcdef" for character in item):
+        raise ValueError(f"storage evidence {field} is not lower-case SHA-256")
+    return item
+
+
+def _require_immutable_image(value: str, field: str) -> None:
+    repository, separator, digest = value.rpartition("@sha256:")
+    if not separator or not repository:
+        raise ValueError(f"storage evidence {field} is not pinned by digest")
+    if len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        raise ValueError(f"storage evidence {field} has an invalid image digest")
+
+
+def _required_decimal(value: dict[str, JsonValue], field: str) -> Decimal:
+    return _decimal_value(value[field], field)
+
+
+def _decimal_value(value: JsonValue, field: str) -> Decimal:
+    if not isinstance(value, str):
+        raise TypeError(f"storage evidence {field} is not a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise ValueError(f"storage evidence {field} is not a decimal string") from error
+    if not parsed.is_finite():
+        raise ValueError(f"storage evidence {field} is not finite")
+    return parsed
+
+
+def _decimal_text(value: Decimal) -> str:
+    return format(value, ".3f")
 
 
 def _validate_snapshot(snapshot: StorageSnapshot) -> None:

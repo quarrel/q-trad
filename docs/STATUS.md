@@ -442,6 +442,12 @@ outside the current data-only phase until explicitly admitted by a later plan up
   active collector and its qualification image remain unchanged. GitHub CI run `29341678396` passed
   the real PostgreSQL representation probe, migration through `0009` and all 255 tests at branch head
   `6a84319`.
+- Storage comparison evidence is now durable locally rather than unhashed stdout. The compare command
+  writes one non-overwriting artifact binding both snapshot hashes and release identity; the new
+  offline contrast command requires distinct digest-pinned images, matching source/configuration,
+  passed automated thresholds and an all-`CHANGED_FIELDS` candidate before calculating mechanical
+  per-message changes. Contrast explicitly leaves both active-market reviews required and records no
+  accepted storage decision. The collector remains unchanged; isolated CI verification is pending.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation

@@ -176,9 +176,44 @@ def test_storage_comparison_dispatches_without_database_access(
     operation = Mock()
     monkeypatch.setattr(cli, "_compare_storage_snapshots", operation)
 
-    cli.main(["storage", "compare", "before.json", "after.json"])
+    cli.main(
+        [
+            "storage",
+            "compare",
+            "--output",
+            "comparison.json",
+            "before.json",
+            "after.json",
+        ]
+    )
 
-    operation.assert_called_once_with(Path("before.json"), Path("after.json"))
+    operation.assert_called_once_with(
+        Path("before.json"), Path("after.json"), Path("comparison.json")
+    )
+
+
+def test_storage_contrast_dispatches_without_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_contrast_storage_comparisons", operation)
+
+    cli.main(
+        [
+            "storage",
+            "contrast",
+            "--output",
+            "contrast.json",
+            "baseline.json",
+            "candidate.json",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        Path("baseline.json"), Path("candidate.json"), Path("contrast.json")
+    )
 
 
 def test_database_upgrade_dispatches_migration_and_seed(

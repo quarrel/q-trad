@@ -29,10 +29,16 @@ and PostgreSQL's physical sizes need comparable observations over a non-trivial 
   payload samples. The evidence binds capture source, universe/configuration and application
   identity, is hash verified, size bounded and cannot overwrite an existing file.
 - Provide an offline `storage compare` command. It requires chronological observations from the
-  same capture source and database and reports physical byte deltas per newly persisted raw
-  message. Relation-level measurements, not a JSON example, are the primary comparison.
+  same capture source and database and writes a bounded, non-overwriting, self-hashed artifact with
+  the snapshot and release identity plus physical byte deltas per newly persisted raw message.
+  Relation-level measurements, not a JSON example, are the primary comparison.
 - Evolve snapshot evidence compatibly: version 2 adds JSONB-versus-JSON-text sample sizes and
-  per-index growth/scan deltas while the loader continues to verify version-one hashes.
+  per-index growth/scan deltas, while version 3 adds pre-marker/coded schema identity and exact raw
+  representation counts. The loader continues to verify version-one and version-two hashes.
+- Compare separately accepted merged-state and changed-field artifacts only through offline
+  `storage contrast`. It requires matching source/configuration, distinct digest-pinned images,
+  passed automated thresholds and an all-changed-fields candidate. Contrast reports mechanical
+  per-message change but cannot accept the storage decision or satisfy active-market review.
 - Take measurements far enough apart to exceed PostgreSQL allocation noise. Treat whole-database
   growth as contextual because unrelated maintenance and relations may contribute.
 

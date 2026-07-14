@@ -132,6 +132,12 @@ Implementation status:
   all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
   and rejects a representation-schema transition. GitHub CI run `29341678396` passed every static and
   shell gate, the real PostgreSQL representation probe and all 255 tests at branch head `6a84319`.
+- Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
+  self-hashed release artifact retaining its snapshot and image identity. Offline `storage contrast`
+  accepts only verified same-source/configuration artifacts from distinct immutable images, requires
+  a merged-state baseline, all-`CHANGED_FIELDS` candidate and passed automated thresholds, and reports
+  mechanical per-message change without claiming the required active-market reviews or accepting a
+  storage decision. Isolated CI verification is pending.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
@@ -319,6 +325,9 @@ python -m qtrad backfill execute --plan-hash SHA256
 python -m qtrad research export --universe PATH --start UTC --end UTC
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
+python -m qtrad storage snapshot --universe PATH --output PATH
+python -m qtrad storage compare --output PATH BEFORE AFTER
+python -m qtrad storage contrast --output PATH BASELINE_COMPARISON CANDIDATE_COMPARISON
 python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...
 python -m qtrad feed probe --endpoint http://127.0.0.1:PORT --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH
 python -m qtrad api

@@ -199,16 +199,20 @@ uv run qtrad storage snapshot \
   --universe config/capture-v1.toml \
   --output tmp/storage-after.json
 
-uv run qtrad storage compare tmp/storage-before.json tmp/storage-after.json
+uv run qtrad storage compare \
+  --output tmp/storage-comparison.json \
+  tmp/storage-before.json \
+  tmp/storage-after.json
 ```
 
-The snapshot transaction is read-only. The comparison reports whole-database, raw relation and
-canonical relation bytes per new raw message; the relation figures are more useful than serialized
-JSON length alone. Do not run the changed-field candidate on the collector during its frozen
-qualification window.
+The snapshot transaction is read-only. The comparison writes a non-overwriting, self-hashed artifact
+reporting whole-database, raw relation and canonical relation bytes per new raw message; the relation
+figures are more useful than serialized JSON length alone. Do not run the changed-field candidate on
+the collector during its frozen qualification window.
 
-Snapshot version 2 also compares JSONB with PostgreSQL's JSON text rendering and reports per-index
-growth and scan deltas. The evidence thresholds and schema candidates are recorded in the
+Snapshot version 3 remains compatible with versions 1 and 2. It compares JSONB with PostgreSQL's JSON
+text rendering, reports per-index growth/scan deltas and binds raw representation counts. The
+evidence thresholds and schema candidates are recorded in the
 [capture storage audit](docs/CAPTURE_STORAGE_AUDIT.md); no index or retention constraint is removed
 automatically.
 

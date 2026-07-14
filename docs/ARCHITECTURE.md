@@ -197,6 +197,14 @@ Comparison rejects source, database, universe, configuration, application-versio
 drift. Its machine-readable evidence gate requires both the minimum elapsed interval and raw-message
 volume, invalidates index usage across a statistics reset and retains an explicit active-market
 operator-review requirement.
+
+`storage compare` writes a bounded, non-overwriting, self-hashed comparison artifact rather than
+ephemeral stdout. The artifact retains both snapshot hashes and the exact application image/version
+that the comparison checked. `storage contrast` accepts two verified comparison artifacts from the
+same source/database/universe/configuration but requires distinct digest-pinned images, a merged-state
+baseline, an all-changed-fields candidate and both automated representative thresholds. It reports
+mechanical per-message changes and percentages in another self-hashed artifact. It cannot record an
+accepted storage decision: active-market reviews remain explicit external evidence.
 The same comparison emits explicitly mechanical observed-rate extrapolations for combined raw and
 canonical relation growth over one, 30 and 365 days. They are capacity-planning scenarios rather
 than forecasts and do not include database-wide or backup growth.
@@ -235,7 +243,8 @@ boundary.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
   its candidate cursor.
 - `storage snapshot` writes non-overwriting, release-bound physical storage evidence;
-  `storage compare` verifies and compares two saved observations without database access.
+  `storage compare` writes a verified same-release artifact and `storage contrast` compares two
+  verified release artifacts without database access or accepting a decision.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

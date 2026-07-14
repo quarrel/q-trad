@@ -463,8 +463,11 @@ sudo env \
 ```
 
 Repeat the helper with `pinned-after` after a representative interval. Copy both evidence files to
-an operator workstation and run `uv run qtrad storage compare BEFORE AFTER`; comparison is offline
-and requires no collector credentials. The helper verifies that the reviewed image is already local
+an operator workstation and run
+`uv run qtrad storage compare --output PINNED_COMPARISON BEFORE AFTER`; comparison is offline,
+non-overwriting and requires no collector credentials. It writes a self-hashed comparison artifact
+which retains the exact snapshot hashes and application image/version. The helper verifies that the
+reviewed image is already local
 and shell interpolation overrides the deployment environment's `QTRAD_IMAGE` only for this command.
 `run --no-deps` does not recreate `db`, `ingest` or `api`; the candidate command opens one bounded
 read-only transaction and exits. The snapshot records exact raw/canonical counts from one
@@ -488,6 +491,22 @@ establish representative market activity by themselves.
 For the later changed-field candidate, also require `raw_representation_evidence.status` to be
 `CODED`, `all_new_rows_changed_fields` to be true and `legacy_unclassified_rows_delta` to be zero.
 Any other result means the measured interval does not prove an uninterrupted changed-field writer.
+
+After both release-bound comparison artifacts pass their automated thresholds, run:
+
+```bash
+uv run qtrad storage contrast \
+  --output merged-vs-changed.json \
+  pinned-comparison.json \
+  changed-field-comparison.json
+```
+
+Contrast requires the same capture source, database, universe and configuration; distinct
+digest-pinned images; a merged/pre-marker baseline; and a coded all-`CHANGED_FIELDS` candidate with
+no new `LEGACY_UNCLASSIFIED` rows. It reports mechanical changes in database, raw, canonical and
+combined bytes per raw message. The artifact deliberately records
+`storage_decision_accepted=false` and keeps both active-market reviews required; the command cannot
+turn automated thresholds into an operator decision.
 
 `observed_rate_extrapolation` reports the interval's raw/canonical rates and the combined capture
 relation bytes implied over one, 30 and 365 days if that exact rate continued. Treat it as a storage

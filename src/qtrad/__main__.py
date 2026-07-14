@@ -61,9 +61,12 @@ from qtrad.runtime.research_snapshot import (
 )
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.storage_measurement import (
+    build_storage_comparison_artifact,
+    build_storage_contrast_artifact,
     build_storage_snapshot,
-    compare_storage_snapshots,
+    load_storage_evidence_artifact,
     load_storage_snapshot,
+    write_storage_evidence_artifact,
     write_storage_snapshot,
 )
 from qtrad.runtime.universe import (
@@ -180,10 +183,17 @@ def build_parser() -> argparse.ArgumentParser:
     storage_snapshot.add_argument("--universe", type=Path, required=True)
     storage_snapshot.add_argument("--output", type=Path, required=True)
     storage_compare = storage_sub.add_parser(
-        "compare", help="compare two storage observations without database access"
+        "compare", help="write a hash-verified comparison of two storage observations"
     )
+    storage_compare.add_argument("--output", type=Path, required=True)
     storage_compare.add_argument("before", type=Path)
     storage_compare.add_argument("after", type=Path)
+    storage_contrast = storage_sub.add_parser(
+        "contrast", help="contrast two release-bound storage comparisons without database access"
+    )
+    storage_contrast.add_argument("--output", type=Path, required=True)
+    storage_contrast.add_argument("baseline", type=Path)
+    storage_contrast.add_argument("candidate", type=Path)
 
     feed = subparsers.add_parser("feed", help="capture-feed contract operations")
     feed_sub = feed.add_subparsers(dest="feed_command", required=True)
@@ -294,7 +304,9 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         )
     elif args.command == "storage" and args.storage_command == "compare":
-        _compare_storage_snapshots(args.before, args.after)
+        _compare_storage_snapshots(args.before, args.after, args.output)
+    elif args.command == "storage" and args.storage_command == "contrast":
+        _contrast_storage_comparisons(args.baseline, args.candidate, args.output)
     elif args.command == "feed" and args.feed_command == "verify":
         _verify_capture_feed_pages(
             source_id=args.source_id,
@@ -990,12 +1002,44 @@ async def _storage_snapshot(
         await engine.dispose()
 
 
-def _compare_storage_snapshots(before_path: Path, after_path: Path) -> None:
-    comparison = compare_storage_snapshots(
+def _compare_storage_snapshots(before_path: Path, after_path: Path, output_path: Path) -> None:
+    artifact = build_storage_comparison_artifact(
         load_storage_snapshot(before_path),
         load_storage_snapshot(after_path),
     )
-    print(json.dumps(comparison, sort_keys=True))
+    write_storage_evidence_artifact(output_path, artifact)
+    print(
+        json.dumps(
+            {
+                "artifact_kind": artifact.artifact_kind,
+                "artifact_sha256": artifact.artifact_sha256,
+                "output": str(output_path),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _contrast_storage_comparisons(
+    baseline_path: Path,
+    candidate_path: Path,
+    output_path: Path,
+) -> None:
+    artifact = build_storage_contrast_artifact(
+        load_storage_evidence_artifact(baseline_path),
+        load_storage_evidence_artifact(candidate_path),
+    )
+    write_storage_evidence_artifact(output_path, artifact)
+    print(
+        json.dumps(
+            {
+                "artifact_kind": artifact.artifact_kind,
+                "artifact_sha256": artifact.artifact_sha256,
+                "output": str(output_path),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _export(
