@@ -1,5 +1,6 @@
 import json
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -55,6 +56,19 @@ async def test_parquet_manifest_round_trip_is_content_addressed_and_non_overwrit
     assert semantic_bar_hash(
         tuple(await store.read_bars(manifest.manifest_id))
     ) == semantic_bar_hash(bars)
+
+    next_day = replace(
+        sample_bar(),
+        interval_start=sample_bar().interval_start + timedelta(days=1),
+        interval_end=sample_bar().interval_end + timedelta(days=1),
+    )
+    expanded = await store.write_bars(
+        (sample_bar(), next_day),
+        universe_name="research-fixture",
+        configuration_hash="a" * 64,
+        metadata={"gap_count": 0},
+    )
+    assert set(manifest.files) < set(expanded.files)
 
 
 @pytest.mark.asyncio

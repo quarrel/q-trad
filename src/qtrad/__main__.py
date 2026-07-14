@@ -143,7 +143,9 @@ def build_parser() -> argparse.ArgumentParser:
     research_export = research_sub.add_parser(
         "export", help="export latest bar revisions to an immutable Parquet manifest"
     )
-    research_export.add_argument("--universe", type=Path)
+    research_export.add_argument("--universe", type=Path, required=True)
+    research_export.add_argument("--start", type=_utc_minute_argument, required=True)
+    research_export.add_argument("--end", type=_utc_minute_argument, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -238,7 +240,15 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif args.command == "backfill" and args.backfill_command == "execute":
         asyncio.run(_execute_backfill(settings, clock, plan_hash=args.plan_hash))
     elif args.command == "research" and args.research_command == "export":
-        asyncio.run(_export(settings, clock, universe_path=args.universe))
+        asyncio.run(
+            _export(
+                settings,
+                clock,
+                universe_path=args.universe,
+                start=args.start,
+                end=args.end,
+            )
+        )
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -881,12 +891,16 @@ async def _export(
     settings: Settings,
     clock: Clock,
     *,
-    universe_path: Path | None,
+    universe_path: Path,
+    start: datetime,
+    end: datetime,
 ) -> None:
+    if end <= start:
+        raise ValueError("research export end must follow start")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     research = ParquetResearchStore(settings.research_root, clock)
-    universe = load_capture_universe(universe_path or settings.capture_universe_path)
+    universe = load_capture_universe(universe_path)
     instrument_ids = tuple(str(instrument.instrument_id) for instrument in universe.instruments)
     encoded_instruments = json.dumps(instrument_ids)
     run_id = await store.start_run(
@@ -904,14 +918,20 @@ async def _export(
                     source_provider, source_environment, source_external_id
                 )
                     * FROM read_model.market_bars
-                WHERE instrument_id IN (
-                    SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
-                )
+                  WHERE instrument_id IN (
+                      SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                  )
+                    AND interval_start >= :interval_start
+                    AND interval_end <= :interval_end
                 ORDER BY instrument_id, basis, interval_start, provenance,
                          source_provider, source_environment, source_external_id,
                          revision DESC
             """,
-            {"instrument_ids": encoded_instruments},
+            {
+                "instrument_ids": encoded_instruments,
+                "interval_start": start,
+                "interval_end": end,
+            },
         )
         bars = tuple(_bar_from_projection(row) for row in rows)
         live_gaps = await store.query(
@@ -919,12 +939,18 @@ async def _export(
             SELECT gap_id, instrument_id, interval_start, interval_end, reason,
                    detected_at, repaired_at
             FROM read_model.data_gaps
-            WHERE instrument_id IN (
-                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
-            )
+              WHERE instrument_id IN (
+                  SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+              )
+                AND interval_start < :interval_end
+                AND interval_end > :interval_start
             ORDER BY instrument_id, interval_start, gap_id
             """,
-            {"instrument_ids": encoded_instruments},
+            {
+                "instrument_ids": encoded_instruments,
+                "interval_start": start,
+                "interval_end": end,
+            },
         )
         historical_coverage = await store.query(
             """
@@ -934,17 +960,25 @@ async def _export(
                    detected_at, detected_by_plan_hash, covered_at,
                    covered_by_plan_hash, observed_points
             FROM read_model.historical_coverage_gaps
-            WHERE instrument_id IN (
-                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
-            )
+              WHERE instrument_id IN (
+                  SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+              )
+                AND interval_start < :interval_end
+                AND interval_end > :interval_start
             ORDER BY instrument_id, interval_start, basis, detected_by_plan_hash
             """,
-            {"instrument_ids": encoded_instruments},
+            {
+                "instrument_ids": encoded_instruments,
+                "interval_start": start,
+                "interval_end": end,
+            },
         )
         metadata = research_export_metadata(
             universe_name=universe.name,
             configuration_hash=universe.configuration_hash,
             instrument_ids=tuple(instrument.instrument_id for instrument in universe.instruments),
+            interval_start=start,
+            interval_end=end,
             bars=bars,
             live_gaps=live_gaps,
             historical_coverage=historical_coverage,
@@ -976,7 +1010,11 @@ async def _export(
             run_id,
             status=terminal_status,
             finished_at=clock.now(),
-            detail={"universe_name": universe.name},
+            detail={
+                "universe_name": universe.name,
+                "interval_start": start.isoformat(),
+                "interval_end": end.isoformat(),
+            },
         )
         await engine.dispose()
 

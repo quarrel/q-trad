@@ -18,6 +18,8 @@ def research_export_metadata(
     universe_name: str,
     configuration_hash: str,
     instrument_ids: Sequence[InstrumentId],
+    interval_start: datetime,
+    interval_end: datetime,
     bars: Sequence[MarketBar],
     live_gaps: Sequence[Mapping[str, object]],
     historical_coverage: Sequence[Mapping[str, object]],
@@ -35,9 +37,15 @@ def research_export_metadata(
         character not in "0123456789abcdef" for character in configuration_hash
     ):
         raise ValueError("research export configuration hash must be lower-case SHA-256")
+    interval_start = _datetime(interval_start)
+    interval_end = _datetime(interval_end)
+    if interval_end <= interval_start:
+        raise ValueError("research export interval end must follow its start")
     unexpected_bars = sorted({str(bar.instrument_id) for bar in bars} - expected)
     if unexpected_bars:
         raise ValueError(f"research export contains bars outside its universe: {unexpected_bars}")
+    if any(bar.interval_start < interval_start or bar.interval_end > interval_end for bar in bars):
+        raise ValueError("research export contains bars outside its requested interval")
     if len(live_gaps) > _MAX_GAP_EVIDENCE_ROWS:
         raise ValueError("research export live-gap evidence exceeds its bounded limit")
     if len(historical_coverage) > _MAX_GAP_EVIDENCE_ROWS:
@@ -48,11 +56,14 @@ def research_export_metadata(
         raise ValueError("research export application image identity is required")
 
     live_records = sorted(
-        (_live_gap_row(row, expected) for row in live_gaps),
+        (_live_gap_row(row, expected, interval_start, interval_end) for row in live_gaps),
         key=lambda row: (str(row["instrument_id"]), str(row["interval_start"]), str(row["gap_id"])),
     )
     historical_records = sorted(
-        (_historical_coverage_row(row, expected) for row in historical_coverage),
+        (
+            _historical_coverage_row(row, expected, interval_start, interval_end)
+            for row in historical_coverage
+        ),
         key=lambda row: (
             str(row["instrument_id"]),
             str(row["interval_start"]),
@@ -86,6 +97,10 @@ def research_export_metadata(
         "manifest_contract": "qtrad-research-bars-v2",
         "application_version": application_version,
         "application_image": application_image,
+        "requested_interval": {
+            "start": _utc_text(interval_start),
+            "end": _utc_text(interval_end),
+        },
         "universe": universe,
         "bar_coverage": _bar_coverage(bars),
         "provenance_counts": dict(sorted(provenance_counts.items())),
@@ -121,23 +136,45 @@ def _bar_coverage(bars: Sequence[MarketBar]) -> list[JsonValue]:
     ]
 
 
-def _live_gap_row(row: Mapping[str, object], expected: set[str]) -> dict[str, JsonValue]:
+def _live_gap_row(
+    row: Mapping[str, object],
+    expected: set[str],
+    requested_start: datetime,
+    requested_end: datetime,
+) -> dict[str, JsonValue]:
     instrument_id = str(row["instrument_id"])
     _require_expected_instrument(instrument_id, expected, "live gap")
+    interval_start = _datetime(row["interval_start"])
+    interval_end = _datetime(row["interval_end"])
+    _require_overlap(interval_start, interval_end, requested_start, requested_end, "live gap")
     return {
         "gap_id": str(row["gap_id"]),
         "instrument_id": instrument_id,
-        "interval_start": _utc_text(_datetime(row["interval_start"])),
-        "interval_end": _utc_text(_datetime(row["interval_end"])),
+        "interval_start": _utc_text(interval_start),
+        "interval_end": _utc_text(interval_end),
         "reason": str(row["reason"]),
         "detected_at": _utc_text(_datetime(row["detected_at"])),
         "repaired_at": _optional_time(row["repaired_at"]),
     }
 
 
-def _historical_coverage_row(row: Mapping[str, object], expected: set[str]) -> dict[str, JsonValue]:
+def _historical_coverage_row(
+    row: Mapping[str, object],
+    expected: set[str],
+    requested_start: datetime,
+    requested_end: datetime,
+) -> dict[str, JsonValue]:
     instrument_id = str(row["instrument_id"])
     _require_expected_instrument(instrument_id, expected, "historical coverage")
+    interval_start = _datetime(row["interval_start"])
+    interval_end = _datetime(row["interval_end"])
+    _require_overlap(
+        interval_start,
+        interval_end,
+        requested_start,
+        requested_end,
+        "historical coverage",
+    )
     observed_points = row["observed_points"]
     if observed_points is not None and not isinstance(observed_points, int):
         raise TypeError("historical coverage observed points must be an integer")
@@ -151,8 +188,8 @@ def _historical_coverage_row(row: Mapping[str, object], expected: set[str]) -> d
         "provenance": str(row["provenance"]),
         "basis": str(row["basis"]),
         "resolution": str(row["resolution"]),
-        "interval_start": _utc_text(_datetime(row["interval_start"])),
-        "interval_end": _utc_text(_datetime(row["interval_end"])),
+        "interval_start": _utc_text(interval_start),
+        "interval_end": _utc_text(interval_end),
         "detected_at": _utc_text(_datetime(row["detected_at"])),
         "detected_by_plan_hash": str(row["detected_by_plan_hash"]),
         "covered_at": _optional_time(row["covered_at"]),
@@ -166,6 +203,19 @@ def _historical_coverage_row(row: Mapping[str, object], expected: set[str]) -> d
 def _require_expected_instrument(instrument_id: str, expected: set[str], evidence: str) -> None:
     if instrument_id not in expected:
         raise ValueError(f"research export {evidence} is outside its universe: {instrument_id}")
+
+
+def _require_overlap(
+    interval_start: datetime,
+    interval_end: datetime,
+    requested_start: datetime,
+    requested_end: datetime,
+    evidence: str,
+) -> None:
+    if interval_end <= interval_start:
+        raise ValueError(f"research export {evidence} interval is invalid")
+    if interval_start >= requested_end or interval_end <= requested_start:
+        raise ValueError(f"research export {evidence} is outside its requested interval")
 
 
 def _datetime(value: object) -> datetime:

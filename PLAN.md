@@ -132,10 +132,11 @@ Implementation status:
     provider bars append corrections. The bounded read-only API exposes this projection.
 - Complete locally without collector access: ADR 0017 and migration `0006` replace mutable
   content-prefix research manifests with schema-version-2 canonical manifest identity. Exports bind
-  the exact universe/configuration, application image/version, grouped coverage, provenance, live
-  gaps and historical-coverage attempts; replay verifies the manifest, every file hash and decoded
-  semantic content. `bars-v2/` isolates new partitions from a rolled-back legacy exporter, while
-  nullable forward columns preserve the prior application's INSERT contract.
+  an explicit UTC range, the exact universe/configuration, application image/version, grouped
+  coverage, provenance, live gaps and historical-coverage attempts; replay verifies the manifest,
+  every file hash and decoded semantic content. Per-instrument/day content identity reuses unchanged
+  partitions as the store grows. `bars-v2/` isolates new partitions from a rolled-back legacy
+  exporter, while nullable forward columns preserve the prior application's INSERT contract.
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.
@@ -227,7 +228,7 @@ python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-
 python -m qtrad backfill plan --universe PATH --start UTC --end UTC --remaining-allowance N --output PATH INSTRUMENT...
 python -m qtrad backfill register --plan PATH --confirm-plan-hash SHA256
 python -m qtrad backfill execute --plan-hash SHA256
-python -m qtrad research export --universe PATH
+python -m qtrad research export --universe PATH --start UTC --end UTC
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
 python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...

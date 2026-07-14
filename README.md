@@ -163,7 +163,9 @@ docker compose run --rm app python -m qtrad backfill execute \
   --plan-hash <reviewed-sha256>
 
 docker compose run --rm app python -m qtrad research export \
-  --universe /app/config/capture-v1.toml
+  --universe /app/config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-02T00:00:00Z
 docker compose run --rm app python -m qtrad replay --manifest /app/data/research/manifests/MANIFEST.json
 ```
 

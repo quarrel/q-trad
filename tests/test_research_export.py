@@ -48,6 +48,8 @@ def _metadata(**overrides: object):
         "universe_name": "research-fixture",
         "configuration_hash": "a" * 64,
         "instrument_ids": (InstrumentId("index:us-500"),),
+        "interval_start": datetime(2026, 7, 1, tzinfo=UTC),
+        "interval_end": datetime(2026, 7, 15, tzinfo=UTC),
         "bars": (sample_bar(),),
         "live_gaps": (_live_gap(),),
         "historical_coverage": (_historical_coverage(),),
@@ -62,6 +64,10 @@ def test_export_metadata_contains_standalone_universe_coverage_and_gap_evidence(
     metadata = _metadata()
 
     assert metadata["manifest_contract"] == "qtrad-research-bars-v2"
+    assert metadata["requested_interval"] == {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-07-15T00:00:00Z",
+    }
     assert metadata["universe"] == {
         "name": "research-fixture",
         "configuration_hash": "a" * 64,
@@ -93,6 +99,13 @@ def test_export_metadata_is_deterministic_and_fails_on_identity_drift() -> None:
         _metadata(instrument_ids=(InstrumentId("fx:aud-usd"),))
     with pytest.raises(ValueError, match="configuration hash"):
         _metadata(configuration_hash="not-a-hash")
+    with pytest.raises(ValueError, match="end must follow"):
+        _metadata(interval_end=datetime(2026, 7, 1, tzinfo=UTC))
+    with pytest.raises(ValueError, match="bars outside its requested interval"):
+        _metadata(
+            interval_start=datetime(2026, 7, 3, tzinfo=UTC),
+            interval_end=datetime(2026, 7, 4, tzinfo=UTC),
+        )
     wrong_gap = _live_gap()
     wrong_gap["instrument_id"] = "fx:aud-usd"
     with pytest.raises(ValueError, match="live gap is outside"):

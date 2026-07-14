@@ -364,3 +364,6 @@ outside the current data-only phase until explicitly admitted by a later plan up
   integration test executes the old INSERT shape after migration `0006` to prove forward-schema
   application rollback compatibility. Export remains confined to an isolated writable database
   copy and has not contacted IG, OCI or the collector.
+- Research export now requires an exact half-open UTC range and uses independent semantic identity
+  for each instrument/day partition. Adding another day therefore reuses prior immutable files
+  instead of rewriting every historical partition under a new whole-export hash.

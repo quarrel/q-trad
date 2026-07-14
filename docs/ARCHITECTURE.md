@@ -51,7 +51,8 @@ application credentials are never reused. Immutable Parquet manifests and snapsh
 normal research interface.
 
 Schema-version-2 research manifests are content-authenticated records rather than mutable export
-indexes. Their canonical hash binds the selected universe/configuration, application version and
+indexes. Export requires an exact half-open UTC range; the canonical hash binds that range, the
+selected universe/configuration, application version and
 image identity, exact file set and hashes, semantic bar hash, grouped coverage and observed live
 and historical-coverage evidence. Replay verifies the manifest, file bytes, decoded bars, row/time
 bounds and partition ownership. New files live under `bars-v2/`; a rolled-back application that
@@ -164,7 +165,8 @@ transaction as event projection.
 - Standard-library CLI under `python -m qtrad`.
 - `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
 - `instruments promote` verifies explicit review-bound selections and emits undeployed TOML.
-- `research export --universe PATH` writes a schema-version-2 manifest from an isolated writable
+- `research export --universe PATH --start UTC --end UTC` writes a bounded schema-version-2 manifest
+  from an isolated writable
   database copy; `replay --manifest PATH` verifies that identity before deterministic replay.
 - `feed verify` checks saved page sequences and reports the final cursor without network I/O.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging

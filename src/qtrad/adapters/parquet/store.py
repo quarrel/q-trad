@@ -89,11 +89,11 @@ class ParquetResearchStore:
 
         serialised = [_bar_row(bar) for bar in ordered]
         content_hash = _sha256_json(serialised)
-        partition_id = content_hash[:24]
         files: list[str] = []
         file_sha256: dict[str, str] = {}
 
         for group in groups.values():
+            partition_id = _sha256_json([_bar_row(bar) for bar in group])[:24]
             relative = Path(_partition_path(group[0], partition_id))
             destination = self._root / relative
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -209,8 +209,13 @@ class ParquetResearchStore:
             rows = pl.read_parquet(path).to_dicts()
             file_bars = tuple(_bar_from_row(row) for row in rows)
             partition_root = "bars" if manifest.schema_version == 1 else "bars-v2"
+            partition_id = (
+                manifest.content_sha256[:24]
+                if manifest.schema_version == 1
+                else _sha256_json([_bar_row(bar) for bar in file_bars])[:24]
+            )
             if any(
-                _partition_path(bar, manifest.content_sha256[:24], root=partition_root) != relative
+                _partition_path(bar, partition_id, root=partition_root) != relative
                 for bar in file_bars
             ):
                 raise ValueError(f"research file contains bars for another partition: {relative}")

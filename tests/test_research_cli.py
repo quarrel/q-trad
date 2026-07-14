@@ -34,6 +34,7 @@ class FakeEngine:
 class FakeAuditStore:
     def __init__(self, *, query_rows: tuple[list[dict[str, object]], ...] = ()) -> None:
         self.query_rows = list(query_rows)
+        self.query_parameters: list[Mapping[str, object]] = []
         self.started: dict[str, object] | None = None
         self.finished: dict[str, object] | None = None
         self.manifest: ResearchManifest | None = None
@@ -43,10 +44,13 @@ class FakeAuditStore:
         return RunId(UUID(int=1))
 
     async def query(
-        self, _: str, __: Mapping[str, object] | None = None
+        self, _: str, parameters: Mapping[str, object] | None = None
     ) -> list[dict[str, object]]:
         if not self.query_rows:
             raise AssertionError("unexpected export query")
+        if parameters is None:
+            raise AssertionError("export query must be explicitly bounded")
+        self.query_parameters.append(parameters)
         return self.query_rows.pop(0)
 
     async def record_manifest(self, manifest: ResearchManifest) -> None:
@@ -127,7 +131,13 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
         image="syd.ocir.io/example/qtrad@sha256:" + "c" * 64,
     )
 
-    await cli._export(settings, FixedClock(), universe_path=universe_path)
+    await cli._export(
+        settings,
+        FixedClock(),
+        universe_path=universe_path,
+        start=datetime(2026, 7, 1, tzinfo=UTC),
+        end=datetime(2026, 7, 15, tzinfo=UTC),
+    )
 
     assert audit.started is not None
     assert audit.started["configuration_hash"] == universe.configuration_hash
@@ -142,6 +152,16 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
             str(instrument.instrument_id) for instrument in universe.instruments
         ),
     }
+    assert metadata["requested_interval"] == {
+        "start": "2026-07-01T00:00:00Z",
+        "end": "2026-07-15T00:00:00Z",
+    }
+    assert len(audit.query_parameters) == 3
+    assert all(
+        parameters["interval_start"] == datetime(2026, 7, 1, tzinfo=UTC)
+        and parameters["interval_end"] == datetime(2026, 7, 15, tzinfo=UTC)
+        for parameters in audit.query_parameters
+    )
     assert _mapping(metadata["live_gaps"])["count"] == 1
     assert _mapping(metadata["historical_coverage"])["open_count"] == 1
     assert audit.finished is not None

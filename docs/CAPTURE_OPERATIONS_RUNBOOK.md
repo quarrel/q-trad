@@ -197,12 +197,16 @@ application role, set a separate writable `QTRAD_RESEARCH_ROOT`, and select the 
 explicitly:
 
 ```bash
-uv run qtrad research export --universe config/capture-v1.toml
+uv run qtrad research export \
+  --universe config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-02T00:00:00Z
 uv run qtrad replay --manifest data/research/manifests/<manifest-id>.json
 ```
 
 Do not point this command at the collector or the exceptional read-only tunnel. The current
-schema-version-2 manifest binds universe/configuration, application image/version, coverage, gaps,
+schema-version-2 manifest binds the requested UTC interval, universe/configuration, application
+image/version, coverage, gaps,
 provenance, file hashes and semantic bar content. A release-quality export should set
 `QTRAD_IMAGE` to the immutable source image digest rather than a mutable tag. Replay validates all
 of that identity before accepting the bars. New partitions live under `bars-v2/`; rolling the
