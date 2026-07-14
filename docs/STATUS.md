@@ -445,7 +445,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   host helper refuses overwrite, binds the exact candidate/release/configuration and its own tool
   hash, and fails closed before 72 hours or on unhealthy readiness, lifecycle, backup/restore,
   migration, unit, container or disk evidence. Its output always remains pending the documented
-  operator reviews; it has not been run against the collector.
+  operator reviews; it has not been run against the collector. GitHub CI run `29334657157` passed
+  ShellCheck, migration through `0007` and all 237 tests against PostgreSQL 18 at branch head
+  `3415f70`.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

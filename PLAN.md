@@ -92,7 +92,8 @@ Implementation status:
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk
   capacity; it leaves gap, log, monitoring and active-market review explicitly pending for the
-  operator.
+  operator. GitHub CI run `29334657157` passed all static, shell, migration and PostgreSQL 18 gates
+  with 237 tests at branch head `3415f70`.
 - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
