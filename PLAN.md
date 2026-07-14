@@ -65,7 +65,9 @@ Implementation status:
   - Complete locally and undeployed: ADR 0009 listing events now project atomically and supersede
     effective listings at provider/environment/instrument scope, including an epic change. Migration
     `0008` enforces one open-ended selection and rebuild replays event-backed listing history while
-    preserving legacy rows. Migration preflight fails closed on existing ambiguity.
+    preserving legacy rows. Migration preflight fails closed on existing ambiguity. GitHub CI run
+    `29338222506` passed migration through `0008` and all 245 tests against PostgreSQL 18 at branch
+    head `5467017`.
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
@@ -318,6 +320,10 @@ python -m qtrad api
   `335f089`.
 - GitHub CI run `29336513376` passed the same full gate set and all 244 tests at branch head
   `640caf7`, including explicit non-streaming universe validation without runtime-universe use.
+- GitHub CI run `29338222506` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
+  migration through `0008` and all 245 tests against isolated PostgreSQL 18 at branch head
+  `5467017`. It proves alternate-epic supersession, atomic failure rollback, the one-effective-listing
+  index and canonical projection rebuild.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

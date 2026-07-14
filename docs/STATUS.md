@@ -363,6 +363,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
     now commits the validation event and projection atomically, closes a superseded epic at the new
     event time, and rebuilds event-backed listings from canonical history. Migration `0008` adds the
     one-open-selection constraint and intentionally fails if pre-existing ambiguity needs review.
+    The first PostgreSQL run exposed an integration fixture that added an eighth operator-visible
+    instrument; the isolated correction retained the canonical seven. GitHub CI run `29338222506`
+    then passed migration through `0008` and all 245 tests at branch head `5467017`.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical
