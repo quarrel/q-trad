@@ -200,7 +200,10 @@ class OperatorQueries:
                    detected_at, detected_by_plan_hash, covered_at,
                    covered_by_plan_hash, observed_points
             FROM read_model.historical_coverage_gaps
-            WHERE (:instrument_id IS NULL OR instrument_id = :instrument_id)
+            WHERE (
+                CAST(:instrument_id AS text) IS NULL
+                OR instrument_id = CAST(:instrument_id AS text)
+            )
               AND (NOT :only_open OR covered_at IS NULL)
             ORDER BY detected_at DESC, instrument_id, basis
             LIMIT :limit

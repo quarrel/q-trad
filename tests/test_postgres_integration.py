@@ -530,6 +530,7 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
     app = create_app(Settings(database_url=DATABASE_URL))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        bounded_response = await client.get("/api/v1/historical-coverage", params={"limit": 1})
         coverage_response = await client.get(
             "/api/v1/historical-coverage",
             params={"instrument_id": str(instrument.instrument_id)},
@@ -540,6 +541,8 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
         )
         invalid_limit = await client.get("/api/v1/historical-coverage", params={"limit": 5001})
 
+    assert bounded_response.status_code == 200
+    assert len(bounded_response.json()) == 1
     assert coverage_response.status_code == 200
     matching_coverage = [
         row for row in coverage_response.json() if row["detected_by_plan_hash"] == plan.plan_hash
