@@ -137,7 +137,8 @@ Implementation status:
   accepts only verified same-source/configuration artifacts from distinct immutable images, requires
   a merged-state baseline, all-`CHANGED_FIELDS` candidate and passed automated thresholds, and reports
   mechanical per-message change without claiming the required active-market reviews or accepting a
-  storage decision. Isolated CI verification is pending.
+  storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
+  `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
@@ -354,6 +355,10 @@ python -m qtrad api
     255 tests against PostgreSQL 18 at branch head `6a84319`. It proves snapshot-v3 representation
     counts reconcile with the actual raw table and preserves deterministic pre-marker, changed-field,
     rollback-compatible and legacy snapshot behaviour.
+  - GitHub CI run `29343411122` passed every static and shell gate, migration through `0009` and all
+    258 tests against PostgreSQL 18 at branch head `8ff48cd`. It proves comparison artifacts are
+    non-overwriting and hash/semantics verified, while contrast rejects identity drift, sub-threshold
+    evidence and rollback-compatible candidate rows without accepting an operator decision.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

@@ -447,7 +447,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   offline contrast command requires distinct digest-pinned images, matching source/configuration,
   passed automated thresholds and an all-`CHANGED_FIELDS` candidate before calculating mechanical
   per-message changes. Contrast explicitly leaves both active-market reviews required and records no
-  accepted storage decision. The collector remains unchanged; isolated CI verification is pending.
+  accepted storage decision. The collector remains unchanged. GitHub CI run `29343411122` passed
+  migration through `0009`, every artifact/contrast case and all 258 tests against PostgreSQL 18 at
+  branch head `8ff48cd`.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation
