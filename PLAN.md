@@ -127,7 +127,12 @@ Implementation status:
   `LEGACY_UNCLASSIFIED`; downgrade refuses to erase changed-field identity. GitHub CI run
   `29332161781` passed all static and shell gates, migration through `0007`, old-writer/default and
   bounded-code integration checks, and all 232 tests against PostgreSQL 18 at branch head `dfe45ea`.
-- In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
+- Next gated sequence: after the frozen qualification closes successfully, retain the current image
+  long enough to collect a representative before/after storage interval, then qualify the
+  changed-field image separately and collect its own representative interval. Each comparison uses
+  one immutable image identity; it is invalid to compare snapshots across the release boundary.
+  Only those results can open an index, JSON representation or whole-legacy-epoch archive decision.
+- Complete locally and undeployed: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
 - Complete locally: the provider-neutral feed consumer contract strictly decodes canonical event
@@ -284,7 +289,9 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass;
-  195 tests pass with eight PostgreSQL migration/integration tests deferred to isolated CI.
+  222 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
+- GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
+  232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
   migrations through `0005`, including exact plan/coverage identity, repeated coverage attempts,
   append-only historical corrections, live-gap isolation and the bounded read-only API.

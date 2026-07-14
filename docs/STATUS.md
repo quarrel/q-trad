@@ -433,6 +433,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - GitHub CI run `29332161781` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets, migration
   through `0007` and all 232 tests against PostgreSQL 18 at branch head `dfe45ea`. The database suite
   proves an old INSERT shape receives code zero and the check constraint rejects an unknown code.
+- The local capture-feed foundation is complete and remains undeployed: the bounded API page,
+  provider-neutral consumer, loopback-only probe and independently authenticated read-only database
+  route all have deterministic or PostgreSQL-backed coverage. No cursor store or derived writer has
+  been added during the data-only phase.
+- The post-qualification storage comparison is now explicitly release-bound. The unchanged
+  merged-state image and the later unchanged changed-field image each require their own accepted
+  before/after interval; cross-image snapshots cannot be compared by weakening identity checks.
+  Operational deletion or legacy-epoch archiving remains closed until both measurements exist.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

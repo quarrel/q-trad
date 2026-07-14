@@ -105,3 +105,25 @@ For both the pinned representation and the later changed-field candidate:
 
 The first result may legitimately be “retain the schema”. Storage cost alone does not outweigh the
 audit, idempotency and deterministic-replay contracts.
+
+### Release-bound comparison sequence
+
+The comparison contract deliberately rejects application-version and immutable-image drift. A
+single interval spanning the merged-state/changed-field deployment would therefore be invalid, even
+if its row counts were large enough. After the frozen qualification closes successfully:
+
+1. take a baseline snapshot with the current qualification image identity;
+2. continue that unchanged image for at least six representative active-market hours and 100,000
+   new raw messages, then take its closing snapshot;
+3. publish and preflight the changed-field candidate as a separate immutable release, including
+   migration, readiness, backup/restore and rollback gates;
+4. take a new baseline only after the changed-field release identity and migration are fixed;
+5. run that unchanged release through its restart/reboot qualification and the same representative
+   threshold, then take its closing snapshot; and
+6. compare within each image pair first, then compare the two accepted interval results as evidence
+   from distinct release epochs rather than feeding cross-release snapshots to `storage compare`.
+
+Do not implement operational deletion or an archive-out path before both intervals are accepted.
+Legacy data is a finite epoch: an archive proposal must show material benefit after permanent
+hash-bound backup, exact payload-hash round-trip, canonical-reference treatment and restore/replay
+verification. If that proof is not compelling, retaining the legacy epoch is the correct decision.
