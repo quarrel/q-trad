@@ -6,7 +6,8 @@ import json
 import os
 from collections.abc import Sequence
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -20,14 +21,19 @@ from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
+from qtrad.application.backfill_planning import (
+    backfill_plan_payload,
+    backfill_requests,
+    build_backfill_plan,
+)
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
-from qtrad.application.quota import points_per_instrument
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.domain.events import EventEnvelope, to_json_value
-from qtrad.domain.identifiers import InstrumentId, ProviderListingId
+from qtrad.domain.historical_coverage import BackfillPlan
+from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.market_data import (
     BarProvenance,
     DataQuality,
@@ -38,6 +44,11 @@ from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
+from qtrad.runtime.backfill_plan import (
+    decode_backfill_plan,
+    load_backfill_plan,
+    write_backfill_plan,
+)
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
@@ -52,6 +63,24 @@ from qtrad.runtime.universe_promotion import (
     load_explicit_selection_set,
     load_listing_review_evidence,
 )
+
+
+def _utc_minute_argument(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timestamp must be an ISO-8601 UTC minute") from error
+    offset = parsed.utcoffset()
+    if parsed.tzinfo is None or offset is None or offset.total_seconds() != 0:
+        raise argparse.ArgumentTypeError("timestamp must be an ISO-8601 UTC minute")
+    if parsed.second or parsed.microsecond:
+        raise argparse.ArgumentTypeError("timestamp must be an ISO-8601 UTC minute")
+    return parsed
+
+
+def _require_sha256_argument(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field} must be lower-case SHA-256")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -88,9 +117,24 @@ def build_parser() -> argparse.ArgumentParser:
     ingest.add_argument("--max-seconds", type=float)
     ingest.add_argument("--force-reconnect-after-seconds", type=float)
 
-    backfill = subparsers.add_parser("backfill", help="bounded IG demo backfill")
-    backfill.add_argument("--max-points", type=int, default=1000)
-    backfill.add_argument("--remaining-allowance", type=int, default=10_000)
+    backfill = subparsers.add_parser("backfill", help="reviewed historical-coverage operations")
+    backfill_sub = backfill.add_subparsers(dest="backfill_command", required=True)
+    backfill_plan = backfill_sub.add_parser("plan", help="create an explicit non-overwriting plan")
+    backfill_plan.add_argument("--universe", type=Path, required=True)
+    backfill_plan.add_argument("--start", type=_utc_minute_argument, required=True)
+    backfill_plan.add_argument("--end", type=_utc_minute_argument, required=True)
+    backfill_plan.add_argument("--remaining-allowance", type=int, required=True)
+    backfill_plan.add_argument("--output", type=Path, required=True)
+    backfill_plan.add_argument("instruments", type=InstrumentId, nargs="+")
+    backfill_register = backfill_sub.add_parser(
+        "register", help="persist a reviewed plan and its coverage gaps"
+    )
+    backfill_register.add_argument("--plan", type=Path, required=True)
+    backfill_register.add_argument("--confirm-plan-hash", required=True)
+    backfill_execute = backfill_sub.add_parser(
+        "execute", help="execute one registered plan by its exact hash"
+    )
+    backfill_execute.add_argument("--plan-hash", required=True)
 
     research = subparsers.add_parser("research", help="research-store operations")
     research_sub = research.add_subparsers(dest="research_command", required=True)
@@ -165,15 +209,29 @@ def main(argv: Sequence[str] | None = None) -> None:
                 force_reconnect_after_seconds=args.force_reconnect_after_seconds,
             )
         )
-    elif args.command == "backfill":
+    elif args.command == "backfill" and args.backfill_command == "plan":
         asyncio.run(
-            _backfill(
+            _plan_backfill(
                 settings,
                 clock,
-                maximum_points=args.max_points,
+                universe_path=args.universe,
+                start=args.start,
+                end=args.end,
                 remaining_allowance=args.remaining_allowance,
+                output_path=args.output,
+                instrument_ids=args.instruments,
             )
         )
+    elif args.command == "backfill" and args.backfill_command == "register":
+        asyncio.run(
+            _register_backfill(
+                settings,
+                plan_path=args.plan,
+                confirmed_plan_hash=args.confirm_plan_hash,
+            )
+        )
+    elif args.command == "backfill" and args.backfill_command == "execute":
+        asyncio.run(_execute_backfill(settings, clock, plan_hash=args.plan_hash))
     elif args.command == "research" and args.research_command == "export":
         asyncio.run(_export(settings, clock))
     elif args.command == "replay":
@@ -245,6 +303,21 @@ def _ig_review_adapter(
         instruments_by_id={
             instrument.instrument_id: instrument for instrument in candidates.instruments
         },
+        preferred_epics={},
+    )
+
+
+def _ig_backfill_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
+    username, password, api_key, account_id = settings.require_ig_credentials()
+    return IgDemoMarketDataAdapter(
+        IgDemoConfig(
+            username=username,
+            password=password,
+            api_key=api_key,
+            account_id=account_id,
+        ),
+        clock,
+        instruments_by_id={},
         preferred_epics={},
     )
 
@@ -558,62 +631,132 @@ async def _ingest(
             raise disconnect_error
 
 
-async def _backfill(
+async def _plan_backfill(
     settings: Settings,
     clock: Clock,
     *,
-    maximum_points: int,
+    universe_path: Path,
+    start: datetime,
+    end: datetime,
     remaining_allowance: int,
+    output_path: Path,
+    instrument_ids: Sequence[InstrumentId],
 ) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"backfill plan output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"backfill plan output directory does not exist: {output_path.parent}"
+        )
+    universe = load_capture_universe(universe_path)
+    available = set(universe.instruments_by_id)
+    unknown = sorted(str(item) for item in set(instrument_ids) - available)
+    if unknown:
+        raise ValueError(f"backfill instruments are not in the selected universe: {unknown}")
+    engine = _engine(settings)
+    try:
+        store = PostgresAuditStore(engine)
+        listings = await store.active_provider_listings(instrument_ids)
+        observed_at = clock.now()
+        plan = build_backfill_plan(
+            universe_name=universe.name,
+            universe_hash=universe.configuration_hash,
+            instrument_ids=instrument_ids,
+            listings=listings,
+            preferred_epics=universe.preferred_epics,
+            start=start,
+            end=end,
+            remaining_allowance=remaining_allowance,
+            quota_observed_at=observed_at,
+            created_at=observed_at,
+        )
+        write_backfill_plan(output_path, plan)
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_hash": plan.plan_hash,
+                "instrument_count": len(plan.items),
+                "points_per_instrument": plan.points_per_instrument,
+                "requested_points": plan.requested_points,
+                "selection_authority": False,
+                "registered": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _register_backfill(
+    settings: Settings,
+    *,
+    plan_path: Path,
+    confirmed_plan_hash: str,
+) -> None:
+    plan = load_backfill_plan(plan_path)
+    if confirmed_plan_hash != plan.plan_hash:
+        raise ValueError("confirmed backfill plan hash does not match the reviewed plan")
+    engine = _engine(settings)
+    try:
+        status = await PostgresAuditStore(engine).register_backfill_plan(
+            plan,
+            backfill_plan_payload(plan),
+        )
+    finally:
+        await engine.dispose()
+    print(json.dumps({"plan_hash": plan.plan_hash, "status": status}, sort_keys=True))
+
+
+async def _execute_backfill(settings: Settings, clock: Clock, *, plan_hash: str) -> None:
+    _require_sha256_argument(plan_hash, "backfill plan hash")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
-    adapter = _ig_adapter(settings, clock)
-    universe = _capture_universe(settings)
-    run_id = await store.start_run(
-        kind=RunKind.BACKFILL,
-        environment=BrokerEnvironment.IG_DEMO,
-        configuration_hash=universe.configuration_hash,
-        started_at=clock.now(),
-    )
+    adapter: IgDemoMarketDataAdapter | None = None
+    plan: BackfillPlan | None = None
+    run_id: RunId | None = None
+    plan_completed = False
     terminal_status = "FAILED"
     written = 0
-    received_points: set[tuple[str, datetime]] = set()
+    received: dict[tuple[InstrumentId, PriceBasis], set[datetime]] = {}
     try:
-        listings = await store.active_provider_listings(
-            [instrument.instrument_id for instrument in universe.instruments]
+        payload = await store.claim_backfill_plan(plan_hash)
+        plan = decode_backfill_plan(json.dumps(payload, sort_keys=True))
+        adapter = _ig_backfill_adapter(settings, clock)
+        run_id = await store.start_run(
+            kind=RunKind.BACKFILL,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=plan.universe_hash,
+            started_at=clock.now(),
         )
-        if len(listings) != len(universe.instruments):
-            raise RuntimeError("run 'qtrad instruments sync' before backfill")
-        points = points_per_instrument(
-            remaining_allowance=remaining_allowance,
-            instrument_count=len(listings),
-            maximum_points=maximum_points,
-        )
-        if points <= 0:
-            raise RuntimeError("historical allowance reserve leaves no points to request")
         await store.record_quota_state(
             provider="ig",
             environment="demo",
-            allowance_name="historical_points_weekly_operator_reported",
-            remaining=remaining_allowance,
-            observed_at=clock.now(),
+            allowance_name=plan.quota.allowance_name,
+            remaining=plan.quota.remaining_points,
+            observed_at=plan.quota.observed_at,
         )
-        await adapter.connect()
-        end = clock.now().replace(second=0, microsecond=0)
-        start = end - timedelta(minutes=points)
-        for listing in listings:
-            request = BackfillRequest(
-                instrument_id=listing.instrument_id,
-                listing=listing,
-                start=start,
-                end=end,
-                maximum_points=points,
-            )
-            async for bar in adapter.backfill(request):
-                received_points.add((str(bar.source_listing_id), bar.interval_start))
-                event = await _append_bar(store, bar, received_time=clock.now())
-                if event is not None:
-                    written += 1
+        listings = tuple([await store.provider_listing_version(item) for item in plan.items])
+        try:
+            await adapter.connect()
+            for request in backfill_requests(plan, listings):
+                async for bar in adapter.backfill(request):
+                    _validate_planned_bar(plan, request, bar)
+                    received.setdefault((bar.instrument_id, bar.basis), set()).add(
+                        bar.interval_start
+                    )
+                    event = await _append_bar(store, bar, received_time=clock.now())
+                    if event is not None:
+                        written += 1
+        finally:
+            await adapter.disconnect()
+        observed_points = {
+            (item.instrument_id, basis): len(received.get((item.instrument_id, basis), set()))
+            for item in plan.items
+            for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID)
+        }
+        if any(points <= 0 for points in observed_points.values()):
+            raise RuntimeError("planned historical range returned no data for a required basis")
         provider_remaining = adapter.historical_allowance_remaining
         if provider_remaining is not None:
             await store.record_quota_state(
@@ -623,30 +766,59 @@ async def _backfill(
                 remaining=provider_remaining,
                 observed_at=clock.now(),
             )
+        await store.complete_backfill_plan(
+            plan,
+            observed_points=observed_points,
+            executed_at=clock.now(),
+        )
+        plan_completed = True
         terminal_status = "COMPLETED"
         print(
             json.dumps(
                 {
-                    "per_instrument_points": points,
-                    "points_received": len(received_points),
+                    "plan_hash": plan.plan_hash,
+                    "points_received": sum(len(points) for points in received.values()),
                     "bars_written": written,
                     "provider_remaining_allowance": provider_remaining,
-                }
+                },
+                sort_keys=True,
             )
         )
+    except BaseException:
+        if plan is not None and not plan_completed:
+            await store.fail_backfill_plan(plan.plan_hash, executed_at=clock.now())
+        raise
     finally:
-        await adapter.disconnect()
-        await store.finish_run(
-            run_id,
-            status=terminal_status,
-            finished_at=clock.now(),
-            detail={
-                "bars_written": written,
-                "points_received": len(received_points),
-                "provider_remaining_allowance": adapter.historical_allowance_remaining,
-            },
-        )
+        if run_id is not None and plan is not None:
+            await store.finish_run(
+                run_id,
+                status=terminal_status,
+                finished_at=clock.now(),
+                detail={
+                    "plan_hash": plan.plan_hash,
+                    "bars_written": written,
+                    "points_received": sum(len(points) for points in received.values()),
+                    "provider_remaining_allowance": (
+                        adapter.historical_allowance_remaining if adapter is not None else None
+                    ),
+                },
+            )
         await engine.dispose()
+
+
+def _validate_planned_bar(plan: BackfillPlan, request: BackfillRequest, bar: MarketBar) -> None:
+    if bar.provenance is not BarProvenance.IG_HISTORICAL:
+        raise RuntimeError("provider returned a non-historical bar for a backfill plan")
+    if bar.instrument_id != request.instrument_id:
+        raise RuntimeError("provider returned a historical bar for another instrument")
+    if bar.source_listing_id != request.listing.listing_id:
+        raise RuntimeError("provider returned a historical bar for another listing")
+    if not request.start <= bar.interval_start < request.end:
+        raise RuntimeError("provider returned a historical bar outside the planned request")
+    if (bar.interval_end - bar.interval_start).total_seconds() != 60:
+        raise RuntimeError("provider returned a historical bar at an unexpected resolution")
+    if request.resolution is not plan.resolution:
+        raise RuntimeError("provider request resolution differs from its backfill plan")
 
 
 async def _append_bar(
@@ -663,18 +835,27 @@ async def _append_bar(
         rows = await store.query(
             """
             SELECT payload FROM canonical.events
-            WHERE stream_id = :stream_id AND stream_version = 1
+            WHERE stream_id = :stream_id AND stream_version = :stream_version
             """,
-            {"stream_id": stream_id},
+            {"stream_id": stream_id, "stream_version": previous},
         )
         payload = to_json_value(bar)
-        if len(rows) != 1 or rows[0]["payload"] != payload:
-            raise RuntimeError(f"historical bar conflict for {stream_id}")
-        return None
+        if len(rows) != 1:
+            raise RuntimeError(f"latest historical bar event is missing for {stream_id}")
+        existing_payload = rows[0]["payload"]
+        if not isinstance(payload, dict) or not isinstance(existing_payload, dict):
+            raise RuntimeError(f"historical bar payload is malformed for {stream_id}")
+        comparable_payload = {key: value for key, value in payload.items() if key != "revision"}
+        comparable_existing = {
+            key: value for key, value in existing_payload.items() if key != "revision"
+        }
+        if comparable_existing == comparable_payload:
+            return None
+        bar = replace(bar, revision=previous + 1)
     event = EventEnvelope.create(
         stream_id=stream_id,
-        stream_version=1,
-        event_type="MarketBarClosed",
+        stream_version=previous + 1,
+        event_type="MarketBarClosed" if previous == 0 else "MarketBarCorrected",
         event_time=bar.interval_end,
         received_time=received_time,
         producer="ig-demo-backfill",
@@ -682,7 +863,7 @@ async def _append_bar(
         payload=bar,
     )
     try:
-        return await store.append(event, expected_stream_version=0)
+        return await store.append(event, expected_stream_version=previous)
     except StreamVersionConflict:
         return await _append_bar(store, bar, received_time=received_time)
 

@@ -5,8 +5,9 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
@@ -14,8 +15,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
+from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
+from qtrad.domain.market_data import BarProvenance, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.operations import AdapterHealth
 from qtrad.ports.storage import (
@@ -320,6 +323,215 @@ class PostgresAuditStore(AuditStore):
                     "detail": json.dumps(detail, sort_keys=True),
                 },
             )
+
+    async def register_backfill_plan(
+        self,
+        plan: BackfillPlan,
+        payload: Mapping[str, JsonValue],
+    ) -> str:
+        """Persist one reviewed plan and project its still-open historical coverage ranges."""
+
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        plan_id = uuid5(NAMESPACE_URL, f"qtrad-backfill:{plan.plan_hash}")
+        async with self._engine.begin() as connection:
+            inserted = await connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.backfill_plans (
+                        plan_id, plan_hash, universe_hash, status, plan, created_at
+                    ) VALUES (
+                        :plan_id, :plan_hash, :universe_hash, 'PLANNED',
+                        CAST(:plan AS jsonb), :created_at
+                    )
+                    ON CONFLICT (plan_hash) DO NOTHING
+                    RETURNING plan_hash
+                    """
+                ),
+                {
+                    "plan_id": plan_id,
+                    "plan_hash": plan.plan_hash,
+                    "universe_hash": plan.universe_hash,
+                    "plan": encoded,
+                    "created_at": plan.created_at,
+                },
+            )
+            if inserted.scalar_one_or_none() is None:
+                existing = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                            SELECT universe_hash, plan, status
+                            FROM ops.backfill_plans
+                            WHERE plan_hash = :plan_hash
+                            """
+                            ),
+                            {"plan_hash": plan.plan_hash},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                if existing["universe_hash"] != plan.universe_hash or existing["plan"] != dict(
+                    payload
+                ):
+                    raise RuntimeError("persisted backfill plan content conflicts with its hash")
+                status = str(existing["status"])
+            else:
+                status = "PLANNED"
+            for item in plan.items:
+                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID):
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO read_model.historical_coverage_gaps (
+                                instrument_id, source_provider, source_environment,
+                                source_external_id, source_listing_valid_from,
+                                source_listing_metadata_version, provenance, basis, resolution,
+                                interval_start, interval_end, detected_at, detected_by_plan_hash
+                            ) VALUES (
+                                :instrument_id, :provider, :environment, :external_id,
+                                :listing_valid_from, :listing_metadata_version,
+                                :provenance, :basis, :resolution,
+                                :interval_start, :interval_end, :detected_at, :plan_hash
+                            )
+                            ON CONFLICT DO NOTHING
+                            """
+                        ),
+                        _coverage_parameters(plan, item, basis),
+                    )
+            return status
+
+    async def claim_backfill_plan(self, plan_hash: str) -> Mapping[str, JsonValue]:
+        """Atomically claim a registered or explicitly retried failed plan."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'EXECUTING', executed_at = NULL
+                    WHERE plan_hash = :plan_hash AND status IN ('PLANNED', 'FAILED')
+                    RETURNING plan
+                    """
+                ),
+                {"plan_hash": plan_hash},
+            )
+            payload = result.scalar_one_or_none()
+            if payload is not None:
+                return cast(Mapping[str, JsonValue], payload)
+            status = (
+                await connection.execute(
+                    text("SELECT status FROM ops.backfill_plans WHERE plan_hash = :plan_hash"),
+                    {"plan_hash": plan_hash},
+                )
+            ).scalar_one_or_none()
+            if status is None:
+                raise RuntimeError("backfill plan is not registered")
+            raise RuntimeError(f"backfill plan cannot execute from status {status}")
+
+    async def fail_backfill_plan(self, plan_hash: str, *, executed_at: datetime) -> None:
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'FAILED', executed_at = :executed_at
+                    WHERE plan_hash = :plan_hash AND status = 'EXECUTING'
+                    RETURNING plan_hash
+                    """
+                ),
+                {"plan_hash": plan_hash, "executed_at": executed_at},
+            )
+            if result.scalar_one_or_none() is None:
+                raise RuntimeError("backfill plan was not executing when failure was recorded")
+
+    async def complete_backfill_plan(
+        self,
+        plan: BackfillPlan,
+        *,
+        observed_points: Mapping[tuple[InstrumentId, PriceBasis], int],
+        executed_at: datetime,
+    ) -> None:
+        """Close only this plan's historical gaps after every planned basis returned data."""
+
+        async with self._engine.begin() as connection:
+            for item in plan.items:
+                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID):
+                    points = observed_points[(item.instrument_id, basis)]
+                    if points <= 0:
+                        raise ValueError(
+                            "historical coverage requires observed points for every basis"
+                        )
+                    result = await connection.execute(
+                        text(
+                            """
+                            UPDATE read_model.historical_coverage_gaps
+                            SET covered_at = :covered_at,
+                                covered_by_plan_hash = :plan_hash,
+                                observed_points = :observed_points
+                            WHERE instrument_id = :instrument_id
+                              AND source_provider = :provider
+                              AND source_environment = :environment
+                              AND source_external_id = :external_id
+                              AND source_listing_valid_from = :listing_valid_from
+                              AND source_listing_metadata_version = :listing_metadata_version
+                              AND provenance = :provenance
+                              AND basis = :basis
+                                AND resolution = :resolution
+                                AND interval_start = :interval_start
+                                AND interval_end = :interval_end
+                                AND detected_by_plan_hash = :plan_hash
+                              RETURNING instrument_id
+                            """
+                        ),
+                        {
+                            **_coverage_parameters(plan, item, basis),
+                            "covered_at": executed_at,
+                            "observed_points": points,
+                        },
+                    )
+                    if result.scalar_one_or_none() is None:
+                        raise RuntimeError("planned historical coverage row is missing")
+            completed = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'COMPLETED', executed_at = :executed_at
+                    WHERE plan_hash = :plan_hash AND status = 'EXECUTING'
+                    RETURNING plan_hash
+                    """
+                ),
+                {"plan_hash": plan.plan_hash, "executed_at": executed_at},
+            )
+            if completed.scalar_one_or_none() is None:
+                raise RuntimeError("backfill plan was not executing at completion")
+
+    async def provider_listing_version(self, item: BackfillPlanItem) -> ProviderListing:
+        rows = await self.query(
+            """
+            SELECT provider, environment, external_id, instrument_id, display_name,
+                   product_type, currency, minimum_deal_size, price_increment,
+                   valid_from, valid_to, metadata_version
+            FROM reference.provider_listings
+            WHERE provider = :provider AND environment = :environment
+              AND external_id = :external_id AND valid_from = :valid_from
+            """,
+            {
+                "provider": item.listing_id.provider,
+                "environment": item.listing_id.environment,
+                "external_id": item.listing_id.external_id,
+                "valid_from": item.listing_valid_from,
+            },
+        )
+        if len(rows) != 1:
+            raise RuntimeError(f"planned provider listing version is missing: {item.listing_id}")
+        listing = _provider_listing(rows[0])
+        if listing.instrument_id != item.instrument_id:
+            raise RuntimeError("planned provider listing belongs to another instrument")
+        if listing.metadata_version != item.listing_metadata_version:
+            raise RuntimeError("planned provider listing metadata version changed")
+        return listing
 
     async def record_manifest(self, manifest: ResearchManifest) -> None:
         async with self._engine.begin() as connection:
@@ -807,6 +1019,47 @@ def _utc(value: object) -> datetime:
     if not isinstance(value, datetime):
         raise TypeError("database timestamp is not a datetime")
     return value.astimezone(UTC)
+
+
+def _provider_listing(row: Mapping[str, object]) -> ProviderListing:
+    return ProviderListing(
+        listing_id=ProviderListingId(
+            provider=str(row["provider"]),
+            environment=str(row["environment"]),
+            external_id=str(row["external_id"]),
+        ),
+        instrument_id=InstrumentId(str(row["instrument_id"])),
+        display_name=str(row["display_name"]),
+        product_type=ProductType(str(row["product_type"])),
+        currency=str(row["currency"]),
+        minimum_deal_size=cast(Decimal, row["minimum_deal_size"]),
+        price_increment=cast(Decimal | None, row["price_increment"]),
+        valid_from=_utc(row["valid_from"]),
+        valid_to=_utc(row["valid_to"]) if row["valid_to"] else None,
+        metadata_version=str(row["metadata_version"]),
+    )
+
+
+def _coverage_parameters(
+    plan: BackfillPlan,
+    item: BackfillPlanItem,
+    basis: PriceBasis,
+) -> dict[str, object]:
+    return {
+        "instrument_id": str(item.instrument_id),
+        "provider": item.listing_id.provider,
+        "environment": item.listing_id.environment,
+        "external_id": item.listing_id.external_id,
+        "listing_valid_from": item.listing_valid_from,
+        "listing_metadata_version": item.listing_metadata_version,
+        "provenance": BarProvenance.IG_HISTORICAL.value,
+        "basis": basis.value,
+        "resolution": plan.resolution.value,
+        "interval_start": plan.start,
+        "interval_end": plan.end,
+        "detected_at": plan.created_at,
+        "plan_hash": plan.plan_hash,
+    }
 
 
 def _parse_datetime(value: JsonValue) -> datetime:

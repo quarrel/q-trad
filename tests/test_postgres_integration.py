@@ -1,3 +1,4 @@
+import dataclasses
 import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -12,9 +13,11 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from qtrad.__main__ import _append_bar
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app, engine_from_app
+from qtrad.application.backfill_planning import backfill_plan_payload, build_backfill_plan
 from qtrad.application.ingestion import IngestionService
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
+from qtrad.domain.instruments import INITIAL_INSTRUMENTS, ProductType, ProviderListing
 from qtrad.domain.market_data import (
     BarProvenance,
     DataQuality,
@@ -250,7 +253,7 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_bar_append_is_idempotent() -> None:
+async def test_historical_bar_append_is_idempotent_and_appends_corrections() -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL)
     store = PostgresAuditStore(engine)
@@ -275,18 +278,53 @@ async def test_historical_bar_append_is_idempotent() -> None:
 
     first = await _append_bar(store, bar, received_time=interval_start)
     duplicate = await _append_bar(store, bar, received_time=interval_start)
+    corrected_bar = dataclasses.replace(bar, close=Decimal("0.65006"))
+    correction = await _append_bar(
+        store,
+        corrected_bar,
+        received_time=interval_start + timedelta(minutes=2),
+    )
+    corrected_duplicate = await _append_bar(
+        store,
+        corrected_bar,
+        received_time=interval_start + timedelta(minutes=2),
+    )
 
     assert first is not None
     assert duplicate is None
+    assert correction is not None
+    assert correction.event_type == "MarketBarCorrected"
+    assert correction.stream_version == 2
+    assert correction.payload["revision"] == 2
+    assert corrected_duplicate is None
     rows = await store.query(
         """
-        SELECT count(*) AS event_count
+        SELECT count(*) AS event_count, max(stream_version) AS latest_version
         FROM canonical.events
         WHERE stream_id LIKE :stream_prefix
         """,
         {"stream_prefix": f"historical-bar:fx:aud-usd:BID:ig:demo:{external_id}:%"},
     )
-    assert rows[0]["event_count"] == 1
+    assert rows[0] == {"event_count": 2, "latest_version": 2}
+    projected = await store.query(
+        """
+        SELECT revision, close
+        FROM read_model.market_bars
+        WHERE instrument_id = :instrument_id AND basis = 'BID'
+          AND interval_start = :interval_start AND provenance = 'IG_HISTORICAL'
+          AND source_external_id = :external_id
+        ORDER BY revision
+        """,
+        {
+            "instrument_id": str(bar.instrument_id),
+            "interval_start": interval_start,
+            "external_id": external_id,
+        },
+    )
+    assert projected == [
+        {"revision": 1, "close": Decimal("0.65005")},
+        {"revision": 2, "close": Decimal("0.65006")},
+    ]
     await engine.dispose()
 
 
@@ -352,4 +390,168 @@ async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write() 
                 await connection.execute(text(prohibited_statement))
             await transaction.rollback()
 
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_registered_backfill_plan_projects_and_closes_exact_historical_coverage() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    await store.seed_instruments()
+    instrument = INITIAL_INSTRUMENTS[0]
+    suffix = uuid4().hex
+    listing = ProviderListing(
+        listing_id=ProviderListingId("ig", "demo", f"BACKFILL.{suffix}"),
+        instrument_id=instrument.instrument_id,
+        display_name="Backfill integration listing",
+        product_type=ProductType.SPOT_FX,
+        currency=instrument.quote_currency,
+        minimum_deal_size=Decimal("0.5"),
+        price_increment=Decimal("0.0001"),
+        valid_from=datetime(2020, 1, 1, tzinfo=UTC),
+        valid_to=datetime(2020, 1, 1, 1, tzinfo=UTC),
+        metadata_version=f"fixture-{suffix}",
+    )
+    plan = build_backfill_plan(
+        universe_name="integration-universe",
+        universe_hash="a" * 64,
+        instrument_ids=(instrument.instrument_id,),
+        listings=(listing,),
+        preferred_epics={instrument.instrument_id: listing.listing_id.external_id},
+        start=datetime(2026, 7, 13, 22, tzinfo=UTC),
+        end=datetime(2026, 7, 13, 23, tzinfo=UTC),
+        remaining_allowance=1000,
+        quota_observed_at=datetime(2026, 7, 14, tzinfo=UTC),
+        created_at=datetime(2026, 7, 14, tzinfo=UTC),
+    )
+    live_gaps_before = await store.query("SELECT count(*) AS count FROM read_model.data_gaps")
+
+    await store.register_backfill_plan(plan, backfill_plan_payload(plan))
+    await store.register_backfill_plan(plan, backfill_plan_payload(plan))
+    await store.upsert_provider_listing(listing, {}, universe_hash=plan.universe_hash)
+    exact_listing = await store.provider_listing_version(plan.items[0])
+    assert exact_listing == listing
+
+    rows = await store.query(
+        """
+        SELECT provenance, basis, resolution, source_listing_valid_from,
+               source_listing_metadata_version, detected_by_plan_hash,
+               covered_at, covered_by_plan_hash, observed_points
+        FROM read_model.historical_coverage_gaps
+        WHERE detected_by_plan_hash = :plan_hash
+        ORDER BY basis
+        """,
+        {"plan_hash": plan.plan_hash},
+    )
+    assert len(rows) == 3
+    assert {row["provenance"] for row in rows} == {"IG_HISTORICAL"}
+    assert {row["basis"] for row in rows} == {"ASK", "BID", "MID"}
+    assert {row["resolution"] for row in rows} == {"MINUTE"}
+    assert {row["source_listing_metadata_version"] for row in rows} == {listing.metadata_version}
+    assert all(row["covered_at"] is None for row in rows)
+
+    claimed = await store.claim_backfill_plan(plan.plan_hash)
+    assert claimed == backfill_plan_payload(plan)
+    with pytest.raises(RuntimeError, match="status EXECUTING"):
+        await store.claim_backfill_plan(plan.plan_hash)
+    await store.fail_backfill_plan(
+        plan.plan_hash,
+        executed_at=datetime(2026, 7, 14, 0, 1, tzinfo=UTC),
+    )
+    await store.claim_backfill_plan(plan.plan_hash)
+    await store.complete_backfill_plan(
+        plan,
+        observed_points={
+            (instrument.instrument_id, PriceBasis.BID): 60,
+            (instrument.instrument_id, PriceBasis.ASK): 60,
+            (instrument.instrument_id, PriceBasis.MID): 60,
+        },
+        executed_at=datetime(2026, 7, 14, 0, 2, tzinfo=UTC),
+    )
+
+    completed = await store.query(
+        "SELECT status FROM ops.backfill_plans WHERE plan_hash = :plan_hash",
+        {"plan_hash": plan.plan_hash},
+    )
+    assert completed == [{"status": "COMPLETED"}]
+    covered = await store.query(
+        """
+        SELECT covered_by_plan_hash, observed_points
+        FROM read_model.historical_coverage_gaps
+        WHERE detected_by_plan_hash = :plan_hash
+        """,
+        {"plan_hash": plan.plan_hash},
+    )
+    assert len(covered) == 3
+    assert {row["covered_by_plan_hash"] for row in covered} == {plan.plan_hash}
+    assert {row["observed_points"] for row in covered} == {60}
+    with pytest.raises(RuntimeError, match="status COMPLETED"):
+        await store.claim_backfill_plan(plan.plan_hash)
+    assert await store.query("SELECT count(*) AS count FROM read_model.data_gaps") == (
+        live_gaps_before
+    )
+
+    repeat_plan = build_backfill_plan(
+        universe_name="integration-universe",
+        universe_hash="a" * 64,
+        instrument_ids=(instrument.instrument_id,),
+        listings=(listing,),
+        preferred_epics={instrument.instrument_id: listing.listing_id.external_id},
+        start=plan.start,
+        end=plan.end,
+        remaining_allowance=1000,
+        quota_observed_at=datetime(2026, 7, 15, tzinfo=UTC),
+        created_at=datetime(2026, 7, 15, tzinfo=UTC),
+    )
+    assert repeat_plan.plan_hash != plan.plan_hash
+    await store.register_backfill_plan(repeat_plan, backfill_plan_payload(repeat_plan))
+    coverage_attempts = await store.query(
+        """
+        SELECT detected_by_plan_hash, covered_by_plan_hash
+        FROM read_model.historical_coverage_gaps
+        WHERE source_external_id = :external_id
+          AND interval_start = :interval_start AND interval_end = :interval_end
+        """,
+        {
+            "external_id": listing.listing_id.external_id,
+            "interval_start": plan.start,
+            "interval_end": plan.end,
+        },
+    )
+    assert len(coverage_attempts) == 6
+    assert {
+        (row["detected_by_plan_hash"], row["covered_by_plan_hash"]) for row in coverage_attempts
+    } == {
+        (plan.plan_hash, plan.plan_hash),
+        (repeat_plan.plan_hash, None),
+    }
+
+    app = create_app(Settings(database_url=DATABASE_URL))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        coverage_response = await client.get(
+            "/api/v1/historical-coverage",
+            params={"instrument_id": str(instrument.instrument_id)},
+        )
+        open_response = await client.get(
+            "/api/v1/historical-coverage",
+            params={"instrument_id": str(instrument.instrument_id), "only_open": True},
+        )
+        invalid_limit = await client.get("/api/v1/historical-coverage", params={"limit": 5001})
+
+    assert coverage_response.status_code == 200
+    matching_coverage = [
+        row for row in coverage_response.json() if row["detected_by_plan_hash"] == plan.plan_hash
+    ]
+    assert len(matching_coverage) == 3
+    assert {row["covered_by_plan_hash"] for row in matching_coverage} == {plan.plan_hash}
+    assert not any(row["detected_by_plan_hash"] == plan.plan_hash for row in open_response.json())
+    assert (
+        sum(row["detected_by_plan_hash"] == repeat_plan.plan_hash for row in open_response.json())
+        == 3
+    )
+    assert invalid_limit.status_code == 422
+
+    await engine_from_app(app).dispose()
     await engine.dispose()

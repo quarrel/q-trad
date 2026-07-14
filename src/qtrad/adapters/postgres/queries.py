@@ -183,6 +183,35 @@ class OperatorQueries:
             "SELECT * FROM read_model.data_gaps ORDER BY detected_at DESC"
         )
 
+    async def historical_coverage(
+        self,
+        *,
+        instrument_id: str | None = None,
+        only_open: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return plan-scoped historical coverage without conflating live-stream gaps."""
+
+        return await self._store.query(
+            """
+            SELECT instrument_id, source_provider, source_environment, source_external_id,
+                   source_listing_valid_from, source_listing_metadata_version,
+                   provenance, basis, resolution, interval_start, interval_end,
+                   detected_at, detected_by_plan_hash, covered_at,
+                   covered_by_plan_hash, observed_points
+            FROM read_model.historical_coverage_gaps
+            WHERE (:instrument_id IS NULL OR instrument_id = :instrument_id)
+              AND (NOT :only_open OR covered_at IS NULL)
+            ORDER BY detected_at DESC, instrument_id, basis
+            LIMIT :limit
+            """,
+            {
+                "instrument_id": instrument_id,
+                "only_open": only_open,
+                "limit": limit,
+            },
+        )
+
     async def runs(self) -> list[dict[str, Any]]:
         return await self._store.query("SELECT * FROM ops.runs ORDER BY started_at DESC LIMIT 100")
 

@@ -4,7 +4,6 @@ from decimal import Decimal
 
 import pytest
 
-from qtrad.application.quota import points_per_instrument
 from qtrad.application.replay import (
     ReplayClock,
     ordered_events,
@@ -37,13 +36,6 @@ def sample_bar() -> MarketBar:
         source_listing_id=ProviderListingId("fixture", "test", "US500"),
         quality=DataQuality.HEALTHY,
     )
-
-
-def test_quota_preserves_twenty_percent_for_seven_instruments() -> None:
-    assert points_per_instrument(remaining_allowance=10_000) == 1000
-    assert points_per_instrument(remaining_allowance=3500) == 400
-    with pytest.raises(ValueError):
-        points_per_instrument(remaining_allowance=-1)
 
 
 def test_bar_hash_is_deterministic() -> None:

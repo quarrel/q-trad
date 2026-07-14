@@ -133,17 +133,43 @@ Instrument synchronisation validates the configured standard-contract preference
 canonical quote currency and rolling/cash metadata for every instrument. It fails
 closed if a preferred listing is missing or invalid.
 
-Bounded backfill and research export are separate commands:
+Historical backfill is deliberately split from research export and from live ingestion. First
+create a non-overwriting plan for explicit instruments and an exact half-open UTC range:
 
 ```bash
-docker compose run --rm app python -m qtrad backfill --max-points 1000
+docker compose run --rm app python -m qtrad backfill plan \
+  --universe /app/config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-01T06:00:00Z \
+  --remaining-allowance 10000 \
+  --output /app/data/backfill-plan.json \
+  fx:aud-usd fx:eur-usd
+```
+
+Planning reads already validated listings from PostgreSQL, requires them to match the selected
+universe, reserves 20% of the operator-reported allowance, and makes no IG request. Inspect the
+JSON and its printed hash. Registration requires that exact hash and still makes no IG request:
+
+```bash
+docker compose run --rm app python -m qtrad backfill register \
+  --plan /app/data/backfill-plan.json \
+  --confirm-plan-hash <reviewed-sha256>
+```
+
+Only then execute the persisted plan by hash. This is the credential-gated provider operation:
+
+```bash
+docker compose run --rm app python -m qtrad backfill execute \
+  --plan-hash <reviewed-sha256>
+
 docker compose run --rm app python -m qtrad research export
 docker compose run --rm app python -m qtrad replay --manifest /app/data/research/manifests/MANIFEST.json
 ```
 
-The backfill command treats the supplied allowance as operator-reported and reserves
-at least 20%. It records IG's provider-reported remaining allowance separately when
-the response supplies it. Verify the current IG allowance before invoking it.
+Execution cannot rediscover or substitute listings, widen the range or alter live-gap evidence.
+Identical bars are idempotent; changed historical values append correction revisions. It records
+IG's provider-reported remaining allowance separately when available. Verify the current IG
+allowance before planning and again before execution.
 
 ## Documentation
 

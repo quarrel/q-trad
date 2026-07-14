@@ -218,6 +218,53 @@ queries must remain bounded and read-only; do not point development tools, migra
 rebuilds or paper writers at this tunnel. Drop the login when it is no longer needed; migration
 ownership of `qtrad_capture_reader` remains unchanged.
 
+## Reviewed historical coverage
+
+Historical backfill is an operator-controlled data operation, not an ingestion recovery action.
+Never run it merely because `/api/v1/gaps` reports a live-stream interruption, and do not run it
+on the frozen collector during a qualification window. Prefer an isolated local database or an
+explicitly approved maintenance window after the candidate release containing migration `0005`
+has passed CI and deployment review.
+
+Verify the current IG demo historical allowance, choose explicit instruments, and create an exact
+half-open UTC range plan. The selected universe may be an approved non-streaming candidate when
+exploring a new instrument, but its listings must already have passed the normal validation path.
+
+```bash
+uv run qtrad backfill plan \
+  --universe config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-01T06:00:00Z \
+  --remaining-allowance 10000 \
+  --output tmp/backfill-plan.json \
+  fx:aud-usd fx:eur-usd
+```
+
+This stage reads PostgreSQL but does not contact IG. Inspect the complete JSON: universe and
+configuration hash, exact listing IDs and effective versions, range, resolution, chunks and quota
+observation. Retain it as review evidence. Repeat the printed hash to register it:
+
+```bash
+uv run qtrad backfill register \
+  --plan tmp/backfill-plan.json \
+  --confirm-plan-hash <reviewed-sha256>
+```
+
+Registration is idempotent for identical content and creates open BID/ASK/MID historical coverage
+attempts without provider access. Execution is the only credential-gated stage:
+
+```bash
+uv run qtrad backfill execute --plan-hash <reviewed-sha256>
+```
+
+Execution atomically claims a registered `PLANNED` or explicitly retried `FAILED` plan before
+constructing the IG adapter. It uses only the persisted listing versions and exact range. Review
+the terminal plan/run status, provider-reported allowance and
+`GET /api/v1/historical-coverage?only_open=true` afterward. A `COMPLETED` plan requires returned
+data for all three bases. It does not imply that every market minute traded and never repairs or
+closes an observed live-stream gap. Repeating a reviewed range creates separate plan evidence;
+unchanged bars append nothing, while changed values append canonical correction revisions.
+
 ## Qualification
 
 Before unattended collection, prove ARM startup, migration, restricted direct IPv6 SSH,

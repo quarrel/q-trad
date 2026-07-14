@@ -8,6 +8,7 @@ from enum import StrEnum
 from typing import Protocol
 
 from qtrad.domain.events import JsonValue
+from qtrad.domain.historical_coverage import HistoricalResolution
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.market_data import MarketBar, MarketQuote
@@ -45,6 +46,7 @@ class BackfillRequest:
     start: datetime
     end: datetime
     maximum_points: int
+    resolution: HistoricalResolution = HistoricalResolution.MINUTE
 
 
 class ListingExpiryKind(StrEnum):

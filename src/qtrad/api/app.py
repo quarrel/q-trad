@@ -155,6 +155,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def gaps() -> Any:
         return jsonable_encoder(await queries.gaps())
 
+    @app.get("/api/v1/historical-coverage")
+    async def historical_coverage(
+        instrument_id: str | None = None,
+        only_open: bool = False,
+        limit: Annotated[int, Query(ge=1, le=5000)] = 500,
+    ) -> Any:
+        return jsonable_encoder(
+            await queries.historical_coverage(
+                instrument_id=instrument_id,
+                only_open=only_open,
+                limit=limit,
+            )
+        )
+
     @app.get("/api/v1/runs")
     async def runs() -> Any:
         return jsonable_encoder(await queries.runs())

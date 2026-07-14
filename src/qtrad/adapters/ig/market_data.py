@@ -635,9 +635,9 @@ class IgDemoMarketDataAdapter:
             "fetch_historical_prices",
             lambda: service.fetch_historical_prices_by_epic_and_date_range(
                 request.listing.listing_id.external_id,
-                "MINUTE",
+                request.resolution.value,
                 _historical_query_time(request.start),
-                _historical_query_time(request.end),
+                _historical_query_time(request.end - timedelta(seconds=1)),
             ),
         )
         allowance = _mapping(_mapping(response).get("allowance"))

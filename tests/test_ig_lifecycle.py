@@ -69,6 +69,7 @@ class FakeService:
         self.historical_response = historical_response
         self.session = FakeSession()
         self.logged_out = False
+        self.historical_request: tuple[str, str, str, str] | None = None
 
     def create_session(self) -> dict[str, str]:
         if self.failure is not None:
@@ -91,6 +92,7 @@ class FakeService:
         self, epic: str, resolution: str, start: str, end: str
     ) -> dict[str, Any]:
         assert epic and resolution == "MINUTE" and start < end
+        self.historical_request = (epic, resolution, start, end)
         return self.historical_response or {"prices": []}
 
 
@@ -790,6 +792,12 @@ async def test_backfill_captures_provider_reported_allowance() -> None:
 
     assert [bar async for bar in adapter.backfill(request)] == []
     assert adapter.historical_allowance_remaining == 9965
+    assert service.historical_request == (
+        listing().listing_id.external_id,
+        "MINUTE",
+        clock.now().strftime("%Y-%m-%d %H:%M:%S"),
+        (clock.now() + timedelta(minutes=5) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
+    )
     await adapter.disconnect()
 
 

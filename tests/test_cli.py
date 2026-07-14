@@ -57,9 +57,50 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             (("maximum_seconds", 60.0), ("force_reconnect_after_seconds", 20.0)),
         ),
         (
-            ["backfill", "--max-points", "25", "--remaining-allowance", "500"],
-            "_backfill",
-            (("maximum_points", 25), ("remaining_allowance", 500)),
+            [
+                "backfill",
+                "plan",
+                "--universe",
+                "config/capture-v1.toml",
+                "--start",
+                "2026-07-17T22:00:00Z",
+                "--end",
+                "2026-07-18T00:00:00Z",
+                "--remaining-allowance",
+                "500",
+                "--output",
+                "backfill-plan.json",
+                "fx:aud-usd",
+            ],
+            "_plan_backfill",
+            (
+                ("universe_path", Path("config/capture-v1.toml")),
+                ("start", datetime(2026, 7, 17, 22, tzinfo=UTC)),
+                ("end", datetime(2026, 7, 18, tzinfo=UTC)),
+                ("remaining_allowance", 500),
+                ("output_path", Path("backfill-plan.json")),
+                ("instrument_ids", [InstrumentId("fx:aud-usd")]),
+            ),
+        ),
+        (
+            [
+                "backfill",
+                "register",
+                "--plan",
+                "backfill-plan.json",
+                "--confirm-plan-hash",
+                "a" * 64,
+            ],
+            "_register_backfill",
+            (
+                ("plan_path", Path("backfill-plan.json")),
+                ("confirmed_plan_hash", "a" * 64),
+            ),
+        ),
+        (
+            ["backfill", "execute", "--plan-hash", "a" * 64],
+            "_execute_backfill",
+            (("plan_hash", "a" * 64),),
         ),
         (["research", "export"], "_export", ()),
         (["replay", "--manifest", "research/manifests/example.json"], "_replay", ()),
@@ -80,7 +121,7 @@ def test_async_command_dispatch(
     cli.main(arguments)
 
     positional: list[object] = [cli_environment]
-    if target != "_rebuild":
+    if target not in {"_rebuild", "_register_backfill"}:
         positional.append(cli_clock)
     if target == "_replay":
         positional.append(Path("research/manifests/example.json"))

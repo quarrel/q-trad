@@ -218,6 +218,18 @@ because IG's deployed server is not compatible with an unverified client upgrade
 Queue insertion remains non-blocking; overflow is counted and reported as degraded
 health without blocking the provider callback. ADR 0010 records these decisions.
 
-Historical requests use IG's v2 UTC date format. Each source, interval and price basis
-has a deterministic canonical stream identity, making overlapping backfills idempotent.
-Operator-supplied and provider-reported historical allowances are stored separately.
+Historical requests use IG's v2 UTC date format, but the former implicit all-universe
+"last N minutes" command is no longer an operational surface. A strict non-overwriting plan
+binds an exact UTC `[start, end)` range to a capture-universe hash, configured and effective
+IG demo listing identity, one-minute resolution, request chunks and timestamped quota evidence.
+The operator must inspect the canonical JSON and repeat its SHA-256 before registration.
+Execution claims only that persisted hash and cannot rediscover a listing, change the range or
+silently substitute an instrument.
+
+Each listing, interval and price basis has a deterministic canonical stream identity. An
+identical overlapping result is idempotent; a changed historical result appends a
+`MarketBarCorrected` stream revision. Plan-scoped historical coverage attempts include the
+listing effective version, `IG_HISTORICAL` provenance, basis, resolution, interval and plan
+hash. They are exposed through a bounded read-only API independently of observed live-stream
+gaps, which backfill never closes or rewrites. Operator-supplied and provider-reported
+historical allowances are stored separately.

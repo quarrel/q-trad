@@ -335,3 +335,19 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The future feed-capable Compose descriptor now fails configuration unless the operator sets
   a stable, non-secret capture-source ID. This branch is not deployed; the running collector's
   environment and release descriptor remain unchanged during qualification.
+- The earlier schema-only claim for planned historical coverage has been replaced locally with
+  an executable, fail-closed workflow. `backfill plan` records explicit instruments, an exact
+  half-open UTC range, the selected universe hash, configured and effective IG demo listing
+  identity, one-minute resolution, chunks and timestamped quota evidence in canonical JSON.
+  It makes no IG call and refuses to overwrite evidence.
+- `backfill register` requires the reviewed SHA-256 before it persists a plan and plan-scoped
+  BID/ASK/MID coverage attempts. `backfill execute` atomically claims only that persisted hash,
+  loads its exact listing versions and cannot rediscover or substitute them. Failed plans are
+  explicit retries; completion requires observations for every basis.
+- Migration `0005` completes historical coverage identity with effective listing version,
+  provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
+  independent coverage evidence; identical returned bars are idempotent and changed historical
+  values append canonical corrections. Live `data_gaps` are neither updated nor closed.
+- The read-only `/api/v1/historical-coverage` resource exposes bounded open or completed
+  historical attempts separately from `/api/v1/gaps`. All implementation and tests so far are
+  local/isolated; no IG request, OCI mutation or collector database access occurred.

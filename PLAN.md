@@ -124,6 +124,12 @@ Implementation status:
   catalogue identity and one manually selected eligible IG demo listing per instrument. It rejects
   stale, tampered, omitted, duplicate, unseen, reused or ineligible selections and deterministically
   renders a non-overwriting, undeployed TOML release bound to review and selection hashes.
+- Complete locally without IG or collector access: historical backfill is now an explicit
+  plan/review/register/execute state machine. A canonical plan binds its exact UTC range,
+  universe hash, configured listing and effective version, resolution, chunks and quota evidence;
+  registration requires the operator-confirmed SHA-256. Plan-scoped BID/ASK/MID coverage attempts
+  remain separate from live gaps, repeated plans preserve independent evidence, and changed
+  provider bars append corrections. The bounded read-only API exposes this projection.
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.
@@ -176,14 +182,15 @@ Implementation status:
 
 ## WP5 — backfill and research data
 
-Use:
-
-```text
-per_instrument_points =
-    min(1000, floor(0.8 × remaining_weekly_allowance / 7))
-```
-
-- Keep historical-bar provenance distinct from quote-derived bars.
+- Create a non-overwriting canonical plan for explicit instruments and an exact UTC range.
+- Bind the plan to the selected universe/configuration, exact effective listing versions,
+  one-minute resolution, request chunks and timestamped operator quota evidence.
+- Reserve 20% of the reported allowance and reject a plan whose exact range exceeds the
+  remaining usable points; do not turn an allowance into an implicit "last N minutes" range.
+- Require review and explicit hash confirmation before registration, and execute only the
+  atomically claimed persisted plan without listing substitution.
+- Keep historical-bar provenance and plan-scoped coverage distinct from quote-derived bars
+  and observed live-stream gaps. Append changed provider history as a new correction revision.
 - Export Parquet by data type, instrument and UTC date.
 - Include schema, coverage, gaps, provenance, code/configuration versions and hashes in manifests.
 
@@ -211,7 +218,9 @@ python -m qtrad instruments sync
 python -m qtrad ingest --environment ig-demo
 python -m qtrad ingest --environment ig-demo --max-seconds 60
 python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-after-seconds 20
-python -m qtrad backfill --max-points 1000
+python -m qtrad backfill plan --universe PATH --start UTC --end UTC --remaining-allowance N --output PATH INSTRUMENT...
+python -m qtrad backfill register --plan PATH --confirm-plan-hash SHA256
+python -m qtrad backfill execute --plan-hash SHA256
 python -m qtrad research export
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
@@ -222,8 +231,8 @@ python -m qtrad api
 
 ## Verification evidence
 
-- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
-  174 tests pass with six PostgreSQL integration tests deferred to isolated CI.
+- Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass;
+  186 tests pass with seven PostgreSQL migration/integration tests deferred to isolated CI.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and
