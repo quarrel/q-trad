@@ -316,31 +316,29 @@ qualification. A failed or ambiguous mapping leaves the collector on `capture-v1
 
 Do not deploy or restart services merely to measure the currently qualified representation. After
 the inspector candidate has passed CI and been published by immutable digest, invoke that image as
-a one-shot read-only process while the pinned collector continues unchanged. Create a root-only
-evidence directory and take two snapshots far enough apart to exceed PostgreSQL page-allocation
-noise:
+a one-shot read-only process while the pinned collector continues unchanged. Pull the reviewed
+digest once, then use the guarded helper. It rejects mutable images and unsafe labels, refuses to
+overwrite evidence, uses `compose run --rm --no-deps --pull never`, and restores the evidence
+directory plus completed file to root-only ownership after the non-root application writes it:
 
 ```bash
-sudo install -d -o root -g root -m 0700 /var/lib/qtrad-capture/storage-evidence
-
-cd /opt/qtrad-capture/current
 STORAGE_INSPECTOR_IMAGE='<reviewed repository@sha256:digest>'
-sudo QTRAD_IMAGE="$STORAGE_INSPECTOR_IMAGE" \
-  docker compose --env-file /etc/qtrad/capture.env \
-  -f compose.capture.yaml run --rm --no-deps \
-  -v /var/lib/qtrad-capture/storage-evidence:/evidence:Z \
-  ingest python -m qtrad storage snapshot \
-  --universe /app/config/capture-v1.toml \
-  --output /evidence/storage-before.json
+sudo docker pull "$STORAGE_INSPECTOR_IMAGE"
+sudo env \
+  QTRAD_CAPTURE_ROOT=/opt/qtrad-capture \
+  QTRAD_STORAGE_EVIDENCE_DIR=/var/lib/qtrad-capture/storage-evidence \
+  QTRAD_STORAGE_INSPECTOR_IMAGE="$STORAGE_INSPECTOR_IMAGE" \
+  /opt/qtrad-capture/ops/capture/storage-snapshot.sh pinned-before
 ```
 
-Repeat with `storage-after.json` after a representative interval. Copy both evidence files to an
-operator workstation and run `uv run qtrad storage compare BEFORE AFTER`; comparison is offline
-and requires no collector credentials. `run --no-deps` does not recreate `db`, `ingest` or `api`;
-the candidate command opens one bounded read-only transaction and exits. The snapshot records
-exact raw/canonical counts from one repeatable-read transaction plus observed physical sizes.
-Database-wide growth is contextual; raw and canonical relation deltas are the primary retention
-inputs.
+Repeat the helper with `pinned-after` after a representative interval. Copy both evidence files to
+an operator workstation and run `uv run qtrad storage compare BEFORE AFTER`; comparison is offline
+and requires no collector credentials. The helper verifies that the reviewed image is already local
+and shell interpolation overrides the deployment environment's `QTRAD_IMAGE` only for this command.
+`run --no-deps` does not recreate `db`, `ingest` or `api`; the candidate command opens one bounded
+read-only transaction and exits. The snapshot records exact raw/canonical counts from one
+repeatable-read transaction plus observed physical sizes. Database-wide growth is contextual; raw
+and canonical relation deltas are the primary retention inputs.
 
 Current snapshot schema version 2 also reports JSON text-rendering sample size and individual index
 byte/scan deltas. Offline comparison attributes combined retained growth to heap, indexes and

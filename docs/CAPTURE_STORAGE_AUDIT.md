@@ -84,7 +84,8 @@ or canonical rows, or infer transport gaps from storage compaction.
 
 For both the pinned representation and the later changed-field candidate:
 
-1. take before/after snapshots from one application image and configuration;
+1. use `ops/capture/storage-snapshot.sh` to take non-overwriting before/after snapshots from one
+   immutable application image and configuration without starting collector dependencies;
 2. use at least six active-market hours or 100,000 new raw messages, whichever is longer;
 3. reject intervals containing a PostgreSQL restart/statistics reset for index-usage conclusions;
 4. compare raw/canonical/combined heap, index and auxiliary allocation, individual indexes, the

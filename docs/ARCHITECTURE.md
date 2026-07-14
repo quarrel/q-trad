@@ -177,6 +177,10 @@ operator-review requirement.
 The same comparison emits explicitly mechanical observed-rate extrapolations for combined raw and
 canonical relation growth over one, 30 and 365 days. They are capacity-planning scenarios rather
 than forecasts and do not include database-wide or backup growth.
+The post-qualification snapshot helper accepts only a local immutable image digest and invokes a
+one-off `--no-deps --pull never` container. It temporarily grants the image's fixed non-root UID
+access to its dedicated evidence directory, then restores root-only directory and file ownership;
+existing collector roles are neither recreated nor restarted.
 `docs/CAPTURE_STORAGE_AUDIT.md` keeps uniqueness and audit retention outside the optimisation
 boundary.
 

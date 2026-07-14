@@ -116,6 +116,10 @@ Implementation status:
   days. These remain labelled interval extrapolations rather than forecasts. GitHub CI run
   `29327187828` passed all static, migration and PostgreSQL 18 gates with 224 tests at branch head
   `448250e`.
+- Complete locally and undeployed: a guarded operator helper runs storage snapshots only from an
+  already-local immutable inspector digest using `--no-deps --pull never`, refuses unsafe labels and
+  overwrites, and returns evidence written by the non-root image to root-only ownership without
+  restarting collector services.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

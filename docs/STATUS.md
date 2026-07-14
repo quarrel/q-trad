@@ -416,6 +416,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
   The output binds its representative-threshold status and does not label those scenarios forecasts.
 - GitHub CI run `29327187828` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `448250e`.
+- `ops/capture/storage-snapshot.sh` now makes the deferred baseline procedure reproducible. It
+  accepts only an already-local immutable digest, runs one non-root inspector container with
+  `--no-deps --pull never`, refuses unsafe labels or existing output and restores evidence to
+  root-only ownership. It remains undeployed during the active qualification.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

@@ -35,14 +35,22 @@ def test_capture_database_is_available_only_on_an_explicit_loopback_port() -> No
     assert "0.0.0.0" not in database
 
 
+def test_storage_snapshot_writer_uid_matches_application_image() -> None:
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text()
+    script = (SCRIPTS / "storage-snapshot.sh").read_text()
+
+    assert "useradd --create-home --uid 10001 qtrad" in dockerfile
+    assert "readonly application_uid=10001" in script
+
+
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)
 
 
-def _run(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+def _run(script: str, env: dict[str, str], *args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
-        [str(SCRIPTS / script)],
+        [str(SCRIPTS / script), *args],
         check=False,
         capture_output=True,
         text=True,
@@ -128,6 +136,112 @@ printf '%s\\n' "$*" >> '{calls}'
         == manifest["manifest_sha256"]
     )
     assert len(calls.read_text().splitlines()) == 3
+
+
+def test_storage_snapshot_uses_pinned_one_shot_image_without_dependencies(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "docker-calls"
+    evidence_dir = tmp_path / "evidence"
+    inspector_image = "example.invalid/qtrad@sha256:" + "a" * 64
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_DATABASE_PASSWORD=test-only\n")
+    (tmp_path / "compose.capture.yaml").write_text("services: {}\n")
+    _write_executable(
+        fake_bin / "install",
+        """#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${!#}"
+""",
+    )
+    for command in ("chown", "chmod"):
+        _write_executable(fake_bin / command, "#!/usr/bin/env bash\nset -euo pipefail\n")
+    _write_executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> '{calls}'
+case "$*" in
+  "image inspect {inspector_image}") ;;
+  *"run --rm --no-deps --pull never"*)
+    [[ "${{QTRAD_IMAGE:?}}" == '{inspector_image}' ]]
+    [[ "$*" == *"-v {evidence_dir}:/evidence:Z"* ]]
+    [[ "$*" == *"--output /evidence/storage-pinned-before.json"* ]]
+    printf '{{"schema_version":2}}\\n' > '{evidence_dir}/storage-pinned-before.json'
+    ;;
+  *) exit 70 ;;
+esac
+""",
+    )
+
+    result = _run(
+        "storage-snapshot.sh",
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_CAPTURE_ROOT": str(tmp_path),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_STORAGE_EVIDENCE_DIR": str(evidence_dir),
+            "QTRAD_STORAGE_INSPECTOR_IMAGE": inspector_image,
+        },
+        "pinned-before",
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == str(evidence_dir / "storage-pinned-before.json")
+    assert len(calls.read_text().splitlines()) == 2
+
+    repeated = _run(
+        "storage-snapshot.sh",
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_CAPTURE_ROOT": str(tmp_path),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_STORAGE_EVIDENCE_DIR": str(evidence_dir),
+            "QTRAD_STORAGE_INSPECTOR_IMAGE": inspector_image,
+        },
+        "pinned-before",
+    )
+    assert repeated.returncode != 0
+    assert len(calls.read_text().splitlines()) == 2
+
+
+@pytest.mark.parametrize(
+    ("label", "image"),
+    [
+        ("../escape", "example.invalid/qtrad@sha256:" + "a" * 64),
+        ("pinned-before", "example.invalid/qtrad:latest"),
+    ],
+)
+def test_storage_snapshot_rejects_unsafe_identity_before_docker(
+    tmp_path: Path,
+    label: str,
+    image: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_called = tmp_path / "docker-called"
+    _write_executable(
+        fake_bin / "docker",
+        f"#!/usr/bin/env bash\nset -euo pipefail\ntouch '{docker_called}'\n",
+    )
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_DATABASE_PASSWORD=test-only\n")
+    (tmp_path / "compose.capture.yaml").write_text("services: {}\n")
+
+    result = _run(
+        "storage-snapshot.sh",
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_CAPTURE_ROOT": str(tmp_path),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_STORAGE_EVIDENCE_DIR": str(tmp_path / "evidence"),
+            "QTRAD_STORAGE_INSPECTOR_IMAGE": image,
+        },
+        label,
+    )
+
+    assert result.returncode != 0
+    assert not docker_called.exists()
 
 
 @pytest.mark.parametrize("manifest_version", [1, 2])
