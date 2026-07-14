@@ -109,7 +109,8 @@ Implementation status:
 - Complete locally and undeployed: comparison now rejects release/source/database identity drift and
   emits an automated evidence gate requiring both six elapsed hours and 100,000 new raw messages.
   Index-scan evidence additionally requires unchanged PostgreSQL statistics; representative
-  active-market conditions remain an explicit operator review.
+  active-market conditions remain an explicit operator review. GitHub CI run `29326917893` passed
+  all static, migration and PostgreSQL 18 gates with 224 tests at branch head `9189f21`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

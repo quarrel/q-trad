@@ -409,6 +409,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   application-version or immutable-image drift. Its machine-readable gate requires six elapsed
   hours and 100,000 new raw messages, marks index evidence unusable across a statistics reset and
   keeps active-market representativeness as an operator review rather than an inferred fact.
+- GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
+  `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
