@@ -35,6 +35,13 @@ Storage snapshot schema version 2 remains backward-readable with version 1 and a
   bounded recent sample; and
 - per-index physical-byte and scan-counter deltas, including bytes per newly captured raw message.
 
+Offline comparison also attributes raw, canonical and combined growth to main heap, indexes and
+auxiliary relation storage. Auxiliary storage is the remainder of total relation size after the
+main heap and indexes; it includes such PostgreSQL-managed allocation as TOAST, free-space and
+visibility-map storage. It reports both bytes per raw message and bytes per new relation row, plus
+the observed canonical-event/raw-message ratio. This makes the headline retained-growth number
+actionable without pretending that sampled payload width equals page allocation.
+
 The snapshot also binds `pg_stat_database.stats_reset`. If it changes, offline comparison marks
 index scan deltas unavailable rather than presenting reset counters as usage evidence. Physical
 allocation occurs in pages, so use a representative active-market window rather than a handful of
@@ -68,7 +75,8 @@ For both the pinned representation and the later changed-field candidate:
 1. take before/after snapshots from one application image and configuration;
 2. use at least six active-market hours or 100,000 new raw messages, whichever is longer;
 3. reject intervals containing a PostgreSQL restart/statistics reset for index-usage conclusions;
-4. compare raw heap/index, canonical heap/index, individual index and JSONB/text sample evidence;
+4. compare raw/canonical/combined heap, index and auxiliary allocation, individual indexes, the
+   canonical/raw row ratio and JSONB/text sample evidence;
 5. record database-wide growth only as context because backups, catalogues and unrelated relations
    may contribute; and
 6. make one schema decision at a time, with restore/replay and application rollback evidence.

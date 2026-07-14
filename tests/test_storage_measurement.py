@@ -105,6 +105,73 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
         "canonical_relation": "750.000",
         "raw_and_canonical_relations": "1500.000",
     }
+    assert comparison["canonical_events_per_raw_message"] == "1.500"
+    assert comparison["capture_growth_attribution"] == {
+        "component_order": ["heap", "indexes", "auxiliary", "total"],
+        "combined": {
+            "rows_delta": 5,
+            "bytes_delta": {
+                "heap": 1_300,
+                "indexes": 700,
+                "auxiliary": 1_000,
+                "total": 3_000,
+            },
+            "bytes_per_raw_message": {
+                "heap": "650.000",
+                "indexes": "350.000",
+                "auxiliary": "500.000",
+                "total": "1500.000",
+            },
+            "bytes_per_new_relation_row": {
+                "heap": "260.000",
+                "indexes": "140.000",
+                "auxiliary": "200.000",
+                "total": "600.000",
+            },
+        },
+        "raw": {
+            "rows_delta": 2,
+            "bytes_delta": {
+                "heap": 500,
+                "indexes": 300,
+                "auxiliary": 700,
+                "total": 1_500,
+            },
+            "bytes_per_raw_message": {
+                "heap": "250.000",
+                "indexes": "150.000",
+                "auxiliary": "350.000",
+                "total": "750.000",
+            },
+            "bytes_per_new_relation_row": {
+                "heap": "250.000",
+                "indexes": "150.000",
+                "auxiliary": "350.000",
+                "total": "750.000",
+            },
+        },
+        "canonical": {
+            "rows_delta": 3,
+            "bytes_delta": {
+                "heap": 800,
+                "indexes": 400,
+                "auxiliary": 300,
+                "total": 1_500,
+            },
+            "bytes_per_raw_message": {
+                "heap": "400.000",
+                "indexes": "200.000",
+                "auxiliary": "150.000",
+                "total": "750.000",
+            },
+            "bytes_per_new_relation_row": {
+                "heap": "266.667",
+                "indexes": "133.333",
+                "auxiliary": "100.000",
+                "total": "500.000",
+            },
+        },
+    }
     assert comparison["index_deltas"] == [
         {
             "index": "canonical.events_pkey",
@@ -198,3 +265,22 @@ def test_storage_comparison_invalidates_scan_deltas_after_statistics_reset() -> 
     for row in index_deltas:
         assert isinstance(row, dict)
         assert row["scans_since_statistics_reset"] is None
+
+
+def test_storage_comparison_handles_no_new_canonical_rows() -> None:
+    before = _measurement()
+    after = replace(
+        before,
+        observed_at=NOW + timedelta(minutes=1),
+        raw_message_count=101,
+    )
+
+    comparison = compare_storage_snapshots(_snapshot(before), _snapshot(after))
+
+    assert comparison["canonical_events_per_raw_message"] == "0.000"
+    attribution = comparison["capture_growth_attribution"]
+    assert isinstance(attribution, dict)
+    canonical = attribution["canonical"]
+    assert isinstance(canonical, dict)
+    assert canonical["rows_delta"] == 0
+    assert canonical["bytes_per_new_relation_row"] is None

@@ -219,6 +219,22 @@ def compare_storage_snapshots(
         after_relations,
         "canonical.events",
     )
+    raw_components = _relation_component_deltas(
+        before_relations,
+        after_relations,
+        "raw.market_messages",
+    )
+    canonical_components = _relation_component_deltas(
+        before_relations,
+        after_relations,
+        "canonical.events",
+    )
+    combined_components = (
+        raw_components[0] + canonical_components[0],
+        raw_components[1] + canonical_components[1],
+        raw_components[2] + canonical_components[2],
+        raw_components[3] + canonical_components[3],
+    )
     elapsed = after.observed_at - before.observed_at
     elapsed_seconds = Decimal(elapsed.days * 86_400 + elapsed.seconds) + (
         Decimal(elapsed.microseconds) / Decimal(1_000_000)
@@ -240,6 +256,7 @@ def compare_storage_snapshots(
         "statistics_reset_changed": statistics_reset_changed,
         "raw_relation_bytes_delta": raw_relation_delta,
         "canonical_relation_bytes_delta": canonical_relation_delta,
+        "canonical_events_per_raw_message": _ratio(canonical_delta, raw_delta),
         "bytes_per_raw_message": {
             "database": _ratio(after.database_bytes - before.database_bytes, raw_delta),
             "raw_relation": _ratio(raw_relation_delta, raw_delta),
@@ -247,6 +264,24 @@ def compare_storage_snapshots(
             "raw_and_canonical_relations": _ratio(
                 raw_relation_delta + canonical_relation_delta,
                 raw_delta,
+            ),
+        },
+        "capture_growth_attribution": {
+            "component_order": ["heap", "indexes", "auxiliary", "total"],
+            "combined": _component_summary(
+                combined_components,
+                raw_message_delta=raw_delta,
+                relation_row_delta=raw_delta + canonical_delta,
+            ),
+            "raw": _component_summary(
+                raw_components,
+                raw_message_delta=raw_delta,
+                relation_row_delta=raw_delta,
+            ),
+            "canonical": _component_summary(
+                canonical_components,
+                raw_message_delta=raw_delta,
+                relation_row_delta=canonical_delta,
             ),
         },
         "relation_deltas": relation_deltas,
@@ -383,6 +418,47 @@ def _total_delta(
     if relation_name not in before or relation_name not in after:
         raise ValueError(f"storage snapshot comparison is missing {relation_name}")
     return after[relation_name].total_bytes - before[relation_name].total_bytes
+
+
+def _relation_component_deltas(
+    before: dict[str, RelationStorageEvidence],
+    after: dict[str, RelationStorageEvidence],
+    relation_name: str,
+) -> tuple[int, int, int, int]:
+    if relation_name not in before or relation_name not in after:
+        raise ValueError(f"storage snapshot comparison is missing {relation_name}")
+    previous = before[relation_name]
+    current = after[relation_name]
+    heap_delta = current.heap_bytes - previous.heap_bytes
+    index_delta = current.index_bytes - previous.index_bytes
+    total_delta = current.total_bytes - previous.total_bytes
+    auxiliary_delta = total_delta - heap_delta - index_delta
+    return heap_delta, index_delta, auxiliary_delta, total_delta
+
+
+def _component_summary(
+    components: tuple[int, int, int, int],
+    *,
+    raw_message_delta: int,
+    relation_row_delta: int,
+) -> dict[str, JsonValue]:
+    names = ("heap", "indexes", "auxiliary", "total")
+    return {
+        "rows_delta": relation_row_delta,
+        "bytes_delta": dict(zip(names, components, strict=True)),
+        "bytes_per_raw_message": {
+            name: _ratio(value, raw_message_delta)
+            for name, value in zip(names, components, strict=True)
+        },
+        "bytes_per_new_relation_row": (
+            None
+            if relation_row_delta == 0
+            else {
+                name: _ratio(value, relation_row_delta)
+                for name, value in zip(names, components, strict=True)
+            }
+        ),
+    }
 
 
 def _sample_summary(snapshot: StorageSnapshot) -> dict[str, JsonValue]:

@@ -100,6 +100,10 @@ Implementation status:
   and hash-width changes conditional on representative measurements rather than estimates. GitHub
   CI run `29325936926` passed all static, migration and PostgreSQL 18 gates with 218 tests at branch
   head `1aefd62`.
+- Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
+  growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
+  per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
+  not incorrectly assumed to represent exactly one canonical event per provider update.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

@@ -343,9 +343,11 @@ Database-wide growth is contextual; raw and canonical relation deltas are the pr
 inputs.
 
 Current snapshot schema version 2 also reports JSON text-rendering sample size and individual index
-byte/scan deltas. Follow `docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or
-100,000 new raw messages, whichever is longer, and reject a restart/statistics-reset interval for
-index-usage conclusions. Do not remove an index or change payload representation from one small
+byte/scan deltas. Offline comparison attributes combined retained growth to heap, indexes and
+auxiliary PostgreSQL storage, and reports the canonical-event/raw-message ratio so a non-one-to-one
+interval is not misread. Follow `docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours
+or 100,000 new raw messages, whichever is longer, and reject a restart/statistics-reset interval
+for index-usage conclusions. Do not remove an index or change payload representation from one small
 sample.
 
 ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete

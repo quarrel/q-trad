@@ -167,6 +167,9 @@ Snapshot schema version 2 remains compatible with saved version-one evidence and
 compares JSONB payload size with PostgreSQL's JSON text rendering and reports per-index byte/scan
 deltas. These are decision inputs only; a changed PostgreSQL statistics-reset timestamp invalidates
 scan deltas.
+Offline comparison derives raw, canonical and combined heap/index/auxiliary growth from those
+physical snapshots and reports both per-message and per-relation-row normalisation. It also exposes
+the canonical-event/raw-message ratio rather than assuming a one-to-one interval.
 `docs/CAPTURE_STORAGE_AUDIT.md` keeps uniqueness and audit retention outside the optimisation
 boundary.
 

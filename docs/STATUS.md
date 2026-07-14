@@ -395,6 +395,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - GitHub CI run `29325936926` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 218 tests against PostgreSQL 18 at branch head `1aefd62`, including the version-two
   statistics-reset and JSON-text catalogue queries.
+- Offline storage comparison now decomposes combined retained growth into main heap, indexes and
+  auxiliary PostgreSQL allocation, with raw/canonical relation breakdowns, bytes per raw message,
+  bytes per new relation row and the observed canonical/raw row ratio. The active collector and its
+  qualification image remain unchanged.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
