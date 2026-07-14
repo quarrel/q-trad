@@ -12,7 +12,9 @@ Every healthy provider update normally appends one row to each primary capture r
 
 `raw.market_messages` retains provider/environment/subscription identity, the deduplication key,
 receive and persistence times, the redacted provider delta, its hexadecimal SHA-256 and adapter
-version. It has a primary-key index and a unique provider/environment/deduplication index.
+version. Migration `0007` additionally retains a compact `SMALLINT` representation code so legacy,
+changed-field and fixture rows cannot be mixed by payload-shape inference. It has a primary-key index
+and a unique provider/environment/deduplication index.
 
 `canonical.events` retains the complete normalised quote plus event, stream, causal, producer,
 receive and persistence identity and a foreign key to raw capture. It has:
@@ -76,6 +78,12 @@ only after its automated thresholds pass and the operator confirms representativ
 5. **Partitioning — retention/maintenance tool, not compression.** It does not by itself reduce the
    retained bytes. Revisit only after measured growth establishes a retention horizon and operational
    deletion requirement.
+
+Legacy merged-state rows must not be rewritten as `CHANGED_FIELDS`: per-row connection-generation
+evidence is absent, so reconstructed differences would be derived compression rather than original
+provider deltas. A whole legacy epoch may be archived out of the operational database only through a
+later retention decision with permanent hash-bound backup, verified restore/replay and explicit
+treatment of canonical raw-record references.
 
 Do not force small payloads into out-of-line storage, remove uniqueness constraints, mutate old raw
 or canonical rows, or infer transport gaps from storage compaction.

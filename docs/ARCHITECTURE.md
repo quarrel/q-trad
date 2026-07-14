@@ -158,6 +158,10 @@ Lightstreamer raw PRICE messages contain only fields marked changed in that call
 an explicitly changed null. The IG adapter maintains a bounded, per-generation merged field state
 for canonical quote construction; an explicit null removes the prior field and its side-specific
 timestamp. Existing full-state raw messages remain immutable. ADR 0018 records this boundary.
+ADR 0020 and migration `0007` add a compact per-row raw payload-representation code. New IG rows are
+`CHANGED_FIELDS`, fixtures are `FIXTURE`, and pre-marker or rollback-writer rows remain conservatively
+`LEGACY_UNCLASSIFIED`; the constant fast default does not rewrite existing raw tuples. The code is
+identity evidence, not permission to relabel reconstructed differences as provider deltas.
 
 A read-only PostgreSQL storage inspector can write bounded, hash-verified snapshots of capture
 counts, physical relation/index sizes and recent JSONB payload samples. Offline comparison reports

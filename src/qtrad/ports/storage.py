@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope, JsonValue
 from qtrad.domain.market_data import MarketBar
 
@@ -17,6 +18,7 @@ class RawMessage:
     deduplication_key: str
     received_time: datetime
     payload: Mapping[str, JsonValue]
+    payload_representation: RawPayloadRepresentation
     adapter_version: str
 
 

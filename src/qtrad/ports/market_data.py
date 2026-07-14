@@ -7,6 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Protocol
 
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import JsonValue
 from qtrad.domain.historical_coverage import HistoricalResolution
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -34,6 +35,7 @@ class MarketDataRecord:
     deduplication_key: str
     received_time: datetime
     raw_payload: Mapping[str, JsonValue]
+    payload_representation: RawPayloadRepresentation
     quote: MarketQuote | None
     error_code: str | None = None
     error_detail: str | None = None

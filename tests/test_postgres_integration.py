@@ -16,6 +16,7 @@ from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConfl
 from qtrad.api.app import create_app, engine_from_app
 from qtrad.application.backfill_planning import backfill_plan_payload, build_backfill_plan
 from qtrad.application.ingestion import IngestionService
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, ProductType, ProviderListing
@@ -64,6 +65,7 @@ async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
             "ask": "0.65003",
             "api_key": "must-not-persist",
         },
+        payload_representation=RawPayloadRepresentation.FIXTURE,
         quote=quote,
     )
     service = IngestionService(store, producer="integration-test", producer_version="1")
@@ -77,13 +79,14 @@ async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
     assert len(bar_events) == 3
     raw = await store.query(
         """
-        SELECT payload FROM raw.market_messages
+        SELECT payload, payload_representation FROM raw.market_messages
         WHERE provider = 'fixture' AND environment = 'integration'
           AND deduplication_key = :deduplication_key
         """,
         {"deduplication_key": unique},
     )
     assert raw[0]["payload"]["api_key"] == "[REDACTED]"
+    assert raw[0]["payload_representation"] == RawPayloadRepresentation.FIXTURE
 
     rows = await store.query(
         """
@@ -113,6 +116,57 @@ async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
         {"external_id": f"AUDUSD-{unique}"},
     )
     assert len(rebuilt) == 3
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_raw_payload_representation_is_backward_compatible_and_bounded() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    unique = uuid4().hex
+    async with engine.begin() as connection:
+        legacy = await connection.execute(
+            text(
+                """
+                INSERT INTO raw.market_messages (
+                    provider, environment, subscription, deduplication_key,
+                    received_time, payload, payload_sha256, adapter_version
+                ) VALUES (
+                    'legacy-writer', 'test', 'legacy', :deduplication_key,
+                    :received_time, '{}'::jsonb, :payload_sha256, 'legacy'
+                )
+                RETURNING payload_representation
+                """
+            ),
+            {
+                "deduplication_key": f"legacy-{unique}",
+                "received_time": datetime.now(UTC),
+                "payload_sha256": "0" * 64,
+            },
+        )
+        assert legacy.scalar_one() == RawPayloadRepresentation.LEGACY_UNCLASSIFIED
+
+    with pytest.raises(DBAPIError):
+        async with engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO raw.market_messages (
+                        provider, environment, subscription, deduplication_key,
+                        received_time, payload, payload_sha256,
+                        payload_representation, adapter_version
+                    ) VALUES (
+                        'invalid-writer', 'test', 'invalid', :deduplication_key,
+                        :received_time, '{}'::jsonb, :payload_sha256, 9, 'invalid'
+                    )
+                    """
+                ),
+                {
+                    "deduplication_key": f"invalid-{unique}",
+                    "received_time": datetime.now(UTC),
+                    "payload_sha256": "0" * 64,
+                },
+            )
     await engine.dispose()
 
 

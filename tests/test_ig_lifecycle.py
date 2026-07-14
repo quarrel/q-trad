@@ -21,6 +21,7 @@ from qtrad.adapters.ig.market_data import (
     _ProviderOperationTimeout,
     _safe_error_code,
 )
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.market_data import DataQuality, MarketQuote
@@ -305,6 +306,7 @@ def market_record(
         deduplication_key=f"record-{quality}",
         received_time=clock.now(),
         raw_payload={},
+        payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
         quote=quote,
     )
 
@@ -763,6 +765,7 @@ async def test_queue_saturation_drops_new_record_and_recovers_after_drain() -> N
         deduplication_key="one",
         received_time=clock.now(),
         raw_payload={},
+        payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
         quote=None,
     )
 
@@ -893,6 +896,7 @@ async def test_price_callback_persists_only_changed_fields_and_preserves_explici
     await asyncio.sleep(0)
     first = adapter._queue.get_nowait()
     assert first.raw_payload == initial
+    assert first.payload_representation is RawPayloadRepresentation.CHANGED_FIELDS
 
     merged = {
         **initial,

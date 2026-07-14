@@ -35,6 +35,7 @@ class IngestionService:
             deduplication_key=record.deduplication_key,
             received_time=record.received_time,
             payload=record.raw_payload,
+            payload_representation=record.payload_representation,
             adapter_version=self._producer_version,
         )
         if record.quote is None:

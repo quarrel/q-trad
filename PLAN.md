@@ -121,6 +121,10 @@ Implementation status:
   overwrites, and returns evidence written by the non-root image to root-only ownership without
   restarting collector services. GitHub CI run `29327683523` passed all static, shell, migration and
   PostgreSQL 18 gates with 228 tests at branch head `fad5211`.
+- Complete locally and undeployed: ADR 0020 and migration `0007` add a compact first-class raw payload
+  representation code without rewriting legacy payloads. The current IG candidate writes
+  `CHANGED_FIELDS`, fixtures write `FIXTURE`, and pre-marker/rollback writes remain conservatively
+  `LEGACY_UNCLASSIFIED`; downgrade refuses to erase changed-field identity.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

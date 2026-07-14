@@ -4,6 +4,7 @@ from decimal import Decimal
 
 import pytest
 
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS
@@ -20,6 +21,15 @@ def test_initial_universe_is_exact_and_stable() -> None:
         "index:us-500",
         "index:ftse-100",
     )
+
+
+def test_raw_payload_representation_codes_are_exact_and_stable() -> None:
+    assert {item.name: int(item) for item in RawPayloadRepresentation} == {
+        "LEGACY_UNCLASSIFIED": 0,
+        "MERGED_STATE": 1,
+        "CHANGED_FIELDS": 2,
+        "FIXTURE": 3,
+    }
 
 
 def test_instrument_id_rejects_non_canonical_values() -> None:

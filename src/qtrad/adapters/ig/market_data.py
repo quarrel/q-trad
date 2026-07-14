@@ -20,6 +20,7 @@ from threading import Thread
 from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from qtrad.adapters.ig.lightstreamer_compat import install_lightstreamer_compatibility
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import (
@@ -762,6 +763,7 @@ class IgDemoMarketDataAdapter:
             deduplication_key=deduplication_key,
             received_time=received,
             raw_payload=serialised_raw,
+            payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
             quote=quote,
             error_code=error_code,
             error_detail=error_detail,

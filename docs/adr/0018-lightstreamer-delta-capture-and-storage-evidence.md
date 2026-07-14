@@ -22,7 +22,8 @@ and PostgreSQL's physical sizes need comparable observations over a non-trivial 
 - Continue to construct canonical quotes from the adapter's bounded merged state. Reset that
   state on every connection generation as already required by the lifecycle contract.
 - Do not rewrite existing raw or canonical records. The representation change begins only with
-  a later reviewed application release.
+  a later reviewed application release. ADR 0020 gives each new raw record a compact representation
+  code while conservatively labelling pre-marker and rollback-writer rows without rewriting them.
 - Provide a read-only `storage snapshot` command. It records exact raw/canonical counts from one
   repeatable-read transaction, observed database/relation/index sizes, and bounded recent JSONB
   payload samples. The evidence binds capture source, universe/configuration and application

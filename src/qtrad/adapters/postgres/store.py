@@ -719,13 +719,14 @@ class PostgresAuditStore(AuditStore):
         result = await connection.execute(
             text(
                 """
-                INSERT INTO raw.market_messages (
-                    provider, environment, subscription, deduplication_key,
-                    received_time, payload, payload_sha256, adapter_version
-                ) VALUES (
-                    :provider, :environment, :subscription, :deduplication_key,
-                    :received_time, CAST(:payload AS jsonb), :payload_sha256,
-                    :adapter_version
+                  INSERT INTO raw.market_messages (
+                      provider, environment, subscription, deduplication_key,
+                      received_time, payload, payload_sha256, payload_representation,
+                      adapter_version
+                  ) VALUES (
+                      :provider, :environment, :subscription, :deduplication_key,
+                      :received_time, CAST(:payload AS jsonb), :payload_sha256,
+                      :payload_representation, :adapter_version
                 )
                 ON CONFLICT (provider, environment, deduplication_key) DO NOTHING
                 RETURNING id
@@ -739,6 +740,7 @@ class PostgresAuditStore(AuditStore):
                 "received_time": message.received_time,
                 "payload": payload_text,
                 "payload_sha256": payload_hash,
+                "payload_representation": int(message.payload_representation),
                 "adapter_version": message.adapter_version,
             },
         )

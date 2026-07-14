@@ -426,6 +426,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
   root-only ownership. It remains undeployed during the active qualification.
 - GitHub CI run `29327683523` passed formatting, Ruff, Pyright, `ty`, all capture/research ShellCheck
   gates, migrations through `0006` and all 228 tests against PostgreSQL 18 at branch head `fad5211`.
+- ADR 0020 and migration `0007` now distinguish raw payload representations with a compact stable
+  code. Existing rows receive a constant fast default without an `UPDATE`; new IG changed-field and
+  fixture records are explicit, while rollback writers remain conservatively unclassified. No raw
+  payload, hash, deduplication key, canonical event or raw-record reference is rewritten.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
