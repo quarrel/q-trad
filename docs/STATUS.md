@@ -282,6 +282,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
   restored seven-of-seven fresh readiness and caught projections up exactly. Capture,
   healthwatch, backup and restore-verification timers remain enabled. The candidate window
   ends no earlier than `2026-07-17T03:05:33Z`.
+- A read-only checkpoint at `2026-07-14T10:48:34Z` found all four collector/timer units active,
+  API and PostgreSQL healthy, ingestion up for eight hours, seven fresh instruments, no readiness
+  reasons and exact projection catch-up at global/checkpoint position `352275`. Healthwatch,
+  backup and restore-verification last results were successful.
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
   Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
   no longer gate data collection, but remain operator hardening follow-ups.

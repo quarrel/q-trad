@@ -42,6 +42,11 @@ sign-off; they must not be silently deleted or presented as successful runs.
   with global and checkpoint positions both 5,102.
 - The first scheduled post-reboot healthwatch invocation succeeded, as did a direct
   healthwatch publication check.
+- The read-only checkpoint at `2026-07-14T10:48:34Z` found the capture service plus
+  healthwatch, backup and restore-verification timers active. API and PostgreSQL containers were
+  healthy, ingestion had remained up for eight hours, all seven instruments were fresh, readiness
+  had no reasons, and global/checkpoint positions were both `352275`. The most recent healthwatch,
+  backup and restore-verification service results were successful.
 
 ## Exit checks
 
