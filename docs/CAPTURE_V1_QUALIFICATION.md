@@ -57,7 +57,16 @@ the frozen collector release. At or after the not-before time it will create one
 root-only, non-overwriting snapshot binding the candidate window, release/configuration identity,
 readiness, adapter and run evidence, systemd/Compose state, backup/restore ages, migration and disk
 capacity. It cannot make the final decision: gap classification, full-window log and monitoring
-review, and active-market storage representativeness remain explicit operator judgements.
+review, and active-market representativeness remain explicit operator judgements. The latter asks
+whether the qualification included meaningful open-market conditions; it is not ADR 0018's separate
+physical-storage comparison.
+
+The locally prepared `ops/capture/qualification-finalise.sh` consumes that immutable snapshot plus a
+bounded operator-review JSON. It verifies the snapshot's self-hash, exact evidence binding,
+full-window log/monitoring periods and one classification for every candidate gap. It produces a
+second self-hashed, non-overwriting `PASS` or `FAIL` record. Invalid or tampered input produces no
+decision record; a valid failed review is preserved and exits non-zero. This tool is also undeployed
+and performs no collector, database, OCI or provider I/O.
 
 At or after the candidate-window end, record and require:
 

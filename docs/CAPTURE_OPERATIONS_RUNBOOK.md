@@ -347,9 +347,67 @@ The command exits non-zero but still writes reviewable evidence when an expected
 fails, including an HTTP 503 readiness response or unreconciled pre-candidate run. A successful
 automatic result still reports `qualification_decision=PENDING_OPERATOR_REVIEW`: inspect and record
 candidate-gap classification, bounded container-log history, OCI/Beszel monitoring history and the
-representative storage interval in `docs/CAPTURE_V1_QUALIFICATION.md`. Never edit the generated JSON;
-copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered output
-name for a later retry; the helper will not overwrite the first attempt.
+active-market representativeness of the candidate window in `docs/CAPTURE_V1_QUALIFICATION.md`.
+This review is distinct from ADR 0018's later physical-storage comparison. Never edit the generated
+JSON; copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered
+output name for a later retry; the helper will not overwrite the first attempt.
+
+Create a separate operator review file. It must bind the automatic evidence hash, use canonical UTC
+timestamps, cover the full candidate-to-snapshot window for logs and monitoring, and classify every
+reported gap exactly once. `UNEXPLAINED` cannot pass. Evidence references are stable, non-secret
+labels or paths to retained screenshots/reports; do not paste unbounded logs into this JSON.
+
+```json
+{
+  "schema": "qtrad-capture-qualification-review-v1",
+  "qualification_evidence_sha256": "<automatic evidence_sha256>",
+  "reviewed_at": "2026-07-17T05:00:00Z",
+  "reviewer": "operator",
+  "reviews": {
+    "candidate_gap_classification": {
+      "decision": "NOT_REQUIRED",
+      "gaps": [],
+      "notes": "The automatic evidence contains no candidate-window gaps."
+    },
+    "container_log_history": {
+      "decision": "PASS",
+      "window_start": "2026-07-14T03:05:33Z",
+      "window_end": "<automatic generated_at>",
+      "evidence_refs": ["bounded-journal-review-20260717.txt"],
+      "notes": "No terminal failure, traceback or unexplained restart was present."
+    },
+    "monitoring_history": {
+      "decision": "PASS",
+      "window_start": "2026-07-14T03:05:33Z",
+      "window_end": "<automatic generated_at>",
+      "evidence_refs": ["oci-beszel-review-20260717.txt"],
+      "notes": "Readiness, backup, restore and disk history were reviewed."
+    },
+    "active_market_representativeness": {
+      "decision": "PASS",
+      "evidence_refs": ["market-hours-review-20260717.txt"],
+      "notes": "The window included representative active Asia, Europe and US sessions."
+    }
+  }
+}
+```
+
+When gaps exist, set the gap decision to `PASS` or `FAIL` and provide one matching `gap_id`, a
+non-empty rationale and one of `EXPECTED_MARKET_CLOSURE`, `EXPLAINED_PROVIDER_MAINTENANCE`,
+`EXPLAINED_LIFECYCLE_EVENT` or `UNEXPLAINED` for each automatic-evidence gap. Then create the final
+hash-bound record offline from the reviewed checkout:
+
+```bash
+"$TOOL_ROOT/ops/capture/qualification-finalise.sh" \
+  capture-v1-final.json \
+  capture-v1-operator-review.json \
+  capture-v1-qualification-decision.json
+```
+
+The finaliser verifies the automatic self-hash, automatic PASS, exact review binding, review windows,
+gap set and bounded review schema. It refuses symlinks and overwrite. A valid failed operator review
+still writes a self-hashed `FAIL` record and exits non-zero; malformed, incomplete, mismatched or
+tampered input writes nothing. Only a self-hashed final `PASS` closes `capture-v1` qualification.
 
 Only after that evidence passes may the candidate 20-instrument universe receive reviewed
 IG epics and become a new capture configuration. It must pass its own 72-hour

@@ -322,7 +322,7 @@ evidence_identity="$(
       operator_reviews:{candidate_gap_classification:(if ($candidate_gaps | length) == 0
           then "NOT_REQUIRED" else "REQUIRED" end),
         container_log_history:"REQUIRED", monitoring_history:"REQUIRED",
-        active_market_storage_interval:"REQUIRED"},
+        active_market_representativeness:"REQUIRED"},
       qualification_decision:"PENDING_OPERATOR_REVIEW"}'
 )"
 readonly evidence_identity

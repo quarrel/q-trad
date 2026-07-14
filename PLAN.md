@@ -88,12 +88,17 @@ Implementation status:
   enablement and final alarm tuning are tracked improvements rather than release gates.
     The corrected candidate has passed deliberate container restart and host reboot recovery.
     `capture-v2` remains excluded.
-- Complete locally and undeployed: a bounded qualification-closure helper will write one
+  - Complete locally and undeployed: a bounded qualification-closure helper will write one
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk
   capacity; it leaves gap, log, monitoring and active-market review explicitly pending for the
-  operator. GitHub CI run `29334657157` passed all static, shell, migration and PostgreSQL 18 gates
-  with 237 tests at branch head `3415f70`.
+    operator. GitHub CI run `29334657157` passed all static, shell, migration and PostgreSQL 18 gates
+    with 237 tests at branch head `3415f70`.
+  - Complete locally and undeployed: qualification finalisation is a separate offline, self-hashed
+    record. It verifies the automatic snapshot, exact operator-review binding, full-window log and
+    monitoring coverage and one classification per candidate gap. Valid failed reviews are preserved;
+    malformed, omitted, mismatched or tampered input cannot emit a decision. Active-market
+    representativeness is explicitly separate from the later physical-storage comparison.
 - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
@@ -294,8 +299,8 @@ python -m qtrad api
 
 ## Verification evidence
 
-- Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass;
-  227 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
+- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
+  233 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
   232 tests against PostgreSQL 18 at branch head `65f7037`.
 - GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying

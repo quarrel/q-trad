@@ -43,6 +43,14 @@ instance principal needs repository-read permission, not image-publication permi
 Compose sends `SIGINT` to the unbounded ingestion role and allows a 90-second stop window so
 the adapter can verify disconnect and persist a terminal run before restart or host shutdown.
 
+Qualification closure is a two-record evidence process. A host-local, read-only collector takes a
+self-hashed snapshot of bounded API, lifecycle, release, backup/restore, mount and capacity facts.
+An offline finaliser then verifies that immutable snapshot and binds bounded operator reviews of
+gaps, full-window logs, monitoring and active-market representativeness. It preserves a valid
+operator `FAIL`, rejects malformed or tampered input without emitting a decision, and cannot produce
+`PASS` from failed automatic checks. Physical-storage comparison remains a later, separately hashed
+release-bound measurement.
+
 PostgreSQL additionally publishes host port 15432 only on `127.0.0.1` for exceptional SSH-tunnel
 inspection. Migration `0004` supplies the non-login `qtrad_capture_reader` privilege role: it can
 select from canonical, reference, read-model and operations schemas, cannot access raw capture and

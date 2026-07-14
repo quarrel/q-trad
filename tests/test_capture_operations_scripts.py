@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -251,6 +252,7 @@ def _qualification_environment(
     include_pre_candidate_run: bool = False,
     include_completed_run: bool = False,
     ready: bool = True,
+    gaps: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -356,7 +358,7 @@ def _qualification_environment(
         "/health/ready": readiness,
         "/api/v1/system": system,
         "/api/v1/runs": runs,
-        "/api/v1/gaps": [],
+        "/api/v1/gaps": [] if gaps is None else gaps,
     }
     response_case = "\n".join(
         f"  *{path}) printf '%s\\n' '{json.dumps(value)}' > \"$output\"; "
@@ -469,7 +471,7 @@ def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path:
         "candidate_gap_classification": "NOT_REQUIRED",
         "container_log_history": "REQUIRED",
         "monitoring_history": "REQUIRED",
-        "active_market_storage_interval": "REQUIRED",
+        "active_market_representativeness": "REQUIRED",
     }
     identity = {key: value for key, value in evidence.items() if key != "evidence_sha256"}
     canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
@@ -523,6 +525,204 @@ def test_qualification_evidence_fails_closed_with_reviewable_output(
     evidence = json.loads(output.read_text())
     assert evidence["automatic_checks_passed"] is False
     assert evidence["automatic_checks"][failed_check] is False
+
+
+def _qualification_review(
+    evidence: dict[str, object], *, monitoring_decision: str = "PASS"
+) -> dict[str, object]:
+    candidate_gaps = cast(list[dict[str, object]], evidence["candidate_gaps"])
+    reviewed_gaps = [
+        {
+            "gap_id": gap["gap_id"],
+            "classification": "EXPECTED_MARKET_CLOSURE",
+            "rationale": "The interval matches the reviewed market closure.",
+        }
+        for gap in candidate_gaps
+    ]
+    return {
+        "schema": "qtrad-capture-qualification-review-v1",
+        "qualification_evidence_sha256": evidence["evidence_sha256"],
+        "reviewed_at": "2026-07-17T05:00:00Z",
+        "reviewer": "operator",
+        "reviews": {
+            "candidate_gap_classification": {
+                "decision": "PASS" if candidate_gaps else "NOT_REQUIRED",
+                "gaps": reviewed_gaps,
+                "notes": (
+                    "Every candidate-window gap was classified."
+                    if candidate_gaps
+                    else "The automatic evidence contains no candidate-window gaps."
+                ),
+            },
+            "container_log_history": {
+                "decision": "PASS",
+                "window_start": "2026-07-14T03:05:33Z",
+                "window_end": "2026-07-17T04:05:33Z",
+                "evidence_refs": ["bounded-journal-review-20260717.txt"],
+                "notes": "No terminal failure, traceback or unexplained restart was present.",
+            },
+            "monitoring_history": {
+                "decision": monitoring_decision,
+                "window_start": "2026-07-14T03:05:33Z",
+                "window_end": "2026-07-17T04:05:33Z",
+                "evidence_refs": ["oci-beszel-review-20260717.txt"],
+                "notes": "Readiness, backup, restore and disk history were reviewed.",
+            },
+            "active_market_representativeness": {
+                "decision": "PASS",
+                "evidence_refs": ["market-hours-review-20260717.txt"],
+                "notes": "The window included active Asia, Europe and US sessions.",
+            },
+        },
+    }
+
+
+def test_qualification_finaliser_binds_reviews_and_refuses_overwrite(tmp_path: Path) -> None:
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path, now="2026-07-17T04:05:33Z"
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode == 0, result.stderr
+    final = json.loads(output.read_text())
+    assert output.stat().st_mode & 0o777 == 0o600
+    assert final["schema"] == "qtrad-capture-qualification-final-v1"
+    assert final["qualification_evidence_sha256"] == evidence["evidence_sha256"]
+    assert final["reviewer"] == "operator"
+    review_canonical = json.dumps(review, separators=(",", ":"), sort_keys=True)
+    assert (
+        subprocess.run(
+            ["sha256sum"], input=review_canonical, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+        == final["operator_review_sha256"]
+    )
+    assert final["operator_reviews_passed"] is True
+    assert final["qualification_decision"] == "PASS"
+    identity = {key: value for key, value in final.items() if key != "final_evidence_sha256"}
+    canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+    assert (
+        subprocess.run(
+            ["sha256sum"], input=canonical, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+        == final["final_evidence_sha256"]
+    )
+
+    repeated = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+    assert repeated.returncode != 0
+
+
+@pytest.mark.parametrize("invalid_case", ["tampered_evidence", "wrong_hash", "extra_gap"])
+def test_qualification_finaliser_rejects_unbound_or_tampered_input(
+    tmp_path: Path, invalid_case: str
+) -> None:
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path, now="2026-07-17T04:05:33Z"
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence)
+    if invalid_case == "tampered_evidence":
+        evidence["generated_at"] = "2026-07-17T04:05:34Z"
+        automatic_path.write_text(json.dumps(evidence))
+    elif invalid_case == "wrong_hash":
+        review["qualification_evidence_sha256"] = "f" * 64
+    else:
+        reviews = cast(dict[str, object], review["reviews"])
+        gap_review = cast(dict[str, object], reviews["candidate_gap_classification"])
+        gap_review["decision"] = "PASS"
+        gap_review["gaps"] = [
+            {
+                "gap_id": "not-in-evidence",
+                "classification": "EXPECTED_MARKET_CLOSURE",
+                "rationale": "This gap was not actually recorded.",
+            }
+        ]
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_qualification_finaliser_preserves_a_failed_operator_decision(tmp_path: Path) -> None:
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path, now="2026-07-17T04:05:33Z"
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence, monitoring_decision="FAIL")
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "failed-final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode != 0
+    final = json.loads(output.read_text())
+    assert final["operator_reviews_passed"] is False
+    assert final["qualification_decision"] == "FAIL"
+
+
+def test_qualification_finaliser_requires_and_binds_each_candidate_gap(tmp_path: Path) -> None:
+    gap_id = "00000000-0000-0000-0000-000000000099"
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        gaps=[
+            {
+                "gap_id": gap_id,
+                "instrument_id": "index:ftse-100",
+                "interval_start": "2026-07-16T20:00:00+00:00",
+                "interval_end": "2026-07-16T21:00:00+00:00",
+                "reason": "STALE_STREAM",
+                "detected_at": "2026-07-16T21:00:01+00:00",
+                "repaired_at": "2026-07-16T21:00:02+00:00",
+            }
+        ],
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    assert evidence["operator_reviews"]["candidate_gap_classification"] == "REQUIRED"
+    review = _qualification_review(evidence)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode == 0, result.stderr
+    final = json.loads(output.read_text())
+    assert final["operator_reviews"]["candidate_gap_classification"]["gaps"] == [
+        {
+            "classification": "EXPECTED_MARKET_CLOSURE",
+            "gap_id": gap_id,
+            "rationale": "The interval matches the reviewed market closure.",
+        }
+    ]
 
 
 @pytest.mark.parametrize("manifest_version", [1, 2])
