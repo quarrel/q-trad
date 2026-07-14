@@ -68,7 +68,11 @@ hashes and the checked release identity. Once the merged-state and changed-field
 their automated gate, offline contrast verifies those artifacts, requires distinct digest-pinned
 images and computes mechanical per-message changes and reduction percentages. Contrast does not
 accept the storage decision or claim the intervals were representative; its artifact keeps both
-active-market reviews required.
+active-market reviews required. Each bounded operator review targets one exact comparison hash and
+becomes a separate self-hashed assertion carrying that interval's source, configuration, image and
+time identity. Offline qualification binds the contrast to both assertions and emits `PASS` only
+when both are representative. A valid negative review is retained as a `FAIL` artifact rather than
+being discarded. Even `PASS` records `storage_decision_accepted=false`.
 
 The output also reports observed raw-message, canonical-event and retained-relation byte rates per
 second, plus mechanical combined-relation extrapolations for one, 30 and 365 days. The basis is
@@ -114,8 +118,10 @@ For both the pinned representation and the later changed-field candidate:
    canonical/raw row ratio, representation-code deltas and JSONB/text sample evidence;
 5. record database-wide growth only as context because backups, catalogues and unrelated relations
    may contribute; and
-6. use the observed-rate extrapolation for capacity scenarios, not as an unqualified forecast; and
-7. make one schema decision at a time, with restore/replay and application rollback evidence.
+6. record a reasoned active-market review for each exact comparison, then bind both reviews to the
+   contrast with offline qualification;
+7. use the observed-rate extrapolation for capacity scenarios, not as an unqualified forecast; and
+8. make one schema decision at a time, with restore/replay and application rollback evidence.
 
 The first result may legitimately be “retain the schema”. Storage cost alone does not outweigh the
 audit, idempotency and deterministic-replay contracts.
@@ -135,10 +141,12 @@ if its row counts were large enough. After the frozen qualification closes succe
 5. run that unchanged release through its restart/reboot qualification and the same representative
    threshold, then take its closing snapshot; require its comparison to report only
    `CHANGED_FIELDS` new rows and zero new `LEGACY_UNCLASSIFIED` rows; and
-6. compare within each image pair first, then compare the two accepted interval results as evidence
+6. compare within each image pair first, then compare the two interval results as evidence
    from distinct release epochs with `storage contrast` rather than feeding cross-release snapshots
-   to `storage compare`. Contrast remains decision-pending until both active-market reviews are
-   recorded.
+   to `storage compare`; and
+7. record one hash-bound active-market review for each comparison and run `storage qualify` against
+   the contrast. A qualification `PASS` closes the evidence gate but does not itself approve a schema,
+   retention or archive change.
 
 Do not implement operational deletion or an archive-out path before both intervals are accepted.
 Legacy data is a finite epoch: an archive proposal must show material benefit after permanent

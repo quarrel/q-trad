@@ -210,6 +210,26 @@ reporting whole-database, raw relation and canonical relation bytes per new raw 
 figures are more useful than serialized JSON length alone. Do not run the changed-field candidate on
 the collector during its frozen qualification window.
 
+After separate merged-state and changed-field comparisons pass their automated gates, create their
+release-bound contrast, record one bounded operator active-market review per comparison, and qualify
+the exact set offline:
+
+```bash
+uv run qtrad storage contrast --output tmp/storage-contrast.json \
+  tmp/merged-comparison.json tmp/changed-comparison.json
+uv run qtrad storage review --output tmp/merged-review.json \
+  tmp/merged-comparison.json tmp/merged-review-input.json
+uv run qtrad storage review --output tmp/changed-review.json \
+  tmp/changed-comparison.json tmp/changed-review-input.json
+uv run qtrad storage qualify --output tmp/storage-qualification.json \
+  tmp/storage-contrast.json tmp/merged-review.json tmp/changed-review.json
+```
+
+The input schema and operator procedure are in the
+[capture operations runbook](docs/CAPTURE_OPERATIONS_RUNBOOK.md). Qualification preserves an honest
+negative review as `FAIL`; even `PASS` is evidence only and cannot approve a storage-schema,
+retention or archive decision.
+
 Snapshot version 3 remains compatible with versions 1 and 2. It compares JSONB with PostgreSQL's JSON
 text rendering, reports per-index growth/scan deltas and binds raw representation counts. The
 evidence thresholds and schema candidates are recorded in the

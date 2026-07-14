@@ -203,8 +203,13 @@ ephemeral stdout. The artifact retains both snapshot hashes and the exact applic
 that the comparison checked. `storage contrast` accepts two verified comparison artifacts from the
 same source/database/universe/configuration but requires distinct digest-pinned images, a merged-state
 baseline, an all-changed-fields candidate and both automated representative thresholds. It reports
-mechanical per-message changes and percentages in another self-hashed artifact. It cannot record an
-accepted storage decision: active-market reviews remain explicit external evidence.
+mechanical per-message changes and percentages in another self-hashed artifact.
+`storage review` turns one bounded operator judgement into a self-hashed assertion bound to the exact
+comparison, release and measured interval. `storage qualify` verifies that the baseline and candidate
+assertions target the contrast's two comparisons and release identities, then emits a durable `PASS`
+or preserves a valid negative `FAIL`. These hashes provide integrity and exact binding, not reviewer
+authentication. Neither contrast, review nor qualification can record an accepted storage decision;
+that later schema, retention or archive choice remains explicit.
 The same comparison emits explicitly mechanical observed-rate extrapolations for combined raw and
 canonical relation growth over one, 30 and 365 days. They are capacity-planning scenarios rather
 than forecasts and do not include database-wide or backup growth.
@@ -243,8 +248,10 @@ boundary.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
   its candidate cursor.
 - `storage snapshot` writes non-overwriting, release-bound physical storage evidence;
-  `storage compare` writes a verified same-release artifact and `storage contrast` compares two
-  verified release artifacts without database access or accepting a decision.
+  `storage compare` writes a verified same-release artifact, `storage contrast` compares two verified
+  release artifacts, `storage review` binds each operator judgement, and `storage qualify` emits the
+  review gate result. All except snapshot operate without database access, and none accepts a storage
+  decision.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

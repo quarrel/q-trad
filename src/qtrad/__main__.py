@@ -61,9 +61,12 @@ from qtrad.runtime.research_snapshot import (
 )
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.storage_measurement import (
+    build_storage_active_market_review_artifact,
     build_storage_comparison_artifact,
     build_storage_contrast_artifact,
+    build_storage_contrast_qualification_artifact,
     build_storage_snapshot,
+    load_storage_active_market_review_input,
     load_storage_evidence_artifact,
     load_storage_snapshot,
     write_storage_evidence_artifact,
@@ -194,6 +197,19 @@ def build_parser() -> argparse.ArgumentParser:
     storage_contrast.add_argument("--output", type=Path, required=True)
     storage_contrast.add_argument("baseline", type=Path)
     storage_contrast.add_argument("candidate", type=Path)
+    storage_review = storage_sub.add_parser(
+        "review", help="bind one operator active-market review to a storage comparison"
+    )
+    storage_review.add_argument("--output", type=Path, required=True)
+    storage_review.add_argument("comparison", type=Path)
+    storage_review.add_argument("review", type=Path)
+    storage_qualify = storage_sub.add_parser(
+        "qualify", help="qualify a storage contrast against two operator review artifacts"
+    )
+    storage_qualify.add_argument("--output", type=Path, required=True)
+    storage_qualify.add_argument("contrast", type=Path)
+    storage_qualify.add_argument("baseline_review", type=Path)
+    storage_qualify.add_argument("candidate_review", type=Path)
 
     feed = subparsers.add_parser("feed", help="capture-feed contract operations")
     feed_sub = feed.add_subparsers(dest="feed_command", required=True)
@@ -307,6 +323,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         _compare_storage_snapshots(args.before, args.after, args.output)
     elif args.command == "storage" and args.storage_command == "contrast":
         _contrast_storage_comparisons(args.baseline, args.candidate, args.output)
+    elif args.command == "storage" and args.storage_command == "review":
+        _record_storage_active_market_review(args.comparison, args.review, args.output)
+    elif args.command == "storage" and args.storage_command == "qualify":
+        _qualify_storage_contrast(
+            args.contrast,
+            args.baseline_review,
+            args.candidate_review,
+            args.output,
+        )
     elif args.command == "feed" and args.feed_command == "verify":
         _verify_capture_feed_pages(
             source_id=args.source_id,
@@ -1035,6 +1060,55 @@ def _contrast_storage_comparisons(
             {
                 "artifact_kind": artifact.artifact_kind,
                 "artifact_sha256": artifact.artifact_sha256,
+                "output": str(output_path),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _record_storage_active_market_review(
+    comparison_path: Path,
+    review_path: Path,
+    output_path: Path,
+) -> None:
+    artifact = build_storage_active_market_review_artifact(
+        load_storage_evidence_artifact(comparison_path),
+        load_storage_active_market_review_input(review_path),
+    )
+    write_storage_evidence_artifact(output_path, artifact)
+    print(
+        json.dumps(
+            {
+                "artifact_kind": artifact.artifact_kind,
+                "artifact_sha256": artifact.artifact_sha256,
+                "active_market_representative": artifact.payload["active_market_representative"],
+                "output": str(output_path),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _qualify_storage_contrast(
+    contrast_path: Path,
+    baseline_review_path: Path,
+    candidate_review_path: Path,
+    output_path: Path,
+) -> None:
+    artifact = build_storage_contrast_qualification_artifact(
+        load_storage_evidence_artifact(contrast_path),
+        load_storage_evidence_artifact(baseline_review_path),
+        load_storage_evidence_artifact(candidate_review_path),
+    )
+    write_storage_evidence_artifact(output_path, artifact)
+    print(
+        json.dumps(
+            {
+                "artifact_kind": artifact.artifact_kind,
+                "artifact_sha256": artifact.artifact_sha256,
+                "qualification_status": artifact.payload["qualification_status"],
+                "storage_decision_accepted": False,
                 "output": str(output_path),
             },
             sort_keys=True,

@@ -15,10 +15,15 @@ from qtrad.adapters.postgres.storage_measurement import (
 )
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.runtime.storage_measurement import (
+    StorageActiveMarketReviewInput,
+    StorageEvidenceArtifact,
+    build_storage_active_market_review_artifact,
     build_storage_comparison_artifact,
     build_storage_contrast_artifact,
+    build_storage_contrast_qualification_artifact,
     build_storage_snapshot,
     compare_storage_snapshots,
+    load_storage_active_market_review_input,
     load_storage_evidence_artifact,
     load_storage_snapshot,
     write_storage_evidence_artifact,
@@ -96,6 +101,70 @@ def _coded_measurement(
         raw_payload_representation_column_present=True,
         raw_payload_representation_counts=tuple(counts),
     )
+
+
+def _qualification_artifacts() -> tuple[
+    StorageEvidenceArtifact,
+    StorageEvidenceArtifact,
+    StorageEvidenceArtifact,
+]:
+    baseline = build_storage_comparison_artifact(
+        _snapshot(_measurement()),
+        _snapshot(
+            replace(
+                _measurement(),
+                observed_at=NOW + timedelta(hours=7),
+                raw_message_count=100_100,
+                canonical_event_count=100_100,
+            )
+        ),
+    )
+    candidate_image = "syd.ocir.io/example/qtrad@sha256:" + "c" * 64
+    candidate = build_storage_comparison_artifact(
+        _snapshot(
+            _coded_measurement(
+                observed_at=NOW + timedelta(hours=8),
+                legacy_rows=100_100,
+                changed_field_rows=0,
+            ),
+            application_image=candidate_image,
+        ),
+        _snapshot(
+            _coded_measurement(
+                observed_at=NOW + timedelta(hours=15),
+                legacy_rows=100_100,
+                changed_field_rows=100_000,
+            ),
+            application_image=candidate_image,
+        ),
+    )
+    return baseline, candidate, build_storage_contrast_artifact(baseline, candidate)
+
+
+def _active_market_review(
+    comparison: StorageEvidenceArtifact,
+    *,
+    representative: bool = True,
+    reason: str = "The measured interval covered normal active-market conditions.",
+) -> StorageEvidenceArtifact:
+    return build_storage_active_market_review_artifact(
+        comparison,
+        StorageActiveMarketReviewInput(
+            schema_version=1,
+            comparison_sha256=comparison.artifact_sha256,
+            reviewed_at=NOW + timedelta(hours=16),
+            reviewer_id="operator@example.com",
+            active_market_representative=representative,
+            reason=reason,
+        ),
+    )
+
+
+def _rehash_artifact(payload: dict[str, object]) -> None:
+    identity = {key: value for key, value in payload.items() if key != "artifact_sha256"}
+    payload["artifact_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
 
 
 def test_storage_snapshot_is_hash_verified_and_non_overwriting(tmp_path: Path) -> None:
@@ -576,6 +645,149 @@ def test_storage_contrast_is_release_bound_and_keeps_operator_review_explicit(
     )
     with pytest.raises(ValueError, match="non-changed-field raw rows"):
         build_storage_contrast_artifact(baseline, rollback_candidate)
+
+
+def test_active_market_review_is_bounded_and_binds_the_comparison(tmp_path: Path) -> None:
+    baseline, _, _ = _qualification_artifacts()
+    review_input_path = tmp_path / "review-input.json"
+    review_input_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "comparison_sha256": baseline.artifact_sha256,
+                "reviewed_at": "2026-07-14T16:00:00Z",
+                "reviewer_id": "operator@example.com",
+                "active_market_representative": True,
+                "reason": "The interval covered normal active-market conditions.",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    review_input = load_storage_active_market_review_input(review_input_path)
+    review = build_storage_active_market_review_artifact(baseline, review_input)
+    review_path = tmp_path / "review.json"
+    write_storage_evidence_artifact(review_path, review)
+
+    assert load_storage_evidence_artifact(review_path) == review
+    assert review.artifact_kind == "STORAGE_ACTIVE_MARKET_REVIEW"
+    assert review.payload["comparison_sha256"] == baseline.artifact_sha256
+    assert review.payload["assertion_authority"] == "OPERATOR_ASSERTED"
+    assert review.payload["storage_decision_accepted"] is False
+
+    oversized = tmp_path / "oversized-review.json"
+    oversized.write_bytes(b" " * (64 * 1024 + 1))
+    with pytest.raises(ValueError, match="maximum encoded size"):
+        load_storage_active_market_review_input(oversized)
+
+
+def test_active_market_review_rejects_wrong_target_time_or_surrounding_whitespace() -> None:
+    baseline, candidate, _ = _qualification_artifacts()
+    wrong_target = StorageActiveMarketReviewInput(
+        schema_version=1,
+        comparison_sha256=candidate.artifact_sha256,
+        reviewed_at=NOW + timedelta(hours=16),
+        reviewer_id="operator",
+        active_market_representative=True,
+        reason="Representative interval.",
+    )
+    with pytest.raises(ValueError, match="different comparison artifact"):
+        build_storage_active_market_review_artifact(baseline, wrong_target)
+
+    premature = wrong_target.model_copy(
+        update={
+            "comparison_sha256": baseline.artifact_sha256,
+            "reviewed_at": NOW + timedelta(hours=6),
+        }
+    )
+    with pytest.raises(ValueError, match="predates the measured interval"):
+        build_storage_active_market_review_artifact(baseline, premature)
+
+    padded = wrong_target.model_copy(
+        update={
+            "comparison_sha256": baseline.artifact_sha256,
+            "reason": " Representative interval. ",
+        }
+    )
+    with pytest.raises(ValueError, match="surrounding whitespace"):
+        build_storage_active_market_review_artifact(baseline, padded)
+
+
+def test_storage_contrast_qualification_preserves_pass_and_negative_reviews(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate, contrast = _qualification_artifacts()
+    baseline_review = _active_market_review(baseline)
+    candidate_review = _active_market_review(candidate)
+
+    qualification = build_storage_contrast_qualification_artifact(
+        contrast,
+        baseline_review,
+        candidate_review,
+    )
+    path = tmp_path / "qualification.json"
+    write_storage_evidence_artifact(path, qualification)
+
+    assert load_storage_evidence_artifact(path) == qualification
+    assert qualification.artifact_kind == "STORAGE_CONTRAST_QUALIFICATION"
+    assert qualification.payload["qualification_status"] == "PASS"
+    assert qualification.payload["failure_reasons"] == []
+    assert qualification.payload["active_market_reviews_satisfied"] is True
+    assert qualification.payload["storage_decision_accepted"] is False
+
+    negative_candidate = _active_market_review(
+        candidate,
+        representative=False,
+        reason="The candidate interval included abnormal provider recovery activity.",
+    )
+    failed = build_storage_contrast_qualification_artifact(
+        contrast,
+        baseline_review,
+        negative_candidate,
+    )
+    assert failed.payload["qualification_status"] == "FAIL"
+    assert failed.payload["failure_reasons"] == ["CANDIDATE_NOT_REPRESENTATIVE"]
+    assert failed.payload["active_market_reviews_satisfied"] is False
+    assert failed.payload["storage_decision_accepted"] is False
+
+
+def test_storage_contrast_qualification_rejects_mismatch_and_cannot_accept_decision(
+    tmp_path: Path,
+) -> None:
+    baseline, candidate, contrast = _qualification_artifacts()
+    baseline_review = _active_market_review(baseline)
+    candidate_review = _active_market_review(candidate)
+
+    with pytest.raises(ValueError, match="baseline active-market review targets"):
+        build_storage_contrast_qualification_artifact(
+            contrast,
+            candidate_review,
+            candidate_review,
+        )
+
+    mismatched_payload = baseline_review.model_dump(mode="json")
+    mismatched_payload["payload"]["capture_source_id"] = "another-source"
+    _rehash_artifact(mismatched_payload)
+    mismatched_review = StorageEvidenceArtifact.model_validate(mismatched_payload)
+    with pytest.raises(ValueError, match="different capture_source_id"):
+        build_storage_contrast_qualification_artifact(
+            contrast,
+            mismatched_review,
+            candidate_review,
+        )
+
+    qualification = build_storage_contrast_qualification_artifact(
+        contrast,
+        baseline_review,
+        candidate_review,
+    )
+    tampered = qualification.model_dump(mode="json")
+    tampered["payload"]["storage_decision_accepted"] = True
+    _rehash_artifact(tampered)
+    path = tmp_path / "tampered-qualification.json"
+    path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="cannot accept a storage decision"):
+        load_storage_evidence_artifact(path)
 
 
 def test_storage_snapshot_allows_schema_scoped_index_names_and_bounds_input(

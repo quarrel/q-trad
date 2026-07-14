@@ -442,14 +442,22 @@ outside the current data-only phase until explicitly admitted by a later plan up
   active collector and its qualification image remain unchanged. GitHub CI run `29341678396` passed
   the real PostgreSQL representation probe, migration through `0009` and all 255 tests at branch head
   `6a84319`.
-- Storage comparison evidence is now durable locally rather than unhashed stdout. The compare command
+  - Storage comparison evidence is now durable locally rather than unhashed stdout. The compare command
   writes one non-overwriting artifact binding both snapshot hashes and release identity; the new
   offline contrast command requires distinct digest-pinned images, matching source/configuration,
   passed automated thresholds and an all-`CHANGED_FIELDS` candidate before calculating mechanical
   per-message changes. Contrast explicitly leaves both active-market reviews required and records no
   accepted storage decision. The collector remains unchanged. GitHub CI run `29343411122` passed
-  migration through `0009`, every artifact/contrast case and all 258 tests against PostgreSQL 18 at
-  branch head `8ff48cd`.
+    migration through `0009`, every artifact/contrast case and all 258 tests against PostgreSQL 18 at
+    branch head `8ff48cd`.
+  - Active-market storage review is now durable local evidence rather than an unresolved prose gate.
+    A bounded operator input targets one exact comparison hash; `storage review` produces a
+    non-overwriting assertion carrying the comparison's source, configuration, image and interval.
+    `storage qualify` binds both assertions to their exact contrast, preserves a valid negative
+    `FAIL`, and leaves `storage_decision_accepted=false` even on `PASS`. Rehashed semantic tampering,
+    mismatched comparison/release identity and premature reviews fail closed. The running collector
+    is unchanged; the full local gate passes with 252 tests and 12 isolated PostgreSQL tests deferred
+    to CI.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation

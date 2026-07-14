@@ -216,6 +216,58 @@ def test_storage_contrast_dispatches_without_database_access(
     )
 
 
+def test_storage_review_dispatches_without_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_record_storage_active_market_review", operation)
+
+    cli.main(
+        [
+            "storage",
+            "review",
+            "--output",
+            "review-artifact.json",
+            "comparison.json",
+            "review-input.json",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        Path("comparison.json"), Path("review-input.json"), Path("review-artifact.json")
+    )
+
+
+def test_storage_qualification_dispatches_without_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_qualify_storage_contrast", operation)
+
+    cli.main(
+        [
+            "storage",
+            "qualify",
+            "--output",
+            "qualification.json",
+            "contrast.json",
+            "baseline-review.json",
+            "candidate-review.json",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        Path("contrast.json"),
+        Path("baseline-review.json"),
+        Path("candidate-review.json"),
+        Path("qualification.json"),
+    )
+
+
 def test_database_upgrade_dispatches_migration_and_seed(
     monkeypatch: pytest.MonkeyPatch, cli_environment: Settings
 ) -> None:

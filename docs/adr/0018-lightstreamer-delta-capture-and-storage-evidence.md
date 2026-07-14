@@ -39,6 +39,11 @@ and PostgreSQL's physical sizes need comparable observations over a non-trivial 
   `storage contrast`. It requires matching source/configuration, distinct digest-pinned images,
   passed automated thresholds and an all-changed-fields candidate. Contrast reports mechanical
   per-message change but cannot accept the storage decision or satisfy active-market review.
+- Record each interval's active-market judgement through offline `storage review`. The bounded
+  operator input targets the exact comparison hash; the resulting self-hashed assertion inherits
+  the measured source, configuration, image and interval identity. Offline `storage qualify` binds
+  the contrast to both assertions and preserves either `PASS` or a valid negative `FAIL`. Review and
+  qualification evidence cannot accept the later schema, retention or archive decision.
 - Take measurements far enough apart to exceed PostgreSQL allocation noise. Treat whole-database
   growth as contextual because unrelated maintenance and relations may contribute.
 

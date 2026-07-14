@@ -14,10 +14,17 @@ from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import JsonValue
 
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
+_MAX_REVIEW_INPUT_BYTES = 64 * 1024
 _MAX_RELATIONS = 500
 _MAX_INDEXES = 2_000
 _MIN_MEASUREMENT_SECONDS = 6 * 60 * 60
 _MIN_RAW_MESSAGES = 100_000
+StorageArtifactKind = Literal[
+    "STORAGE_COMPARISON",
+    "STORAGE_CONTRAST",
+    "STORAGE_ACTIVE_MARKET_REVIEW",
+    "STORAGE_CONTRAST_QUALIFICATION",
+]
 
 
 class _StrictModel(BaseModel):
@@ -78,9 +85,22 @@ class StorageSnapshot(_StrictModel):
 
 class StorageEvidenceArtifact(_StrictModel):
     artifact_schema_version: Literal[1]
-    artifact_kind: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"]
+    artifact_kind: StorageArtifactKind
     artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     payload: dict[str, JsonValue]
+
+
+class StorageActiveMarketReviewInput(_StrictModel):
+    schema_version: Literal[1]
+    comparison_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    reviewed_at: datetime
+    reviewer_id: str = Field(
+        min_length=1,
+        max_length=200,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9._@+-]*$",
+    )
+    active_market_representative: bool
+    reason: str = Field(min_length=1, max_length=2_000)
 
 
 def build_storage_snapshot(
@@ -289,6 +309,116 @@ def build_storage_contrast_artifact(
         "bytes_per_raw_message": byte_contrast,
     }
     return _build_storage_evidence_artifact("STORAGE_CONTRAST", payload)
+
+
+def load_storage_active_market_review_input(path: Path) -> StorageActiveMarketReviewInput:
+    encoded = path.read_bytes()
+    if len(encoded) > _MAX_REVIEW_INPUT_BYTES:
+        raise ValueError("storage active-market review input exceeds the maximum encoded size")
+    review = StorageActiveMarketReviewInput.model_validate_json(encoded)
+    _utc_text(review.reviewed_at)
+    if review.reason != review.reason.strip():
+        raise ValueError("storage active-market review reason has surrounding whitespace")
+    return review
+
+
+def build_storage_active_market_review_artifact(
+    comparison: StorageEvidenceArtifact,
+    review: StorageActiveMarketReviewInput,
+) -> StorageEvidenceArtifact:
+    _require_artifact_kind(comparison, "STORAGE_COMPARISON")
+    if review.reason != review.reason.strip():
+        raise ValueError("storage active-market review reason has surrounding whitespace")
+    if review.comparison_sha256 != comparison.artifact_sha256:
+        raise ValueError("storage active-market review targets a different comparison artifact")
+    comparison_payload = comparison.payload
+    reviewed_at = _utc_text(review.reviewed_at)
+    after_observed_at = _required_utc_text(comparison_payload, "after_observed_at")
+    if review.reviewed_at < after_observed_at:
+        raise ValueError("storage active-market review predates the measured interval")
+    payload: dict[str, JsonValue] = {
+        "schema_version": 1,
+        "comparison_sha256": comparison.artifact_sha256,
+        "capture_source_id": _required_str(comparison_payload, "capture_source_id"),
+        "database_name": _required_str(comparison_payload, "database_name"),
+        "universe_name": _required_str(comparison_payload, "universe_name"),
+        "configuration_hash": _required_str(comparison_payload, "configuration_hash"),
+        "application_image": _required_str(comparison_payload, "application_image"),
+        "interval_start": _required_str(comparison_payload, "before_observed_at"),
+        "interval_end": _required_str(comparison_payload, "after_observed_at"),
+        "reviewed_at": reviewed_at,
+        "reviewer_id": review.reviewer_id,
+        "active_market_representative": review.active_market_representative,
+        "reason": review.reason,
+        "assertion_authority": "OPERATOR_ASSERTED",
+        "storage_decision_accepted": False,
+    }
+    return _build_storage_evidence_artifact("STORAGE_ACTIVE_MARKET_REVIEW", payload)
+
+
+def build_storage_contrast_qualification_artifact(
+    contrast: StorageEvidenceArtifact,
+    baseline_review: StorageEvidenceArtifact,
+    candidate_review: StorageEvidenceArtifact,
+) -> StorageEvidenceArtifact:
+    _require_artifact_kind(contrast, "STORAGE_CONTRAST")
+    _require_artifact_kind(baseline_review, "STORAGE_ACTIVE_MARKET_REVIEW")
+    _require_artifact_kind(candidate_review, "STORAGE_ACTIVE_MARKET_REVIEW")
+    contrast_payload = contrast.payload
+    baseline_payload = baseline_review.payload
+    candidate_payload = candidate_review.payload
+    if _required_sha256(baseline_payload, "comparison_sha256") != _required_sha256(
+        contrast_payload, "baseline_comparison_sha256"
+    ):
+        raise ValueError("baseline active-market review targets a different comparison")
+    if _required_sha256(candidate_payload, "comparison_sha256") != _required_sha256(
+        contrast_payload, "candidate_comparison_sha256"
+    ):
+        raise ValueError("candidate active-market review targets a different comparison")
+    for review_payload, contrast_image_field, label in (
+        (baseline_payload, "baseline_application_image", "baseline"),
+        (candidate_payload, "candidate_application_image", "candidate"),
+    ):
+        for field in (
+            "capture_source_id",
+            "database_name",
+            "universe_name",
+            "configuration_hash",
+        ):
+            if _required_str(review_payload, field) != _required_str(contrast_payload, field):
+                raise ValueError(f"{label} active-market review has different {field}")
+        if _required_str(review_payload, "application_image") != _required_str(
+            contrast_payload, contrast_image_field
+        ):
+            raise ValueError(f"{label} active-market review has different release identity")
+    failure_reasons: list[JsonValue] = []
+    if not _required_bool(baseline_payload, "active_market_representative"):
+        failure_reasons.append("BASELINE_NOT_REPRESENTATIVE")
+    if not _required_bool(candidate_payload, "active_market_representative"):
+        failure_reasons.append("CANDIDATE_NOT_REPRESENTATIVE")
+    qualification_status = "PASS" if not failure_reasons else "FAIL"
+    payload: dict[str, JsonValue] = {
+        "schema_version": 1,
+        "contrast_sha256": contrast.artifact_sha256,
+        "baseline_review_sha256": baseline_review.artifact_sha256,
+        "candidate_review_sha256": candidate_review.artifact_sha256,
+        "baseline_comparison_sha256": _required_sha256(
+            contrast_payload, "baseline_comparison_sha256"
+        ),
+        "candidate_comparison_sha256": _required_sha256(
+            contrast_payload, "candidate_comparison_sha256"
+        ),
+        "capture_source_id": _required_str(contrast_payload, "capture_source_id"),
+        "database_name": _required_str(contrast_payload, "database_name"),
+        "universe_name": _required_str(contrast_payload, "universe_name"),
+        "configuration_hash": _required_str(contrast_payload, "configuration_hash"),
+        "qualification_status": qualification_status,
+        "failure_reasons": failure_reasons,
+        "automated_thresholds_satisfied": True,
+        "active_market_reviews_satisfied": not failure_reasons,
+        "storage_decision_accepted": False,
+    }
+    return _build_storage_evidence_artifact("STORAGE_CONTRAST_QUALIFICATION", payload)
 
 
 def compare_storage_snapshots(
@@ -500,7 +630,7 @@ def compare_storage_snapshots(
 
 
 def _build_storage_evidence_artifact(
-    artifact_kind: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"],
+    artifact_kind: StorageArtifactKind,
     payload: dict[str, JsonValue],
 ) -> StorageEvidenceArtifact:
     identity: dict[str, JsonValue] = {
@@ -528,8 +658,12 @@ def _validate_storage_evidence_artifact(artifact: StorageEvidenceArtifact) -> No
         raise ValueError("storage evidence artifact hash does not match its canonical content")
     if artifact.artifact_kind == "STORAGE_COMPARISON":
         _validate_storage_comparison_payload(artifact.payload)
-    else:
+    elif artifact.artifact_kind == "STORAGE_CONTRAST":
         _validate_storage_contrast_payload(artifact.payload)
+    elif artifact.artifact_kind == "STORAGE_ACTIVE_MARKET_REVIEW":
+        _validate_storage_active_market_review_payload(artifact.payload)
+    else:
+        _validate_storage_contrast_qualification_payload(artifact.payload)
 
 
 def _validate_storage_comparison_payload(payload: dict[str, JsonValue]) -> None:
@@ -668,9 +802,80 @@ def _validate_storage_contrast_payload(payload: dict[str, JsonValue]) -> None:
             _decimal_value(reduction, f"{field}.candidate_reduction_percent")
 
 
+def _validate_storage_active_market_review_payload(payload: dict[str, JsonValue]) -> None:
+    if _required_int(payload, "schema_version") != 1:
+        raise ValueError("storage active-market review schema version is unsupported")
+    _required_sha256(payload, "comparison_sha256")
+    _required_sha256(payload, "configuration_hash")
+    for field in ("capture_source_id", "database_name", "universe_name"):
+        _required_str(payload, field)
+    application_image = _required_str(payload, "application_image")
+    _require_immutable_image(application_image, "reviewed application image")
+    interval_start = _required_utc_text(payload, "interval_start")
+    interval_end = _required_utc_text(payload, "interval_end")
+    reviewed_at = _required_utc_text(payload, "reviewed_at")
+    if interval_end <= interval_start:
+        raise ValueError("storage active-market review interval is not chronological")
+    if reviewed_at < interval_end:
+        raise ValueError("storage active-market review predates the measured interval")
+    reviewer_id = _required_str(payload, "reviewer_id")
+    if (
+        not reviewer_id[0].isalnum()
+        or len(reviewer_id) > 200
+        or any(
+            character not in "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789._@+-"
+            for character in reviewer_id
+        )
+    ):
+        raise ValueError("storage active-market reviewer ID is invalid")
+    _required_bool(payload, "active_market_representative")
+    reason = _required_str(payload, "reason")
+    if len(reason) > 2_000 or reason != reason.strip():
+        raise ValueError("storage active-market review reason is invalid")
+    if _required_str(payload, "assertion_authority") != "OPERATOR_ASSERTED":
+        raise ValueError("storage active-market review authority is invalid")
+    if _required_bool(payload, "storage_decision_accepted"):
+        raise ValueError("storage active-market review cannot accept a storage decision")
+
+
+def _validate_storage_contrast_qualification_payload(payload: dict[str, JsonValue]) -> None:
+    if _required_int(payload, "schema_version") != 1:
+        raise ValueError("storage contrast qualification schema version is unsupported")
+    for field in (
+        "contrast_sha256",
+        "baseline_review_sha256",
+        "candidate_review_sha256",
+        "baseline_comparison_sha256",
+        "candidate_comparison_sha256",
+        "configuration_hash",
+    ):
+        _required_sha256(payload, field)
+    for field in ("capture_source_id", "database_name", "universe_name"):
+        _required_str(payload, field)
+    status = _required_str(payload, "qualification_status")
+    reasons_value = payload["failure_reasons"]
+    if not isinstance(reasons_value, list) or any(
+        not isinstance(reason, str) for reason in reasons_value
+    ):
+        raise TypeError("storage contrast qualification failure reasons are invalid")
+    allowed_reasons = ["BASELINE_NOT_REPRESENTATIVE", "CANDIDATE_NOT_REPRESENTATIVE"]
+    reasons = [reason for reason in allowed_reasons if reason in reasons_value]
+    if reasons_value != reasons:
+        raise ValueError("storage contrast qualification failure reasons are invalid")
+    expected_status = "PASS" if not reasons else "FAIL"
+    if status != expected_status:
+        raise ValueError("storage contrast qualification status contradicts its reasons")
+    if not _required_bool(payload, "automated_thresholds_satisfied"):
+        raise ValueError("storage contrast qualification lost automated threshold evidence")
+    if _required_bool(payload, "active_market_reviews_satisfied") != (not reasons):
+        raise ValueError("storage contrast qualification review status contradicts its reasons")
+    if _required_bool(payload, "storage_decision_accepted"):
+        raise ValueError("storage contrast qualification cannot accept a storage decision")
+
+
 def _require_artifact_kind(
     artifact: StorageEvidenceArtifact,
-    expected: Literal["STORAGE_COMPARISON", "STORAGE_CONTRAST"],
+    expected: StorageArtifactKind,
 ) -> None:
     _validate_storage_evidence_artifact(artifact)
     if artifact.artifact_kind != expected:
@@ -726,6 +931,16 @@ def _required_sha256(value: dict[str, JsonValue], field: str) -> str:
     if len(item) != 64 or any(character not in "0123456789abcdef" for character in item):
         raise ValueError(f"storage evidence {field} is not lower-case SHA-256")
     return item
+
+
+def _required_utc_text(value: dict[str, JsonValue], field: str) -> datetime:
+    item = _required_str(value, field)
+    try:
+        parsed = datetime.fromisoformat(item.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"storage evidence {field} is not an ISO-8601 timestamp") from error
+    _utc_text(parsed)
+    return parsed
 
 
 def _require_immutable_image(value: str, field: str) -> None:

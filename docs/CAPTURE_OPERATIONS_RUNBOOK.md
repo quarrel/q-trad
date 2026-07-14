@@ -508,6 +508,48 @@ combined bytes per raw message. The artifact deliberately records
 `storage_decision_accepted=false` and keeps both active-market reviews required; the command cannot
 turn automated thresholds into an operator decision.
 
+For each comparison, create a bounded operator input after inspecting whether its exact measured
+interval represented ordinary active-market conditions. Replace the zero hash below with the
+`artifact_sha256` printed by `storage compare`, and use a review time after the interval end:
+
+```json
+{
+  "schema_version": 1,
+  "comparison_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "reviewed_at": "2026-07-20T08:00:00Z",
+  "reviewer_id": "operator@example.com",
+  "active_market_representative": true,
+  "reason": "The interval covered normal open-market activity without exceptional provider recovery."
+}
+```
+
+Record both assertions and then qualify their exact contrast:
+
+```bash
+uv run qtrad storage review \
+  --output pinned-active-market-review.json \
+  pinned-comparison.json \
+  pinned-active-market-review-input.json
+
+uv run qtrad storage review \
+  --output changed-active-market-review.json \
+  changed-field-comparison.json \
+  changed-active-market-review-input.json
+
+uv run qtrad storage qualify \
+  --output merged-vs-changed-qualification.json \
+  merged-vs-changed.json \
+  pinned-active-market-review.json \
+  changed-active-market-review.json
+```
+
+The review command rejects a mismatched comparison hash, a pre-interval review time, surrounding
+reason whitespace or oversized/extra input. Qualification rejects a review belonging to another
+comparison or release. If either honest review is negative, it writes a hash-verified `FAIL` with a
+stable reason instead of losing that evidence. A `PASS` closes only this comparison's review gate:
+all review and qualification artifacts retain `storage_decision_accepted=false`. Their hashes bind
+content but do not authenticate the named reviewer, so retain them in the reviewed evidence set.
+
 `observed_rate_extrapolation` reports the interval's raw/canonical rates and the combined capture
 relation bytes implied over one, 30 and 365 days if that exact rate continued. Treat it as a storage
 sizing scenario only after the evidence gate and active-market review pass; it deliberately excludes

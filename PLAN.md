@@ -132,13 +132,19 @@ Implementation status:
   all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
   and rejects a representation-schema transition. GitHub CI run `29341678396` passed every static and
   shell gate, the real PostgreSQL representation probe and all 255 tests at branch head `6a84319`.
-- Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
+  - Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
   self-hashed release artifact retaining its snapshot and image identity. Offline `storage contrast`
   accepts only verified same-source/configuration artifacts from distinct immutable images, requires
   a merged-state baseline, all-`CHANGED_FIELDS` candidate and passed automated thresholds, and reports
   mechanical per-message change without claiming the required active-market reviews or accepting a
-  storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
-  `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
+    storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
+    `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
+  - Complete locally and undeployed, pending CI: bounded `storage review` inputs now become
+    self-hashed operator assertions bound to one exact comparison, release and interval. Offline
+    `storage qualify` verifies both reviews against their contrast, emits `PASS` only when both are
+    representative, preserves an honest negative `FAIL`, and cannot accept a storage decision. The
+    full local gate passes with 252 tests plus 12 isolated-PostgreSQL tests deferred to CI; the running
+    collector remains unchanged.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
@@ -329,6 +335,8 @@ python -m qtrad projections rebuild
 python -m qtrad storage snapshot --universe PATH --output PATH
 python -m qtrad storage compare --output PATH BEFORE AFTER
 python -m qtrad storage contrast --output PATH BASELINE_COMPARISON CANDIDATE_COMPARISON
+python -m qtrad storage review --output PATH COMPARISON REVIEW_INPUT
+python -m qtrad storage qualify --output PATH CONTRAST BASELINE_REVIEW CANDIDATE_REVIEW
 python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...
 python -m qtrad feed probe --endpoint http://127.0.0.1:PORT --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH
 python -m qtrad api
@@ -336,9 +344,8 @@ python -m qtrad api
 
 ## Verification evidence
 
-- Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass; 239 tests pass
-  with 12 PostgreSQL migration/integration tests deferred to isolated CI. ShellCheck is unchanged
-  and is rerun as part of the branch completion gate.
+- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and both ShellCheck sets
+  pass; 252 tests pass with 12 PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.
