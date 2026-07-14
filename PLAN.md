@@ -74,6 +74,9 @@ Implementation status:
 - Complete: the dedicated GitHub publisher has capture-compartment `manage repos`; the
   workflow published and the ARM host pulled the attested dual-architecture OCI index by
   immutable digest. The prior digest is retained as the application rollback target.
+- Complete: the pinned ARM release applied migrations, reached all-seven readiness with an
+  exactly caught-up projection, published a fully healthy OCI metric set, and stopped
+  cleanly under systemd/Compose supervision.
 - Pending qualification: reboot/digest rollback gates followed by the 72-hour unattended
   `capture-v1` run. `capture-v2` remains excluded.
 

@@ -262,3 +262,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - `/etc/qtrad/capture.env` now pins that index digest and the prior application digest is
   retained root-only for rollback. The reviewed release archive is staged, but no collector
   role or operations timer has been started.
+- The pinned ARM release then passed the deployment-path smoke under systemd and Compose:
+  migration completed, readiness returned HTTP 200 with all seven expected instruments,
+  and global/projection positions were exactly caught up at 1,678. Healthwatch accepted the
+  complete readiness, lag, fresh backup/restore and disk evidence and published its healthy
+  OCI metric set. The stack stopped cleanly afterward; capture and all timers remain
+  disabled.
