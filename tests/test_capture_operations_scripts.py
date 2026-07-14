@@ -26,6 +26,14 @@ def test_capture_api_requires_a_stable_source_identity() -> None:
     assert "QTRAD_CAPTURE_SOURCE_ID: ${QTRAD_CAPTURE_SOURCE_ID:?" in api
 
 
+def test_capture_database_is_available_only_on_an_explicit_loopback_port() -> None:
+    compose = (REPOSITORY_ROOT / "compose.capture.yaml").read_text()
+    database = compose.split("  db:\n", maxsplit=1)[1].split("  ingest:\n", maxsplit=1)[0]
+
+    assert '      - "127.0.0.1:${QTRAD_DB_PORT:-15432}:5432"\n' in database
+    assert "0.0.0.0" not in database
+
+
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)

@@ -5,6 +5,8 @@ from uuid import uuid4
 
 import httpx
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qtrad.__main__ import _append_bar
@@ -305,3 +307,49 @@ async def test_read_only_api_reports_seeded_instruments() -> None:
     assert len(instruments.json()) == 7
     assert production_probe.status_code == 404
     await engine_from_app(app).dispose()
+
+
+@pytest.mark.asyncio
+async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+
+    async with engine.connect() as connection:
+        attributes = (
+            await connection.execute(
+                text(
+                    """
+                    SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
+                           rolreplication, rolbypassrls
+                    FROM pg_roles
+                    WHERE rolname = 'qtrad_capture_reader'
+                    """
+                )
+            )
+        ).one()
+    assert tuple(attributes) == (False, False, False, False, False, False)
+
+    async with engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.execute(text("SET LOCAL ROLE qtrad_capture_reader"))
+        for table in (
+            "canonical.events",
+            "reference.instruments",
+            "read_model.latest_quotes",
+            "ops.runs",
+        ):
+            await connection.execute(text(f"SELECT count(*) FROM {table}"))
+        await transaction.rollback()
+
+    for prohibited_statement in (
+        "SELECT count(*) FROM raw.market_messages",
+        "UPDATE read_model.latest_quotes SET quality = quality WHERE false",
+    ):
+        async with engine.connect() as connection:
+            transaction = await connection.begin()
+            await connection.execute(text("SET LOCAL ROLE qtrad_capture_reader"))
+            with pytest.raises(DBAPIError):
+                await connection.execute(text(prohibited_statement))
+            await transaction.rollback()
+
+    await engine.dispose()

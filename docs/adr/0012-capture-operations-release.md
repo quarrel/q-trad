@@ -13,6 +13,10 @@ The capture database is not a development, test, research or paper-write target.
 workloads consume immutable exports or a separate read-only/snapshot path. No order or
 paper component is admitted by this record.
 
+ADR 0016 defines the exceptional direct-read path: an independently authenticated reader
+privilege, no raw-schema access and a database listener bound only to host loopback for SSH
+tunnelling.
+
 ## Consequences
 
 OCI provisioning, backup/restore, health monitoring, IPv6 SSH and Bastion recovery are

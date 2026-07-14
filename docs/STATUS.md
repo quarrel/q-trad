@@ -299,6 +299,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   ambient proxy configuration, bounds status, content type, request duration, decoded bytes and
   page size, then applies the same identity/cursor contract. `feed probe` fetches one page and
   reports `cursor_persisted=false`; it has no cursor database or downstream writer.
+- The previously documented direct database inspection boundary is now implemented locally in ADR
+  0016 and migration `0004`. A non-login reader privilege can select only canonical, reference,
+  read-model and operations schemas; raw capture and writes remain denied. PostgreSQL is bound only
+  to collector host loopback for an independently authenticated SSH-tunnel login. This migration
+  and Compose change are not deployed during the frozen qualification.
 - The feed contract distinguishes current serving-universe identity from per-event historical
   provenance. A universe/configuration transition can be acknowledged only through an explicit
   caught-up rebind on the same capture source; source or schema changes fail and require a new

@@ -68,9 +68,10 @@ Implementation status:
 - Complete: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.
-- Pending operator gate: create and authorise the private backup bucket, install the two
-  non-secret operations environment files, and configure alarms. Bucket lifecycle,
-  instance-principal upload, isolated restore and custom-metric publication now pass.
+- Complete: the private backup bucket, instance-principal policy and both non-secret operations
+  environment files are installed. Bucket lifecycle, upload, isolated restore and custom-metric
+  publication pass. OCI/Beszel alarm thresholds remain an operator tuning activity rather than a
+  collection gate.
 - Complete: the dedicated GitHub publisher has capture-compartment `manage repos`; the
   workflow published and the ARM host pulled the attested dual-architecture OCI index by
   immutable digest. The prior digest is retained as the application rollback target.
@@ -100,6 +101,10 @@ Implementation status:
   unexpected status/content, response growth, total duration, cursor mismatch and page overrun
   fail closed. The probe explicitly reports that its candidate cursor was not persisted; there is
   still no cursor database, derived writer or paper behaviour.
+- Complete locally: ADR 0016, migration `0004` and the loopback-only PostgreSQL binding provide
+  independently authenticated direct-read access without sharing collector credentials. The
+  privilege role can select approved canonical/reference/read-model/operations tables, but cannot
+  access raw capture or write; PostgreSQL CI proves the grants.
 - Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
   hashable offline catalogue that deliberately contains no provider epics and cannot be
   loaded as an ingestion universe.
@@ -218,7 +223,7 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
-  173 tests pass with five PostgreSQL integration tests deferred to isolated CI.
+  174 tests pass with six PostgreSQL integration tests deferred to isolated CI.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and

@@ -43,6 +43,13 @@ instance principal needs repository-read permission, not image-publication permi
 Compose sends `SIGINT` to the unbounded ingestion role and allows a 90-second stop window so
 the adapter can verify disconnect and persist a terminal run before restart or host shutdown.
 
+PostgreSQL additionally publishes host port 15432 only on `127.0.0.1` for exceptional SSH-tunnel
+inspection. Migration `0004` supplies the non-login `qtrad_capture_reader` privilege role: it can
+select from canonical, reference, read-model and operations schemas, cannot access raw capture and
+cannot write. The operator creates and rotates a separate login member interactively; collector
+application credentials are never reused. Immutable Parquet manifests and snapshots remain the
+normal research interface.
+
 The loopback-only API also provides bounded canonical-event pages for later isolated consumers.
 Pages carry feed-schema, capture-source, universe, configuration and high-water identity while
 excluding raw records. Consumers connect through an SSH/Tailscale tunnel and maintain their own

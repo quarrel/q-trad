@@ -130,7 +130,8 @@ requires that mount and must fail rather than write database data to the boot vo
 
 `capture.env` contains the IG demo credentials, database URLs for `qtrad_capture`, the
 approved `QTRAD_CAPTURE_UNIVERSE_PATH`, immutable image references and a stable
-`QTRAD_CAPTURE_SOURCE_ID`. Use a non-secret machine identifier such as
+`QTRAD_CAPTURE_SOURCE_ID`. `QTRAD_DB_PORT` may override the loopback-only PostgreSQL host port;
+leave its default of `15432` unless that port conflicts. Use a non-secret machine identifier such as
 `oci-sydney-capture-1`; retain it across image and universe releases and restores of the same
 canonical history, but never reuse it for an independent event store. The file is never copied
 to a workstation, log, image or repository.
@@ -187,6 +188,35 @@ and deploy only the returned OCI index digest.
 - Do not run development migrations, projection rebuilds, tests or paper/research writers
   against the capture database. Research consumes immutable Parquet manifests or a
   read-only snapshot over an SSH tunnel.
+
+### Exceptional read-only database access
+
+Prefer immutable Parquet manifests or a database snapshot. When direct inspection is necessary,
+create a dedicated login after migration `0004` has installed the non-login privilege role. From
+an interactive `psql` session as the collector database administrator, run:
+
+```sql
+CREATE ROLE qtrad_research LOGIN;
+GRANT qtrad_capture_reader TO qtrad_research WITH INHERIT TRUE, SET TRUE;
+ALTER ROLE qtrad_research SET default_transaction_read_only = on;
+\password qtrad_research
+```
+
+The `\password` prompt prevents the secret entering shell history or process arguments. Store it
+outside `capture.env`; rotate or drop this login independently. Never grant it the collector
+application role and never grant `raw` access.
+
+Open the tunnel from the operator workstation without placing the password in the command:
+
+```bash
+ssh -N -L 15432:127.0.0.1:15432 opc@q-trad-capture
+psql --host 127.0.0.1 --port 15432 --username qtrad_research --dbname qtrad_capture
+```
+
+PostgreSQL remains bound to host loopback, so OCI and Tailscale expose no database listener. Direct
+queries must remain bounded and read-only; do not point development tools, migrations, projection
+rebuilds or paper writers at this tunnel. Drop the login when it is no longer needed; migration
+ownership of `qtrad_capture_reader` remains unchanged.
 
 ## Qualification
 
