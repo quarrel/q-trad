@@ -392,6 +392,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   It retains raw/canonical facts, deduplication, primary keys and event/stream uniqueness. Only the
   unused-by-current-code event-type/time index, payload representation and fixed-width hashes remain
   evidence-gated candidates; no collector schema or retention policy changed.
+- GitHub CI run `29325936926` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
+  `0006` and all 218 tests against PostgreSQL 18 at branch head `1aefd62`, including the version-two
+  statistics-reset and JSON-text catalogue queries.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

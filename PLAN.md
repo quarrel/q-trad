@@ -97,7 +97,9 @@ Implementation status:
 - Complete locally and undeployed: storage snapshot schema version 2 remains backward-readable and
   adds JSON-text comparison plus per-index byte/scan deltas. The storage audit preserves raw and
   canonical facts and all correctness indexes, and makes secondary-index, payload-representation
-  and hash-width changes conditional on representative measurements rather than estimates.
+  and hash-width changes conditional on representative measurements rather than estimates. GitHub
+  CI run `29325936926` passed all static, migration and PostgreSQL 18 gates with 218 tests at branch
+  head `1aefd62`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
