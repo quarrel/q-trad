@@ -292,3 +292,6 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The comment-only `capture-v2` list is now a structured, hashable 20-instrument offline
   catalogue. It contains no preferred provider epics, fails if read as an approved ingestion
   universe and therefore cannot expand the running collector.
+- Draft PR 1 validates this local preparation in an isolated PostgreSQL 18 CI environment.
+  Formatting, linting, typing, shell checks, migration and the full test job passed; no image
+  was published and the frozen OCI release was not changed.

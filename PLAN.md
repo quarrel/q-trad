@@ -93,6 +93,9 @@ Implementation status:
 - Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
   hashable offline catalogue that deliberately contains no provider epics and cannot be
   loaded as an ingestion universe.
+- Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
+  shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
+  draft PR remains unmerged and cannot deploy the collector.
 
 ## WP0 — documentation and scaffold
 
