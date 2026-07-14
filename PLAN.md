@@ -113,7 +113,9 @@ Implementation status:
   all static, migration and PostgreSQL 18 gates with 224 tests at branch head `9189f21`.
 - Complete locally and undeployed: comparison converts the observed interval into raw/canonical and
   retained-relation rates plus explicitly mechanical combined-storage scenarios for one, 30 and 365
-  days. These remain labelled interval extrapolations rather than forecasts.
+  days. These remain labelled interval extrapolations rather than forecasts. GitHub CI run
+  `29327187828` passed all static, migration and PostgreSQL 18 gates with 224 tests at branch head
+  `448250e`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
