@@ -292,6 +292,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The comment-only `capture-v2` list is now a structured, hashable 20-instrument offline
   catalogue. It contains no preferred provider epics, fails if read as an approved ingestion
   universe and therefore cannot expand the running collector.
+- The feature branch now implements the next offline gate: `qtrad instruments review` enumerates
+  bounded IG demo listing evidence into a hash-addressed JSON manifest without automatic
+  minimum-size selection, database writes or streaming. Wrong-currency, non-rolling,
+  unavailable, unknown and invalid-size evidence receives stable fail-closed reason codes;
+  multiple eligible candidates remain visible for explicit operator selection.
+- The review manifest excludes provider snapshots and credentials, cannot overwrite prior
+  evidence and declares `selection_authority=false`. Only a later explicit-epic universe release
+  can authorise sync or ingestion. Fixture tests exercise this path; no IG request was made while
+  the `capture-v1` qualification is running.
 - Draft PR 1 validates this local preparation in an isolated PostgreSQL 18 CI environment.
   Formatting, linting, typing, shell checks, migration and the full test job passed; no image
   was published and the frozen OCI release was not changed.

@@ -21,6 +21,7 @@ from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
 from qtrad.application.ingestion import IngestionService
+from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.quota import points_per_instrument
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.domain.events import EventEnvelope, to_json_value
@@ -36,7 +37,12 @@ from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
-from qtrad.runtime.universe import CaptureUniverse, load_capture_universe
+from qtrad.runtime.universe import (
+    CaptureCandidates,
+    CaptureUniverse,
+    load_capture_candidates,
+    load_capture_universe,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -50,6 +56,15 @@ def build_parser() -> argparse.ArgumentParser:
     instruments = subparsers.add_parser("instruments", help="instrument operations")
     instrument_sub = instruments.add_subparsers(dest="instrument_command", required=True)
     instrument_sub.add_parser("sync", help="discover and persist IG demo listings")
+    review = instrument_sub.add_parser(
+        "review", help="emit bounded IG demo listing candidates without selecting one"
+    )
+    review.add_argument(
+        "--catalogue",
+        type=Path,
+        default=Path("config/capture-v2-candidates.toml"),
+    )
+    review.add_argument("--output", type=Path)
 
     ingest = subparsers.add_parser("ingest", help="run IG demo ingestion")
     ingest.add_argument("--environment", choices=["ig-demo"], default="ig-demo")
@@ -88,6 +103,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(_seed(settings))
     elif args.command == "instruments" and args.instrument_command == "sync":
         asyncio.run(_sync_instruments(settings, clock))
+    elif args.command == "instruments" and args.instrument_command == "review":
+        asyncio.run(
+            _review_instruments(
+                settings,
+                clock,
+                catalogue_path=args.catalogue,
+                output_path=args.output,
+            )
+        )
     elif args.command == "ingest":
         asyncio.run(
             _ingest(
@@ -143,6 +167,25 @@ def _ig_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
     )
 
 
+def _ig_review_adapter(
+    settings: Settings, clock: Clock, candidates: CaptureCandidates
+) -> IgDemoMarketDataAdapter:
+    username, password, api_key, account_id = settings.require_ig_credentials()
+    return IgDemoMarketDataAdapter(
+        IgDemoConfig(
+            username=username,
+            password=password,
+            api_key=api_key,
+            account_id=account_id,
+        ),
+        clock,
+        instruments_by_id={
+            instrument.instrument_id: instrument for instrument in candidates.instruments
+        },
+        preferred_epics={},
+    )
+
+
 async def _seed(settings: Settings) -> None:
     engine = _engine(settings)
     try:
@@ -170,6 +213,53 @@ async def _sync_instruments(settings: Settings, clock: Clock) -> None:
     finally:
         await adapter.disconnect()
         await engine.dispose()
+
+
+async def _review_instruments(
+    settings: Settings,
+    clock: Clock,
+    *,
+    catalogue_path: Path,
+    output_path: Path | None,
+) -> None:
+    if output_path is not None:
+        if output_path.exists():
+            raise FileExistsError(f"listing review output already exists: {output_path}")
+        if not output_path.parent.is_dir():
+            raise FileNotFoundError(
+                f"listing review output directory does not exist: {output_path.parent}"
+            )
+    candidates = load_capture_candidates(catalogue_path)
+    adapter = _ig_review_adapter(settings, clock, candidates)
+    try:
+        await adapter.connect()
+        reviews = await adapter.review_listings(
+            [instrument.instrument_id for instrument in candidates.instruments]
+        )
+        manifest = build_listing_review_manifest(
+            catalogue_name=candidates.name,
+            catalogue_hash=candidates.configuration_hash,
+            instruments=candidates.instruments,
+            reviews=reviews,
+            observed_at=clock.now(),
+        )
+        encoded = json.dumps(manifest.as_json_value(), sort_keys=True, indent=2) + "\n"
+        if output_path is None:
+            print(encoded, end="")
+        else:
+            with output_path.open("x", encoding="utf-8") as output:
+                output.write(encoded)
+            print(
+                json.dumps(
+                    {
+                        "output": str(output_path),
+                        "review_hash": manifest.review_hash,
+                    },
+                    sort_keys=True,
+                )
+            )
+    finally:
+        await adapter.disconnect()
 
 
 async def _ingest(

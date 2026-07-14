@@ -48,6 +48,14 @@ Pages carry feed-schema, capture-source, universe, configuration and high-water 
 excluding raw records. Consumers connect through an SSH/Tailscale tunnel and maintain their own
 cursors; the collector does not host downstream write schemas or a second message-broker product.
 
+Candidate-universe review is a separate, non-authoritative IG demo REST workflow. The
+`instruments review` command loads a hashable catalogue containing no provider epics, enumerates
+relevant account-visible listings and emits a bounded, hash-addressed JSON manifest. It records
+canonical product, expiry and market-state classifications, bounded economics and stable rejection
+codes, but excludes volatile snapshots and credentials. Multiple eligible listings remain visible
+for operator choice: the workflow cannot select a listing, update PostgreSQL, produce an approved
+capture universe or start a stream.
+
 The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
 checksum and a JSON manifest that binds the capture-universe hash and both deployed image
 digests. Object Storage lifecycle rules implement daily/weekly retention. A weekly verifier
@@ -119,6 +127,7 @@ transaction as event projection.
 ## Public surfaces
 
 - Standard-library CLI under `python -m qtrad`.
+- `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.
@@ -131,6 +140,10 @@ IG listing discovery remains fail-closed. Candidates must use the canonical
 instrument's quote currency, and the adapter validates an explicit standard-contract
 preference for each instrument rather than selecting a mini or alternate-currency
 contract from minimum size alone.
+The separate listing-review path has no preferred-epic input and deliberately performs no
+minimum-size selection. A generated manifest always carries `selection_authority=false`; only a
+later, reviewed capture-universe release with an explicit epic for every instrument can enter sync
+or ingestion.
 
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.

@@ -93,3 +93,41 @@ preferred_epic = "must-not-be-accepted"
 
     with pytest.raises(ValueError, match="must not contain preferred IG epics"):
         load_capture_candidates(path)
+
+
+def test_capture_candidates_bound_provider_search_work(tmp_path: Path) -> None:
+    too_many = tmp_path / "too-many.toml"
+    entries = []
+    for index in range(101):
+        entries.append(
+            f"""
+[[instrument]]
+id = "fx:fixture-{index}"
+display_name = "Fixture {index}"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["Fixture {index}"]
+"""
+        )
+    too_many.write_text('name = "too-many"\n' + "".join(entries))
+
+    with pytest.raises(ValueError, match="cannot exceed 100 instruments"):
+        load_capture_candidates(too_many)
+
+    too_many_aliases = tmp_path / "too-many-aliases.toml"
+    too_many_aliases.write_text(
+        """
+name = "too-many-aliases"
+[[instrument]]
+id = "fx:eur-usd"
+display_name = "EUR/USD"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["one", "two", "three", "four", "five", "six"]
+"""
+    )
+
+    with pytest.raises(ValueError, match="cannot exceed five search aliases"):
+        load_capture_candidates(too_many_aliases)

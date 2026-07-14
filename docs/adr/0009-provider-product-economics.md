@@ -33,6 +33,12 @@ provider response. A changed metadata version closes the previous projected vers
 the new event time; an identical version is idempotent. Projection rebuild recreates the
 effective listing and economics entirely from canonical events.
 
+Before a new capture universe is approved, provider discovery may instead run in review mode.
+Review mode emits a hash-addressed, bounded manifest of every relevant candidate and stable
+fail-closed reasons. It neither chooses the smallest contract nor writes a preferred epic,
+listing event or projection. The manifest explicitly has no selection authority; operator review
+and a separate versioned universe release remain required.
+
 Do not reinterpret legacy reference rows as canonical history. The migration preserves
 them until the first new sync, then the event-backed projection becomes authoritative and
 can be rebuilt independently.

@@ -1,5 +1,6 @@
 import asyncio
-from collections.abc import AsyncIterator
+import json
+from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -9,7 +10,9 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from qtrad import __main__ as cli
+from qtrad.domain.identifiers import InstrumentId
 from qtrad.ports.clock import Clock
+from qtrad.ports.market_data import InstrumentListingReview
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import load_capture_universe
 
@@ -33,6 +36,21 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     ("arguments", "target", "expected"),
     [
         (["instruments", "sync"], "_sync_instruments", ()),
+        (
+            [
+                "instruments",
+                "review",
+                "--catalogue",
+                "config/capture-v2-candidates.toml",
+                "--output",
+                "review.json",
+            ],
+            "_review_instruments",
+            (
+                ("catalogue_path", Path("config/capture-v2-candidates.toml")),
+                ("output_path", Path("review.json")),
+            ),
+        ),
         (
             ["ingest", "--max-seconds", "60", "--force-reconnect-after-seconds", "20"],
             "_ingest",
@@ -95,6 +113,61 @@ def test_api_dispatches_read_only_application(
     cli.main(["api", "--host", "0.0.0.0", "--port", "8123"])
 
     run.assert_called_once_with(application, host="0.0.0.0", port=8123)
+
+
+@pytest.mark.asyncio
+async def test_listing_review_writes_new_non_authoritative_manifest_without_database_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.connect_count = 0
+            self.disconnect_count = 0
+
+        async def connect(self) -> None:
+            self.connect_count += 1
+
+        async def disconnect(self) -> None:
+            self.disconnect_count += 1
+
+        async def review_listings(
+            self, instrument_ids: Sequence[InstrumentId]
+        ) -> tuple[InstrumentListingReview, ...]:
+            return tuple(
+                InstrumentListingReview(instrument_id, ()) for instrument_id in instrument_ids
+            )
+
+    adapter = FakeAdapter()
+    clock = Mock(spec=Clock)
+    clock.now.return_value = datetime(2026, 7, 18, tzinfo=UTC)
+    monkeypatch.setattr(
+        cli, "_ig_review_adapter", lambda settings, selected_clock, candidates: adapter
+    )
+    output = tmp_path / "review.json"
+
+    await cli._review_instruments(
+        cast(Settings, SimpleNamespace()),
+        cast(Clock, clock),
+        catalogue_path=Path("config/capture-v2-candidates.toml"),
+        output_path=output,
+    )
+
+    manifest = json.loads(output.read_text())
+    assert manifest["selection_authority"] is False
+    assert manifest["catalogue_name"] == "capture-v2-candidates"
+    assert len(manifest["instruments"]) == 20
+    assert adapter.connect_count == 1
+    assert adapter.disconnect_count == 1
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        await cli._review_instruments(
+            cast(Settings, SimpleNamespace()),
+            cast(Clock, clock),
+            catalogue_path=Path("config/capture-v2-candidates.toml"),
+            output_path=output,
+        )
+    assert adapter.connect_count == 1
 
 
 @pytest.mark.asyncio

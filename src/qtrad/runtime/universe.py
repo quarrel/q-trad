@@ -53,6 +53,10 @@ class CaptureCandidates:
         identifiers = [instrument.instrument_id for instrument in self.instruments]
         if len(set(identifiers)) != len(identifiers):
             raise ValueError("capture candidate instrument IDs must be unique")
+        if len(self.instruments) > 100:
+            raise ValueError("capture candidate catalogue cannot exceed 100 instruments")
+        if any(len(instrument.search_aliases) > 5 for instrument in self.instruments):
+            raise ValueError("capture candidate instrument cannot exceed five search aliases")
 
 
 def load_capture_universe(path: Path) -> CaptureUniverse:

@@ -93,6 +93,14 @@ Implementation status:
 - Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
   hashable offline catalogue that deliberately contains no provider epics and cannot be
   loaded as an ingestion universe.
+- Complete locally without provider or collector access: a bounded `instruments review` workflow
+  enumerates relevant IG demo candidates, classifies fail-closed rejection reasons and emits a
+  deterministic, non-overwriting manifest with `selection_authority=false`. It never chooses an
+  epic, writes PostgreSQL or starts a stream. Fixture coverage retains multiple eligible listings
+  for explicit operator review and excludes volatile snapshots and credentials.
+- Deferred qualification gate: do not invoke the review command against IG demo until the active
+  `capture-v1` 72-hour window closes. Its eventual output is evidence for manual mapping review,
+  not an approved `capture-v2` universe.
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.
