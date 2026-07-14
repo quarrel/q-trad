@@ -243,6 +243,31 @@ async def test_missing_registered_plan_fails_before_credentials_or_provider(
 
 
 @pytest.mark.asyncio
+async def test_claimed_plan_content_must_match_the_requested_database_hash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = FakeEngine()
+    store = FakeStore()
+    provider = Mock(side_effect=AssertionError("provider adapter must not be constructed"))
+    clock = Mock(spec=Clock)
+    clock.now.return_value = NOW
+    monkeypatch.setattr(cli, "_engine", lambda _: engine)
+    monkeypatch.setattr(cli, "PostgresAuditStore", lambda _: store)
+    monkeypatch.setattr(cli, "_ig_backfill_adapter", provider)
+
+    with pytest.raises(RuntimeError, match="does not match the requested hash"):
+        await cli._execute_backfill(
+            cast(Settings, SimpleNamespace()),
+            clock,
+            plan_hash="b" * 64,
+        )
+
+    provider.assert_not_called()
+    assert store.failed is True
+    assert engine.disposed is True
+
+
+@pytest.mark.asyncio
 async def test_registration_requires_the_explicit_reviewed_hash(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

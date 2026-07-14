@@ -714,6 +714,7 @@ async def _execute_backfill(settings: Settings, clock: Clock, *, plan_hash: str)
     store = PostgresAuditStore(engine)
     adapter: IgDemoMarketDataAdapter | None = None
     plan: BackfillPlan | None = None
+    plan_claimed = False
     run_id: RunId | None = None
     plan_completed = False
     terminal_status = "FAILED"
@@ -721,7 +722,10 @@ async def _execute_backfill(settings: Settings, clock: Clock, *, plan_hash: str)
     received: dict[tuple[InstrumentId, PriceBasis], set[datetime]] = {}
     try:
         payload = await store.claim_backfill_plan(plan_hash)
+        plan_claimed = True
         plan = decode_backfill_plan(json.dumps(payload, sort_keys=True))
+        if plan.plan_hash != plan_hash:
+            raise RuntimeError("claimed backfill plan content does not match the requested hash")
         adapter = _ig_backfill_adapter(settings, clock)
         run_id = await store.start_run(
             kind=RunKind.BACKFILL,
@@ -785,8 +789,8 @@ async def _execute_backfill(settings: Settings, clock: Clock, *, plan_hash: str)
             )
         )
     except BaseException:
-        if plan is not None and not plan_completed:
-            await store.fail_backfill_plan(plan.plan_hash, executed_at=clock.now())
+        if plan_claimed and not plan_completed:
+            await store.fail_backfill_plan(plan_hash, executed_at=clock.now())
         raise
     finally:
         if run_id is not None and plan is not None:
