@@ -21,7 +21,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.ports.market_data import MarketDataRecord
-from qtrad.runtime.capture_feed import decode_capture_feed_page
+from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_feed_page
 from qtrad.runtime.settings import Settings
 
 DATABASE_URL = os.getenv("QTRAD_DATABASE_URL")
@@ -230,6 +230,19 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
     assert negative_cursor.status_code == 422
     assert invalid_cursor.status_code == 409
     assert write_probe.status_code == 405
+
+    async with HttpCaptureFeedClient(
+        "http://127.0.0.1:18080",
+        transport=httpx.ASGITransport(app=app),
+    ) as feed_client:
+        client_page = await feed_client.fetch_page(
+            after_position=first.global_position - 1,
+            limit=1,
+        )
+    assert client_page.identity.source_id == "integration-capture"
+    assert client_page.events[0].event_id == first.event_id
+    assert client_page.next_position == first.global_position
+
     await engine_from_app(app).dispose()
     await engine.dispose()
 
