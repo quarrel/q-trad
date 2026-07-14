@@ -101,6 +101,10 @@ Implementation status:
 - Deferred qualification gate: do not invoke the review command against IG demo until the active
   `capture-v1` 72-hour window closes. Its eventual output is evidence for manual mapping review,
   not an approved `capture-v2` universe.
+- Complete locally: explicit universe promotion verifies the manifest's canonical hash, exact
+  catalogue identity and one manually selected eligible IG demo listing per instrument. It rejects
+  stale, tampered, omitted, duplicate, unseen, reused or ineligible selections and deterministically
+  renders a non-overwriting, undeployed TOML release bound to review and selection hashes.
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.

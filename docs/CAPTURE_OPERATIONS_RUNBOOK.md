@@ -202,3 +202,49 @@ starts.
 Only after that evidence passes may the candidate 20-instrument universe receive reviewed
 IG epics and become a new capture configuration. It must pass its own 72-hour
 qualification. A failed or ambiguous mapping leaves the collector on `capture-v1`.
+
+### `capture-v2` review and explicit promotion
+
+Do not run this provider-backed review until the `capture-v1` qualification gate closes. Run it
+from an isolated operator environment with IG demo credentials; it does not need PostgreSQL and
+must never run on the collector merely to save a workstation REST call.
+
+```bash
+uv run qtrad instruments review \
+  --catalogue config/capture-v2-candidates.toml \
+  --output tmp/capture-v2-review.json
+```
+
+Inspect every instrument and candidate. The manifest may retain multiple eligible listings and
+never recommends one. It is bounded, hash-addressed and declares `selection_authority=false`.
+Create `tmp/capture-v2-selections.toml` manually with the manifest's exact hashes and exactly one
+full IG demo listing ID for every catalogue instrument:
+
+```toml
+schema_version = 1
+catalogue_hash = "<64-character catalogue hash>"
+review_hash = "<64-character review hash>"
+
+[[selection]]
+instrument_id = "fx:aud-usd"
+listing_id = "ig:demo:<explicitly reviewed epic>"
+
+# Repeat [[selection]] for all 20 instruments. No omission or duplicate is allowed.
+```
+
+Then produce an undeployed candidate release:
+
+```bash
+uv run qtrad instruments promote \
+  --catalogue config/capture-v2-candidates.toml \
+  --review tmp/capture-v2-review.json \
+  --selections tmp/capture-v2-selections.toml \
+  --release-name capture-v2 \
+  --output tmp/capture-v2.toml
+```
+
+Promotion rechecks the review hash, catalogue identity, exact instrument set, candidate
+eligibility and one-to-one explicit selections. It refuses existing output files and performs no
+IG call, database write, sync, deployment or stream start. Review the emitted TOML and its source
+review/selection hashes before deliberately adding an approved release under `config/`. Merely
+generating `tmp/capture-v2.toml` does not authorise a collector change.

@@ -38,6 +38,10 @@ Review mode emits a hash-addressed, bounded manifest of every relevant candidate
 fail-closed reasons. It neither chooses the smallest contract nor writes a preferred epic,
 listing event or projection. The manifest explicitly has no selection authority; operator review
 and a separate versioned universe release remain required.
+Promotion into such a release requires a complete operator-authored mapping bound to the exact
+catalogue and review hashes. Every selected listing must be an eligible candidate for exactly one
+instrument. Promotion only renders an undeployed configuration; sync and deployment remain
+separate reviewed actions.
 
 Do not reinterpret legacy reference rows as canonical history. The migration preserves
 them until the first new sync, then the event-backed projection becomes authoritative and

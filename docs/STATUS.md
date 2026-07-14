@@ -301,6 +301,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   evidence and declares `selection_authority=false`. Only a later explicit-epic universe release
   can authorise sync or ingestion. Fixture tests exercise this path; no IG request was made while
   the `capture-v1` qualification is running.
+- The following local promotion gate is also implemented without external I/O: a strict review
+  parser verifies canonical content hashes and exact catalogue fields, then requires one explicit
+  eligible IG demo listing per instrument from an operator-authored selection file. It rejects
+  stale, tampered, omitted, duplicate, unseen, reused and ineligible selections before rendering
+  an undeployed universe bound to review and selection hashes. It cannot sync or deploy that file.
 - Draft PR 1 validates this local preparation in an isolated PostgreSQL 18 CI environment.
   Formatting, linting, typing, shell checks, migration and the full test job passed; no image
   was published and the frozen OCI release was not changed.

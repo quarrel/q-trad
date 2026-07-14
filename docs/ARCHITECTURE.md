@@ -55,6 +55,10 @@ canonical product, expiry and market-state classifications, bounded economics an
 codes, but excludes volatile snapshots and credentials. Multiple eligible listings remain visible
 for operator choice: the workflow cannot select a listing, update PostgreSQL, produce an approved
 capture universe or start a stream.
+An independent promotion command accepts only the exact catalogue, the hash-verified review and a
+complete operator-authored selection set. It revalidates every selected candidate and renders an
+undeployed TOML universe that binds the source review and selection hashes. It has no provider,
+database, Git or deployment side effect, and refuses to infer a missing selection.
 
 The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
 checksum and a JSON manifest that binds the capture-universe hash and both deployed image
@@ -128,6 +132,7 @@ transaction as event projection.
 
 - Standard-library CLI under `python -m qtrad`.
 - `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
+- `instruments promote` verifies explicit review-bound selections and emits undeployed TOML.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

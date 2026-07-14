@@ -101,6 +101,59 @@ def test_database_upgrade_dispatches_migration_and_seed(
     seed.assert_awaited_once_with(cli_environment)
 
 
+def test_universe_promotion_dispatches_without_settings_or_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+    cli_clock: Clock,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_promote_universe", operation)
+
+    cli.main(
+        [
+            "instruments",
+            "promote",
+            "--catalogue",
+            "candidates.toml",
+            "--review",
+            "review.json",
+            "--selections",
+            "selections.toml",
+            "--release-name",
+            "capture-v2",
+            "--output",
+            "capture-v2.toml",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        cli_clock,
+        catalogue_path=Path("candidates.toml"),
+        review_path=Path("review.json"),
+        selections_path=Path("selections.toml"),
+        release_name="capture-v2",
+        output_path=Path("capture-v2.toml"),
+    )
+
+
+def test_universe_promotion_refuses_existing_output_before_reading_evidence(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "capture-v2.toml"
+    output.write_text("existing evidence")
+
+    with pytest.raises(FileExistsError, match="already exists"):
+        cli._promote_universe(
+            Mock(spec=Clock),
+            catalogue_path=tmp_path / "missing-catalogue.toml",
+            review_path=tmp_path / "missing-review.json",
+            selections_path=tmp_path / "missing-selections.toml",
+            release_name="capture-v2",
+            output_path=output,
+        )
+
+
 def test_api_dispatches_read_only_application(
     monkeypatch: pytest.MonkeyPatch, cli_environment: Settings
 ) -> None:

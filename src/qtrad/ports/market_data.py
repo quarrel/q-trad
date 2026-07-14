@@ -99,6 +99,10 @@ class ListingReviewCandidate:
             raise ValueError("listing review external ID must contain at most 200 characters")
         if self.currency is not None and (not self.currency or len(self.currency) > 12):
             raise ValueError("listing review currency must contain at most 12 characters")
+        if self.metadata_version is not None and (
+            not self.metadata_version or len(self.metadata_version) > 64
+        ):
+            raise ValueError("listing review metadata version must contain at most 64 characters")
         if len(set(self.rejection_reasons)) != len(self.rejection_reasons):
             raise ValueError("listing review rejection reasons must be unique")
         unexpected_economics = set(self.economics) - _LISTING_REVIEW_ECONOMICS_KEYS

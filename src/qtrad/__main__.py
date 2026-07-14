@@ -24,6 +24,7 @@ from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.quota import points_per_instrument
 from qtrad.application.replay import semantic_bar_hash
+from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.domain.events import EventEnvelope, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.market_data import (
@@ -42,6 +43,11 @@ from qtrad.runtime.universe import (
     CaptureUniverse,
     load_capture_candidates,
     load_capture_universe,
+    render_capture_universe_promotion,
+)
+from qtrad.runtime.universe_promotion import (
+    load_explicit_selection_set,
+    load_listing_review_evidence,
 )
 
 
@@ -65,6 +71,14 @@ def build_parser() -> argparse.ArgumentParser:
         default=Path("config/capture-v2-candidates.toml"),
     )
     review.add_argument("--output", type=Path)
+    promote = instrument_sub.add_parser(
+        "promote", help="verify explicit reviewed selections and emit an undeployed universe"
+    )
+    promote.add_argument("--catalogue", type=Path, required=True)
+    promote.add_argument("--review", type=Path, required=True)
+    promote.add_argument("--selections", type=Path, required=True)
+    promote.add_argument("--release-name", required=True)
+    promote.add_argument("--output", type=Path, required=True)
 
     ingest = subparsers.add_parser("ingest", help="run IG demo ingestion")
     ingest.add_argument("--environment", choices=["ig-demo"], default="ig-demo")
@@ -111,6 +125,15 @@ def main(argv: Sequence[str] | None = None) -> None:
                 catalogue_path=args.catalogue,
                 output_path=args.output,
             )
+        )
+    elif args.command == "instruments" and args.instrument_command == "promote":
+        _promote_universe(
+            clock,
+            catalogue_path=args.catalogue,
+            review_path=args.review,
+            selections_path=args.selections,
+            release_name=args.release_name,
+            output_path=args.output,
         )
     elif args.command == "ingest":
         asyncio.run(
@@ -260,6 +283,52 @@ async def _review_instruments(
             )
     finally:
         await adapter.disconnect()
+
+
+def _promote_universe(
+    clock: Clock,
+    *,
+    catalogue_path: Path,
+    review_path: Path,
+    selections_path: Path,
+    release_name: str,
+    output_path: Path,
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"capture universe output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"capture universe output directory does not exist: {output_path.parent}"
+        )
+    candidates = load_capture_candidates(catalogue_path)
+    evidence = load_listing_review_evidence(review_path, candidates.instruments)
+    selection_set = load_explicit_selection_set(selections_path)
+    promotion = promote_reviewed_universe(
+        release_name=release_name,
+        catalogue_name=candidates.name,
+        catalogue_hash=candidates.configuration_hash,
+        instruments=candidates.instruments,
+        review_catalogue_name=evidence.catalogue_name,
+        review_catalogue_hash=evidence.catalogue_hash,
+        review_hash=evidence.review_hash,
+        reviews=evidence.reviews,
+        selection_set=selection_set,
+        promoted_at=clock.now(),
+    )
+    rendered, universe = render_capture_universe_promotion(promotion)
+    with output_path.open("x", encoding="utf-8") as output:
+        output.write(rendered)
+    print(
+        json.dumps(
+            {
+                "configuration_hash": universe.configuration_hash,
+                "output": str(output_path),
+                "selection_hash": promotion.selection_hash,
+                "source_review_hash": promotion.source_review_hash,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _ingest(
