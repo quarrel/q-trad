@@ -19,6 +19,13 @@ def test_capture_ingest_has_graceful_stop_contract() -> None:
     assert "    stop_grace_period: 90s\n" in ingest
 
 
+def test_capture_api_requires_a_stable_source_identity() -> None:
+    compose = (REPOSITORY_ROOT / "compose.capture.yaml").read_text()
+    api = compose.split("  api:\n", maxsplit=1)[1]
+
+    assert "QTRAD_CAPTURE_SOURCE_ID: ${QTRAD_CAPTURE_SOURCE_ID:?" in api
+
+
 def _write_executable(path: Path, contents: str) -> None:
     path.write_text(contents)
     path.chmod(0o755)

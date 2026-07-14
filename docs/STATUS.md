@@ -295,3 +295,6 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - Draft PR 1 validates this local preparation in an isolated PostgreSQL 18 CI environment.
   Formatting, linting, typing, shell checks, migration and the full test job passed; no image
   was published and the frozen OCI release was not changed.
+- The future feed-capable Compose descriptor now fails configuration unless the operator sets
+  a stable, non-secret capture-source ID. This branch is not deployed; the running collector's
+  environment and release descriptor remain unchanged during qualification.

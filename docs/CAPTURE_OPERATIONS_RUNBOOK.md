@@ -129,7 +129,10 @@ dedicated iSCSI block volume mounted at `/srv/qtrad/postgres`. The capture syste
 requires that mount and must fail rather than write database data to the boot volume.
 
 `capture.env` contains the IG demo credentials, database URLs for `qtrad_capture`, the
-approved `QTRAD_CAPTURE_UNIVERSE_PATH`, and immutable image references. It is never copied
+approved `QTRAD_CAPTURE_UNIVERSE_PATH`, immutable image references and a stable
+`QTRAD_CAPTURE_SOURCE_ID`. Use a non-secret machine identifier such as
+`oci-sydney-capture-1`; retain it across image and universe releases and restores of the same
+canonical history, but never reuse it for an independent event store. The file is never copied
 to a workstation, log, image or repository.
 
 Every Compose invocation must pass `--env-file /etc/qtrad/capture.env`. Compose's service
