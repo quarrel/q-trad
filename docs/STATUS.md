@@ -430,6 +430,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   code. Existing rows receive a constant fast default without an `UPDATE`; new IG changed-field and
   fixture records are explicit, while rollback writers remain conservatively unclassified. No raw
   payload, hash, deduplication key, canonical event or raw-record reference is rewritten.
+- GitHub CI run `29332161781` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets, migration
+  through `0007` and all 232 tests against PostgreSQL 18 at branch head `dfe45ea`. The database suite
+  proves an old INSERT shape receives code zero and the check constraint rejects an unknown code.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

@@ -124,7 +124,9 @@ Implementation status:
 - Complete locally and undeployed: ADR 0020 and migration `0007` add a compact first-class raw payload
   representation code without rewriting legacy payloads. The current IG candidate writes
   `CHANGED_FIELDS`, fixtures write `FIXTURE`, and pre-marker/rollback writes remain conservatively
-  `LEGACY_UNCLASSIFIED`; downgrade refuses to erase changed-field identity.
+  `LEGACY_UNCLASSIFIED`; downgrade refuses to erase changed-field identity. GitHub CI run
+  `29332161781` passed all static and shell gates, migration through `0007`, old-writer/default and
+  bounded-code integration checks, and all 232 tests against PostgreSQL 18 at branch head `dfe45ea`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
