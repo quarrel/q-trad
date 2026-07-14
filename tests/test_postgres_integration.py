@@ -11,6 +11,7 @@ from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qtrad.__main__ import _append_bar
+from qtrad.adapters.postgres.storage_measurement import PostgresStorageInspector
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app, engine_from_app
 from qtrad.application.backfill_planning import backfill_plan_payload, build_backfill_plan
@@ -638,4 +639,23 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
     assert invalid_limit.status_code == 422
 
     await engine_from_app(app).dispose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_storage_inspector_is_bounded_and_reports_capture_relations() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+
+    measurement = await PostgresStorageInspector(engine).measure()
+
+    relation_names = {
+        f"{relation.schema_name}.{relation.relation_name}" for relation in measurement.relations
+    }
+    assert {"raw.market_messages", "canonical.events"}.issubset(relation_names)
+    assert measurement.database_bytes > 0
+    assert measurement.raw_message_count >= 0
+    assert measurement.canonical_event_count >= 0
+    assert measurement.raw_payload_sample.sample_rows <= 10_000
+    assert measurement.canonical_payload_sample.sample_rows <= 10_000
     await engine.dispose()

@@ -305,6 +305,39 @@ Only after that evidence passes may the candidate 20-instrument universe receive
 IG epics and become a new capture configuration. It must pass its own 72-hour
 qualification. A failed or ambiguous mapping leaves the collector on `capture-v1`.
 
+### Physical storage growth
+
+Do not deploy or restart services merely to measure the currently qualified representation. After
+the inspector candidate has passed CI and been published by immutable digest, invoke that image as
+a one-shot read-only process while the pinned collector continues unchanged. Create a root-only
+evidence directory and take two snapshots far enough apart to exceed PostgreSQL page-allocation
+noise:
+
+```bash
+sudo install -d -o root -g root -m 0700 /var/lib/qtrad-capture/storage-evidence
+
+cd /opt/qtrad-capture/current
+STORAGE_INSPECTOR_IMAGE='<reviewed repository@sha256:digest>'
+sudo QTRAD_IMAGE="$STORAGE_INSPECTOR_IMAGE" \
+  docker compose --env-file /etc/qtrad/capture.env \
+  -f compose.capture.yaml run --rm --no-deps \
+  -v /var/lib/qtrad-capture/storage-evidence:/evidence:Z \
+  ingest python -m qtrad storage snapshot \
+  --universe /app/config/capture-v1.toml \
+  --output /evidence/storage-before.json
+```
+
+Repeat with `storage-after.json` after a representative interval. Copy both evidence files to an
+operator workstation and run `uv run qtrad storage compare BEFORE AFTER`; comparison is offline
+and requires no collector credentials. `run --no-deps` does not recreate `db`, `ingest` or `api`;
+the candidate command opens one bounded read-only transaction and exits. The snapshot records
+exact raw/canonical counts from one repeatable-read transaction plus observed physical sizes.
+Database-wide growth is contextual; raw and canonical relation deltas are the primary retention
+inputs.
+
+ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
+the active qualification first; do not mix representations within its 72-hour evidence window.
+
 ### `capture-v2` review and explicit promotion
 
 Do not run this provider-backed review until the `capture-v1` qualification gate closes. Run it

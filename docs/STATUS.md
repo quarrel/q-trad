@@ -369,5 +369,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   instead of rewriting every historical partition under a new whole-export hash.
 - GitHub CI run `29320193656` passed formatting, linting, Pyright, `ty`, ShellCheck, migration
   through `0006` and all 203 tests on isolated PostgreSQL 18 for branch head `2fdac45`. This includes
-  schema-version-2 persistence/conflict checks and the prior application's legacy manifest INSERT
-  after the forward migration. No image was published and the collector remains unchanged.
+    schema-version-2 persistence/conflict checks and the prior application's legacy manifest INSERT
+    after the forward migration. No image was published and the collector remains unchanged.
+- ADR 0018 corrects the local Lightstreamer raw boundary: new candidate code persists only fields
+  changed in each callback, retains explicit nulls in the audit record and removes null fields from
+  per-generation canonical state. Existing raw and canonical history is not rewritten, and the
+  pinned OCI qualification image remains unchanged.
+- New read-only `storage snapshot` evidence binds capture source, universe/configuration and image
+  identity to exact raw/canonical counts, observed PostgreSQL relation/index sizes and bounded
+  payload samples. `storage compare` verifies two files offline and reports physical byte deltas
+  per raw message, allowing the roughly 1,500-byte observation to be decomposed before retention
+  or schema decisions are made.

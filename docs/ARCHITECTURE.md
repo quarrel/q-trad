@@ -146,6 +146,16 @@ one PostgreSQL transaction. Each canonical stream uses optimistic versions and
 an advisory transaction lock. Projection checkpoints advance in the same
 transaction as event projection.
 
+Lightstreamer raw PRICE messages contain only fields marked changed in that callback, including
+an explicitly changed null. The IG adapter maintains a bounded, per-generation merged field state
+for canonical quote construction; an explicit null removes the prior field and its side-specific
+timestamp. Existing full-state raw messages remain immutable. ADR 0018 records this boundary.
+
+A read-only PostgreSQL storage inspector can write bounded, hash-verified snapshots of capture
+counts, physical relation/index sizes and recent JSONB payload samples. Offline comparison reports
+physical growth per new raw message while retaining database-wide and relation-specific deltas.
+It neither mutates the database nor replaces release qualification evidence.
+
 ## Market-data semantics
 
 - Quotes preserve provider event time and q-trad receive time.
@@ -171,6 +181,8 @@ transaction as event projection.
 - `feed verify` checks saved page sequences and reports the final cursor without network I/O.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
   its candidate cursor.
+- `storage snapshot` writes non-overwriting, release-bound physical storage evidence;
+  `storage compare` verifies and compares two saved observations without database access.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

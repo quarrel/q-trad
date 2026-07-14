@@ -122,6 +122,21 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         ),
         (["replay", "--manifest", "research/manifests/example.json"], "_replay", ()),
         (["projections", "rebuild"], "_rebuild", ()),
+        (
+            [
+                "storage",
+                "snapshot",
+                "--universe",
+                "config/capture-v1.toml",
+                "--output",
+                "storage-before.json",
+            ],
+            "_storage_snapshot",
+            (
+                ("universe_path", Path("config/capture-v1.toml")),
+                ("output_path", Path("storage-before.json")),
+            ),
+        ),
     ],
 )
 def test_async_command_dispatch(
@@ -138,11 +153,24 @@ def test_async_command_dispatch(
     cli.main(arguments)
 
     positional: list[object] = [cli_environment]
-    if target not in {"_rebuild", "_register_backfill"}:
+    if target not in {"_rebuild", "_register_backfill", "_storage_snapshot"}:
         positional.append(cli_clock)
     if target == "_replay":
         positional.append(Path("research/manifests/example.json"))
     operation.assert_awaited_once_with(*positional, **dict(expected))
+
+
+def test_storage_comparison_dispatches_without_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_compare_storage_snapshots", operation)
+
+    cli.main(["storage", "compare", "before.json", "after.json"])
+
+    operation.assert_called_once_with(Path("before.json"), Path("after.json"))
 
 
 def test_database_upgrade_dispatches_migration_and_seed(

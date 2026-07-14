@@ -86,8 +86,13 @@ Implementation status:
   the 72-hour qualification ending no earlier than `2026-07-17T03:05:33Z`. Direct SSH is
   restricted at OCI to the operator's IPv6 range and Tailscale is the backup route; Bastion
   enablement and final alarm tuning are tracked improvements rather than release gates.
-  The corrected candidate has passed deliberate container restart and host reboot recovery.
-  `capture-v2` remains excluded.
+    The corrected candidate has passed deliberate container restart and host reboot recovery.
+    `capture-v2` remains excluded.
+- Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
+  with changed-field deltas, including explicit-null semantics, while canonical quotes continue
+  from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
+  compare` commands measure database/relation/index growth per raw message. This candidate is not
+  introduced into the running 72-hour qualification.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.

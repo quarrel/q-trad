@@ -118,6 +118,8 @@ class _IgRestService(Protocol):
 class _ItemUpdate(Protocol):
     def getValue(self, field: str, /) -> object | None: ...
 
+    def isValueChanged(self, field: str, /) -> bool: ...
+
 
 @runtime_checkable
 class _ToDict(Protocol):
@@ -684,21 +686,22 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation:
             return
         received = self._clock.now()
-        raw = {
-            field: update.getValue(field)
-            for field in (
-                "TIMESTAMP",
-                "BIDPRICE1",
-                "ASKPRICE1",
-                "BIDSIZE1",
-                "ASKSIZE1",
-                "DLG_FLAG",
-                "DELAY",
-            )
-            if update.getValue(field) is not None
-        }
+        fields = (
+            "TIMESTAMP",
+            "BIDPRICE1",
+            "ASKPRICE1",
+            "BIDSIZE1",
+            "ASKSIZE1",
+            "DLG_FLAG",
+            "DELAY",
+        )
+        raw = {field: update.getValue(field) for field in fields if update.isValueChanged(field)}
         state = self._field_state.setdefault(epic, {})
-        state.update({key: str(value) for key, value in raw.items()})
+        for field, value in raw.items():
+            if value is None:
+                state.pop(field, None)
+            else:
+                state[field] = str(value)
         timestamp = state.get("TIMESTAMP")
         digest = hashlib.sha256(
             json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
@@ -713,9 +716,15 @@ class IgDemoMarketDataAdapter:
             event_time = datetime.fromtimestamp(int(timestamp) / 1000, tz=UTC)
             side_times = self._side_times.setdefault(epic, {})
             if "BIDPRICE1" in raw:
-                side_times["BID"] = event_time
+                if raw["BIDPRICE1"] is None:
+                    side_times.pop("BID", None)
+                else:
+                    side_times["BID"] = event_time
             if "ASKPRICE1" in raw:
-                side_times["OFFER"] = event_time
+                if raw["ASKPRICE1"] is None:
+                    side_times.pop("OFFER", None)
+                else:
+                    side_times["OFFER"] = event_time
             bid = _decimal_or_none(state.get("BIDPRICE1"))
             ask = _decimal_or_none(state.get("ASKPRICE1"))
             listing = self._listings_by_epic[epic]

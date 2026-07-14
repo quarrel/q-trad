@@ -20,6 +20,7 @@ from qtrad import __version__
 from qtrad.adapters.clock import SystemClock
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.store import ParquetResearchStore
+from qtrad.adapters.postgres.storage_measurement import PostgresStorageInspector
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
 from qtrad.application.backfill_planning import (
@@ -54,6 +55,12 @@ from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.settings import Settings
+from qtrad.runtime.storage_measurement import (
+    build_storage_snapshot,
+    compare_storage_snapshots,
+    load_storage_snapshot,
+    write_storage_snapshot,
+)
 from qtrad.runtime.universe import (
     CaptureCandidates,
     CaptureUniverse,
@@ -154,6 +161,19 @@ def build_parser() -> argparse.ArgumentParser:
     projection_sub = projections.add_subparsers(dest="projection_command", required=True)
     projection_sub.add_parser("rebuild", help="rebuild projections from events")
 
+    storage = subparsers.add_parser("storage", help="read-only capture-storage measurement")
+    storage_sub = storage.add_subparsers(dest="storage_command", required=True)
+    storage_snapshot = storage_sub.add_parser(
+        "snapshot", help="write one hash-verified physical-storage observation"
+    )
+    storage_snapshot.add_argument("--universe", type=Path, required=True)
+    storage_snapshot.add_argument("--output", type=Path, required=True)
+    storage_compare = storage_sub.add_parser(
+        "compare", help="compare two storage observations without database access"
+    )
+    storage_compare.add_argument("before", type=Path)
+    storage_compare.add_argument("after", type=Path)
+
     feed = subparsers.add_parser("feed", help="capture-feed contract operations")
     feed_sub = feed.add_subparsers(dest="feed_command", required=True)
     feed_verify = feed_sub.add_parser("verify", help="verify saved feed pages without network I/O")
@@ -253,6 +273,16 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
         asyncio.run(_rebuild(settings))
+    elif args.command == "storage" and args.storage_command == "snapshot":
+        asyncio.run(
+            _storage_snapshot(
+                settings,
+                universe_path=args.universe,
+                output_path=args.output,
+            )
+        )
+    elif args.command == "storage" and args.storage_command == "compare":
+        _compare_storage_snapshots(args.before, args.after)
     elif args.command == "feed" and args.feed_command == "verify":
         _verify_capture_feed_pages(
             source_id=args.source_id,
@@ -885,6 +915,56 @@ async def _append_bar(
         return await store.append(event, expected_stream_version=previous)
     except StreamVersionConflict:
         return await _append_bar(store, bar, received_time=received_time)
+
+
+async def _storage_snapshot(
+    settings: Settings,
+    *,
+    universe_path: Path,
+    output_path: Path,
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"storage snapshot output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"storage snapshot output directory does not exist: {output_path.parent}"
+        )
+    universe = load_capture_universe(universe_path)
+    engine = _engine(settings)
+    try:
+        measurement = await PostgresStorageInspector(engine).measure()
+        snapshot = build_storage_snapshot(
+            measurement,
+            capture_source_id=settings.capture_source_id,
+            universe_name=universe.name,
+            configuration_hash=universe.configuration_hash,
+            application_version=__version__,
+            application_image=settings.image,
+        )
+        write_storage_snapshot(output_path, snapshot)
+        print(
+            json.dumps(
+                {
+                    "snapshot_sha256": snapshot.snapshot_sha256,
+                    "observed_at": snapshot.observed_at.isoformat(),
+                    "raw_message_count": snapshot.raw_message_count,
+                    "canonical_event_count": snapshot.canonical_event_count,
+                    "database_bytes": snapshot.database_bytes,
+                    "output": str(output_path),
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        await engine.dispose()
+
+
+def _compare_storage_snapshots(before_path: Path, after_path: Path) -> None:
+    comparison = compare_storage_snapshots(
+        load_storage_snapshot(before_path),
+        load_storage_snapshot(after_path),
+    )
+    print(json.dumps(comparison, sort_keys=True))
 
 
 async def _export(

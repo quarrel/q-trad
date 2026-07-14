@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Generator, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -141,11 +141,20 @@ class StaleAdapter(IgDemoMarketDataAdapter):
 
 
 class FakeUpdate:
-    def __init__(self, values: dict[str, str]) -> None:
-        self.values = values
+    def __init__(
+        self,
+        values: Mapping[str, str | None],
+        *,
+        changed_fields: set[str] | None = None,
+    ) -> None:
+        self.values = dict(values)
+        self.changed_fields = set(values) if changed_fields is None else changed_fields
 
     def getValue(self, field: str) -> str | None:
         return self.values.get(field)
+
+    def isValueChanged(self, field: str) -> bool:
+        return field in self.changed_fields
 
 
 class FakeConnectionDetails:
@@ -861,6 +870,64 @@ async def test_partial_price_update_preserves_one_sided_quote() -> None:
     assert quote.bid == Decimal("0.65000")
     assert quote.ask is None
     assert quote.quality.value == "PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_price_callback_persists_only_changed_fields_and_preserves_explicit_null() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._loop = asyncio.get_running_loop()
+    adapter._stream_account_id = "not-a-real-account"
+    adapter._listings_by_epic["CS.D.AUDUSD.CFD.IP"] = listing()
+    epic = "CS.D.AUDUSD.CFD.IP"
+
+    initial = {
+        "TIMESTAMP": "1783065600000",
+        "BIDPRICE1": "0.65000",
+        "ASKPRICE1": "0.65010",
+        "BIDSIZE1": "12",
+        "ASKSIZE1": "10",
+        "DLG_FLAG": "DEAL",
+        "DELAY": "0",
+    }
+    adapter._on_update(epic, FakeUpdate(initial))
+    await asyncio.sleep(0)
+    first = adapter._queue.get_nowait()
+    assert first.raw_payload == initial
+
+    merged = {
+        **initial,
+        "TIMESTAMP": "1783065601000",
+        "BIDPRICE1": "0.65001",
+    }
+    adapter._on_update(
+        epic,
+        FakeUpdate(merged, changed_fields={"TIMESTAMP", "BIDPRICE1"}),
+    )
+    await asyncio.sleep(0)
+    second = adapter._queue.get_nowait()
+    assert second.raw_payload == {
+        "TIMESTAMP": "1783065601000",
+        "BIDPRICE1": "0.65001",
+    }
+    assert second.quote is not None
+    assert second.quote.bid == Decimal("0.65001")
+    assert second.quote.ask == Decimal("0.65010")
+
+    cleared = {**merged, "TIMESTAMP": "1783065602000", "ASKPRICE1": None}
+    adapter._on_update(
+        epic,
+        FakeUpdate(cleared, changed_fields={"TIMESTAMP", "ASKPRICE1"}),
+    )
+    await asyncio.sleep(0)
+    third = adapter._queue.get_nowait()
+    assert third.raw_payload == {
+        "TIMESTAMP": "1783065602000",
+        "ASKPRICE1": None,
+    }
+    assert third.quote is not None
+    assert third.quote.bid == Decimal("0.65001")
+    assert third.quote.ask is None
+    assert third.quote.ask_time is None
 
 
 def test_backoff_is_exponential_and_capped() -> None:
