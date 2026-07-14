@@ -189,14 +189,17 @@ async def _payload_sample(
                     FROM {relation}
                     ORDER BY {order_column} DESC
                     LIMIT {_SAMPLE_ROWS}
+                ), measured AS (
+                    SELECT
+                        pg_column_size(payload) AS payload_bytes,
+                        (SELECT count(*) FROM jsonb_object_keys(payload)) AS payload_fields
+                    FROM sample
                 )
                 SELECT
                     count(*) AS sample_rows,
-                    COALESCE(round(avg(pg_column_size(payload))), 0)::bigint
-                        AS average_payload_bytes,
-                    COALESCE(round(avg(jsonb_object_length(payload))), 0)::bigint
-                        AS average_payload_fields
-                FROM sample
+                    COALESCE(round(avg(payload_bytes)), 0)::bigint AS average_payload_bytes,
+                    COALESCE(round(avg(payload_fields)), 0)::bigint AS average_payload_fields
+                FROM measured
                 """
                 )
             )
