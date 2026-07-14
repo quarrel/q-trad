@@ -54,6 +54,8 @@ _T = TypeVar("_T")
 _ROLLING_EXPIRIES = {"-", "DFB", "DAILY", "CASH", "ROLLING"}
 _UNAVAILABLE_MARKET_STATES = {"CLOSED", "OFFLINE", "EDITS_ONLY"}
 _MAX_LISTING_REVIEW_CANDIDATES = 100
+_MAX_LISTING_REVIEW_SEARCH_REQUESTS = 100
+_MAX_LISTING_REVIEW_DETAIL_REQUESTS = 200
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
     "endpoint.unavailable.for.api-key",
@@ -424,6 +426,8 @@ class IgDemoMarketDataAdapter:
             raise ValueError("listing review instrument IDs must be unique")
         service = self._require_connected()
         reviews: list[InstrumentListingReview] = []
+        search_request_count = 0
+        detail_request_count = 0
         for instrument_id in instrument_ids:
             try:
                 instrument = self._instruments_by_id[instrument_id]
@@ -433,6 +437,12 @@ class IgDemoMarketDataAdapter:
                 ) from error
             by_epic: dict[str, ListingReviewCandidate] = {}
             for alias in instrument.search_aliases:
+                if search_request_count >= _MAX_LISTING_REVIEW_SEARCH_REQUESTS:
+                    raise RuntimeError(
+                        "IG listing review exceeded the global search-request budget of "
+                        f"{_MAX_LISTING_REVIEW_SEARCH_REQUESTS}"
+                    )
+                search_request_count += 1
                 response = await self._run_provider_operation(
                     "search_markets",
                     lambda alias=alias: service.search_markets(alias),
@@ -454,6 +464,12 @@ class IgDemoMarketDataAdapter:
                         )
                     detail: Mapping[str, object] | None = None
                     if _search_row_needs_detail(search_row, instrument):
+                        if detail_request_count >= _MAX_LISTING_REVIEW_DETAIL_REQUESTS:
+                            raise RuntimeError(
+                                "IG listing review exceeded the global detail-request budget of "
+                                f"{_MAX_LISTING_REVIEW_DETAIL_REQUESTS}"
+                            )
+                        detail_request_count += 1
                         detail_response = await self._run_provider_operation(
                             "fetch_market",
                             lambda epic=epic: service.fetch_market_by_epic(epic),
@@ -1415,7 +1431,9 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
     epic = _string(search_row, "epic") or _string(instrument, "epic")
     if not epic:
         return None
-    minimum = _nested_decimal(dealing_rules, "minDealSize", "value") or Decimal("1")
+    minimum = _nested_decimal(dealing_rules, "minDealSize", "value")
+    if minimum is None or minimum <= 0:
+        return None
     currency = _currency(instrument)
     metadata = to_json_value(detail)
     if not isinstance(metadata, dict):

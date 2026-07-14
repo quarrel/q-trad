@@ -159,7 +159,9 @@ contract from minimum size alone.
 The separate listing-review path has no preferred-epic input and deliberately performs no
 minimum-size selection. A generated manifest always carries `selection_authority=false`; only a
 later, reviewed capture-universe release with an explicit epic for every instrument can enter sync
-or ingestion.
+or ingestion. Review discovery applies global search and detail request budgets in addition to
+per-instrument candidate bounds. Missing, zero or negative minimum-size economics are invalid;
+the adapter never substitutes product economics.
 
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
@@ -187,6 +189,10 @@ propagated through the record iterator and finalises the ingestion run as `FAILE
 natural completion is invalid for an unbounded stream. Shutdown invalidates the active
 generation, retains client ownership while unsubscribing, disconnects and waits for
 confirmed transport closure.
+
+The HTTP readiness query also binds operational evidence to the API's loaded capture-universe
+configuration hash. A healthy adapter, fresh quotes or a running ingestion record from another
+configuration cannot make the served release ready.
 
 Synchronous provider calls run as named daemon operations with explicit deadlines rather
 than in asyncio's default executor, and adapter-owned REST requests have bounded default

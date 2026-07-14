@@ -36,17 +36,26 @@ class OperatorQueries:
             "quotas": quotas,
         }
 
-    async def readiness(self, expected_instrument_ids: tuple[str, ...]) -> dict[str, Any]:
+    async def readiness(
+        self,
+        expected_instrument_ids: tuple[str, ...],
+        expected_configuration_hash: str,
+    ) -> dict[str, Any]:
         """Return collector readiness rather than API/database liveness."""
 
         if not expected_instrument_ids:
             raise ValueError("collector readiness requires expected instruments")
+        if len(expected_configuration_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_configuration_hash
+        ):
+            raise ValueError("collector readiness requires a lower-case SHA-256 configuration hash")
         rows = await self._store.query(
             """
             SELECT
                 EXISTS (
-                    SELECT 1 FROM ops.runs
-                    WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                      SELECT 1 FROM ops.runs
+                      WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                        AND configuration_hash = :configuration_hash
                 ) AS ingestion_running,
                 EXISTS (
                     SELECT 1 FROM ops.adapter_health
@@ -70,12 +79,15 @@ class OperatorQueries:
                     WHERE projection_name = 'core'
                 ) AS checkpoint_updated_at
             """,
-            {"instrument_ids": json.dumps(expected_instrument_ids)},
+            {
+                "configuration_hash": expected_configuration_hash,
+                "instrument_ids": json.dumps(expected_instrument_ids),
+            },
         )
         row = rows[0]
         reasons: list[str] = []
         if not row["ingestion_running"]:
-            reasons.append("ingestion is not running")
+            reasons.append("matching ingestion configuration is not running")
         if not row["adapter_healthy"]:
             reasons.append("IG adapter is not healthy")
         if int(row["fresh_quote_count"]) != len(expected_instrument_ids):
@@ -93,6 +105,7 @@ class OperatorQueries:
             "global_position": int(row["global_position"]),
             "checkpoint_position": int(row["checkpoint_position"]),
             "checkpoint_updated_at": checkpoint_updated_at,
+            "configuration_hash": expected_configuration_hash,
         }
 
     async def instruments(self) -> list[dict[str, Any]]:

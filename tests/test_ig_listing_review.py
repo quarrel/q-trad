@@ -1,9 +1,11 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
 import pytest
 
+import qtrad.adapters.ig.market_data as ig_market_data
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -39,6 +41,7 @@ class ReviewService:
         self.rows = rows
         self.details = details
         self.fetched: list[str] = []
+        self.searches: list[str] = []
 
     def create_session(self) -> dict[str, str]:
         return {
@@ -47,7 +50,7 @@ class ReviewService:
         }
 
     def search_markets(self, search_term: str) -> dict[str, object]:
-        assert search_term == "AUD/USD"
+        self.searches.append(search_term)
         return {"markets": self.rows}
 
     def fetch_market_by_epic(self, epic: str) -> dict[str, object]:
@@ -174,6 +177,7 @@ async def test_review_enumerates_bounded_candidates_without_selecting_one() -> N
         "CS.D.AUDUSD.WRONG.IP",
         "CS.D.AUDUSD.MINI.IP",
     ]
+    assert service.searches == ["AUD/USD"]
     assert len(reviews) == 1
     candidates = reviews[0].candidates
     assert tuple(item.listing_id.external_id for item in candidates) == (
@@ -238,6 +242,72 @@ async def test_review_fails_on_a_provider_row_without_an_epic() -> None:
             await adapter.review_listings((instrument.instrument_id,))
     finally:
         await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_review_enforces_a_global_search_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v2-candidates.toml"))
+    instrument = replace(catalogue.instruments[0], search_aliases=("AUD/USD", "Australian dollar"))
+    service = ReviewService([], {})
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        FixedClock(),
+        instruments_by_id={instrument.instrument_id: instrument},
+        preferred_epics={},
+        service_factory=lambda _: service,
+    )
+    monkeypatch.setattr(ig_market_data, "_MAX_LISTING_REVIEW_SEARCH_REQUESTS", 1)
+
+    await adapter.connect()
+    try:
+        with pytest.raises(RuntimeError, match="global search-request budget"):
+            await adapter.review_listings((instrument.instrument_id,))
+    finally:
+        await adapter.disconnect()
+
+    assert service.searches == ["AUD/USD"]
+
+
+@pytest.mark.asyncio
+async def test_review_enforces_a_global_detail_request_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v2-candidates.toml"))
+    instrument = catalogue.instruments[0]
+    epics = ("CS.D.AUDUSD.ONE.IP", "CS.D.AUDUSD.TWO.IP")
+    rows: list[dict[str, object]] = [
+        {
+            "epic": epic,
+            "instrumentName": "AUD/USD",
+            "instrumentType": "CURRENCIES",
+            "expiry": "DFB",
+            "marketStatus": "TRADEABLE",
+        }
+        for epic in epics
+    ]
+    service = ReviewService(
+        rows,
+        {epic: detail(epic=epic, currency="USD", minimum="0.5", bid="0.6500") for epic in epics},
+    )
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        FixedClock(),
+        instruments_by_id={instrument.instrument_id: instrument},
+        preferred_epics={},
+        service_factory=lambda _: service,
+    )
+    monkeypatch.setattr(ig_market_data, "_MAX_LISTING_REVIEW_DETAIL_REQUESTS", 1)
+
+    await adapter.connect()
+    try:
+        with pytest.raises(RuntimeError, match="global detail-request budget"):
+            await adapter.review_listings((instrument.instrument_id,))
+    finally:
+        await adapter.disconnect()
+
+    assert service.fetched == ["CS.D.AUDUSD.ONE.IP"]
 
 
 def test_manifest_hash_is_deterministic_and_covers_observation_time() -> None:

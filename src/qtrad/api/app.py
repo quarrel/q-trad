@@ -101,7 +101,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health/ready")
     async def readiness() -> JSONResponse:
         result = await queries.readiness(
-            tuple(str(instrument.instrument_id) for instrument in universe.instruments)
+            tuple(str(instrument.instrument_id) for instrument in universe.instruments),
+            universe.configuration_hash,
         )
         status_code = 200 if result["ready"] else 503
         return JSONResponse(content=jsonable_encoder(result), status_code=status_code)

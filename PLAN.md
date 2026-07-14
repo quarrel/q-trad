@@ -104,6 +104,10 @@ Implementation status:
   deterministic, non-overwriting manifest with `selection_authority=false`. It never chooses an
   epic, writes PostgreSQL or starts a stream. Fixture coverage retains multiple eligible listings
   for explicit operator review and excludes volatile snapshots and credentials.
+- Complete locally: review discovery has global search/detail request budgets, and approved
+  discovery rejects missing, zero or negative minimum-size economics instead of substituting a
+  value. Collector readiness now requires a running ingestion record with the API's exact
+  capture-universe configuration hash.
 - Deferred qualification gate: do not invoke the review command against IG demo until the active
   `capture-v1` 72-hour window closes. Its eventual output is evidence for manual mapping review,
   not an approved `capture-v2` universe.
