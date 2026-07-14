@@ -107,14 +107,12 @@ def test_restore_verification_uses_manifest_pinned_postgres_image(tmp_path: Path
     )
     object_list = json.dumps(
         {
-            "data": {
-                "objects": [
-                    {
-                        "name": f"daily/{archive_name}",
-                        "time-created": "2026-07-13T00:00:00Z",
-                    }
-                ]
-            }
+            "data": [
+                {
+                    "name": f"daily/{archive_name}",
+                    "time-created": "2026-07-13T00:00:00Z",
+                }
+            ]
         }
     )
     _write_executable(

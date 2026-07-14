@@ -34,7 +34,7 @@ trap record_result EXIT
 latest_object="$(
   "${oci[@]}" os object list --bucket-name "$bucket" --prefix daily/qtrad-capture- \
     --all --fields name,timeCreated,size,etag \
-    | jq -er '[.data.objects[] | select(.name | endswith(".dump"))]
+    | jq -er '[.data[] | select(.name | endswith(".dump"))]
       | sort_by(."time-created") | last | .name'
 )"
 archive_name="$(basename "$latest_object")"
