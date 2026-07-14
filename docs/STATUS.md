@@ -420,6 +420,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   accepts only an already-local immutable digest, runs one non-root inspector container with
   `--no-deps --pull never`, refuses unsafe labels or existing output and restores evidence to
   root-only ownership. It remains undeployed during the active qualification.
+- GitHub CI run `29327683523` passed formatting, Ruff, Pyright, `ty`, all capture/research ShellCheck
+  gates, migrations through `0006` and all 228 tests against PostgreSQL 18 at branch head `fad5211`.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

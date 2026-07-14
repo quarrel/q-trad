@@ -119,7 +119,8 @@ Implementation status:
 - Complete locally and undeployed: a guarded operator helper runs storage snapshots only from an
   already-local immutable inspector digest using `--no-deps --pull never`, refuses unsafe labels and
   overwrites, and returns evidence written by the non-root image to root-only ownership without
-  restarting collector services.
+  restarting collector services. GitHub CI run `29327683523` passed all static, shell, migration and
+  PostgreSQL 18 gates with 228 tests at branch head `fad5211`.
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
