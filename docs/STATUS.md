@@ -351,3 +351,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The read-only `/api/v1/historical-coverage` resource exposes bounded open or completed
   historical attempts separately from `/api/v1/gaps`. All implementation and tests so far are
   local/isolated; no IG request, OCI mutation or collector database access occurred.
+- GitHub CI run `29316896861` passed formatting, linting, both strict type checkers, ShellCheck,
+  migration through `0005` and all 194 tests against isolated PostgreSQL 18. The initial run
+  exposed an untyped optional query bind; the corrected query and a regression for its unfiltered
+  bounded form passed. This feature branch remains undeployed during collector qualification.

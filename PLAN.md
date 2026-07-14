@@ -233,6 +233,9 @@ python -m qtrad api
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright and `ty` pass;
   187 tests pass with seven PostgreSQL migration/integration tests deferred to isolated CI.
+- GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
+  migrations through `0005`, including exact plan/coverage identity, repeated coverage attempts,
+  append-only historical corrections, live-gap isolation and the bounded read-only API.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and
