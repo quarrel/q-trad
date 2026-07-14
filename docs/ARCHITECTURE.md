@@ -47,6 +47,16 @@ The loopback-only API also provides bounded canonical-event pages for later isol
 Pages carry feed-schema, capture-source, universe, configuration and high-water identity while
 excluding raw records. Consumers connect through an SSH/Tailscale tunnel and maintain their own
 cursors; the collector does not host downstream write schemas or a second message-broker product.
+The provider-neutral consumer contract strictly decodes saved JSON pages into canonical event
+envelopes, pins all four identity fields and advances only from the exact requested cursor. It
+accepts non-contiguous global positions and concurrent-append empty pages, while rejecting replay,
+cursor skips, identity drift, high-water regression, contradictory continuation evidence,
+malformed events and raw-record fields. The current `feed verify` role is offline only; no network
+client or downstream persistence has been introduced.
+Universe/configuration fields are the current API serving identity rather than per-event
+provenance for the source's older history. A release change is therefore an explicit, caught-up
+cursor rebind on the same capture source; source changes require an independent cursor and schema
+changes require a new consumer contract.
 
 Candidate-universe review is a separate, non-authoritative IG demo REST workflow. The
 `instruments review` command loads a hashable catalogue containing no provider epics, enumerates
@@ -133,6 +143,7 @@ transaction as event projection.
 - Standard-library CLI under `python -m qtrad`.
 - `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
 - `instruments promote` verifies explicit review-bound selections and emits undeployed TOML.
+- `feed verify` checks saved page sequences and reports the final cursor without network I/O.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

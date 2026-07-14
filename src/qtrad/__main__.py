@@ -20,6 +20,7 @@ from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
+from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.quota import points_per_instrument
@@ -34,8 +35,10 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
+from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
+from qtrad.runtime.capture_feed import load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import (
@@ -100,6 +103,15 @@ def build_parser() -> argparse.ArgumentParser:
     projection_sub = projections.add_subparsers(dest="projection_command", required=True)
     projection_sub.add_parser("rebuild", help="rebuild projections from events")
 
+    feed = subparsers.add_parser("feed", help="capture-feed contract operations")
+    feed_sub = feed.add_subparsers(dest="feed_command", required=True)
+    feed_verify = feed_sub.add_parser("verify", help="verify saved feed pages without network I/O")
+    feed_verify.add_argument("--source-id", required=True)
+    feed_verify.add_argument("--universe-name", required=True)
+    feed_verify.add_argument("--configuration-hash", required=True)
+    feed_verify.add_argument("--after-position", type=int, default=0)
+    feed_verify.add_argument("pages", type=Path, nargs="+")
+
     api = subparsers.add_parser("api", help="run the read-only operator API")
     api.add_argument("--host", default="127.0.0.1")
     api.add_argument("--port", type=int, default=8000)
@@ -159,6 +171,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(_replay(settings, clock, Path(args.manifest)))
     elif args.command == "projections" and args.projection_command == "rebuild":
         asyncio.run(_rebuild(settings))
+    elif args.command == "feed" and args.feed_command == "verify":
+        _verify_capture_feed_pages(
+            source_id=args.source_id,
+            universe_name=args.universe_name,
+            configuration_hash=args.configuration_hash,
+            after_position=args.after_position,
+            page_paths=args.pages,
+        )
     elif args.command == "api":
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
@@ -325,6 +345,43 @@ def _promote_universe(
                 "output": str(output_path),
                 "selection_hash": promotion.selection_hash,
                 "source_review_hash": promotion.source_review_hash,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_capture_feed_pages(
+    *,
+    source_id: str,
+    universe_name: str,
+    configuration_hash: str,
+    after_position: int,
+    page_paths: Sequence[Path],
+) -> None:
+    identity = CaptureFeedIdentity(
+        feed_schema_version=1,
+        source_id=source_id,
+        universe_name=universe_name,
+        configuration_hash=configuration_hash,
+    )
+    cursor = CaptureFeedCursor.initial(identity, after_position=after_position)
+    event_count = 0
+    for page_path in page_paths:
+        page = load_capture_feed_page(page_path)
+        cursor = advance_capture_feed_cursor(cursor, page)
+        event_count += len(page.events)
+    print(
+        json.dumps(
+            {
+                "caught_up": cursor.position == cursor.observed_high_water_position,
+                "event_count": event_count,
+                "page_count": len(page_paths),
+                "position": cursor.position,
+                "source_id": cursor.identity.source_id,
+                "universe_name": cursor.identity.universe_name,
+                "configuration_hash": cursor.identity.configuration_hash,
+                "observed_high_water_position": cursor.observed_high_water_position,
             },
             sort_keys=True,
         )

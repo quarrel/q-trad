@@ -90,6 +90,12 @@ Implementation status:
 - In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
   canonical-event feed prepare the later isolated paper/research boundary. This remains a
   read-only data-foundation interface and makes no IG call.
+- Complete locally: the provider-neutral feed consumer contract strictly decodes canonical event
+  pages, pins source/universe/configuration/schema identity and validates exact cursor continuation
+  and monotonic high-water evidence. The offline `feed verify` command accepts saved pages only;
+  it adds no HTTP dependency, cursor database, derived writer or paper behaviour.
+  Serving-universe changes require an explicit caught-up rebind on the same source; source or feed
+  schema changes cannot reuse the cursor.
 - Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
   hashable offline catalogue that deliberately contains no provider epics and cannot be
   loaded as an ingestion universe.

@@ -154,6 +154,40 @@ def test_universe_promotion_refuses_existing_output_before_reading_evidence(
         )
 
 
+def test_feed_verification_dispatches_saved_pages_without_network_io(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_verify_capture_feed_pages", operation)
+
+    cli.main(
+        [
+            "feed",
+            "verify",
+            "--source-id",
+            "oci-sydney-capture-1",
+            "--universe-name",
+            "capture-v1",
+            "--configuration-hash",
+            "a" * 64,
+            "--after-position",
+            "41",
+            "page-1.json",
+            "page-2.json",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        source_id="oci-sydney-capture-1",
+        universe_name="capture-v1",
+        configuration_hash="a" * 64,
+        after_position=41,
+        page_paths=[Path("page-1.json"), Path("page-2.json")],
+    )
+
+
 def test_api_dispatches_read_only_application(
     monkeypatch: pytest.MonkeyPatch, cli_environment: Settings
 ) -> None:

@@ -21,6 +21,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.ports.market_data import MarketDataRecord
+from qtrad.runtime.capture_feed import decode_capture_feed_page
 from qtrad.runtime.settings import Settings
 
 DATABASE_URL = os.getenv("QTRAD_DATABASE_URL")
@@ -213,6 +214,9 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
     assert first_payload["has_more"] is True
     assert first_payload["events"][0]["event_id"] == str(first.event_id)
     assert "raw_record_id" not in first_payload["events"][0]
+    decoded_first_page = decode_capture_feed_page(first_page.text)
+    assert decoded_first_page.events[0].event_id == first.event_id
+    assert decoded_first_page.identity.source_id == "integration-capture"
 
     assert second_page.status_code == 200
     second_payload = second_page.json()

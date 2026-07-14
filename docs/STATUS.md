@@ -289,6 +289,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
   paper behaviour.
+- Consumer-side feed validation is now implemented locally as a pure state transition plus strict
+  saved-page decoder. It accepts legitimate sequence gaps and concurrent-append empty pages, but
+  rejects source or universe drift, stale/replayed/skipped cursors, high-water regression,
+  contradictory page metadata, malformed canonical events and raw-record identity. `feed verify`
+  performs no HTTP request or persistence.
+- The feed contract distinguishes current serving-universe identity from per-event historical
+  provenance. A universe/configuration transition can be acknowledged only through an explicit
+  caught-up rebind on the same capture source; source or schema changes fail and require a new
+  cursor or consumer contract respectively.
 - The comment-only `capture-v2` list is now a structured, hashable 20-instrument offline
   catalogue. It contains no preferred provider epics, fails if read as an approved ingestion
   universe and therefore cannot expand the running collector.
