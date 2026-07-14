@@ -92,10 +92,14 @@ Implementation status:
   read-only data-foundation interface and makes no IG call.
 - Complete locally: the provider-neutral feed consumer contract strictly decodes canonical event
   pages, pins source/universe/configuration/schema identity and validates exact cursor continuation
-  and monotonic high-water evidence. The offline `feed verify` command accepts saved pages only;
-  it adds no HTTP dependency, cursor database, derived writer or paper behaviour.
+  and monotonic high-water evidence. The offline `feed verify` command accepts saved pages only.
   Serving-universe changes require an explicit caught-up rebind on the same source; source or feed
   schema changes cannot reuse the cursor.
+- Complete locally: ADR 0015 and `feed probe` add a bounded async client for one page through an
+  operator-established literal-loopback tunnel. Redirects, ambient proxies, credentials,
+  unexpected status/content, response growth, total duration, cursor mismatch and page overrun
+  fail closed. The probe explicitly reports that its candidate cursor was not persisted; there is
+  still no cursor database, derived writer or paper behaviour.
 - Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
   hashable offline catalogue that deliberately contains no provider epics and cannot be
   loaded as an ingestion universe.
@@ -206,11 +210,15 @@ python -m qtrad backfill --max-points 1000
 python -m qtrad research export
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
+python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...
+python -m qtrad feed probe --endpoint http://127.0.0.1:PORT --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH
 python -m qtrad api
 ```
 
 ## Verification evidence
 
+- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
+  173 tests pass with five PostgreSQL integration tests deferred to isolated CI.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and

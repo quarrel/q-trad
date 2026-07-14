@@ -188,6 +188,43 @@ def test_feed_verification_dispatches_saved_pages_without_network_io(
     )
 
 
+def test_feed_probe_dispatches_one_bounded_loopback_request(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+) -> None:
+    del cli_environment
+    operation = AsyncMock()
+    monkeypatch.setattr(cli, "_probe_capture_feed", operation)
+
+    cli.main(
+        [
+            "feed",
+            "probe",
+            "--endpoint",
+            "http://127.0.0.1:18080",
+            "--source-id",
+            "oci-sydney-capture-1",
+            "--universe-name",
+            "capture-v1",
+            "--configuration-hash",
+            "a" * 64,
+            "--after-position",
+            "41",
+            "--limit",
+            "25",
+        ]
+    )
+
+    operation.assert_awaited_once_with(
+        endpoint="http://127.0.0.1:18080",
+        source_id="oci-sydney-capture-1",
+        universe_name="capture-v1",
+        configuration_hash="a" * 64,
+        after_position=41,
+        limit=25,
+    )
+
+
 def test_api_dispatches_read_only_application(
     monkeypatch: pytest.MonkeyPatch, cli_environment: Settings
 ) -> None:

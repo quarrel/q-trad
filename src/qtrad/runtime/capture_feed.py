@@ -1,16 +1,21 @@
 """Strict JSON boundary for offline capture-feed page verification."""
 
+import asyncio
 from datetime import datetime
 from pathlib import Path
-from typing import Literal
+from types import TracebackType
+from typing import Literal, Self
+from urllib.parse import urlsplit
 from uuid import UUID
 
+import httpx
 from pydantic import BaseModel, ConfigDict, Field
 
 from qtrad.domain.events import EventEnvelope, JsonValue
 from qtrad.ports.capture_feed import CaptureFeedIdentity, CaptureFeedPage
 
 _MAX_FEED_PAGE_BYTES = 16 * 1024 * 1024
+_FEED_PATH = "/api/v1/feed/events"
 
 
 class _StrictModel(BaseModel):
@@ -90,3 +95,91 @@ def decode_capture_feed_page(value: str) -> CaptureFeedPage:
 
 def load_capture_feed_page(path: Path) -> CaptureFeedPage:
     return decode_capture_feed_page(path.read_text(encoding="utf-8"))
+
+
+class HttpCaptureFeedClient:
+    """Fetch bounded feed pages only through an explicit loopback tunnel endpoint."""
+
+    def __init__(
+        self,
+        base_url: str,
+        *,
+        timeout_seconds: float = 10.0,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("capture feed timeout must be positive")
+        endpoint = urlsplit(base_url)
+        if endpoint.scheme != "http" or endpoint.hostname not in {"127.0.0.1", "::1"}:
+            raise ValueError("capture feed endpoint must be HTTP on a literal loopback address")
+        if endpoint.username is not None or endpoint.password is not None:
+            raise ValueError("capture feed endpoint must not contain credentials")
+        if endpoint.path not in {"", "/"} or endpoint.query or endpoint.fragment:
+            raise ValueError("capture feed endpoint must contain only scheme, address and port")
+        try:
+            port = endpoint.port
+        except ValueError as error:
+            raise ValueError("capture feed endpoint has an invalid port") from error
+        if port is None or port == 0:
+            raise ValueError("capture feed endpoint requires an explicit tunnel port")
+        self._timeout_seconds = timeout_seconds
+        self._client = httpx.AsyncClient(
+            base_url=base_url,
+            follow_redirects=False,
+            headers={"Accept": "application/json"},
+            timeout=httpx.Timeout(timeout_seconds),
+            transport=transport,
+            trust_env=False,
+        )
+
+    async def __aenter__(self) -> Self:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_value: BaseException | None,
+        traceback: TracebackType | None,
+    ) -> None:
+        await self.close()
+
+    async def close(self) -> None:
+        await self._client.aclose()
+
+    async def fetch_page(self, *, after_position: int, limit: int = 500) -> CaptureFeedPage:
+        if after_position < 0:
+            raise ValueError("capture feed request cursor cannot be negative")
+        if not 1 <= limit <= 1000:
+            raise ValueError("capture feed request limit must be between 1 and 1000")
+
+        body = bytearray()
+        async with asyncio.timeout(self._timeout_seconds):
+            async with self._client.stream(
+                "GET",
+                _FEED_PATH,
+                params={"after_position": after_position, "limit": limit},
+            ) as response:
+                if response.status_code != 200:
+                    raise RuntimeError(
+                        f"capture feed returned unexpected HTTP status {response.status_code}"
+                    )
+                content_type = response.headers.get("content-type")
+                if content_type is None or content_type.partition(";")[0].strip().lower() != (
+                    "application/json"
+                ):
+                    raise RuntimeError("capture feed response is not application/json")
+                async for chunk in response.aiter_bytes():
+                    body.extend(chunk)
+                    if len(body) > _MAX_FEED_PAGE_BYTES:
+                        raise RuntimeError("capture feed response exceeds the 16 MiB client limit")
+
+        try:
+            encoded_page = body.decode("utf-8")
+        except UnicodeDecodeError as error:
+            raise ValueError("capture feed response is not valid UTF-8") from error
+        page = decode_capture_feed_page(encoded_page)
+        if page.after_position != after_position:
+            raise ValueError("capture feed response does not match the requested cursor")
+        if len(page.events) > limit:
+            raise ValueError("capture feed response exceeds the requested page limit")
+        return page

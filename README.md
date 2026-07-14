@@ -83,6 +83,21 @@ uv run pyright
 uv run ty check
 ```
 
+After a feed-capable collector release is separately approved and deployed, a locally established
+SSH or Tailscale tunnel can be probed without persisting a consumer cursor:
+
+```bash
+uv run qtrad feed probe \
+  --endpoint http://127.0.0.1:18080 \
+  --source-id SOURCE \
+  --universe-name UNIVERSE \
+  --configuration-hash SHA256
+```
+
+The endpoint must be a literal loopback address with an explicit port. The probe fetches one
+bounded page, performs the strict feed and identity checks, and reports
+`"cursor_persisted": false`. It does not establish the tunnel or acknowledge any events.
+
 Closing VS Code does not stop the container or database, which allows a `tmux`-hosted
 soak to continue. Stop them explicitly from WSL when required:
 

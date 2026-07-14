@@ -52,7 +52,10 @@ envelopes, pins all four identity fields and advances only from the exact reques
 accepts non-contiguous global positions and concurrent-append empty pages, while rejecting replay,
 cursor skips, identity drift, high-water regression, contradictory continuation evidence,
 malformed events and raw-record fields. The current `feed verify` role is offline only; no network
-client or downstream persistence has been introduced.
+request or downstream persistence is involved. The separate `feed probe` role uses a bounded async
+HTTP client to fetch exactly one page through an operator-established tunnel. It accepts only a
+literal IPv4 or IPv6 loopback URL with an explicit port, disables redirects and ambient proxies,
+bounds total duration and decoded bytes, and does not persist its candidate cursor.
 Universe/configuration fields are the current API serving identity rather than per-event
 provenance for the source's older history. A release change is therefore an explicit, caught-up
 cursor rebind on the same capture source; source changes require an independent cursor and schema
@@ -144,6 +147,8 @@ transaction as event projection.
 - `instruments review` emits a non-overwriting candidate manifest; it is not instrument sync.
 - `instruments promote` verifies explicit review-bound selections and emits undeployed TOML.
 - `feed verify` checks saved page sequences and reports the final cursor without network I/O.
+- `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
+  its candidate cursor.
 - Read-only FastAPI endpoints under `/api/v1`.
 - Jinja/HTMX operator console at `/`.
 - No order, fill, position or broker-execution interface.

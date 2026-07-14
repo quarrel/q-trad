@@ -1,9 +1,11 @@
+import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from uuid import UUID
 
+import httpx
 import pytest
 from pydantic import ValidationError
 
@@ -16,7 +18,7 @@ from qtrad.application.capture_feed import (
 from qtrad.domain.events import EventEnvelope
 from qtrad.ports.capture_feed import CaptureFeedIdentity, CaptureFeedPage
 from qtrad.runtime import capture_feed as capture_feed_runtime
-from qtrad.runtime.capture_feed import decode_capture_feed_page
+from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_feed_page
 
 IDENTITY = CaptureFeedIdentity(
     feed_schema_version=1,
@@ -270,3 +272,160 @@ def test_offline_cli_verifier_reports_final_cursor(
         "source_id": IDENTITY.source_id,
         "universe_name": IDENTITY.universe_name,
     }
+
+
+@pytest.mark.asyncio
+async def test_http_client_fetches_one_exact_bounded_loopback_page() -> None:
+    encoded = _page_json(_page(after=5, high_water=8, positions=(7,)))
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/api/v1/feed/events"
+        assert request.url.params["after_position"] == "5"
+        assert request.url.params["limit"] == "1"
+        assert request.headers["accept"] == "application/json"
+        return httpx.Response(200, headers={"content-type": "application/json"}, text=encoded)
+
+    async with HttpCaptureFeedClient(
+        "http://127.0.0.1:18080",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        page = await client.fetch_page(after_position=5, limit=1)
+
+    assert page.after_position == 5
+    assert tuple(event.global_position for event in page.events) == (7,)
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "https://127.0.0.1:18080",
+        "http://localhost:18080",
+        "http://192.0.2.1:18080",
+        "http://user:password@127.0.0.1:18080",
+        "http://127.0.0.1:18080/api/v1/feed/events",
+        "http://127.0.0.1",
+        "http://127.0.0.1:0",
+    ],
+)
+def test_http_client_rejects_non_tunnel_or_ambiguous_endpoints(endpoint: str) -> None:
+    with pytest.raises(ValueError, match="capture feed endpoint"):
+        HttpCaptureFeedClient(endpoint)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("after_position", "limit"), [(-1, 1), (0, 0), (0, 1001)])
+async def test_http_client_rejects_invalid_request_bounds(after_position: int, limit: int) -> None:
+    async def unexpected(_: httpx.Request) -> httpx.Response:
+        raise AssertionError("invalid feed request reached the transport")
+
+    async with HttpCaptureFeedClient(
+        "http://127.0.0.1:18080",
+        transport=httpx.MockTransport(unexpected),
+    ) as client:
+        with pytest.raises(ValueError, match="capture feed request"):
+            await client.fetch_page(after_position=after_position, limit=limit)
+
+
+@pytest.mark.asyncio
+async def test_http_client_rejects_status_content_type_cursor_and_page_limit() -> None:
+    responses = iter(
+        (
+            httpx.Response(302, headers={"location": "http://127.0.0.1:18081"}),
+            httpx.Response(200, headers={"content-type": "text/plain"}, text="{}"),
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                text=_page_json(_page(after=1, high_water=1, positions=())),
+            ),
+            httpx.Response(
+                200,
+                headers={"content-type": "application/json"},
+                text=_page_json(_page(after=0, high_water=2, positions=(1, 2))),
+            ),
+        )
+    )
+
+    async def handler(_: httpx.Request) -> httpx.Response:
+        return next(responses)
+
+    async with HttpCaptureFeedClient(
+        "http://[::1]:18080",
+        transport=httpx.MockTransport(handler),
+    ) as client:
+        with pytest.raises(RuntimeError, match="HTTP status 302"):
+            await client.fetch_page(after_position=0)
+        with pytest.raises(RuntimeError, match="not application/json"):
+            await client.fetch_page(after_position=0)
+        with pytest.raises(ValueError, match="requested cursor"):
+            await client.fetch_page(after_position=0)
+        with pytest.raises(ValueError, match="requested page limit"):
+            await client.fetch_page(after_position=0, limit=1)
+
+
+@pytest.mark.asyncio
+async def test_http_client_bounds_response_bytes_and_total_request_time(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def oversized(_: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            headers={"content-type": "application/json"},
+            content=b"{" + b" " * 10 + b"}",
+        )
+
+    monkeypatch.setattr(capture_feed_runtime, "_MAX_FEED_PAGE_BYTES", 10)
+    async with HttpCaptureFeedClient(
+        "http://127.0.0.1:18080",
+        transport=httpx.MockTransport(oversized),
+    ) as client:
+        with pytest.raises(RuntimeError, match="16 MiB client limit"):
+            await client.fetch_page(after_position=0)
+
+    async def stalled(_: httpx.Request) -> httpx.Response:
+        await asyncio.sleep(1)
+        raise AssertionError("request timeout did not cancel the transport")
+
+    async with HttpCaptureFeedClient(
+        "http://127.0.0.1:18080",
+        timeout_seconds=0.01,
+        transport=httpx.MockTransport(stalled),
+    ) as client:
+        with pytest.raises(TimeoutError):
+            await client.fetch_page(after_position=0)
+
+
+@pytest.mark.asyncio
+async def test_feed_probe_reports_an_unpersisted_candidate_cursor(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    page = _page(after=5, high_water=8, positions=(7,))
+
+    class FakeClient:
+        async def __aenter__(self) -> "FakeClient":
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            pass
+
+        async def fetch_page(self, *, after_position: int, limit: int) -> CaptureFeedPage:
+            assert after_position == 5
+            assert limit == 25
+            return page
+
+    monkeypatch.setattr(cli, "HttpCaptureFeedClient", lambda endpoint: FakeClient())
+
+    await cli._probe_capture_feed(
+        endpoint="http://127.0.0.1:18080",
+        source_id=IDENTITY.source_id,
+        universe_name=IDENTITY.universe_name,
+        configuration_hash=IDENTITY.configuration_hash,
+        after_position=5,
+        limit=25,
+    )
+
+    result = json.loads(capsys.readouterr().out)
+    assert result["next_position"] == 7
+    assert result["observed_high_water_position"] == 8
+    assert result["caught_up"] is False
+    assert result["cursor_persisted"] is False

@@ -43,5 +43,6 @@ continues to use immutable Parquet manifests. Any later paper database stores de
 facts and cursor state rather than another full quote estate. The feed remains data-only during
 WP8; no signal strategy, allocation, risk, paper execution or P&L behaviour is admitted by this
 record.
-The initial consumer implementation is a pure validator and offline saved-page command; it has no
-HTTP client, cursor database or derived writer.
+The first consumer implementation was a pure validator and offline saved-page command. ADR 0015
+adds a bounded loopback HTTP client and single-page probe, but no cursor database, derived writer
+or automatic acknowledgement.

@@ -38,7 +38,7 @@ from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
-from qtrad.runtime.capture_feed import load_capture_feed_page
+from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import (
@@ -111,6 +111,15 @@ def build_parser() -> argparse.ArgumentParser:
     feed_verify.add_argument("--configuration-hash", required=True)
     feed_verify.add_argument("--after-position", type=int, default=0)
     feed_verify.add_argument("pages", type=Path, nargs="+")
+    feed_probe = feed_sub.add_parser(
+        "probe", help="fetch and validate one bounded page through a loopback tunnel"
+    )
+    feed_probe.add_argument("--endpoint", required=True)
+    feed_probe.add_argument("--source-id", required=True)
+    feed_probe.add_argument("--universe-name", required=True)
+    feed_probe.add_argument("--configuration-hash", required=True)
+    feed_probe.add_argument("--after-position", type=int, default=0)
+    feed_probe.add_argument("--limit", type=int, default=500)
 
     api = subparsers.add_parser("api", help="run the read-only operator API")
     api.add_argument("--host", default="127.0.0.1")
@@ -178,6 +187,17 @@ def main(argv: Sequence[str] | None = None) -> None:
             configuration_hash=args.configuration_hash,
             after_position=args.after_position,
             page_paths=args.pages,
+        )
+    elif args.command == "feed" and args.feed_command == "probe":
+        asyncio.run(
+            _probe_capture_feed(
+                endpoint=args.endpoint,
+                source_id=args.source_id,
+                universe_name=args.universe_name,
+                configuration_hash=args.configuration_hash,
+                after_position=args.after_position,
+                limit=args.limit,
+            )
         )
     elif args.command == "api":
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
@@ -382,6 +402,43 @@ def _verify_capture_feed_pages(
                 "universe_name": cursor.identity.universe_name,
                 "configuration_hash": cursor.identity.configuration_hash,
                 "observed_high_water_position": cursor.observed_high_water_position,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _probe_capture_feed(
+    *,
+    endpoint: str,
+    source_id: str,
+    universe_name: str,
+    configuration_hash: str,
+    after_position: int,
+    limit: int,
+) -> None:
+    identity = CaptureFeedIdentity(
+        feed_schema_version=1,
+        source_id=source_id,
+        universe_name=universe_name,
+        configuration_hash=configuration_hash,
+    )
+    cursor = CaptureFeedCursor.initial(identity, after_position=after_position)
+    async with HttpCaptureFeedClient(endpoint) as client:
+        page = await client.fetch_page(after_position=after_position, limit=limit)
+    candidate_cursor = advance_capture_feed_cursor(cursor, page)
+    print(
+        json.dumps(
+            {
+                "caught_up": candidate_cursor.position
+                == candidate_cursor.observed_high_water_position,
+                "event_count": len(page.events),
+                "next_position": candidate_cursor.position,
+                "observed_high_water_position": candidate_cursor.observed_high_water_position,
+                "source_id": candidate_cursor.identity.source_id,
+                "universe_name": candidate_cursor.identity.universe_name,
+                "configuration_hash": candidate_cursor.identity.configuration_hash,
+                "cursor_persisted": False,
             },
             sort_keys=True,
         )

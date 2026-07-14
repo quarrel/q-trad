@@ -294,6 +294,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   rejects source or universe drift, stale/replayed/skipped cursors, high-water regression,
   contradictory page metadata, malformed canonical events and raw-record identity. `feed verify`
   performs no HTTP request or persistence.
+- ADR 0015 now adds the separately bounded transport probe without touching the collector. Its
+  HTTPX client accepts only an explicit literal-loopback tunnel endpoint, disables redirects and
+  ambient proxy configuration, bounds status, content type, request duration, decoded bytes and
+  page size, then applies the same identity/cursor contract. `feed probe` fetches one page and
+  reports `cursor_persisted=false`; it has no cursor database or downstream writer.
 - The feed contract distinguishes current serving-universe identity from per-event historical
   provenance. A universe/configuration transition can be acknowledged only through an explicit
   caught-up rebind on the same capture source; source or schema changes fail and require a new
