@@ -141,10 +141,12 @@ resolved secrets.
 
 1. GitHub Actions runs formatting, lint, type, shell and isolated PostgreSQL gates on every
    main-branch push and pull request. The manually dispatched `Publish application image`
-   workflow builds `linux/amd64` and `linux/arm64`, publishes the commit-SHA tag and records
-   its immutable OCI index digest. Configure the protected `capture-release` environment
-   with only `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_TOKEN`; never add IG or database
-   credentials to GitHub.
+    workflow builds `linux/amd64` and `linux/arm64`, publishes the commit-SHA tag and records
+    its immutable OCI index digest. Configure the protected `capture-release` environment
+    with only `OCI_REGISTRY_USERNAME` and `OCI_REGISTRY_TOKEN`; never add IG or database
+    credentials to GitHub. The dedicated publisher requires `manage repos` in the capture
+    compartment: `use repos` authenticates successfully but OCIR denies Buildx's
+    multi-platform manifest, SBOM and provenance push.
 2. Commit a reviewed deployment descriptor that pins only that digest and the approved
    universe/configuration hash. The host has a repository-scoped, read-only GitHub deploy
    key and checkout at `/home/opc/q-trad-source`. Run `git -C ~/q-trad-source pull
@@ -157,7 +159,7 @@ resolved secrets.
    back by deployment.
 
 OCI Container Registry in Sydney currently rejects repository-level immutability. Publish
-each release once under a unique `git-<commit>` tag, never publish `latest` or reuse a tag,
+each release once under its unique full commit-SHA tag, never publish `latest` or reuse a tag,
 and deploy only the returned OCI index digest.
 
 ## Operations

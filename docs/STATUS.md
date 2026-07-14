@@ -251,6 +251,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   With capture deliberately stopped, healthwatch correctly publishes the available fresh
   backup/restore/disk evidence and exits unhealthy because readiness is unavailable.
 - The dedicated GitHub publisher authenticates to Sydney OCIR, and Buildx completes both
-  architecture builds, but OCIR denied both manifest pushes. A delayed retry ruled out IAM
-  propagation; publisher group membership or its repository permission still needs
-  correction before an immutable digest can be deployed.
+  architecture builds. OCIR denied manifest publication under `use repos`, including after
+  identity-domain and propagation checks; the OCI-specific correction is capture-compartment
+  `manage repos` for the dedicated publisher group.
+- GitHub Actions subsequently published commit `839cd49` as an attested OCI index at digest
+  `sha256:3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80`.
+  Registry inspection proves native `linux/amd64` and `linux/arm64` manifests with separate
+  per-platform attestation manifests. The collector pulled the index by digest, selected
+  ARM64, and verified the image runs as non-root `qtrad` on `aarch64`.
+- `/etc/qtrad/capture.env` now pins that index digest and the prior application digest is
+  retained root-only for rollback. The reviewed release archive is staged, but no collector
+  role or operations timer has been started.

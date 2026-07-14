@@ -71,9 +71,9 @@ Implementation status:
 - Pending operator gate: create and authorise the private backup bucket, install the two
   non-secret operations environment files, and configure alarms. Bucket lifecycle,
   instance-principal upload, isolated restore and custom-metric publication now pass.
-- Pending registry gate: the dedicated GitHub identity authenticates to OCIR, but two
-  cached multi-platform attempts were denied at image push; verify its group membership
-  and grant repository-scoped `use repos` before dispatching again.
+- Complete: the dedicated GitHub publisher has capture-compartment `manage repos`; the
+  workflow published and the ARM host pulled the attested dual-architecture OCI index by
+  immutable digest. The prior digest is retained as the application rollback target.
 - Pending qualification: reboot/digest rollback gates followed by the 72-hour unattended
   `capture-v1` run. `capture-v2` remains excluded.
 
