@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from qtrad.runtime.universe import load_capture_universe
+from qtrad.runtime.universe import load_capture_candidates, load_capture_universe
 
 
 def test_capture_v1_is_the_qualified_seven_and_hashes_its_content() -> None:
@@ -37,5 +37,39 @@ search_aliases = ["EUR/USD"]
 """
     )
 
+    with pytest.raises(ValueError, match="explicit preferred IG epic"):
+        load_capture_universe(path)
+
+
+def test_capture_v2_candidates_are_hashable_but_cannot_authorise_ingestion() -> None:
+    path = Path("config/capture-v2-candidates.toml")
+
+    candidates = load_capture_candidates(path)
+
+    identifiers = tuple(str(item.instrument_id) for item in candidates.instruments)
+    assert candidates.name == "capture-v2-candidates"
+    assert identifiers == (
+        "fx:aud-usd",
+        "fx:eur-usd",
+        "fx:usd-jpy",
+        "fx:gbp-usd",
+        "fx:usd-chf",
+        "fx:usd-cad",
+        "fx:nzd-usd",
+        "fx:eur-jpy",
+        "fx:eur-gbp",
+        "fx:usd-cnh",
+        "index:australia-200",
+        "index:us-500",
+        "index:ftse-100",
+        "index:us-tech-100",
+        "index:wall-street",
+        "index:germany-40",
+        "index:france-40",
+        "index:japan-225",
+        "index:hong-kong-hs50",
+        "index:eu-stocks-50",
+    )
+    assert len(candidates.configuration_hash) == 64
     with pytest.raises(ValueError, match="explicit preferred IG epic"):
         load_capture_universe(path)

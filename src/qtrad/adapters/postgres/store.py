@@ -21,6 +21,7 @@ from qtrad.domain.operations import AdapterHealth
 from qtrad.ports.storage import (
     AppendResult,
     AuditStore,
+    EventPage,
     RawMessage,
     ResearchManifest,
 )
@@ -756,6 +757,30 @@ class PostgresAuditStore(AuditStore):
             )
             async for row in result.mappings():
                 yield _event_from_row(row)
+
+    async def read_page(self, *, after_position: int, limit: int) -> EventPage:
+        if after_position < 0:
+            raise ValueError("event cursor cannot be negative")
+        if not 1 <= limit <= 1000:
+            raise ValueError("event page limit must be between 1 and 1000")
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT * FROM canonical.events
+                    WHERE global_position > :after_position
+                    ORDER BY global_position
+                    LIMIT :limit
+                    """
+                ),
+                {"after_position": after_position, "limit": limit},
+            )
+            events = tuple(_event_from_row(row) for row in result.mappings())
+            high_water_result = await connection.execute(
+                text("SELECT COALESCE(MAX(global_position), 0) FROM canonical.events")
+            )
+            high_water_position = int(high_water_result.scalar_one())
+        return EventPage(events=events, high_water_position=high_water_position)
 
 
 def _event_from_row(row: RowMapping) -> EventEnvelope:

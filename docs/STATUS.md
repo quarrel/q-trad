@@ -285,3 +285,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
   Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
   no longer gate data collection, but remain operator hardening follow-ups.
+- Local branch preparation has started without changing the frozen collector. ADR 0014 defines
+  a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
+  identity and no raw-record exposure. Its local implementation adds no IG call or downstream
+  paper behaviour.
+- The comment-only `capture-v2` list is now a structured, hashable 20-instrument offline
+  catalogue. It contains no preferred provider epics, fails if read as an approved ingestion
+  universe and therefore cannot expand the running collector.

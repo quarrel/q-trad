@@ -27,6 +27,27 @@ class AppendResult:
     duplicate: bool
 
 
+@dataclass(frozen=True, slots=True)
+class EventPage:
+    """A bounded, ordered view of persisted canonical events."""
+
+    events: tuple[EventEnvelope, ...]
+    high_water_position: int
+
+    def __post_init__(self) -> None:
+        if self.high_water_position < 0:
+            raise ValueError("event high-water position cannot be negative")
+        positions: list[int] = []
+        for event in self.events:
+            if event.global_position is None or event.persisted_time is None:
+                raise ValueError("event pages require persisted events")
+            positions.append(event.global_position)
+        if positions != sorted(set(positions)):
+            raise ValueError("event page positions must be strictly increasing")
+        if positions and positions[-1] > self.high_water_position:
+            raise ValueError("event page cannot exceed its high-water position")
+
+
 class RawCapture(Protocol):
     async def capture(self, message: RawMessage) -> int: ...
 

@@ -13,6 +13,12 @@ def test_production_ig_environment_is_rejected() -> None:
         Settings.model_validate({"ig_environment": "live"})
 
 
+@pytest.mark.parametrize("source_id", ["OCI-capture", "contains space", ""])
+def test_capture_source_id_is_bounded_and_machine_safe(source_id: str) -> None:
+    with pytest.raises(ValidationError):
+        Settings.model_validate({"capture_source_id": source_id})
+
+
 def test_logging_redacts_secret_named_fields() -> None:
     record = logging.LogRecord(
         "test",

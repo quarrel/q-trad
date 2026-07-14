@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from qtrad.adapters.postgres.store import PostgresAuditStore
+from qtrad.ports.storage import EventPage
 
 
 class OperatorQueries:
@@ -176,3 +177,6 @@ class OperatorQueries:
         return await self._store.query(
             "SELECT * FROM ops.research_manifests ORDER BY created_at DESC"
         )
+
+    async def event_page(self, *, after_position: int, limit: int) -> EventPage:
+        return await self._store.read_page(after_position=after_position, limit=limit)

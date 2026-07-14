@@ -144,6 +144,82 @@ async def test_stream_version_conflict_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    now = datetime.now(UTC)
+    suffix = uuid4().hex
+    first = await store.append(
+        EventEnvelope.create(
+            stream_id=f"feed:{suffix}:1",
+            stream_version=1,
+            event_type="FeedTestObserved",
+            event_time=now,
+            received_time=now,
+            producer="integration-test",
+            producer_version="1",
+            payload={"sequence": 1},
+        ),
+        expected_stream_version=0,
+    )
+    second = await store.append(
+        EventEnvelope.create(
+            stream_id=f"feed:{suffix}:2",
+            stream_version=1,
+            event_type="FeedTestObserved",
+            event_time=now,
+            received_time=now,
+            producer="integration-test",
+            producer_version="1",
+            payload={"sequence": 2},
+        ),
+        expected_stream_version=0,
+    )
+    assert first.global_position is not None
+    assert second.global_position is not None
+
+    settings = Settings(database_url=DATABASE_URL, capture_source_id="integration-capture")
+    app = create_app(settings)
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        first_page = await client.get(
+            "/api/v1/feed/events",
+            params={"after_position": first.global_position - 1, "limit": 1},
+        )
+        second_page = await client.get(
+            "/api/v1/feed/events",
+            params={"after_position": first.global_position, "limit": 1000},
+        )
+        invalid_limit = await client.get("/api/v1/feed/events", params={"limit": 1001})
+        invalid_cursor = await client.get(
+            "/api/v1/feed/events",
+            params={"after_position": second.global_position + 1},
+        )
+        write_probe = await client.post("/api/v1/feed/events")
+
+    assert first_page.status_code == 200
+    first_payload = first_page.json()
+    assert first_payload["source_id"] == "integration-capture"
+    assert first_payload["universe_name"] == "capture-v1"
+    assert first_payload["after_position"] == first.global_position - 1
+    assert first_payload["next_position"] == first.global_position
+    assert first_payload["has_more"] is True
+    assert first_payload["events"][0]["event_id"] == str(first.event_id)
+    assert "raw_record_id" not in first_payload["events"][0]
+
+    assert second_page.status_code == 200
+    second_payload = second_page.json()
+    assert second_payload["events"][0]["event_id"] == str(second.event_id)
+    assert second_payload["next_position"] >= second.global_position
+    assert invalid_limit.status_code == 422
+    assert invalid_cursor.status_code == 409
+    assert write_probe.status_code == 405
+    await engine_from_app(app).dispose()
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
 async def test_historical_bar_append_is_idempotent() -> None:
     assert DATABASE_URL is not None
     engine = create_async_engine(DATABASE_URL)

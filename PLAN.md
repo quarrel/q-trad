@@ -87,6 +87,12 @@ Implementation status:
   enablement and final alarm tuning are tracked improvements rather than release gates.
   The corrected candidate has passed deliberate container restart and host reboot recovery.
   `capture-v2` remains excluded.
+- In progress locally without collector deployment: ADR 0014 and the bounded zero-copy
+  canonical-event feed prepare the later isolated paper/research boundary. This remains a
+  read-only data-foundation interface and makes no IG call.
+- Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
+  hashable offline catalogue that deliberately contains no provider epics and cannot be
+  loaded as an ingestion universe.
 
 ## WP0 — documentation and scaffold
 
