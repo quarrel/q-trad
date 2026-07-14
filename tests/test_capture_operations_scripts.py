@@ -9,6 +9,7 @@ import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPOSITORY_ROOT / "ops" / "capture"
+RESEARCH_SCRIPTS = REPOSITORY_ROOT / "ops" / "research"
 
 
 def test_capture_ingest_has_graceful_stop_contract() -> None:
@@ -49,6 +50,16 @@ def _run(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     )
 
 
+def _run_research(script: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [str(RESEARCH_SCRIPTS / script)],
+        check=False,
+        capture_output=True,
+        text=True,
+        env={**os.environ, **env},
+    )
+
+
 def test_backup_writes_manifest_status_and_object_set(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -61,7 +72,10 @@ set -euo pipefail
 case "$*" in
   *"exec -T db pg_dump"*) printf 'archive' ;;
   *"exec -T db pg_restore --list"*) exit 0 ;;
-  *"run --rm --no-deps ingest python -c"*) printf '%s\\n' '{universe_hash}' ;;
+  *"run --rm --no-deps ingest python -c"*)
+    printf '%s\\n' '{{"name":"capture-v1","hash":"{universe_hash}"}}'
+    ;;
+  *"SELECT version_num FROM alembic_version"*) printf '0006\\n' ;;
   *) printf 'unexpected docker call: %s\\n' "$*" >&2; exit 70 ;;
 esac
 """,
@@ -77,6 +91,7 @@ printf '%s\\n' "$*" >> '{calls}'
     capture_env.write_text(
         "QTRAD_IMAGE=example.invalid/qtrad@sha256:" + "1" * 64 + "\n"
         "QTRAD_POSTGRES_IMAGE=postgres@sha256:" + "2" * 64 + "\n"
+        "QTRAD_CAPTURE_SOURCE_ID=oci-sydney-capture-1\n"
     )
     backup_dir = tmp_path / "backups"
     status_dir = tmp_path / "status"
@@ -99,12 +114,26 @@ printf '%s\\n' "$*" >> '{calls}'
     assert status["success"] is True
     assert status["universe_hash"] == universe_hash
     manifest = json.loads(next(backup_dir.glob("*.manifest.json")).read_text())
-    assert manifest["schema"] == "qtrad-capture-backup-v1"
+    assert manifest["schema"] == "qtrad-capture-backup-v2"
+    assert manifest["capture_source_id"] == "oci-sydney-capture-1"
+    assert manifest["universe_name"] == "capture-v1"
     assert manifest["universe_hash"] == universe_hash
+    assert manifest["migration_version"] == "0006"
+    identity = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+    assert (
+        subprocess.run(
+            ["sha256sum"], input=canonical, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+        == manifest["manifest_sha256"]
+    )
     assert len(calls.read_text().splitlines()) == 3
 
 
-def test_restore_verification_uses_manifest_pinned_postgres_image(tmp_path: Path) -> None:
+@pytest.mark.parametrize("manifest_version", [1, 2])
+def test_restore_verification_uses_manifest_pinned_postgres_image(
+    tmp_path: Path, manifest_version: int
+) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     object_store = tmp_path / "objects" / "daily"
@@ -117,17 +146,28 @@ def test_restore_verification_uses_manifest_pinned_postgres_image(tmp_path: Path
     ).stdout.split()[0]
     (object_store / f"{archive_name}.sha256").write_text(f"{digest}  {archive_name}\n")
     postgres_image = "postgres@sha256:" + "2" * 64
-    (object_store / f"{archive_name}.manifest.json").write_text(
-        json.dumps(
-            {
-                "schema": "qtrad-capture-backup-v1",
-                "archive": archive_name,
-                "sha256": digest,
-                "universe_hash": "a" * 64,
-                "postgres_image": postgres_image,
-            }
-        )
-    )
+    manifest_identity = {
+        "schema": f"qtrad-capture-backup-v{manifest_version}",
+        "created_at": "2026-07-13T00:00:00Z",
+        "archive": archive_name,
+        "sha256": digest,
+        "database": "qtrad_capture",
+        "capture_source_id": "oci-sydney-capture-1",
+        "universe_name": "capture-v1",
+        "universe_hash": "a" * 64,
+        "capture_image": "example.invalid/qtrad@sha256:" + "1" * 64,
+        "postgres_image": postgres_image,
+    }
+    if manifest_version == 2:
+        manifest_identity["migration_version"] = "0006"
+        canonical_manifest = json.dumps(manifest_identity, separators=(",", ":"), sort_keys=True)
+        manifest_identity["manifest_sha256"] = subprocess.run(
+            ["sha256sum"], input=canonical_manifest, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+    else:
+        manifest_identity.pop("capture_source_id")
+        manifest_identity.pop("universe_name")
+    (object_store / f"{archive_name}.manifest.json").write_text(json.dumps(manifest_identity))
     object_list = json.dumps(
         {
             "data": [
@@ -167,7 +207,7 @@ fi
 set -euo pipefail
 printf '%s\\n' "$*" >> '{docker_calls}'
 case "$*" in
-  *"SELECT version_num FROM alembic_version"*) printf '0003\\n' ;;
+  *"SELECT version_num FROM alembic_version"*) printf '0006\\n' ;;
   *"SELECT count(*) FROM canonical.events"*) printf '42\\n' ;;
 esac
 """,
@@ -180,6 +220,7 @@ esac
             "PATH": f"{fake_bin}:{os.environ['PATH']}",
             "QTRAD_BACKUP_BUCKET": "capture-backups",
             "QTRAD_STATUS_DIR": str(status_dir),
+            "QTRAD_EXPECTED_V1_MIGRATION_VERSION": "0006",
         },
     )
 
@@ -187,7 +228,115 @@ esac
     status = json.loads((status_dir / "restore-status.json").read_text())
     assert status["success"] is True
     assert status["canonical_event_count"] == 42
+    assert status["migration_version"] == "0006"
+    assert status["manifest_schema"] == f"qtrad-capture-backup-v{manifest_version}"
     assert postgres_image in docker_calls.read_text()
+
+
+@pytest.mark.parametrize("manifest_version", [1, 2])
+def test_research_snapshot_import_is_verified_non_overwriting_and_evidenced(
+    tmp_path: Path, manifest_version: int
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    archive_name = "qtrad-capture-20260713T000000Z.dump"
+    archive = tmp_path / archive_name
+    archive.write_text("archive")
+    archive_sha = subprocess.run(
+        ["sha256sum", str(archive)], check=True, capture_output=True, text=True
+    ).stdout.split()[0]
+    checksum = tmp_path / f"{archive_name}.sha256"
+    checksum.write_text(f"{archive_sha}  {archive_name}\n")
+    universe_hash = "a" * 64
+    manifest_identity = {
+        "schema": f"qtrad-capture-backup-v{manifest_version}",
+        "created_at": "2026-07-13T00:00:00Z",
+        "archive": archive_name,
+        "sha256": archive_sha,
+        "database": "qtrad_capture",
+        "capture_source_id": "oci-sydney-capture-1",
+        "universe_name": "capture-v1",
+        "universe_hash": universe_hash,
+        "capture_image": "example.invalid/qtrad@sha256:" + "1" * 64,
+        "postgres_image": "postgres@sha256:" + "2" * 64,
+    }
+    if manifest_version == 2:
+        manifest_identity["migration_version"] = "0006"
+        canonical_manifest = json.dumps(manifest_identity, separators=(",", ":"), sort_keys=True)
+        manifest_identity["manifest_sha256"] = subprocess.run(
+            ["sha256sum"], input=canonical_manifest, check=True, capture_output=True, text=True
+        ).stdout.split()[0]
+    else:
+        manifest_identity.pop("capture_source_id")
+        manifest_identity.pop("universe_name")
+    manifest = tmp_path / f"{archive_name}.manifest.json"
+    manifest.write_text(json.dumps(manifest_identity))
+    calls = tmp_path / "calls"
+    for command in ("createdb", "dropdb"):
+        _write_executable(
+            fake_bin / command,
+            f"#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' '{command} $*' >> '{calls}'\n",
+        )
+    _write_executable(
+        fake_bin / "pg_restore",
+        f"#!/usr/bin/env bash\nset -euo pipefail\nprintf '%s\\n' 'pg_restore $*' >> '{calls}'\n",
+    )
+    _write_executable(
+        fake_bin / "psql",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "psql $*" >> '{calls}'
+case "$*" in
+  *"SELECT datname FROM pg_database"*) ;;
+  *"SELECT (SELECT version_num"*) printf '0006|12|11\\n' ;;
+esac
+""",
+    )
+    evidence = tmp_path / "import.json"
+    env = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "QTRAD_SNAPSHOT_ARCHIVE": str(archive),
+        "QTRAD_SNAPSHOT_CHECKSUM": str(checksum),
+        "QTRAD_SNAPSHOT_MANIFEST": str(manifest),
+        "QTRAD_RESEARCH_DATABASE": "qtrad_research_capture_20260713",
+        "QTRAD_RESEARCH_IMPORT_EVIDENCE": str(evidence),
+        "QTRAD_EXPECTED_CAPTURE_SOURCE_ID": "oci-sydney-capture-1",
+        "QTRAD_EXPECTED_UNIVERSE_HASH": universe_hash,
+        "QTRAD_EXPECTED_V1_MIGRATION_VERSION": "0006",
+    }
+
+    result = _run_research("import-capture-snapshot.sh", env)
+
+    assert result.returncode == 0, result.stderr
+    imported = json.loads(evidence.read_text())
+    assert imported["schema"] == "qtrad-research-snapshot-import-v1"
+    assert imported["capture_source_id"] == "oci-sydney-capture-1"
+    assert imported["source_manifest_schema"] == f"qtrad-capture-backup-v{manifest_version}"
+    assert imported["raw_message_count"] == 12
+    assert imported["canonical_event_count"] == 11
+    assert imported["import_sha256"]
+    assert "createdb" in calls.read_text()
+    assert "dropdb" not in calls.read_text()
+
+    repeated = _run_research("import-capture-snapshot.sh", env)
+    assert repeated.returncode != 0
+
+    _write_executable(
+        fake_bin / "pg_restore",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "pg_restore $*" >> '{calls}'
+[[ "$*" == *"--list"* ]]
+""",
+    )
+    failed_env = {
+        **env,
+        "QTRAD_RESEARCH_DATABASE": "qtrad_research_failed_20260713",
+        "QTRAD_RESEARCH_IMPORT_EVIDENCE": str(tmp_path / "failed-import.json"),
+    }
+    failed = _run_research("import-capture-snapshot.sh", failed_env)
+    assert failed.returncode != 0
+    assert "dropdb" in calls.read_text()
 
 
 @pytest.mark.parametrize(

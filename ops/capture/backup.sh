@@ -52,28 +52,47 @@ archive_sha="$(sha256sum "$archive" | cut -d ' ' -f 1)"
 printf '%s  %s\n' "$archive_sha" "$basename" > "$checksum"
 "${compose[@]}" exec -T db pg_restore --list < "$archive" > /dev/null
 
-universe_hash="$(
+universe_evidence="$(
   "${compose[@]}" run --rm --no-deps ingest python -c \
-    'from qtrad.runtime.settings import Settings; from qtrad.runtime.universe import load_capture_universe; print(load_capture_universe(Settings().capture_universe_path).configuration_hash)'
+    'import json; from qtrad.runtime.settings import Settings; from qtrad.runtime.universe import load_capture_universe; universe = load_capture_universe(Settings().capture_universe_path); print(json.dumps({"name": universe.name, "hash": universe.configuration_hash}, sort_keys=True))'
 )"
+universe_name="$(jq -er '.name' <<< "$universe_evidence")"
+universe_hash="$(jq -er '.hash' <<< "$universe_evidence")"
 capture_image="$(sed -n 's/^QTRAD_IMAGE=//p' "$capture_env")"
 postgres_image="$(sed -n 's/^QTRAD_POSTGRES_IMAGE=//p' "$capture_env")"
+capture_source_id="$(sed -n 's/^QTRAD_CAPTURE_SOURCE_ID=//p' "$capture_env")"
+migration_version="$(
+  "${compose[@]}" exec -T db psql --username=qtrad_capture --dbname=qtrad_capture \
+    --tuples-only --no-align --command 'SELECT version_num FROM alembic_version;'
+)"
+[[ "$universe_name" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
 [[ "$universe_hash" =~ ^[[:xdigit:]]{64}$ ]]
 [[ "$capture_image" == *@sha256:* ]]
 [[ "$postgres_image" == *@sha256:* ]]
+[[ "$capture_source_id" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
+[[ "$migration_version" =~ ^[0-9a-f]{4,32}$ ]]
 
-jq -n \
-  --arg schema "qtrad-capture-backup-v1" \
+manifest_identity="$(
+  jq -cS -n \
+  --arg schema "qtrad-capture-backup-v2" \
   --arg created_at "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
   --arg archive "$basename" \
   --arg sha256 "$archive_sha" \
   --arg database "qtrad_capture" \
+  --arg capture_source_id "$capture_source_id" \
+  --arg universe_name "$universe_name" \
   --arg universe_hash "$universe_hash" \
   --arg capture_image "$capture_image" \
   --arg postgres_image "$postgres_image" \
+  --arg migration_version "$migration_version" \
   '{schema:$schema, created_at:$created_at, archive:$archive, sha256:$sha256,
-    database:$database, universe_hash:$universe_hash, capture_image:$capture_image,
-    postgres_image:$postgres_image}' > "$manifest"
+    database:$database, capture_source_id:$capture_source_id, universe_name:$universe_name,
+    universe_hash:$universe_hash, capture_image:$capture_image,
+    postgres_image:$postgres_image, migration_version:$migration_version}'
+)"
+manifest_sha="$(printf '%s' "$manifest_identity" | sha256sum | cut -d ' ' -f 1)"
+jq --arg manifest_sha256 "$manifest_sha" \
+  '. + {manifest_sha256:$manifest_sha256}' <<< "$manifest_identity" > "$manifest"
 
 upload_prefix() {
   local prefix=$1
@@ -96,8 +115,10 @@ jq -n \
   --arg object_name "daily/$basename" \
   --arg sha256 "$archive_sha" \
   --arg universe_hash "$universe_hash" \
+  --arg manifest_sha256 "$manifest_sha" \
   '{success:true, completed_at:$completed_at, object_name:$object_name,
-    sha256:$sha256, universe_hash:$universe_hash}' > "$temporary_status"
+    sha256:$sha256, universe_hash:$universe_hash,
+    manifest_sha256:$manifest_sha256}' > "$temporary_status"
 mv -f "$temporary_status" "$status_file"
 
 find "$backup_dir" -maxdepth 1 -type f -name 'qtrad-capture-*' \

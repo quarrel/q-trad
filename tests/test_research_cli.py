@@ -1,3 +1,5 @@
+import hashlib
+import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -127,9 +129,34 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
     monkeypatch.setattr(cli, "_engine", lambda _: engine)
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda _: audit)
     settings = Settings(
+        database_url="postgresql+asyncpg://qtrad@db/qtrad_research_capture_20260714",
         research_root=tmp_path,
+        capture_source_id="oci-sydney-capture-1",
         image="syd.ocir.io/example/qtrad@sha256:" + "c" * 64,
     )
+    snapshot_identity = {
+        "schema": "qtrad-research-snapshot-import-v1",
+        "imported_at": "2026-07-14T10:00:00Z",
+        "target_database": "qtrad_research_capture_20260714",
+        "source_manifest_schema": "qtrad-capture-backup-v2",
+        "source_manifest_file_sha256": "1" * 64,
+        "source_manifest_identity_sha256": "2" * 64,
+        "source_archive_sha256": "3" * 64,
+        "source_created_at": "2026-07-14T00:00:00Z",
+        "capture_source_id": "oci-sydney-capture-1",
+        "universe_name": universe.name,
+        "universe_hash": universe.configuration_hash,
+        "capture_image": "example.invalid/qtrad@sha256:" + "4" * 64,
+        "postgres_image": "postgres@sha256:" + "5" * 64,
+        "migration_version": "0006",
+        "raw_message_count": 120,
+        "canonical_event_count": 118,
+    }
+    snapshot_identity["import_sha256"] = hashlib.sha256(
+        json.dumps(snapshot_identity, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    snapshot_evidence = tmp_path / "snapshot-import.json"
+    snapshot_evidence.write_text(json.dumps(snapshot_identity), encoding="utf-8")
 
     await cli._export(
         settings,
@@ -137,6 +164,7 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
         universe_path=universe_path,
         start=datetime(2026, 7, 1, tzinfo=UTC),
         end=datetime(2026, 7, 15, tzinfo=UTC),
+        snapshot_import_path=snapshot_evidence,
     )
 
     assert audit.started is not None
@@ -156,6 +184,18 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
         "start": "2026-07-01T00:00:00Z",
         "end": "2026-07-15T00:00:00Z",
     }
+    assert metadata["source_snapshot"] == {
+        "kind": "verified-capture-snapshot",
+        "import_sha256": snapshot_identity["import_sha256"],
+        "capture_source_id": "oci-sydney-capture-1",
+        "source_created_at": "2026-07-14T00:00:00Z",
+        "source_archive_sha256": "3" * 64,
+        "source_manifest_schema": "qtrad-capture-backup-v2",
+        "source_manifest_identity_sha256": "2" * 64,
+        "source_migration_version": "0006",
+        "source_capture_image": "example.invalid/qtrad@sha256:" + "4" * 64,
+        "source_postgres_image": "postgres@sha256:" + "5" * 64,
+    }
     assert len(audit.query_parameters) == 3
     assert all(
         parameters["interval_start"] == datetime(2026, 7, 1, tzinfo=UTC)
@@ -167,6 +207,21 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
     assert audit.finished is not None
     assert audit.finished["status"] == "COMPLETED"
     assert engine.disposed is True
+
+    wrong_database = Settings(
+        database_url="postgresql+asyncpg://qtrad@db/qtrad_research_other",
+        research_root=tmp_path,
+        capture_source_id="oci-sydney-capture-1",
+    )
+    with pytest.raises(ValueError, match="configured database"):
+        await cli._export(
+            wrong_database,
+            FixedClock(),
+            universe_path=universe_path,
+            start=datetime(2026, 7, 1, tzinfo=UTC),
+            end=datetime(2026, 7, 15, tzinfo=UTC),
+            snapshot_import_path=snapshot_evidence,
+        )
 
 
 @pytest.mark.asyncio

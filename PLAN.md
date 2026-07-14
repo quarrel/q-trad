@@ -146,6 +146,11 @@ Implementation status:
 - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
   shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
   draft PR remains unmerged and cannot deploy the collector.
+- Complete locally and undeployed: ADR 0019 adds a versioned backup-v2 identity and a
+  non-overwriting snapshot-to-research importer. It verifies source, universe, images, migration,
+  archive and restored counts before producing hash-verified import evidence. Research export can
+  require that evidence and binds it into the immutable manifest; no collector or OCI access was
+  used while implementing this path.
 
 ## WP0 — documentation and scaffold
 

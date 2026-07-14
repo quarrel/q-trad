@@ -180,6 +180,12 @@ tunnel role. Schema-version-2 manifests bind the selected universe/configuration
 identity, coverage, gaps, provenance and per-file hashes. Replay verifies that complete identity
 and the decoded semantic bars; legacy schema-version-1 manifests remain readable.
 
+The supported collector-backup path is documented in the
+[research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md). It verifies a complete downloaded
+backup set, creates a new `qtrad_research_*` database without overwriting, emits hash-verified import
+evidence and allows `research export --snapshot-import-evidence PATH` to bind the source snapshot
+into the resulting Parquet manifest.
+
 To measure physical capture growth, take two non-overwriting storage snapshots against the same
 database and capture source, then compare them offline:
 
@@ -207,6 +213,7 @@ qualification window.
 - [Implementation plan](PLAN.md)
 - [Current status](docs/STATUS.md)
 - [Seven-instrument soak runbook](docs/SOAK_RUNBOOK.md)
+- [Research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md)
 - [Soak evidence record](docs/SOAK_EVIDENCE.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Engineering rules](docs/ENGINEERING.md)

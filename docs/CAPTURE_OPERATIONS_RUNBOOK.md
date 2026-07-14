@@ -120,6 +120,13 @@ IG or PostgreSQL credential: backup and restore use the host's instance principa
 running database container. Before enabling either timer, prove the policy with one manual
 backup and one manual restore verification.
 
+Qualification-era images write `qtrad-capture-backup-v1`. A later reviewed release containing
+ADR 0019 writes self-hashed v2 manifests that additionally bind capture source, universe name and
+migration version; do not change the running qualification image merely to obtain v2. The restore
+verifier accepts both contracts and uses `QTRAD_EXPECTED_V1_MIGRATION_VERSION` only for legacy v1.
+Operator download and isolated research import are documented separately in
+`docs/RESEARCH_SNAPSHOT_RUNBOOK.md`.
+
 Install `capture-monitor.env.example` in the same way and replace its compartment OCID. Keep
 the explicit regional `telemetry-ingestion` endpoint: OCI custom-metric publication does not
 use the normal Monitoring query endpoint.

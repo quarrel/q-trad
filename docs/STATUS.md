@@ -384,3 +384,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   `0006` and all 211 tests against PostgreSQL 18 for branch head `e24ccc7`. This includes the
   read-only storage inspector's actual catalogue/JSONB queries. No image was published and the
   collector remains unchanged.
+- ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
+  manifests bind capture source, universe, images and migration in self-hashed identity, while the
+  restore verifier remains compatible with qualification-era v1 bundles.
+- `ops/research/import-capture-snapshot.sh` verifies a downloaded dump/checksum/manifest set and
+  operator source/universe expectations, creates only a new `qtrad_research_*` database, restores
+  without source grants and writes hash-verified import evidence. Existing targets fail closed and a
+  failed invocation removes only the database it created.
+- Research export can verify that import evidence against its configured database, capture source
+  and universe, then includes the source archive/import identity in the content-authenticated
+  Parquet manifest. This remains local and undeployed; no collector database, Object Storage object
+  or IG endpoint was accessed.

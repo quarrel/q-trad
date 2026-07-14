@@ -56,7 +56,7 @@ jobs:
         run: uv run pyright
 
       - name: Check shell scripts
-        run: shellcheck ops/capture/*.sh
+        run: shellcheck ops/capture/*.sh ops/research/*.sh
 
       - name: Migrate isolated database
         run: uv run alembic upgrade head

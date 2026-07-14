@@ -14,6 +14,7 @@ from pathlib import Path
 import uvicorn
 from alembic import command
 from alembic.config import Config
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
 from qtrad import __version__
@@ -33,7 +34,7 @@ from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.universe_promotion import promote_reviewed_universe
-from qtrad.domain.events import EventEnvelope, to_json_value
+from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.market_data import (
@@ -54,6 +55,10 @@ from qtrad.runtime.backfill_plan import (
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.research_export import research_export_metadata
+from qtrad.runtime.research_snapshot import (
+    load_research_snapshot_import,
+    research_snapshot_metadata,
+)
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.storage_measurement import (
     build_storage_snapshot,
@@ -153,6 +158,7 @@ def build_parser() -> argparse.ArgumentParser:
     research_export.add_argument("--universe", type=Path, required=True)
     research_export.add_argument("--start", type=_utc_minute_argument, required=True)
     research_export.add_argument("--end", type=_utc_minute_argument, required=True)
+    research_export.add_argument("--snapshot-import-evidence", type=Path)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -267,6 +273,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 universe_path=args.universe,
                 start=args.start,
                 end=args.end,
+                snapshot_import_path=args.snapshot_import_evidence,
             )
         )
     elif args.command == "replay":
@@ -974,13 +981,30 @@ async def _export(
     universe_path: Path,
     start: datetime,
     end: datetime,
+    snapshot_import_path: Path | None = None,
 ) -> None:
     if end <= start:
         raise ValueError("research export end must follow start")
+    universe = load_capture_universe(universe_path)
+    snapshot_metadata: dict[str, JsonValue] = {
+        "kind": "unbound-database",
+        "capture_source_id": settings.capture_source_id,
+    }
+    if snapshot_import_path is not None:
+        snapshot_import = load_research_snapshot_import(snapshot_import_path)
+        database_name = make_url(settings.database_url).database
+        if database_name != snapshot_import.target_database:
+            raise ValueError("research snapshot evidence does not identify the configured database")
+        if settings.capture_source_id != snapshot_import.capture_source_id:
+            raise ValueError("research snapshot evidence does not identify the configured source")
+        if universe.configuration_hash != snapshot_import.universe_hash:
+            raise ValueError("research snapshot evidence does not identify the selected universe")
+        if snapshot_import.universe_name not in {"unknown-v1", universe.name}:
+            raise ValueError("research snapshot evidence has a different universe name")
+        snapshot_metadata = research_snapshot_metadata(snapshot_import)
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     research = ParquetResearchStore(settings.research_root, clock)
-    universe = load_capture_universe(universe_path)
     instrument_ids = tuple(str(instrument.instrument_id) for instrument in universe.instruments)
     encoded_instruments = json.dumps(instrument_ids)
     run_id = await store.start_run(
@@ -1065,6 +1089,7 @@ async def _export(
             application_version=__version__,
             application_image=settings.image,
         )
+        metadata["source_snapshot"] = snapshot_metadata
         manifest = await research.write_bars(
             bars,
             universe_name=universe.name,

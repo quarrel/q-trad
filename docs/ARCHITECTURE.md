@@ -99,6 +99,14 @@ container selected by the manifest digest. Backup and restore status files are a
 evidence inputs to the health watcher; they are not substitutes for the remote objects or a
 successful restore.
 
+New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
+capture-source, universe name, migration and source database identity. An operator can download one
+complete object set and import it only into a new local `qtrad_research_*` database. The importer
+verifies source/universe expectations, archive and manifest hashes, restores without source grants,
+checks migration and counts, revokes public connect and writes immutable import evidence. A research
+export can require that evidence and binds its import/archive identity into the research manifest.
+ADR 0019 records this collector-to-research boundary.
+
 ```mermaid
 flowchart LR
     SRC["Fixture or IG demo"] --> ADAPTER["Market-data adapter"]
@@ -178,6 +186,8 @@ It neither mutates the database nor replaces release qualification evidence.
 - `research export --universe PATH --start UTC --end UTC` writes a bounded schema-version-2 manifest
   from an isolated writable
   database copy; `replay --manifest PATH` verifies that identity before deterministic replay.
+- `research export --snapshot-import-evidence PATH` additionally verifies and binds the restored
+  collector source, universe, database and archive identity.
 - `feed verify` checks saved page sequences and reports the final cursor without network I/O.
 - `feed probe` validates one bounded page through a literal-loopback tunnel without acknowledging
   its candidate cursor.
