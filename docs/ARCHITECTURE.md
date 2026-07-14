@@ -40,6 +40,8 @@ service for migrations and integration tests; a separately protected manual work
 publishes one multi-platform application image under the source commit SHA and reports its
 OCI index digest. The collector's deployment descriptor consumes only that digest and its
 instance principal needs repository-read permission, not image-publication permission.
+Compose sends `SIGINT` to the unbounded ingestion role and allows a 90-second stop window so
+the adapter can verify disconnect and persist a terminal run before restart or host shutdown.
 
 The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
 checksum and a JSON manifest that binds the capture-universe hash and both deployed image

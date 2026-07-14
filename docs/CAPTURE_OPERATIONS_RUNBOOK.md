@@ -187,9 +187,14 @@ and deploy only the returned OCI index digest.
 
 ## Qualification
 
-Before unattended collection, prove ARM startup, migration, direct IPv6 SSH, Bastion
-recovery, backup/restore, image-digest rollback and host reboot recovery. Then collect
-`capture-v1` for 72 hours, including a deliberate container restart and host reboot.
+Before unattended collection, prove ARM startup, migration, restricted direct IPv6 SSH,
+a second operator access route, backup/restore, image-digest rollback and host reboot
+recovery. The second route may initially be policy-constrained Tailscale SSH; retain OCI
+Bastion as a recommended break-glass improvement rather than blocking collection when the
+other two routes are working. Then collect `capture-v1` for 72 hours, including a deliberate
+container restart and host reboot. The ingestion container must receive `SIGINT` with its
+configured 90-second grace period so the interrupted run is terminal before its replacement
+starts.
 
 Only after that evidence passes may the candidate 20-instrument universe receive reviewed
 IG epics and become a new capture configuration. It must pass its own 72-hour

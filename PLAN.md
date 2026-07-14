@@ -81,8 +81,11 @@ Implementation status:
   the restored current image without rolling back schema or canonical data. Clean host
   reboot recovered Tailscale, Docker, Beszel, the release and XFS database mount; the
   post-reboot current image again reached caught-up all-seven readiness and stopped cleanly.
-- Pending qualification: confirm the operator's Bastion recovery route and OCI alarms,
-  then enable operations timers and begin the 72-hour unattended `capture-v1` run.
+- In progress: the operations timers and unattended `capture-v1` collector are enabled for
+  the 72-hour qualification ending no earlier than `2026-07-17T03:05:33Z`. Direct SSH is
+  restricted at OCI to the operator's IPv6 range and Tailscale is the backup route; Bastion
+  enablement and final alarm tuning are tracked improvements rather than release gates.
+  The corrected candidate has passed deliberate container restart and host reboot recovery.
   `capture-v2` remains excluded.
 
 ## WP0 — documentation and scaffold

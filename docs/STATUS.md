@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-13
+**Updated:** 2026-07-14
 **Current milestone:** capture operations release
-**State:** IN PROGRESS — data foundation qualified; persistent demo-only collection is being prepared
+**State:** IN PROGRESS — `capture-v1` cloud qualification is running
 
 ## Completed
 
@@ -182,8 +182,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   collector; the candidate 20-instrument expansion is not admitted until IG mappings and
   a separate 72-hour qualification pass.
 - The repository now contains immutable-image Compose, systemd, backup, healthwatch and
-  OCI operator-runbook assets. OCI resources, credentials, registry image publication and
-  runtime qualification still require operator execution.
+  OCI operator-runbook assets. The required OCI resources, credentials and registry image
+  are configured; the runtime qualification is in progress.
 - The initial OCI ARM64 collector host is provisioned and hardened with its dedicated
   PostgreSQL block volume, restricted IPv6 SSH, Docker Engine and OCI tooling. The capture
   deployment now binds PostgreSQL to that required mount and validates backups with the
@@ -225,28 +225,25 @@ outside the current data-only phase until explicitly admitted by a later plan up
   custom metrics, and fails closed when any required operational evidence is stale.
 - GitHub workflow definitions now provide push/pull-request static and isolated-PostgreSQL
   gates plus manual commit-SHA-tagged dual-architecture publication to Sydney OCIR. The
-  repository release environment and its two OCIR secrets remain an operator gate.
-- Four deterministic command-level tests cover successful backup evidence, upload object
-  sets, manifest-pinned restore verification, metric publication and unhealthy readiness.
-  The collector remains stopped and disabled until the real bucket, IAM, backup/restore,
-  alarm and reboot gates pass.
+  protected repository release environment and dedicated publisher credentials are configured.
+- Five deterministic operations tests cover the collector stop contract, successful backup
+  evidence, upload object sets, manifest-pinned restore verification, metric publication and
+  unhealthy readiness.
 - GitHub CI passed all static checks, migration and 113 tests against an isolated PostgreSQL
-  18 service. The `capture-release` environment exists with a main-only deployment policy;
-  its two OCIR secrets are not yet configured. Host metric publication now targets OCI's
-  required regional ingestion endpoint and correctly stops at the still-pending metric IAM
-  permission.
+  18 service. The `capture-release` environment has a main-only deployment policy. Host metric
+  publication targets OCI's required regional ingestion endpoint and passes with the scoped
+  instance-principal permission.
 - A repository-scoped, read-only GitHub deploy key now backs the host checkout at
   `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
   reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`
-  points to it, while the collector and all three operations timers remain disabled.
+  selects it atomically.
 - The private `qtrad-capture-backups` bucket is versioned with active 14-day daily,
   56-day weekly and 7-day previous-version lifecycle rules. Instance-principal access
   uploaded the first real archive/checksum/manifest set successfully.
 - The first isolated restore verification exposed and corrected the OCI CLI's direct
   `data` array response shape. The retry verified the checksum, restored migration `0003`
   into a networkless temporary PostgreSQL container and read 1,642 canonical events.
-  Backup and restore status evidence is fresh; their timers remain disabled until capture
-  starts.
+  Backup and restore status evidence is fresh; their timers are enabled with the collector.
 - OCI custom-metric ingestion now accepts the collector's instance-principal publication.
   With capture deliberately stopped, healthwatch correctly publishes the available fresh
   backup/restore/disk evidence and exits unhealthy because readiness is unavailable.
@@ -260,8 +257,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   per-platform attestation manifests. The collector pulled the index by digest, selected
   ARM64, and verified the image runs as non-root `qtrad` on `aarch64`.
 - `/etc/qtrad/capture.env` now pins that index digest and the prior application digest is
-  retained root-only for rollback. The reviewed release archive is staged, but no collector
-  role or operations timer has been started.
+  retained root-only for rollback. The active reviewed release descriptor is selected through
+  `/opt/qtrad-capture`.
 - The pinned ARM release then passed the deployment-path smoke under systemd and Compose:
   migration completed, readiness returned HTTP 200 with all seven expected instruments,
   and global/projection positions were exactly caught up at 1,678. Healthwatch accepted the
@@ -275,5 +272,16 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - A clean host reboot recovered Tailscale SSH, Docker, the Beszel agent, the reviewed release
   symlink and the dedicated XFS PostgreSQL mount with no failed units. The post-reboot current
   image returned seven fresh instruments with global/projection positions exactly caught up
-  at 1,756, then stopped cleanly. Capture and all operations timers remain disabled pending
-  the Bastion/alarm confirmation and start of the 72-hour qualification.
+  at 1,756, then stopped cleanly.
+- The unattended `capture-v1` qualification began on 2026-07-14. Its first deliberate
+  container restart exposed that Compose's default `SIGTERM` bypassed Python's clean
+  cancellation path and left the interrupted run non-terminal. Release descriptor
+  `89c7553` now sends `SIGINT` and allows 90 seconds for verified disconnect.
+- With that correction deployed, both a clean host reboot and a deliberate ingestion
+  container restart finalised their preceding runs as `STOPPED`, started replacement runs,
+  restored seven-of-seven fresh readiness and caught projections up exactly. Capture,
+  healthwatch, backup and restore-verification timers remain enabled. The candidate window
+  ends no earlier than `2026-07-17T03:05:33Z`.
+- Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
+  Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
+  no longer gate data collection, but remain operator hardening follow-ups.
