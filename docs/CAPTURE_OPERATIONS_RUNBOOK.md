@@ -471,19 +471,23 @@ read-only transaction and exits. The snapshot records exact raw/canonical counts
 repeatable-read transaction plus observed physical sizes. Database-wide growth is contextual; raw
 and canonical relation deltas are the primary retention inputs.
 
-Current snapshot schema version 2 also reports JSON text-rendering sample size and individual index
-byte/scan deltas. Offline comparison attributes combined retained growth to heap, indexes and
-auxiliary PostgreSQL storage, and reports the canonical-event/raw-message ratio so a non-one-to-one
-interval is not misread. Follow `docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours
-or 100,000 new raw messages, whichever is longer, and reject a restart/statistics-reset interval
-for index-usage conclusions. Do not remove an index or change payload representation from one small
-sample.
+Current snapshot schema version 3 remains able to load version-one and version-two evidence. It
+reports JSON text-rendering sample size, individual index byte/scan deltas, and exact raw
+representation-code counts when migration `0007` is present. Offline comparison attributes combined
+retained growth to heap, indexes and auxiliary PostgreSQL storage, reports the
+canonical-event/raw-message ratio and derives the representations added during the interval. Follow
+`docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or 100,000 new raw messages,
+whichever is longer, and reject a restart/statistics-reset interval for index-usage conclusions. Do
+not remove an index or change payload representation from one small sample.
 
 The comparison command requires identical capture source, database, universe, configuration,
 application version and immutable image identity. Its `measurement_gate` requires both six elapsed
 hours and 100,000 new raw messages and separately reports whether index-scan evidence is usable.
 `operator_active_market_review_required` remains true because elapsed time and row count cannot
 establish representative market activity by themselves.
+For the later changed-field candidate, also require `raw_representation_evidence.status` to be
+`CODED`, `all_new_rows_changed_fields` to be true and `legacy_unclassified_rows_delta` to be zero.
+Any other result means the measured interval does not prove an uninterrupted changed-field writer.
 
 `observed_rate_extrapolation` reports the interval's raw/canonical rates and the combined capture
 relation bytes implied over one, 30 and 365 days if that exact rate continued. Treat it as a storage

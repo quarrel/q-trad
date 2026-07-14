@@ -126,6 +126,11 @@ Implementation status:
   and hash-width changes conditional on representative measurements rather than estimates. GitHub
   CI run `29325936926` passed all static, migration and PostgreSQL 18 gates with 218 tests at branch
   head `1aefd62`.
+- Complete locally and undeployed: storage snapshot schema version 3 remains backward-readable with
+  versions 1 and 2, records pre-marker versus coded raw-representation schema state and binds exact
+  per-code row counts. Offline comparison derives interval representation deltas, proves an
+  all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
+  and rejects a representation-schema transition. PostgreSQL verification remains pending CI.
 - Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
   growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
   per new relation row. It reports the canonical/raw row ratio so the observed headline growth is

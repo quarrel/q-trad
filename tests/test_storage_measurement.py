@@ -10,8 +10,10 @@ from qtrad.adapters.postgres.storage_measurement import (
     IndexStorage,
     PayloadSample,
     PostgresStorageMeasurement,
+    RawPayloadRepresentationCount,
     RelationStorage,
 )
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.runtime.storage_measurement import (
     build_storage_snapshot,
     compare_storage_snapshots,
@@ -30,6 +32,8 @@ def _measurement() -> PostgresStorageMeasurement:
         database_bytes=10_000,
         raw_message_count=100,
         canonical_event_count=100,
+        raw_payload_representation_column_present=False,
+        raw_payload_representation_counts=(),
         relations=(
             RelationStorage("canonical", "events", 100, 1_000, 800, 2_000),
             RelationStorage("raw", "market_messages", 100, 500, 400, 1_000),
@@ -54,6 +58,38 @@ def _snapshot(measurement: PostgresStorageMeasurement | None = None):
     )
 
 
+def _coded_measurement(
+    *,
+    observed_at: datetime = NOW,
+    legacy_rows: int,
+    changed_field_rows: int,
+) -> PostgresStorageMeasurement:
+    raw_rows = legacy_rows + changed_field_rows
+    counts = []
+    if legacy_rows:
+        counts.append(
+            RawPayloadRepresentationCount(
+                RawPayloadRepresentation.LEGACY_UNCLASSIFIED,
+                legacy_rows,
+            )
+        )
+    if changed_field_rows:
+        counts.append(
+            RawPayloadRepresentationCount(
+                RawPayloadRepresentation.CHANGED_FIELDS,
+                changed_field_rows,
+            )
+        )
+    return replace(
+        _measurement(),
+        observed_at=observed_at,
+        raw_message_count=raw_rows,
+        canonical_event_count=raw_rows,
+        raw_payload_representation_column_present=True,
+        raw_payload_representation_counts=tuple(counts),
+    )
+
+
 def test_storage_snapshot_is_hash_verified_and_non_overwriting(tmp_path: Path) -> None:
     snapshot = _snapshot()
     path = tmp_path / "storage.json"
@@ -71,6 +107,80 @@ def test_storage_snapshot_is_hash_verified_and_non_overwriting(tmp_path: Path) -
     path.write_text(json.dumps(payload), encoding="utf-8")
     with pytest.raises(ValueError, match="hash does not match"):
         load_storage_snapshot(path)
+
+
+def test_storage_comparison_proves_changed_field_rows_and_exposes_rollback_rows() -> None:
+    before = _snapshot(_coded_measurement(legacy_rows=100, changed_field_rows=0))
+    changed_only = _snapshot(
+        _coded_measurement(
+            observed_at=NOW + timedelta(minutes=1),
+            legacy_rows=100,
+            changed_field_rows=2,
+        )
+    )
+
+    changed_evidence = compare_storage_snapshots(before, changed_only)[
+        "raw_representation_evidence"
+    ]
+
+    assert changed_evidence == {
+        "usable": True,
+        "status": "CODED",
+        "new_rows_by_representation": {"CHANGED_FIELDS": 2},
+        "single_new_representation": "CHANGED_FIELDS",
+        "all_new_rows_changed_fields": True,
+        "legacy_unclassified_rows_delta": 0,
+    }
+
+    mixed = _snapshot(
+        _coded_measurement(
+            observed_at=NOW + timedelta(minutes=2),
+            legacy_rows=101,
+            changed_field_rows=2,
+        )
+    )
+    mixed_evidence = compare_storage_snapshots(before, mixed)["raw_representation_evidence"]
+    assert mixed_evidence == {
+        "usable": True,
+        "status": "CODED",
+        "new_rows_by_representation": {"LEGACY_UNCLASSIFIED": 1, "CHANGED_FIELDS": 2},
+        "single_new_representation": None,
+        "all_new_rows_changed_fields": False,
+        "legacy_unclassified_rows_delta": 1,
+    }
+
+
+def test_storage_snapshot_rejects_inconsistent_raw_representation_counts() -> None:
+    inconsistent = replace(
+        _coded_measurement(legacy_rows=100, changed_field_rows=0),
+        raw_message_count=101,
+    )
+
+    with pytest.raises(ValueError, match="counts do not match raw messages"):
+        _snapshot(inconsistent)
+
+
+def test_storage_comparison_rejects_representation_regression_or_schema_transition() -> None:
+    before = _snapshot(_coded_measurement(legacy_rows=100, changed_field_rows=0))
+    regressed = _snapshot(
+        _coded_measurement(
+            observed_at=NOW + timedelta(minutes=1),
+            legacy_rows=99,
+            changed_field_rows=3,
+        )
+    )
+    with pytest.raises(ValueError, match="representation count regressed"):
+        compare_storage_snapshots(before, regressed)
+
+    pre_marker = _snapshot(
+        replace(
+            _measurement(),
+            observed_at=NOW + timedelta(minutes=1),
+            raw_message_count=102,
+        )
+    )
+    with pytest.raises(ValueError, match="representation schema changed"):
+        compare_storage_snapshots(before, pre_marker)
 
 
 def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
@@ -106,6 +216,7 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
         "raw_volume_satisfied": False,
         "representative_thresholds_satisfied": False,
         "index_scan_evidence_usable": False,
+        "raw_representation_evidence_usable": True,
         "operator_active_market_review_required": True,
     }
     assert comparison["observed_rate_extrapolation"] == {
@@ -131,6 +242,14 @@ def test_storage_comparison_reports_physical_bytes_per_raw_message() -> None:
         "raw_and_canonical_relations": "1500.000",
     }
     assert comparison["canonical_events_per_raw_message"] == "1.500"
+    assert comparison["raw_representation_evidence"] == {
+        "usable": True,
+        "status": "PRE_MARKER_SCHEMA",
+        "new_rows_by_representation": {"PRE_MARKER_SCHEMA": 2},
+        "single_new_representation": "PRE_MARKER_SCHEMA",
+        "all_new_rows_changed_fields": None,
+        "legacy_unclassified_rows_delta": None,
+    }
     assert comparison["capture_growth_attribution"] == {
         "component_order": ["heap", "indexes", "auxiliary", "total"],
         "combined": {
@@ -289,6 +408,7 @@ def test_storage_comparison_reports_representative_measurement_gate() -> None:
         "raw_volume_satisfied": True,
         "representative_thresholds_satisfied": True,
         "index_scan_evidence_usable": True,
+        "raw_representation_evidence_usable": True,
         "operator_active_market_review_required": True,
     }
     extrapolation = comparison["observed_rate_extrapolation"]
@@ -320,6 +440,8 @@ def test_legacy_storage_snapshot_hash_omits_version_two_payload_evidence(tmp_pat
     payload = json.loads(current_path.read_text(encoding="utf-8"))
     payload["schema_version"] = 1
     payload.pop("statistics_reset_at")
+    payload.pop("raw_payload_representation_column_present")
+    payload.pop("raw_payload_representations")
     payload["raw_payload_sample"].pop("average_json_text_bytes")
     payload["canonical_payload_sample"].pop("average_json_text_bytes")
     identity = {key: value for key, value in payload.items() if key != "snapshot_sha256"}
@@ -333,6 +455,27 @@ def test_legacy_storage_snapshot_hash_omits_version_two_payload_evidence(tmp_pat
 
     assert legacy.schema_version == 1
     assert legacy.raw_payload_sample.average_json_text_bytes is None
+
+
+def test_version_two_storage_snapshot_remains_hash_verified_and_readable(tmp_path: Path) -> None:
+    current_path = tmp_path / "current.json"
+    write_storage_snapshot(current_path, _snapshot())
+    payload = json.loads(current_path.read_text(encoding="utf-8"))
+    payload["schema_version"] = 2
+    payload.pop("raw_payload_representation_column_present")
+    payload.pop("raw_payload_representations")
+    identity = {key: value for key, value in payload.items() if key != "snapshot_sha256"}
+    payload["snapshot_sha256"] = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    legacy_path = tmp_path / "version-two.json"
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    legacy = load_storage_snapshot(legacy_path)
+
+    assert legacy.schema_version == 2
+    assert legacy.raw_payload_representation_column_present is None
+    assert legacy.raw_payload_representations == ()
 
 
 def test_storage_comparison_invalidates_scan_deltas_after_statistics_reset() -> None:

@@ -6,6 +6,8 @@ from datetime import datetime
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from qtrad.domain.audit import RawPayloadRepresentation
+
 _SAMPLE_ROWS = 10_000
 
 
@@ -37,6 +39,12 @@ class PayloadSample:
 
 
 @dataclass(frozen=True, slots=True)
+class RawPayloadRepresentationCount:
+    representation: RawPayloadRepresentation
+    row_count: int
+
+
+@dataclass(frozen=True, slots=True)
 class PostgresStorageMeasurement:
     observed_at: datetime
     statistics_reset_at: datetime | None
@@ -44,6 +52,8 @@ class PostgresStorageMeasurement:
     database_bytes: int
     raw_message_count: int
     canonical_event_count: int
+    raw_payload_representation_column_present: bool
+    raw_payload_representation_counts: tuple[RawPayloadRepresentationCount, ...]
     relations: tuple[RelationStorage, ...]
     indexes: tuple[IndexStorage, ...]
     raw_payload_sample: PayloadSample
@@ -62,6 +72,11 @@ class PostgresStorageInspector:
                 text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
             )
             await connection.execute(text("SET LOCAL statement_timeout = '30s'"))
+            (
+                representation_column_present,
+                representation_counts,
+                raw_message_count,
+            ) = await _raw_payload_representation_counts(connection)
             summary = (
                 (
                     await connection.execute(
@@ -73,7 +88,6 @@ class PostgresStorageInspector:
                                  WHERE datname = current_database()) AS statistics_reset_at,
                                 current_database() AS database_name,
                                 pg_database_size(current_database()) AS database_bytes,
-                                (SELECT count(*) FROM raw.market_messages) AS raw_message_count,
                                 (SELECT count(*) FROM canonical.events) AS canonical_event_count
                             """
                         )
@@ -145,8 +159,10 @@ class PostgresStorageInspector:
             statistics_reset_at=summary["statistics_reset_at"],
             database_name=str(summary["database_name"]),
             database_bytes=int(summary["database_bytes"]),
-            raw_message_count=int(summary["raw_message_count"]),
+            raw_message_count=raw_message_count,
             canonical_event_count=int(summary["canonical_event_count"]),
+            raw_payload_representation_column_present=representation_column_present,
+            raw_payload_representation_counts=representation_counts,
             relations=tuple(
                 RelationStorage(
                     schema_name=str(row["schema_name"]),
@@ -171,6 +187,60 @@ class PostgresStorageInspector:
             raw_payload_sample=raw_sample,
             canonical_payload_sample=canonical_sample,
         )
+
+
+async def _raw_payload_representation_counts(
+    connection: AsyncConnection,
+) -> tuple[bool, tuple[RawPayloadRepresentationCount, ...], int]:
+    column_present_value = (
+        await connection.execute(
+            text(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM pg_attribute
+                    WHERE attrelid = 'raw.market_messages'::regclass
+                      AND attname = 'payload_representation'
+                      AND NOT attisdropped
+                )
+                """
+            )
+        )
+    ).scalar_one()
+    if not isinstance(column_present_value, bool):
+        raise TypeError("raw payload representation column probe did not return a boolean")
+    if not column_present_value:
+        raw_message_count = int(
+            (
+                await connection.execute(text("SELECT count(*) FROM raw.market_messages"))
+            ).scalar_one()
+        )
+        return False, (), raw_message_count
+
+    rows = (
+        (
+            await connection.execute(
+                text(
+                    """
+                    SELECT payload_representation, count(*) AS row_count
+                    FROM raw.market_messages
+                    GROUP BY payload_representation
+                    ORDER BY payload_representation
+                    """
+                )
+            )
+        )
+        .mappings()
+        .all()
+    )
+    counts = tuple(
+        RawPayloadRepresentationCount(
+            representation=RawPayloadRepresentation(int(row["payload_representation"])),
+            row_count=int(row["row_count"]),
+        )
+        for row in rows
+    )
+    return True, counts, sum(count.row_count for count in counts)
 
 
 async def _payload_sample(

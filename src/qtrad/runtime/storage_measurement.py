@@ -10,6 +10,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from qtrad.adapters.postgres.storage_measurement import PostgresStorageMeasurement
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import JsonValue
 
 _MAX_SNAPSHOT_BYTES = 4 * 1024 * 1024
@@ -47,8 +48,14 @@ class PayloadSampleEvidence(_StrictModel):
     average_payload_fields: int = Field(ge=0)
 
 
+class RawPayloadRepresentationEvidence(_StrictModel):
+    representation_code: int = Field(ge=0, le=3)
+    representation_name: Literal["LEGACY_UNCLASSIFIED", "MERGED_STATE", "CHANGED_FIELDS", "FIXTURE"]
+    row_count: int = Field(gt=0)
+
+
 class StorageSnapshot(_StrictModel):
-    schema_version: Literal[1, 2]
+    schema_version: Literal[1, 2, 3]
     snapshot_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     observed_at: datetime
     statistics_reset_at: datetime | None = None
@@ -61,6 +68,8 @@ class StorageSnapshot(_StrictModel):
     database_bytes: int = Field(ge=0)
     raw_message_count: int = Field(ge=0)
     canonical_event_count: int = Field(ge=0)
+    raw_payload_representation_column_present: bool | None = None
+    raw_payload_representations: tuple[RawPayloadRepresentationEvidence, ...] = ()
     relations: tuple[RelationStorageEvidence, ...]
     indexes: tuple[IndexStorageEvidence, ...]
     raw_payload_sample: PayloadSampleEvidence
@@ -77,7 +86,7 @@ def build_storage_snapshot(
     application_image: str,
 ) -> StorageSnapshot:
     snapshot = StorageSnapshot(
-        schema_version=2,
+        schema_version=3,
         snapshot_sha256="0" * 64,
         observed_at=measurement.observed_at,
         statistics_reset_at=measurement.statistics_reset_at,
@@ -90,6 +99,17 @@ def build_storage_snapshot(
         database_bytes=measurement.database_bytes,
         raw_message_count=measurement.raw_message_count,
         canonical_event_count=measurement.canonical_event_count,
+        raw_payload_representation_column_present=(
+            measurement.raw_payload_representation_column_present
+        ),
+        raw_payload_representations=tuple(
+            RawPayloadRepresentationEvidence(
+                representation_code=int(count.representation),
+                representation_name=count.representation.name,
+                row_count=count.row_count,
+            )
+            for count in measurement.raw_payload_representation_counts
+        ),
         relations=tuple(
             RelationStorageEvidence(
                 schema_name=relation.schema_name,
@@ -252,8 +272,9 @@ def compare_storage_snapshots(
     elapsed_satisfied = elapsed_seconds >= _MIN_MEASUREMENT_SECONDS
     raw_volume_satisfied = raw_delta >= _MIN_RAW_MESSAGES
     representative_thresholds_satisfied = elapsed_satisfied and raw_volume_satisfied
+    representation_evidence = _representation_comparison(before, after, raw_delta=raw_delta)
     return {
-        "schema_version": 1,
+        "schema_version": 2,
         "capture_source_id": before.capture_source_id,
         "database_name": before.database_name,
         "before_snapshot_sha256": before.snapshot_sha256,
@@ -276,8 +297,10 @@ def compare_storage_snapshots(
             "index_scan_evidence_usable": (
                 representative_thresholds_satisfied and not statistics_reset_changed
             ),
+            "raw_representation_evidence_usable": representation_evidence["usable"],
             "operator_active_market_review_required": True,
         },
+        "raw_representation_evidence": representation_evidence,
         "observed_rate_extrapolation": {
             "basis": "mechanical_continuation_of_observed_interval",
             "representative_thresholds_satisfied": representative_thresholds_satisfied,
@@ -367,10 +390,40 @@ def _validate_snapshot(snapshot: StorageSnapshot) -> None:
         sample.average_json_text_bytes is not None for sample in samples
     ):
         raise ValueError("version-one storage snapshot has JSON-text evidence")
-    if snapshot.schema_version == 2 and any(
+    if snapshot.schema_version >= 2 and any(
         sample.average_json_text_bytes is None for sample in samples
     ):
-        raise ValueError("version-two storage snapshot requires JSON-text evidence")
+        raise ValueError("current storage snapshot requires JSON-text evidence")
+    if snapshot.schema_version < 3:
+        if snapshot.raw_payload_representation_column_present is not None:
+            raise ValueError("legacy storage snapshot has raw representation schema evidence")
+        if snapshot.raw_payload_representations:
+            raise ValueError("legacy storage snapshot has raw representation counts")
+    else:
+        column_present = snapshot.raw_payload_representation_column_present
+        if column_present is None:
+            raise ValueError(
+                "version-three storage snapshot requires representation schema evidence"
+            )
+        if not column_present and snapshot.raw_payload_representations:
+            raise ValueError("pre-marker storage snapshot cannot contain representation counts")
+        representation_codes = [
+            representation.representation_code
+            for representation in snapshot.raw_payload_representations
+        ]
+        if len(set(representation_codes)) != len(representation_codes):
+            raise ValueError("storage snapshot raw representation codes must be unique")
+        if representation_codes != sorted(representation_codes):
+            raise ValueError("storage snapshot raw representation codes must be ordered")
+        for representation in snapshot.raw_payload_representations:
+            expected_name = RawPayloadRepresentation(representation.representation_code).name
+            if representation.representation_name != expected_name:
+                raise ValueError("storage snapshot raw representation code and name disagree")
+        if column_present and (
+            sum(representation.row_count for representation in snapshot.raw_payload_representations)
+            != snapshot.raw_message_count
+        ):
+            raise ValueError("storage snapshot raw representation counts do not match raw messages")
     relation_names = [
         f"{relation.schema_name}.{relation.relation_name}" for relation in snapshot.relations
     ]
@@ -420,12 +473,20 @@ def _snapshot_identity(snapshot: StorageSnapshot) -> dict[str, JsonValue]:
             snapshot.canonical_payload_sample, schema_version=snapshot.schema_version
         ),
     }
-    if snapshot.schema_version == 2:
+    if snapshot.schema_version >= 2:
         value["statistics_reset_at"] = (
             _utc_text(snapshot.statistics_reset_at)
             if snapshot.statistics_reset_at is not None
             else None
         )
+    if snapshot.schema_version >= 3:
+        value["raw_payload_representation_column_present"] = (
+            snapshot.raw_payload_representation_column_present
+        )
+        value["raw_payload_representations"] = [
+            representation.model_dump(mode="json")
+            for representation in snapshot.raw_payload_representations
+        ]
     return value
 
 
@@ -536,11 +597,80 @@ def _payload_sample_identity(
         "average_payload_bytes": sample.average_payload_bytes,
         "average_payload_fields": sample.average_payload_fields,
     }
-    if schema_version == 2:
+    if schema_version >= 2:
         if sample.average_json_text_bytes is None:
             raise ValueError("version-two storage sample requires JSON-text evidence")
         value["average_json_text_bytes"] = sample.average_json_text_bytes
     return value
+
+
+def _representation_comparison(
+    before: StorageSnapshot,
+    after: StorageSnapshot,
+    *,
+    raw_delta: int,
+) -> dict[str, JsonValue]:
+    if before.schema_version < 3 or after.schema_version < 3:
+        result: dict[str, JsonValue] = {
+            "usable": False,
+            "status": "UNAVAILABLE_IN_LEGACY_SNAPSHOT",
+            "new_rows_by_representation": None,
+            "single_new_representation": None,
+            "all_new_rows_changed_fields": None,
+            "legacy_unclassified_rows_delta": None,
+        }
+        return result
+    before_column = before.raw_payload_representation_column_present
+    after_column = after.raw_payload_representation_column_present
+    if before_column != after_column:
+        raise ValueError("raw payload representation schema changed between storage snapshots")
+    if not before_column:
+        pre_marker_result: dict[str, JsonValue] = {
+            "usable": True,
+            "status": "PRE_MARKER_SCHEMA",
+            "new_rows_by_representation": {"PRE_MARKER_SCHEMA": raw_delta},
+            "single_new_representation": "PRE_MARKER_SCHEMA",
+            "all_new_rows_changed_fields": None,
+            "legacy_unclassified_rows_delta": None,
+        }
+        return pre_marker_result
+
+    before_counts = _representation_map(before)
+    after_counts = _representation_map(after)
+    deltas: dict[str, int] = {}
+    for representation in RawPayloadRepresentation:
+        delta = after_counts.get(representation, 0) - before_counts.get(representation, 0)
+        if delta < 0:
+            raise ValueError("raw payload representation count regressed between storage snapshots")
+        if delta:
+            deltas[representation.name] = delta
+    if sum(deltas.values()) != raw_delta:
+        raise ValueError("raw payload representation deltas do not match new raw messages")
+    single = next(iter(deltas)) if len(deltas) == 1 else None
+    changed_fields_delta = int(deltas.get(RawPayloadRepresentation.CHANGED_FIELDS.name, 0))
+    new_rows_by_representation: dict[str, JsonValue] = {
+        name: count for name, count in deltas.items()
+    }
+    coded_result: dict[str, JsonValue] = {
+        "usable": True,
+        "status": "CODED",
+        "new_rows_by_representation": new_rows_by_representation,
+        "single_new_representation": single,
+        "all_new_rows_changed_fields": changed_fields_delta == raw_delta,
+        "legacy_unclassified_rows_delta": int(
+            deltas.get(RawPayloadRepresentation.LEGACY_UNCLASSIFIED.name, 0)
+        ),
+    }
+    return coded_result
+
+
+def _representation_map(
+    snapshot: StorageSnapshot,
+) -> dict[RawPayloadRepresentation, int]:
+    return {
+        RawPayloadRepresentation(representation.representation_code): representation.row_count
+        for representation in snapshot.raw_payload_representations
+    }
 
 
 def _ratio(numerator: int, denominator: int) -> str:

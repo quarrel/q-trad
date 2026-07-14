@@ -182,10 +182,14 @@ A read-only PostgreSQL storage inspector can write bounded, hash-verified snapsh
 counts, physical relation/index sizes and recent JSONB payload samples. Offline comparison reports
 physical growth per new raw message while retaining database-wide and relation-specific deltas.
 It neither mutates the database nor replaces release qualification evidence.
-Snapshot schema version 2 remains compatible with saved version-one evidence and additionally
-compares JSONB payload size with PostgreSQL's JSON text rendering and reports per-index byte/scan
-deltas. These are decision inputs only; a changed PostgreSQL statistics-reset timestamp invalidates
-scan deltas.
+Snapshot schema version 3 remains compatible with saved version-one and version-two evidence. In
+addition to JSONB/text samples and per-index byte/scan deltas, it records whether migration `0007`'s
+representation column exists and, when it does, exact row counts for every stable representation
+code. Comparison reports representation deltas for the measured interval, so changed-field evidence
+can expose any `LEGACY_UNCLASSIFIED` rows added by a rollback writer rather than relying only on the
+operator-supplied image identity. A pre-`0007` pair remains explicitly identified as a pre-marker
+schema interval; a representation-schema transition inside one comparison fails closed. A changed
+PostgreSQL statistics-reset timestamp separately invalidates scan deltas.
 Offline comparison derives raw, canonical and combined heap/index/auxiliary growth from those
 physical snapshots and reports both per-message and per-relation-row normalisation. It also exposes
 the canonical-event/raw-message ratio rather than assuming a one-to-one interval.

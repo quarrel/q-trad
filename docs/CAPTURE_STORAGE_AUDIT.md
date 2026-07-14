@@ -31,11 +31,18 @@ downsampling quote events is outside this optimisation.
 
 ## Evidence added
 
-Storage snapshot schema version 2 remains backward-readable with version 1 and adds:
+Storage snapshot schema version 3 remains backward-readable with versions 1 and 2. Version 2 added:
 
 - average physical JSONB payload bytes and PostgreSQL's JSON text rendering over each
   bounded recent sample; and
 - per-index physical-byte and scan-counter deltas, including bytes per newly captured raw message.
+
+Version 3 additionally records whether the raw representation column exists and exact counts by
+stable code when it does. Comparison derives the codes added during the interval, identifies a
+single-representation interval, reports whether every new row is `CHANGED_FIELDS`, and exposes any
+new `LEGACY_UNCLASSIFIED` rows that could have come from a rollback writer. A pre-migration pair is
+explicitly labelled `PRE_MARKER_SCHEMA`; a column transition within one interval fails closed. This
+is row-level release evidence, not permission to reinterpret legacy payloads.
 
 Offline comparison also attributes raw, canonical and combined growth to main heap, indexes and
 auxiliary relation storage. Auxiliary storage is the remainder of total relation size after the
@@ -97,7 +104,7 @@ For both the pinned representation and the later changed-field candidate:
 2. use at least six active-market hours or 100,000 new raw messages, whichever is longer;
 3. reject intervals containing a PostgreSQL restart/statistics reset for index-usage conclusions;
 4. compare raw/canonical/combined heap, index and auxiliary allocation, individual indexes, the
-   canonical/raw row ratio and JSONB/text sample evidence;
+   canonical/raw row ratio, representation-code deltas and JSONB/text sample evidence;
 5. record database-wide growth only as context because backups, catalogues and unrelated relations
    may contribute; and
 6. use the observed-rate extrapolation for capacity scenarios, not as an unqualified forecast; and
@@ -119,7 +126,8 @@ if its row counts were large enough. After the frozen qualification closes succe
    migration, readiness, backup/restore and rollback gates;
 4. take a new baseline only after the changed-field release identity and migration are fixed;
 5. run that unchanged release through its restart/reboot qualification and the same representative
-   threshold, then take its closing snapshot; and
+   threshold, then take its closing snapshot; require its comparison to report only
+   `CHANGED_FIELDS` new rows and zero new `LEGACY_UNCLASSIFIED` rows; and
 6. compare within each image pair first, then compare the two accepted interval results as evidence
    from distinct release epochs rather than feeding cross-release snapshots to `storage compare`.
 

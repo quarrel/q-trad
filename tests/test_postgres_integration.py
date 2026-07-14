@@ -849,6 +849,11 @@ async def test_storage_inspector_is_bounded_and_reports_capture_relations() -> N
     assert measurement.database_bytes > 0
     assert measurement.raw_message_count >= 0
     assert measurement.canonical_event_count >= 0
+    assert measurement.raw_payload_representation_column_present is True
+    assert (
+        sum(count.row_count for count in measurement.raw_payload_representation_counts)
+        == measurement.raw_message_count
+    )
     assert measurement.raw_payload_sample.sample_rows <= 10_000
     assert measurement.canonical_payload_sample.sample_rows <= 10_000
     await engine.dispose()

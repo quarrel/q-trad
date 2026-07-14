@@ -434,6 +434,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
   application-version or immutable-image drift. Its machine-readable gate requires six elapsed
   hours and 100,000 new raw messages, marks index evidence unusable across a statistics reset and
   keeps active-market representativeness as an operator review rather than an inferred fact.
+- A local storage-evidence audit found that image identity alone could not prove which raw writer
+  representations were added during a measured interval. Snapshot schema version 3 now remains
+  backward-readable with versions 1 and 2 while binding pre-marker/coded schema state and exact
+  per-code counts. Comparison reports whether all new rows are `CHANGED_FIELDS`, exposes new
+  `LEGACY_UNCLASSIFIED` rollback-compatible rows and rejects a representation-schema transition. The
+  active collector and its qualification image remain unchanged; isolated PostgreSQL verification is
+  pending CI.
 - GitHub CI run `29326917893` passed formatting, Ruff, Pyright, `ty`, ShellCheck, migrations through
   `0006` and all 224 tests against PostgreSQL 18 at branch head `9189f21`.
 - Storage comparison now reports observed raw-message, canonical-event and raw/canonical relation
