@@ -150,7 +150,8 @@ Implementation status:
   non-overwriting snapshot-to-research importer. It verifies source, universe, images, migration,
   archive and restored counts before producing hash-verified import evidence. Research export can
   require that evidence and binds it into the immutable manifest; no collector or OCI access was
-  used while implementing this path.
+  used while implementing this path. GitHub CI run `29324650522` passed all static, shell,
+  migration and PostgreSQL 18 gates with 216 tests at branch head `4f366d2`.
 
 ## WP0 — documentation and scaffold
 

@@ -395,3 +395,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
   and universe, then includes the source archive/import identity in the content-authenticated
   Parquet manifest. This remains local and undeployed; no collector database, Object Storage object
   or IG endpoint was accessed.
+- GitHub CI run `29324650522` passed formatting, Ruff, Pyright, `ty`, both capture and research
+  ShellCheck sets, migrations through `0006` and all 216 tests against PostgreSQL 18 for branch head
+  `4f366d2`. It covers backup v1/v2 restore compatibility, v1/v2 import, failed-import cleanup,
+  evidence tampering and manifest provenance binding.
