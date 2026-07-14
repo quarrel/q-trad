@@ -19,7 +19,13 @@ from qtrad.application.ingestion import IngestionService
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS, ProductType, ProviderListing
+from qtrad.domain.instruments import (
+    INITIAL_INSTRUMENTS,
+    AssetClass,
+    Instrument,
+    ProductType,
+    ProviderListing,
+)
 from qtrad.domain.market_data import (
     BarProvenance,
     DataQuality,
@@ -167,6 +173,147 @@ async def test_raw_payload_representation_is_backward_compatible_and_bounded() -
                     "payload_sha256": "0" * 64,
                 },
             )
+    await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_listing_validation_atomically_supersedes_epics_and_rebuilds() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    suffix = uuid4().hex
+    instrument = Instrument(
+        instrument_id=InstrumentId(f"fx:listing-{suffix}"),
+        display_name="Listing projection fixture",
+        asset_class=AssetClass.FX,
+        base_currency="FIX",
+        quote_currency="USD",
+        search_aliases=("Listing projection fixture",),
+    )
+    await store.seed_instruments((instrument,))
+    second_observed_at = datetime.now(UTC) - timedelta(minutes=1)
+    first_observed_at = second_observed_at - timedelta(minutes=1)
+    first = ProviderListing(
+        listing_id=ProviderListingId("ig", "demo", f"FIRST.{suffix}"),
+        instrument_id=instrument.instrument_id,
+        display_name="First listing",
+        product_type=ProductType.SPOT_FX,
+        currency="USD",
+        minimum_deal_size=Decimal("1"),
+        price_increment=Decimal("0.0001"),
+        valid_from=first_observed_at - timedelta(days=1),
+        valid_to=None,
+        metadata_version="first-version",
+        economics={"quantity_unit": "contracts"},
+    )
+    second = dataclasses.replace(
+        first,
+        listing_id=ProviderListingId("ig", "demo", f"SECOND.{suffix}"),
+        display_name="Second listing",
+        valid_from=second_observed_at - timedelta(days=1),
+        metadata_version="second-version",
+    )
+
+    first_event = await store.validate_provider_listing(
+        first, universe_hash="a" * 64, observed_at=first_observed_at
+    )
+    second_event = await store.validate_provider_listing(
+        second, universe_hash="b" * 64, observed_at=second_observed_at
+    )
+    repeated = await store.validate_provider_listing(
+        second,
+        universe_hash="b" * 64,
+        observed_at=second_observed_at + timedelta(seconds=1),
+    )
+
+    assert first_event is not None
+    assert second_event is not None
+    assert repeated is None
+    expected_rows = [
+        {
+            "external_id": first.listing_id.external_id,
+            "valid_from": first_observed_at,
+            "valid_to": second_observed_at,
+            "metadata_version": first.metadata_version,
+            "universe_hash": "a" * 64,
+        },
+        {
+            "external_id": second.listing_id.external_id,
+            "valid_from": second_observed_at,
+            "valid_to": None,
+            "metadata_version": second.metadata_version,
+            "universe_hash": "b" * 64,
+        },
+    ]
+    rows = await store.query(
+        """
+        SELECT external_id, valid_from, valid_to, metadata_version, universe_hash
+        FROM reference.provider_listings
+        WHERE instrument_id = :instrument_id
+        ORDER BY valid_from
+        """,
+        {"instrument_id": str(instrument.instrument_id)},
+    )
+    assert rows == expected_rows
+    active = await store.active_provider_listings((instrument.instrument_id,))
+    assert [item.listing_id for item in active] == [second.listing_id]
+    event_rows = await store.query(
+        """
+        SELECT payload ->> 'universe_hash' AS universe_hash
+        FROM canonical.events
+        WHERE event_type = 'ProviderListingValidated'
+          AND payload #>> '{listing,instrument_id}' = :instrument_id
+        ORDER BY global_position
+        """,
+        {"instrument_id": str(instrument.instrument_id)},
+    )
+    assert event_rows == [{"universe_hash": "a" * 64}, {"universe_hash": "b" * 64}]
+    invalid_event = EventEnvelope.create(
+        stream_id=f"provider-listing:ig:demo:INVALID.{suffix}",
+        stream_version=1,
+        event_type="ProviderListingValidated",
+        event_time=second_observed_at + timedelta(seconds=1),
+        received_time=second_observed_at + timedelta(seconds=1),
+        producer="integration-test",
+        producer_version="1",
+        payload={
+            "listing": dataclasses.replace(
+                second,
+                listing_id=ProviderListingId("ig", "demo", f"INVALID.{suffix}"),
+                valid_from=second_observed_at + timedelta(seconds=1),
+            ),
+            "universe_hash": "invalid",
+        },
+    )
+    with pytest.raises(ValueError, match="universe hash is invalid"):
+        await store.append(invalid_event, expected_stream_version=0)
+    assert await store.query(
+        "SELECT count(*) AS count FROM canonical.events WHERE event_id = :event_id",
+        {"event_id": invalid_event.event_id},
+    ) == [{"count": 0}]
+    indexes = await store.query(
+        """
+        SELECT indexdef FROM pg_indexes
+        WHERE schemaname = 'reference'
+          AND indexname = 'uq_provider_listings_active_instrument'
+        """
+    )
+    assert len(indexes) == 1
+    assert "UNIQUE INDEX" in indexes[0]["indexdef"]
+    assert "WHERE (valid_to IS NULL)" in indexes[0]["indexdef"]
+
+    await store.rebuild_projections()
+
+    rebuilt = await store.query(
+        """
+        SELECT external_id, valid_from, valid_to, metadata_version, universe_hash
+        FROM reference.provider_listings
+        WHERE instrument_id = :instrument_id
+        ORDER BY valid_from
+        """,
+        {"instrument_id": str(instrument.instrument_id)},
+    )
+    assert rebuilt == expected_rows
     await engine.dispose()
 
 

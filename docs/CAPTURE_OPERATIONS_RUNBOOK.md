@@ -173,6 +173,23 @@ OCI Container Registry in Sydney currently rejects repository-level immutability
 each release once under its unique full commit-SHA tag, never publish `latest` or reuse a tag,
 and deploy only the returned OCI index digest.
 
+Before deploying migration `0008`, run this bounded preflight against the target database. It must
+return no rows; do not let a migration or operator guess which epic is authoritative:
+
+```sql
+SELECT provider, environment, instrument_id, count(*) AS effective_count
+FROM reference.provider_listings
+WHERE valid_to IS NULL
+GROUP BY provider, environment, instrument_id
+HAVING count(*) > 1;
+```
+
+Migration `0008` adds the matching partial unique index. New application code commits each
+`ProviderListingValidated` event and the instrument-level supersession projection atomically, and
+projection rebuild recreates event-backed listing rows from canonical history. If preflight ever
+finds ambiguity, stop the release and reconcile it through a reviewed universe validation with the
+new image against schema `0007` before retrying the migration; never delete an arbitrary row.
+
 ## Operations
 
 - Install the capture, backup, weekly restore-verification and healthwatch systemd units

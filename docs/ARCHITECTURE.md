@@ -251,6 +251,13 @@ or ingestion. Review discovery applies global search and detail request budgets 
 per-instrument candidate bounds. Missing, zero or negative minimum-size economics are invalid;
 the adapter never substitutes product economics.
 
+An accepted listing validation event and its reference projection commit atomically. Projection
+identity is provider, environment and canonical instrument rather than provider epic alone, so a
+reviewed epic change closes the former selection at the new validation time. A partial unique index
+enforces one open-ended listing for that identity. Rebuild removes only event-backed reference rows
+and replays the canonical listing events, retaining legacy rows until a validation event supersedes
+them. An unchanged metadata version under a different universe hash remains a new validation fact.
+
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
 The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are

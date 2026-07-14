@@ -59,9 +59,13 @@ A work package is `DONE` only when:
 
 Implementation status:
 
-- Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
-  coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
-  bounded-cloud qualification.
+  - Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
+    coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
+    bounded-cloud qualification.
+  - Complete locally and undeployed: ADR 0009 listing events now project atomically and supersede
+    effective listings at provider/environment/instrument scope, including an epic change. Migration
+    `0008` enforces one open-ended selection and rebuild replays event-backed listing history while
+    preserving legacy rows. Migration preflight fails closed on existing ambiguity.
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
@@ -308,7 +312,7 @@ python -m qtrad api
 ## Verification evidence
 
 - Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and ShellCheck pass;
-  234 tests pass with ten PostgreSQL migration/integration tests deferred to isolated CI.
+  234 tests pass with eleven PostgreSQL migration/integration tests deferred to isolated CI.
 - GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
   migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
   `335f089`.

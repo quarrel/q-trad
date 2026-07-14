@@ -27,11 +27,14 @@ Conversion to `value_per_price_unit` must be deterministic and covered by fixtur
 seven selected listings. Missing, unparsable or dimensionally inconsistent fields make the
 listing ineligible for paper allocation.
 
-Instrument sync appends a `ProviderListingValidated` canonical event before projecting the
-effective listing. The bounded canonical payload excludes account data and the unbounded
-provider response. A changed metadata version closes the previous projected version at
-the new event time; an identical version is idempotent. Projection rebuild recreates the
-effective listing and economics entirely from canonical events.
+Instrument sync appends a `ProviderListingValidated` canonical event and projects it in the same
+database transaction. The bounded canonical payload excludes account data and the unbounded
+provider response. Each event makes exactly one listing effective for its provider, environment and
+instrument: it closes every earlier effective epic or metadata version at the new event time before
+inserting the selected version. An identical effective version and universe hash is idempotent.
+Migration `0008` enforces at most one open-ended listing for that identity. Projection rebuild deletes
+only event-backed listing rows, preserves legacy rows, and replays canonical validation events to
+recreate effective listings and economics; the first event closes any superseded legacy selection.
 
 Before a new capture universe is approved, provider discovery may instead run in review mode.
 Review mode emits a hash-addressed, bounded manifest of every relevant candidate and stable
@@ -52,3 +55,8 @@ can be rebuilt independently.
 Paper allocation can fail closed using auditable product economics. Instrument sync now
 uses the canonical event store rather than direct projection-only truth. No broker order
 method, account balance or margin replica is introduced.
+
+A previous application remains usable for rollback with the same selected epics, but the database
+constraint deliberately rejects an attempted alternate-epic write that would create two effective
+listings. A migration preflight must find no existing duplicate open-ended selections; ambiguity is
+not repaired by guessing which row should survive.

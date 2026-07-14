@@ -80,69 +80,85 @@ class PostgresAuditStore(AuditStore):
         universe_hash: str | None = None,
     ) -> None:
         async with self._engine.begin() as connection:
+            await self._upsert_provider_listing_projection(
+                connection,
+                listing,
+                metadata,
+                universe_hash=universe_hash,
+            )
+
+    async def _upsert_provider_listing_projection(
+        self,
+        connection: AsyncConnection,
+        listing: ProviderListing,
+        metadata: Mapping[str, JsonValue],
+        *,
+        universe_hash: str | None,
+    ) -> None:
+        if listing.valid_to is None:
             await connection.execute(
                 text(
                     """
                     UPDATE reference.provider_listings SET valid_to = :valid_from
                     WHERE provider = :provider AND environment = :environment
-                      AND external_id = :external_id AND valid_to IS NULL
-                      AND metadata_version <> :metadata_version
+                      AND instrument_id = :instrument_id
+                      AND valid_from < :valid_from
+                      AND (valid_to IS NULL OR valid_to > :valid_from)
                     """
                 ),
                 {
                     "provider": listing.listing_id.provider,
                     "environment": listing.listing_id.environment,
-                    "external_id": listing.listing_id.external_id,
-                    "valid_from": listing.valid_from,
-                    "metadata_version": listing.metadata_version,
-                },
-            )
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO reference.provider_listings (
-                        provider, environment, external_id, instrument_id,
-                        display_name, product_type, currency, minimum_deal_size,
-                          price_increment, valid_from, valid_to, metadata_version, metadata,
-                          economics, universe_hash
-                    ) VALUES (
-                        :provider, :environment, :external_id, :instrument_id,
-                        :display_name, :product_type, :currency, :minimum_deal_size,
-                          :price_increment, :valid_from, :valid_to, :metadata_version,
-                          CAST(:metadata AS jsonb), CAST(:economics AS jsonb), :universe_hash
-                    )
-                    ON CONFLICT (provider, environment, external_id, valid_from)
-                    DO UPDATE SET
-                        display_name = EXCLUDED.display_name,
-                        product_type = EXCLUDED.product_type,
-                        currency = EXCLUDED.currency,
-                        minimum_deal_size = EXCLUDED.minimum_deal_size,
-                        price_increment = EXCLUDED.price_increment,
-                        valid_to = EXCLUDED.valid_to,
-                        metadata_version = EXCLUDED.metadata_version,
-                          metadata = EXCLUDED.metadata,
-                          economics = EXCLUDED.economics,
-                          universe_hash = EXCLUDED.universe_hash
-                    """
-                ),
-                {
-                    "provider": listing.listing_id.provider,
-                    "environment": listing.listing_id.environment,
-                    "external_id": listing.listing_id.external_id,
                     "instrument_id": str(listing.instrument_id),
-                    "display_name": listing.display_name,
-                    "product_type": listing.product_type.value,
-                    "currency": listing.currency,
-                    "minimum_deal_size": listing.minimum_deal_size,
-                    "price_increment": listing.price_increment,
                     "valid_from": listing.valid_from,
-                    "valid_to": listing.valid_to,
-                    "metadata_version": listing.metadata_version,
-                    "metadata": json.dumps(metadata, sort_keys=True),
-                    "economics": json.dumps(listing.economics, sort_keys=True),
-                    "universe_hash": universe_hash,
                 },
             )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO reference.provider_listings (
+                    provider, environment, external_id, instrument_id,
+                    display_name, product_type, currency, minimum_deal_size,
+                      price_increment, valid_from, valid_to, metadata_version, metadata,
+                      economics, universe_hash
+                ) VALUES (
+                    :provider, :environment, :external_id, :instrument_id,
+                    :display_name, :product_type, :currency, :minimum_deal_size,
+                      :price_increment, :valid_from, :valid_to, :metadata_version,
+                      CAST(:metadata AS jsonb), CAST(:economics AS jsonb), :universe_hash
+                )
+                ON CONFLICT (provider, environment, external_id, valid_from)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    product_type = EXCLUDED.product_type,
+                    currency = EXCLUDED.currency,
+                    minimum_deal_size = EXCLUDED.minimum_deal_size,
+                    price_increment = EXCLUDED.price_increment,
+                    valid_to = EXCLUDED.valid_to,
+                    metadata_version = EXCLUDED.metadata_version,
+                      metadata = EXCLUDED.metadata,
+                      economics = EXCLUDED.economics,
+                      universe_hash = EXCLUDED.universe_hash
+                """
+            ),
+            {
+                "provider": listing.listing_id.provider,
+                "environment": listing.listing_id.environment,
+                "external_id": listing.listing_id.external_id,
+                "instrument_id": str(listing.instrument_id),
+                "display_name": listing.display_name,
+                "product_type": listing.product_type.value,
+                "currency": listing.currency,
+                "minimum_deal_size": listing.minimum_deal_size,
+                "price_increment": listing.price_increment,
+                "valid_from": listing.valid_from,
+                "valid_to": listing.valid_to,
+                "metadata_version": listing.metadata_version,
+                "metadata": json.dumps(metadata, sort_keys=True),
+                "economics": json.dumps(listing.economics, sort_keys=True),
+                "universe_hash": universe_hash,
+            },
+        )
 
     async def validate_provider_listing(
         self, listing: ProviderListing, *, universe_hash: str, observed_at: datetime
@@ -166,6 +182,7 @@ class PostgresAuditStore(AuditStore):
             and existing[0]["universe_hash"] == universe_hash
         ):
             return None
+        effective_listing = replace(listing, valid_from=observed_at, valid_to=None)
         stream_id = (
             f"provider-listing:{listing.listing_id.provider}:{listing.listing_id.environment}:"
             f"{listing.listing_id.external_id}"
@@ -179,7 +196,7 @@ class PostgresAuditStore(AuditStore):
             received_time=observed_at,
             producer="ig-demo-discovery",
             producer_version="0.1.0",
-            payload={"listing": listing, "universe_hash": universe_hash},
+            payload={"listing": effective_listing, "universe_hash": universe_hash},
         )
         try:
             persisted = await self.append(event, expected_stream_version=previous)
@@ -187,10 +204,6 @@ class PostgresAuditStore(AuditStore):
             return await self.validate_provider_listing(
                 listing, universe_hash=universe_hash, observed_at=observed_at
             )
-        metadata = to_json_value(listing)
-        if not isinstance(metadata, dict):
-            raise TypeError("provider listing did not serialise to an object")
-        await self.upsert_provider_listing(listing, metadata, universe_hash=universe_hash)
         return persisted
 
     async def active_provider_listings(
@@ -851,7 +864,24 @@ class PostgresAuditStore(AuditStore):
         return persisted
 
     async def _project(self, connection: AsyncConnection, event: EventEnvelope) -> None:
-        if event.event_type == "MarketQuoteObserved":
+        if event.event_type == "ProviderListingValidated":
+            payload = event.payload
+            listing = _provider_listing_from_event(_mapping(payload["listing"]))
+            universe_hash = str(payload["universe_hash"])
+            if len(universe_hash) != 64 or any(
+                character not in "0123456789abcdef" for character in universe_hash
+            ):
+                raise ValueError("provider listing event universe hash is invalid")
+            metadata = to_json_value(listing)
+            if not isinstance(metadata, dict):
+                raise TypeError("provider listing did not serialise to an object")
+            await self._upsert_provider_listing_projection(
+                connection,
+                listing,
+                metadata,
+                universe_hash=universe_hash,
+            )
+        elif event.event_type == "MarketQuoteObserved":
             payload = event.payload
             listing = _mapping(payload["listing_id"])
             await connection.execute(
@@ -970,6 +1000,9 @@ class PostgresAuditStore(AuditStore):
 
     async def rebuild_projections(self) -> int:
         async with self._engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM reference.provider_listings WHERE universe_hash IS NOT NULL")
+            )
             await connection.execute(text("TRUNCATE read_model.latest_quotes"))
             await connection.execute(text("TRUNCATE read_model.market_bars"))
             await connection.execute(text("TRUNCATE read_model.data_gaps"))
@@ -1089,6 +1122,29 @@ def _provider_listing(row: Mapping[str, object]) -> ProviderListing:
         valid_from=_utc(row["valid_from"]),
         valid_to=_utc(row["valid_to"]) if row["valid_to"] else None,
         metadata_version=str(row["metadata_version"]),
+    )
+
+
+def _provider_listing_from_event(value: Mapping[str, JsonValue]) -> ProviderListing:
+    listing_id = _mapping(value["listing_id"])
+    price_increment = value["price_increment"]
+    valid_to = value["valid_to"]
+    return ProviderListing(
+        listing_id=ProviderListingId(
+            provider=str(listing_id["provider"]),
+            environment=str(listing_id["environment"]),
+            external_id=str(listing_id["external_id"]),
+        ),
+        instrument_id=InstrumentId(str(value["instrument_id"])),
+        display_name=str(value["display_name"]),
+        product_type=ProductType(str(value["product_type"])),
+        currency=str(value["currency"]),
+        minimum_deal_size=Decimal(str(value["minimum_deal_size"])),
+        price_increment=(Decimal(str(price_increment)) if price_increment is not None else None),
+        valid_from=_parse_datetime(value["valid_from"]),
+        valid_to=_parse_datetime(valid_to) if valid_to is not None else None,
+        metadata_version=str(value["metadata_version"]),
+        economics=_mapping(value["economics"]),
     )
 
 

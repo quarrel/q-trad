@@ -358,6 +358,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
     stream. The documented path uses the same isolated writable database as candidate backfill.
     GitHub CI run `29336513376` passed all static, shell, migration and PostgreSQL 18 gates with 244
     tests at branch head `640caf7`.
+  - The subsequent identity audit found that ADR 0009's projection still treated the provider epic,
+    rather than provider/environment/instrument, as effective-selection identity. Local candidate code
+    now commits the validation event and projection atomically, closes a superseded epic at the new
+    event time, and rebuilds event-backed listings from canonical history. Migration `0008` adds the
+    one-open-selection constraint and intentionally fails if pre-existing ambiguity needs review.
 - Migration `0005` completes historical coverage identity with effective listing version,
   provenance, resolution and detecting/covering plan hashes. Repeated reviewed plans retain
   independent coverage evidence; identical returned bars are idempotent and changed historical
