@@ -49,6 +49,14 @@ sign-off; they must not be silently deleted or presented as successful runs.
   healthy, ingestion had remained up for eight hours, all seven instruments were fresh, readiness
   had no reasons, and global/checkpoint positions were both `352275`. The most recent healthwatch,
   backup and restore-verification service results were successful.
+- The read-only checkpoint at `2026-07-14T15:26:37Z` again found caught-up all-seven readiness:
+  raw messages were `709986`, canonical events were `725683`, global/checkpoint positions were both
+  `725684`, adapter state was `READY`, and reconnects, dropped records, provider operations and gaps
+  were all zero. The API and database containers were healthy; capture, backup, healthwatch and
+  restore-verification timers were active, and the most recent backup and healthwatch results were
+  successful. Five older pre-candidate rows remain `RUNNING` alongside candidate run
+  `9ef5ca09-4025-429e-a7c0-383a8a2644fd`; they are records left by the superseded stop contract, not
+  concurrent containers.
 
 ## Exit checks
 
@@ -67,6 +75,16 @@ full-window log/monitoring periods and one classification for every candidate ga
 second self-hashed, non-overwriting `PASS` or `FAIL` record. Invalid or tampered input produces no
 decision record; a valid failed review is preserved and exits non-zero. This tool is also undeployed
 and performs no collector, database, OCI or provider I/O.
+
+The locally prepared `runs reconcile-plan`/`runs reconcile` path closes the known pre-candidate run
+record issue without deleting evidence or guessing a clean stop. Its first step is read-only and
+writes a self-hashed plan for the complete `RUNNING` ingestion set strictly before
+`2026-07-14T03:05:33.653928Z`. The operator must confirm that exact hash and five-run set. Execution
+also requires the same immutable one-shot image, then locks and rechecks the complete set in one
+transaction, marks only those rows `FAILED`, and
+records the cutoff as an asserted interruption upper bound. It remains undeployed and must not run
+until the candidate window has ended; the current candidate run, raw data and canonical events are
+outside its mutation boundary.
 
 At or after the candidate-window end, record and require:
 

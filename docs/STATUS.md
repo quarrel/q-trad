@@ -286,6 +286,20 @@ outside the current data-only phase until explicitly admitted by a later plan up
   API and PostgreSQL healthy, ingestion up for eight hours, seven fresh instruments, no readiness
   reasons and exact projection catch-up at global/checkpoint position `352275`. Healthwatch,
   backup and restore-verification last results were successful.
+- A second read-only checkpoint at `2026-07-14T15:26:37Z` found seven fresh subscriptions,
+  `READY` adapter state, exact global/checkpoint catch-up at `725684`, zero reconnects, drops,
+  provider operations and gaps, healthy API/PostgreSQL containers, and successful backup and
+  healthwatch results. Five pre-candidate database rows remain `RUNNING` beside the single actual
+  candidate run; the host still has only one ingestion container.
+- A local, undeployed reconciliation path now closes that known evidence issue after the frozen
+  window. `runs reconcile-plan` writes a bounded self-hashed complete-set plan for one configuration
+  strictly before the candidate cutoff. Hash-confirmed execution rechecks the capture source,
+  database, universe, immutable tool image and every target under lock, then atomically records only
+  those abandoned rows
+  as `FAILED` with the cutoff labelled an operator-asserted upper bound. It refuses a partial or
+  changed set and cannot include the current run or alter raw/canonical data. The guarded helper uses
+  an immutable one-shot image without starting dependencies. The full local gate passes with 262
+  tests and 13 isolated PostgreSQL tests deferred to CI; the collector remains unchanged.
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
   Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
   no longer gate data collection, but remain operator hardening follow-ups.

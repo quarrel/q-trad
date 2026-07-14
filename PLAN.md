@@ -114,6 +114,14 @@ Implementation status:
     representativeness is explicitly separate from the later physical-storage comparison. GitHub CI
     run `29335826682` passed all static, shell, migration and PostgreSQL 18 gates with 243 tests at
     branch head `335f089`.
+  - Complete locally and undeployed, pending CI: pre-candidate run reconciliation is now an explicit
+    hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
+    immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
+    Execution locks and rechecks the
+    complete set atomically, marks only those rows `FAILED` with an asserted cutoff upper-bound basis,
+    and cannot touch the current run or raw/canonical data. A guarded immutable one-shot helper is
+    prepared for use only after the candidate window. The full local gate passes with 262 tests and
+    13 isolated-PostgreSQL tests deferred to CI; the collector remains unchanged.
 - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
@@ -322,6 +330,8 @@ Implementation status:
 
 ```text
 python -m qtrad db upgrade
+python -m qtrad runs reconcile-plan [--universe PATH] --cutoff UTC --output PATH
+python -m qtrad runs reconcile --plan PATH --confirm-plan-hash SHA256
 python -m qtrad instruments sync [--universe PATH]
 python -m qtrad ingest --environment ig-demo
 python -m qtrad ingest --environment ig-demo --max-seconds 60

@@ -39,9 +39,11 @@ def test_capture_database_is_available_only_on_an_explicit_loopback_port() -> No
 def test_storage_snapshot_writer_uid_matches_application_image() -> None:
     dockerfile = (REPOSITORY_ROOT / "Dockerfile").read_text()
     script = (SCRIPTS / "storage-snapshot.sh").read_text()
+    reconciliation_script = (SCRIPTS / "reconcile-runs.sh").read_text()
 
     assert "useradd --create-home --uid 10001 qtrad" in dockerfile
     assert "readonly application_uid=10001" in script
+    assert "readonly application_uid=10001" in reconciliation_script
 
 
 def _write_executable(path: Path, contents: str) -> None:
@@ -239,6 +241,121 @@ def test_storage_snapshot_rejects_unsafe_identity_before_docker(
             "QTRAD_STORAGE_INSPECTOR_IMAGE": image,
         },
         label,
+    )
+
+    assert result.returncode != 0
+    assert not docker_called.exists()
+
+
+def test_run_reconciliation_uses_reviewed_pinned_one_shot_plan(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    calls = tmp_path / "docker-calls"
+    evidence_dir = tmp_path / "reconciliation"
+    plan_path = evidence_dir / "run-reconciliation-pre-candidate.json"
+    image = "example.invalid/qtrad@sha256:" + "b" * 64
+    plan_hash = "c" * 64
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_DATABASE_PASSWORD=test-only\n")
+    (tmp_path / "compose.capture.yaml").write_text("services: {}\n")
+    _write_executable(
+        fake_bin / "install",
+        """#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "${!#}"
+""",
+    )
+    for command in ("chown", "chmod"):
+        _write_executable(fake_bin / command, "#!/usr/bin/env bash\nset -euo pipefail\n")
+    _write_executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{calls}'
+case "$*" in
+  "image inspect {image}") ;;
+  *"runs reconcile-plan"*)
+    [[ "${{QTRAD_IMAGE:?}}" == '{image}' ]]
+    [[ "$*" == *"--rm --no-deps --pull never"* ]]
+    [[ "$*" == *"-e QTRAD_IMAGE={image}"* ]]
+    [[ "$*" == *"-v {evidence_dir}:/evidence:Z"* ]]
+    [[ "$*" == *"--cutoff 2026-07-14T03:05:33.653928Z"* ]]
+    printf '{{"plan_hash":"{plan_hash}"}}\n' > '{plan_path}'
+    ;;
+  *"runs reconcile --plan"*)
+    [[ "${{QTRAD_IMAGE:?}}" == '{image}' ]]
+    [[ "$*" == *"-e QTRAD_IMAGE={image}"* ]]
+    [[ "$*" == *"-v {evidence_dir}:/evidence:ro,Z"* ]]
+    [[ "$*" == *"--confirm-plan-hash {plan_hash}"* ]]
+    ;;
+  *) exit 70 ;;
+esac
+""",
+    )
+    environment = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "QTRAD_CAPTURE_ROOT": str(tmp_path),
+        "QTRAD_CAPTURE_ENV": str(capture_env),
+        "QTRAD_RUN_RECONCILIATION_EVIDENCE_DIR": str(evidence_dir),
+        "QTRAD_RUN_RECONCILIATION_IMAGE": image,
+    }
+
+    planned = _run(
+        "reconcile-runs.sh",
+        environment,
+        "plan",
+        "pre-candidate",
+        "2026-07-14T03:05:33.653928Z",
+    )
+    executed = _run(
+        "reconcile-runs.sh",
+        environment,
+        "execute",
+        "pre-candidate",
+        plan_hash,
+    )
+
+    assert planned.returncode == 0, planned.stderr
+    assert planned.stdout.strip() == str(plan_path)
+    assert executed.returncode == 0, executed.stderr
+    assert len(calls.read_text().splitlines()) == 4
+
+
+@pytest.mark.parametrize(
+    ("label", "image"),
+    [
+        ("../escape", "example.invalid/qtrad@sha256:" + "a" * 64),
+        ("pre-candidate", "example.invalid/qtrad:latest"),
+    ],
+)
+def test_run_reconciliation_rejects_unsafe_identity_before_docker(
+    tmp_path: Path,
+    label: str,
+    image: str,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_called = tmp_path / "docker-called"
+    _write_executable(
+        fake_bin / "docker",
+        f"#!/usr/bin/env bash\nset -euo pipefail\ntouch '{docker_called}'\n",
+    )
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_DATABASE_PASSWORD=test-only\n")
+    (tmp_path / "compose.capture.yaml").write_text("services: {}\n")
+
+    result = _run(
+        "reconcile-runs.sh",
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_CAPTURE_ROOT": str(tmp_path),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_RUN_RECONCILIATION_EVIDENCE_DIR": str(tmp_path / "evidence"),
+            "QTRAD_RUN_RECONCILIATION_IMAGE": image,
+        },
+        "plan",
+        label,
+        "2026-07-14T03:05:33.653928Z",
     )
 
     assert result.returncode != 0

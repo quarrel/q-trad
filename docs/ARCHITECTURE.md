@@ -51,6 +51,16 @@ operator `FAIL`, rejects malformed or tampered input without emitting a decision
 `PASS` from failed automatic checks. Physical-storage comparison remains a later, separately hashed
 release-bound measurement.
 
+Pre-candidate ingestion rows abandoned by the superseded stop contract have a separate reviewed
+reconciliation path. A read-only command enumerates the complete `RUNNING` set for one IG demo
+configuration strictly before an operator cutoff and writes a bounded, self-hashed plan. Execution
+requires that exact hash, verifies capture source, database, universe and immutable tool-image
+identity, locks and rechecks
+the full eligible set under a brief run-table write lock, and atomically marks only those rows
+`FAILED`. Terminal rows cannot be finalised again. Reconciliation never deletes a run or
+touches raw/canonical data. The cutoff is retained as an asserted interruption upper bound rather
+than represented as a known stop timestamp; any current run at or after the cutoff is ineligible.
+
 PostgreSQL additionally publishes host port 15432 only on `127.0.0.1` for exceptional SSH-tunnel
 inspection. Migration `0004` supplies the non-login `qtrad_capture_reader` privilege role: it can
 select from canonical, reference, read-model and operations schemas, cannot access raw capture and

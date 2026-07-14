@@ -14,13 +14,19 @@ from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from qtrad.application.run_reconciliation import verify_run_reconciliation_plan_hash
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
 from qtrad.domain.market_data import BarProvenance, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
-from qtrad.domain.operations import AdapterHealth
+from qtrad.domain.operations import (
+    AdapterHealth,
+    RunReconciliationPlan,
+    RunReconciliationTarget,
+)
+from qtrad.domain.time import require_utc
 from qtrad.ports.storage import (
     AppendResult,
     AuditStore,
@@ -323,7 +329,7 @@ class PostgresAuditStore(AuditStore):
         if status not in {"COMPLETED", "FAILED", "STOPPED"}:
             raise ValueError("invalid terminal run status")
         async with self._engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     UPDATE ops.runs
@@ -331,6 +337,8 @@ class PostgresAuditStore(AuditStore):
                         finished_at = :finished_at,
                         detail = CAST(:detail AS jsonb)
                     WHERE run_id = :run_id
+                      AND status = 'RUNNING'
+                    RETURNING run_id
                     """
                 ),
                 {
@@ -340,6 +348,147 @@ class PostgresAuditStore(AuditStore):
                     "detail": json.dumps(detail, sort_keys=True),
                 },
             )
+            if result.scalar_one_or_none() != run_id.value:
+                raise RuntimeError("run does not exist or is already terminal")
+
+    async def database_name(self) -> str:
+        async with self._engine.connect() as connection:
+            value = (await connection.execute(text("SELECT current_database()"))).scalar_one()
+        if not isinstance(value, str) or not value:
+            raise TypeError("PostgreSQL current_database() did not return a non-empty string")
+        return value
+
+    async def stale_running_ingestion_runs(
+        self,
+        *,
+        cutoff: datetime,
+        environment: BrokerEnvironment,
+        configuration_hash: str,
+    ) -> tuple[RunReconciliationTarget, ...]:
+        require_utc(cutoff, "run reconciliation cutoff")
+        _require_sha256(configuration_hash, "run reconciliation configuration hash")
+        async with self._engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT run_id, started_at
+                        FROM ops.runs
+                        WHERE kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at < :cutoff
+                        ORDER BY started_at, run_id
+                        """
+                    ),
+                    {
+                        "cutoff": cutoff,
+                        "environment": environment.value,
+                        "configuration_hash": configuration_hash,
+                    },
+                )
+            ).mappings()
+            return tuple(
+                RunReconciliationTarget(
+                    run_id=RunId(row["run_id"]),
+                    started_at=_utc(row["started_at"]),
+                )
+                for row in rows
+            )
+
+    async def reconcile_stale_ingestion_runs(
+        self,
+        plan: RunReconciliationPlan,
+        *,
+        reconciled_at: datetime,
+    ) -> int:
+        """Atomically fail only the complete, unchanged target set in a reviewed plan."""
+
+        verify_run_reconciliation_plan_hash(plan)
+        require_utc(reconciled_at, "run reconciliation execution time")
+        if reconciled_at < plan.created_at:
+            raise ValueError("run reconciliation execution predates its reviewed plan")
+        detail: dict[str, JsonValue] = {
+            "previous_status": "RUNNING",
+            "reason_code": plan.reason_code,
+            "reconciliation_plan_hash": plan.plan_hash,
+            "reconciled_at": _utc_text(reconciled_at),
+            "finished_at_basis": plan.finished_at_basis,
+            "cutoff": _utc_text(plan.cutoff),
+        }
+        async with self._engine.begin() as connection:
+            await connection.execute(text("LOCK TABLE ops.runs IN SHARE ROW EXCLUSIVE MODE"))
+            database_name = (
+                await connection.execute(text("SELECT current_database()"))
+            ).scalar_one()
+            if database_name != plan.database_name:
+                raise ValueError("run reconciliation plan targets a different database")
+            rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT run_id, started_at
+                        FROM ops.runs
+                        WHERE kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at < :cutoff
+                        ORDER BY started_at, run_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "cutoff": plan.cutoff,
+                        "environment": plan.environment.value,
+                        "configuration_hash": plan.configuration_hash,
+                    },
+                )
+            ).mappings()
+            observed = tuple(
+                RunReconciliationTarget(
+                    run_id=RunId(row["run_id"]),
+                    started_at=_utc(row["started_at"]),
+                )
+                for row in rows
+            )
+            if observed != plan.targets:
+                raise ValueError(
+                    "run reconciliation target set changed or omitted an eligible stale run"
+                )
+            for target in plan.targets:
+                updated = await connection.execute(
+                    text(
+                        """
+                        UPDATE ops.runs
+                        SET status = :status,
+                            finished_at = :finished_at,
+                            detail = CAST(:detail AS jsonb)
+                        WHERE run_id = :run_id
+                          AND kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at = :started_at
+                          AND started_at < :cutoff
+                        RETURNING run_id
+                        """
+                    ),
+                    {
+                        "run_id": target.run_id.value,
+                        "status": plan.terminal_status,
+                        "finished_at": plan.cutoff,
+                        "detail": json.dumps(detail, sort_keys=True),
+                        "environment": plan.environment.value,
+                        "configuration_hash": plan.configuration_hash,
+                        "started_at": target.started_at,
+                        "cutoff": plan.cutoff,
+                    },
+                )
+                if updated.scalar_one_or_none() != target.run_id.value:
+                    raise RuntimeError("run reconciliation target changed while locked")
+        return len(plan.targets)
 
     async def register_backfill_plan(
         self,
@@ -1110,6 +1259,11 @@ def _utc(value: object) -> datetime:
     if not isinstance(value, datetime):
         raise TypeError("database timestamp is not a datetime")
     return value.astimezone(UTC)
+
+
+def _utc_text(value: datetime) -> str:
+    require_utc(value, "database evidence time")
+    return value.isoformat().replace("+00:00", "Z")
 
 
 def _provider_listing(row: Mapping[str, object]) -> ProviderListing:

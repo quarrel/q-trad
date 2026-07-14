@@ -37,6 +37,39 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     ("arguments", "target", "expected"),
     [
         (
+            [
+                "runs",
+                "reconcile-plan",
+                "--universe",
+                "config/capture-v1.toml",
+                "--cutoff",
+                "2026-07-14T03:05:33.653928Z",
+                "--output",
+                "run-reconciliation.json",
+            ],
+            "_plan_run_reconciliation",
+            (
+                ("universe_path", Path("config/capture-v1.toml")),
+                ("cutoff", datetime(2026, 7, 14, 3, 5, 33, 653928, tzinfo=UTC)),
+                ("output_path", Path("run-reconciliation.json")),
+            ),
+        ),
+        (
+            [
+                "runs",
+                "reconcile",
+                "--plan",
+                "run-reconciliation.json",
+                "--confirm-plan-hash",
+                "a" * 64,
+            ],
+            "_reconcile_runs",
+            (
+                ("plan_path", Path("run-reconciliation.json")),
+                ("confirmed_plan_hash", "a" * 64),
+            ),
+        ),
+        (
             ["instruments", "sync", "--universe", "candidate.toml"],
             "_sync_instruments",
             (("universe_path", Path("candidate.toml")),),

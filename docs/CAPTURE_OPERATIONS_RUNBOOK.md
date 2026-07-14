@@ -338,6 +338,59 @@ container restart and host reboot. The ingestion container must receive `SIGINT`
 configured 90-second grace period so the interrupted run is terminal before its replacement
 starts.
 
+For this first candidate only, five pre-candidate ingestion rows were abandoned by the superseded
+`SIGTERM` stop contract. At or after the qualification not-before time, reconcile them before taking
+the automatic evidence snapshot. Publish and pull a reviewed immutable image containing the
+reconciliation command, but do not deploy it or restart any collector role. The guarded helper runs
+only a one-off `--no-deps --pull never` command against the existing database:
+
+```bash
+TOOL_ROOT=/home/opc/q-trad-source
+RECONCILIATION_IMAGE='<reviewed repository@sha256:digest>'
+sudo docker pull "$RECONCILIATION_IMAGE"
+
+sudo env \
+  QTRAD_CAPTURE_ROOT=/opt/qtrad-capture \
+  QTRAD_CAPTURE_ENV=/etc/qtrad/capture.env \
+  QTRAD_RUN_RECONCILIATION_EVIDENCE_DIR=/var/lib/qtrad-capture/qualification \
+  QTRAD_RUN_RECONCILIATION_IMAGE="$RECONCILIATION_IMAGE" \
+  "$TOOL_ROOT/ops/capture/reconcile-runs.sh" \
+  plan pre-candidate 2026-07-14T03:05:33.653928Z
+```
+
+Review the root-only plan. Require the documented capture source, `qtrad_capture`, `capture-v1`,
+the exact configuration hash, the reviewed application version and `RECONCILIATION_IMAGE`, terminal
+status `FAILED`, reason
+`PRE_CANDIDATE_PROCESS_INTERRUPTED`, time basis
+`OPERATOR_ASSERTED_CUTOFF_UPPER_BOUND`, and exactly the five known stale run IDs. The current
+candidate starts after the strict cutoff and must not appear. Then repeat the printed hash before
+execution:
+
+```bash
+PLAN=/var/lib/qtrad-capture/qualification/run-reconciliation-pre-candidate.json
+sudo jq '{plan_hash,cutoff,capture_source_id,database_name,universe_name,
+  configuration_hash,application_version,application_image,terminal_status,
+  reason_code,finished_at_basis,targets}' "$PLAN"
+PLAN_HASH="$(sudo jq -er .plan_hash "$PLAN")"
+
+sudo env \
+  QTRAD_CAPTURE_ROOT=/opt/qtrad-capture \
+  QTRAD_CAPTURE_ENV=/etc/qtrad/capture.env \
+  QTRAD_RUN_RECONCILIATION_EVIDENCE_DIR=/var/lib/qtrad-capture/qualification \
+  QTRAD_RUN_RECONCILIATION_IMAGE="$RECONCILIATION_IMAGE" \
+  "$TOOL_ROOT/ops/capture/reconcile-runs.sh" \
+  execute pre-candidate "$PLAN_HASH"
+```
+
+Execution re-verifies the plan hash, capture/universe/database and immutable tool-image identity,
+plus the complete eligible row set under lock. Any omitted, added, changed or already-terminal
+target aborts the transaction.
+On success, only those rows become `FAILED`; `finished_at` is explicitly an asserted upper bound,
+not an invented exact stop time. Raw messages, canonical events and the candidate run are untouched.
+Retain the plan with qualification evidence and confirm `/api/v1/runs` now contains exactly one
+`RUNNING` row, the current candidate. Do not reuse this exceptional procedure for a healthy
+terminal run.
+
 At or after the recorded not-before time, create one non-overwriting automatic evidence snapshot
 from a reviewed detached checkout. This does not deploy that checkout: `QTRAD_CAPTURE_ROOT` remains
 the active pinned release, and the tool makes only loopback GET requests, Compose `ps`, one

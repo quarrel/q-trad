@@ -16,6 +16,7 @@ from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConfl
 from qtrad.api.app import create_app, engine_from_app
 from qtrad.application.backfill_planning import backfill_plan_payload, build_backfill_plan
 from qtrad.application.ingestion import IngestionService
+from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -31,6 +32,7 @@ from qtrad.domain.market_data import (
     MarketQuote,
     PriceBasis,
 )
+from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.ports.market_data import MarketDataRecord
 from qtrad.ports.storage import ResearchManifest
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_feed_page
@@ -971,3 +973,137 @@ async def test_configuration_identity_constraints_are_validated_and_reject_bad_n
             await transaction.rollback()
 
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    cutoff = datetime(2026, 7, 14, 3, 5, 33, 653928, tzinfo=UTC)
+    configuration_hash = uuid4().hex * 2
+    mismatch_hash = uuid4().hex * 2
+    created_run_ids = []
+    try:
+        first = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=configuration_hash,
+            started_at=cutoff - timedelta(minutes=2),
+        )
+        second = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=configuration_hash,
+            started_at=cutoff - timedelta(minutes=1),
+        )
+        current = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=configuration_hash,
+            started_at=cutoff + timedelta(seconds=1),
+        )
+        created_run_ids.extend((first.value, second.value, current.value))
+        targets = await store.stale_running_ingestion_runs(
+            cutoff=cutoff,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=configuration_hash,
+        )
+        plan = build_run_reconciliation_plan(
+            targets=targets,
+            created_at=cutoff + timedelta(hours=1),
+            cutoff=cutoff,
+            capture_source_id="integration-capture",
+            database_name=await store.database_name(),
+            universe_name="capture-v1",
+            configuration_hash=configuration_hash,
+            application_version="0.1.0",
+            application_image="example.invalid/qtrad@sha256:" + "a" * 64,
+            environment=BrokerEnvironment.IG_DEMO,
+        )
+
+        reconciled = await store.reconcile_stale_ingestion_runs(
+            plan,
+            reconciled_at=cutoff + timedelta(hours=2),
+        )
+
+        assert reconciled == 2
+        rows = await store.query(
+            """
+            SELECT run_id, status, finished_at, detail
+            FROM ops.runs
+            WHERE configuration_hash = :configuration_hash
+            ORDER BY started_at
+            """,
+            {"configuration_hash": configuration_hash},
+        )
+        assert [row["status"] for row in rows] == ["FAILED", "FAILED", "RUNNING"]
+        for row in rows[:2]:
+            assert row["finished_at"] == cutoff
+            assert row["detail"] == {
+                "previous_status": "RUNNING",
+                "reason_code": "PRE_CANDIDATE_PROCESS_INTERRUPTED",
+                "reconciliation_plan_hash": plan.plan_hash,
+                "reconciled_at": "2026-07-14T05:05:33.653928Z",
+                "finished_at_basis": "OPERATOR_ASSERTED_CUTOFF_UPPER_BOUND",
+                "cutoff": "2026-07-14T03:05:33.653928Z",
+            }
+        assert rows[2]["finished_at"] is None
+        assert rows[2]["detail"] == {}
+        with pytest.raises(RuntimeError, match="already terminal"):
+            await store.finish_run(
+                first,
+                status="STOPPED",
+                finished_at=cutoff + timedelta(hours=3),
+                detail={},
+            )
+
+        omitted = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=mismatch_hash,
+            started_at=cutoff - timedelta(minutes=3),
+        )
+        planned = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=mismatch_hash,
+            started_at=cutoff - timedelta(minutes=4),
+        )
+        created_run_ids.extend((omitted.value, planned.value))
+        mismatch_targets = await store.stale_running_ingestion_runs(
+            cutoff=cutoff,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=mismatch_hash,
+        )
+        incomplete = build_run_reconciliation_plan(
+            targets=mismatch_targets[:1],
+            created_at=cutoff + timedelta(hours=1),
+            cutoff=cutoff,
+            capture_source_id="integration-capture",
+            database_name=await store.database_name(),
+            universe_name="capture-v1",
+            configuration_hash=mismatch_hash,
+            application_version="0.1.0",
+            application_image="example.invalid/qtrad@sha256:" + "a" * 64,
+            environment=BrokerEnvironment.IG_DEMO,
+        )
+        with pytest.raises(ValueError, match="omitted an eligible stale run"):
+            await store.reconcile_stale_ingestion_runs(
+                incomplete,
+                reconciled_at=cutoff + timedelta(hours=2),
+            )
+        untouched = await store.query(
+            "SELECT status FROM ops.runs WHERE configuration_hash = :configuration_hash",
+            {"configuration_hash": mismatch_hash},
+        )
+        assert {row["status"] for row in untouched} == {"RUNNING"}
+    finally:
+        if created_run_ids:
+            async with engine.begin() as connection:
+                for run_id in created_run_ids:
+                    await connection.execute(
+                        text("DELETE FROM ops.runs WHERE run_id = :run_id"),
+                        {"run_id": run_id},
+                    )
+        await engine.dispose()

@@ -33,6 +33,7 @@ from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_fe
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.replay import semantic_bar_hash
+from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan
@@ -58,6 +59,10 @@ from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
     load_research_snapshot_import,
     research_snapshot_metadata,
+)
+from qtrad.runtime.run_reconciliation import (
+    load_run_reconciliation_plan,
+    write_run_reconciliation_plan,
 )
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.storage_measurement import (
@@ -98,6 +103,17 @@ def _utc_minute_argument(value: str) -> datetime:
     return parsed
 
 
+def _utc_timestamp_argument(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise argparse.ArgumentTypeError("timestamp must be ISO-8601 UTC") from error
+    offset = parsed.utcoffset()
+    if parsed.tzinfo is None or offset is None or offset.total_seconds() != 0:
+        raise argparse.ArgumentTypeError("timestamp must be ISO-8601 UTC")
+    return parsed
+
+
 def _require_sha256_argument(value: str, field: str) -> None:
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError(f"{field} must be lower-case SHA-256")
@@ -110,6 +126,20 @@ def build_parser() -> argparse.ArgumentParser:
     db = subparsers.add_parser("db", help="database operations")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("upgrade", help="apply migrations and seed instruments")
+
+    runs = subparsers.add_parser("runs", help="operational run evidence")
+    runs_sub = runs.add_subparsers(dest="runs_command", required=True)
+    reconcile_plan = runs_sub.add_parser(
+        "reconcile-plan", help="plan exact stale ingestion-run reconciliation"
+    )
+    reconcile_plan.add_argument("--universe", type=Path)
+    reconcile_plan.add_argument("--cutoff", type=_utc_timestamp_argument, required=True)
+    reconcile_plan.add_argument("--output", type=Path, required=True)
+    reconcile = runs_sub.add_parser(
+        "reconcile", help="execute one confirmed stale-run reconciliation plan"
+    )
+    reconcile.add_argument("--plan", type=Path, required=True)
+    reconcile.add_argument("--confirm-plan-hash", required=True)
 
     instruments = subparsers.add_parser("instruments", help="instrument operations")
     instrument_sub = instruments.add_subparsers(dest="instrument_command", required=True)
@@ -244,6 +274,25 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "db" and args.db_command == "upgrade":
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
+    elif args.command == "runs" and args.runs_command == "reconcile-plan":
+        asyncio.run(
+            _plan_run_reconciliation(
+                settings,
+                clock,
+                universe_path=args.universe,
+                cutoff=args.cutoff,
+                output_path=args.output,
+            )
+        )
+    elif args.command == "runs" and args.runs_command == "reconcile":
+        asyncio.run(
+            _reconcile_runs(
+                settings,
+                clock,
+                plan_path=args.plan,
+                confirmed_plan_hash=args.confirm_plan_hash,
+            )
+        )
     elif args.command == "instruments" and args.instrument_command == "sync":
         asyncio.run(_sync_instruments(settings, clock, universe_path=args.universe))
     elif args.command == "instruments" and args.instrument_command == "review":
@@ -424,6 +473,104 @@ async def _seed(settings: Settings) -> None:
         await PostgresAuditStore(engine).seed_instruments(_capture_universe(settings).instruments)
     finally:
         await engine.dispose()
+
+
+async def _plan_run_reconciliation(
+    settings: Settings,
+    clock: Clock,
+    *,
+    universe_path: Path | None,
+    cutoff: datetime,
+    output_path: Path,
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"run reconciliation plan output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"run reconciliation plan output directory does not exist: {output_path.parent}"
+        )
+    universe = load_capture_universe(universe_path or settings.capture_universe_path)
+    engine = _engine(settings)
+    try:
+        store = PostgresAuditStore(engine)
+        database_name = await store.database_name()
+        targets = await store.stale_running_ingestion_runs(
+            cutoff=cutoff,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=universe.configuration_hash,
+        )
+        if not targets:
+            raise ValueError("no eligible stale ingestion runs exist before the cutoff")
+        plan = build_run_reconciliation_plan(
+            targets=targets,
+            created_at=clock.now(),
+            cutoff=cutoff,
+            capture_source_id=settings.capture_source_id,
+            database_name=database_name,
+            universe_name=universe.name,
+            configuration_hash=universe.configuration_hash,
+            application_version=__version__,
+            application_image=settings.image,
+            environment=BrokerEnvironment.IG_DEMO,
+        )
+        write_run_reconciliation_plan(output_path, plan)
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_hash": plan.plan_hash,
+                "target_count": len(plan.targets),
+                "cutoff": plan.cutoff.isoformat().replace("+00:00", "Z"),
+                "application_image": plan.application_image,
+                "executed": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _reconcile_runs(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_path: Path,
+    confirmed_plan_hash: str,
+) -> None:
+    _require_sha256_argument(confirmed_plan_hash, "run reconciliation plan hash")
+    plan = load_run_reconciliation_plan(plan_path)
+    if confirmed_plan_hash != plan.plan_hash:
+        raise ValueError("confirmed run reconciliation hash does not match the reviewed plan")
+    universe = _capture_universe(settings)
+    if settings.capture_source_id != plan.capture_source_id:
+        raise ValueError("run reconciliation plan targets a different capture source")
+    if (
+        universe.name != plan.universe_name
+        or universe.configuration_hash != plan.configuration_hash
+    ):
+        raise ValueError("run reconciliation plan targets a different capture universe")
+    if __version__ != plan.application_version or settings.image != plan.application_image:
+        raise ValueError("run reconciliation plan targets a different application image")
+    engine = _engine(settings)
+    try:
+        reconciled = await PostgresAuditStore(engine).reconcile_stale_ingestion_runs(
+            plan,
+            reconciled_at=clock.now(),
+        )
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_hash": plan.plan_hash,
+                "reconciled_run_count": reconciled,
+                "terminal_status": plan.terminal_status,
+                "finished_at_basis": plan.finished_at_basis,
+                "application_image": plan.application_image,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _sync_instruments(
