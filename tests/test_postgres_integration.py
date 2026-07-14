@@ -21,8 +21,6 @@ from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import (
     INITIAL_INSTRUMENTS,
-    AssetClass,
-    Instrument,
     ProductType,
     ProviderListing,
 )
@@ -182,15 +180,7 @@ async def test_listing_validation_atomically_supersedes_epics_and_rebuilds() -> 
     engine = create_async_engine(DATABASE_URL)
     store = PostgresAuditStore(engine)
     suffix = uuid4().hex
-    instrument = Instrument(
-        instrument_id=InstrumentId(f"fx:listing-{suffix}"),
-        display_name="Listing projection fixture",
-        asset_class=AssetClass.FX,
-        base_currency="FIX",
-        quote_currency="USD",
-        search_aliases=("Listing projection fixture",),
-    )
-    await store.seed_instruments((instrument,))
+    instrument = INITIAL_INSTRUMENTS[0]
     second_observed_at = datetime.now(UTC) - timedelta(minutes=1)
     first_observed_at = second_observed_at - timedelta(minutes=1)
     first = ProviderListing(
