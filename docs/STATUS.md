@@ -268,3 +268,12 @@ outside the current data-only phase until explicitly admitted by a later plan up
   complete readiness, lag, fresh backup/restore and disk evidence and published its healthy
   OCI metric set. The stack stopped cleanly afterward; capture and all timers remain
   disabled.
+- Application rollback was exercised without changing schema or canonical data: the saved
+  prior digest reached seven-of-seven caught-up readiness, then the restored current digest
+  did the same. The current digest remains pinned and the rollback reference remains
+  root-only.
+- A clean host reboot recovered Tailscale SSH, Docker, the Beszel agent, the reviewed release
+  symlink and the dedicated XFS PostgreSQL mount with no failed units. The post-reboot current
+  image returned seven fresh instruments with global/projection positions exactly caught up
+  at 1,756, then stopped cleanly. Capture and all operations timers remain disabled pending
+  the Bastion/alarm confirmation and start of the 72-hour qualification.

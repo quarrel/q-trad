@@ -77,8 +77,13 @@ Implementation status:
 - Complete: the pinned ARM release applied migrations, reached all-seven readiness with an
   exactly caught-up projection, published a fully healthy OCI metric set, and stopped
   cleanly under systemd/Compose supervision.
-- Pending qualification: reboot/digest rollback gates followed by the 72-hour unattended
-  `capture-v1` run. `capture-v2` remains excluded.
+- Complete: digest rollback reached all-seven readiness on both the saved prior image and
+  the restored current image without rolling back schema or canonical data. Clean host
+  reboot recovered Tailscale, Docker, Beszel, the release and XFS database mount; the
+  post-reboot current image again reached caught-up all-seven readiness and stopped cleanly.
+- Pending qualification: confirm the operator's Bastion recovery route and OCI alarms,
+  then enable operations timers and begin the 72-hour unattended `capture-v1` run.
+  `capture-v2` remains excluded.
 
 ## WP0 — documentation and scaffold
 
