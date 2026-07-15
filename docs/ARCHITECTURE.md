@@ -51,6 +51,12 @@ operator `FAIL`, rejects malformed or tampered input without emitting a decision
 `PASS` from failed automatic checks. Physical-storage comparison remains a later, separately hashed
 release-bound measurement.
 
+Full-window log preservation is supporting evidence rather than a third decision record. A
+post-snapshot host helper verifies the automatic snapshot hash, derives its exact interval and binds
+filtered container identity plus byte-bounded Docker and systemd logs in a non-overwriting root-only
+bundle. Its manifest authenticates retained files and effective image/restart/logging identity; only
+the operator review determines coverage and meaning.
+
 Pre-candidate ingestion rows abandoned by the superseded stop contract have a separate reviewed
 reconciliation path. A read-only command enumerates the complete `RUNNING` set for one IG demo
 configuration strictly before an operator cutoff and writes a bounded, self-hashed plan. Execution
@@ -127,6 +133,9 @@ bounded evidence references for every gap. `EXPECTED_MARKET_INACTIVITY` is pass-
 same-generation subscription continuity, absence of recovery/drop/failure, spontaneous resumption
 before the stale-reconnect threshold and relevant market/provider context are retained; otherwise
 the gap remains `UNEXPLAINED` and qualification cannot pass.
+The companion log bundle verifies and binds that automatic record before reading the exact
+candidate-to-snapshot interval. It retains only filtered inspection identity and bounded log files;
+container environments and rendered Compose configuration are excluded.
 
 Post-window historical corroboration is a separate offline evidence path. A reviewed IG demo plan
 runs only in a writable database imported from a verified collector snapshot that postdates the

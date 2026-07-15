@@ -443,6 +443,37 @@ This review is distinct from ADR 0018's later physical-storage comparison. Never
 JSON; copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered
 output name for a later retry; the helper will not overwrite the first attempt.
 
+Immediately after the automatic snapshot, and before any restart, deployment or other lifecycle
+operation, preserve the exact log window in a separate root-only bundle:
+
+```bash
+AUTOMATIC=/var/lib/qtrad-capture/qualification/capture-v1-final.json
+LOG_BUNDLE=/var/lib/qtrad-capture/qualification/capture-v1-log-bundle
+
+sudo env \
+  QTRAD_CAPTURE_ROOT=/opt/qtrad-capture \
+  QTRAD_CAPTURE_ENV=/etc/qtrad/capture.env \
+  "$TOOL_ROOT/ops/capture/qualification-log-evidence.sh" \
+  "$AUTOMATIC" "$LOG_BUNDLE"
+
+sudo jq '{schema,qualification_evidence_sha256,window_start,window_end,
+  tool_sha256,manifest_sha256,containers,sources}' "$LOG_BUNDLE/manifest.json"
+```
+
+The helper verifies the automatic snapshot's self-hash and derives the candidate start and snapshot
+time from it; do not transcribe a second window. It requires the three current Compose services to be
+running, proves that the application containers use the snapshot's immutable image, and captures
+filtered container identity, timestamped Docker logs and the `docker`, `qtrad-capture` and `tailscaled`
+systemd journals. Each source is capped at 32 MiB by default while it is read. The manifest binds the
+automatic evidence hash, helper hash, container image/restart/logging identities and every retained
+file hash. The directory is non-overwriting mode `0700`; its files are mode `0600`.
+
+This bundle is retained operator evidence, not a third qualification decision and not an automated
+claim that the logs are complete or healthy. Review the first/last timestamps, log-rotation metadata,
+reboots and all relevant messages against the full candidate window. Reference the manifest path and
+`manifest_sha256` from bounded gap/log reviews. Never commit the bundle or raw logs to Git, and never
+edit a retained file; a failed capture gets a new output directory.
+
 Create a separate operator review file. It must bind the automatic evidence hash, use canonical UTC
 timestamps, cover the full candidate-to-snapshot window for logs and monitoring, and classify every
 reported gap exactly once. `UNEXPLAINED` cannot pass. Evidence references are stable, non-secret
@@ -460,13 +491,13 @@ labels or paths to retained screenshots/reports; do not paste unbounded logs int
       "gaps": [],
       "notes": "The automatic evidence contains no candidate-window gaps."
     },
-    "container_log_history": {
-      "decision": "PASS",
-      "window_start": "2026-07-14T03:05:33Z",
-      "window_end": "<automatic generated_at>",
-      "evidence_refs": ["bounded-journal-review-20260717.txt"],
-      "notes": "No terminal failure, traceback or unexplained restart was present."
-    },
+      "container_log_history": {
+        "decision": "PASS",
+        "window_start": "2026-07-14T03:05:33Z",
+        "window_end": "<automatic generated_at>",
+        "evidence_refs": ["capture-v1-log-bundle/manifest.json#sha256:<manifest_sha256>"],
+        "notes": "No terminal failure, traceback or unexplained restart was present."
+      },
     "monitoring_history": {
       "decision": "PASS",
       "window_start": "2026-07-14T03:05:33Z",

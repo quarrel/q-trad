@@ -83,6 +83,13 @@ sign-off; they must not be silently deleted or presented as successful runs.
   The historical service is a distinct provider path, so either result is corroborating evidence
   only: it neither repairs a live gap nor replaces the continuity, log and monitoring review required
   by ADR 0021.
+- A read-only retention audit at `2026-07-15T02:44:04Z` found Docker's `local` logging driver with
+  effective `max-file=5` and `max-size=10m` for all three collector containers. Each still had one
+  retained log file: ingestion was 19,337 bytes, API 325,519 bytes and PostgreSQL 126,679 bytes.
+  Their retained histories began at candidate startup; the ingestion log's last entry was earlier
+  because that process emits bounded lifecycle/warning events rather than a heartbeat. The system
+  journal occupied 8 MiB and retained the candidate boot. These observed volumes were far below
+  rotation capacity, so no logging change was made during the frozen window.
 
 The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
 After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into
@@ -111,6 +118,14 @@ full-window log/monitoring periods and one classification for every candidate ga
 second self-hashed, non-overwriting `PASS` or `FAIL` record. Invalid or tampered input produces no
 decision record; a valid failed review is preserved and exits non-zero. This tool is also undeployed
 and performs no collector, database, OCI or provider I/O.
+
+The locally prepared `ops/capture/qualification-log-evidence.sh` verifies and binds the exact
+automatic snapshot, derives its candidate-to-snapshot interval, and writes one root-only,
+non-overwriting bundle of filtered container identities, bounded timestamped container logs and the
+three relevant systemd journals. Its self-hashed manifest records every retained file hash and the
+effective image, restart and log-rotation identity. It must run immediately after the automatic
+snapshot and before later lifecycle work. The bundle supports, but cannot perform, the explicit
+full-window operator review and must never be committed to Git.
 
 The locally prepared `runs reconcile-plan`/`runs reconcile` path closes the known pre-candidate run
 record issue without deleting evidence or guessing a clean stop. Its first step is read-only and

@@ -130,11 +130,16 @@ Implementation status:
           without a causal classification. Formatting, Ruff, both type checkers, ShellCheck and all
           288 tests pass locally against a disposable database migrated through `0009`. The real
           provider query remains pending the window end.
-          - Complete locally and undeployed: `qualification gap-plan` now derives the common
-            minute-aligned range and sorted distinct instruments directly from the automatic evidence.
-            It requires the exact verified post-evidence snapshot target/source/universe and the
-            repository's single current Alembic head before delegating to the existing listing-bound
-            plan writer. Operator allowance entry, review, registration and hash confirmation remain.
+            - Complete locally and undeployed: `qualification gap-plan` now derives the common
+              minute-aligned range and sorted distinct instruments directly from the automatic evidence.
+              It requires the exact verified post-evidence snapshot target/source/universe and the
+              repository's single current Alembic head before delegating to the existing listing-bound
+              plan writer. Operator allowance entry, review, registration and hash confirmation remain.
+            - Complete locally and undeployed: a post-window log-evidence helper verifies and binds the
+              automatic qualification snapshot, derives its exact candidate interval and streams bounded
+              Docker/systemd history into a root-only, non-overwriting bundle. Filtered inspection records
+              bind immutable image, restart and effective logging identity without exposing container
+              environment. The bundle supports the explicit operator review and cannot qualify the release.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.

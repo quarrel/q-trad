@@ -554,11 +554,18 @@ outside the current data-only phase until explicitly admitted by a later plan up
           actual historical request remains deferred until the frozen interval closes. Formatting,
           Ruff, both type checkers, ShellCheck and all 288 tests pass locally against a disposable
           database migrated through `0009`.
-          - The local `qualification gap-plan` companion removes manual gap-range and instrument
-            transcription. It verifies the automatic evidence and exact post-evidence snapshot
-            database/source/universe, requires the repository's current Alembic head, then delegates
-            the derived minute-aligned range and sorted instruments to the existing plan writer.
-            Allowance entry and explicit reviewed hash confirmation remain operator gates.
+            - The local `qualification gap-plan` companion removes manual gap-range and instrument
+              transcription. It verifies the automatic evidence and exact post-evidence snapshot
+              database/source/universe, requires the repository's current Alembic head, then delegates
+              the derived minute-aligned range and sorted instruments to the existing plan writer.
+              Allowance entry and explicit reviewed hash confirmation remain operator gates.
+            - A local post-window log-evidence helper now verifies the automatic snapshot's self-hash,
+              derives its exact interval and writes a root-only, non-overwriting bundle of filtered
+              container identities and byte-bounded Docker/systemd logs. The manifest binds every file,
+              the helper and the automatic evidence; it excludes container environments and rendered
+              Compose configuration and cannot perform the operator review. A read-only remote audit found
+              the current retained logs far below their effective five-by-10-MiB rotation capacity, so the
+              frozen collector was not changed.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

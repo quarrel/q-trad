@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -936,6 +937,219 @@ def test_qualification_finaliser_rejects_unsupported_or_unevidenced_gap_pass(
 
     result = _run(
         "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_qualification_log_bundle_is_bounded_hash_verified_and_read_only(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    root = tmp_path / "release"
+    root.mkdir()
+    (root / "compose.capture.yaml").write_text("services: {}\n")
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_NON_SECRET_TEST=1\n")
+    calls = tmp_path / "calls"
+    image = "example.invalid/qtrad@sha256:" + "1" * 64
+    postgres_image = "postgres@sha256:" + "2" * 64
+    automatic_identity = {
+        "schema": "qtrad-capture-qualification-v1",
+        "candidate_start": "2026-07-14T03:05:33Z",
+        "generated_at": "2026-07-17T03:05:33Z",
+        "release": {"actual_image": image},
+    }
+    automatic_canonical = json.dumps(automatic_identity, separators=(",", ":"), sort_keys=True)
+    automatic_sha256 = hashlib.sha256(automatic_canonical.encode()).hexdigest()
+    automatic_evidence = tmp_path / "automatic.json"
+    automatic_evidence.write_text(
+        json.dumps({**automatic_identity, "evidence_sha256": automatic_sha256})
+    )
+    compose_rows = json.dumps(
+        [
+            {"Service": "api", "State": "running", "Name": "qtrad-capture-api-1"},
+            {"Service": "db", "State": "running", "Name": "qtrad-capture-db-1"},
+            {"Service": "ingest", "State": "running", "Name": "qtrad-capture-ingest-1"},
+        ]
+    )
+    _write_executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\n' "$*" >> '{calls}'
+if [[ "$1" == compose && "$*" == *" ps --format json" ]]; then
+  printf '%s\n' '{compose_rows}'
+elif [[ "$1" == inspect ]]; then
+  name=$2
+  service=${{name#qtrad-capture-}}
+  service=${{service%-1}}
+  configured_image='{image}'
+  if [[ "$service" == db ]]; then configured_image='{postgres_image}'; fi
+  jq -cn \
+    --arg id "$(printf '%064d' 0)" \
+    --arg name "/$name" \
+    --arg configured_image "$configured_image" \
+    '[{{Id:$id,Name:$name,Created:"2026-07-14T03:06:00Z",RestartCount:0,
+       Config:{{Image:$configured_image}},Image:("sha256:" + ("3" * 64)),
+       State:{{StartedAt:"2026-07-14T03:06:00Z",Status:"running"}},
+       HostConfig:{{LogConfig:{{Type:"local",Config:{{"max-file":"5","max-size":"10m"}}}}}}}}]'
+elif [[ "$1" == logs ]]; then
+  if [[ "${{QTRAD_TEST_OVERSIZE:-0}}" == 1 ]]; then
+    printf '2026-07-14T03:06:01.000000000Z '
+    dd if=/dev/zero bs=1048576 count=1 status=none | tr '\0' x
+    printf '\n'
+  else
+    printf '%s\n' \
+      '2026-07-14T03:06:01.000000000Z {{"event":"started"}}' \
+      '2026-07-17T03:05:32.000000000Z {{"event":"observed"}}'
+  fi
+else
+  exit 70
+fi
+""",
+    )
+    _write_executable(
+        fake_bin / "journalctl",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf 'journalctl %s\n' "$*" >> '{calls}'
+printf '%s\n' \
+  '2026-07-14T03:06:02+0000 host systemd[1]: unit started' \
+  '2026-07-17T03:05:31+0000 host systemd[1]: unit healthy'
+""",
+    )
+    output = tmp_path / "qualification-logs"
+    environment = {
+        "PATH": f"{fake_bin}:{os.environ['PATH']}",
+        "QTRAD_CAPTURE_ROOT": str(root),
+        "QTRAD_CAPTURE_ENV": str(capture_env),
+        "QTRAD_QUALIFICATION_NOW": "2026-07-17T04:05:33Z",
+    }
+
+    result = _run(
+        "qualification-log-evidence.sh", environment, str(automatic_evidence), str(output)
+    )
+
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads((output / "manifest.json").read_text())
+    assert output.stat().st_mode & 0o777 == 0o700
+    assert manifest["schema"] == "qtrad-capture-qualification-log-bundle-v1"
+    assert manifest["qualification_evidence_sha256"] == automatic_sha256
+    assert len(manifest["containers"]) == 3
+    assert len(manifest["sources"]) == 6
+    identity = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
+    canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
+    assert hashlib.sha256(canonical.encode()).hexdigest() == manifest["manifest_sha256"]
+    for source in manifest["sources"]:
+        path = output / source["file"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == source["sha256"]
+        assert path.stat().st_mode & 0o777 == 0o600
+    for container in manifest["containers"]:
+        path = output / container["file"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == container["sha256"]
+        assert path.stat().st_mode & 0o777 == 0o600
+    assert not (output / "compose.json").exists()
+    assert (output / "manifest.json").stat().st_mode & 0o777 == 0o600
+    recorded_calls = calls.read_text()
+    assert "logs --timestamps --since " in recorded_calls
+    assert " restart " not in recorded_calls
+    assert " stop " not in recorded_calls
+    assert " up " not in recorded_calls
+
+    repeated = _run(
+        "qualification-log-evidence.sh", environment, str(automatic_evidence), str(output)
+    )
+    assert repeated.returncode != 0
+
+    oversized_output = tmp_path / "oversized-qualification-logs"
+    oversized = _run(
+        "qualification-log-evidence.sh",
+        {
+            **environment,
+            "QTRAD_QUALIFICATION_LOG_MAX_BYTES": "1048576",
+            "QTRAD_TEST_OVERSIZE": "1",
+        },
+        str(automatic_evidence),
+        str(oversized_output),
+    )
+    assert oversized.returncode != 0
+    assert not oversized_output.exists()
+
+
+def test_qualification_log_bundle_refuses_a_premature_window(tmp_path: Path) -> None:
+    root = tmp_path / "release"
+    root.mkdir()
+    (root / "compose.capture.yaml").write_text("services: {}\n")
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_NON_SECRET_TEST=1\n")
+    image = "example.invalid/qtrad@sha256:" + "1" * 64
+    automatic_identity = {
+        "schema": "qtrad-capture-qualification-v1",
+        "candidate_start": "2026-07-14T03:05:33Z",
+        "generated_at": "2026-07-17T03:05:33Z",
+        "release": {"actual_image": image},
+    }
+    automatic_canonical = json.dumps(automatic_identity, separators=(",", ":"), sort_keys=True)
+    automatic_evidence = tmp_path / "automatic.json"
+    automatic_evidence.write_text(
+        json.dumps(
+            {
+                **automatic_identity,
+                "evidence_sha256": hashlib.sha256(automatic_canonical.encode()).hexdigest(),
+            }
+        )
+    )
+    output = tmp_path / "qualification-logs"
+
+    result = _run(
+        "qualification-log-evidence.sh",
+        {
+            "QTRAD_CAPTURE_ROOT": str(root),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_QUALIFICATION_NOW": "2026-07-17T03:05:32Z",
+        },
+        str(automatic_evidence),
+        str(output),
+    )
+
+    assert result.returncode != 0
+    assert not output.exists()
+
+
+def test_qualification_log_bundle_refuses_tampered_automatic_evidence(tmp_path: Path) -> None:
+    root = tmp_path / "release"
+    root.mkdir()
+    (root / "compose.capture.yaml").write_text("services: {}\n")
+    capture_env = tmp_path / "capture.env"
+    capture_env.write_text("QTRAD_NON_SECRET_TEST=1\n")
+    automatic_evidence = tmp_path / "automatic.json"
+    automatic_evidence.write_text(
+        json.dumps(
+            {
+                "schema": "qtrad-capture-qualification-v1",
+                "candidate_start": "2026-07-14T03:05:34Z",
+                "generated_at": "2026-07-17T03:05:33Z",
+                "release": {
+                    "actual_image": "example.invalid/qtrad@sha256:" + "1" * 64,
+                },
+                "evidence_sha256": "0" * 64,
+            }
+        )
+    )
+    output = tmp_path / "qualification-logs"
+
+    result = _run(
+        "qualification-log-evidence.sh",
+        {
+            "QTRAD_CAPTURE_ROOT": str(root),
+            "QTRAD_CAPTURE_ENV": str(capture_env),
+            "QTRAD_QUALIFICATION_NOW": "2026-07-17T04:05:33Z",
+        },
+        str(automatic_evidence),
+        str(output),
     )
 
     assert result.returncode != 0
