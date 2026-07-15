@@ -163,6 +163,30 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         ),
         (
             [
+                "qualification",
+                "gap-plan",
+                "--evidence",
+                "qualification.json",
+                "--snapshot-import-evidence",
+                "snapshot-import.json",
+                "--universe",
+                "config/capture-v1.toml",
+                "--remaining-allowance",
+                "500",
+                "--output",
+                "gap-plan.json",
+            ],
+            "_plan_qualification_gap_history",
+            (
+                ("evidence_path", Path("qualification.json")),
+                ("snapshot_import_path", Path("snapshot-import.json")),
+                ("universe_path", Path("config/capture-v1.toml")),
+                ("remaining_allowance", 500),
+                ("output_path", Path("gap-plan.json")),
+            ),
+        ),
+        (
+            [
                 "research",
                 "export",
                 "--universe",
@@ -320,6 +344,28 @@ def test_storage_qualification_dispatches_without_database_access(
         Path("candidate-review.json"),
         Path("qualification.json"),
     )
+
+
+@pytest.mark.asyncio
+async def test_gap_plan_requires_isolated_database_at_current_migration_head(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    engine = SimpleNamespace(dispose=AsyncMock())
+    store = SimpleNamespace(query=AsyncMock(return_value=[{"version_num": "0009"}]))
+    monkeypatch.setattr(cli, "_engine", lambda _: engine)
+    monkeypatch.setattr(cli, "PostgresAuditStore", lambda _: store)
+    monkeypatch.setattr(
+        cli.ScriptDirectory,
+        "from_config",
+        Mock(return_value=SimpleNamespace(get_current_head=Mock(return_value="0009"))),
+    )
+    settings = Settings(database_url="postgresql+asyncpg://qtrad@db/qtrad_research_test")
+
+    await cli._require_database_at_migration_head(settings)
+
+    store.query.return_value = [{"version_num": "0008"}]
+    with pytest.raises(RuntimeError, match="migration head"):
+        await cli._require_database_at_migration_head(settings)
 
 
 def test_database_upgrade_dispatches_migration_and_seed(

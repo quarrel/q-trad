@@ -21,7 +21,10 @@ result into the collector would conflate historical coverage with immutable obse
   database imported from a verified collector snapshot that postdates the automatic evidence.
 - One plan must cover every investigated gap's instrument and minute-aligned UTC interval, bind the
   exact effective listing versions and retain quota evidence. It never targets or repairs the
-  collector database or `read_model.data_gaps`.
+  collector database or `read_model.data_gaps`. `qualification gap-plan` derives that range and
+  instrument set from the self-hashed automatic evidence, requires a verified post-evidence snapshot
+  import into the configured `qtrad_research_*` database and proves the database is at the repository's
+  single current Alembic head before reading listings.
 - Export the exact plan interval through the version-two research manifest. An offline
   `qualification gap-history` command verifies the automatic evidence self-hash, configuration and
   capture source; the plan and completed BID/ASK/MID coverage; the snapshot import; the research

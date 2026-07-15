@@ -23,8 +23,11 @@ from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     load_qualification_evidence,
     load_qualification_gap_history_artifact,
+    qualification_gap_backfill_scope,
+    validate_qualification_gap_snapshot,
     write_qualification_gap_history_artifact,
 )
+from qtrad.runtime.research_snapshot import load_research_snapshot_import
 from tests.test_quota_replay import sample_bar
 
 _CONFIGURATION_HASH = "a" * 64
@@ -159,6 +162,60 @@ def _metadata(evidence: QualificationEvidence, plan: BackfillPlan) -> dict[str, 
         },
         "historical_coverage": {"records": coverage},
     }
+
+
+def _snapshot_import(tmp_path: Path, *, source_created_at: str = "2026-07-17T04:10:00Z"):
+    identity = {
+        "schema": "qtrad-research-snapshot-import-v1",
+        "imported_at": "2026-07-17T04:20:00Z",
+        "target_database": "qtrad_research_capture_20260717",
+        "source_manifest_schema": "qtrad-capture-backup-v2",
+        "source_manifest_file_sha256": "1" * 64,
+        "source_manifest_identity_sha256": "2" * 64,
+        "source_archive_sha256": "3" * 64,
+        "source_created_at": source_created_at,
+        "capture_source_id": "oci-sydney-capture-1",
+        "universe_name": "capture-v1",
+        "universe_hash": _CONFIGURATION_HASH,
+        "capture_image": "example.invalid/qtrad@sha256:" + "4" * 64,
+        "postgres_image": "postgres@sha256:" + "5" * 64,
+        "migration_version": "0003",
+        "raw_message_count": 100,
+        "canonical_event_count": 100,
+    }
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"))
+    identity["import_sha256"] = hashlib.sha256(canonical.encode()).hexdigest()
+    path = tmp_path / f"snapshot-{source_created_at[11:16].replace(':', '')}.json"
+    path.write_text(json.dumps(identity), encoding="utf-8")
+    return load_research_snapshot_import(path)
+
+
+def test_gap_backfill_scope_and_snapshot_identity_are_derived_fail_closed(
+    tmp_path: Path,
+) -> None:
+    evidence = _qualification_evidence()
+    scope = qualification_gap_backfill_scope(evidence)
+
+    assert scope.start == datetime(2026, 7, 14, 20, 38, tzinfo=UTC)
+    assert scope.end == datetime(2026, 7, 14, 20, 41, tzinfo=UTC)
+    assert scope.instrument_ids == (InstrumentId("index:us-500"),)
+    validate_qualification_gap_snapshot(
+        evidence=evidence,
+        snapshot=_snapshot_import(tmp_path),
+        database_name="qtrad_research_capture_20260717",
+        configured_capture_source_id="oci-sydney-capture-1",
+        universe_name="capture-v1",
+        universe_hash=_CONFIGURATION_HASH,
+    )
+    with pytest.raises(ValueError, match="predates"):
+        validate_qualification_gap_snapshot(
+            evidence=evidence,
+            snapshot=_snapshot_import(tmp_path, source_created_at="2026-07-17T04:00:00Z"),
+            database_name="qtrad_research_capture_20260717",
+            configured_capture_source_id="oci-sydney-capture-1",
+            universe_name="capture-v1",
+            universe_hash=_CONFIGURATION_HASH,
+        )
 
 
 @pytest.mark.asyncio

@@ -552,8 +552,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
           import, exact reviewed plan, completed BID/ASK/MID coverage, copied live-gap identity and
           research manifest/Parquet hashes before writing a self-hashed corroboration artifact. The
           actual historical request remains deferred until the frozen interval closes. Formatting,
-          Ruff, both type checkers, ShellCheck and all 285 tests pass locally against a disposable
+          Ruff, both type checkers, ShellCheck and all 288 tests pass locally against a disposable
           database migrated through `0009`.
+          - The local `qualification gap-plan` companion removes manual gap-range and instrument
+            transcription. It verifies the automatic evidence and exact post-evidence snapshot
+            database/source/universe, requires the repository's current Alembic head, then delegates
+            the derived minute-aligned range and sorted instruments to the existing plan writer.
+            Allowance entry and explicit reviewed hash confirmation remain operator gates.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

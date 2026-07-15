@@ -14,6 +14,7 @@ from pathlib import Path
 import uvicorn
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 
@@ -58,6 +59,8 @@ from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     load_qualification_evidence,
+    qualification_gap_backfill_scope,
+    validate_qualification_gap_snapshot,
     write_qualification_gap_history_artifact,
 )
 from qtrad.runtime.research_export import research_export_metadata
@@ -207,6 +210,14 @@ def build_parser() -> argparse.ArgumentParser:
     gap_history.add_argument("--plan", type=Path, required=True)
     gap_history.add_argument("--manifest", type=Path, required=True)
     gap_history.add_argument("--output", type=Path, required=True)
+    gap_plan = qualification_sub.add_parser(
+        "gap-plan", help="derive a reviewed historical plan from candidate gaps"
+    )
+    gap_plan.add_argument("--evidence", type=Path, required=True)
+    gap_plan.add_argument("--snapshot-import-evidence", type=Path, required=True)
+    gap_plan.add_argument("--universe", type=Path, required=True)
+    gap_plan.add_argument("--remaining-allowance", type=int, required=True)
+    gap_plan.add_argument("--output", type=Path, required=True)
 
     research = subparsers.add_parser("research", help="research-store operations")
     research_sub = research.add_subparsers(dest="research_command", required=True)
@@ -373,6 +384,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif args.command == "qualification" and args.qualification_command == "gap-plan":
+        asyncio.run(
+            _plan_qualification_gap_history(
+                settings,
+                clock,
+                evidence_path=args.evidence,
+                snapshot_import_path=args.snapshot_import_evidence,
+                universe_path=args.universe,
+                remaining_allowance=args.remaining_allowance,
+                output_path=args.output,
+            )
+        )
     elif args.command == "research" and args.research_command == "export":
         asyncio.run(
             _export(
@@ -474,6 +497,60 @@ async def _review_qualification_gap_history(
             sort_keys=True,
         )
     )
+
+
+async def _plan_qualification_gap_history(
+    settings: Settings,
+    clock: Clock,
+    *,
+    evidence_path: Path,
+    snapshot_import_path: Path,
+    universe_path: Path,
+    remaining_allowance: int,
+    output_path: Path,
+) -> None:
+    evidence = load_qualification_evidence(evidence_path)
+    snapshot = load_research_snapshot_import(snapshot_import_path)
+    universe = load_capture_universe(universe_path)
+    database_name = make_url(settings.database_url).database
+    if database_name is None:
+        raise ValueError("configured database URL does not identify a database")
+    validate_qualification_gap_snapshot(
+        evidence=evidence,
+        snapshot=snapshot,
+        database_name=database_name,
+        configured_capture_source_id=settings.capture_source_id,
+        universe_name=universe.name,
+        universe_hash=universe.configuration_hash,
+    )
+    await _require_database_at_migration_head(settings)
+    scope = qualification_gap_backfill_scope(evidence)
+    await _plan_backfill(
+        settings,
+        clock,
+        universe_path=universe_path,
+        start=scope.start,
+        end=scope.end,
+        remaining_allowance=remaining_allowance,
+        output_path=output_path,
+        instrument_ids=scope.instrument_ids,
+    )
+
+
+async def _require_database_at_migration_head(settings: Settings) -> None:
+    migration_head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
+    if migration_head is None:
+        raise RuntimeError("migration script directory has no current head")
+    engine = _engine(settings)
+    try:
+        rows = await PostgresAuditStore(engine).query("SELECT version_num FROM alembic_version")
+    finally:
+        await engine.dispose()
+    if len(rows) != 1 or rows[0]["version_num"] != migration_head:
+        raise RuntimeError(
+            "isolated research database is not at the reviewed migration head: "
+            f"expected {migration_head}"
+        )
 
 
 def _upgrade_database(settings: Settings) -> None:

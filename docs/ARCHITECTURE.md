@@ -134,6 +134,10 @@ automatic qualification evidence. Its exact-range research export binds complete
 coverage and immutable Parquet content. The hash-bound `qualification gap-history` artifact compares
 those bars with exact copied live gaps per instrument and basis, but deliberately records no causal
 classification and cannot change live-gap or canonical history.
+The `qualification gap-plan` boundary derives the common minute-aligned range and unique instruments
+from automatic evidence rather than operator transcription. It accepts only the exact verified
+post-evidence snapshot database, source and universe at the repository's current migration head;
+normal plan registration and hash confirmation remain required before the IG demo request.
 
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one

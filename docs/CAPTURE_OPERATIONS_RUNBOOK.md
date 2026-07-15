@@ -517,14 +517,27 @@ Make that comparison reproducible as follows:
 
 1. Preserve the automatic qualification evidence, then create and import a verified collector
    snapshot whose `source_created_at` is at or after the evidence `generated_at`. Use the isolated
-   `qtrad_research_*` database and import evidence from `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`. Apply the
-   reviewed branch's expand-only migrations to that isolated database; never migrate the collector as
-   part of this investigation.
-2. Round the earliest gap start down and latest gap end up to UTC minute boundaries. In the isolated
-   database, create one `backfill plan` for that range and the distinct gap instruments, using the
-   reviewed `capture-v1` universe and current operator-observed demo allowance. Review its listing,
-   range, quota and plan hash, then register and execute that exact hash. Never point this operation
-   at the collector database.
+   `qtrad_research_*` database and import evidence from `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`. Never
+   migrate the collector as part of this investigation.
+2. Apply the reviewed migrations to the isolated database, set its normal q-trad database and capture
+   source configuration, then derive the plan without manually transcribing gap times or instruments:
+
+   ```bash
+   uv run qtrad qualification gap-plan \
+     --evidence capture-v1-final.json \
+     --snapshot-import-evidence capture-v1-snapshot-import.json \
+     --universe config/capture-v1.toml \
+     --remaining-allowance '<current IG demo allowance>' \
+     --output gap-history-backfill-plan.json
+   ```
+
+   The command requires the configured target to be the exact verified `qtrad_research_*` import,
+   checks that the snapshot postdates the automatic evidence, proves source/universe identity and
+   requires the database to be at the repository's single current Alembic head. It rounds the earliest
+   gap down and latest gap up to UTC minute boundaries and sorts the distinct gap instruments. Review
+   the resulting listing versions, range, quota and plan hash. Then register and execute only that
+   confirmed hash through the normal backfill commands. Never point this operation at the collector
+   database.
 3. Export the exact plan interval from the isolated database with `--snapshot-import-evidence`.
    Retain the version-two manifest ID printed by the command.
 4. Produce the offline comparison from the same configured research root:

@@ -13,8 +13,10 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.domain.historical_coverage import BackfillPlan
+from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance, MarketBar, PriceBasis
 from qtrad.ports.storage import ResearchManifest
+from qtrad.runtime.research_snapshot import ResearchSnapshotImport
 
 _MAX_QUALIFICATION_EVIDENCE_BYTES = 16 * 1024 * 1024
 _MAX_ARTIFACT_BYTES = 4 * 1024 * 1024
@@ -69,6 +71,12 @@ class HistoricalBasisEvidence(_StrictModel):
     plan_observed_points: int = Field(gt=0)
 
 
+class QualificationGapBackfillScope(_StrictModel):
+    start: datetime
+    end: datetime
+    instrument_ids: tuple[InstrumentId, ...]
+
+
 class GapHistoricalEvidence(_StrictModel):
     gap_id: str
     instrument_id: str
@@ -121,6 +129,58 @@ def load_qualification_evidence(path: Path) -> QualificationEvidence:
     evidence = QualificationEvidence.model_validate_json(encoded)
     _validate_qualification_evidence(evidence)
     return evidence
+
+
+def qualification_gap_backfill_scope(
+    evidence: QualificationEvidence,
+) -> QualificationGapBackfillScope:
+    """Derive one deterministic minute-aligned range for all candidate gaps."""
+
+    _validate_qualification_evidence(evidence)
+    if not evidence.candidate_gaps:
+        raise ValueError("qualification evidence contains no candidate gaps to investigate")
+    start = min(gap.interval_start for gap in evidence.candidate_gaps).replace(
+        second=0, microsecond=0
+    )
+    latest_end = max(gap.interval_end for gap in evidence.candidate_gaps)
+    end = latest_end.replace(second=0, microsecond=0)
+    if end < latest_end:
+        end += timedelta(minutes=1)
+    instrument_ids = tuple(
+        InstrumentId(value)
+        for value in sorted({gap.instrument_id for gap in evidence.candidate_gaps})
+    )
+    return QualificationGapBackfillScope(start=start, end=end, instrument_ids=instrument_ids)
+
+
+def validate_qualification_gap_snapshot(
+    *,
+    evidence: QualificationEvidence,
+    snapshot: ResearchSnapshotImport,
+    database_name: str,
+    configured_capture_source_id: str,
+    universe_name: str,
+    universe_hash: str,
+) -> None:
+    """Require a verified post-evidence snapshot and exact isolated target identity."""
+
+    _validate_qualification_evidence(evidence)
+    if snapshot.target_database != database_name:
+        raise ValueError("snapshot import evidence does not identify the configured database")
+    if not database_name.startswith("qtrad_research_"):
+        raise ValueError("qualification gap history requires an isolated research database")
+    if configured_capture_source_id != evidence.release.capture_source_id:
+        raise ValueError("configured capture source does not match qualification evidence")
+    if snapshot.capture_source_id != evidence.release.capture_source_id:
+        raise ValueError("snapshot import does not match the qualification capture source")
+    if snapshot.universe_hash != evidence.release.configuration_hash:
+        raise ValueError("snapshot import does not match the qualification configuration")
+    if universe_hash != evidence.release.configuration_hash:
+        raise ValueError("selected universe does not match the qualification configuration")
+    if snapshot.universe_name not in {"unknown-v1", universe_name}:
+        raise ValueError("snapshot import has a different capture universe")
+    if snapshot.source_created_at < evidence.generated_at:
+        raise ValueError("snapshot import predates the automatic qualification evidence")
 
 
 def build_qualification_gap_history_artifact(

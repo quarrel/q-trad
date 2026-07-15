@@ -128,8 +128,13 @@ Implementation status:
           verified post-evidence database snapshot, completed three-basis coverage and immutable
           research manifest/Parquet content, then writes a non-overwriting self-hashed per-gap result
           without a causal classification. Formatting, Ruff, both type checkers, ShellCheck and all
-          285 tests pass locally against a disposable database migrated through `0009`. The real
+          288 tests pass locally against a disposable database migrated through `0009`. The real
           provider query remains pending the window end.
+          - Complete locally and undeployed: `qualification gap-plan` now derives the common
+            minute-aligned range and sorted distinct instruments directly from the automatic evidence.
+            It requires the exact verified post-evidence snapshot target/source/universe and the
+            repository's single current Alembic head before delegating to the existing listing-bound
+            plan writer. Operator allowance entry, review, registration and hash confirmation remain.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.

@@ -89,6 +89,10 @@ After the automatic snapshot, it requires a verified post-evidence collector sna
 an isolated `qtrad_research_*` database, one reviewed exact-range IG demo plan covering every gap,
 completed BID/ASK/MID coverage and a hash-verified version-two research export. Its self-hashed output
 records per-gap returned historical points and completeness only; it cannot classify or repair a gap.
+The companion `qualification gap-plan` command removes manual range/instrument transcription while
+retaining operator allowance entry, plan review and explicit hash confirmation. It fails unless the
+configured database is the verified post-evidence `qtrad_research_*` import at the current migration
+head.
 
 ## Exit checks
 
