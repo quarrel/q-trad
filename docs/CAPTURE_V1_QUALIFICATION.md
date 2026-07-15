@@ -84,6 +84,12 @@ sign-off; they must not be silently deleted or presented as successful runs.
   only: it neither repairs a live gap nor replaces the continuity, log and monitoring review required
   by ADR 0021.
 
+The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
+After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into
+an isolated `qtrad_research_*` database, one reviewed exact-range IG demo plan covering every gap,
+completed BID/ASK/MID coverage and a hash-verified version-two research export. Its self-hashed output
+records per-gap returned historical points and completeness only; it cannot classify or repair a gap.
+
 ## Exit checks
 
 The reviewed `ops/capture/qualification-evidence.sh` command is prepared locally but is not part of

@@ -128,6 +128,13 @@ same-generation subscription continuity, absence of recovery/drop/failure, spont
 before the stale-reconnect threshold and relevant market/provider context are retained; otherwise
 the gap remains `UNEXPLAINED` and qualification cannot pass.
 
+Post-window historical corroboration is a separate offline evidence path. A reviewed IG demo plan
+runs only in a writable database imported from a verified collector snapshot that postdates the
+automatic qualification evidence. Its exact-range research export binds completed BID/ASK/MID
+coverage and immutable Parquet content. The hash-bound `qualification gap-history` artifact compares
+those bars with exact copied live gaps per instrument and basis, but deliberately records no causal
+classification and cannot change live-gap or canonical history.
+
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one
 complete object set and import it only into a new local `qtrad_research_*` database. The importer

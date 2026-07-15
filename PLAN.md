@@ -123,6 +123,13 @@ Implementation status:
         bars with immutable live evidence as a diagnostic only; historical presence prompts deeper
         stream-path investigation, while absence supports but cannot prove upstream inactivity.
         Historical results neither repair gaps nor determine ADR 0021 classification by themselves.
+        - Complete locally and undeployed: ADR 0022 and `qualification gap-history` turn that future
+          query into bounded evidence. The offline command binds the automatic snapshot, exact plan,
+          verified post-evidence database snapshot, completed three-basis coverage and immutable
+          research manifest/Parquet content, then writes a non-overwriting self-hashed per-gap result
+          without a causal classification. Formatting, Ruff, both type checkers, ShellCheck and all
+          285 tests pass locally against a disposable database migrated through `0009`. The real
+          provider query remains pending the window end.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.

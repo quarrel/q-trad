@@ -142,6 +142,27 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         ),
         (
             [
+                "qualification",
+                "gap-history",
+                "--evidence",
+                "qualification.json",
+                "--plan",
+                "backfill-plan.json",
+                "--manifest",
+                "research/manifests/example.json",
+                "--output",
+                "gap-history.json",
+            ],
+            "_review_qualification_gap_history",
+            (
+                ("evidence_path", Path("qualification.json")),
+                ("plan_path", Path("backfill-plan.json")),
+                ("manifest_path", Path("research/manifests/example.json")),
+                ("output_path", Path("gap-history.json")),
+            ),
+        ),
+        (
+            [
                 "research",
                 "export",
                 "--universe",

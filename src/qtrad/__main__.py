@@ -55,6 +55,11 @@ from qtrad.runtime.backfill_plan import (
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.logging import configure_logging
+from qtrad.runtime.qualification_gap_history import (
+    build_qualification_gap_history_artifact,
+    load_qualification_evidence,
+    write_qualification_gap_history_artifact,
+)
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
     load_research_snapshot_import,
@@ -190,6 +195,18 @@ def build_parser() -> argparse.ArgumentParser:
         "execute", help="execute one registered plan by its exact hash"
     )
     backfill_execute.add_argument("--plan-hash", required=True)
+
+    qualification = subparsers.add_parser(
+        "qualification", help="offline capture-qualification evidence operations"
+    )
+    qualification_sub = qualification.add_subparsers(dest="qualification_command", required=True)
+    gap_history = qualification_sub.add_parser(
+        "gap-history", help="compare candidate live gaps with verified historical bars"
+    )
+    gap_history.add_argument("--evidence", type=Path, required=True)
+    gap_history.add_argument("--plan", type=Path, required=True)
+    gap_history.add_argument("--manifest", type=Path, required=True)
+    gap_history.add_argument("--output", type=Path, required=True)
 
     research = subparsers.add_parser("research", help="research-store operations")
     research_sub = research.add_subparsers(dest="research_command", required=True)
@@ -345,6 +362,17 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
     elif args.command == "backfill" and args.backfill_command == "execute":
         asyncio.run(_execute_backfill(settings, clock, plan_hash=args.plan_hash))
+    elif args.command == "qualification" and args.qualification_command == "gap-history":
+        asyncio.run(
+            _review_qualification_gap_history(
+                settings,
+                clock,
+                evidence_path=args.evidence,
+                plan_path=args.plan,
+                manifest_path=args.manifest,
+                output_path=args.output,
+            )
+        )
     elif args.command == "research" and args.research_command == "export":
         asyncio.run(
             _export(
@@ -404,6 +432,48 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         raise RuntimeError("unhandled command")
+
+
+async def _review_qualification_gap_history(
+    settings: Settings,
+    clock: Clock,
+    *,
+    evidence_path: Path,
+    plan_path: Path,
+    manifest_path: Path,
+    output_path: Path,
+) -> None:
+    evidence = load_qualification_evidence(evidence_path)
+    plan = load_backfill_plan(plan_path)
+    expected_manifest_directory = settings.research_root.resolve() / "manifests"
+    if manifest_path.parent.resolve() != expected_manifest_directory:
+        raise ValueError("research manifest must be inside the configured research root")
+    manifest_id = manifest_path.stem
+    research = ParquetResearchStore(settings.research_root, clock)
+    manifest = await research.read_manifest(manifest_id)
+    bars = await research.read_bars(manifest_id)
+    artifact = build_qualification_gap_history_artifact(
+        evidence=evidence,
+        plan=plan,
+        manifest=manifest,
+        bars=bars,
+        generated_at=clock.now(),
+    )
+    write_qualification_gap_history_artifact(output_path, artifact)
+    print(
+        json.dumps(
+            {
+                "artifact_sha256": artifact.artifact_sha256,
+                "gaps": len(artifact.results),
+                "historical_data_present": sum(
+                    result.historical_data_status == "HISTORICAL_DATA_PRESENT"
+                    for result in artifact.results
+                ),
+                "output": str(output_path),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 def _upgrade_database(settings: Settings) -> None:

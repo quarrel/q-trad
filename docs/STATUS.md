@@ -547,6 +547,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         an isolated writable database. Returned bars will be compared with immutable live evidence,
         but the separate historical path is corroboration only and cannot repair or conclusively
         classify a streaming gap.
+        - The local ADR 0022 implementation makes that diagnosis reproducible without collector or IG
+          access during the window. `qualification gap-history` verifies a post-evidence snapshot
+          import, exact reviewed plan, completed BID/ASK/MID coverage, copied live-gap identity and
+          research manifest/Parquet hashes before writing a self-hashed corroboration artifact. The
+          actual historical request remains deferred until the frozen interval closes. Formatting,
+          Ruff, both type checkers, ShellCheck and all 285 tests pass locally against a disposable
+          database migrated through `0009`.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

@@ -8,6 +8,8 @@ from typing import cast
 
 import pytest
 
+from qtrad.runtime.qualification_gap_history import load_qualification_evidence
+
 REPOSITORY_ROOT = Path(__file__).parents[1]
 SCRIPTS = REPOSITORY_ROOT / "ops" / "capture"
 RESEARCH_SCRIPTS = REPOSITORY_ROOT / "ops" / "research"
@@ -598,6 +600,7 @@ def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path:
         ).stdout.split()[0]
         == evidence["evidence_sha256"]
     )
+    assert load_qualification_evidence(output).evidence_sha256 == evidence["evidence_sha256"]
     recorded_calls = calls.read_text()
     assert "exec -T db psql" in recorded_calls
     assert "SELECT version_num FROM alembic_version" in recorded_calls

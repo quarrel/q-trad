@@ -513,6 +513,37 @@ bars present during the silence justify further stream-path investigation; no ba
 consistent with upstream inactivity. Neither outcome proves what the streaming endpoint emitted,
 changes the gap, or substitutes for the ADR 0021 continuity and full-window reviews.
 
+Make that comparison reproducible as follows:
+
+1. Preserve the automatic qualification evidence, then create and import a verified collector
+   snapshot whose `source_created_at` is at or after the evidence `generated_at`. Use the isolated
+   `qtrad_research_*` database and import evidence from `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`. Apply the
+   reviewed branch's expand-only migrations to that isolated database; never migrate the collector as
+   part of this investigation.
+2. Round the earliest gap start down and latest gap end up to UTC minute boundaries. In the isolated
+   database, create one `backfill plan` for that range and the distinct gap instruments, using the
+   reviewed `capture-v1` universe and current operator-observed demo allowance. Review its listing,
+   range, quota and plan hash, then register and execute that exact hash. Never point this operation
+   at the collector database.
+3. Export the exact plan interval from the isolated database with `--snapshot-import-evidence`.
+   Retain the version-two manifest ID printed by the command.
+4. Produce the offline comparison from the same configured research root:
+
+   ```bash
+   uv run qtrad qualification gap-history \
+     --evidence capture-v1-final.json \
+     --plan gap-history-backfill-plan.json \
+     --manifest "${QTRAD_RESEARCH_ROOT}/manifests/<manifest-id>.json" \
+     --output capture-v1-gap-history.json
+   ```
+
+The command makes no IG or database request. It re-verifies the automatic evidence, plan, verified
+snapshot import, exact copied live gaps, completed plan coverage, manifest and Parquet hashes before
+writing a non-overwriting `qtrad-qualification-gap-history-v1` artifact. Retain that artifact as an
+ADR 0021 evidence reference. `HISTORICAL_DATA_PRESENT` prompts deeper streaming-path investigation;
+`NO_HISTORICAL_DATA_RETURNED` supports but does not prove upstream inactivity. Neither is itself a
+pass-eligible gap classification.
+
 Then create the final hash-bound record offline from the reviewed checkout:
 
 ```bash
