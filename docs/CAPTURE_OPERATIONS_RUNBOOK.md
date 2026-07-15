@@ -450,7 +450,7 @@ labels or paths to retained screenshots/reports; do not paste unbounded logs int
 
 ```json
 {
-  "schema": "qtrad-capture-qualification-review-v1",
+    "schema": "qtrad-capture-qualification-review-v2",
   "qualification_evidence_sha256": "<automatic evidence_sha256>",
   "reviewed_at": "2026-07-17T05:00:00Z",
   "reviewer": "operator",
@@ -484,9 +484,36 @@ labels or paths to retained screenshots/reports; do not paste unbounded logs int
 ```
 
 When gaps exist, set the gap decision to `PASS` or `FAIL` and provide one matching `gap_id`, a
-non-empty rationale and one of `EXPECTED_MARKET_CLOSURE`, `EXPLAINED_PROVIDER_MAINTENANCE`,
-`EXPLAINED_LIFECYCLE_EVENT` or `UNEXPLAINED` for each automatic-evidence gap. Then create the final
-hash-bound record offline from the reviewed checkout:
+non-empty rationale, a non-empty bounded `evidence_refs` array and one of
+`EXPECTED_MARKET_CLOSURE`, `EXPECTED_MARKET_INACTIVITY`, `EXPLAINED_PROVIDER_MAINTENANCE`,
+`EXPLAINED_LIFECYCLE_EVENT` or `UNEXPLAINED` for each automatic-evidence gap.
+
+`EXPECTED_MARKET_INACTIVITY` is not a synonym for “no ticks arrived”. Per ADR 0021, retain evidence
+that the same connection generation and subscription set bracketed the interval, no disconnect,
+reconnect, unsubscription, dropped record or terminal failure occurred, quotes resumed spontaneously
+before the configured stale-reconnect threshold, and dealing-state, cross-channel or market-session
+context supports inactivity rather than capture-path failure. If any part is missing or ambiguous,
+use `UNEXPLAINED`; it cannot pass. Classification does not set `repaired_at` or alter raw/canonical
+history. A gap entry therefore has this shape:
+
+```json
+{
+  "gap_id": "<automatic-evidence gap UUID>",
+  "classification": "EXPECTED_MARKET_INACTIVITY",
+  "evidence_refs": ["gap-review-<gap UUID>.json"],
+  "rationale": "Same-generation continuity and spontaneous recovery are demonstrated by the retained bounded review."
+}
+```
+
+After the candidate window, investigate each gap through the reviewed demo historical-coverage
+workflow in an isolated writable database. Build an explicit plan for the exact instrument, effective
+listing version and UTC interval (expanded only as required to align one-minute bars), retain quota
+and returned-bar evidence, and compare it with the immutable live raw/canonical record. Historical
+bars present during the silence justify further stream-path investigation; no bars are evidence
+consistent with upstream inactivity. Neither outcome proves what the streaming endpoint emitted,
+changes the gap, or substitutes for the ADR 0021 continuity and full-window reviews.
+
+Then create the final hash-bound record offline from the reviewed checkout:
 
 ```bash
 "$TOOL_ROOT/ops/capture/qualification-finalise.sh" \
@@ -496,9 +523,10 @@ hash-bound record offline from the reviewed checkout:
 ```
 
 The finaliser verifies the automatic self-hash, automatic PASS, exact review binding, review windows,
-gap set and bounded review schema. It refuses symlinks and overwrite. A valid failed operator review
-still writes a self-hashed `FAIL` record and exits non-zero; malformed, incomplete, mismatched or
-tampered input writes nothing. Only a self-hashed final `PASS` closes `capture-v1` qualification.
+gap set and bounded v2 review schema, including evidence references for every gap. It refuses
+symlinks and overwrite. A valid failed operator review still writes a self-hashed v2 `FAIL` record
+and exits non-zero; malformed, incomplete, mismatched or tampered input writes nothing. Only a
+self-hashed final v2 `PASS` closes `capture-v1` qualification.
 
 Only after that evidence passes may the candidate 20-instrument universe receive reviewed
 IG epics and become a new capture configuration. It must pass its own 72-hour

@@ -107,13 +107,22 @@ Implementation status:
   capacity; it leaves gap, log, monitoring and active-market review explicitly pending for the
     operator. GitHub CI run `29334657157` passed all static, shell, migration and PostgreSQL 18 gates
     with 237 tests at branch head `3415f70`.
-  - Complete locally and undeployed: qualification finalisation is a separate offline, self-hashed
-    record. It verifies the automatic snapshot, exact operator-review binding, full-window log and
-    monitoring coverage and one classification per candidate gap. Valid failed reviews are preserved;
-    malformed, omitted, mismatched or tampered input cannot emit a decision. Active-market
-    representativeness is explicitly separate from the later physical-storage comparison. GitHub CI
-    run `29335826682` passed all static, shell, migration and PostgreSQL 18 gates with 243 tests at
-    branch head `335f089`.
+    - Complete locally and undeployed: qualification finalisation is a separate offline, self-hashed
+      record. It verifies the automatic snapshot, exact operator-review binding, full-window log and
+      monitoring coverage and one classification per candidate gap. ADR 0021 and review/final schema
+      v2 add evidence-bound `EXPECTED_MARKET_INACTIVITY` without treating quote silence as proof of a
+      transport failure: every gap requires bounded evidence references, while absent or ambiguous
+      continuity remains `UNEXPLAINED` and cannot pass. Valid failed reviews are preserved; malformed,
+      omitted, mismatched or tampered input cannot emit a decision. Active-market representativeness
+      is explicitly separate from the later physical-storage comparison. The earlier v1 implementation
+      passed GitHub CI run `29335826682` with 243 tests at branch head `335f089`; v2 remains local and
+      undeployed. Formatting, Ruff, both type checkers, ShellCheck, skill validation, focused script
+      tests and all 279 tests pass locally against a disposable database migrated through `0009`.
+      - Pending after the frozen window: run one reviewed, plan-bound IG demo historical query for
+        every candidate gap against an isolated writable database. Compare exact listing/UTC interval
+        bars with immutable live evidence as a diagnostic only; historical presence prompts deeper
+        stream-path investigation, while absence supports but cannot prove upstream inactivity.
+        Historical results neither repair gaps nor determine ADR 0021 classification by themselves.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
@@ -129,8 +138,10 @@ Implementation status:
     repo-scoped `qtrad-capture-ops` skill classifies observation, evidence, publication, deployment
     and control-plane work before acting, and fresh read-only Codex invocations correctly refused a
     deployment during qualification while permitting bounded health observation. Dev Container MCP
-    registration is sequential and verified; Context7 reads its inherited credential rather than
-    persisting it in a renderable process argument. Skill validation, JSON validation, formatting,
+      registration is sequential and verified; Context7 uses Codex's `env_vars` allow-list to forward
+      its inherited credential rather than persisting it in a renderable process argument. A fresh
+      `codex exec` process successfully resolved Context7 documentation. Skill validation, JSON
+      validation, formatting,
     Ruff, Pyright, `ty` and all 275 tests pass against a disposable database migrated through
     `0009`. GitHub CI run `29383000650` passed the repository's full pull-request gate at
     implementation head `cb68265`.

@@ -88,7 +88,7 @@ jq -e --arg evidence_sha "$recorded_evidence_sha" '
     . == "PASS" or . == "FAIL";
   type == "object"
   and (keys == ["qualification_evidence_sha256", "reviewed_at", "reviewer", "reviews", "schema"])
-  and .schema == "qtrad-capture-qualification-review-v1"
+  and .schema == "qtrad-capture-qualification-review-v2"
   and .qualification_evidence_sha256 == $evidence_sha
   and (.reviewed_at | type == "string")
   and (.reviewer | bounded_text(128))
@@ -103,12 +103,14 @@ jq -e --arg evidence_sha "$recorded_evidence_sha" '
     and (.notes | bounded_text(2000))
     and (.gaps | type == "array" and length <= 100
       and all(.[];
-        type == "object" and (keys == ["classification", "gap_id", "rationale"])
+        type == "object" and (keys == ["classification", "evidence_refs", "gap_id", "rationale"])
         and (.gap_id | bounded_text(128))
         and (.classification | IN(
-          "EXPECTED_MARKET_CLOSURE", "EXPLAINED_PROVIDER_MAINTENANCE",
+          "EXPECTED_MARKET_CLOSURE", "EXPECTED_MARKET_INACTIVITY",
+          "EXPLAINED_PROVIDER_MAINTENANCE",
           "EXPLAINED_LIFECYCLE_EVENT", "UNEXPLAINED"
         ))
+        and (.evidence_refs | evidence_refs)
         and (.rationale | bounded_text(2000)))
       and ([.[].gap_id] | unique | length) == length))
   and (.reviews.container_log_history
@@ -185,7 +187,7 @@ readonly qualification_decision review_canonical review_sha finaliser_tool_sha
 
 final_identity="$(
   jq -cS -n \
-    --arg schema qtrad-capture-qualification-final-v1 \
+    --arg schema qtrad-capture-qualification-final-v2 \
     --arg finalised_at "$reviewed_at" \
     --arg evidence_sha256 "$recorded_evidence_sha" \
     --arg operator_review_sha256 "$review_sha" \

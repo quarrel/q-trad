@@ -645,19 +645,23 @@ def test_qualification_evidence_fails_closed_with_reviewable_output(
 
 
 def _qualification_review(
-    evidence: dict[str, object], *, monitoring_decision: str = "PASS"
+    evidence: dict[str, object],
+    *,
+    monitoring_decision: str = "PASS",
+    gap_classification: str = "EXPECTED_MARKET_CLOSURE",
 ) -> dict[str, object]:
     candidate_gaps = cast(list[dict[str, object]], evidence["candidate_gaps"])
     reviewed_gaps = [
         {
             "gap_id": gap["gap_id"],
-            "classification": "EXPECTED_MARKET_CLOSURE",
-            "rationale": "The interval matches the reviewed market closure.",
+            "classification": gap_classification,
+            "evidence_refs": [f"gap-review-{gap['gap_id']}.json"],
+            "rationale": "The interval has retained evidence for the selected classification.",
         }
         for gap in candidate_gaps
     ]
     return {
-        "schema": "qtrad-capture-qualification-review-v1",
+        "schema": "qtrad-capture-qualification-review-v2",
         "qualification_evidence_sha256": evidence["evidence_sha256"],
         "reviewed_at": "2026-07-17T05:00:00Z",
         "reviewer": "operator",
@@ -713,7 +717,7 @@ def test_qualification_finaliser_binds_reviews_and_refuses_overwrite(tmp_path: P
     assert result.returncode == 0, result.stderr
     final = json.loads(output.read_text())
     assert output.stat().st_mode & 0o777 == 0o600
-    assert final["schema"] == "qtrad-capture-qualification-final-v1"
+    assert final["schema"] == "qtrad-capture-qualification-final-v2"
     assert final["qualification_evidence_sha256"] == evidence["evidence_sha256"]
     assert final["reviewer"] == "operator"
     review_canonical = json.dumps(review, separators=(",", ":"), sort_keys=True)
@@ -764,6 +768,7 @@ def test_qualification_finaliser_rejects_unbound_or_tampered_input(
             {
                 "gap_id": "not-in-evidence",
                 "classification": "EXPECTED_MARKET_CLOSURE",
+                "evidence_refs": ["gap-review-not-in-evidence.json"],
                 "rationale": "This gap was not actually recorded.",
             }
         ]
@@ -836,10 +841,102 @@ def test_qualification_finaliser_requires_and_binds_each_candidate_gap(tmp_path:
     assert final["operator_reviews"]["candidate_gap_classification"]["gaps"] == [
         {
             "classification": "EXPECTED_MARKET_CLOSURE",
+            "evidence_refs": [f"gap-review-{gap_id}.json"],
             "gap_id": gap_id,
-            "rationale": "The interval matches the reviewed market closure.",
+            "rationale": "The interval has retained evidence for the selected classification.",
         }
     ]
+
+
+def test_qualification_finaliser_accepts_evidence_bound_market_inactivity(
+    tmp_path: Path,
+) -> None:
+    gap_id = "00000000-0000-0000-0000-000000000100"
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        gaps=[
+            {
+                "gap_id": gap_id,
+                "instrument_id": "fx:aud-usd",
+                "interval_start": "2026-07-16T21:10:00+00:00",
+                "interval_end": "2026-07-16T21:14:00+00:00",
+                "reason": "NO_HEALTHY_QUOTE_DURING_EXPECTED_STREAM",
+                "detected_at": "2026-07-16T21:14:01+00:00",
+                "repaired_at": None,
+            }
+        ],
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence, gap_classification="EXPECTED_MARKET_INACTIVITY")
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode == 0, result.stderr
+    final = json.loads(output.read_text())
+    gaps = final["operator_reviews"]["candidate_gap_classification"]["gaps"]
+    assert gaps == [
+        {
+            "classification": "EXPECTED_MARKET_INACTIVITY",
+            "evidence_refs": [f"gap-review-{gap_id}.json"],
+            "gap_id": gap_id,
+            "rationale": "The interval has retained evidence for the selected classification.",
+        }
+    ]
+
+
+@pytest.mark.parametrize(
+    "invalid_case", ["missing_evidence_refs", "unknown_classification", "unexplained_pass"]
+)
+def test_qualification_finaliser_rejects_unsupported_or_unevidenced_gap_pass(
+    tmp_path: Path, invalid_case: str
+) -> None:
+    gap_id = "00000000-0000-0000-0000-000000000101"
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        gaps=[
+            {
+                "gap_id": gap_id,
+                "instrument_id": "index:us-500",
+                "interval_start": "2026-07-16T21:47:00+00:00",
+                "interval_end": "2026-07-16T21:54:00+00:00",
+                "reason": "NO_HEALTHY_QUOTE_DURING_EXPECTED_STREAM",
+                "detected_at": "2026-07-16T21:54:01+00:00",
+                "repaired_at": None,
+            }
+        ],
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode == 0, automatic_result.stderr
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence)
+    reviews = cast(dict[str, object], review["reviews"])
+    gap_review = cast(dict[str, object], reviews["candidate_gap_classification"])
+    reviewed_gaps = cast(list[dict[str, object]], gap_review["gaps"])
+    if invalid_case == "missing_evidence_refs":
+        reviewed_gaps[0].pop("evidence_refs")
+    elif invalid_case == "unknown_classification":
+        reviewed_gaps[0]["classification"] = "CONNECTED_BUT_SILENT"
+    else:
+        reviewed_gaps[0]["classification"] = "UNEXPLAINED"
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode != 0
+    assert not output.exists()
 
 
 @pytest.mark.parametrize("manifest_version", [1, 2])

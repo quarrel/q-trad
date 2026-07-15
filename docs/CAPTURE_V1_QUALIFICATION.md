@@ -57,6 +57,32 @@ sign-off; they must not be silently deleted or presented as successful runs.
   successful. Five older pre-candidate rows remain `RUNNING` alongside candidate run
   `9ef5ca09-4025-429e-a7c0-383a8a2644fd`; they are records left by the superseded stop contract, not
   concurrent containers.
+- The read-only checkpoint at `2026-07-15T02:03:21Z` found all-seven readiness with global and
+  checkpoint positions both `1078020`, raw count `1049423` and canonical count `1078167`. The
+  current ingestion run and containers had remained up for about 23 hours; adapter generation was
+  still one with seven subscriptions, zero reconnects, zero dropped records and zero provider
+  operations. The latest 100,000 raw callbacks spanned 2.650 hours, the prior hour contained 41,276
+  callbacks, the PostgreSQL volume had approximately 103 GB free, and the external host interface
+  reported no RX/TX errors or drops. Backup and healthwatch results remained successful and the next
+  scheduled backup was pending normally.
+- That checkpoint also found 21 unrepaired candidate gap records between `2026-07-14T20:38:23Z`
+  and `21:59:33Z`: eight FX and thirteen index gaps. Full raw callbacks resumed on the same
+  generation without reconnect; the longest underlying callback pause was about 14 minutes, while
+  the three index subscriptions shared a roughly 6.4-minute pause. AUD/USD and USD/JPY emitted
+  provider `DLG_FLAG=CALL` around their longest pauses. Bounded ingest logs recorded stale-channel
+  warnings but no disconnect, reconnect, unsubscription, drop or terminal failure. These are
+  preliminary continuity observations, not a completed classification. ADR 0021 and the v2 review
+  contract require per-gap retained evidence and full-window log/monitoring review before an
+  operator may use `EXPECTED_MARKET_INACTIVITY`; ambiguity remains `UNEXPLAINED` and cannot pass.
+- After the frozen window ends, query the IG demo historical API for every candidate gap's exact
+  instrument and UTC interval through the reviewed planned-history path, using an isolated writable
+  database rather than the collector. Retain the requested range, listing version, returned
+  one-minute bars and quota evidence, then compare them with the raw/canonical live record. Historical
+  bars during a live silence are evidence that IG later published prices for the interval and warrant
+  deeper stream-path investigation; no returned bars support, but do not prove, upstream inactivity.
+  The historical service is a distinct provider path, so either result is corroborating evidence
+  only: it neither repairs a live gap nor replaces the continuity, log and monitoring review required
+  by ADR 0021.
 
 ## Exit checks
 

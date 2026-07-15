@@ -122,7 +122,11 @@ host-local tool binds the declared candidate window and immutable release/config
 readiness/system/run/gap responses, systemd and Compose state, backup/restore ages, migration and
 disk capacity, then writes a non-overwriting self-hashed JSON record. Automatic failure remains
 reviewable, while candidate-gap classification and full-window log/monitoring review stay explicit
-operator decisions; the tool cannot label the release qualified.
+operator decisions; the tool cannot label the release qualified. Operator-review v2 requires
+bounded evidence references for every gap. `EXPECTED_MARKET_INACTIVITY` is pass-eligible only when
+same-generation subscription continuity, absence of recovery/drop/failure, spontaneous resumption
+before the stale-reconnect threshold and relevant market/provider context are retained; otherwise
+the gap remains `UNEXPLAINED` and qualification cannot pass.
 
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one
@@ -239,7 +243,9 @@ boundary.
 - A five-second watermark closes a bar.
 - Late samples create a later revision.
 - Missing prices are not forward-filled.
-- A healthy-stream silence over two minutes creates a gap event.
+- A healthy-stream silence over two minutes creates a gap event. It records missing fresh-quote
+  evidence, not a conclusion that the shared transport failed, and classification never repairs or
+  deletes it.
 - IG historical bars retain `IG_HISTORICAL` provenance.
 - Market-bar projection identity includes provenance and the complete source listing,
   so overlapping quote-derived and historical series remain distinct.

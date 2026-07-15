@@ -249,8 +249,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
   and message-rate observation without claiming unobserved evidence.
 - Dev Container setup now configures Context7, GitHub and Tilth sequentially after the base Codex
   configuration, verifies their non-secret identities, and fails on missing credential environment.
-  Context7 consumes its inherited environment variable instead of storing the key in a command
-  argument that `codex mcp get/list` can render. The generated registrations passed identity checks;
+    Context7 uses Codex's `env_vars` allow-list to forward its inherited environment variable instead
+    of storing the key in a command argument that `codex mcp get/list` can render. The generated
+    registrations passed identity checks, and a fresh `codex exec` process successfully resolved a
+    Context7 library;
   skill validation, Dev Container JSON validation, formatting, Ruff, Pyright, `ty` and all 275 tests
   pass against a disposable PostgreSQL database migrated through `0009`. GitHub CI run
   `29383000650` passed the full pull-request gate at implementation head `cb68265`.
@@ -529,12 +531,22 @@ outside the current data-only phase until explicitly admitted by a later plan up
     operator reviews; it has not been run against the collector. GitHub CI run `29334657157` passed
     ShellCheck, migration through `0007` and all 237 tests against PostgreSQL 18 at branch head
     `3415f70`.
-  - A separate local qualification finaliser now verifies that automatic snapshot and binds bounded
-    operator reviews of candidate gaps, full-window logs, monitoring and active-market
-    representativeness. It preserves a self-hashed `FAIL`, refuses overwrite and emits no decision for
-    malformed, incomplete, mismatched or tampered input. It performs no external I/O and remains
-    undeployed with the rest of the feature branch. GitHub CI run `29335826682` passed every static,
-    shell, migration and PostgreSQL 18 gate with all 243 tests at branch head `335f089`.
+    - A separate local qualification finaliser now verifies that automatic snapshot and binds bounded
+      operator reviews of candidate gaps, full-window logs, monitoring and active-market
+      representativeness. ADR 0021 and review/final schema v2 require explicit bounded evidence
+      references per gap and add `EXPECTED_MARKET_INACTIVITY` only for same-generation continuity,
+      spontaneous pre-recovery resumption and retained market/provider context; absent or ambiguous
+      evidence remains `UNEXPLAINED` and cannot pass. The finaliser preserves a self-hashed `FAIL`,
+      refuses overwrite and emits no decision for malformed, incomplete, mismatched or tampered input.
+      It performs no external I/O and remains undeployed. The earlier v1 implementation passed GitHub
+        CI run `29335826682` with all 243 tests at branch head `335f089`. The v2 implementation remains
+        local and undeployed; formatting, Ruff, both type checkers, ShellCheck, focused script tests and
+        all 279 tests pass against a disposable database migrated through `0009`.
+      - Post-window gap diagnosis is now explicitly queued: every candidate gap will receive a
+        reviewed, quota-bound IG demo historical query for its exact listing and UTC interval through
+        an isolated writable database. Returned bars will be compared with immutable live evidence,
+        but the separate historical path is corroboration only and cannot repair or conclusively
+        classify a streaming gap.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.
