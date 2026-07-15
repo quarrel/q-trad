@@ -217,6 +217,15 @@ new image against schema `0007` before retrying the migration; never delete an a
   digests. Bucket lifecycle rules retain 14 daily and 8 weekly copies. A weekly job verifies
   the latest daily archive in an isolated, networkless, temporary PostgreSQL container
   using the manifest-pinned database image before recording success.
+- On this host, the dedicated PostgreSQL volume is an iSCSI attachment whose
+  `169.254.2.0/24` storage traffic uses the primary VNIC. Host, Beszel and OCI VNIC transmit
+  counters therefore include database block writes and must not be labelled public-internet
+  egress. Correlate `VnicToNetworkBytes` or `NetworksBytesOut` with the block volume's
+  `VolumeWriteThroughput`, and measure Object Storage uploads from the actual backup objects.
+  OCI documents both [VNIC byte semantics](https://docs.oracle.com/en-us/iaas/Content/Network/Reference/vnicmetrics.htm)
+  and the [iSCSI block-volume route](https://docs.oracle.com/en-us/iaas/Content/Network/Tasks/managingVNICs.htm).
+  Do not change the attachment or its route during a qualification or storage-measurement
+  interval merely to make a network graph easier to interpret.
 - Do not run development migrations, projection rebuilds, tests or paper/research writers
   against the capture database. Research consumes immutable Parquet manifests or a
   read-only snapshot over an SSH tunnel.

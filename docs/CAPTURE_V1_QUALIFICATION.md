@@ -81,6 +81,17 @@ sign-off; they must not be silently deleted or presented as successful runs.
   configuration hash `227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b`.
   The exact application and PostgreSQL images, descriptor, source, adapter and all-seven readiness
   gates remain mandatory; later images must expose endpoint configuration identity.
+- The first scheduled backup after hour 24 ran from `2026-07-15T03:30:07Z` to
+  `2026-07-15T03:30:40Z` and completed successfully. Independent Object Storage listing confirmed
+  the daily dump (`195589108` bytes), checksum (`102` bytes) and manifest (`574` bytes) at their
+  expected object names. During the run, readiness remained seven of seven with matching global
+  and checkpoint positions at `1123450`.
+- The host's apparent 35.7 GB transmit total after reboot was not a backup-volume anomaly. The
+  PostgreSQL container reported 34.6 GB of block writes, and `/dev/sdb` is attached over iSCSI at
+  `169.254.2.2:3260` through the same primary VNIC. A read-only 15-second sample observed `4789149`
+  VNIC transmit bytes alongside `4669440` block-volume write bytes. Treat this as storage I/O and
+  PostgreSQL write-amplification evidence, not as public-internet egress; the actual daily backup
+  upload was approximately 196 MB.
 - The detailed gap review found 21 unrepaired candidate records between `2026-07-14T20:38:23Z`
   and `21:59:33Z`: eight FX and thirteen index gaps. Full raw callbacks resumed on the same
   generation without reconnect; the longest underlying callback pause was about 14 minutes, while

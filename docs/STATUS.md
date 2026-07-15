@@ -314,6 +314,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
   provider operations and gaps, healthy API/PostgreSQL containers, and successful backup and
   healthwatch results. Five pre-candidate database rows remain `RUNNING` beside the single actual
   candidate run; the host still has only one ingestion container.
+- The first daily backup after hour 24 completed successfully at `2026-07-15T03:30:40Z` while
+  readiness remained exactly caught up for all seven instruments. Independent Object Storage
+  read-back found the expected dump, checksum and manifest; the dump was `195589108` bytes.
+  The much larger host-interface transmit counter is iSCSI database traffic rather than backup or
+  public-internet egress: a 15-second sample matched `4789149` VNIC transmit bytes with `4669440`
+  writes to the dedicated block device. The runbook now requires VNIC and block-volume correlation
+  before alerting on apparent egress.
 - A local, undeployed reconciliation path now closes that known evidence issue after the frozen
   window. `runs reconcile-plan` writes a bounded self-hashed complete-set plan for one configuration
   strictly before the candidate cutoff. Hash-confirmed execution rechecks the capture source,
