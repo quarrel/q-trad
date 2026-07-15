@@ -150,10 +150,11 @@ Implementation status:
               identity and fails closed if it is absent. Formatting, Ruff, both type checkers, ShellCheck,
               45 focused qualification tests and all 282 database-independent tests pass locally; the 13
               PostgreSQL integration tests remain delegated to the isolated pull-request CI service.
-            - In progress: release CI now proves the newer reconciliation command against a fresh database
+            - Complete: release CI proves the newer reconciliation command against a fresh database
               stopped at the collector's exact migration `0003` before advancing that same database to head
-              for the full suite. This closes the previously implicit old-schema compatibility assumption;
-              merging and publishing the immutable utility image remain operator-gated.
+              for the full suite. Draft PR 1 returned clean at implementation head `d4f1974`. This closes the
+              previously implicit old-schema compatibility assumption; merging and publishing the immutable
+              utility image remain operator-gated.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
