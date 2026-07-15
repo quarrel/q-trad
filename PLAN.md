@@ -122,8 +122,18 @@ Implementation status:
     and cannot touch the current run or raw/canonical data. A guarded immutable one-shot helper is
     prepared for use only after the candidate window. GitHub CI run `29346869695` passed every static
     and shell gate, migration through `0009` and all 275 tests against PostgreSQL 18 at branch head
-    `5ba0b07`; the collector remains unchanged.
-- Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
+      `5ba0b07`; the collector remains unchanged.
+  - Complete locally without collector access: repository operational guidance now treats the
+    collector and qualification artifacts as evidence-bearing state, protects immutable raw and
+    canonical history, and requires independent read-back after control-plane writes. The
+    repo-scoped `qtrad-capture-ops` skill classifies observation, evidence, publication, deployment
+    and control-plane work before acting, and fresh read-only Codex invocations correctly refused a
+    deployment during qualification while permitting bounded health observation. Dev Container MCP
+    registration is sequential and verified; Context7 reads its inherited credential rather than
+    persisting it in a renderable process argument. Skill validation, JSON validation, formatting,
+    Ruff, Pyright, `ty` and all 275 tests pass against a disposable database migrated through
+    `0009`.
+  - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
   with changed-field deltas, including explicit-null semantics, while canonical quotes continue
   from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
   compare` commands measure database/relation/index growth per raw message. This candidate is not

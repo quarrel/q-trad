@@ -238,6 +238,21 @@ outside the current data-only phase until explicitly admitted by a later plan up
   publication job itself also enforces `refs/heads/main`: operator review, removal of draft status,
   merge and a green main-branch CI run must precede image dispatch. No feature-branch image was
   published and the collector remains frozen.
+- Operational evidence safety is now durable repository guidance: collector observation defaults
+  to read-only, qualification mutations must be protocol-bound, legacy raw/canonical history cannot
+  be selectively rewritten or deleted, guarded helpers require immutable images, secrets must not
+  be rendered, and control-plane writes require independent read-back.
+- The repo-scoped `qtrad-capture-ops` skill routes collector work through WP8, status, the relevant
+  runbook heading and accepted ADR before classifying observation, evidence, publication,
+  deployment or control-plane work. Fresh read-only Codex invocations discovered the skill,
+  refused a changed-field deployment during active qualification and permitted a bounded health
+  and message-rate observation without claiming unobserved evidence.
+- Dev Container setup now configures Context7, GitHub and Tilth sequentially after the base Codex
+  configuration, verifies their non-secret identities, and fails on missing credential environment.
+  Context7 consumes its inherited environment variable instead of storing the key in a command
+  argument that `codex mcp get/list` can render. The generated registrations passed identity checks;
+  skill validation, Dev Container JSON validation, formatting, Ruff, Pyright, `ty` and all 275 tests
+  pass against a disposable PostgreSQL database migrated through `0009`.
 - A repository-scoped, read-only GitHub deploy key now backs the host checkout at
   `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
   reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`
