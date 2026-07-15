@@ -8,6 +8,8 @@ import os
 import shutil
 import subprocess
 import sys
+import tempfile
+import tomllib
 from pathlib import Path
 
 MCP_SERVER_NAMES = ("context7", "github", "tilth")
@@ -65,6 +67,63 @@ def run_codex_mcp(*arguments: str) -> None:
     subprocess.run(["codex", "mcp", *arguments], check=True)
 
 
+def forward_mcp_environment_variable(server_name: str, variable_name: str) -> None:
+    """Add Codex's parent-environment pass-through setting without persisting a secret."""
+    config = Path.home() / ".codex" / "config.toml"
+    current = config.read_text(encoding="utf-8")
+    header = f"[mcp_servers.{server_name}]"
+    lines = current.splitlines(keepends=True)
+    try:
+        section_start = next(
+            index for index, line in enumerate(lines) if line.rstrip("\r\n") == header
+        )
+    except StopIteration as error:
+        raise RuntimeError(f"missing MCP server section: {server_name}") from error
+
+    section_end = next(
+        (
+            index
+            for index in range(section_start + 1, len(lines))
+            if lines[index].lstrip().startswith("[")
+        ),
+        len(lines),
+    )
+    expected_line = f'env_vars = ["{variable_name}"]'
+    existing = [
+        line.strip()
+        for line in lines[section_start + 1 : section_end]
+        if line.strip().startswith("env_vars")
+    ]
+    if existing and existing != [expected_line]:
+        raise RuntimeError(f"unexpected MCP environment pass-through for {server_name}")
+    if not existing:
+        lines.insert(section_end, f"{expected_line}\n")
+
+    updated = "".join(lines)
+    parsed = tomllib.loads(updated)
+    if parsed["mcp_servers"][server_name]["env_vars"] != [variable_name]:
+        raise RuntimeError(f"failed to configure MCP environment pass-through for {server_name}")
+
+    mode = config.stat().st_mode & 0o777
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=config.parent,
+            prefix=".config.toml.",
+            delete=False,
+        ) as temporary:
+            temporary.write(updated)
+            temporary_name = temporary.name
+        os.chmod(temporary_name, mode)
+        os.replace(temporary_name, config)
+        temporary_name = None
+    finally:
+        if temporary_name is not None:
+            Path(temporary_name).unlink(missing_ok=True)
+
+
 def configure_mcp_servers() -> None:
     """Replace project MCP registrations sequentially and verify safe identities."""
     missing_environment = [
@@ -90,6 +149,9 @@ def configure_mcp_servers() -> None:
     # Context7 reads the inherited environment variable. Do not persist its value in
     # config.toml or in a process argument that a diagnostic command can render.
     run_codex_mcp("add", "context7", "--", "npx", "-y", "@upstash/context7-mcp")
+    # `codex mcp add --env` accepts only literal KEY=VALUE pairs. Add the
+    # documented env_vars pass-through after the CLI has created the section.
+    forward_mcp_environment_variable("context7", "CONTEXT7_API_KEY")
     run_codex_mcp(
         "add",
         "github",
@@ -119,10 +181,15 @@ def configure_mcp_servers() -> None:
         raise RuntimeError("one or more required MCP servers were not registered")
 
     context7 = by_name["context7"]["transport"]
-    if context7["command"] != "npx" or context7["args"] != [
-        "-y",
-        "@upstash/context7-mcp",
-    ]:
+    if (
+        context7["command"] != "npx"
+        or context7["args"]
+        != [
+            "-y",
+            "@upstash/context7-mcp",
+        ]
+        or context7["env_vars"] != ["CONTEXT7_API_KEY"]
+    ):
         raise RuntimeError("Context7 MCP registration does not match the reviewed command")
 
     github = by_name["github"]["transport"]
