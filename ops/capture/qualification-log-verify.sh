@@ -60,6 +60,7 @@ jq -e '
   and (.candidate_start | type == "string")
   and (.generated_at | type == "string")
   and (.release.actual_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))
+  and (.release.postgres_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))
 ' "$automatic_evidence" > /dev/null
 
 jq -e --arg evidence_sha256 "$automatic_sha256" '
@@ -130,7 +131,8 @@ readonly start_epoch end_epoch created_epoch
 ((created_epoch >= end_epoch))
 
 qualification_image="$(jq -er '.release.actual_image' "$automatic_evidence")"
-readonly qualification_image
+qualification_postgres_image="$(jq -er '.release.postgres_image' "$automatic_evidence")"
+readonly qualification_image qualification_postgres_image
 
 declare -A expected_files=(
   [manifest.json]=1
@@ -179,6 +181,8 @@ for service in api db ingest; do
   ' "$path" > /dev/null
   if [[ "$service" == api || "$service" == ingest ]]; then
     [[ "$(jq -er '.configured_image' <<< "$row")" == "$qualification_image" ]]
+  elif [[ "$service" == db ]]; then
+    [[ "$(jq -er '.configured_image' <<< "$row")" == "$qualification_postgres_image" ]]
   fi
 done
 

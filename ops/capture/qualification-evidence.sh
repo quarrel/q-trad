@@ -27,6 +27,7 @@ readonly maximum_backup_age="${QTRAD_MAX_BACKUP_AGE_SECONDS:-129600}"
 readonly maximum_restore_age="${QTRAD_MAX_RESTORE_AGE_SECONDS:-691200}"
 readonly minimum_disk_free_percent="${QTRAD_MIN_DISK_FREE_PERCENT:-15}"
 readonly now="${QTRAD_QUALIFICATION_NOW:-$(date --utc +%Y-%m-%dT%H:%M:%SZ)}"
+readonly legacy_readiness_digest=3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80
 readonly compose=(
   docker compose --env-file "$capture_env" --project-directory "$root" -f "$compose_file"
 )
@@ -127,6 +128,7 @@ fetch_json runs /api/v1/runs 200
 fetch_json gaps /api/v1/gaps 200
 
 actual_image="$(capture_value QTRAD_IMAGE)"
+expected_postgres_image="$(capture_value QTRAD_POSTGRES_IMAGE)"
 actual_source_id="$(capture_value QTRAD_CAPTURE_SOURCE_ID)"
 actual_descriptor_sha="$(sha256sum "$compose_file" | cut -d ' ' -f 1)"
 evidence_tool_sha="$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f 1)"
@@ -134,10 +136,16 @@ migration_version="$(
   "${compose[@]}" exec -T db psql --username=qtrad_capture --dbname=qtrad_capture \
     --tuples-only --no-align --command 'SELECT version_num FROM alembic_version;'
 )"
-readonly actual_image actual_source_id actual_descriptor_sha evidence_tool_sha migration_version
+readonly actual_image expected_postgres_image actual_source_id
+readonly actual_descriptor_sha evidence_tool_sha migration_version
+[[ "$expected_postgres_image" =~ ^[^[:space:]]+@sha256:[0-9a-f]{64}$ ]]
 [[ "$migration_version" =~ ^[0-9a-f]{4,32}$ ]]
 
-"${compose[@]}" ps --format json > "$work_dir/compose.json"
+timeout 30 "${compose[@]}" ps --format json > "$work_dir/compose.raw.json"
+(( $(wc -c < "$work_dir/compose.raw.json") <= 1048576 ))
+jq -s 'if length == 1 and (.[0] | type == "array") then .[0] else . end' \
+  "$work_dir/compose.raw.json" > "$work_dir/compose.json"
+rm "$work_dir/compose.raw.json"
 jq -e 'type == "array"' "$work_dir/compose.json" > /dev/null
 
 readonly backup_status="$status_dir/backup-status.json"
@@ -182,19 +190,24 @@ run_checks="$(
       def candidate: select((.started_at | epoch) >= ($start | fromdateiso8601));
       {
         response_is_bounded: (type == "array" and length < 100),
+        current_ingestion_runs: ([.[]
+          | select(.kind == "INGESTION" and .status == "RUNNING")] | length),
         current_matching_runs: ([.[] | select(.kind == "INGESTION" and .status == "RUNNING"
           and .configuration_hash == $configuration_hash)] | length),
-        candidate_failed_runs: ([.[] | candidate | select(.kind == "INGESTION" and .status == "FAILED")] | length),
+        candidate_failed_runs: ([.[] | candidate
+          | select(.kind == "INGESTION" and .status == "FAILED")] | length),
         candidate_unexpected_status_runs: ([.[] | candidate
           | select(.kind == "INGESTION"
-            and (.status | IN("RUNNING", "STOPPED", "FAILED") | not))] | length),
-        candidate_stopped_runs: ([.[] | candidate | select(.kind == "INGESTION" and .status == "STOPPED")] | length),
+          and (.status | IN("RUNNING", "STOPPED", "FAILED") | not))] | length),
+        candidate_stopped_runs: ([.[] | candidate
+          | select(.kind == "INGESTION" and .status == "STOPPED")] | length),
         candidate_stops_without_zero_drops: ([.[] | candidate
           | select(.kind == "INGESTION" and .status == "STOPPED")
-          | select((.detail.adapter_health // "") | contains("dropped_records=0") | not)] | length),
+          | select((.detail.adapter_health // "")
+          | contains("dropped_records=0") | not)] | length),
         pre_candidate_nonterminal_runs: [.[]
           | select(.kind == "INGESTION" and .status == "RUNNING"
-            and (.started_at | epoch) < ($start | fromdateiso8601))
+          and (.started_at | epoch) < ($start | fromdateiso8601))
           | {run_id, started_at, configuration_hash}]
       }' "$work_dir/runs.json"
 )"
@@ -209,6 +222,30 @@ gap_review="$(
 )"
 readonly gap_review
 
+readiness_configuration_hash="$(
+  jq -r 'if has("configuration_hash") then .configuration_hash else "" end' \
+    "$work_dir/readiness.json"
+)"
+readiness_configuration_basis=MISSING_CONFIGURATION_IDENTITY
+readiness_configuration_bound=false
+if [[ -n "$readiness_configuration_hash" ]]; then
+  readiness_configuration_basis=ENDPOINT_CONFIGURATION_HASH
+  if [[ "$readiness_configuration_hash" == "$expected_configuration_hash" ]]; then
+    readiness_configuration_bound=true
+  fi
+elif [[ "$expected_image" == *@sha256:"$legacy_readiness_digest" ]]; then
+  readiness_configuration_basis=LEGACY_SINGLE_MATCHING_RUN_SHARED_RELEASE
+  if jq -e '
+    .current_ingestion_runs == 1
+    and .current_matching_runs == 1
+    and (.pre_candidate_nonterminal_runs | length) == 0
+  ' <<< "$run_checks" > /dev/null; then
+    readiness_configuration_bound=true
+  fi
+fi
+readonly readiness_configuration_hash readiness_configuration_basis
+readonly readiness_configuration_bound
+
 automatic_checks="$(
   jq -cS -n \
     --argjson now_at_or_after_end "$([[ "$now_epoch" -ge "$end_epoch" ]] && printf true || printf false)" \
@@ -218,16 +255,15 @@ automatic_checks="$(
     --argjson source_matches "$([[ "$actual_source_id" == "$expected_source_id" ]] && printf true || printf false)" \
     --argjson migration_matches "$([[ "$migration_version" == "$expected_migration" ]] && printf true || printf false)" \
     --arg readiness_http_code "$(< "$work_dir/readiness.http")" \
-    --argjson readiness_ok "$(jq -e --arg hash "$expected_configuration_hash" --arg now "$now" \
+    --argjson readiness_configuration_bound "$readiness_configuration_bound" \
+    --argjson readiness_ok "$(jq -e --arg now "$now" \
       'def epoch: sub("\\+00:00$"; "Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
        .ready == true and .fresh_quote_count == 7 and .expected_instruments == 7
-       and .configuration_hash == $hash and .reasons == []
+       and .reasons == []
        and (.global_position - .checkpoint_position >= 0)
        and (.global_position - .checkpoint_position <= 100)
-       and ((.checkpoint_updated_at | epoch)
-         <= ($now | fromdateiso8601))
-         and (($now | fromdateiso8601)
-           - (.checkpoint_updated_at | epoch) <= 300)' \
+       and ((.checkpoint_updated_at | epoch) <= ($now | fromdateiso8601))
+       and (($now | fromdateiso8601) - (.checkpoint_updated_at | epoch) <= 300)' \
       "$work_dir/readiness.json" > /dev/null \
       && printf true || printf false)" \
     --argjson adapter_ok "$(jq -e '
@@ -248,29 +284,37 @@ automatic_checks="$(
       and (.[0].source | type == "string" and length > 0)
       and (.[0].options | split(",") | index("rw") != null)' \
       "$work_dir/data-mount.json" > /dev/null && printf true || printf false)" \
-    --argjson compose_ok "$(jq -e '
-      length == 3 and ([.[].Service] | sort == ["api", "db", "ingest"])
-      and all(.[]; .State == "running")
-      and ([.[] | select(.Service == "api" or .Service == "db") | .Health]
+    --argjson compose_ok "$(jq -e \
+      --arg image "$expected_image" \
+      --arg postgres_image "$expected_postgres_image" '
+        length == 3 and ([.[].Service] | sort == ["api", "db", "ingest"])
+        and all(.[]; .State == "running")
+        and all(.[]; (.Image | type == "string" and test("@sha256:[0-9a-f]{64}$")))
+        and all(.[] | select(.Service == "api" or .Service == "ingest"); .Image == $image)
+        and all(.[] | select(.Service == "db"); .Image == $postgres_image)
+        and ([.[] | select(.Service == "api" or .Service == "db") | .Health]
         | all(. == "healthy"))' "$work_dir/compose.json" > /dev/null && printf true || printf false)" \
     --argjson backup_ok "$([[ "$backup_age" -ge 0 && "$backup_age" -le "$maximum_backup_age" ]] && printf true || printf false)" \
     --argjson restore_ok "$([[ "$restore_age" -ge 0 && "$restore_age" -le "$maximum_restore_age" ]] && printf true || printf false)" \
     --argjson disk_ok "$([[ "$disk_free_percent" -ge "$minimum_disk_free_percent" ]] && printf true || printf false)" \
     --argjson run_checks "$run_checks" \
     '{now_at_or_after_end:$now_at_or_after_end, elapsed_at_least_72_hours:$elapsed_at_least_72_hours,
-      image_matches:$image_matches, descriptor_matches:$descriptor_matches,
-      source_matches:$source_matches, migration_matches:$migration_matches,
-      readiness_http_200:($readiness_http_code == "200"),
-      readiness_ok:$readiness_ok, adapter_ok:$adapter_ok, units_ok:$units_ok,
-      compose_ok:$compose_ok, data_mount_ok:$data_mount_ok,
-      backup_ok:$backup_ok, restore_ok:$restore_ok, disk_ok:$disk_ok,
-      run_history_bounded:$run_checks.response_is_bounded,
-      exactly_one_current_matching_run:($run_checks.current_matching_runs == 1),
-      no_candidate_failed_runs:($run_checks.candidate_failed_runs == 0),
-      no_candidate_unexpected_statuses:($run_checks.candidate_unexpected_status_runs == 0),
-      lifecycle_restarts_observed:($run_checks.candidate_stopped_runs >= 2),
-      stopped_runs_report_zero_drops:($run_checks.candidate_stops_without_zero_drops == 0),
-      pre_candidate_runs_reconciled:($run_checks.pre_candidate_nonterminal_runs | length == 0)}'
+        image_matches:$image_matches, descriptor_matches:$descriptor_matches,
+        source_matches:$source_matches, migration_matches:$migration_matches,
+        readiness_http_200:($readiness_http_code == "200"),
+        readiness_ok:$readiness_ok,
+          readiness_configuration_bound:$readiness_configuration_bound,
+          adapter_ok:$adapter_ok, units_ok:$units_ok,
+          compose_ok:$compose_ok, data_mount_ok:$data_mount_ok,
+          backup_ok:$backup_ok, restore_ok:$restore_ok, disk_ok:$disk_ok,
+          run_history_bounded:$run_checks.response_is_bounded,
+          exactly_one_current_ingestion_run:($run_checks.current_ingestion_runs == 1),
+          exactly_one_current_matching_run:($run_checks.current_matching_runs == 1),
+          no_candidate_failed_runs:($run_checks.candidate_failed_runs == 0),
+          no_candidate_unexpected_statuses:($run_checks.candidate_unexpected_status_runs == 0),
+          lifecycle_restarts_observed:($run_checks.candidate_stopped_runs >= 2),
+          stopped_runs_report_zero_drops:($run_checks.candidate_stops_without_zero_drops == 0),
+          pre_candidate_runs_reconciled:($run_checks.pre_candidate_nonterminal_runs | length == 0)}'
 )"
 readonly automatic_checks
 automatic_passed="$(jq -r '[.[]] | all' <<< "$automatic_checks")"
@@ -284,12 +328,14 @@ evidence_identity="$(
     --arg not_before_end "$not_before_end" \
     --arg expected_image "$expected_image" \
     --arg actual_image "$actual_image" \
+    --arg postgres_image "$expected_postgres_image" \
     --arg descriptor_commit "$expected_descriptor_commit" \
     --arg descriptor_sha256 "$actual_descriptor_sha" \
     --arg evidence_tool_sha256 "$evidence_tool_sha" \
     --arg capture_source_id "$actual_source_id" \
     --arg configuration_hash "$expected_configuration_hash" \
     --arg migration_version "$migration_version" \
+    --arg readiness_configuration_basis "$readiness_configuration_basis" \
     --argjson elapsed_seconds "$((now_epoch - start_epoch))" \
     --argjson backup_age_seconds "$backup_age" \
     --argjson restore_age_seconds "$restore_age" \
@@ -308,10 +354,12 @@ evidence_identity="$(
     '{schema:$schema, generated_at:$generated_at, candidate_start:$candidate_start,
       not_before_end:$not_before_end, elapsed_seconds:$elapsed_seconds,
       release:{expected_image:$expected_image, actual_image:$actual_image,
+        postgres_image:$postgres_image,
         descriptor_commit:$descriptor_commit, descriptor_sha256:$descriptor_sha256,
         evidence_tool_sha256:$evidence_tool_sha256,
         capture_source_id:$capture_source_id, configuration_hash:$configuration_hash,
         migration_version:$migration_version},
+      readiness_configuration_basis:$readiness_configuration_basis,
       readiness:$readiness[0], system:$system[0], units:$units[0],
       compose_services:$compose_services[0], data_mount:$data_mount[0],
       backup:$backup[0], restore:$restore[0],

@@ -52,11 +52,13 @@ jq -e '
   and (.candidate_start | type == "string")
   and (.generated_at | type == "string")
   and (.release.actual_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))
+  and (.release.postgres_image | type == "string" and test("@sha256:[0-9a-f]{64}$"))
 ' "$automatic_evidence" > /dev/null
 window_start="$(jq -er '.candidate_start' "$automatic_evidence")"
 window_end="$(jq -er '.generated_at' "$automatic_evidence")"
 qualification_image="$(jq -er '.release.actual_image' "$automatic_evidence")"
-readonly window_start window_end qualification_image
+qualification_postgres_image="$(jq -er '.release.postgres_image' "$automatic_evidence")"
+readonly window_start window_end qualification_image qualification_postgres_image
 start_epoch="$(utc_epoch "$window_start")"
 end_epoch="$(utc_epoch "$window_end")"
 now_epoch="$(utc_epoch "$now")"
@@ -73,8 +75,11 @@ chmod 0700 "$work_dir"
 
 tool_sha256="$(sha256sum "${BASH_SOURCE[0]}" | cut -d ' ' -f 1)"
 readonly tool_sha256
-timeout 30 "${compose[@]}" ps --format json > "$work_dir/compose.json"
-(( $(wc -c < "$work_dir/compose.json") <= 1048576 ))
+timeout 30 "${compose[@]}" ps --format json > "$work_dir/compose.raw.json"
+(( $(wc -c < "$work_dir/compose.raw.json") <= 1048576 ))
+jq -s 'if length == 1 and (.[0] | type == "array") then .[0] else . end' \
+  "$work_dir/compose.raw.json" > "$work_dir/compose.json"
+rm "$work_dir/compose.raw.json"
 jq -e '
   type == "array" and length == 3
   and ([.[].Service] | sort == ["api", "db", "ingest"])
@@ -153,6 +158,8 @@ for service in api db ingest; do
   ' "$work_dir/$inspect_file" > /dev/null
   if [[ "$service" == api || "$service" == ingest ]]; then
     [[ "$(jq -er '.configured_image' "$work_dir/$inspect_file")" == "$qualification_image" ]]
+  elif [[ "$service" == db ]]; then
+    [[ "$(jq -er '.configured_image' "$work_dir/$inspect_file")" == "$qualification_postgres_image" ]]
   fi
   (( $(wc -c < "$work_dir/$inspect_file") <= 65536 ))
   inspect_sha="$(sha256sum "$work_dir/$inspect_file" | cut -d ' ' -f 1)"

@@ -568,6 +568,16 @@ outside the current data-only phase until explicitly admitted by a later plan up
               timestamp or image drift and returns only the authenticated manifest hash. A read-only remote
               audit found the current retained logs far below their effective five-by-10-MiB rotation
               capacity, so the frozen collector was not changed.
+            - The hour-24 audit exposed two local closure-tool assumptions before hour 72: OCI Compose
+              returns newline-delimited `ps` JSON rather than one array, and the frozen image's readiness
+              response predates the configuration-hash field. ADR 0023 normalises both supported Compose
+              forms. For the exact frozen digest only, configuration identity is instead bound by exactly
+                one total running ingestion row with the expected hash after reconciliation, plus the exact
+                images/descriptor/source and all normal readiness gates. Later images still require endpoint
+                identity. Formatting, Ruff, Pyright, `ty`, ShellCheck, 45 focused qualification tests and
+                all 282 database-independent tests pass locally. The Dev Container has no Docker client, so
+                the 13 PostgreSQL integration tests remain an explicit pull-request CI gate. No collector
+                process or configuration changed.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

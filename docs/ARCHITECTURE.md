@@ -136,6 +136,13 @@ bounded evidence references for every gap. `EXPECTED_MARKET_INACTIVITY` is pass-
 same-generation subscription continuity, absence of recovery/drop/failure, spontaneous resumption
 before the stale-reconnect threshold and relevant market/provider context are retained; otherwise
 the gap remains `UNEXPLAINED` and qualification cannot pass.
+
+Configuration-bound readiness normally requires the endpoint's configuration hash. ADR 0023 permits
+the first frozen digest's pre-field response only through a recorded composite basis after
+reconciliation: exactly one running ingestion row in total, its exact expected hash, no legacy
+non-terminal row, exact application images/descriptor/source and all normal readiness gates. The
+exception is digest-bound; later images fail when endpoint identity is absent. Compose observation is
+normalised from either JSON-array or newline-delimited JSON without changing its evidence semantics.
 The companion log bundle verifies and binds that automatic record before reading the exact
 candidate-to-snapshot interval. It retains only filtered inspection identity and bounded log files;
 container environments and rendered Compose configuration are excluded. Its offline verifier has no

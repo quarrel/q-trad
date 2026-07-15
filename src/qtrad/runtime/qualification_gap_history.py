@@ -40,6 +40,7 @@ class QualificationGap(_StrictModel):
 class QualificationRelease(_StrictModel):
     expected_image: str
     actual_image: str
+    postgres_image: str
     descriptor_commit: str
     descriptor_sha256: str
     evidence_tool_sha256: str

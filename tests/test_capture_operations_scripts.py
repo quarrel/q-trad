@@ -372,13 +372,23 @@ def _qualification_environment(
     include_pre_candidate_run: bool = False,
     include_completed_run: bool = False,
     ready: bool = True,
+    legacy_readiness: bool = False,
+    include_readiness_configuration_hash: bool = True,
+    include_other_current_run: bool = False,
+    compose_image_mismatch: bool = False,
     gaps: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     calls = tmp_path / "calls"
     output = tmp_path / "qualification.json"
-    image = "example.invalid/qtrad@sha256:" + "1" * 64
+    image_digest = (
+        "3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80"
+        if legacy_readiness
+        else "1" * 64
+    )
+    image = "example.invalid/qtrad@sha256:" + image_digest
+    postgres_image = "postgres@sha256:" + "2" * 64
     source_id = "oci-sydney-capture-1"
     configuration_hash = "a" * 64
     compose_file = tmp_path / "compose.capture.yaml"
@@ -389,6 +399,7 @@ def _qualification_environment(
     capture_env = tmp_path / "capture.env"
     capture_env.write_text(
         f"QTRAD_IMAGE={image}\n"
+        f"QTRAD_POSTGRES_IMAGE={postgres_image}\n"
         f"QTRAD_CAPTURE_SOURCE_ID={source_id}\n"
         "QTRAD_DATABASE_PASSWORD=test-only\n"
     )
@@ -400,7 +411,7 @@ def _qualification_environment(
     (status_dir / "restore-status.json").write_text(
         json.dumps({"success": True, "completed_at": "2026-07-17T03:00:00Z"})
     )
-    readiness = {
+    readiness: dict[str, object] = {
         "ready": ready,
         "reasons": [] if ready else ["IG adapter is not healthy"],
         "expected_instruments": 7,
@@ -408,8 +419,9 @@ def _qualification_environment(
         "global_position": 500_001,
         "checkpoint_position": 500_001,
         "checkpoint_updated_at": "2026-07-17T04:05:30.123456+00:00",
-        "configuration_hash": configuration_hash,
     }
+    if not legacy_readiness and include_readiness_configuration_hash:
+        readiness["configuration_hash"] = configuration_hash
     system = {
         "counts": {"raw_messages": 500_000, "canonical_events": 500_001},
         "adapter_health": [
@@ -471,6 +483,17 @@ def _qualification_environment(
                 "status": "COMPLETED",
                 "started_at": "2026-07-16T00:00:00+00:00",
                 "configuration_hash": configuration_hash,
+                "detail": {},
+            }
+        )
+    if include_other_current_run:
+        runs.append(
+            {
+                "run_id": "00000000-0000-0000-0000-000000000005",
+                "kind": "INGESTION",
+                "status": "RUNNING",
+                "started_at": "2026-07-16T12:00:00+00:00",
+                "configuration_hash": "b" * 64,
                 "detail": {},
             }
         )
@@ -540,9 +563,21 @@ printf '%s\n' '{mount_evidence}'
 """,
     )
     compose_services = [
-        {"Service": "db", "State": "running", "Health": "healthy"},
-        {"Service": "ingest", "State": "running", "Health": ""},
-        {"Service": "api", "State": "running", "Health": "healthy"},
+        {
+            "Service": "db",
+            "Image": postgres_image,
+            "State": "running",
+            "Health": "healthy",
+        },
+        {
+            "Service": "ingest",
+            "Image": (
+                "example.invalid/qtrad@sha256:" + "9" * 64 if compose_image_mismatch else image
+            ),
+            "State": "running",
+            "Health": "",
+        },
+        {"Service": "api", "Image": image, "State": "running", "Health": "healthy"},
     ]
     _write_executable(
         fake_bin / "docker",
@@ -613,6 +648,75 @@ def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path:
 
     repeated = _run("qualification-evidence.sh", environment, str(output))
     assert repeated.returncode != 0
+
+
+def test_qualification_evidence_binds_the_frozen_release_through_one_exact_run(
+    tmp_path: Path,
+) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        legacy_readiness=True,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["readiness_configuration_basis"] == (
+        "LEGACY_SINGLE_MATCHING_RUN_SHARED_RELEASE"
+    )
+    assert evidence["automatic_checks"]["readiness_configuration_bound"] is True
+    assert evidence["automatic_checks"]["exactly_one_current_ingestion_run"] is True
+
+
+def test_qualification_evidence_rejects_multiple_running_ingestion_records(
+    tmp_path: Path,
+) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        legacy_readiness=True,
+        include_other_current_run=True,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode != 0
+    evidence = json.loads(output.read_text())
+    assert evidence["automatic_checks"]["readiness_configuration_bound"] is False
+    assert evidence["automatic_checks"]["exactly_one_current_ingestion_run"] is False
+
+
+def test_qualification_evidence_requires_endpoint_identity_for_later_images(
+    tmp_path: Path,
+) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        include_readiness_configuration_hash=False,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode != 0
+    evidence = json.loads(output.read_text())
+    assert evidence["readiness_configuration_basis"] == "MISSING_CONFIGURATION_IDENTITY"
+    assert evidence["automatic_checks"]["readiness_configuration_bound"] is False
+
+
+def test_qualification_evidence_rejects_running_container_image_drift(tmp_path: Path) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        compose_image_mismatch=True,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode != 0
+    evidence = json.loads(output.read_text())
+    assert evidence["automatic_checks"]["compose_ok"] is False
 
 
 @pytest.mark.parametrize(
@@ -960,7 +1064,7 @@ def test_qualification_log_bundle_is_bounded_hash_verified_and_read_only(
         "schema": "qtrad-capture-qualification-v1",
         "candidate_start": "2026-07-14T03:05:33Z",
         "generated_at": "2026-07-17T03:05:33Z",
-        "release": {"actual_image": image},
+        "release": {"actual_image": image, "postgres_image": postgres_image},
     }
     automatic_canonical = json.dumps(automatic_identity, separators=(",", ":"), sort_keys=True)
     automatic_sha256 = hashlib.sha256(automatic_canonical.encode()).hexdigest()
@@ -968,8 +1072,9 @@ def test_qualification_log_bundle_is_bounded_hash_verified_and_read_only(
     automatic_evidence.write_text(
         json.dumps({**automatic_identity, "evidence_sha256": automatic_sha256})
     )
-    compose_rows = json.dumps(
-        [
+    compose_rows = "\n".join(
+        json.dumps(row)
+        for row in [
             {"Service": "api", "State": "running", "Name": "qtrad-capture-api-1"},
             {"Service": "db", "State": "running", "Name": "qtrad-capture-db-1"},
             {"Service": "ingest", "State": "running", "Name": "qtrad-capture-ingest-1"},
@@ -1065,7 +1170,10 @@ printf '%s\n' \
 
     other_identity = {
         **automatic_identity,
-        "release": {"actual_image": "example.invalid/qtrad@sha256:" + "4" * 64},
+        "release": {
+            "actual_image": "example.invalid/qtrad@sha256:" + "4" * 64,
+            "postgres_image": postgres_image,
+        },
     }
     other_canonical = json.dumps(other_identity, separators=(",", ":"), sort_keys=True)
     other_evidence = tmp_path / "other-automatic.json"
@@ -1141,7 +1249,10 @@ def test_qualification_log_bundle_refuses_a_premature_window(tmp_path: Path) -> 
         "schema": "qtrad-capture-qualification-v1",
         "candidate_start": "2026-07-14T03:05:33Z",
         "generated_at": "2026-07-17T03:05:33Z",
-        "release": {"actual_image": image},
+        "release": {
+            "actual_image": image,
+            "postgres_image": "postgres@sha256:" + "2" * 64,
+        },
     }
     automatic_canonical = json.dumps(automatic_identity, separators=(",", ":"), sort_keys=True)
     automatic_evidence = tmp_path / "automatic.json"
@@ -1185,6 +1296,7 @@ def test_qualification_log_bundle_refuses_tampered_automatic_evidence(tmp_path: 
                 "generated_at": "2026-07-17T03:05:33Z",
                 "release": {
                     "actual_image": "example.invalid/qtrad@sha256:" + "1" * 64,
+                    "postgres_image": "postgres@sha256:" + "2" * 64,
                 },
                 "evidence_sha256": "0" * 64,
             }

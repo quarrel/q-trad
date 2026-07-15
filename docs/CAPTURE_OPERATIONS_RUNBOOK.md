@@ -443,6 +443,15 @@ This review is distinct from ADR 0018's later physical-storage comparison. Never
 JSON; copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered
 output name for a later retry; the helper will not overwrite the first attempt.
 
+Inspect `readiness_configuration_basis` in the automatic record. Per ADR 0023, the frozen digest may
+report `LEGACY_SINGLE_MATCHING_RUN_SHARED_RELEASE` only because its readiness response predates the
+configuration-hash field. This basis passes only when reconciliation has left exactly one running
+ingestion row in total, that row carries the expected hash, the application containers are the exact
+frozen digest, PostgreSQL is the expected digest and every descriptor/source/readiness/adapter gate
+also passes. Any later image must
+report `ENDPOINT_CONFIGURATION_HASH`; a missing endpoint identity fails. The helper accepts both the
+array and newline-delimited forms of Compose JSON but records one normalised array.
+
 Immediately after the automatic snapshot, and before any restart, deployment or other lifecycle
 operation, preserve the exact log window in a separate root-only bundle:
 

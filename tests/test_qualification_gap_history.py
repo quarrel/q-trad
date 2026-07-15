@@ -53,6 +53,7 @@ def _qualification_evidence() -> QualificationEvidence:
                 "release": {
                     "expected_image": "example.invalid/qtrad@sha256:" + "1" * 64,
                     "actual_image": "example.invalid/qtrad@sha256:" + "1" * 64,
+                    "postgres_image": "postgres@sha256:" + "9" * 64,
                     "descriptor_commit": "1" * 40,
                     "descriptor_sha256": "2" * 64,
                     "evidence_tool_sha256": "3" * 64,

@@ -142,6 +142,14 @@ Implementation status:
               environment. An independent offline verifier rejects binding, schema, exact-file-set,
               ownership/mode, hash, count, timestamp or image drift before returning the manifest hash.
               Neither tool performs semantic review or can qualify the release.
+            - Complete locally and undeployed: ADR 0023 closes two hour-24 qualification-tool
+              incompatibilities without changing the collector. Compose array and newline-delimited
+              output now normalise to one checked representation. The exact frozen digest may bind its
+              pre-hash-field readiness response only through one total running ingestion row carrying the
+              expected configuration hash after reconciliation; every later image requires endpoint
+              identity and fails closed if it is absent. Formatting, Ruff, both type checkers, ShellCheck,
+              45 focused qualification tests and all 282 database-independent tests pass locally; the 13
+              PostgreSQL integration tests remain delegated to the isolated pull-request CI service.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.

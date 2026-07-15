@@ -65,7 +65,23 @@ sign-off; they must not be silently deleted or presented as successful runs.
   callbacks, the PostgreSQL volume had approximately 103 GB free, and the external host interface
   reported no RX/TX errors or drops. Backup and healthwatch results remained successful and the next
   scheduled backup was pending normally.
-- That checkpoint also found 21 unrepaired candidate gap records between `2026-07-14T20:38:23Z`
+- The hour-24 read-only checkpoint at `2026-07-15T03:09:43Z` again found all-seven readiness,
+  generation one, seven subscriptions and zero reconnects, drops or provider operations. The
+  atomic readiness response had matching global/checkpoint positions of `1113552`; a subsequent
+  system read observed the live projection at `1113555`. Raw messages were `1083421`, canonical
+  events `1113551` and one-minute bars `30102`. The three containers had remained up for 24 hours,
+  all capture/backup/healthwatch/restore timers were active with successful latest results, and the
+  PostgreSQL volume had `103434051584` bytes free. The candidate gap count remained 21 with no gap
+  detected after `2026-07-14T21:59:33Z`.
+- That checkpoint also proved that the frozen digest's readiness response predates the later
+  configuration-hash field and that the host's Compose version emits newline-delimited JSON for
+  `ps --format json`. ADR 0023 fixes the undeployed closure helpers rather than the collector:
+  Compose output is normalised, and after the reviewed five-row reconciliation the exact frozen
+  digest may bind readiness only when exactly one ingestion row remains running in total and it has
+  configuration hash `227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b`.
+  The exact application and PostgreSQL images, descriptor, source, adapter and all-seven readiness
+  gates remain mandatory; later images must expose endpoint configuration identity.
+- The detailed gap review found 21 unrepaired candidate records between `2026-07-14T20:38:23Z`
   and `21:59:33Z`: eight FX and thirteen index gaps. Full raw callbacks resumed on the same
   generation without reconnect; the longest underlying callback pause was about 14 minutes, while
   the three index subscriptions shared a roughly 6.4-minute pause. AUD/USD and USD/JPY emitted
