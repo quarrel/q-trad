@@ -252,7 +252,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
   Context7 consumes its inherited environment variable instead of storing the key in a command
   argument that `codex mcp get/list` can render. The generated registrations passed identity checks;
   skill validation, Dev Container JSON validation, formatting, Ruff, Pyright, `ty` and all 275 tests
-  pass against a disposable PostgreSQL database migrated through `0009`.
+  pass against a disposable PostgreSQL database migrated through `0009`. GitHub CI run
+  `29383000650` passed the full pull-request gate at implementation head `cb68265`.
 - A repository-scoped, read-only GitHub deploy key now backs the host checkout at
   `/home/opc/q-trad-source`; `git pull --ff-only` succeeds without an operator PAT. The
   reviewed release archive is staged at the current full commit and `/opt/qtrad-capture`
