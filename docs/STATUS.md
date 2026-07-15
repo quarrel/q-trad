@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-14
+**Updated:** 2026-07-15
 **Current milestone:** capture operations release
 **State:** IN PROGRESS — `capture-v1` cloud qualification is running
 
@@ -233,11 +233,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   18 service. The `capture-release` environment has a main-only deployment policy. Host metric
   publication targets OCI's required regional ingestion endpoint and passes with the scoped
   instance-principal permission.
-- The current release-boundary audit confirms `origin/main` is an ancestor of the clean feature
-  head and GitHub reports draft PR 1 as cleanly mergeable with its `verify` check passing. The
-  publication job itself also enforces `refs/heads/main`: operator review, removal of draft status,
-  merge and a green main-branch CI run must precede image dispatch. No feature-branch image was
-  published and the collector remains frozen.
+- PR 1 merged exact reviewed head `bd053b48d5e15c6ff5455387838c83bed3c001d8` as merge commit
+  `08c0e5b99a83cdafe1a53bfc8e2afb8c01850fc6`. The operator confirmed the resulting main-branch CI
+  passed; its only message was the standing non-blocking Node.js 20 deprecation warning. The
+  publication job still enforces `refs/heads/main`, and publication remains a separate protected
+  action. No image from the merged work has been published and the collector remains frozen.
 - Operational evidence safety is now durable repository guidance: collector observation defaults
   to read-only, qualification mutations must be protocol-bound, legacy raw/canonical history cannot
   be selectively rewritten or deleted, guarded helpers require immutable images, secrets must not
@@ -364,7 +364,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The comment-only `capture-v2` list is now a structured, hashable 20-instrument offline
   catalogue. It contains no preferred provider epics, fails if read as an approved ingestion
   universe and therefore cannot expand the running collector.
-- The feature branch now implements the next offline gate: `qtrad instruments review` enumerates
+- `main` now contains the next offline gate: `qtrad instruments review` enumerates
   bounded IG demo listing evidence into a hash-addressed JSON manifest without automatic
   minimum-size selection, database writes or streaming. Wrong-currency, non-rolling,
   unavailable, unknown and invalid-size evidence receives stable fail-closed reason codes;
@@ -378,15 +378,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
   eligible IG demo listing per instrument from an operator-authored selection file. It rejects
   stale, tampered, omitted, duplicate, unseen, reused and ineligible selections before rendering
   an undeployed universe bound to review and selection hashes. It cannot sync or deploy that file.
-- Draft PR 1 validates this local preparation in an isolated PostgreSQL 18 CI environment.
-  Formatting, linting, typing, shell checks, migration and the full test job passed; no image
+- PR 1 merged this preparation after isolated PostgreSQL 18 CI passed formatting, linting, typing,
+  shell checks, migration and the full test job. The resulting main-branch CI also passed; no image
   was published and the frozen OCI release was not changed.
 - A branch-wide release audit tightened two fail-closed boundaries without contacting IG or the
   collector: listing review now has global search/detail request budgets and discovery no longer
   invents missing minimum-size economics. API readiness additionally requires the running
   ingestion record to match the served capture-universe configuration hash.
 - The future feed-capable Compose descriptor now fails configuration unless the operator sets
-  a stable, non-secret capture-source ID. This branch is not deployed; the running collector's
+  a stable, non-secret capture-source ID. This code is not deployed; the running collector's
   environment and release descriptor remain unchanged during qualification.
 - The earlier schema-only claim for planned historical coverage has been replaced locally with
   an executable, fail-closed workflow. `backfill plan` records explicit instruments, an exact
@@ -428,7 +428,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - GitHub CI run `29316896861` passed formatting, linting, both strict type checkers, ShellCheck,
   migration through `0005` and all 194 tests against isolated PostgreSQL 18. The initial run
   exposed an untyped optional query bind; the corrected query and a regression for its unfiltered
-  bounded form passed. This feature branch remains undeployed during collector qualification.
+  bounded form passed. This implementation remains undeployed during collector qualification.
 - ADR 0017 and migration `0006` now make local research exports independently verifiable. A
   schema-version-2 manifest hash binds the exact universe/configuration, application image/version,
   file hashes, semantic bars, coverage, provenance, observed live gaps and plan-scoped historical
@@ -589,9 +589,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
                 on migration head even though it must operate against the frozen collector at migration
                 `0003`. Pull-request CI now stops a fresh PostgreSQL 18 database at `0003`, runs the exact
                 reconciliation integration test, then upgrades that database to head for the full suite. The
-                draft PR returned clean at exact implementation head `d4f1974`; the scoped GitHub token cannot
-                read the individual check-run ID. The utility image remains unpublished and the collector
-                remains unchanged.
+                pull-request and main-branch gates passed before and after PR 1 merged exact reviewed head
+                `bd053b48d5e15c6ff5455387838c83bed3c001d8` as
+                `08c0e5b99a83cdafe1a53bfc8e2afb8c01850fc6`. The GitHub MCP's check-runs path remains
+                unavailable to its fine-grained PAT, so the operator independently confirmed the green
+                main-branch run. The utility image remains unpublished and the collector remains unchanged.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

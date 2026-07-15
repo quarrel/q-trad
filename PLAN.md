@@ -150,11 +150,13 @@ Implementation status:
               identity and fails closed if it is absent. Formatting, Ruff, both type checkers, ShellCheck,
               45 focused qualification tests and all 282 database-independent tests pass locally; the 13
               PostgreSQL integration tests remain delegated to the isolated pull-request CI service.
-            - Complete: release CI proves the newer reconciliation command against a fresh database
-              stopped at the collector's exact migration `0003` before advancing that same database to head
-              for the full suite. Draft PR 1 returned clean at implementation head `d4f1974`. This closes the
-              previously implicit old-schema compatibility assumption; merging and publishing the immutable
-              utility image remain operator-gated.
+              - Complete on `main`: release CI proves the newer reconciliation command against a fresh database
+                stopped at the collector's exact migration `0003` before advancing that same database to head
+                for the full suite. PR 1 merged exact reviewed head
+                `bd053b48d5e15c6ff5455387838c83bed3c001d8` as merge commit
+                `08c0e5b99a83cdafe1a53bfc8e2afb8c01850fc6`; the resulting main-branch CI passed. This
+                closes the previously implicit old-schema compatibility assumption. Publishing the immutable
+                utility image remains a separate operator-gated action.
   - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
     hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
     immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
@@ -295,14 +297,13 @@ Implementation status:
   every file hash and decoded semantic content. Per-instrument/day content identity reuses unchanged
   partitions as the store grows. `bars-v2/` isolates new partitions from a rolled-back legacy
   exporter, while nullable forward columns preserve the prior application's INSERT contract.
-  - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
-    shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
-    draft PR remains unmerged and cannot deploy the collector.
-  - Release-boundary audit complete: current `origin/main` is an ancestor of the clean feature head,
-    GitHub reports draft PR 1 as cleanly mergeable, and its required `verify` check passes. The image
-    workflow deliberately publishes only from `main`; operator review, removal of draft status,
-    merge and a green main-branch CI run must precede dispatch. No branch image was published and the
-    collector remains frozen.
+    - Complete on `main`: isolated GitHub CI passed formatting, linting, typing, shell validation,
+      PostgreSQL 18 migration and the full feed/catalogue test suite. PR 1 merged exact reviewed head
+      `bd053b48d5e15c6ff5455387838c83bed3c001d8` as merge commit
+      `08c0e5b99a83cdafe1a53bfc8e2afb8c01850fc6`; the resulting main-branch CI passed.
+    - Release-boundary audit complete: the image workflow publishes only from `main`, but merge and
+      green CI do not themselves authorise publication or deployment. The new immutable utility image
+      remains unpublished and the collector remains frozen on its qualification release.
 - Complete locally and undeployed: ADR 0019 adds a versioned backup-v2 identity and a
   non-overwriting snapshot-to-research importer. It verifies source, universe, images, migration,
   archive and restored counts before producing hash-verified import evidence. Research export can
