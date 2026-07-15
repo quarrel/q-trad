@@ -1,12 +1,153 @@
-# Candidate universe only. Do not use for ingestion until every preferred_epic has been
-# selected from IG demo discovery and the file is promoted to an approved capture release.
+# Offline candidate catalogue only. This file contains no provider epics and cannot authorise
+# ingestion. Promote it to a separate approved release only after fail-closed IG demo review.
 name = "capture-v2-candidates"
 
-# Candidate IDs: fx:aud-usd, fx:eur-usd, fx:usd-jpy, fx:gbp-usd, fx:usd-chf,
-# fx:usd-cad, fx:nzd-usd, fx:eur-jpy, fx:eur-gbp, fx:usd-cnh; index:australia-200,
-# index:us-500, index:ftse-100, index:us-tech-100, index:wall-street,
-# index:germany-40, index:france-40, index:japan-225, index:hong-kong-hs50,
-# index:eu-stocks-50.
-#
-# This intentionally is not loadable: an approved capture universe requires explicit,
-# reviewed provider epics and never selects a market automatically.
+[[instrument]]
+id = "fx:aud-usd"
+display_name = "AUD/USD"
+asset_class = "FX"
+base_currency = "AUD"
+quote_currency = "USD"
+search_aliases = ["AUD/USD"]
+
+[[instrument]]
+id = "fx:eur-usd"
+display_name = "EUR/USD"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["EUR/USD"]
+
+[[instrument]]
+id = "fx:usd-jpy"
+display_name = "USD/JPY"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "JPY"
+search_aliases = ["USD/JPY"]
+
+[[instrument]]
+id = "fx:gbp-usd"
+display_name = "GBP/USD"
+asset_class = "FX"
+base_currency = "GBP"
+quote_currency = "USD"
+search_aliases = ["GBP/USD"]
+
+[[instrument]]
+id = "fx:usd-chf"
+display_name = "USD/CHF"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "CHF"
+search_aliases = ["USD/CHF"]
+
+[[instrument]]
+id = "fx:usd-cad"
+display_name = "USD/CAD"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "CAD"
+search_aliases = ["USD/CAD"]
+
+[[instrument]]
+id = "fx:nzd-usd"
+display_name = "NZD/USD"
+asset_class = "FX"
+base_currency = "NZD"
+quote_currency = "USD"
+search_aliases = ["NZD/USD"]
+
+[[instrument]]
+id = "fx:eur-jpy"
+display_name = "EUR/JPY"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "JPY"
+search_aliases = ["EUR/JPY"]
+
+[[instrument]]
+id = "fx:eur-gbp"
+display_name = "EUR/GBP"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "GBP"
+search_aliases = ["EUR/GBP"]
+
+[[instrument]]
+id = "fx:usd-cnh"
+display_name = "USD/CNH"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "CNH"
+search_aliases = ["USD/CNH"]
+
+[[instrument]]
+id = "index:australia-200"
+display_name = "Australia 200"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["Australia 200", "ASX 200"]
+
+[[instrument]]
+id = "index:us-500"
+display_name = "US 500"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["US 500", "S&P 500"]
+
+[[instrument]]
+id = "index:ftse-100"
+display_name = "FTSE 100"
+asset_class = "INDEX"
+quote_currency = "GBP"
+search_aliases = ["FTSE 100", "UK 100"]
+
+[[instrument]]
+id = "index:us-tech-100"
+display_name = "US Tech 100"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["US Tech 100", "Nasdaq 100"]
+
+[[instrument]]
+id = "index:wall-street"
+display_name = "Wall Street"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["Wall Street", "Dow Jones"]
+
+[[instrument]]
+id = "index:germany-40"
+display_name = "Germany 40"
+asset_class = "INDEX"
+quote_currency = "EUR"
+search_aliases = ["Germany 40", "DAX"]
+
+[[instrument]]
+id = "index:france-40"
+display_name = "France 40"
+asset_class = "INDEX"
+quote_currency = "EUR"
+search_aliases = ["France 40", "CAC 40"]
+
+[[instrument]]
+id = "index:japan-225"
+display_name = "Japan 225"
+asset_class = "INDEX"
+quote_currency = "JPY"
+search_aliases = ["Japan 225", "Nikkei 225"]
+
+[[instrument]]
+id = "index:hong-kong-hs50"
+display_name = "Hong Kong HS50"
+asset_class = "INDEX"
+quote_currency = "HKD"
+search_aliases = ["Hong Kong HS50", "Hang Seng"]
+
+[[instrument]]
+id = "index:eu-stocks-50"
+display_name = "EU Stocks 50"
+asset_class = "INDEX"
+quote_currency = "EUR"
+search_aliases = ["EU Stocks 50", "Euro Stoxx 50"]

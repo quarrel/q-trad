@@ -8,7 +8,7 @@ from qtrad.domain.instruments import ProviderListing
 from qtrad.domain.market_data import MarketBar
 from qtrad.domain.modes import BrokerEnvironment
 from qtrad.domain.operations import AdapterHealth, HealthStatus
-from qtrad.ports.market_data import BackfillRequest, MarketDataRecord
+from qtrad.ports.market_data import BackfillRequest, InstrumentListingReview, MarketDataRecord
 
 
 class FixtureMarketDataAdapter:
@@ -17,9 +17,11 @@ class FixtureMarketDataAdapter:
         records: Sequence[MarketDataRecord],
         listings: Sequence[ProviderListing] = (),
         historical_bars: Sequence[MarketBar] = (),
+        listing_reviews: Sequence[InstrumentListingReview] = (),
     ) -> None:
         self._records = tuple(records)
         self._listings = tuple(listings)
+        self._listing_reviews = tuple(listing_reviews)
         self._historical_bars = tuple(historical_bars)
         self._connected = False
         self._subscribed: set[str] = set()
@@ -35,6 +37,12 @@ class FixtureMarketDataAdapter:
     ) -> Sequence[ProviderListing]:
         wanted = set(instrument_ids)
         return tuple(item for item in self._listings if item.instrument_id in wanted)
+
+    async def review_listings(
+        self, instrument_ids: Sequence[InstrumentId]
+    ) -> Sequence[InstrumentListingReview]:
+        wanted = set(instrument_ids)
+        return tuple(item for item in self._listing_reviews if item.instrument_id in wanted)
 
     async def subscribe(self, listings: Sequence[ProviderListing]) -> None:
         self._subscribed.update(str(item.listing_id) for item in listings)

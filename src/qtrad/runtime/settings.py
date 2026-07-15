@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     migration_database_url: str = "postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad"
     research_root: Path = Path("data/research")
     capture_universe_path: Path = Path("config/capture-v1.toml")
+    capture_source_id: str = "local-development"
+    image: str = "qtrad-app:local"
     log_level: str = "INFO"
 
     ig_username: str | None = None
@@ -27,6 +29,24 @@ class Settings(BaseSettings):
     def async_postgres_only(cls, value: str) -> str:
         if not value.startswith("postgresql+asyncpg://"):
             raise ValueError("database URL must use postgresql+asyncpg")
+        return value
+
+    @field_validator("capture_source_id")
+    @classmethod
+    def valid_capture_source_id(cls, value: str) -> str:
+        if not value or len(value) > 64:
+            raise ValueError("capture source ID must contain between 1 and 64 characters")
+        if any(character not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for character in value):
+            raise ValueError(
+                "capture source ID must use lowercase letters, digits, '.', '_' or '-'"
+            )
+        return value
+
+    @field_validator("image")
+    @classmethod
+    def valid_image_identity(cls, value: str) -> str:
+        if not value or len(value) > 500 or any(character.isspace() for character in value):
+            raise ValueError("application image identity must be a bounded non-whitespace value")
         return value
 
     def require_ig_credentials(self) -> tuple[str, str, str, str | None]:

@@ -5,6 +5,7 @@ from typing import cast
 import pytest
 
 from qtrad.application.ingestion import IngestionService
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.market_data import MarketQuote
 from qtrad.ports.market_data import MarketDataRecord
@@ -34,6 +35,7 @@ async def test_database_interruption_propagates_without_acknowledging_record() -
         deduplication_key="database-interruption",
         received_time=now,
         raw_payload={"BIDPRICE1": "0.65000", "ASKPRICE1": "0.65002"},
+        payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
         quote=quote,
     )
     service = IngestionService(

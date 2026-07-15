@@ -1,0 +1,154 @@
+# Capture storage audit
+
+**Status:** evidence gathering; no schema change approved
+
+This audit decomposes the observed physical growth without weakening raw or canonical retention.
+ADR 0018's changed-field raw payload and storage-snapshot commands are implemented locally but are
+not deployed during the active `capture-v1` qualification.
+
+## Current per-update storage
+
+Every healthy provider update normally appends one row to each primary capture relation.
+
+`raw.market_messages` retains provider/environment/subscription identity, the deduplication key,
+receive and persistence times, the redacted provider delta, its hexadecimal SHA-256 and adapter
+version. Migration `0007` additionally retains a compact `SMALLINT` representation code so legacy,
+changed-field and fixture rows cannot be mixed by payload-shape inference. It has a primary-key index
+and a unique provider/environment/deduplication index.
+
+`canonical.events` retains the complete normalised quote plus event, stream, causal, producer,
+receive and persistence identity and a foreign key to raw capture. It has:
+
+- the global-position primary key used by projections, readiness and the bounded feed;
+- unique event-ID enforcement;
+- unique stream-ID/version enforcement used by optimistic append and latest-version lookup; and
+- `events_type_time_idx` on event type/time.
+
+The first three canonical indexes and raw uniqueness are correctness constraints, not optional
+query accelerators. Raw and canonical payloads are deliberately separate facts: one supports
+provider forensics/re-normalisation, the other deterministic domain replay. Removing either or
+downsampling quote events is outside this optimisation.
+
+## Evidence added
+
+Storage snapshot schema version 3 remains backward-readable with versions 1 and 2. Version 2 added:
+
+- average physical JSONB payload bytes and PostgreSQL's JSON text rendering over each
+  bounded recent sample; and
+- per-index physical-byte and scan-counter deltas, including bytes per newly captured raw message.
+
+Version 3 additionally records whether the raw representation column exists and exact counts by
+stable code when it does. Comparison derives the codes added during the interval, identifies a
+single-representation interval, reports whether every new row is `CHANGED_FIELDS`, and exposes any
+new `LEGACY_UNCLASSIFIED` rows that could have come from a rollback writer. A pre-migration pair is
+explicitly labelled `PRE_MARKER_SCHEMA`; a column transition within one interval fails closed. This
+is row-level release evidence, not permission to reinterpret legacy payloads.
+
+Offline comparison also attributes raw, canonical and combined growth to main heap, indexes and
+auxiliary relation storage. Auxiliary storage is the remainder of total relation size after the
+main heap and indexes; it includes such PostgreSQL-managed allocation as TOAST, free-space and
+visibility-map storage. It reports both bytes per raw message and bytes per new relation row, plus
+the observed canonical-event/raw-message ratio. This makes the headline retained-growth number
+actionable without pretending that sampled payload width equals page allocation.
+
+The snapshot also binds `pg_stat_database.stats_reset`. If it changes, offline comparison marks
+index scan deltas unavailable rather than presenting reset counters as usage evidence. Physical
+allocation occurs in pages, so use a representative active-market window rather than a handful of
+updates.
+
+Comparison fails closed if capture source, database, universe, configuration hash, application
+version or immutable image differs between the two snapshots. It emits a machine-readable
+measurement gate requiring both six elapsed hours and 100,000 new raw messages. These automated
+thresholds do not prove that the interval represents active market conditions, so operator review
+remains explicit. Index-scan evidence is usable only when both thresholds pass and PostgreSQL's
+statistics-reset timestamp is unchanged.
+
+Comparison output is a bounded, non-overwriting, self-hashed artifact retaining both source snapshot
+hashes and the checked release identity. Once the merged-state and changed-field intervals each pass
+their automated gate, offline contrast verifies those artifacts, requires distinct digest-pinned
+images and computes mechanical per-message changes and reduction percentages. Contrast does not
+accept the storage decision or claim the intervals were representative; its artifact keeps both
+active-market reviews required. Each bounded operator review targets one exact comparison hash and
+becomes a separate self-hashed assertion carrying that interval's source, configuration, image and
+time identity. Offline qualification binds the contrast to both assertions and emits `PASS` only
+when both are representative. A valid negative review is retained as a `FAIL` artifact rather than
+being discarded. Even `PASS` records `storage_decision_accepted=false`.
+
+The output also reports observed raw-message, canonical-event and retained-relation byte rates per
+second, plus mechanical combined-relation extrapolations for one, 30 and 365 days. The basis is
+labelled `mechanical_continuation_of_observed_interval`; it is not a demand forecast. Use an interval
+only after its automated thresholds pass and the operator confirms representative market activity.
+
+## Candidate decisions
+
+1. **Changed-field raw capture — implemented candidate.** This corrects raw semantics and normally
+   removes repeated fields. Qualify it as a new image and compare equivalent active-market windows.
+2. **`events_type_time_idx` — evidence-gated removal candidate.** No implemented query filters the
+   canonical store by event type/time. Consider a reversible drop/recreate maintenance migration
+   only if a representative interval records no scans and the index contributes material growth.
+3. **JSON rather than JSONB — benchmark candidate.** Raw and canonical payload columns have no JSON
+   operator index or filter dependency. The text rendering is a comparison input, not the exact
+   compact input a JSON column would retain. Consider a copy/restore benchmark only if that benchmark
+   is materially smaller; replay/rebuild decoding time and rollback compatibility must also pass.
+4. **Fixed-width binary hashes — deferred compatibility candidate.** Hexadecimal payload hashes and
+   text deduplication identity consume avoidable width, but replacing them needs dual-read/write or
+   a maintenance rewrite. Do not pursue it before relation/index measurements show material value.
+5. **Partitioning — retention/maintenance tool, not compression.** It does not by itself reduce the
+   retained bytes. Revisit only after measured growth establishes a retention horizon and operational
+   deletion requirement.
+
+Legacy merged-state rows must not be rewritten as `CHANGED_FIELDS`: per-row connection-generation
+evidence is absent, so reconstructed differences would be derived compression rather than original
+provider deltas. A whole legacy epoch may be archived out of the operational database only through a
+later retention decision with permanent hash-bound backup, verified restore/replay and explicit
+treatment of canonical raw-record references.
+
+Do not force small payloads into out-of-line storage, remove uniqueness constraints, mutate old raw
+or canonical rows, or infer transport gaps from storage compaction.
+
+## Measurement gate
+
+For both the pinned representation and the later changed-field candidate:
+
+1. use `ops/capture/storage-snapshot.sh` to take non-overwriting before/after snapshots from one
+   immutable application image and configuration without starting collector dependencies;
+2. use at least six active-market hours or 100,000 new raw messages, whichever is longer;
+3. reject intervals containing a PostgreSQL restart/statistics reset for index-usage conclusions;
+4. compare raw/canonical/combined heap, index and auxiliary allocation, individual indexes, the
+   canonical/raw row ratio, representation-code deltas and JSONB/text sample evidence;
+5. record database-wide growth only as context because backups, catalogues and unrelated relations
+   may contribute; and
+6. record a reasoned active-market review for each exact comparison, then bind both reviews to the
+   contrast with offline qualification;
+7. use the observed-rate extrapolation for capacity scenarios, not as an unqualified forecast; and
+8. make one schema decision at a time, with restore/replay and application rollback evidence.
+
+The first result may legitimately be “retain the schema”. Storage cost alone does not outweigh the
+audit, idempotency and deterministic-replay contracts.
+
+### Release-bound comparison sequence
+
+The comparison contract deliberately rejects application-version and immutable-image drift. A
+single interval spanning the merged-state/changed-field deployment would therefore be invalid, even
+if its row counts were large enough. After the frozen qualification closes successfully:
+
+1. take a baseline snapshot with the current qualification image identity;
+2. continue that unchanged image for at least six representative active-market hours and 100,000
+   new raw messages, then take its closing snapshot;
+3. publish and preflight the changed-field candidate as a separate immutable release, including
+   migration, readiness, backup/restore and rollback gates;
+4. take a new baseline only after the changed-field release identity and migration are fixed;
+5. run that unchanged release through its restart/reboot qualification and the same representative
+   threshold, then take its closing snapshot; require its comparison to report only
+   `CHANGED_FIELDS` new rows and zero new `LEGACY_UNCLASSIFIED` rows; and
+6. compare within each image pair first, then compare the two interval results as evidence
+   from distinct release epochs with `storage contrast` rather than feeding cross-release snapshots
+   to `storage compare`; and
+7. record one hash-bound active-market review for each comparison and run `storage qualify` against
+   the contrast. A qualification `PASS` closes the evidence gate but does not itself approve a schema,
+   retention or archive change.
+
+Do not implement operational deletion or an archive-out path before both intervals are accepted.
+Legacy data is a finite epoch: an archive proposal must show material benefit after permanent
+hash-bound backup, exact payload-hash round-trip, canonical-reference treatment and restore/replay
+verification. If that proof is not compelling, retaining the legacy epoch is the correct decision.

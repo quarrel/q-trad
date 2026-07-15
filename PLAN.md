@@ -59,18 +59,32 @@ A work package is `DONE` only when:
 
 Implementation status:
 
-- Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
-  coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
-  bounded-cloud qualification.
+  - Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
+    coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
+    bounded-cloud qualification.
+  - Complete locally and undeployed: ADR 0009 listing events now project atomically and supersede
+    effective listings at provider/environment/instrument scope, including an epic change. Migration
+    `0008` enforces one open-ended selection and rebuild replays event-backed listing history while
+    preserving legacy rows. Migration preflight fails closed on existing ambiguity. GitHub CI run
+    `29338222506` passed migration through `0008` and all 245 tests against PostgreSQL 18 at branch
+    head `5467017`.
+  - Complete locally and undeployed: migration `0009` validates lower-case SHA-256 identity for run
+    configurations, research manifests, backfill plans and non-null provider-listing universes. Run
+    and listing application boundaries reject malformed identity before database access; nullable
+    legacy listing rows remain distinguishable. A read-only audit of the frozen collector found no
+    malformed identities in its 11 runs or seven listings. GitHub CI run `29339570739` applied migration
+    `0009`, exercised direct database rejection and passed all 251 tests against PostgreSQL 18 at branch
+    head `7437258`.
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
 - Complete: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.
-- Pending operator gate: create and authorise the private backup bucket, install the two
-  non-secret operations environment files, and configure alarms. Bucket lifecycle,
-  instance-principal upload, isolated restore and custom-metric publication now pass.
+- Complete: the private backup bucket, instance-principal policy and both non-secret operations
+  environment files are installed. Bucket lifecycle, upload, isolated restore and custom-metric
+  publication pass. OCI/Beszel alarm thresholds remain an operator tuning activity rather than a
+  collection gate.
 - Complete: the dedicated GitHub publisher has capture-compartment `manage repos`; the
   workflow published and the ARM host pulled the attested dual-architecture OCI index by
   immutable digest. The prior digest is retained as the application rollback target.
@@ -85,8 +99,216 @@ Implementation status:
   the 72-hour qualification ending no earlier than `2026-07-17T03:05:33Z`. Direct SSH is
   restricted at OCI to the operator's IPv6 range and Tailscale is the backup route; Bastion
   enablement and final alarm tuning are tracked improvements rather than release gates.
-  The corrected candidate has passed deliberate container restart and host reboot recovery.
-  `capture-v2` remains excluded.
+    The corrected candidate has passed deliberate container restart and host reboot recovery.
+    `capture-v2` remains excluded.
+  - Complete locally and undeployed: a bounded qualification-closure helper will write one
+  self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
+  boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk
+  capacity; it leaves gap, log, monitoring and active-market review explicitly pending for the
+    operator. GitHub CI run `29334657157` passed all static, shell, migration and PostgreSQL 18 gates
+    with 237 tests at branch head `3415f70`.
+    - Complete locally and undeployed: qualification finalisation is a separate offline, self-hashed
+      record. It verifies the automatic snapshot, exact operator-review binding, full-window log and
+      monitoring coverage and one classification per candidate gap. ADR 0021 and review/final schema
+      v2 add evidence-bound `EXPECTED_MARKET_INACTIVITY` without treating quote silence as proof of a
+      transport failure: every gap requires bounded evidence references, while absent or ambiguous
+      continuity remains `UNEXPLAINED` and cannot pass. Valid failed reviews are preserved; malformed,
+      omitted, mismatched or tampered input cannot emit a decision. Active-market representativeness
+      is explicitly separate from the later physical-storage comparison. The earlier v1 implementation
+      passed GitHub CI run `29335826682` with 243 tests at branch head `335f089`; v2 remains local and
+      undeployed. Formatting, Ruff, both type checkers, ShellCheck, skill validation, focused script
+      tests and all 279 tests pass locally against a disposable database migrated through `0009`.
+      - Pending after the frozen window: run one reviewed, plan-bound IG demo historical query for
+        every candidate gap against an isolated writable database. Compare exact listing/UTC interval
+        bars with immutable live evidence as a diagnostic only; historical presence prompts deeper
+        stream-path investigation, while absence supports but cannot prove upstream inactivity.
+        Historical results neither repair gaps nor determine ADR 0021 classification by themselves.
+        - Complete locally and undeployed: ADR 0022 and `qualification gap-history` turn that future
+          query into bounded evidence. The offline command binds the automatic snapshot, exact plan,
+          verified post-evidence database snapshot, completed three-basis coverage and immutable
+          research manifest/Parquet content, then writes a non-overwriting self-hashed per-gap result
+          without a causal classification. Formatting, Ruff, both type checkers, ShellCheck and all
+          288 tests pass locally against a disposable database migrated through `0009`. The real
+          provider query remains pending the window end.
+            - Complete locally and undeployed: `qualification gap-plan` now derives the common
+              minute-aligned range and sorted distinct instruments directly from the automatic evidence.
+              It requires the exact verified post-evidence snapshot target/source/universe and the
+              repository's single current Alembic head before delegating to the existing listing-bound
+              plan writer. Operator allowance entry, review, registration and hash confirmation remain.
+            - Complete locally and undeployed: a post-window log-evidence helper verifies and binds the
+              automatic qualification snapshot, derives its exact candidate interval and streams bounded
+              Docker/systemd history into a root-only, non-overwriting bundle. Filtered inspection records
+              bind immutable image, restart and effective logging identity without exposing container
+              environment. An independent offline verifier rejects binding, schema, exact-file-set,
+              ownership/mode, hash, count, timestamp or image drift before returning the manifest hash.
+              Neither tool performs semantic review or can qualify the release.
+            - Complete locally and undeployed: ADR 0023 closes two hour-24 qualification-tool
+              incompatibilities without changing the collector. Compose array and newline-delimited
+              output now normalise to one checked representation. The exact frozen digest may bind its
+              pre-hash-field readiness response only through one total running ingestion row carrying the
+              expected configuration hash after reconciliation; every later image requires endpoint
+              identity and fails closed if it is absent. Formatting, Ruff, both type checkers, ShellCheck,
+              45 focused qualification tests and all 282 database-independent tests pass locally; the 13
+              PostgreSQL integration tests remain delegated to the isolated pull-request CI service.
+            - Complete: release CI proves the newer reconciliation command against a fresh database
+              stopped at the collector's exact migration `0003` before advancing that same database to head
+              for the full suite. Draft PR 1 returned clean at implementation head `d4f1974`. This closes the
+              previously implicit old-schema compatibility assumption; merging and publishing the immutable
+              utility image remain operator-gated.
+  - Complete locally and undeployed: pre-candidate run reconciliation is now an explicit
+    hash-confirmed two-step operation. Its read-only plan binds capture/database/universe and
+    immutable tool-image identity, the strict candidate cutoff and every eligible stale run.
+    Execution locks and rechecks the
+    complete set atomically, marks only those rows `FAILED` with an asserted cutoff upper-bound basis,
+    and cannot touch the current run or raw/canonical data. A guarded immutable one-shot helper is
+    prepared for use only after the candidate window. GitHub CI run `29346869695` passed every static
+    and shell gate, migration through `0009` and all 275 tests against PostgreSQL 18 at branch head
+      `5ba0b07`; the collector remains unchanged.
+  - Complete locally without collector access: repository operational guidance now treats the
+    collector and qualification artifacts as evidence-bearing state, protects immutable raw and
+    canonical history, and requires independent read-back after control-plane writes. The
+    repo-scoped `qtrad-capture-ops` skill classifies observation, evidence, publication, deployment
+    and control-plane work before acting, and fresh read-only Codex invocations correctly refused a
+    deployment during qualification while permitting bounded health observation. Dev Container MCP
+      registration is sequential and verified; Context7 uses Codex's `env_vars` allow-list to forward
+      its inherited credential rather than persisting it in a renderable process argument. A fresh
+      `codex exec` process successfully resolved Context7 documentation. Skill validation, JSON
+      validation, formatting,
+    Ruff, Pyright, `ty` and all 275 tests pass against a disposable database migrated through
+    `0009`. GitHub CI run `29383000650` passed the repository's full pull-request gate at
+    implementation head `cb68265`.
+  - Complete locally and undeployed: ADR 0018 replaces repeated merged Lightstreamer raw payloads
+  with changed-field deltas, including explicit-null semantics, while canonical quotes continue
+  from bounded per-generation state. Hash-verified `storage snapshot` and offline `storage
+  compare` commands measure database/relation/index growth per raw message. This candidate is not
+  introduced into the running 72-hour qualification. GitHub CI run `29322668979` passed all static,
+  migration and PostgreSQL 18 gates with 211 tests at branch head `e24ccc7`.
+- Complete locally and undeployed: storage snapshot schema version 2 remains backward-readable and
+  adds JSON-text comparison plus per-index byte/scan deltas. The storage audit preserves raw and
+  canonical facts and all correctness indexes, and makes secondary-index, payload-representation
+  and hash-width changes conditional on representative measurements rather than estimates. GitHub
+  CI run `29325936926` passed all static, migration and PostgreSQL 18 gates with 218 tests at branch
+  head `1aefd62`.
+- Complete locally and undeployed: storage snapshot schema version 3 remains backward-readable with
+  versions 1 and 2, records pre-marker versus coded raw-representation schema state and binds exact
+  per-code row counts. Offline comparison derives interval representation deltas, proves an
+  all-`CHANGED_FIELDS` interval or exposes newly added `LEGACY_UNCLASSIFIED` rollback-compatible rows,
+  and rejects a representation-schema transition. GitHub CI run `29341678396` passed every static and
+  shell gate, the real PostgreSQL representation probe and all 255 tests at branch head `6a84319`.
+- Complete locally and undeployed: `storage compare` now writes a bounded, non-overwriting,
+  self-hashed release artifact retaining its snapshot and image identity. Offline `storage contrast`
+  accepts only verified same-source/configuration artifacts from distinct immutable images, requires
+  a merged-state baseline, all-`CHANGED_FIELDS` candidate and passed automated thresholds, and reports
+  mechanical per-message change without claiming the required active-market reviews or accepting a
+  storage decision. GitHub CI run `29343411122` passed all static and shell gates, migration through
+  `0009` and all 258 tests against PostgreSQL 18 at branch head `8ff48cd`.
+- Complete locally and undeployed: bounded `storage review` inputs now become self-hashed operator
+  assertions bound to one exact comparison, release and interval. Offline `storage qualify` verifies
+  both reviews against their contrast, emits `PASS` only when both are representative, preserves an
+  honest negative `FAIL`, and cannot accept a storage decision. The running collector remains
+  unchanged. GitHub CI run `29344877350` passed every static and shell gate, migration through `0009`
+  and all 264 tests against PostgreSQL 18 at branch head `961d9d5`.
+- Complete locally and undeployed: offline storage comparison attributes raw, canonical and combined
+  growth to heap, indexes and auxiliary PostgreSQL allocation, normalised both per raw message and
+  per new relation row. It reports the canonical/raw row ratio so the observed headline growth is
+  not incorrectly assumed to represent exactly one canonical event per provider update. GitHub CI
+  run `29326440612` passed all static, migration and PostgreSQL 18 gates with 219 tests at branch
+  head `246855e`.
+- Complete locally and undeployed: comparison now rejects release/source/database identity drift and
+  emits an automated evidence gate requiring both six elapsed hours and 100,000 new raw messages.
+  Index-scan evidence additionally requires unchanged PostgreSQL statistics; representative
+  active-market conditions remain an explicit operator review. GitHub CI run `29326917893` passed
+  all static, migration and PostgreSQL 18 gates with 224 tests at branch head `9189f21`.
+- Complete locally and undeployed: comparison converts the observed interval into raw/canonical and
+  retained-relation rates plus explicitly mechanical combined-storage scenarios for one, 30 and 365
+  days. These remain labelled interval extrapolations rather than forecasts. GitHub CI run
+  `29327187828` passed all static, migration and PostgreSQL 18 gates with 224 tests at branch head
+  `448250e`.
+- Complete locally and undeployed: a guarded operator helper runs storage snapshots only from an
+  already-local immutable inspector digest using `--no-deps --pull never`, refuses unsafe labels and
+  overwrites, and returns evidence written by the non-root image to root-only ownership without
+  restarting collector services. GitHub CI run `29327683523` passed all static, shell, migration and
+  PostgreSQL 18 gates with 228 tests at branch head `fad5211`.
+- Complete locally and undeployed: ADR 0020 and migration `0007` add a compact first-class raw payload
+  representation code without rewriting legacy payloads. The current IG candidate writes
+  `CHANGED_FIELDS`, fixtures write `FIXTURE`, and pre-marker/rollback writes remain conservatively
+  `LEGACY_UNCLASSIFIED`; downgrade refuses to erase changed-field identity. GitHub CI run
+  `29332161781` passed all static and shell gates, migration through `0007`, old-writer/default and
+  bounded-code integration checks, and all 232 tests against PostgreSQL 18 at branch head `dfe45ea`.
+- Next gated sequence: after the frozen qualification closes successfully, retain the current image
+  long enough to collect a representative before/after storage interval, then qualify the
+  changed-field image separately and collect its own representative interval. Each comparison uses
+  one immutable image identity; it is invalid to compare snapshots across the release boundary.
+  Only those results can open an index, JSON representation or whole-legacy-epoch archive decision.
+- Complete locally and undeployed: ADR 0014 and the bounded zero-copy
+  canonical-event feed prepare the later isolated paper/research boundary. This remains a
+  read-only data-foundation interface and makes no IG call.
+- Complete locally: the provider-neutral feed consumer contract strictly decodes canonical event
+  pages, pins source/universe/configuration/schema identity and validates exact cursor continuation
+  and monotonic high-water evidence. The offline `feed verify` command accepts saved pages only.
+  Serving-universe changes require an explicit caught-up rebind on the same source; source or feed
+  schema changes cannot reuse the cursor.
+- Complete locally: ADR 0015 and `feed probe` add a bounded async client for one page through an
+  operator-established literal-loopback tunnel. Redirects, ambient proxies, credentials,
+  unexpected status/content, response growth, total duration, cursor mismatch and page overrun
+  fail closed. The probe explicitly reports that its candidate cursor was not persisted; there is
+  still no cursor database, derived writer or paper behaviour.
+- Complete locally: ADR 0016, migration `0004` and the loopback-only PostgreSQL binding provide
+  independently authenticated direct-read access without sharing collector credentials. The
+  privilege role can select approved canonical/reference/read-model/operations tables, but cannot
+  access raw capture or write; PostgreSQL CI proves the grants.
+- Complete locally: the 20-instrument `capture-v2` candidate list is now a deterministic,
+  hashable offline catalogue that deliberately contains no provider epics and cannot be
+  loaded as an ingestion universe.
+- Complete locally without provider or collector access: a bounded `instruments review` workflow
+  enumerates relevant IG demo candidates, classifies fail-closed rejection reasons and emits a
+  deterministic, non-overwriting manifest with `selection_authority=false`. It never chooses an
+  epic, writes PostgreSQL or starts a stream. Fixture coverage retains multiple eligible listings
+  for explicit operator review and excludes volatile snapshots and credentials.
+- Complete locally: review discovery has global search/detail request budgets, and approved
+  discovery rejects missing, zero or negative minimum-size economics instead of substituting a
+  value. Collector readiness now requires a running ingestion record with the API's exact
+  capture-universe configuration hash.
+- Deferred qualification gate: do not invoke the review command against IG demo until the active
+  `capture-v1` 72-hour window closes. Its eventual output is evidence for manual mapping review,
+  not an approved `capture-v2` universe.
+- Complete locally: explicit universe promotion verifies the manifest's canonical hash, exact
+  catalogue identity and one manually selected eligible IG demo listing per instrument. It rejects
+  stale, tampered, omitted, duplicate, unseen, reused or ineligible selections and deterministically
+  renders a non-overwriting, undeployed TOML release bound to review and selection hashes.
+  - Complete locally without IG or collector access: historical backfill is now an explicit
+  plan/review/register/execute state machine. A canonical plan binds its exact UTC range,
+  universe hash, configured listing and effective version, resolution, chunks and quota evidence;
+  registration requires the operator-confirmed SHA-256. Plan-scoped BID/ASK/MID coverage attempts
+  remain separate from live gaps, repeated plans preserve independent evidence, and changed
+    provider bars append corrections. The bounded read-only API exposes this projection.
+  - Complete locally without provider access: `instruments sync --universe PATH` validates a
+    reviewed, epic-pinned non-streaming universe into the selected writable database without
+    changing ingestion's configured universe or starting a stream. This supplies the explicit
+    listing-validation step before candidate historical planning on an isolated database. GitHub CI
+    run `29336513376` passed every static, shell, migration and PostgreSQL 18 gate with all 244 tests
+    at branch head `640caf7`.
+- Complete locally without collector access: ADR 0017 and migration `0006` replace mutable
+  content-prefix research manifests with schema-version-2 canonical manifest identity. Exports bind
+  an explicit UTC range, the exact universe/configuration, application image/version, grouped
+  coverage, provenance, live gaps and historical-coverage attempts; replay verifies the manifest,
+  every file hash and decoded semantic content. Per-instrument/day content identity reuses unchanged
+  partitions as the store grows. `bars-v2/` isolates new partitions from a rolled-back legacy
+  exporter, while nullable forward columns preserve the prior application's INSERT contract.
+  - Complete on the feature branch: isolated GitHub CI passed formatting, linting, typing,
+    shell validation, PostgreSQL 18 migration and the full feed/catalogue test suite. The
+    draft PR remains unmerged and cannot deploy the collector.
+  - Release-boundary audit complete: current `origin/main` is an ancestor of the clean feature head,
+    GitHub reports draft PR 1 as cleanly mergeable, and its required `verify` check passes. The image
+    workflow deliberately publishes only from `main`; operator review, removal of draft status,
+    merge and a green main-branch CI run must precede dispatch. No branch image was published and the
+    collector remains frozen.
+- Complete locally and undeployed: ADR 0019 adds a versioned backup-v2 identity and a
+  non-overwriting snapshot-to-research importer. It verifies source, universe, images, migration,
+  archive and restored counts before producing hash-verified import evidence. Research export can
+  require that evidence and binds it into the immutable manifest; no collector or OCI access was
+  used while implementing this path. GitHub CI run `29324650522` passed all static, shell,
+  migration and PostgreSQL 18 gates with 216 tests at branch head `4f366d2`.
 
 ## WP0 — documentation and scaffold
 
@@ -136,14 +358,15 @@ Implementation status:
 
 ## WP5 — backfill and research data
 
-Use:
-
-```text
-per_instrument_points =
-    min(1000, floor(0.8 × remaining_weekly_allowance / 7))
-```
-
-- Keep historical-bar provenance distinct from quote-derived bars.
+- Create a non-overwriting canonical plan for explicit instruments and an exact UTC range.
+- Bind the plan to the selected universe/configuration, exact effective listing versions,
+  one-minute resolution, request chunks and timestamped operator quota evidence.
+- Reserve 20% of the reported allowance and reject a plan whose exact range exceeds the
+  remaining usable points; do not turn an allowance into an implicit "last N minutes" range.
+- Require review and explicit hash confirmation before registration, and execute only the
+  atomically claimed persisted plan without listing substitution.
+- Keep historical-bar provenance and plan-scoped coverage distinct from quote-derived bars
+  and observed live-stream gaps. Append changed provider history as a new correction revision.
 - Export Parquet by data type, instrument and UTC date.
 - Include schema, coverage, gaps, provenance, code/configuration versions and hashes in manifests.
 
@@ -167,19 +390,68 @@ per_instrument_points =
 
 ```text
 python -m qtrad db upgrade
-python -m qtrad instruments sync
+python -m qtrad runs reconcile-plan [--universe PATH] --cutoff UTC --output PATH
+python -m qtrad runs reconcile --plan PATH --confirm-plan-hash SHA256
+python -m qtrad instruments sync [--universe PATH]
 python -m qtrad ingest --environment ig-demo
 python -m qtrad ingest --environment ig-demo --max-seconds 60
 python -m qtrad ingest --environment ig-demo --max-seconds 90 --force-reconnect-after-seconds 20
-python -m qtrad backfill --max-points 1000
-python -m qtrad research export
+python -m qtrad backfill plan --universe PATH --start UTC --end UTC --remaining-allowance N --output PATH INSTRUMENT...
+python -m qtrad backfill register --plan PATH --confirm-plan-hash SHA256
+python -m qtrad backfill execute --plan-hash SHA256
+python -m qtrad research export --universe PATH --start UTC --end UTC
 python -m qtrad replay --manifest PATH
 python -m qtrad projections rebuild
+python -m qtrad storage snapshot --universe PATH --output PATH
+python -m qtrad storage compare --output PATH BEFORE AFTER
+python -m qtrad storage contrast --output PATH BASELINE_COMPARISON CANDIDATE_COMPARISON
+python -m qtrad storage review --output PATH COMPARISON REVIEW_INPUT
+python -m qtrad storage qualify --output PATH CONTRAST BASELINE_REVIEW CANDIDATE_REVIEW
+python -m qtrad feed verify --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH PAGE...
+python -m qtrad feed probe --endpoint http://127.0.0.1:PORT --source-id SOURCE --universe-name UNIVERSE --configuration-hash HASH
 python -m qtrad api
 ```
 
 ## Verification evidence
 
+- Current feature-branch local gates: Ruff formatting/lint, Pyright, `ty` and both ShellCheck sets
+  pass; 262 tests pass with 13 PostgreSQL migration/integration tests deferred to isolated CI.
+- GitHub CI run `29335826682` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
+  migration through `0007` and all 243 tests against isolated PostgreSQL 18 at branch head
+  `335f089`.
+- GitHub CI run `29336513376` passed the same full gate set and all 244 tests at branch head
+  `640caf7`, including explicit non-streaming universe validation without runtime-universe use.
+  - GitHub CI run `29338222506` passed formatting, Ruff, Pyright, `ty`, both ShellCheck sets,
+    migration through `0008` and all 245 tests against isolated PostgreSQL 18 at branch head
+    `5467017`. It proves alternate-epic supersession, atomic failure rollback, the one-effective-listing
+    index and canonical projection rebuild.
+  - GitHub CI run `29339570739` passed every static and shell gate, migration through `0009` and all
+    251 tests against PostgreSQL 18 at branch head `7437258`. It proves validated SHA-256 constraints
+    reject malformed new run, manifest, backfill-plan and non-null listing identities.
+  - GitHub CI run `29341678396` passed every static and shell gate, migration through `0009` and all
+    255 tests against PostgreSQL 18 at branch head `6a84319`. It proves snapshot-v3 representation
+    counts reconcile with the actual raw table and preserves deterministic pre-marker, changed-field,
+    rollback-compatible and legacy snapshot behaviour.
+- GitHub CI run `29343411122` passed every static and shell gate, migration through `0009` and all
+  258 tests against PostgreSQL 18 at branch head `8ff48cd`. It proves comparison artifacts are
+  non-overwriting and hash/semantics verified, while contrast rejects identity drift, sub-threshold
+  evidence and rollback-compatible candidate rows without accepting an operator decision.
+- GitHub CI run `29344877350` passed every static and shell gate, migration through `0009` and all
+  264 tests against PostgreSQL 18 at branch head `961d9d5`. It proves exact review/contrast binding,
+  valid negative-review preservation, semantic tamper rejection and the no-storage-decision boundary.
+- GitHub CI run `29346869695` passed every static and shell gate, migration through `0009` and all
+  275 tests against PostgreSQL 18 at branch head `5ba0b07`. It proves exact stale-run set locking,
+  omitted-target rollback, current-run preservation and terminal-record immutability.
+- GitHub CI run `29332962174` passed every static and shell gate, migration through `0007` and all
+  232 tests against PostgreSQL 18 at branch head `65f7037`.
+- GitHub CI run `29316896861` passed all 194 tests against PostgreSQL 18 after applying
+  migrations through `0005`, including exact plan/coverage identity, repeated coverage attempts,
+  append-only historical corrections, live-gap isolation and the bounded read-only API.
+- GitHub CI run `29320193656` passed formatting, linting, both strict type checkers, ShellCheck,
+  migration through `0006` and all 203 tests against PostgreSQL 18. It proves schema-version-2
+  manifest persistence, exact duplicate acceptance, conflicting identity rejection and the prior
+  application's legacy INSERT after the forward migration, alongside bounded range export,
+  per-partition reuse and tamper-failing replay.
 - Current Ruff check: passed.
 - Current strict-core Pyright check: zero errors and warnings.
 - Pyright now checks the IG adapter in strict mode through minimal local `trading-ig` and

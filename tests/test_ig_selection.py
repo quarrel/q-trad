@@ -6,6 +6,7 @@ import pytest
 from qtrad.adapters.ig.market_data import (
     _bounded_economics,
     _Candidate,
+    _candidate,
     _listing_metadata_version,
     _search_row_can_match,
     _select_candidate,
@@ -161,3 +162,25 @@ def test_listing_version_excludes_volatile_market_snapshot() -> None:
     assert _listing_metadata_version(first, first_economics) == _listing_metadata_version(
         second, second_economics
     )
+
+
+@pytest.mark.parametrize("minimum", [None, "0", "-0.1"])
+def test_discovery_fails_closed_without_a_positive_minimum_deal_size(
+    minimum: str | None,
+) -> None:
+    dealing_rules: dict[str, object] = {}
+    if minimum is not None:
+        dealing_rules["minDealSize"] = {"value": minimum}
+    detail = {
+        "instrument": {
+            "epic": "CS.D.AUDUSD.CFD.IP",
+            "name": "AUD/USD",
+            "type": "CURRENCIES",
+            "expiry": "DFB",
+            "currencies": [{"code": "USD"}],
+        },
+        "dealingRules": dealing_rules,
+        "snapshot": {"marketStatus": "TRADEABLE"},
+    }
+
+    assert _candidate({"epic": "CS.D.AUDUSD.CFD.IP"}, detail) is None

@@ -53,6 +53,15 @@ Shutdown is complete only when subscriptions, transport resources, library threa
 REST resources and process state are verified closed. Cleanup warnings, resident client
 threads or an inability to prove closure fail lifecycle acceptance.
 
+Operational run rows abandoned by an older unclean stop are never deleted or silently labelled
+`STOPPED`. Reconciliation requires a non-overwriting, hash-confirmed plan containing the complete
+set of `RUNNING` ingestion rows for one configuration before an explicit cutoff. Execution locks and
+rechecks that set in one transaction, excludes any run at or after the cutoff, and records `FAILED`
+with a stable interruption reason. Because the exact stop time is unknown, `finished_at` is the
+operator-asserted cutoff upper bound and that basis is retained in each row's detail. Terminal run
+records cannot be finalised again, so a late or duplicate lifecycle path cannot overwrite this
+evidence.
+
 ## Consequences
 
 Connection transitions, generation, retry class, bounded error code, deadlines and

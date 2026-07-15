@@ -83,6 +83,21 @@ uv run pyright
 uv run ty check
 ```
 
+After a feed-capable collector release is separately approved and deployed, a locally established
+SSH or Tailscale tunnel can be probed without persisting a consumer cursor:
+
+```bash
+uv run qtrad feed probe \
+  --endpoint http://127.0.0.1:18080 \
+  --source-id SOURCE \
+  --universe-name UNIVERSE \
+  --configuration-hash SHA256
+```
+
+The endpoint must be a literal loopback address with an explicit port. The probe fetches one
+bounded page, performs the strict feed and identity checks, and reports
+`"cursor_persisted": false`. It does not establish the tunnel or acknowledge any events.
+
 Closing VS Code does not stop the container or database, which allows a `tmux`-hosted
 soak to continue. Stop them explicitly from WSL when required:
 
@@ -118,17 +133,108 @@ Instrument synchronisation validates the configured standard-contract preference
 canonical quote currency and rolling/cash metadata for every instrument. It fails
 closed if a preferred listing is missing or invalid.
 
-Bounded backfill and research export are separate commands:
+Historical backfill is deliberately split from research export and from live ingestion. First
+create a non-overwriting plan for explicit instruments and an exact half-open UTC range:
 
 ```bash
-docker compose run --rm app python -m qtrad backfill --max-points 1000
-docker compose run --rm app python -m qtrad research export
+docker compose run --rm app python -m qtrad backfill plan \
+  --universe /app/config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-01T06:00:00Z \
+  --remaining-allowance 10000 \
+  --output /app/data/backfill-plan.json \
+  fx:aud-usd fx:eur-usd
+```
+
+Planning reads already validated listings from PostgreSQL, requires them to match the selected
+universe, reserves 20% of the operator-reported allowance, and makes no IG request. Inspect the
+JSON and its printed hash. Registration requires that exact hash and still makes no IG request:
+
+```bash
+docker compose run --rm app python -m qtrad backfill register \
+  --plan /app/data/backfill-plan.json \
+  --confirm-plan-hash <reviewed-sha256>
+```
+
+Only then execute the persisted plan by hash. This is the credential-gated provider operation:
+
+```bash
+docker compose run --rm app python -m qtrad backfill execute \
+  --plan-hash <reviewed-sha256>
+
+docker compose run --rm app python -m qtrad research export \
+  --universe /app/config/capture-v1.toml \
+  --start 2026-07-01T00:00:00Z \
+  --end 2026-07-02T00:00:00Z
 docker compose run --rm app python -m qtrad replay --manifest /app/data/research/manifests/MANIFEST.json
 ```
 
-The backfill command treats the supplied allowance as operator-reported and reserves
-at least 20%. It records IG's provider-reported remaining allowance separately when
-the response supplies it. Verify the current IG allowance before invoking it.
+Execution cannot rediscover or substitute listings, widen the range or alter live-gap evidence.
+Identical bars are idempotent; changed historical values append correction revisions. It records
+IG's provider-reported remaining allowance separately when available. Verify the current IG
+allowance before planning and again before execution.
+
+Research export records a run and manifest, so run it against an isolated restored database or
+another explicitly approved writable research copy—not the live collector or its read-only SSH
+tunnel role. Schema-version-2 manifests bind the selected universe/configuration, application
+identity, coverage, gaps, provenance and per-file hashes. Replay verifies that complete identity
+and the decoded semantic bars; legacy schema-version-1 manifests remain readable.
+
+The supported collector-backup path is documented in the
+[research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md). It verifies a complete downloaded
+backup set, creates a new `qtrad_research_*` database without overwriting, emits hash-verified import
+evidence and allows `research export --snapshot-import-evidence PATH` to bind the source snapshot
+into the resulting Parquet manifest.
+
+To measure physical capture growth, take two non-overwriting storage snapshots against the same
+database and capture source, then compare them offline:
+
+```bash
+uv run qtrad storage snapshot \
+  --universe config/capture-v1.toml \
+  --output tmp/storage-before.json
+
+# Wait for a representative capture interval, then use a new output path.
+uv run qtrad storage snapshot \
+  --universe config/capture-v1.toml \
+  --output tmp/storage-after.json
+
+uv run qtrad storage compare \
+  --output tmp/storage-comparison.json \
+  tmp/storage-before.json \
+  tmp/storage-after.json
+```
+
+The snapshot transaction is read-only. The comparison writes a non-overwriting, self-hashed artifact
+reporting whole-database, raw relation and canonical relation bytes per new raw message; the relation
+figures are more useful than serialized JSON length alone. Do not run the changed-field candidate on
+the collector during its frozen qualification window.
+
+After separate merged-state and changed-field comparisons pass their automated gates, create their
+release-bound contrast, record one bounded operator active-market review per comparison, and qualify
+the exact set offline:
+
+```bash
+uv run qtrad storage contrast --output tmp/storage-contrast.json \
+  tmp/merged-comparison.json tmp/changed-comparison.json
+uv run qtrad storage review --output tmp/merged-review.json \
+  tmp/merged-comparison.json tmp/merged-review-input.json
+uv run qtrad storage review --output tmp/changed-review.json \
+  tmp/changed-comparison.json tmp/changed-review-input.json
+uv run qtrad storage qualify --output tmp/storage-qualification.json \
+  tmp/storage-contrast.json tmp/merged-review.json tmp/changed-review.json
+```
+
+The input schema and operator procedure are in the
+[capture operations runbook](docs/CAPTURE_OPERATIONS_RUNBOOK.md). Qualification preserves an honest
+negative review as `FAIL`; even `PASS` is evidence only and cannot approve a storage-schema,
+retention or archive decision.
+
+Snapshot version 3 remains compatible with versions 1 and 2. It compares JSONB with PostgreSQL's JSON
+text rendering, reports per-index growth/scan deltas and binds raw representation counts. The
+evidence thresholds and schema candidates are recorded in the
+[capture storage audit](docs/CAPTURE_STORAGE_AUDIT.md); no index or retention constraint is removed
+automatically.
 
 ## Documentation
 
@@ -136,6 +242,8 @@ the response supplies it. Verify the current IG allowance before invoking it.
 - [Implementation plan](PLAN.md)
 - [Current status](docs/STATUS.md)
 - [Seven-instrument soak runbook](docs/SOAK_RUNBOOK.md)
+- [Research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md)
+- [Capture storage audit](docs/CAPTURE_STORAGE_AUDIT.md)
 - [Soak evidence record](docs/SOAK_EVIDENCE.md)
 - [Implemented architecture](docs/ARCHITECTURE.md)
 - [Engineering rules](docs/ENGINEERING.md)

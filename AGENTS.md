@@ -68,6 +68,26 @@ The fixed canonical universe is:
 - Verify transport tasks, threads, sessions and processes have ended before declaring
   disconnect or restart complete.
 
+## Operational evidence safety
+
+- Treat the collector host, capture database and qualification artifacts as
+  evidence-bearing operational state. Remote inspection is read-only by default.
+- Do not deploy, restart, migrate, reconcile, reprocess or perform operator-initiated
+  database maintenance during a qualification or measurement interval unless that action
+  is explicitly required by its reviewed protocol. An unplanned mutation invalidates the
+  affected interval; stop and report it.
+- Raw capture and canonical events are immutable audit evidence. Do not rewrite or
+  selectively delete historical rows to optimise storage. Apply representation changes
+  only to future versioned capture. Retiring a historical epoch requires an accepted
+  retention decision, hash-bound archive and verified restore/replay.
+- Use checked-in guarded operational commands and immutable image digests. Do not
+  improvise mutating SQL or use mutable image tags against the collector.
+- Never print secret-bearing environment files or rendered Compose configuration. Keep
+  control-plane credentials off workload hosts and prefer scoped workload identities such
+  as OCI instance principals.
+- After an external control-plane write, read the resource back and verify its effective
+  state; command completion alone is not evidence of the intended result.
+
 ## Repository synchronisation
 
 - The canonical private Git remote is `https://github.com/quarrel/q-trad.git` as

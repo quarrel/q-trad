@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from qtrad.adapters.postgres.store import PostgresAuditStore
+from qtrad.ports.storage import EventPage
 
 
 class OperatorQueries:
@@ -35,17 +36,26 @@ class OperatorQueries:
             "quotas": quotas,
         }
 
-    async def readiness(self, expected_instrument_ids: tuple[str, ...]) -> dict[str, Any]:
+    async def readiness(
+        self,
+        expected_instrument_ids: tuple[str, ...],
+        expected_configuration_hash: str,
+    ) -> dict[str, Any]:
         """Return collector readiness rather than API/database liveness."""
 
         if not expected_instrument_ids:
             raise ValueError("collector readiness requires expected instruments")
+        if len(expected_configuration_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in expected_configuration_hash
+        ):
+            raise ValueError("collector readiness requires a lower-case SHA-256 configuration hash")
         rows = await self._store.query(
             """
             SELECT
                 EXISTS (
-                    SELECT 1 FROM ops.runs
-                    WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                      SELECT 1 FROM ops.runs
+                      WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                        AND configuration_hash = :configuration_hash
                 ) AS ingestion_running,
                 EXISTS (
                     SELECT 1 FROM ops.adapter_health
@@ -69,12 +79,15 @@ class OperatorQueries:
                     WHERE projection_name = 'core'
                 ) AS checkpoint_updated_at
             """,
-            {"instrument_ids": json.dumps(expected_instrument_ids)},
+            {
+                "configuration_hash": expected_configuration_hash,
+                "instrument_ids": json.dumps(expected_instrument_ids),
+            },
         )
         row = rows[0]
         reasons: list[str] = []
         if not row["ingestion_running"]:
-            reasons.append("ingestion is not running")
+            reasons.append("matching ingestion configuration is not running")
         if not row["adapter_healthy"]:
             reasons.append("IG adapter is not healthy")
         if int(row["fresh_quote_count"]) != len(expected_instrument_ids):
@@ -92,6 +105,7 @@ class OperatorQueries:
             "global_position": int(row["global_position"]),
             "checkpoint_position": int(row["checkpoint_position"]),
             "checkpoint_updated_at": checkpoint_updated_at,
+            "configuration_hash": expected_configuration_hash,
         }
 
     async def instruments(self) -> list[dict[str, Any]]:
@@ -169,6 +183,38 @@ class OperatorQueries:
             "SELECT * FROM read_model.data_gaps ORDER BY detected_at DESC"
         )
 
+    async def historical_coverage(
+        self,
+        *,
+        instrument_id: str | None = None,
+        only_open: bool = False,
+        limit: int = 500,
+    ) -> list[dict[str, Any]]:
+        """Return plan-scoped historical coverage without conflating live-stream gaps."""
+
+        return await self._store.query(
+            """
+            SELECT instrument_id, source_provider, source_environment, source_external_id,
+                   source_listing_valid_from, source_listing_metadata_version,
+                   provenance, basis, resolution, interval_start, interval_end,
+                   detected_at, detected_by_plan_hash, covered_at,
+                   covered_by_plan_hash, observed_points
+            FROM read_model.historical_coverage_gaps
+            WHERE (
+                CAST(:instrument_id AS text) IS NULL
+                OR instrument_id = CAST(:instrument_id AS text)
+            )
+              AND (NOT :only_open OR covered_at IS NULL)
+            ORDER BY detected_at DESC, instrument_id, basis
+            LIMIT :limit
+            """,
+            {
+                "instrument_id": instrument_id,
+                "only_open": only_open,
+                "limit": limit,
+            },
+        )
+
     async def runs(self) -> list[dict[str, Any]]:
         return await self._store.query("SELECT * FROM ops.runs ORDER BY started_at DESC LIMIT 100")
 
@@ -176,3 +222,6 @@ class OperatorQueries:
         return await self._store.query(
             "SELECT * FROM ops.research_manifests ORDER BY created_at DESC"
         )
+
+    async def event_page(self, *, after_position: int, limit: int) -> EventPage:
+        return await self._store.read_page(after_position=after_position, limit=limit)

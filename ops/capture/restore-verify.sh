@@ -54,13 +54,46 @@ manifest_object="$latest_object.manifest.json"
 )
 actual_sha="$(sha256sum "$work_dir/$archive_name" | cut -d ' ' -f 1)"
 manifest_file="$work_dir/$archive_name.manifest.json"
-jq -e \
-  --arg archive "$archive_name" \
-  --arg sha256 "$actual_sha" \
-  '.schema == "qtrad-capture-backup-v1" and .archive == $archive and .sha256 == $sha256
-    and (.universe_hash | test("^[0-9a-fA-F]{64}$"))
-    and (.postgres_image | contains("@sha256:"))' \
-  "$manifest_file" > /dev/null
+manifest_schema="$(jq -er '.schema' "$manifest_file")"
+case "$manifest_schema" in
+  qtrad-capture-backup-v1)
+    jq -e \
+      --arg archive "$archive_name" \
+      --arg sha256 "$actual_sha" \
+      '.schema == "qtrad-capture-backup-v1" and .archive == $archive and .sha256 == $sha256
+        and (.universe_hash | test("^[0-9a-fA-F]{64}$"))
+        and (.postgres_image | contains("@sha256:"))' \
+      "$manifest_file" > /dev/null
+    expected_migration_version="${QTRAD_EXPECTED_V1_MIGRATION_VERSION:-0003}"
+    ;;
+  qtrad-capture-backup-v2)
+    jq -e \
+      --arg archive "$archive_name" \
+      --arg sha256 "$actual_sha" \
+      '(keys | sort) == ["archive", "capture_image", "capture_source_id", "created_at",
+        "database", "manifest_sha256", "migration_version", "postgres_image", "schema",
+        "sha256", "universe_hash", "universe_name"]
+        and .archive == $archive and .sha256 == $sha256 and .database == "qtrad_capture"
+        and (.created_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"))
+        and (.capture_source_id | test("^[a-z0-9][a-z0-9._-]{0,63}$"))
+        and (.universe_name | test("^[a-z0-9][a-z0-9._-]{0,63}$"))
+        and (.universe_hash | test("^[0-9a-f]{64}$"))
+        and (.capture_image | test("@sha256:[0-9a-f]{64}$"))
+        and (.postgres_image | test("@sha256:[0-9a-f]{64}$"))
+        and (.migration_version | test("^[0-9a-f]{4,32}$"))
+        and (.manifest_sha256 | test("^[0-9a-f]{64}$"))' \
+      "$manifest_file" > /dev/null
+    manifest_identity="$(jq -cS 'del(.manifest_sha256)' "$manifest_file")"
+    actual_manifest_sha="$(printf '%s' "$manifest_identity" | sha256sum | cut -d ' ' -f 1)"
+    expected_manifest_sha="$(jq -er '.manifest_sha256' "$manifest_file")"
+    [[ "$actual_manifest_sha" == "$expected_manifest_sha" ]]
+    expected_migration_version="$(jq -er '.migration_version' "$manifest_file")"
+    ;;
+  *)
+    printf 'unsupported capture backup manifest schema: %s\n' "$manifest_schema" >&2
+    exit 65
+    ;;
+esac
 postgres_image="$(jq -er '.postgres_image' "$manifest_file")"
 
 docker run --detach --name "$container" --network none \
@@ -85,7 +118,7 @@ migration_version="$(
     psql --dbname=qtrad_restore --tuples-only --no-align \
     --command 'SELECT version_num FROM alembic_version;'
 )"
-[[ "$migration_version" == 0003 ]]
+[[ "$migration_version" == "$expected_migration_version" ]]
 event_count="$(
   docker exec -u postgres "$container" \
     psql --dbname=qtrad_restore --tuples-only --no-align \
@@ -98,10 +131,12 @@ jq -n \
   --arg completed_at "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
   --arg object_name "$latest_object" \
   --arg sha256 "$actual_sha" \
+  --arg manifest_schema "$manifest_schema" \
   --arg migration_version "$migration_version" \
   --argjson canonical_event_count "$event_count" \
   '{success:true, completed_at:$completed_at, object_name:$object_name, sha256:$sha256,
-    migration_version:$migration_version, canonical_event_count:$canonical_event_count}' \
+    manifest_schema:$manifest_schema, migration_version:$migration_version,
+    canonical_event_count:$canonical_event_count}' \
   > "$temporary_status"
 mv -f "$temporary_status" "$status_file"
 

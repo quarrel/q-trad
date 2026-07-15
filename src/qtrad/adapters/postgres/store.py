@@ -5,22 +5,32 @@ import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any, cast
-from uuid import UUID
+from uuid import NAMESPACE_URL, UUID, uuid5
 
 from sqlalchemy import text
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from qtrad.application.run_reconciliation import verify_run_reconciliation_plan_hash
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
+from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
+from qtrad.domain.market_data import BarProvenance, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
-from qtrad.domain.operations import AdapterHealth
+from qtrad.domain.operations import (
+    AdapterHealth,
+    RunReconciliationPlan,
+    RunReconciliationTarget,
+)
+from qtrad.domain.time import require_utc
 from qtrad.ports.storage import (
     AppendResult,
     AuditStore,
+    EventPage,
     RawMessage,
     ResearchManifest,
 )
@@ -75,76 +85,95 @@ class PostgresAuditStore(AuditStore):
         *,
         universe_hash: str | None = None,
     ) -> None:
+        if universe_hash is not None:
+            _require_sha256(universe_hash, "provider listing universe hash")
         async with self._engine.begin() as connection:
+            await self._upsert_provider_listing_projection(
+                connection,
+                listing,
+                metadata,
+                universe_hash=universe_hash,
+            )
+
+    async def _upsert_provider_listing_projection(
+        self,
+        connection: AsyncConnection,
+        listing: ProviderListing,
+        metadata: Mapping[str, JsonValue],
+        *,
+        universe_hash: str | None,
+    ) -> None:
+        if listing.valid_to is None:
             await connection.execute(
                 text(
                     """
                     UPDATE reference.provider_listings SET valid_to = :valid_from
                     WHERE provider = :provider AND environment = :environment
-                      AND external_id = :external_id AND valid_to IS NULL
-                      AND metadata_version <> :metadata_version
+                      AND instrument_id = :instrument_id
+                      AND valid_from < :valid_from
+                      AND (valid_to IS NULL OR valid_to > :valid_from)
                     """
                 ),
                 {
                     "provider": listing.listing_id.provider,
                     "environment": listing.listing_id.environment,
-                    "external_id": listing.listing_id.external_id,
-                    "valid_from": listing.valid_from,
-                    "metadata_version": listing.metadata_version,
-                },
-            )
-            await connection.execute(
-                text(
-                    """
-                    INSERT INTO reference.provider_listings (
-                        provider, environment, external_id, instrument_id,
-                        display_name, product_type, currency, minimum_deal_size,
-                          price_increment, valid_from, valid_to, metadata_version, metadata,
-                          economics, universe_hash
-                    ) VALUES (
-                        :provider, :environment, :external_id, :instrument_id,
-                        :display_name, :product_type, :currency, :minimum_deal_size,
-                          :price_increment, :valid_from, :valid_to, :metadata_version,
-                          CAST(:metadata AS jsonb), CAST(:economics AS jsonb), :universe_hash
-                    )
-                    ON CONFLICT (provider, environment, external_id, valid_from)
-                    DO UPDATE SET
-                        display_name = EXCLUDED.display_name,
-                        product_type = EXCLUDED.product_type,
-                        currency = EXCLUDED.currency,
-                        minimum_deal_size = EXCLUDED.minimum_deal_size,
-                        price_increment = EXCLUDED.price_increment,
-                        valid_to = EXCLUDED.valid_to,
-                        metadata_version = EXCLUDED.metadata_version,
-                          metadata = EXCLUDED.metadata,
-                          economics = EXCLUDED.economics,
-                          universe_hash = EXCLUDED.universe_hash
-                    """
-                ),
-                {
-                    "provider": listing.listing_id.provider,
-                    "environment": listing.listing_id.environment,
-                    "external_id": listing.listing_id.external_id,
                     "instrument_id": str(listing.instrument_id),
-                    "display_name": listing.display_name,
-                    "product_type": listing.product_type.value,
-                    "currency": listing.currency,
-                    "minimum_deal_size": listing.minimum_deal_size,
-                    "price_increment": listing.price_increment,
                     "valid_from": listing.valid_from,
-                    "valid_to": listing.valid_to,
-                    "metadata_version": listing.metadata_version,
-                    "metadata": json.dumps(metadata, sort_keys=True),
-                    "economics": json.dumps(listing.economics, sort_keys=True),
-                    "universe_hash": universe_hash,
                 },
             )
+        await connection.execute(
+            text(
+                """
+                INSERT INTO reference.provider_listings (
+                    provider, environment, external_id, instrument_id,
+                    display_name, product_type, currency, minimum_deal_size,
+                      price_increment, valid_from, valid_to, metadata_version, metadata,
+                      economics, universe_hash
+                ) VALUES (
+                    :provider, :environment, :external_id, :instrument_id,
+                    :display_name, :product_type, :currency, :minimum_deal_size,
+                      :price_increment, :valid_from, :valid_to, :metadata_version,
+                      CAST(:metadata AS jsonb), CAST(:economics AS jsonb), :universe_hash
+                )
+                ON CONFLICT (provider, environment, external_id, valid_from)
+                DO UPDATE SET
+                    display_name = EXCLUDED.display_name,
+                    product_type = EXCLUDED.product_type,
+                    currency = EXCLUDED.currency,
+                    minimum_deal_size = EXCLUDED.minimum_deal_size,
+                    price_increment = EXCLUDED.price_increment,
+                    valid_to = EXCLUDED.valid_to,
+                    metadata_version = EXCLUDED.metadata_version,
+                      metadata = EXCLUDED.metadata,
+                      economics = EXCLUDED.economics,
+                      universe_hash = EXCLUDED.universe_hash
+                """
+            ),
+            {
+                "provider": listing.listing_id.provider,
+                "environment": listing.listing_id.environment,
+                "external_id": listing.listing_id.external_id,
+                "instrument_id": str(listing.instrument_id),
+                "display_name": listing.display_name,
+                "product_type": listing.product_type.value,
+                "currency": listing.currency,
+                "minimum_deal_size": listing.minimum_deal_size,
+                "price_increment": listing.price_increment,
+                "valid_from": listing.valid_from,
+                "valid_to": listing.valid_to,
+                "metadata_version": listing.metadata_version,
+                "metadata": json.dumps(metadata, sort_keys=True),
+                "economics": json.dumps(listing.economics, sort_keys=True),
+                "universe_hash": universe_hash,
+            },
+        )
 
     async def validate_provider_listing(
         self, listing: ProviderListing, *, universe_hash: str, observed_at: datetime
     ) -> EventEnvelope | None:
         """Record a bounded listing-validation fact before changing its projection."""
 
+        _require_sha256(universe_hash, "provider listing universe hash")
         existing = await self.query(
             """
             SELECT metadata_version, universe_hash FROM reference.provider_listings
@@ -162,6 +191,7 @@ class PostgresAuditStore(AuditStore):
             and existing[0]["universe_hash"] == universe_hash
         ):
             return None
+        effective_listing = replace(listing, valid_from=observed_at, valid_to=None)
         stream_id = (
             f"provider-listing:{listing.listing_id.provider}:{listing.listing_id.environment}:"
             f"{listing.listing_id.external_id}"
@@ -175,7 +205,7 @@ class PostgresAuditStore(AuditStore):
             received_time=observed_at,
             producer="ig-demo-discovery",
             producer_version="0.1.0",
-            payload={"listing": listing, "universe_hash": universe_hash},
+            payload={"listing": effective_listing, "universe_hash": universe_hash},
         )
         try:
             persisted = await self.append(event, expected_stream_version=previous)
@@ -183,10 +213,6 @@ class PostgresAuditStore(AuditStore):
             return await self.validate_provider_listing(
                 listing, universe_hash=universe_hash, observed_at=observed_at
             )
-        metadata = to_json_value(listing)
-        if not isinstance(metadata, dict):
-            raise TypeError("provider listing did not serialise to an object")
-        await self.upsert_provider_listing(listing, metadata, universe_hash=universe_hash)
         return persisted
 
     async def active_provider_listings(
@@ -267,6 +293,7 @@ class PostgresAuditStore(AuditStore):
         configuration_hash: str,
         started_at: datetime,
     ) -> RunId:
+        _require_sha256(configuration_hash, "run configuration hash")
         run_id = RunId.new()
         async with self._engine.begin() as connection:
             await connection.execute(
@@ -302,7 +329,7 @@ class PostgresAuditStore(AuditStore):
         if status not in {"COMPLETED", "FAILED", "STOPPED"}:
             raise ValueError("invalid terminal run status")
         async with self._engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     UPDATE ops.runs
@@ -310,6 +337,8 @@ class PostgresAuditStore(AuditStore):
                         finished_at = :finished_at,
                         detail = CAST(:detail AS jsonb)
                     WHERE run_id = :run_id
+                      AND status = 'RUNNING'
+                    RETURNING run_id
                     """
                 ),
                 {
@@ -319,37 +348,437 @@ class PostgresAuditStore(AuditStore):
                     "detail": json.dumps(detail, sort_keys=True),
                 },
             )
+            if result.scalar_one_or_none() != run_id.value:
+                raise RuntimeError("run does not exist or is already terminal")
+
+    async def database_name(self) -> str:
+        async with self._engine.connect() as connection:
+            value = (await connection.execute(text("SELECT current_database()"))).scalar_one()
+        if not isinstance(value, str) or not value:
+            raise TypeError("PostgreSQL current_database() did not return a non-empty string")
+        return value
+
+    async def stale_running_ingestion_runs(
+        self,
+        *,
+        cutoff: datetime,
+        environment: BrokerEnvironment,
+        configuration_hash: str,
+    ) -> tuple[RunReconciliationTarget, ...]:
+        require_utc(cutoff, "run reconciliation cutoff")
+        _require_sha256(configuration_hash, "run reconciliation configuration hash")
+        async with self._engine.connect() as connection:
+            rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT run_id, started_at
+                        FROM ops.runs
+                        WHERE kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at < :cutoff
+                        ORDER BY started_at, run_id
+                        """
+                    ),
+                    {
+                        "cutoff": cutoff,
+                        "environment": environment.value,
+                        "configuration_hash": configuration_hash,
+                    },
+                )
+            ).mappings()
+            return tuple(
+                RunReconciliationTarget(
+                    run_id=RunId(row["run_id"]),
+                    started_at=_utc(row["started_at"]),
+                )
+                for row in rows
+            )
+
+    async def reconcile_stale_ingestion_runs(
+        self,
+        plan: RunReconciliationPlan,
+        *,
+        reconciled_at: datetime,
+    ) -> int:
+        """Atomically fail only the complete, unchanged target set in a reviewed plan."""
+
+        verify_run_reconciliation_plan_hash(plan)
+        require_utc(reconciled_at, "run reconciliation execution time")
+        if reconciled_at < plan.created_at:
+            raise ValueError("run reconciliation execution predates its reviewed plan")
+        detail: dict[str, JsonValue] = {
+            "previous_status": "RUNNING",
+            "reason_code": plan.reason_code,
+            "reconciliation_plan_hash": plan.plan_hash,
+            "reconciled_at": _utc_text(reconciled_at),
+            "finished_at_basis": plan.finished_at_basis,
+            "cutoff": _utc_text(plan.cutoff),
+        }
+        async with self._engine.begin() as connection:
+            await connection.execute(text("LOCK TABLE ops.runs IN SHARE ROW EXCLUSIVE MODE"))
+            database_name = (
+                await connection.execute(text("SELECT current_database()"))
+            ).scalar_one()
+            if database_name != plan.database_name:
+                raise ValueError("run reconciliation plan targets a different database")
+            rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT run_id, started_at
+                        FROM ops.runs
+                        WHERE kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at < :cutoff
+                        ORDER BY started_at, run_id
+                        FOR UPDATE
+                        """
+                    ),
+                    {
+                        "cutoff": plan.cutoff,
+                        "environment": plan.environment.value,
+                        "configuration_hash": plan.configuration_hash,
+                    },
+                )
+            ).mappings()
+            observed = tuple(
+                RunReconciliationTarget(
+                    run_id=RunId(row["run_id"]),
+                    started_at=_utc(row["started_at"]),
+                )
+                for row in rows
+            )
+            if observed != plan.targets:
+                raise ValueError(
+                    "run reconciliation target set changed or omitted an eligible stale run"
+                )
+            for target in plan.targets:
+                updated = await connection.execute(
+                    text(
+                        """
+                        UPDATE ops.runs
+                        SET status = :status,
+                            finished_at = :finished_at,
+                            detail = CAST(:detail AS jsonb)
+                        WHERE run_id = :run_id
+                          AND kind = 'INGESTION'
+                          AND status = 'RUNNING'
+                          AND environment = :environment
+                          AND configuration_hash = :configuration_hash
+                          AND started_at = :started_at
+                          AND started_at < :cutoff
+                        RETURNING run_id
+                        """
+                    ),
+                    {
+                        "run_id": target.run_id.value,
+                        "status": plan.terminal_status,
+                        "finished_at": plan.cutoff,
+                        "detail": json.dumps(detail, sort_keys=True),
+                        "environment": plan.environment.value,
+                        "configuration_hash": plan.configuration_hash,
+                        "started_at": target.started_at,
+                        "cutoff": plan.cutoff,
+                    },
+                )
+                if updated.scalar_one_or_none() != target.run_id.value:
+                    raise RuntimeError("run reconciliation target changed while locked")
+        return len(plan.targets)
+
+    async def register_backfill_plan(
+        self,
+        plan: BackfillPlan,
+        payload: Mapping[str, JsonValue],
+    ) -> str:
+        """Persist one reviewed plan and project its still-open historical coverage ranges."""
+
+        encoded = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        plan_id = uuid5(NAMESPACE_URL, f"qtrad-backfill:{plan.plan_hash}")
+        async with self._engine.begin() as connection:
+            inserted = await connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.backfill_plans (
+                        plan_id, plan_hash, universe_hash, status, plan, created_at
+                    ) VALUES (
+                        :plan_id, :plan_hash, :universe_hash, 'PLANNED',
+                        CAST(:plan AS jsonb), :created_at
+                    )
+                    ON CONFLICT (plan_hash) DO NOTHING
+                    RETURNING plan_hash
+                    """
+                ),
+                {
+                    "plan_id": plan_id,
+                    "plan_hash": plan.plan_hash,
+                    "universe_hash": plan.universe_hash,
+                    "plan": encoded,
+                    "created_at": plan.created_at,
+                },
+            )
+            if inserted.scalar_one_or_none() is None:
+                existing = (
+                    (
+                        await connection.execute(
+                            text(
+                                """
+                            SELECT universe_hash, plan, status
+                            FROM ops.backfill_plans
+                            WHERE plan_hash = :plan_hash
+                            """
+                            ),
+                            {"plan_hash": plan.plan_hash},
+                        )
+                    )
+                    .mappings()
+                    .one()
+                )
+                if existing["universe_hash"] != plan.universe_hash or existing["plan"] != dict(
+                    payload
+                ):
+                    raise RuntimeError("persisted backfill plan content conflicts with its hash")
+                status = str(existing["status"])
+            else:
+                status = "PLANNED"
+            for item in plan.items:
+                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID):
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO read_model.historical_coverage_gaps (
+                                instrument_id, source_provider, source_environment,
+                                source_external_id, source_listing_valid_from,
+                                source_listing_metadata_version, provenance, basis, resolution,
+                                interval_start, interval_end, detected_at, detected_by_plan_hash
+                            ) VALUES (
+                                :instrument_id, :provider, :environment, :external_id,
+                                :listing_valid_from, :listing_metadata_version,
+                                :provenance, :basis, :resolution,
+                                :interval_start, :interval_end, :detected_at, :plan_hash
+                            )
+                            ON CONFLICT DO NOTHING
+                            """
+                        ),
+                        _coverage_parameters(plan, item, basis),
+                    )
+            return status
+
+    async def claim_backfill_plan(self, plan_hash: str) -> Mapping[str, JsonValue]:
+        """Atomically claim a registered or explicitly retried failed plan."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'EXECUTING', executed_at = NULL
+                    WHERE plan_hash = :plan_hash AND status IN ('PLANNED', 'FAILED')
+                    RETURNING plan
+                    """
+                ),
+                {"plan_hash": plan_hash},
+            )
+            payload = result.scalar_one_or_none()
+            if payload is not None:
+                return cast(Mapping[str, JsonValue], payload)
+            status = (
+                await connection.execute(
+                    text("SELECT status FROM ops.backfill_plans WHERE plan_hash = :plan_hash"),
+                    {"plan_hash": plan_hash},
+                )
+            ).scalar_one_or_none()
+            if status is None:
+                raise RuntimeError("backfill plan is not registered")
+            raise RuntimeError(f"backfill plan cannot execute from status {status}")
+
+    async def fail_backfill_plan(self, plan_hash: str, *, executed_at: datetime) -> None:
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'FAILED', executed_at = :executed_at
+                    WHERE plan_hash = :plan_hash AND status = 'EXECUTING'
+                    RETURNING plan_hash
+                    """
+                ),
+                {"plan_hash": plan_hash, "executed_at": executed_at},
+            )
+            if result.scalar_one_or_none() is None:
+                raise RuntimeError("backfill plan was not executing when failure was recorded")
+
+    async def complete_backfill_plan(
+        self,
+        plan: BackfillPlan,
+        *,
+        observed_points: Mapping[tuple[InstrumentId, PriceBasis], int],
+        executed_at: datetime,
+    ) -> None:
+        """Close only this plan's historical gaps after every planned basis returned data."""
+
+        async with self._engine.begin() as connection:
+            for item in plan.items:
+                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID):
+                    points = observed_points[(item.instrument_id, basis)]
+                    if points <= 0:
+                        raise ValueError(
+                            "historical coverage requires observed points for every basis"
+                        )
+                    result = await connection.execute(
+                        text(
+                            """
+                            UPDATE read_model.historical_coverage_gaps
+                            SET covered_at = :covered_at,
+                                covered_by_plan_hash = :plan_hash,
+                                observed_points = :observed_points
+                            WHERE instrument_id = :instrument_id
+                              AND source_provider = :provider
+                              AND source_environment = :environment
+                              AND source_external_id = :external_id
+                              AND source_listing_valid_from = :listing_valid_from
+                              AND source_listing_metadata_version = :listing_metadata_version
+                              AND provenance = :provenance
+                              AND basis = :basis
+                                AND resolution = :resolution
+                                AND interval_start = :interval_start
+                                AND interval_end = :interval_end
+                                AND detected_by_plan_hash = :plan_hash
+                              RETURNING instrument_id
+                            """
+                        ),
+                        {
+                            **_coverage_parameters(plan, item, basis),
+                            "covered_at": executed_at,
+                            "observed_points": points,
+                        },
+                    )
+                    if result.scalar_one_or_none() is None:
+                        raise RuntimeError("planned historical coverage row is missing")
+            completed = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.backfill_plans
+                    SET status = 'COMPLETED', executed_at = :executed_at
+                    WHERE plan_hash = :plan_hash AND status = 'EXECUTING'
+                    RETURNING plan_hash
+                    """
+                ),
+                {"plan_hash": plan.plan_hash, "executed_at": executed_at},
+            )
+            if completed.scalar_one_or_none() is None:
+                raise RuntimeError("backfill plan was not executing at completion")
+
+    async def provider_listing_version(self, item: BackfillPlanItem) -> ProviderListing:
+        rows = await self.query(
+            """
+            SELECT provider, environment, external_id, instrument_id, display_name,
+                   product_type, currency, minimum_deal_size, price_increment,
+                   valid_from, valid_to, metadata_version
+            FROM reference.provider_listings
+            WHERE provider = :provider AND environment = :environment
+              AND external_id = :external_id AND valid_from = :valid_from
+            """,
+            {
+                "provider": item.listing_id.provider,
+                "environment": item.listing_id.environment,
+                "external_id": item.listing_id.external_id,
+                "valid_from": item.listing_valid_from,
+            },
+        )
+        if len(rows) != 1:
+            raise RuntimeError(f"planned provider listing version is missing: {item.listing_id}")
+        listing = _provider_listing(rows[0])
+        if listing.instrument_id != item.instrument_id:
+            raise RuntimeError("planned provider listing belongs to another instrument")
+        if listing.metadata_version != item.listing_metadata_version:
+            raise RuntimeError("planned provider listing metadata version changed")
+        return listing
 
     async def record_manifest(self, manifest: ResearchManifest) -> None:
         async with self._engine.begin() as connection:
-            await connection.execute(
+            result = await connection.execute(
                 text(
                     """
                     INSERT INTO ops.research_manifests (
-                        manifest_id, created_at, schema_version, row_count,
+                        manifest_id, manifest_sha256, created_at, schema_version,
+                        universe_name, row_count,
                         minimum_event_time, maximum_event_time, content_sha256,
-                        configuration_hash, files, metadata
+                        configuration_hash, files, file_sha256, metadata
                     ) VALUES (
-                        :manifest_id, :created_at, :schema_version, :row_count,
+                        :manifest_id, :manifest_sha256, :created_at, :schema_version,
+                        :universe_name, :row_count,
                         :minimum_event_time, :maximum_event_time, :content_sha256,
-                        :configuration_hash, CAST(:files AS jsonb), CAST(:metadata AS jsonb)
+                        :configuration_hash, CAST(:files AS jsonb),
+                        CAST(:file_sha256 AS jsonb), CAST(:metadata AS jsonb)
                     )
                     ON CONFLICT (manifest_id) DO NOTHING
+                    RETURNING manifest_id
                     """
                 ),
                 {
                     "manifest_id": manifest.manifest_id,
+                    "manifest_sha256": manifest.manifest_sha256,
                     "created_at": manifest.created_at,
                     "schema_version": manifest.schema_version,
+                    "universe_name": manifest.universe_name,
                     "row_count": manifest.row_count,
                     "minimum_event_time": manifest.minimum_event_time,
                     "maximum_event_time": manifest.maximum_event_time,
                     "content_sha256": manifest.content_sha256,
                     "configuration_hash": manifest.configuration_hash,
                     "files": json.dumps(manifest.files),
+                    "file_sha256": (
+                        json.dumps(manifest.file_sha256, sort_keys=True)
+                        if manifest.schema_version == 2
+                        else None
+                    ),
                     "metadata": json.dumps(manifest.metadata, sort_keys=True),
                 },
             )
+            if result.scalar_one_or_none() is not None:
+                return
+            existing = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                            SELECT manifest_sha256, created_at, schema_version, universe_name,
+                                   row_count, minimum_event_time, maximum_event_time,
+                                   content_sha256, configuration_hash, files,
+                                   file_sha256, metadata
+                            FROM ops.research_manifests
+                            WHERE manifest_id = :manifest_id
+                            """
+                        ),
+                        {"manifest_id": manifest.manifest_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            expected = {
+                "manifest_sha256": manifest.manifest_sha256,
+                "created_at": manifest.created_at,
+                "schema_version": manifest.schema_version,
+                "universe_name": manifest.universe_name,
+                "row_count": manifest.row_count,
+                "minimum_event_time": manifest.minimum_event_time,
+                "maximum_event_time": manifest.maximum_event_time,
+                "content_sha256": manifest.content_sha256,
+                "configuration_hash": manifest.configuration_hash,
+                "files": list(manifest.files),
+                "file_sha256": (
+                    dict(manifest.file_sha256) if manifest.schema_version == 2 else None
+                ),
+                "metadata": dict(manifest.metadata),
+            }
+            if dict(existing) != expected:
+                raise RuntimeError("persisted research manifest conflicts with its identity")
 
     async def record_quota_state(
         self,
@@ -456,13 +885,14 @@ class PostgresAuditStore(AuditStore):
         result = await connection.execute(
             text(
                 """
-                INSERT INTO raw.market_messages (
-                    provider, environment, subscription, deduplication_key,
-                    received_time, payload, payload_sha256, adapter_version
-                ) VALUES (
-                    :provider, :environment, :subscription, :deduplication_key,
-                    :received_time, CAST(:payload AS jsonb), :payload_sha256,
-                    :adapter_version
+                  INSERT INTO raw.market_messages (
+                      provider, environment, subscription, deduplication_key,
+                      received_time, payload, payload_sha256, payload_representation,
+                      adapter_version
+                  ) VALUES (
+                      :provider, :environment, :subscription, :deduplication_key,
+                      :received_time, CAST(:payload AS jsonb), :payload_sha256,
+                      :payload_representation, :adapter_version
                 )
                 ON CONFLICT (provider, environment, deduplication_key) DO NOTHING
                 RETURNING id
@@ -476,6 +906,7 @@ class PostgresAuditStore(AuditStore):
                 "received_time": message.received_time,
                 "payload": payload_text,
                 "payload_sha256": payload_hash,
+                "payload_representation": int(message.payload_representation),
                 "adapter_version": message.adapter_version,
             },
         )
@@ -586,7 +1017,21 @@ class PostgresAuditStore(AuditStore):
         return persisted
 
     async def _project(self, connection: AsyncConnection, event: EventEnvelope) -> None:
-        if event.event_type == "MarketQuoteObserved":
+        if event.event_type == "ProviderListingValidated":
+            payload = event.payload
+            listing = _provider_listing_from_event(_mapping(payload["listing"]))
+            universe_hash = str(payload["universe_hash"])
+            _require_sha256(universe_hash, "provider listing event universe hash")
+            metadata = to_json_value(listing)
+            if not isinstance(metadata, dict):
+                raise TypeError("provider listing did not serialise to an object")
+            await self._upsert_provider_listing_projection(
+                connection,
+                listing,
+                metadata,
+                universe_hash=universe_hash,
+            )
+        elif event.event_type == "MarketQuoteObserved":
             payload = event.payload
             listing = _mapping(payload["listing_id"])
             await connection.execute(
@@ -705,6 +1150,9 @@ class PostgresAuditStore(AuditStore):
 
     async def rebuild_projections(self) -> int:
         async with self._engine.begin() as connection:
+            await connection.execute(
+                text("DELETE FROM reference.provider_listings WHERE universe_hash IS NOT NULL")
+            )
             await connection.execute(text("TRUNCATE read_model.latest_quotes"))
             await connection.execute(text("TRUNCATE read_model.market_bars"))
             await connection.execute(text("TRUNCATE read_model.data_gaps"))
@@ -757,6 +1205,30 @@ class PostgresAuditStore(AuditStore):
             async for row in result.mappings():
                 yield _event_from_row(row)
 
+    async def read_page(self, *, after_position: int, limit: int) -> EventPage:
+        if after_position < 0:
+            raise ValueError("event cursor cannot be negative")
+        if not 1 <= limit <= 1000:
+            raise ValueError("event page limit must be between 1 and 1000")
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT * FROM canonical.events
+                    WHERE global_position > :after_position
+                    ORDER BY global_position
+                    LIMIT :limit
+                    """
+                ),
+                {"after_position": after_position, "limit": limit},
+            )
+            events = tuple(_event_from_row(row) for row in result.mappings())
+            high_water_result = await connection.execute(
+                text("SELECT COALESCE(MAX(global_position), 0) FROM canonical.events")
+            )
+            high_water_position = int(high_water_result.scalar_one())
+        return EventPage(events=events, high_water_position=high_water_position)
+
 
 def _event_from_row(row: RowMapping) -> EventEnvelope:
     return EventEnvelope(
@@ -778,10 +1250,84 @@ def _event_from_row(row: RowMapping) -> EventEnvelope:
     )
 
 
+def _require_sha256(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field} must be lower-case SHA-256")
+
+
 def _utc(value: object) -> datetime:
     if not isinstance(value, datetime):
         raise TypeError("database timestamp is not a datetime")
     return value.astimezone(UTC)
+
+
+def _utc_text(value: datetime) -> str:
+    require_utc(value, "database evidence time")
+    return value.isoformat().replace("+00:00", "Z")
+
+
+def _provider_listing(row: Mapping[str, object]) -> ProviderListing:
+    return ProviderListing(
+        listing_id=ProviderListingId(
+            provider=str(row["provider"]),
+            environment=str(row["environment"]),
+            external_id=str(row["external_id"]),
+        ),
+        instrument_id=InstrumentId(str(row["instrument_id"])),
+        display_name=str(row["display_name"]),
+        product_type=ProductType(str(row["product_type"])),
+        currency=str(row["currency"]),
+        minimum_deal_size=cast(Decimal, row["minimum_deal_size"]),
+        price_increment=cast(Decimal | None, row["price_increment"]),
+        valid_from=_utc(row["valid_from"]),
+        valid_to=_utc(row["valid_to"]) if row["valid_to"] else None,
+        metadata_version=str(row["metadata_version"]),
+    )
+
+
+def _provider_listing_from_event(value: Mapping[str, JsonValue]) -> ProviderListing:
+    listing_id = _mapping(value["listing_id"])
+    price_increment = value["price_increment"]
+    valid_to = value["valid_to"]
+    return ProviderListing(
+        listing_id=ProviderListingId(
+            provider=str(listing_id["provider"]),
+            environment=str(listing_id["environment"]),
+            external_id=str(listing_id["external_id"]),
+        ),
+        instrument_id=InstrumentId(str(value["instrument_id"])),
+        display_name=str(value["display_name"]),
+        product_type=ProductType(str(value["product_type"])),
+        currency=str(value["currency"]),
+        minimum_deal_size=Decimal(str(value["minimum_deal_size"])),
+        price_increment=(Decimal(str(price_increment)) if price_increment is not None else None),
+        valid_from=_parse_datetime(value["valid_from"]),
+        valid_to=_parse_datetime(valid_to) if valid_to is not None else None,
+        metadata_version=str(value["metadata_version"]),
+        economics=_mapping(value["economics"]),
+    )
+
+
+def _coverage_parameters(
+    plan: BackfillPlan,
+    item: BackfillPlanItem,
+    basis: PriceBasis,
+) -> dict[str, object]:
+    return {
+        "instrument_id": str(item.instrument_id),
+        "provider": item.listing_id.provider,
+        "environment": item.listing_id.environment,
+        "external_id": item.listing_id.external_id,
+        "listing_valid_from": item.listing_valid_from,
+        "listing_metadata_version": item.listing_metadata_version,
+        "provenance": BarProvenance.IG_HISTORICAL.value,
+        "basis": basis.value,
+        "resolution": plan.resolution.value,
+        "interval_start": plan.start,
+        "interval_end": plan.end,
+        "detected_at": plan.created_at,
+        "plan_hash": plan.plan_hash,
+    }
 
 
 def _parse_datetime(value: JsonValue) -> datetime:

@@ -1,5 +1,5 @@
 import asyncio
-from collections.abc import Awaitable, Callable, Generator, Sequence
+from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
@@ -21,6 +21,7 @@ from qtrad.adapters.ig.market_data import (
     _ProviderOperationTimeout,
     _safe_error_code,
 )
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.market_data import DataQuality, MarketQuote
@@ -69,6 +70,7 @@ class FakeService:
         self.historical_response = historical_response
         self.session = FakeSession()
         self.logged_out = False
+        self.historical_request: tuple[str, str, str, str] | None = None
 
     def create_session(self) -> dict[str, str]:
         if self.failure is not None:
@@ -91,6 +93,7 @@ class FakeService:
         self, epic: str, resolution: str, start: str, end: str
     ) -> dict[str, Any]:
         assert epic and resolution == "MINUTE" and start < end
+        self.historical_request = (epic, resolution, start, end)
         return self.historical_response or {"prices": []}
 
 
@@ -139,11 +142,20 @@ class StaleAdapter(IgDemoMarketDataAdapter):
 
 
 class FakeUpdate:
-    def __init__(self, values: dict[str, str]) -> None:
-        self.values = values
+    def __init__(
+        self,
+        values: Mapping[str, str | None],
+        *,
+        changed_fields: set[str] | None = None,
+    ) -> None:
+        self.values = dict(values)
+        self.changed_fields = set(values) if changed_fields is None else changed_fields
 
     def getValue(self, field: str) -> str | None:
         return self.values.get(field)
+
+    def isValueChanged(self, field: str) -> bool:
+        return field in self.changed_fields
 
 
 class FakeConnectionDetails:
@@ -294,6 +306,7 @@ def market_record(
         deduplication_key=f"record-{quality}",
         received_time=clock.now(),
         raw_payload={},
+        payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
         quote=quote,
     )
 
@@ -752,6 +765,7 @@ async def test_queue_saturation_drops_new_record_and_recovers_after_drain() -> N
         deduplication_key="one",
         received_time=clock.now(),
         raw_payload={},
+        payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
         quote=None,
     )
 
@@ -790,6 +804,12 @@ async def test_backfill_captures_provider_reported_allowance() -> None:
 
     assert [bar async for bar in adapter.backfill(request)] == []
     assert adapter.historical_allowance_remaining == 9965
+    assert service.historical_request == (
+        listing().listing_id.external_id,
+        "MINUTE",
+        clock.now().strftime("%Y-%m-%d %H:%M:%S"),
+        (clock.now() + timedelta(minutes=5) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
+    )
     await adapter.disconnect()
 
 
@@ -853,6 +873,65 @@ async def test_partial_price_update_preserves_one_sided_quote() -> None:
     assert quote.bid == Decimal("0.65000")
     assert quote.ask is None
     assert quote.quality.value == "PARTIAL"
+
+
+@pytest.mark.asyncio
+async def test_price_callback_persists_only_changed_fields_and_preserves_explicit_null() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._loop = asyncio.get_running_loop()
+    adapter._stream_account_id = "not-a-real-account"
+    adapter._listings_by_epic["CS.D.AUDUSD.CFD.IP"] = listing()
+    epic = "CS.D.AUDUSD.CFD.IP"
+
+    initial = {
+        "TIMESTAMP": "1783065600000",
+        "BIDPRICE1": "0.65000",
+        "ASKPRICE1": "0.65010",
+        "BIDSIZE1": "12",
+        "ASKSIZE1": "10",
+        "DLG_FLAG": "DEAL",
+        "DELAY": "0",
+    }
+    adapter._on_update(epic, FakeUpdate(initial))
+    await asyncio.sleep(0)
+    first = adapter._queue.get_nowait()
+    assert first.raw_payload == initial
+    assert first.payload_representation is RawPayloadRepresentation.CHANGED_FIELDS
+
+    merged = {
+        **initial,
+        "TIMESTAMP": "1783065601000",
+        "BIDPRICE1": "0.65001",
+    }
+    adapter._on_update(
+        epic,
+        FakeUpdate(merged, changed_fields={"TIMESTAMP", "BIDPRICE1"}),
+    )
+    await asyncio.sleep(0)
+    second = adapter._queue.get_nowait()
+    assert second.raw_payload == {
+        "TIMESTAMP": "1783065601000",
+        "BIDPRICE1": "0.65001",
+    }
+    assert second.quote is not None
+    assert second.quote.bid == Decimal("0.65001")
+    assert second.quote.ask == Decimal("0.65010")
+
+    cleared = {**merged, "TIMESTAMP": "1783065602000", "ASKPRICE1": None}
+    adapter._on_update(
+        epic,
+        FakeUpdate(cleared, changed_fields={"TIMESTAMP", "ASKPRICE1"}),
+    )
+    await asyncio.sleep(0)
+    third = adapter._queue.get_nowait()
+    assert third.raw_payload == {
+        "TIMESTAMP": "1783065602000",
+        "ASKPRICE1": None,
+    }
+    assert third.quote is not None
+    assert third.quote.bid == Decimal("0.65001")
+    assert third.quote.ask is None
+    assert third.quote.ask_time is None
 
 
 def test_backoff_is_exponential_and_capped() -> None:

@@ -20,6 +20,7 @@ from threading import Thread
 from typing import Protocol, TypeVar, cast, runtime_checkable
 
 from qtrad.adapters.ig.lightstreamer_compat import install_lightstreamer_compatibility
+from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import (
@@ -39,11 +40,23 @@ from qtrad.domain.market_data import (
 from qtrad.domain.modes import BrokerEnvironment
 from qtrad.domain.operations import AdapterHealth, HealthStatus
 from qtrad.ports.clock import Clock
-from qtrad.ports.market_data import BackfillRequest, MarketDataRecord
+from qtrad.ports.market_data import (
+    BackfillRequest,
+    InstrumentListingReview,
+    ListingExpiryKind,
+    ListingMarketState,
+    ListingReviewCandidate,
+    ListingReviewRejection,
+    MarketDataRecord,
+)
 
 LOGGER = logging.getLogger(__name__)
 _T = TypeVar("_T")
 _ROLLING_EXPIRIES = {"-", "DFB", "DAILY", "CASH", "ROLLING"}
+_UNAVAILABLE_MARKET_STATES = {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+_MAX_LISTING_REVIEW_CANDIDATES = 100
+_MAX_LISTING_REVIEW_SEARCH_REQUESTS = 100
+_MAX_LISTING_REVIEW_DETAIL_REQUESTS = 200
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
     "endpoint.unavailable.for.api-key",
@@ -105,6 +118,8 @@ class _IgRestService(Protocol):
 
 class _ItemUpdate(Protocol):
     def getValue(self, field: str, /) -> object | None: ...
+
+    def isValueChanged(self, field: str, /) -> bool: ...
 
 
 @runtime_checkable
@@ -403,6 +418,81 @@ class IgDemoMarketDataAdapter:
             listings.append(listing)
         return tuple(listings)
 
+    async def review_listings(
+        self, instrument_ids: Sequence[InstrumentId]
+    ) -> Sequence[InstrumentListingReview]:
+        """Return bounded listing evidence without selecting or persisting a candidate."""
+
+        if not instrument_ids or len(instrument_ids) > 100:
+            raise ValueError("listing review requires between one and 100 instruments")
+        if len(set(instrument_ids)) != len(instrument_ids):
+            raise ValueError("listing review instrument IDs must be unique")
+        service = self._require_connected()
+        reviews: list[InstrumentListingReview] = []
+        search_request_count = 0
+        detail_request_count = 0
+        for instrument_id in instrument_ids:
+            try:
+                instrument = self._instruments_by_id[instrument_id]
+            except KeyError as error:
+                raise RuntimeError(
+                    f"listing review catalogue has no instrument definition for {instrument_id}"
+                ) from error
+            by_epic: dict[str, ListingReviewCandidate] = {}
+            for alias in instrument.search_aliases:
+                if search_request_count >= _MAX_LISTING_REVIEW_SEARCH_REQUESTS:
+                    raise RuntimeError(
+                        "IG listing review exceeded the global search-request budget of "
+                        f"{_MAX_LISTING_REVIEW_SEARCH_REQUESTS}"
+                    )
+                search_request_count += 1
+                response = await self._run_provider_operation(
+                    "search_markets",
+                    lambda alias=alias: service.search_markets(alias),
+                )
+                for search_row in _records(response):
+                    epic = _string(search_row, "epic")
+                    if not epic:
+                        raise RuntimeError(
+                            f"IG listing search returned a row without an epic for {instrument_id}"
+                        )
+                    if epic in by_epic or not _search_row_is_review_relevant(
+                        search_row, instrument
+                    ):
+                        continue
+                    if len(by_epic) >= _MAX_LISTING_REVIEW_CANDIDATES:
+                        raise RuntimeError(
+                            f"IG listing review exceeded {_MAX_LISTING_REVIEW_CANDIDATES} "
+                            f"candidates for {instrument_id}"
+                        )
+                    detail: Mapping[str, object] | None = None
+                    if _search_row_needs_detail(search_row, instrument):
+                        if detail_request_count >= _MAX_LISTING_REVIEW_DETAIL_REQUESTS:
+                            raise RuntimeError(
+                                "IG listing review exceeded the global detail-request budget of "
+                                f"{_MAX_LISTING_REVIEW_DETAIL_REQUESTS}"
+                            )
+                        detail_request_count += 1
+                        detail_response = await self._run_provider_operation(
+                            "fetch_market",
+                            lambda epic=epic: service.fetch_market_by_epic(epic),
+                        )
+                        detail = _single_record(detail_response)
+                    by_epic[epic] = _listing_review_candidate(
+                        search_row,
+                        detail,
+                        instrument,
+                    )
+            reviews.append(
+                InstrumentListingReview(
+                    instrument_id=instrument_id,
+                    candidates=tuple(
+                        sorted(by_epic.values(), key=lambda item: item.listing_id.external_id)
+                    ),
+                )
+            )
+        return tuple(reviews)
+
     async def subscribe(self, listings: Sequence[ProviderListing]) -> None:
         self._require_connected()
         if not listings:
@@ -548,9 +638,9 @@ class IgDemoMarketDataAdapter:
             "fetch_historical_prices",
             lambda: service.fetch_historical_prices_by_epic_and_date_range(
                 request.listing.listing_id.external_id,
-                "MINUTE",
+                request.resolution.value,
                 _historical_query_time(request.start),
-                _historical_query_time(request.end),
+                _historical_query_time(request.end - timedelta(seconds=1)),
             ),
         )
         allowance = _mapping(_mapping(response).get("allowance"))
@@ -597,21 +687,22 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation:
             return
         received = self._clock.now()
-        raw = {
-            field: update.getValue(field)
-            for field in (
-                "TIMESTAMP",
-                "BIDPRICE1",
-                "ASKPRICE1",
-                "BIDSIZE1",
-                "ASKSIZE1",
-                "DLG_FLAG",
-                "DELAY",
-            )
-            if update.getValue(field) is not None
-        }
+        fields = (
+            "TIMESTAMP",
+            "BIDPRICE1",
+            "ASKPRICE1",
+            "BIDSIZE1",
+            "ASKSIZE1",
+            "DLG_FLAG",
+            "DELAY",
+        )
+        raw = {field: update.getValue(field) for field in fields if update.isValueChanged(field)}
         state = self._field_state.setdefault(epic, {})
-        state.update({key: str(value) for key, value in raw.items()})
+        for field, value in raw.items():
+            if value is None:
+                state.pop(field, None)
+            else:
+                state[field] = str(value)
         timestamp = state.get("TIMESTAMP")
         digest = hashlib.sha256(
             json.dumps(raw, sort_keys=True, separators=(",", ":")).encode()
@@ -626,9 +717,15 @@ class IgDemoMarketDataAdapter:
             event_time = datetime.fromtimestamp(int(timestamp) / 1000, tz=UTC)
             side_times = self._side_times.setdefault(epic, {})
             if "BIDPRICE1" in raw:
-                side_times["BID"] = event_time
+                if raw["BIDPRICE1"] is None:
+                    side_times.pop("BID", None)
+                else:
+                    side_times["BID"] = event_time
             if "ASKPRICE1" in raw:
-                side_times["OFFER"] = event_time
+                if raw["ASKPRICE1"] is None:
+                    side_times.pop("OFFER", None)
+                else:
+                    side_times["OFFER"] = event_time
             bid = _decimal_or_none(state.get("BIDPRICE1"))
             ask = _decimal_or_none(state.get("ASKPRICE1"))
             listing = self._listings_by_epic[epic]
@@ -666,6 +763,7 @@ class IgDemoMarketDataAdapter:
             deduplication_key=deduplication_key,
             received_time=received,
             raw_payload=serialised_raw,
+            payload_representation=RawPayloadRepresentation.CHANGED_FIELDS,
             quote=quote,
             error_code=error_code,
             error_detail=error_detail,
@@ -1344,7 +1442,9 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
     epic = _string(search_row, "epic") or _string(instrument, "epic")
     if not epic:
         return None
-    minimum = _nested_decimal(dealing_rules, "minDealSize", "value") or Decimal("1")
+    minimum = _nested_decimal(dealing_rules, "minDealSize", "value")
+    if minimum is None or minimum <= 0:
+        return None
     currency = _currency(instrument)
     metadata = to_json_value(detail)
     if not isinstance(metadata, dict):
@@ -1373,8 +1473,144 @@ def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrume
     return (
         (not instrument_type or instrument_type == expected_type)
         and (not expiry or expiry in _ROLLING_EXPIRIES)
-        and market_status not in {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+        and market_status not in _UNAVAILABLE_MARKET_STATES
     )
+
+
+def _search_row_is_review_relevant(
+    search_row: Mapping[str, object], instrument: Instrument
+) -> bool:
+    """Exclude unrelated product families while retaining dated and unavailable evidence."""
+
+    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    instrument_type = (_string(search_row, "instrumentType") or "").upper()
+    return not instrument_type or instrument_type == expected_type
+
+
+def _search_row_needs_detail(search_row: Mapping[str, object], instrument: Instrument) -> bool:
+    """Fetch detail only where a search row could still be an eligible listing."""
+
+    return _search_row_can_match(search_row, instrument)
+
+
+def _listing_review_candidate(
+    search_row: Mapping[str, object],
+    detail: Mapping[str, object] | None,
+    instrument: Instrument,
+) -> ListingReviewCandidate:
+    detail_instrument: Mapping[str, object] = (
+        _mapping(detail.get("instrument")) if detail is not None else {}
+    )
+    snapshot: Mapping[str, object] = _mapping(detail.get("snapshot")) if detail is not None else {}
+    dealing_rules: Mapping[str, object] = (
+        _mapping(detail.get("dealingRules")) if detail is not None else {}
+    )
+    epic = _string(search_row, "epic") or _string(detail_instrument, "epic")
+    if not epic:
+        raise RuntimeError(f"IG listing review detail has no epic for {instrument.instrument_id}")
+
+    raw_product_type = (
+        _string(search_row, "instrumentType") or _string(detail_instrument, "type") or ""
+    ).upper()
+    product_type = _review_product_type(raw_product_type)
+    raw_expiry = (
+        _string(search_row, "expiry") or _string(detail_instrument, "expiry") or ""
+    ).upper()
+    expiry_kind = _review_expiry_kind(raw_expiry)
+    raw_market_state = (
+        _string(search_row, "marketStatus") or _string(snapshot, "marketStatus") or ""
+    ).upper()
+    market_state = _review_market_state(raw_market_state)
+    currency = _currency(detail_instrument).upper() or None
+    minimum_deal_size = _nested_decimal(dealing_rules, "minDealSize", "value")
+    expected_product_type = (
+        ProductType.SPOT_FX if instrument.asset_class is AssetClass.FX else ProductType.ROLLING_CFD
+    )
+
+    rejections: list[ListingReviewRejection] = []
+    if product_type is not expected_product_type:
+        rejections.append(ListingReviewRejection.WRONG_PRODUCT_TYPE)
+    if expiry_kind is not ListingExpiryKind.ROLLING:
+        rejections.append(ListingReviewRejection.NON_ROLLING_EXPIRY)
+    if market_state is ListingMarketState.UNAVAILABLE:
+        rejections.append(ListingReviewRejection.UNAVAILABLE_MARKET)
+    elif market_state is ListingMarketState.UNKNOWN:
+        rejections.append(ListingReviewRejection.UNKNOWN_MARKET_STATE)
+
+    economics: Mapping[str, JsonValue] = {}
+    metadata_version: str | None = None
+    if detail is not None:
+        if not currency:
+            rejections.append(ListingReviewRejection.MISSING_CURRENCY)
+        elif currency != instrument.quote_currency.upper():
+            rejections.append(ListingReviewRejection.WRONG_CURRENCY)
+        if minimum_deal_size is None:
+            rejections.append(ListingReviewRejection.MISSING_MINIMUM_DEAL_SIZE)
+        elif minimum_deal_size <= 0:
+            rejections.append(ListingReviewRejection.INVALID_MINIMUM_DEAL_SIZE)
+
+        bounded_detail = to_json_value(detail)
+        if not isinstance(bounded_detail, dict):
+            raise TypeError("IG listing review detail did not serialise to an object")
+        economics = _bounded_economics(bounded_detail)
+        if minimum_deal_size is not None and minimum_deal_size > 0:
+            metadata_version = _listing_metadata_version(
+                _Candidate(
+                    epic=epic,
+                    name=(
+                        _string(search_row, "instrumentName")
+                        or _string(detail_instrument, "name")
+                        or epic
+                    ),
+                    instrument_type=raw_product_type,
+                    expiry=raw_expiry,
+                    market_status=raw_market_state,
+                    currency=currency or "",
+                    minimum_deal_size=minimum_deal_size,
+                    metadata=bounded_detail,
+                ),
+                economics,
+            )
+
+    return ListingReviewCandidate(
+        instrument_id=instrument.instrument_id,
+        listing_id=ProviderListingId("ig", "demo", epic),
+        display_name=(
+            _string(search_row, "instrumentName") or _string(detail_instrument, "name") or epic
+        ),
+        product_type=product_type,
+        expiry_kind=expiry_kind,
+        market_state=market_state,
+        currency=currency,
+        minimum_deal_size=minimum_deal_size,
+        economics=economics,
+        metadata_version=metadata_version,
+        rejection_reasons=tuple(rejections),
+    )
+
+
+def _review_product_type(raw_product_type: str) -> ProductType:
+    if raw_product_type == "CURRENCIES":
+        return ProductType.SPOT_FX
+    if raw_product_type == "INDICES":
+        return ProductType.ROLLING_CFD
+    return ProductType.UNKNOWN
+
+
+def _review_expiry_kind(raw_expiry: str) -> ListingExpiryKind:
+    if raw_expiry in _ROLLING_EXPIRIES:
+        return ListingExpiryKind.ROLLING
+    if raw_expiry:
+        return ListingExpiryKind.DATED
+    return ListingExpiryKind.UNKNOWN
+
+
+def _review_market_state(raw_market_state: str) -> ListingMarketState:
+    if raw_market_state == "TRADEABLE":
+        return ListingMarketState.TRADEABLE
+    if raw_market_state in _UNAVAILABLE_MARKET_STATES:
+        return ListingMarketState.UNAVAILABLE
+    return ListingMarketState.UNKNOWN
 
 
 def _select_candidate(
@@ -1389,7 +1625,7 @@ def _select_candidate(
         for candidate in candidates
         if candidate.instrument_type.upper() == expected_type
         and candidate.expiry.upper() in _ROLLING_EXPIRIES
-        and candidate.market_status.upper() not in {"CLOSED", "OFFLINE", "EDITS_ONLY"}
+        and candidate.market_status.upper() not in _UNAVAILABLE_MARKET_STATES
         and candidate.currency.upper() == instrument.quote_currency.upper()
     ]
     if not matches:
