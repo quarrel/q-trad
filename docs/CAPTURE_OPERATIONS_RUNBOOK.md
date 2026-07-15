@@ -361,6 +361,15 @@ the automatic evidence snapshot. Publish and pull a reviewed immutable image con
 reconciliation command, but do not deploy it or restart any collector role. The guarded helper runs
 only a one-off `--no-deps --pull never` command against the existing database:
 
+The image is eligible only when its main-branch CI has first migrated a fresh PostgreSQL 18 database
+to the collector's exact migration `0003`, passed the stale-run reconciliation integration test there,
+then upgraded the same database to the current head and passed the complete suite. This explicitly
+proves the newer one-shot command against the frozen schema; it does not authorise migrating the
+collector. Publication still requires the reviewed pull request to merge, green main-branch CI and
+operator approval of the protected `capture-release` environment. Those steps may occur after the
+72-hour boundary while collection continues, but complete them promptly enough to preserve the
+full-window logs required below.
+
 ```bash
 TOOL_ROOT=/home/opc/q-trad-source
 RECONCILIATION_IMAGE='<reviewed repository@sha256:digest>'

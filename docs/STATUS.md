@@ -585,6 +585,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
                 all 282 database-independent tests pass locally. The Dev Container has no Docker client, so
                 the 13 PostgreSQL integration tests remain an explicit pull-request CI gate. No collector
                 process or configuration changed.
+              - The post-window artifact audit found that the newer reconciliation image had only been tested
+                on migration head even though it must operate against the frozen collector at migration
+                `0003`. Pull-request CI now stops a fresh PostgreSQL 18 database at `0003`, runs the exact
+                reconciliation integration test, then upgrades that database to head for the full suite.
+                The utility image remains unpublished and the collector remains unchanged.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

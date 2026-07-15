@@ -58,7 +58,15 @@ jobs:
       - name: Check shell scripts
         run: shellcheck ops/capture/*.sh ops/research/*.sh
 
-      - name: Migrate isolated database
+      - name: Migrate to frozen collector schema
+        run: uv run alembic upgrade 0003
+
+      - name: Verify reconciliation against frozen collector schema
+        run: >-
+          uv run pytest
+          tests/test_postgres_integration.py::test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run
+
+      - name: Migrate isolated database to head
         run: uv run alembic upgrade head
 
       - name: Test
