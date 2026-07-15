@@ -563,9 +563,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
               derives its exact interval and writes a root-only, non-overwriting bundle of filtered
               container identities and byte-bounded Docker/systemd logs. The manifest binds every file,
               the helper and the automatic evidence; it excludes container environments and rendered
-              Compose configuration and cannot perform the operator review. A read-only remote audit found
-              the current retained logs far below their effective five-by-10-MiB rotation capacity, so the
-              frozen collector was not changed.
+              Compose configuration and cannot perform the operator review. Its independent offline
+              verifier fails on automatic-evidence, schema, exact-file-set, ownership/mode, content,
+              timestamp or image drift and returns only the authenticated manifest hash. A read-only remote
+              audit found the current retained logs far below their effective five-by-10-MiB rotation
+              capacity, so the frozen collector was not changed.
 - ADR 0019 now closes the local snapshot-to-research gap without touching OCI. Future backup-v2
   manifests bind capture source, universe, images and migration in self-hashed identity, while the
   restore verifier remains compatible with qualification-era v1 bundles.

@@ -1059,6 +1059,57 @@ printf '%s\n' \
     assert " stop " not in recorded_calls
     assert " up " not in recorded_calls
 
+    verified = _run("qualification-log-verify.sh", {}, str(automatic_evidence), str(output))
+    assert verified.returncode == 0, verified.stderr
+    assert verified.stdout.strip() == manifest["manifest_sha256"]
+
+    other_identity = {
+        **automatic_identity,
+        "release": {"actual_image": "example.invalid/qtrad@sha256:" + "4" * 64},
+    }
+    other_canonical = json.dumps(other_identity, separators=(",", ":"), sort_keys=True)
+    other_evidence = tmp_path / "other-automatic.json"
+    other_evidence.write_text(
+        json.dumps(
+            {
+                **other_identity,
+                "evidence_sha256": hashlib.sha256(other_canonical.encode()).hexdigest(),
+            }
+        )
+    )
+    assert _run("qualification-log-verify.sh", {}, str(other_evidence), str(output)).returncode != 0
+
+    unexpected = output / "unexpected.log"
+    unexpected.write_text("not evidence\n")
+    assert (
+        _run("qualification-log-verify.sh", {}, str(automatic_evidence), str(output)).returncode
+        != 0
+    )
+    unexpected.unlink()
+
+    source_path = output / manifest["sources"][0]["file"]
+    saved_source = tmp_path / "saved-source.log"
+    source_path.rename(saved_source)
+    source_path.symlink_to(saved_source)
+    assert (
+        _run("qualification-log-verify.sh", {}, str(automatic_evidence), str(output)).returncode
+        != 0
+    )
+    source_path.unlink()
+    saved_source.rename(source_path)
+
+    source_path.chmod(0o644)
+    assert (
+        _run("qualification-log-verify.sh", {}, str(automatic_evidence), str(output)).returncode
+        != 0
+    )
+    source_path.chmod(0o600)
+    source_path.write_text(source_path.read_text() + "tampered\n")
+    assert (
+        _run("qualification-log-verify.sh", {}, str(automatic_evidence), str(output)).returncode
+        != 0
+    )
+
     repeated = _run(
         "qualification-log-evidence.sh", environment, str(automatic_evidence), str(output)
     )

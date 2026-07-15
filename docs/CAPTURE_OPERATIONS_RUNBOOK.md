@@ -456,8 +456,11 @@ sudo env \
   "$TOOL_ROOT/ops/capture/qualification-log-evidence.sh" \
   "$AUTOMATIC" "$LOG_BUNDLE"
 
-sudo jq '{schema,qualification_evidence_sha256,window_start,window_end,
-  tool_sha256,manifest_sha256,containers,sources}' "$LOG_BUNDLE/manifest.json"
+VERIFIED_MANIFEST_SHA="$(
+  sudo "$TOOL_ROOT/ops/capture/qualification-log-verify.sh" \
+    "$AUTOMATIC" "$LOG_BUNDLE"
+)"
+printf 'verified log manifest: %s\n' "$VERIFIED_MANIFEST_SHA"
 ```
 
 The helper verifies the automatic snapshot's self-hash and derives the candidate start and snapshot
@@ -467,6 +470,14 @@ filtered container identity, timestamped Docker logs and the `docker`, `qtrad-ca
 systemd journals. Each source is capped at 32 MiB by default while it is read. The manifest binds the
 automatic evidence hash, helper hash, container image/restart/logging identities and every retained
 file hash. The directory is non-overwriting mode `0700`; its files are mode `0600`.
+
+The independent verifier is read-only. It requires the exact root ownership and modes, rejects
+symlinks and extra or missing files, rechecks both self-hashes and the automatic-evidence binding,
+and verifies inspection identity plus every retained byte, line count, first/last timestamp and
+source-window bound. Its only output is the verified `manifest_sha256`; use that value in the
+evidence reference. A verification failure leaves the bundle untouched and cannot be waived by
+editing or rehashing it; preserve the failed bundle and recapture to a new directory only when the
+reviewed protocol permits.
 
 This bundle is retained operator evidence, not a third qualification decision and not an automated
 claim that the logs are complete or healthy. Review the first/last timestamps, log-rotation metadata,

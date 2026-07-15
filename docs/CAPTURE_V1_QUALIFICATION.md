@@ -126,6 +126,10 @@ three relevant systemd journals. Its self-hashed manifest records every retained
 effective image, restart and log-rotation identity. It must run immediately after the automatic
 snapshot and before later lifecycle work. The bundle supports, but cannot perform, the explicit
 full-window operator review and must never be committed to Git.
+The companion `ops/capture/qualification-log-verify.sh` independently rejects a mismatched automatic
+snapshot, changed manifest or file, unsafe mode/owner, symlink, unexpected file, identity mismatch or
+out-of-window source bound. A successful integrity check still says nothing about semantic log
+coverage or gap cause; those remain operator judgements under ADR 0021.
 
 The locally prepared `runs reconcile-plan`/`runs reconcile` path closes the known pre-candidate run
 record issue without deleting evidence or guessing a clean stop. Its first step is read-only and

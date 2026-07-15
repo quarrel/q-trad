@@ -55,7 +55,10 @@ Full-window log preservation is supporting evidence rather than a third decision
 post-snapshot host helper verifies the automatic snapshot hash, derives its exact interval and binds
 filtered container identity plus byte-bounded Docker and systemd logs in a non-overwriting root-only
 bundle. Its manifest authenticates retained files and effective image/restart/logging identity; only
-the operator review determines coverage and meaning.
+the operator review determines coverage and meaning. A separate offline verifier checks the exact
+file set, ownership/modes, automatic-evidence binding, manifest and content hashes, inspection
+identity, counts and source-window bounds before that manifest is referenced. Verification proves
+integrity, not semantic sufficiency.
 
 Pre-candidate ingestion rows abandoned by the superseded stop contract have a separate reviewed
 reconciliation path. A read-only command enumerates the complete `RUNNING` set for one IG demo
@@ -135,7 +138,8 @@ before the stale-reconnect threshold and relevant market/provider context are re
 the gap remains `UNEXPLAINED` and qualification cannot pass.
 The companion log bundle verifies and binds that automatic record before reading the exact
 candidate-to-snapshot interval. It retains only filtered inspection identity and bounded log files;
-container environments and rendered Compose configuration are excluded.
+container environments and rendered Compose configuration are excluded. Its offline verifier has no
+collector, database, provider or cloud I/O and emits only the authenticated manifest hash.
 
 Post-window historical corroboration is a separate offline evidence path. A reviewed IG demo plan
 runs only in a writable database imported from a verified collector snapshot that postdates the
