@@ -31,10 +31,11 @@ services:
           "opc@q-trad-capture.taild465a.ts.net",
           "true",
         ]
-      interval: 10s
+      interval: 60s
       timeout: 10s
-      retries: 5
-      start_period: 10s
+      retries: 3
+      start_interval: 5s
+      start_period: 30s
 
   dev:
     build:
