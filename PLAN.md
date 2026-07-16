@@ -95,12 +95,21 @@ Implementation status:
   the restored current image without rolling back schema or canonical data. Clean host
   reboot recovered Tailscale, Docker, Beszel, the release and XFS database mount; the
   post-reboot current image again reached caught-up all-seven readiness and stopped cleanly.
-- In progress: the operations timers and unattended `capture-v1` collector are enabled for
-  the 72-hour qualification ending no earlier than `2026-07-17T03:05:33Z`. Direct SSH is
-  restricted at OCI to the operator's IPv6 range and Tailscale is the backup route; Bastion
-  enablement and final alarm tuning are tracked improvements rather than release gates.
-    The corrected candidate has passed deliberate container restart and host reboot recovery.
-    `capture-v2` remains excluded.
+  - In progress: the operations timers and unattended `capture-v1` collector are enabled for
+    the 72-hour qualification ending no earlier than `2026-07-17T03:05:33Z`. Direct SSH is
+    restricted at OCI to the operator's IPv6 range from the WSL host; the Dev Container uses
+    Tailscale exclusively because direct Docker/WSL IPv6 forwarding was retired as unreliable.
+    Bastion enablement and final alarm tuning are tracked improvements rather than release gates.
+      The corrected candidate has passed deliberate container restart and host reboot recovery.
+      `capture-v2` remains excluded.
+      - The belated 48-hour checkpoint at `2026-07-16T13:30:16Z` was 58.4 hours into the
+        candidate. Host services, all three containers, timers, daily backup, restore evidence,
+        projection catch-up and database capacity remained available, but Lightstreamer queue
+        saturation had begun at `2026-07-16T12:57:15Z`. Readiness returned HTTP 503 with no fresh
+        required quotes; the adapter had recorded 17,985 dropped records by
+        `2026-07-16T13:30:57Z`. The window remains frozen for honest closure evidence, but the
+        candidate cannot pass unless the documented final review accounts for this operational
+        loss; no restart or other collector mutation was performed.
   - Complete locally and undeployed: a bounded qualification-closure helper will write one
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk

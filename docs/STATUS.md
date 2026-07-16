@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-15
+**Updated:** 2026-07-16
 **Current milestone:** capture operations release
 **State:** IN PROGRESS — `capture-v1` cloud qualification is running
 
@@ -346,12 +346,33 @@ outside the current data-only phase until explicitly admitted by a later plan up
   static and shell gate, migration through `0009` and all 275 tests against PostgreSQL 18 at branch
   head `5ba0b07`; the collector remains unchanged.
 - Restricted direct IPv6 SSH remains the primary recovery route and policy-constrained
-  Tailscale SSH is the backup. Bastion availability and ongoing OCI/Beszel threshold tuning
-  no longer gate data collection, but remain operator hardening follow-ups.
+  Tailscale SSH is the Dev Container's normal administration route. Direct IPv6 from the Dev
+  Container has been retired because Docker/WSL forwarding repeatedly caused instability; the
+  operator's WSL host retains working restricted IPv6 as an independently routed fallback.
+  Bastion availability and ongoing OCI/Beszel threshold tuning no longer gate data collection,
+  but remain operator hardening follow-ups.
 - The operator has independently verified the OCI Service Gateway path and successful access to
   other Ksplice endpoints from the collector. The remaining repository-specific Ksplice failure is
   being escalated to Oracle support and remains a non-blocking host-hardening follow-up rather than
   a capture qualification failure.
+- A belated 48-hour read-only checkpoint at `2026-07-16T13:30:16Z` occurred 58.4 hours after the
+  candidate boundary, with 13 hours 35 minutes remaining. The capture service, ingestion/API/
+  PostgreSQL containers and the actual `qtrad-backup`, `qtrad-healthwatch` and
+  `qtrad-restore-verify` timers remained present; the daily backup completed successfully at
+  `2026-07-16T03:31:07Z`, restore evidence remained valid at migration `0003`, and the database
+  volume was 7% used.
+- That checkpoint exposed a material candidate failure condition. Lightstreamer queue saturation
+  began at `2026-07-16T12:57:15Z`; at `2026-07-16T13:30:17Z` the adapter was `DEGRADED`, readiness
+  returned HTTP 503, all seven quotes were stale and 17,439 records had been dropped. At
+  `2026-07-16T13:30:57Z` the adapter status had returned to `HEALTHY` and projections remained
+  caught up, but readiness was still HTTP 503 with zero fresh quotes and the cumulative drop count
+  had reached 17,985. Ingestion was using about 86% CPU but only 1.8 GiB of 10.6 GiB available
+  memory; no container had restarted.
+- The read model contained 39 observed gaps at the checkpoint, all retained for the required
+  post-window review. Queue saturation and dropped records mean the candidate cannot currently
+  satisfy the no-unexplained-loss acceptance gate. Collection remains untouched so automatic
+  closure, log preservation and historical corroboration can describe the complete failure
+  honestly; no restart, migration, reconciliation or other collector mutation was performed.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
