@@ -27,6 +27,8 @@ container-local Codex state. No credentials or other host Codex state are copied
 Docker socket is not mounted. PostgreSQL runs as the existing `db` sidecar on the private
 Compose network. Dev Container setup registers Tilth, Context7 and the repository-scoped
 GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
+The image includes the Docker CLI and Compose plugin so configuration can be rendered and
+validated inside the Dev Container without granting access to a Docker daemon.
 
 The Dev Container retains an ordinary IPv4 Docker network namespace; public IPv6 egress
 is intentionally unsupported under WSL mirrored networking. The WSL host and OCI

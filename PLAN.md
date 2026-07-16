@@ -465,9 +465,11 @@ python -m qtrad api
 - Dev Container image rebuilt successfully with Codex CLI `0.142.2`.
 - Dev Container Trixie image and isolated host-global Codex guidance copy verified.
 - Dev Container configuration now provisions the local/OCI compiler, database, SSH and
-  network-diagnostic toolchain through its multi-architecture Trixie image while retaining
-  the repository-only host bind mount and no Docker-socket access. Package availability,
-  JSON configuration and the uv-based bootstrap command were verified before rebuild.
+  network-diagnostic toolchain plus the Docker CLI and Compose plugin through its
+  multi-architecture Trixie image while retaining the repository-only host bind mount and
+  no Docker-socket access. Package availability and merged offline Compose validation
+  were verified in the running container; persistence in a fresh container requires the
+  normal Dev Container rebuild.
 - Dev Container networking deliberately uses an IPv4-only Docker bridge under WSL
   mirrored networking. Collector access follows the WSL host's Tailscale routes and an
   unprivileged non-interactive Tailscale SSH gate must pass before Dev Container startup;

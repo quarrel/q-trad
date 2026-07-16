@@ -63,6 +63,8 @@ full access without approval prompts. Codex can modify anything in the repositor
 including `.git` and `.env`, but cannot use Docker to reach other WSL containers or
 filesystems. The Dev Container has unrestricted outbound IPv4 internet access. Public
 IPv6 egress is intentionally unsupported under WSL mirrored networking.
+The Docker CLI and Compose plugin are available for local configuration validation, but
+there is no Docker socket mount and therefore no access to a host Docker daemon.
 
 The private canonical remote is `origin` at `https://github.com/quarrel/q-trad.git`.
 Review commits and the worktree before pushing, then synchronise completed work regularly

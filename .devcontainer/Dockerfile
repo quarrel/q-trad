@@ -22,6 +22,8 @@ RUN apt-get update \
         ca-certificates \
         curl \
         dnsutils \
+        docker-cli \
+        docker-compose \
         fd-find \
         file \
         git \

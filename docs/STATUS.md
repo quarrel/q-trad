@@ -71,7 +71,8 @@
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
 - The Dev Container includes the compiler, database client, SSH, IPv6, DNS, socket,
-  packet, file and shell diagnostics needed for local and OCI operations. Its only host
+  packet, file and shell diagnostics needed for local and OCI operations. It also includes
+  the Docker CLI and Compose plugin for offline configuration validation. Its only host
   bind mount is the q-trad repository; it does not mount the host Docker socket, home
   directory, SSH agent or WSL/cloud filesystem.
 - The Dev Container intentionally supports IPv4 rather than public IPv6 egress under WSL
@@ -127,6 +128,10 @@
   unprivileged gate resolves the collector's full MagicDNS name and completes an
   authorised Tailscale SSH command through the WSL host; IPv4 internet and PostgreSQL
   service discovery pass.
+- Dev Container Docker tooling: Debian Trixie's Docker CLI and Compose plugin validate
+  the merged Compose configuration without a Docker socket or daemon access. The running
+  container has the packages installed; the Dockerfile change takes effect on the next
+  Dev Container rebuild.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
 - Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`, including dependency-direction checks,
