@@ -61,17 +61,20 @@ outside this repository.
 Docker is the outer isolation boundary, so the container-local Codex configuration uses
 full access without approval prompts. Codex can modify anything in the repository,
 including `.git` and `.env`, but cannot use Docker to reach other WSL containers or
-filesystems. The Dev Container has unrestricted outbound internet access.
+filesystems. The Dev Container has unrestricted outbound IPv4 internet access. Public
+IPv6 egress is intentionally unsupported under WSL mirrored networking.
 
 The private canonical remote is `origin` at `https://github.com/quarrel/q-trad.git`.
 Review commits and the worktree before pushing, then synchronise completed work regularly
 rather than accumulating a large unpublished local history. GitHub MCP credentials are
 scoped to this repository; they do not belong in tracked files or command output.
 
-The Dev Container joins the operator's Tailscale network and may administer the collector
-over Tailscale SSH using `ssh opc@q-trad-capture`. Tailscale policy permits this container
-to reach only the collector's SSH service; it does not provide general access to the
-collector or the operator's other network services.
+The Dev Container reaches the collector through the WSL host's authenticated Tailscale
+client. An unprivileged `tailnet-gate` service must resolve the collector's full MagicDNS
+name and complete a non-interactive Tailscale SSH command as `opc` before the Dev
+Container starts. This verifies the actual SSH policy rather than only an open TCP port.
+No Tailscale daemon, state, TUN device or network capability is present inside Docker.
+Restricted native-IPv6 SSH to the OCI host remains an external operator backup path.
 
 Run project commands directly in the container:
 

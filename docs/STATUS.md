@@ -74,6 +74,11 @@
   packet, file and shell diagnostics needed for local and OCI operations. Its only host
   bind mount is the q-trad repository; it does not mount the host Docker socket, home
   directory, SSH agent or WSL/cloud filesystem.
+- The Dev Container intentionally supports IPv4 rather than public IPv6 egress under WSL
+  mirrored networking. Collector administration uses the WSL host's authenticated
+  Tailscale client; an unprivileged gate must complete a non-interactive Tailscale SSH
+  command as `opc` before Dev Container startup. Docker contains no Tailscale state, TUN
+  device or network capability.
 - A future-facing intraday-strategy research dossier now surveys public FX and
   equity-index evidence, validation quality, market-state/regime research, adaptive risk,
   reported success and candidate experiments. It changes no current implementation scope.
@@ -118,6 +123,10 @@
   `@openai/codex` `latest` dist-tag.
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled after the rebuild.
 - Dev Container static gates after the rebuild: Ruff, Pyright and `ty` passed.
+- Dev Container networking: the IPv4-only Compose configuration validates. The
+  unprivileged gate resolves the collector's full MagicDNS name and completes an
+  authorised Tailscale SSH command through the WSL host; IPv4 internet and PostgreSQL
+  service discovery pass.
 - Dev Container global guidance: host `~/.codex/AGENTS.md` copied into isolated Codex state.
 - Dev Container PostgreSQL-backed suite: 68 passed.
 - Current isolated PostgreSQL-backed suite: 106 passed through migration `0003`, including dependency-direction checks,

@@ -468,6 +468,12 @@ python -m qtrad api
   network-diagnostic toolchain through its multi-architecture Trixie image while retaining
   the repository-only host bind mount and no Docker-socket access. Package availability,
   JSON configuration and the uv-based bootstrap command were verified before rebuild.
+- Dev Container networking deliberately uses an IPv4-only Docker bridge under WSL
+  mirrored networking. Collector access follows the WSL host's Tailscale routes and an
+  unprivileged non-interactive Tailscale SSH gate must pass before Dev Container startup;
+  Docker contains no Tailscale state or network capability. Compose validation,
+  authorised SSH gate health, IPv4 internet, collector reachability and PostgreSQL service
+  discovery passed.
 - The initial Oracle Linux ARM64 collector host has restricted IPv6 SSH, a dedicated XFS
   PostgreSQL volume, Docker Engine and OCI CLI. Capture Compose binds PostgreSQL to the
   required host mount, and backup validation uses the pinned database container's client.

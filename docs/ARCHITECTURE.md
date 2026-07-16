@@ -28,10 +28,16 @@ Docker socket is not mounted. PostgreSQL runs as the existing `db` sidecar on th
 Compose network. Dev Container setup registers Tilth, Context7 and the repository-scoped
 GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
 
-The Dev Container and OCI collector are Tailscale peers. Tailscale ACLs allow the Dev
-Container to reach TCP/22 on the collector, exposed through MagicDNS as
-`q-trad-capture`, without a WSL socket proxy. The collector may make only the separately
-allowed outbound connection to the operator's Beszel hub port. Beszel supplies
+The Dev Container retains an ordinary IPv4 Docker network namespace; public IPv6 egress
+is intentionally unsupported under WSL mirrored networking. The WSL host and OCI
+collector are Tailscale peers. An unprivileged `tailnet-gate` container must resolve the
+collector's full MagicDNS name and complete a non-interactive Tailscale SSH command as
+`opc` through the host's Tailscale routes before the Dev Container starts. The gate
+therefore verifies effective SSH policy, not only TCP/22 transport. No Tailscale daemon,
+state, TUN device or networking capability is present inside Docker. Restricted
+native-IPv6 SSH remains an external operator backup path rather than an in-container
+route. The collector may make only the separately allowed outbound connection to the
+operator's Beszel hub port. Beszel supplies
 supplemental host/container telemetry; application readiness, backup verification and OCI
 alarms remain independent operational evidence.
 

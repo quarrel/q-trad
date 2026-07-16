@@ -3,42 +3,38 @@ services:
     networks:
       - qtrad-dev
 
-  tailscale:
-    image: tailscale/tailscale:latest
-    hostname: qtrad-dev-container
+  tailnet-gate:
+    build:
+      context: .
+      dockerfile: .devcontainer/Dockerfile.tailnet-gate
     restart: unless-stopped
-    env_file:
-      - path: .env
-        required: false
-    environment:
-      TS_STATE_DIR: /var/lib/tailscale
-      TS_EXTRA_ARGS: --accept-routes
-      TS_ACCENT_DNS: "true"
-      TS_SOCKET: /var/run/tailscale/tailscaled.sock
-      TS_AUTH_ONCE: "true"
-      TS_USERSPACE: "false"
-      TS_ENABLE_HEALTH_CHECK: "true"
-      TS_LOCAL_ADDR_PORT: "[::]:9002"
-    volumes:
-      - tailscale-state:/var/lib/tailscale
-      - tailscale-socket:/var/run/tailscale
-    devices:
-      - /dev/net/tun:/dev/net/tun
-    cap_add:
-      - NET_ADMIN
-      - MKNOD
+    command: ["sleep", "infinity"]
     networks:
       - qtrad-dev
     healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9002/healthz"]
+      test:
+        [
+          "CMD",
+          "ssh",
+          "-o",
+          "BatchMode=yes",
+          "-o",
+          "ConnectTimeout=8",
+          "-o",
+          "ConnectionAttempts=1",
+          "-o",
+          "StrictHostKeyChecking=no",
+          "-o",
+          "UserKnownHostsFile=/dev/null",
+          "-o",
+          "LogLevel=ERROR",
+          "opc@q-trad-capture.taild465a.ts.net",
+          "true",
+        ]
       interval: 10s
-      timeout: 3s
+      timeout: 10s
       retries: 5
-      start_period: 20s
-    sysctls:
-      - net.ipv4.tcp_keepalive_time=60
-      - net.ipv4.tcp_keepalive_intvl=15
-      - net.ipv4.tcp_keepalive_probes=4
+      start_period: 10s
 
   dev:
     build:
@@ -58,7 +54,7 @@ services:
     depends_on:
       db:
         condition: service_healthy
-      tailscale:
+      tailnet-gate:
         condition: service_healthy
     volumes:
       - .:/workspace
@@ -66,8 +62,8 @@ services:
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv
-      - tailscale-socket:/var/run/tailscale
-    network_mode: service:tailscale
+    networks:
+      - qtrad-dev
 
 networks:
   qtrad-dev:
@@ -77,5 +73,3 @@ volumes:
   qtrad-command-history:
   qtrad-uv-cache:
   qtrad-venv:
-  tailscale-state:
-  tailscale-socket:
