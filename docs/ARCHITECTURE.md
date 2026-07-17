@@ -29,6 +29,13 @@ Compose network. Dev Container setup registers Tilth, Context7 and the repositor
 GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
 The image includes the Docker CLI and Compose plugin so configuration can be rendered and
 validated inside the Dev Container without granting access to a Docker daemon.
+After the development database migration succeeds, the Dev Container starts Codex Remote
+Control's local app-server daemon. The command is idempotent, and Codex state, host identity
+and device pairings persist in the container-local `qtrad-codex-home` named volume across
+ordinary container rebuilds and recreation. The image contains one npm-installed `latest`
+Codex CLI as the fresh-volume bootstrap. Remote Control manages its standalone, auto-updated
+runtime in the persistent Codex volume; the pnpm-managed Tilth dependency tree does not carry
+a redundant Codex package.
 
 The Dev Container retains an ordinary IPv4 Docker network namespace; public IPv6 egress
 is intentionally unsupported under WSL mirrored networking. The WSL host and OCI
@@ -156,16 +163,25 @@ candidate-to-snapshot interval. It retains only filtered inspection identity and
 container environments and rendered Compose configuration are excluded. Its offline verifier has no
 collector, database, provider or cloud I/O and emits only the authenticated manifest hash.
 
-Post-window historical corroboration is a separate offline evidence path. A reviewed IG demo plan
+Post-window historical corroboration is a separate offline evidence path. A reviewed, hash-bound
+sparse IG demo plan set
 runs only in a writable database imported from a verified collector snapshot that postdates the
 automatic qualification evidence. Its exact-range research export binds completed BID/ASK/MID
-coverage and immutable Parquet content. The hash-bound `qualification gap-history` artifact compares
+coverage, completed request results and immutable Parquet content. Each provider call has append-only
+usage evidence for its approved maximum, listing/range, returned points and reported remaining
+allowance; an empty result completes the diagnostic without claiming data coverage. The hash-bound
+`qualification gap-history` artifact compares
 those bars with exact copied live gaps per instrument and basis, but deliberately records no causal
 classification and cannot change live-gap or canonical history.
-The `qualification gap-plan` boundary derives the common minute-aligned range and unique instruments
-from automatic evidence rather than operator transcription. It accepts only the exact verified
+Historical calls are conservatively paced at the adapter boundary because the provider's request-rate
+allowance is distinct from its weekly historical-point allowance. Each attempt is appended before the
+call and completed afterwards, so a rate-limited or interrupted attempt remains visible and the same
+exact plan set can resume completed work without rewriting evidence.
+The `qualification gap-plan` boundary derives per-instrument minute-aligned ranges, merging only
+touching or overlapping gaps, from automatic evidence rather than operator transcription. It accepts
+only the exact verified
 post-evidence snapshot database, source and universe at the repository's current migration head;
-normal plan registration and hash confirmation remain required before the IG demo request.
+every standard plan is registered and the enclosing set hash is confirmed before any IG demo request.
 
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one

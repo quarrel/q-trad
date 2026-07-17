@@ -148,11 +148,20 @@ Implementation status:
             independent qualification loss gate still requires `dropped_records=0`. Historical API
             corroboration may classify the retained gaps after closure, but must not be used to erase
             or reclassify the queue-loss failure.
-          - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
+            - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
             between `20:00Z` and `21:59Z` across three consecutive days, with one isolated FTSE 100
             interval at `04:25Z`. A provider/session-cycle cause is only a hypothesis. After formal
             closure, derive the quota-bounded reviewed historical plan for all 70 intervals and record
-            whether IG historical bars exist before assigning any upstream or operational class.
+              whether IG historical bars exist before assigning any upstream or operational class.
+            - Complete: merged sparse plan-set execution queried all 70 retained gaps through 56 exact
+              IG demo plans and 267 historical points in the isolated verified-snapshot database. The
+              first unpaced run hit a separate request-rate allowance after 27 requests while reporting
+              9,865 weekly points remaining; append-only usage evidence retained that failed attempt.
+              A reviewed three-second provider-boundary pacing correction passed CI and the exact same
+              set resumed to completion with 9,733 points remaining. The v2 offline artifact found
+              historical data for all 70 gaps and complete coverage for all 210 basis results (834/834
+              expected basis-minute intervals). This warrants deeper streaming/session-path analysis
+              but does not prove what IG's streaming endpoint emitted or repair the failed qualification.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
@@ -533,6 +542,13 @@ python -m qtrad api
   Docker contains no Tailscale state or network capability. Compose validation,
   authorised SSH gate health, IPv4 internet, collector reachability and PostgreSQL service
   discovery passed.
+- Dev Container startup now starts Codex Remote Control after the interactive database
+  migration. Repeated `codex remote-control start` calls are idempotent, and the existing
+  Codex named volume preserves the host identity and device pairing across ordinary
+  container rebuilds.
+- The image keeps one npm-installed latest Codex bootstrap while Remote Control owns its
+  persistent standalone runtime. The pnpm tool dependency tree now contains Tilth only,
+  removing its unused duplicate Codex installation.
 - The initial Oracle Linux ARM64 collector host has restricted IPv6 SSH, a dedicated XFS
   PostgreSQL volume, Docker Engine and OCI CLI. Capture Compose binds PostgreSQL to the
   required host mount, and backup validation uses the pinned database container's client.

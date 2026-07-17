@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-16
+**Updated:** 2026-07-17
 **Current milestone:** capture operations release
 **State:** IN PROGRESS — `capture-v1` window complete; failed loss gate and closure evidence pending
 
@@ -67,6 +67,12 @@
 - Dev Container setup now registers Tilth, remote Context7 and repository-scoped GitHub
   MCP servers through the Codex CLI. The private GitHub repository is configured as
   `origin` and is the regular synchronisation target for reviewed commits.
+- Dev Container startup now starts the idempotent Codex Remote Control daemon after the
+  development database migration. Its host identity and device pairings remain in the
+  persistent container-local Codex named volume across ordinary rebuilds.
+- The Dev Container retains one npm-installed latest Codex CLI as its image bootstrap;
+  Remote Control owns the standalone runtime in persistent Codex state, and the separate
+  pnpm-managed Tilth dependency tree no longer installs a redundant Codex package.
 - The application and Dev Container use Debian Trixie base images. The Dev Container
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
@@ -120,8 +126,12 @@
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
 - IG adapter focused static check: included in strict Pyright with no diagnostics.
 - `ty`: passed on current source.
-- Dev Container image: rebuilt without cache; Codex CLI `0.144.1` matches npm's
+- Dev Container image: rebuilt; Codex CLI `0.144.5` matches npm's
   `@openai/codex` `latest` dist-tag.
+- Dev Container Codex Remote Control: stable CLI `0.144.5` bootstrapped the daemon and a
+  repeated start reported `alreadyRunning`, confirming idempotent startup.
+- Dev Container Codex installation boundary: package and Dockerfile regression coverage
+  confirms one npm image bootstrap plus Remote Control's persistent managed runtime.
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled after the rebuild.
 - Dev Container static gates after the rebuild: Ruff, Pyright and `ty` passed.
 - Dev Container networking: the IPv4-only Compose configuration validates. The
@@ -458,11 +468,29 @@ outside the current data-only phase until explicitly admitted by a later plan up
     the individual/aggregate automatic checks, preserves their actual value and emits `PASS` only when
     both automatic and operator gates pass. Regression coverage proves a failed automatic snapshot is
     retained as a final `FAIL` artifact.
-  - The original post-gap planner failed closed before IG access because its common rectangular range
-    requests 20,741 points against IG's documented 10,000-point weekly allowance. A read-only union of
-    the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
-    local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
-    will not be fabricated and the collector remains untouched.
+    - The original post-gap planner failed closed before IG access because its common rectangular range
+      requests 20,741 points against IG's documented 10,000-point weekly allowance. A read-only union of
+      the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
+      local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
+      will not be fabricated and the collector remains untouched.
+    - PR 9 merged the hash-bound sparse planner, exact set register/execute boundary, migration `0010`,
+      zero-result request evidence and append-only per-request quota ledger after PostgreSQL 18 CI passed
+      all 307 tests. The final set hash `20d8bd4a116499f2240b5b0e78a76c7a8f84fd0cb209dcdc1604507b14599474`
+      binds 56 plans, all 70 unique gaps, 267 requested points, the verified snapshot import and a
+      2,000-point reserve.
+    - The first execution completed 27 requests/135 points before the 28th rapid request raised
+      `ApiExceededException`; IG still reported 9,865 weekly historical points. The active plan and run
+      failed closed, and the usage ledger retained 27 completed attempts plus one incomplete rate-limited
+      attempt. Context7-backed `trading-ig` guidance confirmed that historical requests require separate
+      pacing. PR 10 added a conservative three-second adapter-boundary interval and passed full CI.
+    - The exact set then resumed without replacement or duplicate completion. All 56 plans completed,
+      the ledger records 267 successful requested/returned points plus the retained incomplete attempt,
+      and IG's final provider-reported weekly allowance is 9,733. Research manifest
+      `5289530e6b5d946c626593f74eda8d14774d1454774fff666c9c313a9946565d` binds 62,175 exported bars.
+      Offline v2 artifact `ce5c6e1c2fad69ba909067b67e5c4409a888379af3cb108204aa28df0c273d89`
+      reports `HISTORICAL_DATA_PRESENT` for all 70 live gaps and complete coverage for all 210 basis
+      results (834/834 expected basis-minute intervals). This is evidence for deeper streaming/session
+      investigation, not proof of streaming emission and not remediation of the failed no-drop gate.
   - The failed candidate is now formally closed by final evidence
     `d7bcd88e3179aca9eda89673f14383d6525bcd92e602462c6c56815892fb5c3f`. It binds the corrected
     automatic snapshot, operator review, all 70 `UNEXPLAINED` gaps and the 22,029 dropped records;
