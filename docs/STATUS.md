@@ -512,9 +512,12 @@ outside the current data-only phase until explicitly admitted by a later plan up
     uncertainty is per-item provider silence versus SDK/subscription delivery.
   - A local undeployed continuity-evidence slice records subscription establishment/end,
     server-applied real frequency, bounded server errors and SDK-reported lost updates. Renewal
-    invalidates prior item state and loss is sticky degraded health. All 38 focused lifecycle tests
-    pass, and the complete isolated PostgreSQL gate passes all 313 tests plus formatting, Ruff,
-    Pyright, `ty` and ShellCheck. `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
+    invalidates prior item state and loss is sticky degraded health. Idempotent REST reads additionally
+    perform at most one serialised v2 invalid-token reauthentication/replay, expose only numeric
+    effective limiter rates and retain authoritative allowance-error codes without retrying them.
+    All 42 focused lifecycle tests pass, and the complete isolated PostgreSQL gate passes all 317 tests
+    plus formatting, Ruff, Pyright, `ty` and ShellCheck.
+    `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance, synthetic stress and separately credentialled dual-observer gates; no collector
     mutation occurred.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines

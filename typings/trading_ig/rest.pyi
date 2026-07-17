@@ -1,5 +1,7 @@
 from collections.abc import Mapping
 
+class TokenInvalidException(Exception): ...
+
 class _Session:
     headers: Mapping[str, str]
 

@@ -84,6 +84,15 @@ Before a release, deterministic local tests must cover:
 The load test passes only with zero q-trad drops, zero unreported Lightstreamer loss, bounded queue
 and persistence latency, no correction feedback loop, and verified process exit.
 
+The REST/session portion is implemented locally. An explicit invalid-token exception serialises
+reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
+the existing full stream-rebuild path so REST and streaming credentials cannot diverge; a standalone
+research/backfill adapter replaces only its REST session. The library's numeric effective trading and
+non-trading limiter rates are retained after each login without making another `get_client_apps()`
+request or recording the returned API key. Any `exceeded-*` response remains authoritative, is
+recorded by bounded code and is not automatically retried. Historical remaining allowance continues
+to come from each historical response and remains separate from these short-window rates.
+
 ### C. Provider-backed independent observation
 
 If experiment A still produces unexplained per-item silences, run a minimal reference observer for

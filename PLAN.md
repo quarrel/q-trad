@@ -172,8 +172,11 @@ Implementation status:
                 establishment/end, server-error, real-frequency and Lightstreamer lost-update evidence.
                 Subscription renewal invalidates prior merged item state and requires a fresh healthy
                 update; SDK-reported loss remains sticky degraded health. The focused lifecycle suite
-                passes all 38 focused tests; the complete isolated PostgreSQL gate passes all 313 tests,
-                formatting, Ruff, Pyright, `ty` and ShellCheck. The experiment and exit gates are in
+                passes all 42 focused tests. Idempotent REST reads now serialise one v2 invalid-token
+                reauthentication and one replay, while effective limiter rates and authoritative
+                allowance failures are retained without API-key material. The complete isolated
+                PostgreSQL gate passes all 317 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                The experiment and exit gates are in
                 `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default

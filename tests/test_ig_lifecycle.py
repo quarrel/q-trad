@@ -6,6 +6,7 @@ from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from trading_ig.rest import TokenInvalidException
 
 from qtrad.adapters.ig import lightstreamer_compat
 from qtrad.adapters.ig import market_data as ig_market_data
@@ -108,6 +109,33 @@ class FailingLogoutService(FakeService):
 
     def _exit_bucket_threads(self) -> None:
         self.rate_limiter_stopped = True
+
+
+class TokenInvalidReadService(FakeService):
+    def __init__(self, *, fail_reads: bool) -> None:
+        super().__init__()
+        self.fail_reads = fail_reads
+        self.search_calls = 0
+
+    def search_markets(self, search_term: str) -> object:
+        assert search_term == "probe"
+        self.search_calls += 1
+        if self.fail_reads:
+            raise TokenInvalidException("error.security.client-token-invalid")
+        return {"status": "fresh-session"}
+
+
+class AllowanceExceededService(FakeService):
+    def search_markets(self, search_term: str) -> object:
+        assert search_term == "probe"
+        raise RuntimeError("error.public-api.exceeded-account-allowance")
+
+
+class RateLimitedService(FakeService):
+    def __init__(self) -> None:
+        super().__init__()
+        self._trading_requests_per_minute = 7
+        self._non_trading_requests_per_minute = 23
 
 
 class FakeStreamAdapter(IgDemoMarketDataAdapter):
@@ -742,6 +770,95 @@ async def test_logout_failure_still_stops_rate_limiter_and_closes_session() -> N
     assert service.rate_limiter_stopped is True
     assert service.session.closed is True
     assert (await adapter.health()).status is HealthStatus.STOPPED
+
+
+@pytest.mark.asyncio
+async def test_invalid_v2_token_reauthenticates_and_replays_idempotent_read_once() -> None:
+    stale_service = TokenInvalidReadService(fail_reads=True)
+    fresh_service = TokenInvalidReadService(fail_reads=False)
+    services = iter((stale_service, fresh_service))
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: next(services),
+    )
+    await adapter.connect()
+
+    result = await adapter._run_rest_read(
+        "probe",
+        lambda service: service.search_markets("probe"),
+    )
+
+    assert result == {"status": "fresh-session"}
+    assert stale_service.search_calls == 1
+    assert stale_service.logged_out is True
+    assert stale_service.session.closed is True
+    assert fresh_service.search_calls == 1
+    assert adapter._rest_reauthentications == 1
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_invalid_v2_token_is_replayed_at_most_once() -> None:
+    first_service = TokenInvalidReadService(fail_reads=True)
+    second_service = TokenInvalidReadService(fail_reads=True)
+    services = iter((first_service, second_service))
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: next(services),
+    )
+    await adapter.connect()
+
+    with pytest.raises(TokenInvalidException, match="client-token-invalid"):
+        await adapter._run_rest_read(
+            "probe",
+            lambda service: service.search_markets("probe"),
+        )
+
+    assert first_service.search_calls == 1
+    assert second_service.search_calls == 1
+    assert adapter._rest_reauthentications == 1
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_rest_allowance_error_is_retained_without_automatic_retry() -> None:
+    service = AllowanceExceededService()
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: service,
+    )
+    await adapter.connect()
+
+    with pytest.raises(RuntimeError, match="exceeded-account-allowance"):
+        await adapter._run_rest_read(
+            "probe",
+            lambda current: current.search_markets("probe"),
+        )
+
+    health_detail = (await adapter.health()).detail or ""
+    assert "allowance_errors=1" in health_detail
+    assert "last_allowance_error=error.public-api.exceeded-account-allowance" in health_detail
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_effective_trading_ig_rate_limiter_values_are_retained_without_api_key() -> None:
+    service = RateLimitedService()
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: service,
+    )
+
+    await adapter.connect()
+
+    health_detail = (await adapter.health()).detail or ""
+    assert "effective_rest_rates=7/23" in health_detail
+    assert "not-a-real" not in health_detail
+    await adapter.disconnect()
 
 
 def test_subscription_error_degrades_health_without_exposing_message() -> None:

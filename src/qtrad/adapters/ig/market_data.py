@@ -94,6 +94,12 @@ class _RateLimiterControl(Protocol):
     def _exit_bucket_threads(self) -> None: ...
 
 
+@runtime_checkable
+class _RateLimiterEvidence(Protocol):
+    _trading_requests_per_minute: int
+    _non_trading_requests_per_minute: int
+
+
 class _IgRestService(Protocol):
     @property
     def session(self) -> _HttpSession: ...
@@ -265,6 +271,7 @@ class IgDemoMarketDataAdapter:
         self._jitter = jitter
         self._service_factory = service_factory
         self._service: _IgRestService | None = None
+        self._rest_reauthentication_lock = asyncio.Lock()
         self._session_details: Mapping[str, object] | None = None
         self._stream_client: _StreamClient | None = None
         self._stream_account_id: str | None = None
@@ -298,6 +305,11 @@ class IgDemoMarketDataAdapter:
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
         self._historical_allowance_remaining: int | None = None
+        self._effective_trading_requests_per_minute: int | None = None
+        self._effective_non_trading_requests_per_minute: int | None = None
+        self._rest_reauthentications = 0
+        self._allowance_errors = 0
+        self._last_allowance_error: str | None = None
         self._generation = 0
         self._expected_epics: set[str] = set()
         self._subscribed_epics: set[str] = set()
@@ -375,7 +387,6 @@ class IgDemoMarketDataAdapter:
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
     ) -> Sequence[ProviderListing]:
-        service = self._require_connected()
         listings: list[ProviderListing] = []
         for instrument_id in instrument_ids:
             try:
@@ -387,9 +398,9 @@ class IgDemoMarketDataAdapter:
                 ) from error
             by_epic: dict[str, _Candidate] = {}
             for alias in instrument.search_aliases:
-                response = await self._run_provider_operation(
+                response = await self._run_rest_read(
                     "search_markets",
-                    lambda alias=alias: service.search_markets(alias),
+                    lambda service, alias=alias: service.search_markets(alias),
                 )
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
@@ -399,9 +410,9 @@ class IgDemoMarketDataAdapter:
                         or not _search_row_can_match(search_row, instrument)
                     ):
                         continue
-                    detail_response = await self._run_provider_operation(
+                    detail_response = await self._run_rest_read(
                         "fetch_market",
-                        lambda epic=epic: service.fetch_market_by_epic(epic),
+                        lambda service, epic=epic: service.fetch_market_by_epic(epic),
                     )
                     detail = _single_record(detail_response)
                     candidate = _candidate(search_row, detail)
@@ -440,7 +451,6 @@ class IgDemoMarketDataAdapter:
             raise ValueError("listing review requires between one and 100 instruments")
         if len(set(instrument_ids)) != len(instrument_ids):
             raise ValueError("listing review instrument IDs must be unique")
-        service = self._require_connected()
         reviews: list[InstrumentListingReview] = []
         search_request_count = 0
         detail_request_count = 0
@@ -459,9 +469,9 @@ class IgDemoMarketDataAdapter:
                         f"{_MAX_LISTING_REVIEW_SEARCH_REQUESTS}"
                     )
                 search_request_count += 1
-                response = await self._run_provider_operation(
+                response = await self._run_rest_read(
                     "search_markets",
-                    lambda alias=alias: service.search_markets(alias),
+                    lambda service, alias=alias: service.search_markets(alias),
                 )
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
@@ -486,9 +496,9 @@ class IgDemoMarketDataAdapter:
                                 f"{_MAX_LISTING_REVIEW_DETAIL_REQUESTS}"
                             )
                         detail_request_count += 1
-                        detail_response = await self._run_provider_operation(
+                        detail_response = await self._run_rest_read(
                             "fetch_market",
-                            lambda epic=epic: service.fetch_market_by_epic(epic),
+                            lambda service, epic=epic: service.fetch_market_by_epic(epic),
                         )
                         detail = _single_record(detail_response)
                     by_epic[epic] = _listing_review_candidate(
@@ -659,12 +669,11 @@ class IgDemoMarketDataAdapter:
             raise self._fatal_error
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
-        service = self._require_connected()
         if self._config.historical_request_interval_seconds > 0:
             await self._sleep(self._config.historical_request_interval_seconds)
-        response = await self._run_provider_operation(
+        response = await self._run_rest_read(
             "fetch_historical_prices",
-            lambda: service.fetch_historical_prices_by_epic_and_date_range(
+            lambda service: service.fetch_historical_prices_by_epic_and_date_range(
                 request.listing.listing_id.external_id,
                 request.resolution.value,
                 _historical_query_time(request.start),
@@ -720,7 +729,12 @@ class IgDemoMarketDataAdapter:
                 f"last_drop_at={_health_time(self._last_drop_at)}; "
                 f"queue={self._queue.qsize()}/{self._queue.maxsize}; "
                 f"queue_high_water={self._queue_high_water}; "
-                f"provider_operations={len(self._provider_threads)}"
+                f"provider_operations={len(self._provider_threads)}; "
+                f"rest_reauthentications={self._rest_reauthentications}; "
+                f"effective_rest_rates={self._effective_trading_requests_per_minute}/"
+                f"{self._effective_non_trading_requests_per_minute}; "
+                f"allowance_errors={self._allowance_errors}; "
+                f"last_allowance_error={self._last_allowance_error}"
             ),
         )
 
@@ -1253,6 +1267,7 @@ class IgDemoMarketDataAdapter:
                     service.create_session,
                 )
                 self._session_details = _single_record(session_details)
+                self._record_rate_limiter_evidence(service)
                 self._status = HealthStatus.STARTING
                 self._connection_state = _ConnectionState.AUTHENTICATED
                 return
@@ -1314,6 +1329,83 @@ class IgDemoMarketDataAdapter:
             ),
         )
         return service
+
+    async def _run_rest_read(
+        self,
+        operation_name: str,
+        operation: Callable[[_IgRestService], _T],
+    ) -> _T:
+        """Run one idempotent REST read with one controlled invalid-token recovery."""
+
+        service = self._require_connected()
+        try:
+            return await self._run_provider_operation(
+                operation_name,
+                lambda: operation(service),
+            )
+        except Exception as error:
+            self._record_allowance_error(error)
+            if not _is_token_invalid_exception(error):
+                raise
+
+        async with self._rest_reauthentication_lock:
+            if self._service is service:
+                LOGGER.warning(
+                    "ig_rest_session_invalid",
+                    extra={"operation": operation_name, "generation": self._generation},
+                )
+                await self._reauthenticate_after_invalid_token()
+                self._rest_reauthentications += 1
+        retry_service = self._require_connected()
+        try:
+            return await self._run_provider_operation(
+                operation_name,
+                lambda: operation(retry_service),
+            )
+        except Exception as error:
+            self._record_allowance_error(error)
+            raise
+
+    async def _reauthenticate_after_invalid_token(self) -> None:
+        if self._reconnecting:
+            raise RuntimeError("cannot reauthenticate REST while stream recovery is active")
+        if self._desired_listings:
+            self._reconnecting = True
+            await self._reconnect_stream()
+            return
+        await self._logout_rest_session()
+        self._connection_state = _ConnectionState.AUTHENTICATING
+        await self._establish_rest_session()
+
+    def _record_allowance_error(self, error: Exception) -> None:
+        error_code = _safe_error_code(error)
+        if not error_code.startswith("error.public-api.exceeded-"):
+            return
+        self._allowance_errors += 1
+        self._last_allowance_error = error_code
+        LOGGER.warning(
+            "ig_rest_allowance_exceeded",
+            extra={"error_code": error_code, "generation": self._generation},
+        )
+
+    def _record_rate_limiter_evidence(self, service: _IgRestService) -> None:
+        if not isinstance(service, _RateLimiterEvidence):
+            self._effective_trading_requests_per_minute = None
+            self._effective_non_trading_requests_per_minute = None
+            return
+        trading = service._trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        non_trading = service._non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        if trading <= 0 or non_trading <= 0:
+            raise RuntimeError("trading-ig configured a non-positive effective REST request rate")
+        self._effective_trading_requests_per_minute = trading
+        self._effective_non_trading_requests_per_minute = non_trading
+        LOGGER.info(
+            "ig_rest_rate_limiter_configured",
+            extra={
+                "effective_trading_requests_per_minute": trading,
+                "effective_non_trading_requests_per_minute": non_trading,
+            },
+        )
 
     async def _close_stream(self) -> None:
         client = self._stream_client
@@ -1555,6 +1647,12 @@ def _safe_error_code(error: BaseException) -> str:
     if match is not None:
         return match.group(1)[:96]
     return type(error).__name__.upper()[:96]
+
+
+def _is_token_invalid_exception(error: BaseException) -> bool:
+    from trading_ig.rest import TokenInvalidException
+
+    return isinstance(error, TokenInvalidException)
 
 
 def _is_fatal_provider_error(error_code: str) -> bool:
