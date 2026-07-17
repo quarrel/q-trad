@@ -5,7 +5,7 @@
 **Universe:** `capture-v1`, seven IG demo instruments  
 **Application image:** `sha256:3ca07eaee8cf1500546c1779bb0732d9260b085e8a179e3514a507da4ee77d80`  
 **Deployment descriptor:** `89c7553160705ca0fd859fbb0477163efc0e279d`
-**Deployment descriptor SHA-256:** `c686332b24eff24e57a3c7128279777e2c45882e18b9e15d3149797272d40d84`
+**Deployment descriptor SHA-256:** `a95e53c3f7bec61ebc11126484ad61ad71828f542727c72a3d9654d88541c57d`
 **Configuration SHA-256:** `227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b`
 
 This record is the evidence ledger for the first persistent cloud collector. It does not
@@ -117,6 +117,22 @@ sign-off; they must not be silently deleted or presented as successful runs.
   because that process emits bounded lifecycle/warning events rather than a heartbeat. The system
   journal occupied 8 MiB and retained the candidate boot. These observed volumes were far below
   rotation capacity, so no logging change was made during the frozen window.
+- The post-window reconciliation plan
+  `06a78e2f4bf407ea9e6be6de5d67a169aca1e2c5209fb39da7b072656a3882e3`
+  atomically marked the five known pre-candidate non-terminal rows `FAILED` at
+  `2026-07-17T04:36:27Z`. Read-back found exactly one current ingestion run and confirmed that raw
+  capture and canonical events were outside the mutation.
+- The first immutable automatic snapshot was written at `2026-07-17T04:37:33Z` with evidence SHA-256
+  `47641c55cc84e9373b4d66aa9572e86379d4a35cbbfbd1ffff9d5f34efbae20d`.
+  It correctly failed `adapter_ok` for 22,029 dropped records. It also exposed two closure-tool
+  bookkeeping defects: the documented descriptor hash referred to the later source checkout rather
+  than descriptor commit `89c7553`, and the mount check did not admit XFS beneath systemd automount.
+  The active descriptor independently hashes to `a95e53c3f7bec61ebc11126484ad61ad71828f542727c72a3d9654d88541c57d`,
+  exactly matching that frozen commit; `findmnt` records the read/write `/dev/sdb` XFS mount beneath
+  the same-target `autofs` entry. The original snapshot remains immutable.
+- Before any restart or deployment, the snapshot's bounded log bundle was written and independently
+  verified with manifest SHA-256
+  `093f5267d9ae8a6acd838180d84a60fcb0c2a995d3f8436fa30c991bd3047b43`.
 
 The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
 After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into

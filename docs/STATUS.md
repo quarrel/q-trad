@@ -425,12 +425,26 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - The first daily backup after the boundary ran on schedule from `2026-07-17T03:30:04Z` to
     `03:31:41Z` and exited successfully while collector readiness remained HTTP 200. This is useful
     continuing-operations evidence, but does not change the failed no-loss qualification result.
-  - The first post-window reconciliation plan correctly found the five expected stale runs but was
+- The first post-window reconciliation plan correctly found the five expected stale runs but was
     not executed because its effective capture source was `local-development`, conflicting with the
     runbook's assumed `oci-sydney-capture-1`. The deployed environment had omitted the explicit source
     variable, so the validated application default is the truthful identity already used by this
-    canonical store and its backups. Documentation now preserves that identity rather than relabelling
-    existing history.
+  canonical store and its backups. Documentation now preserves that identity rather than relabelling
+  existing history.
+  - After that identity correction, hash-confirmed reconciliation atomically closed exactly the five
+    reviewed rows as `FAILED`; read-back found one current ingestion run and no raw/canonical mutation.
+    The first immutable automatic qualification snapshot at `2026-07-17T04:37:33Z` correctly failed
+    the no-drop gate with 22,029 dropped records and retained all 70 candidate gaps.
+  - That snapshot also exposed two non-substantive closure-check defects. The ledger had recorded the
+    later checkout's descriptor hash rather than the active descriptor from frozen commit `89c7553`,
+    and the mount assertion rejected the valid `/dev/sdb` XFS filesystem because systemd automount
+    adds a same-target `autofs` row. The active descriptor exactly matches its frozen commit at SHA-256
+    `a95e53c3f7bec61ebc11126484ad61ad71828f542727c72a3d9654d88541c57d`; a local correction now
+    requires exactly one read/write XFS backing filesystem while allowing only same-target XFS/autofs
+    records. The original snapshot is preserved rather than overwritten.
+  - The non-overwriting log bundle was captured before any lifecycle operation and independently
+    verified at manifest SHA-256
+    `093f5267d9ae8a6acd838180d84a60fcb0c2a995d3f8436fa30c991bd3047b43`.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
