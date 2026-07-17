@@ -97,6 +97,8 @@ from qtrad.runtime.universe_promotion import (
     load_listing_review_evidence,
 )
 
+_HEALTH_PERSIST_INTERVAL_SECONDS = 1.0
+
 
 def _utc_minute_argument(value: str) -> datetime:
     try:
@@ -964,7 +966,10 @@ async def _ingest(
             raise RuntimeError("run 'qtrad instruments sync' before ingestion")
         await adapter.connect()
         await adapter.subscribe(listings)
-        await store.record_adapter_health(await adapter.health())
+        initial_health = await adapter.health()
+        await store.record_adapter_health(initial_health)
+        last_health_status = initial_health.status
+        last_health_persisted_at = asyncio.get_running_loop().time()
 
         async def force_reconnect() -> None:
             assert force_reconnect_after_seconds is not None
@@ -976,10 +981,19 @@ async def _ingest(
             reconnect_task = asyncio.create_task(force_reconnect())
 
         async def consume() -> None:
+            nonlocal last_health_persisted_at, last_health_status
             async for record in adapter.records():
                 await service.process(record)
-                await service.advance_bars(clock.now())
-                await store.record_adapter_health(await adapter.health())
+                await service.advance_bars(record.received_time)
+                health = await adapter.health()
+                monotonic_now = asyncio.get_running_loop().time()
+                if (
+                    health.status != last_health_status
+                    or monotonic_now - last_health_persisted_at >= _HEALTH_PERSIST_INTERVAL_SECONDS
+                ):
+                    await store.record_adapter_health(health)
+                    last_health_status = health.status
+                    last_health_persisted_at = monotonic_now
 
         if maximum_seconds is None:
             await consume()

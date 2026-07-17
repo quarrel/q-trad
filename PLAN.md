@@ -100,16 +100,46 @@ Implementation status:
     restricted at OCI to the operator's IPv6 range from the WSL host; the Dev Container uses
     Tailscale exclusively because direct Docker/WSL IPv6 forwarding was retired as unreliable.
     Bastion enablement and final alarm tuning are tracked improvements rather than release gates.
+    Future host-hardening work should extend healthwatch with clock-synchronisation evidence from
+    Chrony: OCI's `169.254.169.254` source online, system clock synchronised, normal leap status and a
+    bounded absolute offset. Alert thresholds should be qualified against normal host observations;
+    an initial sustained 100 ms offset threshold is conservative for capture receive timestamps.
       The corrected candidate has passed deliberate container restart and host reboot recovery.
       `capture-v2` remains excluded.
-      - The belated 48-hour checkpoint at `2026-07-16T13:30:16Z` was 58.4 hours into the
-        candidate. Host services, all three containers, timers, daily backup, restore evidence,
+        - The belated 48-hour checkpoint at `2026-07-16T13:30:16Z` was 58.4 hours into the
+          candidate. Host services, all three containers, timers, daily backup, restore evidence,
         projection catch-up and database capacity remained available, but Lightstreamer queue
         saturation had begun at `2026-07-16T12:57:15Z`. Readiness returned HTTP 503 with no fresh
         required quotes; the adapter had recorded 17,985 dropped records by
         `2026-07-16T13:30:57Z`. The window remains frozen for honest closure evidence, but the
-        candidate cannot pass unless the documented final review accounts for this operational
-        loss; no restart or other collector mutation was performed.
+          candidate cannot satisfy the no-loss gate; no restart or other collector mutation was
+          performed.
+        - The boundary checkpoint at `2026-07-17T03:05:54Z` found HTTP 200 readiness, seven fresh
+          subscriptions, exact projection catch-up and healthy backup/restore/capacity evidence, but
+          the run retained 22,029 dropped records, one reconnect and 70 observed gaps. Formal
+          qualification closure remains evidence-gated, but the internal loss already prevents a
+          `PASS`.
+        - Root-cause analysis is complete locally: accepted input rose from roughly 9 to 32 records
+          per second; persistence latency then grew from milliseconds to more than eight minutes.
+          Queue loss ran from `2026-07-16T12:57:15Z` to `13:36:11Z` and the backlog cleared around
+          `14:20Z`. Ingestion incorrectly advanced bar closure with processing wall time, converting
+            delayed-but-ordered records into 339,336 durable `MarketBarCorrected` events and amplifying
+            the backlog. A local undeployed correction uses transport receive time, makes drop health
+            sticky, rate-limits overflow logs, records queue occupancy and limits health persistence to
+            state changes or one write per second. First/last drop receive times remain in bounded health
+            evidence even though per-drop logging is removed. Formatting, Ruff, Pyright, `ty` and all 283
+            database-independent tests pass; isolated
+            migrated-PostgreSQL validation remains the release gate.
+          - None of the 70 projected market-data gaps overlaps the overload interval. Gap projections
+            describe observed quote silence, not callbacks discarded by an internal queue; the
+            independent qualification loss gate still requires `dropped_records=0`. Historical API
+            corroboration may classify the retained gaps after closure, but must not be used to erase
+            or reclassify the queue-loss failure.
+          - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
+            between `20:00Z` and `21:59Z` across three consecutive days, with one isolated FTSE 100
+            interval at `04:25Z`. A provider/session-cycle cause is only a hypothesis. After formal
+            closure, derive the quota-bounded reviewed historical plan for all 70 intervals and record
+            whether IG historical bars exist before assigning any upstream or operational class.
   - Complete locally and undeployed: a bounded qualification-closure helper will write one
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk

@@ -2,7 +2,7 @@
 
 **Updated:** 2026-07-16
 **Current milestone:** capture operations release
-**State:** IN PROGRESS — `capture-v1` cloud qualification is running
+**State:** IN PROGRESS — `capture-v1` window complete; failed loss gate and closure evidence pending
 
 ## Completed
 
@@ -237,6 +237,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The host-local health watcher now publishes readiness, fresh-subscription count,
   projection lag, backup age, restore evidence/age and database-volume free space as OCI
   custom metrics, and fails closed when any required operational evidence is stale.
+- A read-only host audit at `2026-07-17T03:34:29Z` confirmed enabled, active Chrony synchronisation
+  against OCI's link-local `169.254.169.254` service, normal leap state, complete recent reachability
+  and sub-millisecond error. The current watcher does not publish clock health. A future hardening
+  slice should add source-online, synchronised-state, leap-state and absolute-offset metrics/alarms;
+  no running-host change is required for the present healthy configuration.
 - GitHub workflow definitions now provide push/pull-request static and isolated-PostgreSQL
   gates plus manual commit-SHA-tagged dual-architecture publication to Sydney OCIR. The
   protected repository release environment and dedicated publisher credentials are configured.
@@ -373,6 +378,45 @@ outside the current data-only phase until explicitly admitted by a later plan up
   satisfy the no-unexplained-loss acceptance gate. Collection remains untouched so automatic
   closure, log preservation and historical corroboration can describe the complete failure
   honestly; no restart, migration, reconciliation or other collector mutation was performed.
+- At the exact post-boundary checkpoint (`2026-07-17T03:05:54Z`), the collector had recovered to
+  HTTP 200 readiness with seven fresh instruments and exact projection catch-up. All containers and
+  timers remained active, the database volume was 8% used and backup/restore evidence was valid.
+  Recovery does not erase the run's 22,029 dropped records, one reconnect or 70 retained gaps; the
+  no-unexplained-loss gate has failed even though formal hash-bound closure remains pending.
+- Read-only database and log analysis isolated the overload interval. Accepted input climbed from
+  roughly 9 records/s to a five-minute peak of 31.92 records/s. Canonical persistence p50 rose from
+  about 5 ms to more than eight minutes; queue drops began at `2026-07-16T12:57:15Z`, ended at
+  `13:36:11Z`, and latency returned to milliseconds around `14:20Z`. The interval produced 208,574
+  quote events, 339,336 bar corrections and 3,780 bar closes.
+- The implementation advanced the five-second bar watermark with processing wall time after every
+  dequeued record. Once database work lagged transport, the bar builder closed queued records'
+  minutes prematurely and each later-processed quote emitted further durable corrections. That
+  feedback multiplied database transactions and physical writes until the 10,000-record queue
+  overflowed. The same loop also persisted adapter health after every record and logged every drop.
+  - A local undeployed corrective branch now advances bars from each record's transport receive time,
+    keeps any run-level queue loss visibly `DEGRADED`, rate-limits overflow logs, reports queue current/
+    high-water occupancy and first/last drop receive times, and persists health only on state changes or
+    once per second. Formatting,
+    Ruff, Pyright, `ty` and all 283 database-independent tests pass. The configured Dev Container
+    database is intentionally not migrated in place, so the isolated PostgreSQL integration gate
+    remains delegated to CI. The running collector has not changed.
+  - None of the 70 retained gap intervals overlaps the `12:57:15Z`–`13:36:11Z` queue-loss interval.
+    This is expected: the gap projection records observed quote silence, whereas a full internal queue
+    discards callbacks before canonical processing. Qualification independently requires
+    `dropped_records=0`, so later IG historical corroboration of genuine market gaps cannot hide or
+    remediate this run's internal loss.
+  - Read-only gap review found durations of 121–385 seconds. Sixty-nine of 70 intervals begin between
+    `20:00Z` and `21:59Z` across 14–16 July; the sole exception is an FTSE 100 interval beginning at
+    `2026-07-16T04:25:07.986Z`. This repeated shape is evidence for a provider/session-cycle hypothesis,
+    not a classification. The post-closure reviewed historical plan must query all 70 intervals within
+    evidenced quota and record whether provider bars exist.
+  - The retained ingestion log still spans the candidate start and contains 22,159 bounded records,
+    including exactly 22,029 `ig_queue_saturated` events. This independently corroborates the database
+    health total and confirms that the formal non-overwriting log bundle can still preserve the complete
+    loss sequence; it has not yet been written.
+  - The first daily backup after the boundary ran on schedule from `2026-07-17T03:30:04Z` to
+    `03:31:41Z` and exited successfully while collector readiness remained HTTP 200. This is useful
+    continuing-operations evidence, but does not change the failed no-loss qualification result.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

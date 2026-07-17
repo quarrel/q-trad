@@ -283,7 +283,9 @@ class IgDemoMarketDataAdapter:
         self._stopping = False
         self._reconnect_count = 0
         self._dropped_records = 0
-        self._queue_saturated = False
+        self._first_drop_at: datetime | None = None
+        self._last_drop_at: datetime | None = None
+        self._queue_high_water = 0
         self._historical_allowance_remaining: int | None = None
         self._generation = 0
         self._expected_epics: set[str] = set()
@@ -622,10 +624,6 @@ class IgDemoMarketDataAdapter:
                 raise self._fatal_error
             try:
                 record = await asyncio.wait_for(self._queue.get(), timeout=1)
-                if self._queue_saturated:
-                    self._queue_saturated = False
-                    if not self._reconnecting and self._connection_state is _ConnectionState.READY:
-                        self._status = HealthStatus.HEALTHY
                 yield record
             except TimeoutError:
                 self._check_staleness()
@@ -678,6 +676,10 @@ class IgDemoMarketDataAdapter:
                 f"subscriptions={len(self._subscribed_epics)}/{len(self._expected_epics)}; "
                 f"updates={len(self._updated_epics)}/{len(self._expected_epics)}; "
                 f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}; "
+                f"first_drop_at={_health_time(self._first_drop_at)}; "
+                f"last_drop_at={_health_time(self._last_drop_at)}; "
+                f"queue={self._queue.qsize()}/{self._queue.maxsize}; "
+                f"queue_high_water={self._queue_high_water}; "
                 f"provider_operations={len(self._provider_threads)}"
             ),
         )
@@ -791,14 +793,22 @@ class IgDemoMarketDataAdapter:
     def _enqueue_record(self, record: MarketDataRecord, epic: str) -> None:
         try:
             self._queue.put_nowait(record)
+            self._queue_high_water = max(self._queue_high_water, self._queue.qsize())
         except asyncio.QueueFull:
             self._dropped_records += 1
-            self._queue_saturated = True
+            if self._first_drop_at is None:
+                self._first_drop_at = record.received_time
+            self._last_drop_at = record.received_time
             self._status = HealthStatus.DEGRADED
-            LOGGER.error(
-                "ig_queue_saturated",
-                extra={"epic": epic, "dropped_records": self._dropped_records},
-            )
+            if self._dropped_records == 1 or self._dropped_records % 1_000 == 0:
+                LOGGER.error(
+                    "ig_queue_saturated",
+                    extra={
+                        "epic": epic,
+                        "dropped_records": self._dropped_records,
+                        "queue_size": self._queue.qsize(),
+                    },
+                )
 
     def _check_staleness(self) -> None:
         if self._stopping or self._reconnecting or not self._desired_listings:
@@ -955,7 +965,7 @@ class IgDemoMarketDataAdapter:
             watchdog_task.cancel()
         self._retry_watchdog_task = None
         self._connection_state = _ConnectionState.READY
-        self._status = HealthStatus.HEALTHY
+        self._status = HealthStatus.HEALTHY if self._dropped_records == 0 else HealthStatus.DEGRADED
         self._ready_event.set()
 
     def _start_retry_watchdog(self, generation: int) -> None:
@@ -1733,6 +1743,10 @@ def _integer_or_none(value: object) -> int | None:
     if value in (None, ""):
         return None
     return int(str(value))
+
+
+def _health_time(value: datetime | None) -> str:
+    return "none" if value is None else value.isoformat()
 
 
 def _bounded_economics(metadata: Mapping[str, JsonValue]) -> dict[str, JsonValue]:

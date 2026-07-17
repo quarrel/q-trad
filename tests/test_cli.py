@@ -749,7 +749,7 @@ async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
             del listings
 
         async def health(self) -> SimpleNamespace:
-            return SimpleNamespace(detail="state=STOPPED; reconnects=0")
+            return SimpleNamespace(status="STOPPED", detail="state=STOPPED; reconnects=0")
 
         async def force_reconnect(self) -> None:
             await asyncio.Event().wait()
@@ -790,6 +790,91 @@ async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
         "forced_reconnect_requested": True,
         "forced_reconnect_completed": False,
     }
+
+
+@pytest.mark.asyncio
+async def test_ingestion_uses_transport_receive_time_as_bar_watermark(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeEngine:
+        async def dispose(self) -> None:
+            pass
+
+    class FakeStore:
+        def __init__(self) -> None:
+            self.health_writes = 0
+
+        async def start_run(self, **kwargs: object) -> str:
+            del kwargs
+            return "not-a-real-run"
+
+        async def active_provider_listings(self, instrument_ids: object) -> list[object]:
+            del instrument_ids
+            return [object() for _ in range(7)]
+
+        async def record_adapter_health(self, health: object) -> None:
+            del health
+            self.health_writes += 1
+
+        async def finish_run(self, run_id: str, **kwargs: object) -> None:
+            assert run_id == "not-a-real-run"
+            assert kwargs["status"] == "STOPPED"
+
+    transport_time = datetime(2026, 7, 16, 12, 30, tzinfo=UTC)
+    record = SimpleNamespace(received_time=transport_time)
+
+    class FakeAdapter:
+        async def connect(self) -> None:
+            pass
+
+        async def subscribe(self, listings: object) -> None:
+            del listings
+
+        async def health(self) -> SimpleNamespace:
+            return SimpleNamespace(status="HEALTHY", detail="state=READY; dropped_records=0")
+
+        async def records(self) -> AsyncIterator[SimpleNamespace]:
+            yield record
+            await asyncio.Event().wait()
+
+        async def disconnect(self) -> None:
+            pass
+
+    class FakeService:
+        def __init__(self) -> None:
+            self.processed: list[object] = []
+            self.watermarks: list[datetime] = []
+
+        async def process(self, observed_record: object) -> None:
+            self.processed.append(observed_record)
+
+        async def advance_bars(self, watermark: datetime) -> None:
+            self.watermarks.append(watermark)
+
+    store = FakeStore()
+    adapter = FakeAdapter()
+    service = FakeService()
+    clock = Mock(spec=Clock)
+    clock.now.return_value = datetime(2026, 7, 16, 12, 40, tzinfo=UTC)
+    monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
+    monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: store)
+    monkeypatch.setattr(cli, "_ig_adapter", lambda settings, selected_clock: adapter)
+    monkeypatch.setattr(cli, "IngestionService", lambda *args, **kwargs: service)
+    monkeypatch.setattr(
+        cli,
+        "_capture_universe",
+        lambda settings: load_capture_universe(Path("config/capture-v1.toml")),
+    )
+
+    await cli._ingest(
+        cast(Settings, SimpleNamespace()),
+        cast(Clock, clock),
+        maximum_seconds=0.02,
+    )
+
+    assert service.processed == [record]
+    assert service.watermarks == [transport_time]
+    assert store.health_writes == 2
 
 
 def test_main_does_not_leave_an_event_loop_running(

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from qtrad.adapters.ig import lightstreamer_compat
+from qtrad.adapters.ig import market_data as ig_market_data
 from qtrad.adapters.ig.market_data import (
     IgDemoConfig,
     IgDemoMarketDataAdapter,
@@ -752,7 +753,19 @@ def test_subscription_error_degrades_health_without_exposing_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_queue_saturation_drops_new_record_and_recovers_after_drain() -> None:
+async def test_queue_saturation_is_sticky_and_rate_limits_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class RecordingLogger:
+        def __init__(self) -> None:
+            self.errors: list[dict[str, object]] = []
+
+        def error(self, event: str, *, extra: dict[str, object]) -> None:
+            assert event == "ig_queue_saturated"
+            self.errors.append(extra)
+
+    logger = RecordingLogger()
+    monkeypatch.setattr(ig_market_data, "LOGGER", logger)
     clock = MutableClock()
     adapter = IgDemoMarketDataAdapter(config(queue_capacity=1), clock)
     adapter._service = FakeService()
@@ -770,13 +783,20 @@ async def test_queue_saturation_drops_new_record_and_recovers_after_drain() -> N
     )
 
     adapter._enqueue_record(record, "CS.D.AUDUSD.CFD.IP")
-    adapter._enqueue_record(record, "CS.D.AUDUSD.CFD.IP")
+    for _ in range(2_001):
+        adapter._enqueue_record(record, "CS.D.AUDUSD.CFD.IP")
     assert (await adapter.health()).status is HealthStatus.DEGRADED
-    assert "dropped_records=1" in ((await adapter.health()).detail or "")
+    health_detail = (await adapter.health()).detail or ""
+    assert "dropped_records=2001" in health_detail
+    assert f"first_drop_at={record.received_time.isoformat()}" in health_detail
+    assert f"last_drop_at={record.received_time.isoformat()}" in health_detail
+    assert "queue=1/1" in health_detail
+    assert "queue_high_water=1" in health_detail
+    assert [item["dropped_records"] for item in logger.errors] == [1, 1_000, 2_000]
 
     received = await anext(adapter.records())
     assert received is record
-    assert (await adapter.health()).status is HealthStatus.HEALTHY
+    assert (await adapter.health()).status is HealthStatus.DEGRADED
 
 
 @pytest.mark.asyncio
