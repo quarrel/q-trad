@@ -92,6 +92,9 @@ def verify(manifest_path: Path) -> dict[str, object]:
         raise ValueError("experiment manifest self-hash does not match")
 
     experiment = _text(manifest, "experiment")
+    checks = _object(manifest["checks"], "checks")
+    if not checks or any(not isinstance(value, bool) for value in checks.values()):
+        raise TypeError("experiment checks must be a non-empty object of booleans")
     detail: dict[str, object] = {}
     if experiment == _CONTRAST:
         detail = _verify_contrast(manifest_path, manifest)
@@ -100,6 +103,9 @@ def verify(manifest_path: Path) -> dict[str, object]:
     result = _text(manifest, "result")
     if result not in {"PASS", "FAIL"}:
         raise ValueError("experiment result must be PASS or FAIL")
+    expected_result = "PASS" if all(cast(bool, value) for value in checks.values()) else "FAIL"
+    if result != expected_result:
+        raise ValueError("experiment result does not agree with its checks")
     return {
         "verified": True,
         "experiment": experiment,

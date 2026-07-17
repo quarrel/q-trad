@@ -120,4 +120,5 @@ For a contrast, the verifier requires the gzip event stream beside its manifest,
 manifest self-hash, streams and parses every event, requires strictly increasing sequence numbers and
 checks the uncompressed record count and SHA-256. For recovery evidence it recomputes the manifest
 self-hash and validates the experiment/result contract. Verification confirms integrity and shape;
-it deliberately preserves a truthful `FAIL` rather than converting it to success.
+it also requires a non-empty boolean check set and proves that `PASS` is exactly equivalent to every
+check passing. It deliberately preserves a truthful `FAIL` rather than converting it to success.

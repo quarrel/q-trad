@@ -536,7 +536,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 336 tests.
+            compatibility, all migrations and all 337 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited

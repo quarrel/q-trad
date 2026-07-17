@@ -35,6 +35,7 @@ def test_verifies_contrast_manifest_and_event_stream(tmp_path: Path) -> None:
     evidence: dict[str, object] = {
         "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
         "result": "FAIL",
+        "checks": {"zero_loss": False},
         "event_stream": {
             "path": events.name,
             "encoding": "gzip-json-lines",
@@ -59,6 +60,7 @@ def test_rejects_tampered_contrast_event_stream(tmp_path: Path) -> None:
     evidence: dict[str, object] = {
         "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
         "result": "PASS",
+        "checks": {"zero_loss": True},
         "event_stream": {
             "path": events.name,
             "encoding": "gzip-json-lines",
@@ -78,6 +80,7 @@ def test_verifies_recovery_manifest_without_event_stream(tmp_path: Path) -> None
     evidence: dict[str, object] = {
         "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
         "result": "PASS",
+        "checks": {"recovered": True},
     }
     write_recovery(manifest, evidence)
 
@@ -92,6 +95,7 @@ def test_rejects_manifest_tampering_and_event_path_escape(tmp_path: Path) -> Non
     evidence: dict[str, object] = {
         "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
         "result": "PASS",
+        "checks": {"recovered": True},
     }
     write_recovery(recovery, evidence)
     stored = json.loads(recovery.read_text())
@@ -112,8 +116,24 @@ def test_rejects_manifest_tampering_and_event_path_escape(tmp_path: Path) -> Non
         {
             "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
             "result": "FAIL",
+            "checks": {"zero_loss": False},
             "event_stream": event_stream,
         },
     )
     with pytest.raises(ValueError, match="remain beside"):
         verify(contrast)
+
+
+def test_rejects_result_that_disagrees_with_checks(tmp_path: Path) -> None:
+    manifest = tmp_path / "recovery.json"
+    write_recovery(
+        manifest,
+        {
+            "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
+            "result": "PASS",
+            "checks": {"recovered": False},
+        },
+    )
+
+    with pytest.raises(ValueError, match="does not agree"):
+        verify(manifest)

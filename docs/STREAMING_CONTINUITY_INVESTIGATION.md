@@ -131,7 +131,8 @@ It remains unexecuted while the corrected collector measurement owns the API key
 `ops/dev/verify_stream_experiment_evidence.py` independently validates either experiment. It
 recomputes the manifest self-hash; for the contrast it additionally confines the event path beside
 the manifest, streams every gzip JSON-lines record, requires increasing callback sequence and
-recomputes the uncompressed count and SHA-256. A structurally valid `FAIL` remains a failure.
+recomputes the uncompressed count and SHA-256. It requires a non-empty boolean check set and verifies
+that `PASS` means every check passed. A structurally valid `FAIL` remains a failure.
 
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
