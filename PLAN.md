@@ -131,6 +131,11 @@ Implementation status:
             independent qualification loss gate still requires `dropped_records=0`. Historical API
             corroboration may classify the retained gaps after closure, but must not be used to erase
             or reclassify the queue-loss failure.
+          - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
+            between `20:00Z` and `21:59Z` across three consecutive days, with one isolated FTSE 100
+            interval at `04:25Z`. A provider/session-cycle cause is only a hypothesis. After formal
+            closure, derive the quota-bounded reviewed historical plan for all 70 intervals and record
+            whether IG historical bars exist before assigning any upstream or operational class.
   - Complete locally and undeployed: a bounded qualification-closure helper will write one
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk

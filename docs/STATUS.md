@@ -400,6 +400,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
     discards callbacks before canonical processing. Qualification independently requires
     `dropped_records=0`, so later IG historical corroboration of genuine market gaps cannot hide or
     remediate this run's internal loss.
+  - Read-only gap review found durations of 121–385 seconds. Sixty-nine of 70 intervals begin between
+    `20:00Z` and `21:59Z` across 14–16 July; the sole exception is an FTSE 100 interval beginning at
+    `2026-07-16T04:25:07.986Z`. This repeated shape is evidence for a provider/session-cycle hypothesis,
+    not a classification. The post-closure reviewed historical plan must query all 70 intervals within
+    evidenced quota and record whether provider bars exist.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
