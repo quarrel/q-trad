@@ -118,6 +118,16 @@ These bounded profiles prove sustained local handoff, finite backlog drain and r
 They do not prove provider compatibility, real Lightstreamer recovery or IG per-item delivery;
 those remain provider-backed gates.
 
+The checked-in `ops/dev/provider-recovery-experiment.sh` prepares the remaining provider-backed
+fault proof without touching PostgreSQL. Under the same exact collector-stopped acknowledgement it
+uses the production adapter, requires initial PRICE/heartbeat/frequency readiness, terminates the
+actual Lightstreamer client and requires automatic recovery with fresh records from every
+instrument. It then replaces only the local CST/XST request headers with a fixed invalid probe value;
+one idempotent listing-review read must cause exactly one bounded reauthentication/replay and a
+second fully ready stream generation. The non-overwriting manifest requires exactly two reconnects,
+one REST reauthentication, zero q-trad/SDK loss or subscription/server errors and verified cleanup.
+It remains unexecuted while the corrected collector measurement owns the API key.
+
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
 the existing full stream-rebuild path so REST and streaming credentials cannot diverge; a standalone

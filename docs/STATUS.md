@@ -536,7 +536,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-          compatibility, all migrations and all 326 tests.
+          compatibility, all migrations and all 332 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
@@ -545,6 +545,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         cannot run without an exact collector-stopped acknowledgement. It remains unexecuted against IG
         while the corrected collector measurement is active;
       no collector mutation occurred.
+    - A second guarded provider-recovery harness now uses the production adapter without a database.
+      It requires initial PRICE/heartbeat/frequency readiness, terminates the actual Lightstreamer
+      client, verifies automatic recovery with fresh records from all instruments, then injects a
+      fixed invalid local REST token and requires one bounded reauthentication/replay plus another
+      complete stream generation. Exact reconnect and reauthentication counts, zero loss/errors and
+      complete adapter/consumer/provider-thread cleanup fail closed. It remains unexecuted while the
+      corrected collector owns the API key.
     - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
       ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
       reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70

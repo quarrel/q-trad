@@ -543,8 +543,10 @@ def _prestream_failure(
 
 
 def _run(arguments: _Arguments) -> dict[str, object]:
-    if os.environ.get("QTRAD_PROVIDER_CONTRAST_SINGLE_CONNECTION_ACK") != _ACKNOWLEDGEMENT:
-        raise RuntimeError("set QTRAD_PROVIDER_CONTRAST_SINGLE_CONNECTION_ACK=" + _ACKNOWLEDGEMENT)
+    if os.environ.get("QTRAD_PROVIDER_EXPERIMENT_SINGLE_CONNECTION_ACK") != _ACKNOWLEDGEMENT:
+        raise RuntimeError(
+            "set QTRAD_PROVIDER_EXPERIMENT_SINGLE_CONNECTION_ACK=" + _ACKNOWLEDGEMENT
+        )
     if arguments.output_manifest.exists() or arguments.output_events.exists():
         raise FileExistsError("contrast evidence paths must not already exist")
 

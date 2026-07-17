@@ -74,7 +74,7 @@ With IG demo credentials available through the normal `QTRAD_IG_*` settings, run
 three-hour, single-connection contrast spanning the target market window:
 
 ```bash
-export QTRAD_PROVIDER_CONTRAST_SINGLE_CONNECTION_ACK=COLLECTOR_STOPPED_AND_NO_OTHER_STREAM
+export QTRAD_PROVIDER_EXPERIMENT_SINGLE_CONNECTION_ACK=COLLECTOR_STOPPED_AND_NO_OTHER_STREAM
 ops/dev/provider-stream-contrast.sh \
   tmp/provider-contrast.json \
   tmp/provider-contrast-events.jsonl.gz \
@@ -89,3 +89,22 @@ changed-field identity and bounded lifecycle codes. It records no account identi
 provider message or price value. Partial readiness, queue overflow, Lightstreamer loss, subscription
 or server errors, feed discrepancies and unverified unsubscribe/disconnect all fail the run. A
 failed login still produces an empty hash-bound event stream and failure manifest.
+
+After the contrast, retain the same acknowledgement and run the bounded q-trad recovery probe while
+the collector remains stopped:
+
+```bash
+ops/dev/provider-recovery-experiment.sh tmp/provider-recovery.json \
+  --phase-observation-seconds 10 \
+  --phase-timeout-seconds 180
+```
+
+This probe uses the production IG adapter with no database. It first requires fresh records from all
+seven PRICE channels and a fresh heartbeat, deliberately terminates the underlying Lightstreamer
+client and requires automatic recovery, then replaces only the local REST session headers with a
+fixed invalid probe value. The next idempotent listing-review read must produce one bounded token
+reauthentication/replay and another complete stream generation. Each phase records bounded adapter
+and per-instrument count evidence. The final checks require exactly two reconnects, one REST
+reauthentication, zero q-trad/SDK loss or server/subscription errors, and verified termination of the
+stream, REST service, consumer and provider-operation threads. It never records credentials, tokens,
+account identity, provider messages or market values.

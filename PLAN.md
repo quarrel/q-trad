@@ -203,6 +203,13 @@ Implementation status:
                   acknowledgement, all 15 channels data-ready, non-overwriting hash-bound callback
                   evidence, zero queue/SDK loss and verified unsubscribe/disconnect. It remains
                   unexecuted against IG while the corrected collector measurement is active.
+                - A separate guarded recovery harness now drives the production adapter without a
+                  database. It requires fresh initial data, terminates the underlying Lightstreamer
+                  client, verifies automatic recovery, injects a fixed invalid local REST token and
+                  verifies one bounded reauthentication/replay plus another complete stream
+                  generation. Exact reconnect/reauthentication counts, zero loss and full process
+                  cleanup are release gates. It also remains unexecuted while the collector owns the
+                  API key.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was

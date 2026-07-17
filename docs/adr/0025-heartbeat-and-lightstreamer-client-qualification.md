@@ -40,7 +40,11 @@ For the next candidate release:
   and
 - run the reviewed seven-PRICE/seven-CHART:TICK/heartbeat contrast only after the collector
   measurement and a verified operator-approved stop. Require one connection, all 15 channels
-  data-ready, bounded non-overwriting callback/lifecycle evidence, zero loss and verified teardown.
+  data-ready, bounded non-overwriting callback/lifecycle evidence, zero loss and verified teardown;
+  and
+- on a separate single-connection run under the same stop gate, terminate the real client and inject
+  a fixed invalid local REST token. Require fresh per-channel data after automatic disconnect
+  recovery and after exactly one bounded REST reauthentication/replay, followed by verified cleanup.
 
 The heartbeat consumes one additional subscription: `capture-v1` uses eight, and the proposed
 seven-PRICE/seven-CHART contrast uses fifteen, both below IG's documented default limit of 40.
