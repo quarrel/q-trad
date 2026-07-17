@@ -21,6 +21,7 @@ from ops.dev.provider_stream_contrast import (
     _write_manifest,
     _writer,
 )
+from ops.dev.verify_stream_experiment_evidence import verify
 from qtrad.runtime.universe import load_capture_universe
 
 
@@ -219,3 +220,5 @@ def test_prestream_failure_retains_empty_bounded_evidence(tmp_path: Path) -> Non
     }
     with gzip.open(arguments.output_events, "rb") as stream:
         assert stream.read() == b""
+    _write_manifest(arguments.output_manifest, evidence)
+    assert verify(arguments.output_manifest)["result"] == "FAIL"

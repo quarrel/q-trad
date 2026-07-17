@@ -13,6 +13,36 @@ from typing import cast
 
 _CONTRAST = "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST"
 _RECOVERY = "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY"
+_CONTRAST_CHECKS = {
+    "all_channels_data_ready",
+    "all_channels_current_at_stop",
+    "all_applied_frequencies_observed",
+    "transport_connected",
+    "no_queue_drops",
+    "no_lightstreamer_lost_updates",
+    "no_subscription_errors",
+    "no_server_errors",
+    "no_unexplained_discrepancies",
+    "shutdown_verified",
+    "unsubscriptions_verified",
+    "logout_completed",
+    "http_session_close_completed",
+    "provider_workers_terminated",
+    "provider_operation_completed",
+}
+_RECOVERY_CHECKS = {
+    "initial_ready",
+    "disconnect_recovered",
+    "invalid_token_recovered",
+    "exact_reconnect_count",
+    "exact_rest_reauthentication_count",
+    "zero_qtrad_drops",
+    "zero_lightstreamer_loss",
+    "zero_subscription_errors",
+    "zero_server_errors",
+    "shutdown_verified",
+    "provider_operations_completed",
+}
 
 
 def _parse_args() -> Path:
@@ -84,6 +114,8 @@ def _verify_contrast(manifest_path: Path, manifest: Mapping[str, object]) -> dic
 
 def verify(manifest_path: Path) -> dict[str, object]:
     manifest = _object(json.loads(manifest_path.read_text(encoding="utf-8")), "manifest")
+    if _integer(manifest, "schema_version") != 1:
+        raise ValueError("unsupported stream experiment schema version")
     expected_hash = _text(manifest, "evidence_sha256")
     unsigned = dict(manifest)
     del unsigned["evidence_sha256"]
@@ -97,8 +129,13 @@ def verify(manifest_path: Path) -> dict[str, object]:
         raise TypeError("experiment checks must be a non-empty object of booleans")
     detail: dict[str, object] = {}
     if experiment == _CONTRAST:
+        if set(checks) != _CONTRAST_CHECKS:
+            raise ValueError("contrast evidence does not contain the exact v1 check set")
         detail = _verify_contrast(manifest_path, manifest)
-    elif experiment != _RECOVERY:
+    elif experiment == _RECOVERY:
+        if set(checks) != _RECOVERY_CHECKS:
+            raise ValueError("recovery evidence does not contain the exact v1 check set")
+    else:
         raise ValueError(f"unsupported stream experiment: {experiment}")
     result = _text(manifest, "result")
     if result not in {"PASS", "FAIL"}:

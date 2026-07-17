@@ -122,4 +122,6 @@ manifest self-hash, streams and parses every event, requires strictly increasing
 checks the uncompressed record count and SHA-256. For recovery evidence it recomputes the manifest
 self-hash and validates the experiment/result contract. Verification confirms integrity and shape;
 it also requires a non-empty boolean check set and proves that `PASS` is exactly equivalent to every
-check passing. It deliberately preserves a truthful `FAIL` rather than converting it to success.
+check passing. Schema v1 requires the complete experiment-specific check names, so a truncated or
+invented PASS cannot satisfy verification. It deliberately preserves a truthful `FAIL` rather than
+converting it to success.

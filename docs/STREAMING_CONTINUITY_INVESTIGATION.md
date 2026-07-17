@@ -132,7 +132,9 @@ It remains unexecuted while the corrected collector measurement owns the API key
 recomputes the manifest self-hash; for the contrast it additionally confines the event path beside
 the manifest, streams every gzip JSON-lines record, requires increasing callback sequence and
 recomputes the uncompressed count and SHA-256. It requires a non-empty boolean check set and verifies
-that `PASS` means every check passed. A structurally valid `FAIL` remains a failure.
+that `PASS` means every check passed. Schema v1 additionally requires the exact contrast or recovery
+check set, preventing a partial manifest from weakening the gate. A structurally valid `FAIL`
+remains a failure.
 
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses

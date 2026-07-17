@@ -536,7 +536,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 337 tests.
+            compatibility, all migrations and all 338 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
@@ -555,7 +555,8 @@ outside the current data-only phase until explicitly admitted by a later plan up
     - Provider experiment evidence now has an independent offline verifier. It recomputes either
       manifest self-hash and, for contrast evidence, confines the adjacent event path, parses every
       gzip JSON-lines record and recomputes increasing sequence, count and uncompressed SHA-256.
-      Verification preserves rather than masks a valid failure artifact.
+      Schema v1 requires the complete experiment-specific check set and exact PASS equivalence;
+      verification preserves rather than masks a valid failure artifact.
     - The continuity protocol now prevents evidence substitution: the current old-lock run measures
       the overload correction through its recurrent windows/weekend; guarded provider probes run only
       after its approved stop and during active markets; ADR 0025 remains Proposed until both pass;
