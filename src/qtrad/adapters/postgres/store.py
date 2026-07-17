@@ -636,18 +636,9 @@ class PostgresAuditStore(AuditStore):
                             UPDATE read_model.historical_coverage_gaps
                             SET request_completed_at = :executed_at,
                                 returned_points = :observed_points,
-                                covered_at = CASE
-                                    WHEN :observed_points > 0 THEN :executed_at
-                                    ELSE NULL
-                                END,
-                                covered_by_plan_hash = CASE
-                                    WHEN :observed_points > 0 THEN :plan_hash
-                                    ELSE NULL
-                                END,
-                                observed_points = CASE
-                                    WHEN :observed_points > 0 THEN :observed_points
-                                    ELSE NULL
-                                END
+                                covered_at = :covered_at,
+                                covered_by_plan_hash = :covered_by_plan_hash,
+                                observed_points = :covered_points
                             WHERE instrument_id = :instrument_id
                               AND source_provider = :provider
                               AND source_environment = :environment
@@ -667,6 +658,9 @@ class PostgresAuditStore(AuditStore):
                             **_coverage_parameters(plan, item, basis),
                             "executed_at": executed_at,
                             "observed_points": points,
+                            "covered_at": executed_at if points > 0 else None,
+                            "covered_by_plan_hash": plan.plan_hash if points > 0 else None,
+                            "covered_points": points if points > 0 else None,
                         },
                     )
                     if result.scalar_one_or_none() is None:
