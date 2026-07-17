@@ -155,6 +155,18 @@ sign-off; they must not be silently deleted or presented as successful runs.
   same evidence is 56 instrument/range spans and only 267 points. Historical corroboration therefore
   requires a sparse hash-bound plan set; inflating quota evidence or querying the wasteful rectangle
   is prohibited.
+- The candidate is formally closed as `FAIL`. Final evidence SHA-256
+  `d7bcd88e3179aca9eda89673f14383d6525bcd92e602462c6c56815892fb5c3f` binds automatic evidence
+  `62a9227792a6e2c396f394a4c6346da0dde42af3aeef9312443bb7f0b060f0dc`, operator review
+  `35007f18acab7d8a5d9ddbb73b660cbd713354fb23d7a04bb384d73b061964af`, the 22,029 dropped records
+  and all 70 `UNEXPLAINED` gaps. The result does not admit `capture-v2`.
+- After formal closure and the post-evidence backup, the corrected seven-instrument application was
+  deployed at `2026-07-17T05:02Z`. Release descriptor `807a96734e4aa1181acc24501f8031e0455b3bf3`
+  pins image digest `cb9d8efa9951daea91269e596c798c85fa262ab7100d93050025461eecb363ee`;
+  the collector database advanced expand-only from `0003` to `0009`. New run
+  `15ea66f4-a04a-4c99-b897-877bcb021877` reached seven fresh subscriptions, exact projection
+  catch-up, zero reconnects/drops/provider operations and queue high-water 7/10,000. The failed run
+  stopped cleanly and remains immutable.
 
 The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
 After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into

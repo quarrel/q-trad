@@ -127,7 +127,7 @@ Implementation status:
           the run retained 22,029 dropped records, one reconnect and 70 observed gaps. Formal
           qualification closure remains evidence-gated, but the internal loss already prevents a
           `PASS`.
-        - Root-cause analysis is complete locally: accepted input rose from roughly 9 to 32 records
+          - Root-cause analysis is complete locally: accepted input rose from roughly 9 to 32 records
           per second; persistence latency then grew from milliseconds to more than eight minutes.
           Queue loss ran from `2026-07-16T12:57:15Z` to `13:36:11Z` and the backlog cleared around
           `14:20Z`. Ingestion incorrectly advanced bar closure with processing wall time, converting
@@ -137,7 +137,12 @@ Implementation status:
             state changes or one write per second. First/last drop receive times remain in bounded health
             evidence even though per-drop logging is removed. Formatting, Ruff, Pyright, `ty` and all 283
             database-independent tests pass; isolated
-            migrated-PostgreSQL validation remains the release gate.
+              migrated-PostgreSQL validation remains the release gate.
+          - Complete: the failed 72-hour candidate is hash-bound as `FAIL`; its 22,029 drops and 70
+            unexplained gaps remain immutable. The overload correction is deployed to `capture-v1`
+            at migration `0009` and has begun a new seven-instrument measurement with all-seven
+            caught-up readiness and zero initial drops. Historical corroboration remains pending a
+            sparse 267-point plan set; the rejected 20,741-point rectangle made no provider request.
           - None of the 70 projected market-data gaps overlaps the overload interval. Gap projections
             describe observed quote silence, not callbacks discarded by an internal queue; the
             independent qualification loss gate still requires `dropped_records=0`. Historical API

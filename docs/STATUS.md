@@ -463,6 +463,18 @@ outside the current data-only phase until explicitly admitted by a later plan up
     the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
     local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
     will not be fabricated and the collector remains untouched.
+  - The failed candidate is now formally closed by final evidence
+    `d7bcd88e3179aca9eda89673f14383d6525bcd92e602462c6c56815892fb5c3f`. It binds the corrected
+    automatic snapshot, operator review, all 70 `UNEXPLAINED` gaps and the 22,029 dropped records;
+    qualification decision is `FAIL` and no expansion is admitted.
+  - The previously published overload-corrected ARM image was then deployed under reviewed descriptor
+    commit `807a967` after the verified post-evidence backup. The collector stopped cleanly, applied
+    expand-only migrations from `0003` through `0009`, and started a new seven-instrument run on digest
+    `sha256:cb9d8efa9951daea91269e596c798c85fa262ab7100d93050025461eecb363ee`.
+    Read-back at `2026-07-17T05:02Z` found HTTP 200 readiness, seven fresh subscriptions, exact
+    projection catch-up, zero reconnects/drops/provider operations and queue high-water 7/10,000.
+    This begins corrected `capture-v1` measurement; `capture-v2` and 40-instrument stress remain
+    separate later stages.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
