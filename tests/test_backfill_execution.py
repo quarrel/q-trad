@@ -78,6 +78,7 @@ class FakeStore:
         self.failed = False
         self.finished: dict[str, object] | None = None
         self.quotas: list[tuple[str, int]] = []
+        self.request_usage: list[dict[str, object]] = []
 
     async def claim_backfill_plan(self, plan_hash: str) -> Mapping[str, JsonValue]:
         self.claimed = plan_hash
@@ -91,6 +92,13 @@ class FakeStore:
 
     async def provider_listing_version(self, _: object) -> ProviderListing:
         return _listing()
+
+    async def start_historical_request_usage(self, **values: object) -> None:
+        self.request_usage.append(values)
+
+    async def complete_historical_request_usage(self, request_id: UUID, **values: object) -> None:
+        assert self.request_usage[-1]["request_id"] == request_id
+        self.request_usage[-1].update(values)
 
     async def complete_backfill_plan(
         self, _: object, *, observed_points: Mapping[tuple[object, PriceBasis], int], **__: object

@@ -56,6 +56,28 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         ),
         (
             [
+                "qualification",
+                "gap-history",
+                "--evidence",
+                "qualification.json",
+                "--plan-set",
+                "gap-plan-set.json",
+                "--manifest",
+                "research/manifests/example.json",
+                "--output",
+                "gap-history.json",
+            ],
+            "_review_qualification_gap_history",
+            (
+                ("evidence_path", Path("qualification.json")),
+                ("plan_path", None),
+                ("plan_set_path", Path("gap-plan-set.json")),
+                ("manifest_path", Path("research/manifests/example.json")),
+                ("output_path", Path("gap-history.json")),
+            ),
+        ),
+        (
+            [
                 "runs",
                 "reconcile",
                 "--plan",
@@ -67,6 +89,42 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             (
                 ("plan_path", Path("run-reconciliation.json")),
                 ("confirmed_plan_hash", "a" * 64),
+            ),
+        ),
+        (
+            [
+                "qualification",
+                "gap-register",
+                "--plan-set",
+                "gap-plan-set.json",
+                "--snapshot-import-evidence",
+                "snapshot-import.json",
+                "--confirm-plan-set-hash",
+                "a" * 64,
+            ],
+            "_register_qualification_gap_plan_set",
+            (
+                ("plan_set_path", Path("gap-plan-set.json")),
+                ("snapshot_import_path", Path("snapshot-import.json")),
+                ("confirmed_plan_set_hash", "a" * 64),
+            ),
+        ),
+        (
+            [
+                "qualification",
+                "gap-execute",
+                "--plan-set",
+                "gap-plan-set.json",
+                "--snapshot-import-evidence",
+                "snapshot-import.json",
+                "--confirm-plan-set-hash",
+                "a" * 64,
+            ],
+            "_execute_qualification_gap_plan_set",
+            (
+                ("plan_set_path", Path("gap-plan-set.json")),
+                ("snapshot_import_path", Path("snapshot-import.json")),
+                ("confirmed_plan_set_hash", "a" * 64),
             ),
         ),
         (
@@ -157,6 +215,7 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             (
                 ("evidence_path", Path("qualification.json")),
                 ("plan_path", Path("backfill-plan.json")),
+                ("plan_set_path", None),
                 ("manifest_path", Path("research/manifests/example.json")),
                 ("output_path", Path("gap-history.json")),
             ),
@@ -239,7 +298,12 @@ def test_async_command_dispatch(
     cli.main(arguments)
 
     positional: list[object] = [cli_environment]
-    if target not in {"_rebuild", "_register_backfill", "_storage_snapshot"}:
+    if target not in {
+        "_rebuild",
+        "_register_backfill",
+        "_register_qualification_gap_plan_set",
+        "_storage_snapshot",
+    }:
         positional.append(cli_clock)
     if target == "_replay":
         positional.append(Path("research/manifests/example.json"))

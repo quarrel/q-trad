@@ -51,3 +51,5 @@ capture universe. Backfill cannot claim to recreate missing ticks.
 `read_model.data_gaps` and `/api/v1/gaps`. A covered historical range means the reviewed
 provider request returned at least one point for each basis; it is not evidence that every
 market minute traded or that an observed stream interruption was repaired.
+Completed provider requests and their quota usage are recorded separately. A request that returns
+zero points remains useful diagnostic evidence, but leaves the historical coverage gap open.

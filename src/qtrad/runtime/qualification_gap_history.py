@@ -16,6 +16,7 @@ from qtrad.domain.historical_coverage import BackfillPlan
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance, MarketBar, PriceBasis
 from qtrad.ports.storage import ResearchManifest
+from qtrad.runtime.qualification_gap_plan_set import QualificationGapPlanSet
 from qtrad.runtime.research_snapshot import ResearchSnapshotImport
 
 _MAX_QUALIFICATION_EVIDENCE_BYTES = 16 * 1024 * 1024
@@ -76,6 +77,7 @@ class QualificationGapBackfillScope(_StrictModel):
     start: datetime
     end: datetime
     instrument_ids: tuple[InstrumentId, ...]
+    gap_ids: tuple[str, ...] = ()
 
 
 class GapHistoricalEvidence(_StrictModel):
@@ -98,6 +100,24 @@ class QualificationGapHistoryArtifact(_StrictModel):
     generated_at: datetime
     qualification_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     backfill_plan_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    research_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    capture_source_id: str
+    universe_name: str
+    configuration_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    source_snapshot_import_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    results: tuple[GapHistoricalEvidence, ...]
+    interpretation: Literal["CORROBORATING_ONLY_DOES_NOT_CLASSIFY_OR_REPAIR_LIVE_GAPS"] = (
+        "CORROBORATING_ONLY_DOES_NOT_CLASSIFY_OR_REPAIR_LIVE_GAPS"
+    )
+
+
+class QualificationGapPlanSetHistoryArtifact(_StrictModel):
+    schema_name: Literal["qtrad-qualification-gap-history-v2"] = Field(alias="schema")
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    generated_at: datetime
+    qualification_evidence_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    backfill_plan_set_hash: str = Field(pattern=r"^[0-9a-f]{64}$")
+    backfill_plan_hashes: tuple[str, ...] = Field(min_length=1, max_length=100)
     research_manifest_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
     capture_source_id: str
     universe_name: str
@@ -152,6 +172,53 @@ def qualification_gap_backfill_scope(
         for value in sorted({gap.instrument_id for gap in evidence.candidate_gaps})
     )
     return QualificationGapBackfillScope(start=start, end=end, instrument_ids=instrument_ids)
+
+
+def qualification_gap_backfill_scopes(
+    evidence: QualificationEvidence,
+) -> tuple[QualificationGapBackfillScope, ...]:
+    """Merge only overlapping minute-aligned gaps for each instrument."""
+
+    _validate_qualification_evidence(evidence)
+    if not evidence.candidate_gaps:
+        raise ValueError("qualification evidence contains no candidate gaps to investigate")
+    grouped: dict[str, list[tuple[datetime, datetime, str]]] = {}
+    for gap in evidence.candidate_gaps:
+        start = gap.interval_start.replace(second=0, microsecond=0)
+        end = gap.interval_end.replace(second=0, microsecond=0)
+        if end < gap.interval_end:
+            end += timedelta(minutes=1)
+        grouped.setdefault(gap.instrument_id, []).append((start, end, gap.gap_id))
+    scopes: list[QualificationGapBackfillScope] = []
+    for instrument_id in sorted(grouped):
+        current_start: datetime | None = None
+        current_end: datetime | None = None
+        current_gap_ids: list[str] = []
+        for start, end, gap_id in sorted(grouped[instrument_id]):
+            if current_end is None or start > current_end:
+                if current_start is not None and current_end is not None:
+                    scopes.append(
+                        QualificationGapBackfillScope(
+                            start=current_start,
+                            end=current_end,
+                            instrument_ids=(InstrumentId(instrument_id),),
+                            gap_ids=tuple(current_gap_ids),
+                        )
+                    )
+                current_start, current_end, current_gap_ids = start, end, [gap_id]
+            else:
+                current_end = max(current_end, end)
+                current_gap_ids.append(gap_id)
+        if current_start is not None and current_end is not None:
+            scopes.append(
+                QualificationGapBackfillScope(
+                    start=current_start,
+                    end=current_end,
+                    instrument_ids=(InstrumentId(instrument_id),),
+                    gap_ids=tuple(current_gap_ids),
+                )
+            )
+    return tuple(sorted(scopes, key=lambda scope: (scope.start, str(scope.instrument_ids[0]))))
 
 
 def validate_qualification_gap_snapshot(
@@ -316,8 +383,183 @@ def build_qualification_gap_history_artifact(
     )
 
 
+def build_qualification_gap_plan_set_history_artifact(
+    *,
+    evidence: QualificationEvidence,
+    plan_set: QualificationGapPlanSet,
+    plans: Sequence[BackfillPlan],
+    manifest: ResearchManifest,
+    bars: Sequence[MarketBar],
+    generated_at: datetime,
+) -> QualificationGapPlanSetHistoryArtifact:
+    """Compare all sparse planned ranges without broadening provider requests."""
+
+    _require_utc(generated_at, "historical gap review generation time")
+    _validate_qualification_evidence(evidence)
+    if not evidence.candidate_gaps:
+        raise ValueError("qualification evidence contains no candidate gaps to investigate")
+    if len(plans) != len(plan_set.entries):
+        raise ValueError("qualification gap plan set does not match loaded plans")
+    if plan_set.qualification_evidence_sha256 != evidence.evidence_sha256:
+        raise ValueError("qualification gap plan set does not match automatic evidence")
+    if (
+        plan_set.capture_source_id != evidence.release.capture_source_id
+        or plan_set.universe_hash != evidence.release.configuration_hash
+    ):
+        raise ValueError("qualification gap plan set has different capture identity")
+    plan_by_gap: dict[str, BackfillPlan] = {}
+    for entry, plan in zip(plan_set.entries, plans, strict=True):
+        if entry.plan_hash != plan.plan_hash:
+            raise ValueError("qualification gap plan-set entry differs from loaded plan")
+        for gap_id in entry.gap_ids:
+            if gap_id in plan_by_gap:
+                raise ValueError("qualification gap plan set contains duplicate gap IDs")
+            plan_by_gap[gap_id] = plan
+    expected_gap_ids = {gap.gap_id for gap in evidence.candidate_gaps}
+    if set(plan_by_gap) != expected_gap_ids:
+        raise ValueError("qualification gap plan set does not cover the exact evidence gap set")
+    if manifest.schema_version != 2 or manifest.manifest_sha256 is None:
+        raise ValueError("historical gap review requires a hash-verified version-two manifest")
+    if (
+        manifest.configuration_hash != plan_set.universe_hash
+        or manifest.universe_name != plan_set.universe_name
+    ):
+        raise ValueError("research manifest does not match the qualification plan set")
+    metadata = manifest.metadata
+    _require_plan_set_metadata_identity(metadata, evidence, plan_set, plans)
+    _require_live_gap_evidence(metadata, evidence)
+    coverage_by_hash = {
+        plan.plan_hash: _plan_coverage_points(metadata, plan, allow_empty=True) for plan in plans
+    }
+    results = tuple(
+        _gap_result(
+            gap=gap,
+            plan=plan_by_gap[gap.gap_id],
+            bars=bars,
+            coverage_points=coverage_by_hash[plan_by_gap[gap.gap_id].plan_hash],
+        )
+        for gap in sorted(
+            evidence.candidate_gaps, key=lambda item: (item.interval_start, item.gap_id)
+        )
+    )
+    source_snapshot = _mapping(metadata["source_snapshot"], "source snapshot")
+    source_snapshot_import_sha256 = source_snapshot["import_sha256"]
+    if not isinstance(source_snapshot_import_sha256, str):
+        raise TypeError("source snapshot import hash must be a string")
+    plan_hashes = tuple(entry.plan_hash for entry in plan_set.entries)
+    identity = {
+        "schema": "qtrad-qualification-gap-history-v2",
+        "generated_at": generated_at,
+        "qualification_evidence_sha256": evidence.evidence_sha256,
+        "backfill_plan_set_hash": plan_set.plan_set_hash,
+        "backfill_plan_hashes": plan_hashes,
+        "research_manifest_sha256": manifest.manifest_sha256,
+        "capture_source_id": evidence.release.capture_source_id,
+        "universe_name": plan_set.universe_name,
+        "configuration_hash": plan_set.universe_hash,
+        "source_snapshot_import_sha256": source_snapshot_import_sha256,
+        "results": results,
+        "interpretation": "CORROBORATING_ONLY_DOES_NOT_CLASSIFY_OR_REPAIR_LIVE_GAPS",
+    }
+    artifact_hash = _sha256_json(_json_value(identity))
+    return QualificationGapPlanSetHistoryArtifact(
+        artifact_sha256=artifact_hash,
+        **identity,
+    )
+
+
+def _gap_result(
+    *,
+    gap: QualificationGap,
+    plan: BackfillPlan,
+    bars: Sequence[MarketBar],
+    coverage_points: Mapping[tuple[str, str], int],
+) -> GapHistoricalEvidence:
+    item = next(
+        (value for value in plan.items if str(value.instrument_id) == gap.instrument_id), None
+    )
+    if item is None:
+        raise ValueError(f"backfill plan omits qualification gap instrument: {gap.instrument_id}")
+    aligned_start = gap.interval_start.replace(second=0, microsecond=0)
+    aligned_end = gap.interval_end.replace(second=0, microsecond=0)
+    if aligned_end < gap.interval_end:
+        aligned_end += timedelta(minutes=1)
+    if plan.start > aligned_start or plan.end < aligned_end:
+        raise ValueError(f"backfill plan does not cover qualification gap: {gap.gap_id}")
+    expected_minutes = int((aligned_end - aligned_start).total_seconds() // 60)
+    listing_bars = [
+        bar
+        for bar in bars
+        if str(bar.instrument_id) == gap.instrument_id
+        and bar.provenance is BarProvenance.IG_HISTORICAL
+        and bar.source_listing_id == item.listing_id
+        and bar.interval_start < gap.interval_end
+        and bar.interval_end > gap.interval_start
+    ]
+    basis_evidence = tuple(
+        _basis_evidence(
+            basis=basis,
+            bars=listing_bars,
+            aligned_start=aligned_start,
+            aligned_end=aligned_end,
+            expected_minutes=expected_minutes,
+            plan_observed_points=coverage_points[(gap.instrument_id, basis.value)],
+        )
+        for basis in _BASES
+    )
+    return GapHistoricalEvidence(
+        gap_id=gap.gap_id,
+        instrument_id=gap.instrument_id,
+        interval_start=gap.interval_start,
+        interval_end=gap.interval_end,
+        aligned_query_start=aligned_start,
+        aligned_query_end=aligned_end,
+        source_listing_id=str(item.listing_id),
+        source_listing_valid_from=item.listing_valid_from,
+        source_listing_metadata_version=item.listing_metadata_version,
+        historical_data_status=(
+            "HISTORICAL_DATA_PRESENT"
+            if any(value.returned_points_in_gap for value in basis_evidence)
+            else "NO_HISTORICAL_DATA_RETURNED"
+        ),
+        bases=cast(
+            tuple[HistoricalBasisEvidence, HistoricalBasisEvidence, HistoricalBasisEvidence],
+            basis_evidence,
+        ),
+    )
+
+
+def _require_plan_set_metadata_identity(
+    metadata: Mapping[str, object],
+    evidence: QualificationEvidence,
+    plan_set: QualificationGapPlanSet,
+    plans: Sequence[BackfillPlan],
+) -> None:
+    if metadata["manifest_contract"] != "qtrad-research-bars-v2":
+        raise ValueError("research manifest does not use the version-two bars contract")
+    requested = _mapping(metadata["requested_interval"], "requested interval")
+    if _datetime(requested["start"], "requested interval start") != min(
+        plan.start for plan in plans
+    ):
+        raise ValueError("research export start does not match the qualification plan set")
+    if _datetime(requested["end"], "requested interval end") != max(plan.end for plan in plans):
+        raise ValueError("research export end does not match the qualification plan set")
+    source = _mapping(metadata["source_snapshot"], "source snapshot")
+    if source["kind"] != "verified-capture-snapshot":
+        raise ValueError("historical gap review requires a verified capture snapshot")
+    if source["capture_source_id"] != evidence.release.capture_source_id:
+        raise ValueError("research snapshot does not match the qualification capture source")
+    if source["import_sha256"] != plan_set.snapshot_import_sha256:
+        raise ValueError("research snapshot does not match the qualification plan set")
+    if (
+        _datetime(source["source_created_at"], "source snapshot creation time")
+        < evidence.generated_at
+    ):
+        raise ValueError("research snapshot predates the automatic qualification evidence")
+
+
 def write_qualification_gap_history_artifact(
-    path: Path, artifact: QualificationGapHistoryArtifact
+    path: Path, artifact: QualificationGapHistoryArtifact | QualificationGapPlanSetHistoryArtifact
 ) -> None:
     """Write one bounded artifact without overwriting existing evidence."""
 
@@ -335,7 +577,9 @@ def write_qualification_gap_history_artifact(
         output.write(encoded)
 
 
-def load_qualification_gap_history_artifact(path: Path) -> QualificationGapHistoryArtifact:
+def load_qualification_gap_history_artifact(
+    path: Path,
+) -> QualificationGapHistoryArtifact | QualificationGapPlanSetHistoryArtifact:
     """Load and verify one previously written historical-gap artifact."""
 
     if path.is_symlink() or not path.is_file():
@@ -343,7 +587,13 @@ def load_qualification_gap_history_artifact(path: Path) -> QualificationGapHisto
     encoded = path.read_bytes()
     if len(encoded) > _MAX_ARTIFACT_BYTES:
         raise ValueError("historical gap evidence exceeds the maximum encoded size")
-    artifact = QualificationGapHistoryArtifact.model_validate_json(encoded)
+    raw = json.loads(encoded)
+    if not isinstance(raw, dict):
+        raise TypeError("historical gap evidence must be a JSON object")
+    if raw.get("schema") == "qtrad-qualification-gap-history-v2":
+        artifact = QualificationGapPlanSetHistoryArtifact.model_validate_json(encoded)
+    else:
+        artifact = QualificationGapHistoryArtifact.model_validate_json(encoded)
     _validate_artifact_hash(artifact)
     return artifact
 
@@ -397,7 +647,7 @@ def _require_metadata_identity(
 
 
 def _plan_coverage_points(
-    metadata: Mapping[str, object], plan: BackfillPlan
+    metadata: Mapping[str, object], plan: BackfillPlan, *, allow_empty: bool = False
 ) -> dict[tuple[str, str], int]:
     historical = _mapping(metadata["historical_coverage"], "historical coverage")
     records = _sequence(historical["records"], "historical coverage records")
@@ -411,8 +661,8 @@ def _plan_coverage_points(
         if key not in expected or record["detected_by_plan_hash"] != plan.plan_hash:
             continue
         item = expected[key]
-        if record["covered_by_plan_hash"] != plan.plan_hash:
-            raise ValueError(f"historical coverage is not completed by the selected plan: {key}")
+        if record["request_completed_at"] is None:
+            raise ValueError(f"historical request is not completed by the selected plan: {key}")
         if record["provenance"] != "IG_HISTORICAL" or record["resolution"] != "MINUTE":
             raise ValueError(f"historical coverage has unexpected provenance or resolution: {key}")
         if record["source_listing_id"] != str(item.listing_id):
@@ -428,9 +678,25 @@ def _plan_coverage_points(
             or _datetime(record["interval_end"], "historical coverage end") != plan.end
         ):
             raise ValueError(f"historical coverage has a different planned interval: {key}")
-        points = record["observed_points"]
-        if not isinstance(points, int) or isinstance(points, bool) or points <= 0:
-            raise ValueError(f"historical coverage has no observed points: {key}")
+        points = record["returned_points"]
+        if (
+            not isinstance(points, int)
+            or isinstance(points, bool)
+            or points < 0
+            or (points == 0 and not allow_empty)
+        ):
+            raise ValueError(f"historical request has invalid returned points: {key}")
+        if points == 0:
+            if record["covered_at"] is not None or record["covered_by_plan_hash"] is not None:
+                raise ValueError(f"empty historical request falsely claims coverage: {key}")
+            if record["observed_points"] is not None:
+                raise ValueError(f"empty historical request records covered points: {key}")
+        elif (
+            record["covered_at"] is None
+            or record["covered_by_plan_hash"] != plan.plan_hash
+            or record["observed_points"] != points
+        ):
+            raise ValueError(f"returned historical data is not recorded as coverage: {key}")
         if key in observed:
             raise ValueError(f"historical coverage contains duplicate plan evidence: {key}")
         observed[key] = points
@@ -508,7 +774,9 @@ def _basis_evidence(
     )
 
 
-def _validate_artifact_hash(artifact: QualificationGapHistoryArtifact) -> None:
+def _validate_artifact_hash(
+    artifact: QualificationGapHistoryArtifact | QualificationGapPlanSetHistoryArtifact,
+) -> None:
     identity = artifact.model_dump(mode="json", by_alias=True)
     recorded = identity.pop("artifact_sha256")
     if _sha256_json(identity) != recorded:

@@ -175,6 +175,9 @@ def _historical_coverage_row(
         requested_end,
         "historical coverage",
     )
+    returned_points = row["returned_points"]
+    if returned_points is not None and not isinstance(returned_points, int):
+        raise TypeError("historical request returned points must be an integer")
     observed_points = row["observed_points"]
     if observed_points is not None and not isinstance(observed_points, int):
         raise TypeError("historical coverage observed points must be an integer")
@@ -192,6 +195,8 @@ def _historical_coverage_row(
         "interval_end": _utc_text(interval_end),
         "detected_at": _utc_text(_datetime(row["detected_at"])),
         "detected_by_plan_hash": str(row["detected_by_plan_hash"]),
+        "request_completed_at": _optional_time(row["request_completed_at"]),
+        "returned_points": returned_points,
         "covered_at": _optional_time(row["covered_at"]),
         "covered_by_plan_hash": (
             str(row["covered_by_plan_hash"]) if row["covered_by_plan_hash"] is not None else None

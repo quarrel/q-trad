@@ -600,7 +600,8 @@ Make that comparison reproducible as follows:
    `qtrad_research_*` database and import evidence from `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`. Never
    migrate the collector as part of this investigation.
 2. Apply the reviewed migrations to the isolated database, set its normal q-trad database and capture
-   source configuration, then derive the plan without manually transcribing gap times or instruments:
+   source configuration, then derive the sparse plan set without manually transcribing gap times or
+   instruments:
 
    ```bash
    uv run qtrad qualification gap-plan \
@@ -608,31 +609,48 @@ Make that comparison reproducible as follows:
      --snapshot-import-evidence capture-v1-snapshot-import.json \
      --universe config/capture-v1.toml \
      --remaining-allowance '<current IG demo allowance>' \
-     --output gap-history-backfill-plan.json
+      --output gap-history-backfill-plan-set.json
    ```
 
    The command requires the configured target to be the exact verified `qtrad_research_*` import,
    checks that the snapshot postdates the automatic evidence, proves source/universe identity and
-   requires the database to be at the repository's single current Alembic head. It rounds the earliest
-   gap down and latest gap up to UTC minute boundaries and sorts the distinct gap instruments. Review
-   the resulting listing versions, range, quota and plan hash. Then register and execute only that
-   confirmed hash through the normal backfill commands. Never point this operation at the collector
-   database.
-3. Export the exact plan interval from the isolated database with `--snapshot-import-evidence`.
+   requires the database to be at the repository's single current Alembic head. It minute-aligns each
+   gap and merges only touching or overlapping ranges for the same instrument. Review the set envelope,
+   every sibling plan's listing/range, all gap bindings, aggregate requested points, reserve and set
+   hash. Then register and execute only that confirmed set:
+
+   ```bash
+   uv run qtrad qualification gap-register \
+     --plan-set gap-history-backfill-plan-set.json \
+     --snapshot-import-evidence capture-v1-snapshot-import.json \
+     --confirm-plan-set-hash '<reviewed set hash>'
+
+   uv run qtrad qualification gap-execute \
+     --plan-set gap-history-backfill-plan-set.json \
+     --snapshot-import-evidence capture-v1-snapshot-import.json \
+     --confirm-plan-set-hash '<same reviewed set hash>'
+   ```
+
+   Execution uses one IG demo session and records an append-only usage row before every request. The
+   row retains the approved maximum and completes with returned points and provider-reported remaining
+   allowance. Zero returned points complete the diagnostic request without falsely closing historical
+   coverage. Never point this operation at the collector database.
+3. Export the enclosing plan-set interval from the isolated database with
+   `--snapshot-import-evidence`.
    Retain the version-two manifest ID printed by the command.
 4. Produce the offline comparison from the same configured research root:
 
    ```bash
    uv run qtrad qualification gap-history \
      --evidence capture-v1-final.json \
-     --plan gap-history-backfill-plan.json \
+      --plan-set gap-history-backfill-plan-set.json \
      --manifest "${QTRAD_RESEARCH_ROOT}/manifests/<manifest-id>.json" \
      --output capture-v1-gap-history.json
    ```
 
 The command makes no IG or database request. It re-verifies the automatic evidence, plan, verified
-snapshot import, exact copied live gaps, completed plan coverage, manifest and Parquet hashes before
-writing a non-overwriting `qtrad-qualification-gap-history-v1` artifact. Retain that artifact as an
+snapshot import, exact copied live gaps, completed plan request evidence, manifest and Parquet hashes
+before writing a non-overwriting `qtrad-qualification-gap-history-v2` artifact. Retain that artifact as an
 ADR 0021 evidence reference. `HISTORICAL_DATA_PRESENT` prompts deeper streaming-path investigation;
 `NO_HISTORICAL_DATA_RETURNED` supports but does not prove upstream inactivity. Neither is itself a
 pass-eligible gap classification.

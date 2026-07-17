@@ -21,11 +21,16 @@ from qtrad.domain.market_data import BarProvenance, PriceBasis
 from qtrad.runtime.qualification_gap_history import (
     QualificationEvidence,
     build_qualification_gap_history_artifact,
+    build_qualification_gap_plan_set_history_artifact,
     load_qualification_evidence,
     load_qualification_gap_history_artifact,
     qualification_gap_backfill_scope,
     validate_qualification_gap_snapshot,
     write_qualification_gap_history_artifact,
+)
+from qtrad.runtime.qualification_gap_plan_set import (
+    QualificationGapPlanEntry,
+    build_qualification_gap_plan_set,
 )
 from qtrad.runtime.research_snapshot import load_research_snapshot_import
 from tests.test_quota_replay import sample_bar
@@ -132,6 +137,8 @@ def _metadata(evidence: QualificationEvidence, plan: BackfillPlan) -> dict[str, 
             "interval_end": "2026-07-14T21:00:00Z",
             "detected_at": "2026-07-17T04:31:00Z",
             "detected_by_plan_hash": plan.plan_hash,
+            "request_completed_at": "2026-07-17T04:32:00Z",
+            "returned_points": 30,
             "covered_at": "2026-07-17T04:32:00Z",
             "covered_by_plan_hash": plan.plan_hash,
             "observed_points": 30,
@@ -291,6 +298,58 @@ async def test_gap_history_records_no_returned_data_without_inventing_upstream_c
 
     assert artifact.results[0].historical_data_status == "NO_HISTORICAL_DATA_RETURNED"
     assert all(basis.returned_points_in_gap == 0 for basis in artifact.results[0].bases)
+
+
+@pytest.mark.asyncio
+async def test_gap_history_binds_sparse_plan_set_and_all_plan_hashes(tmp_path: Path) -> None:
+    evidence = _qualification_evidence()
+    plan = _plan()
+    plan_set = build_qualification_gap_plan_set(
+        qualification_evidence_sha256=evidence.evidence_sha256,
+        snapshot_import_sha256="d" * 64,
+        capture_source_id=evidence.release.capture_source_id,
+        universe_name=plan.universe_name,
+        universe_hash=plan.universe_hash,
+        created_at=datetime(2026, 7, 17, 4, 30, tzinfo=UTC),
+        remaining_allowance=1000,
+        reserve_points=200,
+        entries=(
+            QualificationGapPlanEntry(
+                file="gap-plan-001.json",
+                plan_hash=plan.plan_hash,
+                gap_ids=(evidence.candidate_gaps[0].gap_id,),
+                requested_points=plan.requested_points,
+            ),
+        ),
+    )
+    bars = tuple(
+        _bar(minute, basis)
+        for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID)
+        for minute in (38, 39, 40)
+    )
+    store = ParquetResearchStore(tmp_path, FixedClock())
+    manifest = await store.write_bars(
+        bars,
+        universe_name=plan.universe_name,
+        configuration_hash=plan.universe_hash,
+        metadata=_metadata(evidence, plan),
+    )
+
+    artifact = build_qualification_gap_plan_set_history_artifact(
+        evidence=evidence,
+        plan_set=plan_set,
+        plans=(plan,),
+        manifest=manifest,
+        bars=await store.read_bars(manifest.manifest_id),
+        generated_at=datetime(2026, 7, 17, 5, 1, tzinfo=UTC),
+    )
+
+    assert artifact.schema_name == "qtrad-qualification-gap-history-v2"
+    assert artifact.backfill_plan_set_hash == plan_set.plan_set_hash
+    assert artifact.backfill_plan_hashes == (plan.plan_hash,)
+    output = tmp_path / "gap-history-v2.json"
+    write_qualification_gap_history_artifact(output, artifact)
+    assert load_qualification_gap_history_artifact(output) == artifact
 
 
 def test_qualification_evidence_loader_rejects_tampering(tmp_path: Path) -> None:

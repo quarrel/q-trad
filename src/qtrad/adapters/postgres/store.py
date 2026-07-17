@@ -618,14 +618,15 @@ class PostgresAuditStore(AuditStore):
         *,
         observed_points: Mapping[tuple[InstrumentId, PriceBasis], int],
         executed_at: datetime,
+        allow_empty: bool = False,
     ) -> None:
-        """Close only this plan's historical gaps after every planned basis returned data."""
+        """Close a plan after recording each request result and any returned coverage."""
 
         async with self._engine.begin() as connection:
             for item in plan.items:
                 for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID):
                     points = observed_points[(item.instrument_id, basis)]
-                    if points <= 0:
+                    if points < 0 or (points == 0 and not allow_empty):
                         raise ValueError(
                             "historical coverage requires observed points for every basis"
                         )
@@ -633,9 +634,11 @@ class PostgresAuditStore(AuditStore):
                         text(
                             """
                             UPDATE read_model.historical_coverage_gaps
-                            SET covered_at = :covered_at,
-                                covered_by_plan_hash = :plan_hash,
-                                observed_points = :observed_points
+                            SET request_completed_at = :executed_at,
+                                returned_points = :observed_points,
+                                covered_at = :covered_at,
+                                covered_by_plan_hash = :covered_by_plan_hash,
+                                observed_points = :covered_points
                             WHERE instrument_id = :instrument_id
                               AND source_provider = :provider
                               AND source_environment = :environment
@@ -653,8 +656,11 @@ class PostgresAuditStore(AuditStore):
                         ),
                         {
                             **_coverage_parameters(plan, item, basis),
-                            "covered_at": executed_at,
+                            "executed_at": executed_at,
                             "observed_points": points,
+                            "covered_at": executed_at if points > 0 else None,
+                            "covered_by_plan_hash": plan.plan_hash if points > 0 else None,
+                            "covered_points": points if points > 0 else None,
                         },
                     )
                     if result.scalar_one_or_none() is None:
@@ -811,6 +817,83 @@ class PostgresAuditStore(AuditStore):
                     "observed_at": observed_at,
                 },
             )
+
+    async def start_historical_request_usage(
+        self,
+        *,
+        request_id: UUID,
+        run_id: RunId,
+        plan_hash: str,
+        instrument_id: InstrumentId,
+        listing_id: ProviderListingId,
+        interval_start: datetime,
+        interval_end: datetime,
+        requested_points: int,
+        started_at: datetime,
+    ) -> None:
+        """Append the approved maximum before a provider historical request starts."""
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.historical_request_usage (
+                        request_id, run_id, plan_hash, instrument_id,
+                        source_provider, source_environment, source_external_id,
+                        interval_start, interval_end, requested_points, started_at
+                    ) VALUES (
+                        :request_id, :run_id, :plan_hash, :instrument_id,
+                        :source_provider, :source_environment, :source_external_id,
+                        :interval_start, :interval_end, :requested_points, :started_at
+                    )
+                    """
+                ),
+                {
+                    "request_id": request_id,
+                    "run_id": run_id.value,
+                    "plan_hash": plan_hash,
+                    "instrument_id": str(instrument_id),
+                    "source_provider": listing_id.provider,
+                    "source_environment": listing_id.environment,
+                    "source_external_id": listing_id.external_id,
+                    "interval_start": interval_start,
+                    "interval_end": interval_end,
+                    "requested_points": requested_points,
+                    "started_at": started_at,
+                },
+            )
+
+    async def complete_historical_request_usage(
+        self,
+        request_id: UUID,
+        *,
+        returned_points: int,
+        provider_remaining: int | None,
+        completed_at: datetime,
+    ) -> None:
+        """Complete one usage row without overwriting an earlier attempt."""
+
+        async with self._engine.begin() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    UPDATE ops.historical_request_usage
+                    SET returned_points = :returned_points,
+                        provider_remaining = :provider_remaining,
+                        completed_at = :completed_at
+                    WHERE request_id = :request_id AND completed_at IS NULL
+                    RETURNING request_id
+                    """
+                ),
+                {
+                    "request_id": request_id,
+                    "returned_points": returned_points,
+                    "provider_remaining": provider_remaining,
+                    "completed_at": completed_at,
+                },
+            )
+            if result.scalar_one_or_none() is None:
+                raise RuntimeError("historical request usage row is missing or already completed")
 
     async def capture(self, message: RawMessage) -> int:
         async with self._engine.begin() as connection:
