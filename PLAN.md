@@ -179,7 +179,7 @@ Implementation status:
                 response contains exactly one entry for the configured API key; numeric published
                 rates and the pinned library's published-minus-two effective rates are retained without
                 API-key material. Authoritative allowance failures are not retried. The complete isolated
-                  PostgreSQL gate now passes all 349 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                  PostgreSQL gate now passes all 350 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
                   `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
                 - In progress locally and undeployed: proposed ADR 0025 adds IG's documented

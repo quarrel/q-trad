@@ -542,7 +542,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         its retained watchdog grace window. Health returns only after a new heartbeat and fresh evidence
         from every PRICE channel on the recovered transport; a pre-stall heartbeat cannot qualify it.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 349 tests.
+            compatibility, all migrations and all 350 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited

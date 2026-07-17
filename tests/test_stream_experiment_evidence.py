@@ -322,6 +322,47 @@ def test_rejects_recovery_checks_without_matching_structured_lifecycle_evidence(
         verify(manifest)
 
 
+def test_verifies_structured_recovery_failure_before_initial_readiness(tmp_path: Path) -> None:
+    manifest = tmp_path / "recovery-failure.json"
+    evidence = _recovery_evidence()
+    evidence["phases"] = []
+    final = cast(dict[str, object], evidence["final_adapter"])
+    final["reconnects"] = 0
+    final["rest_reauthentications"] = 0
+    for key in (
+        "published_trading_requests_per_minute",
+        "published_non_trading_requests_per_minute",
+        "effective_trading_requests_per_minute",
+        "effective_non_trading_requests_per_minute",
+    ):
+        final[key] = None
+    evidence["shutdown"] = {
+        "consumer_created": False,
+        "consumer_done": False,
+        "consumer_error": False,
+    }
+    evidence["failure"] = {"type": "TimeoutError", "code": None}
+    evidence["checks"] = {
+        **_RECOVERY_CHECKS,
+        "initial_ready": False,
+        "disconnect_recovered": False,
+        "invalid_token_recovered": False,
+        "exact_reconnect_count": False,
+        "exact_rest_reauthentication_count": False,
+        "provider_rate_limits_observed": False,
+        "shutdown_verified": False,
+        "provider_operations_completed": False,
+    }
+    evidence["result"] = "FAIL"
+    write_recovery(manifest, evidence)
+
+    result = verify(manifest)
+
+    assert result["verified"] is True
+    assert result["result"] == "FAIL"
+    assert result["recovery_phases"] == []
+
+
 def test_rejects_incomplete_check_set(tmp_path: Path) -> None:
     manifest = tmp_path / "recovery.json"
     write_recovery(
