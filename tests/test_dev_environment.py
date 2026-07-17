@@ -19,8 +19,8 @@ def test_dev_container_separates_persistent_and_test_postgres() -> None:
     assert "  test-db:\n" in compose
     assert "    tmpfs:\n      - /var/lib/postgresql\n" in compose
     assert (
-        '"postStartCommand": "uv run alembic upgrade head && codex remote-control start"'
-        in devcontainer
+        '"postStartCommand": "uv run alembic upgrade head && codex remote-control stop '
+        '&& codex remote-control start"' in devcontainer
     )
     assert "/var/run/docker.sock" not in compose
 

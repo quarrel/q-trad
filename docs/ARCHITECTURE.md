@@ -29,13 +29,15 @@ Compose network. Dev Container setup registers Tilth, Context7 and the repositor
 GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
 The image includes the Docker CLI and Compose plugin so configuration can be rendered and
 validated inside the Dev Container without granting access to a Docker daemon.
-After the development database migration succeeds, the Dev Container starts Codex Remote
-Control's local app-server daemon. The command is idempotent, and Codex state, host identity
-and device pairings persist in the container-local `qtrad-codex-home` named volume across
-ordinary container rebuilds and recreation. The image contains one npm-installed `latest`
-Codex CLI as the fresh-volume bootstrap. Remote Control manages its standalone, auto-updated
-runtime in the persistent Codex volume; the pnpm-managed Tilth dependency tree does not carry
-a redundant Codex package.
+After the development database migration succeeds, the Dev Container stops any recorded
+Codex Remote Control daemon before starting a fresh local app-server daemon. This clears
+PID and socket metadata retained in the named volume after the prior container process has
+ended. The stop operation does not remove Codex state, host identity or device pairings;
+those persist in the container-local `qtrad-codex-home` named volume across ordinary
+container rebuilds and recreation. The image contains one npm-installed `latest` Codex CLI
+as the fresh-volume bootstrap. Remote Control manages its standalone, auto-updated runtime
+in the persistent Codex volume; the pnpm-managed Tilth dependency tree does not carry a
+redundant Codex package.
 
 The Dev Container retains an ordinary IPv4 Docker network namespace; public IPv6 egress
 is intentionally unsupported under WSL mirrored networking. The WSL host and OCI

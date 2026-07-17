@@ -67,9 +67,10 @@
 - Dev Container setup now registers Tilth, remote Context7 and repository-scoped GitHub
   MCP servers through the Codex CLI. The private GitHub repository is configured as
   `origin` and is the regular synchronisation target for reviewed commits.
-- Dev Container startup now starts the idempotent Codex Remote Control daemon after the
-  development database migration. Its host identity and device pairings remain in the
-  persistent container-local Codex named volume across ordinary rebuilds.
+- Dev Container startup now stops stale Codex Remote Control daemon state before starting
+  a fresh daemon after the development database migration. Its host identity and device
+  pairings remain in the persistent container-local Codex named volume across ordinary
+  rebuilds.
 - The Dev Container retains one npm-installed latest Codex CLI as its image bootstrap;
   Remote Control owns the standalone runtime in persistent Codex state, and the separate
   pnpm-managed Tilth dependency tree no longer installs a redundant Codex package.
@@ -128,8 +129,9 @@
 - `ty`: passed on current source.
 - Dev Container image: rebuilt; Codex CLI `0.144.5` matches npm's
   `@openai/codex` `latest` dist-tag.
-- Dev Container Codex Remote Control: stable CLI `0.144.5` bootstrapped the daemon and a
-  repeated start reported `alreadyRunning`, confirming idempotent startup.
+- Dev Container Codex Remote Control: stable CLI `0.144.5` reproduced stale PID-managed
+  state after container recreation; `stop` classified it as `notRunning`, cleared it and
+  allowed a fresh daemon to bootstrap with the same persistent environment identity.
 - Dev Container Codex installation boundary: package and Dockerfile regression coverage
   confirms one npm image bootstrap plus Remote Control's persistent managed runtime.
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled after the rebuild.

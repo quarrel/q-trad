@@ -542,8 +542,8 @@ python -m qtrad api
   Docker contains no Tailscale state or network capability. Compose validation,
   authorised SSH gate health, IPv4 internet, collector reachability and PostgreSQL service
   discovery passed.
-- Dev Container startup now starts Codex Remote Control after the interactive database
-  migration. Repeated `codex remote-control start` calls are idempotent, and the existing
+- Dev Container startup now clears any stale PID-managed Codex Remote Control daemon state
+  before starting a fresh daemon after the interactive database migration. The existing
   Codex named volume preserves the host identity and device pairing across ordinary
   container rebuilds.
 - The image keeps one npm-installed latest Codex bootstrap while Remote Control owns its
