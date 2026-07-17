@@ -45,3 +45,21 @@ remote host.
 The host Docker socket remains outside the Dev Container. It is effectively a root-capability
 boundary and is unnecessary for local PostgreSQL integration now that `test-db` is provisioned by
 the outer Compose project.
+
+## Streaming load experiment
+
+Run a bounded callback-to-PostgreSQL experiment against another uniquely named tmpfs database:
+
+```bash
+ops/dev/stream-load-experiment.sh tmp/stream-load.json \
+  --duration-seconds 300 \
+  --callbacks-per-second 200 \
+  --instruments 40 \
+  --persistence-delay-ms 1
+```
+
+The helper applies migrations, drives a worker-thread callback stream through the real IG adapter
+handoff, ingestion service, bar/gap logic and PostgreSQL store, writes one mode-0600 self-hashed JSON
+result without overwrite, and forcibly removes its database. It fails closed on a non-local host,
+unsafe database name, queue or SDK loss, incomplete persistence, excessive lag or an unclean
+consumer exit. Generated evidence belongs under ignored `tmp/`, not in Git.

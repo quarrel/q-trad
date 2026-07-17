@@ -516,11 +516,31 @@ outside the current data-only phase until explicitly admitted by a later plan up
     invalidates prior item state and loss is sticky degraded health. Idempotent REST reads additionally
     perform at most one serialised v2 invalid-token reauthentication/replay, expose only numeric
     effective limiter rates and retain authoritative allowance-error codes without retrying them.
-    All 42 focused lifecycle tests pass, and the complete isolated PostgreSQL gate passes all 317 tests
-    plus formatting, Ruff, Pyright, `ty` and ShellCheck.
+      The earlier 42 focused lifecycle tests and complete 317-test isolated PostgreSQL gate passed.
+      Proposed ADR 0025 now adds the IG application heartbeat as distinct whole-connection evidence,
+      requires it for readiness and moves changed-field state mutation onto the event-loop side of the
+      provider callback boundary. Forty-six focused lifecycle tests pass. It does not treat heartbeat as
+      session renewal or proof of a PRICE emission.
+    - `trading-ig` 0.0.24 pins superseded Lightstreamer 1.0.3. The maintained 2.2.2 API passes q-trad's
+      used-surface probe and 83 adapter/CLI tests under a local uv override; its official 2.1.0 changelog
+      specifically records higher update-rate performance. Provider compatibility remains unproven and
+      this lock is not deployed.
+      - The new isolated load helper produced self-hashed PASS evidence for 2,000 callbacks at 200/s over
+        40 subscriptions with zero loss. A 5 ms injected persistence stall reached queue high-water
+        799/10,000, p95 lag 6.58 seconds and maximum lag 6.91 seconds before complete drain. The five-minute
+        200/s profile passed all 60,000 callbacks with zero loss, queue high-water 51/10,000, p95 lag
+        4.33 ms and maximum lag 257 ms. An all-item renewal at load separately passed 2,000 callbacks and
+        recorded 40 renewal events with complete post-renewal state. Provider-backed connection/recovery
+        faults remain outstanding.
+      - Ingestion health persistence now runs on its own periodic task rather than only after a market
+        record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
+        when no PRICE callback arrives.
+        The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
+        compatibility, all migrations and all 321 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
-    The latter uses 14 of IG's published 40 subscriptions and avoids the prohibited second connection;
+      The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
+      second connection;
     no collector mutation occurred.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe

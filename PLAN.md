@@ -170,18 +170,32 @@ Implementation status:
                 three to eight minute bars per interval. This rules out persistence, queue loss, a
                 whole-connection outage and ordinary price inactivity, but cannot yet separate IG demo
                 per-item stream suppression from SDK/subscription delivery failure.
-              - In progress locally and undeployed: the adapter captures bounded subscription
+                - Complete locally and undeployed: the adapter captures bounded subscription
                 establishment/end, server-error, real-frequency and Lightstreamer lost-update evidence.
                 Subscription renewal invalidates prior merged item state and requires a fresh healthy
                 update; SDK-reported loss remains sticky degraded health. The focused lifecycle suite
-                passes all 42 focused tests. Idempotent REST reads now serialise one v2 invalid-token
+                  passes all 46 focused tests. Idempotent REST reads now serialise one v2 invalid-token
                 reauthentication and one replay, while effective limiter rates and authoritative
                 allowance failures are retained without API-key material. The complete isolated
                 PostgreSQL gate passes all 317 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
-                `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
-              - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
-                contrast for the same seven epics. Fourteen subscriptions remain below IG's published
+                  `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
+                - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
+                  application heartbeat as separate whole-connection evidence and requires it for
+                  readiness without treating it as token renewal or per-item proof. Stateful delta
+                  normalisation now shares event-loop ordering with subscription renewal. The maintained
+                  Lightstreamer 2.2.2 used API is compatible locally and is selected through a reviewed uv
+                  override because `trading-ig` pins superseded 1.0.3; IG demo qualification remains a
+                  release gate.
+                - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
+                  subscriptions with zero drops. With a 5 ms injected persistence stall it absorbs a
+                  queue high-water of 799/10,000 and drains completely with 6.58-second p95 and 6.91-second
+                  maximum lag. The five-minute 200/s profile also passes all 60,000 callbacks with zero
+                  loss, queue high-water 51/10,000 and 0.257-second maximum lag. A separate all-item
+                  renewal at load passes 2,000 callbacks and re-establishes complete state for all 40
+                  subscriptions. Provider-backed connection/recovery faults remain pending.
+                - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
+                  contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent
                 connections. This experiment runs only after the current measurement in a separate
                 evidence store; it is not an undeclared collector sidecar or release change.

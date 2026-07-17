@@ -57,6 +57,16 @@ _UNAVAILABLE_MARKET_STATES = {"CLOSED", "OFFLINE", "EDITS_ONLY"}
 _MAX_LISTING_REVIEW_CANDIDATES = 100
 _MAX_LISTING_REVIEW_SEARCH_REQUESTS = 100
 _MAX_LISTING_REVIEW_DETAIL_REQUESTS = 200
+_HEARTBEAT_ITEM = "TRADE:HB.U.HEARTBEAT.IP"
+_PRICE_FIELDS = (
+    "TIMESTAMP",
+    "BIDPRICE1",
+    "ASKPRICE1",
+    "BIDSIZE1",
+    "ASKSIZE1",
+    "DLG_FLAG",
+    "DELAY",
+)
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
     "endpoint.unavailable.for.api-key",
@@ -301,6 +311,12 @@ class IgDemoMarketDataAdapter:
         self._last_stream_status = "UNOBSERVED"
         self._last_stream_status_at: datetime | None = None
         self._real_max_frequency_by_epic: dict[str, str] = {}
+        self._heartbeat_subscribed = False
+        self._heartbeat_events = 0
+        self._last_heartbeat_at: datetime | None = None
+        self._last_heartbeat_value: str | None = None
+        self._heartbeat_real_max_frequency: str | None = None
+        self._heartbeat_stale = False
         self._first_drop_at: datetime | None = None
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
@@ -574,6 +590,32 @@ class IgDemoMarketDataAdapter:
             def onRealMaxFrequency(self, frequency: str | None) -> None:
                 adapter._on_real_max_frequency(self._epic, frequency, generation)
 
+        class HeartbeatListener(SubscriptionListener):
+            def onItemUpdate(self, update: ItemUpdate) -> None:
+                adapter._on_heartbeat(update, generation)
+
+            def onSubscription(self) -> None:
+                adapter._on_heartbeat_subscription(generation)
+
+            def onUnsubscription(self) -> None:
+                adapter._on_heartbeat_unsubscription(generation)
+
+            def onSubscriptionError(self, code: int, message: str | None) -> None:
+                del message
+                adapter._on_heartbeat_subscription_error(code, generation)
+
+            def onItemLostUpdates(
+                self,
+                itemName: str | None,
+                itemPos: int,
+                lostUpdates: int,
+            ) -> None:
+                del itemName, itemPos
+                adapter._on_item_lost_updates(_HEARTBEAT_ITEM, lostUpdates, generation)
+
+            def onRealMaxFrequency(self, frequency: str | None) -> None:
+                adapter._on_heartbeat_real_max_frequency(frequency, generation)
+
         class StatusListener(ClientListener):
             def onStatusChange(self, status: str) -> None:
                 adapter._on_stream_status(status, generation)
@@ -599,6 +641,12 @@ class IgDemoMarketDataAdapter:
         self._quote_received_times.clear()
         self._stale_epics.clear()
         self._real_max_frequency_by_epic.clear()
+        self._heartbeat_subscribed = False
+        self._heartbeat_events = 0
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_real_max_frequency = None
+        self._heartbeat_stale = False
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
@@ -616,6 +664,20 @@ class IgDemoMarketDataAdapter:
         await self._run_provider_operation("stream_connect", client.connect)
 
         self._connection_state = _ConnectionState.SUBSCRIBING
+        heartbeat = cast(
+            _Subscription,
+            Subscription(
+                mode="MERGE",
+                items=[_HEARTBEAT_ITEM],
+                fields=["HEARTBEAT"],
+            ),
+        )
+        heartbeat.addListener(HeartbeatListener())
+        await self._run_provider_operation(
+            "stream_subscribe_heartbeat",
+            lambda: client.subscribe(heartbeat),
+        )
+        self._subscriptions.append(heartbeat)
         for listing in listings:
             epic = listing.listing_id.external_id
             self._listings_by_epic[epic] = listing
@@ -723,6 +785,12 @@ class IgDemoMarketDataAdapter:
                 f"last_server_error_code={self._last_server_error_code}; "
                 f"stream_status={self._last_stream_status}; "
                 f"stream_status_at={_health_time(self._last_stream_status_at)}; "
+                f"heartbeat_subscribed={str(self._heartbeat_subscribed).lower()}; "
+                f"heartbeat_events={self._heartbeat_events}; "
+                f"last_heartbeat_at={_health_time(self._last_heartbeat_at)}; "
+                f"last_heartbeat_value={self._last_heartbeat_value}; "
+                f"heartbeat_stale={str(self._heartbeat_stale).lower()}; "
+                f"heartbeat_frequency={self._heartbeat_real_max_frequency}; "
                 f"frequency_evidence={len(self._real_max_frequency_by_epic)}/"
                 f"{len(self._expected_epics)}; "
                 f"first_drop_at={_health_time(self._first_drop_at)}; "
@@ -743,16 +811,36 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation:
             return
         received = self._clock.now()
-        fields = (
-            "TIMESTAMP",
-            "BIDPRICE1",
-            "ASKPRICE1",
-            "BIDSIZE1",
-            "ASKSIZE1",
-            "DLG_FLAG",
-            "DELAY",
+        raw = {
+            field: update.getValue(field) for field in _PRICE_FIELDS if update.isValueChanged(field)
+        }
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("IG callback received before event loop registration")
+        loop.call_soon_threadsafe(
+            self._handle_update,
+            epic,
+            raw,
+            received,
+            observed_generation,
         )
-        raw = {field: update.getValue(field) for field in fields if update.isValueChanged(field)}
+
+    def _handle_update(
+        self,
+        epic: str,
+        raw: Mapping[str, object | None],
+        received: datetime,
+        generation: int,
+    ) -> None:
+        """Normalise one callback on the event-loop thread.
+
+        Lightstreamer invokes listeners on its dispatch thread. Subscription renewal clears
+        merged field state on the event-loop thread, so updates must cross the same ordered
+        boundary before reading or changing that state.
+        """
+
+        if generation != self._generation or self._stopping:
+            return
         state = self._field_state.setdefault(epic, {})
         for field, value in raw.items():
             if value is None:
@@ -824,14 +912,36 @@ class IgDemoMarketDataAdapter:
             error_code=error_code,
             error_detail=error_detail,
         )
-        if self._loop is None:
-            raise RuntimeError("IG callback received before event loop registration")
-        self._loop.call_soon_threadsafe(
-            self._accept_update,
-            record,
-            epic,
-            observed_generation,
-        )
+        self._accept_update(record, epic, generation)
+
+    def _on_heartbeat(self, update: _ItemUpdate, generation: int) -> None:
+        value = update.getValue("HEARTBEAT")
+        received = self._clock.now()
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("IG heartbeat received before event loop registration")
+        loop.call_soon_threadsafe(self._handle_heartbeat, value, received, generation)
+
+    def _handle_heartbeat(
+        self,
+        value: object | None,
+        received: datetime,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        if value is None or not str(value).strip():
+            self._status = HealthStatus.DEGRADED
+            LOGGER.warning(
+                "ig_heartbeat_invalid",
+                extra={"generation": generation},
+            )
+            return
+        self._heartbeat_events += 1
+        self._last_heartbeat_at = received
+        self._last_heartbeat_value = str(value).strip()[:32]
+        self._heartbeat_stale = False
+        self._mark_ready_if_complete(generation)
 
     def _accept_update(self, record: MarketDataRecord, epic: str, generation: int) -> None:
         if generation != self._generation or self._stopping:
@@ -871,14 +981,21 @@ class IgDemoMarketDataAdapter:
         stale_channels = ""
         stale_epics: set[str] = set()
         reconnect_required = False
+        previous_heartbeat_stale = self._heartbeat_stale
+        heartbeat_current = (
+            self._heartbeat_subscribed
+            and self._last_heartbeat_at is not None
+            and now - self._last_heartbeat_at <= timedelta(seconds=self._config.stale_after_seconds)
+        )
         if self._expected_epics:
             current_epics = {
                 epic
                 for epic, received_time in self._quote_received_times.items()
                 if now - received_time <= timedelta(seconds=self._config.stale_after_seconds)
             }
-            if current_epics == self._expected_epics:
+            if current_epics == self._expected_epics and heartbeat_current:
                 self._stale_epics.clear()
+                self._heartbeat_stale = False
                 return
             channel_evidence: list[str] = []
             stale_epics = self._expected_epics - current_epics
@@ -892,6 +1009,17 @@ class IgDemoMarketDataAdapter:
                     seconds=self._config.stale_reconnect_after_seconds
                 ):
                     reconnect_required = True
+            if not heartbeat_current:
+                heartbeat_age = (
+                    f"{(now - self._last_heartbeat_at).total_seconds():.1f}"
+                    if self._last_heartbeat_at is not None
+                    else "missing"
+                )
+                channel_evidence.append(f"heartbeat:{heartbeat_age}")
+                if self._last_heartbeat_at is None or now - self._last_heartbeat_at > timedelta(
+                    seconds=self._config.stale_reconnect_after_seconds
+                ):
+                    reconnect_required = True
             stale_channels = ",".join(channel_evidence)
         else:
             anchor = self._last_message_at or self._stream_connected_at
@@ -902,7 +1030,12 @@ class IgDemoMarketDataAdapter:
             reconnect_required = True
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
-        if stale_epics != self._stale_epics or reconnect_required:
+        self._heartbeat_stale = not heartbeat_current
+        if (
+            stale_epics != self._stale_epics
+            or self._heartbeat_stale != previous_heartbeat_stale
+            or reconnect_required
+        ):
             LOGGER.warning("ig_stream_stale", extra={"stale_channels": stale_channels})
         self._stale_epics = stale_epics
         if reconnect_required or not self._expected_epics:
@@ -950,6 +1083,104 @@ class IgDemoMarketDataAdapter:
             self._field_state.clear()
             self._side_times.clear()
             self._last_message_at = None
+            self._heartbeat_subscribed = False
+            self._last_heartbeat_at = None
+            self._last_heartbeat_value = None
+            self._heartbeat_real_max_frequency = None
+            self._heartbeat_stale = False
+
+    def _on_heartbeat_subscription(self, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_subscription,
+                generation,
+            )
+
+    def _handle_heartbeat_subscription(self, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._subscription_events += 1
+        self._heartbeat_subscribed = True
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_stale = False
+        LOGGER.info(
+            "ig_heartbeat_subscription_established",
+            extra={"generation": generation},
+        )
+
+    def _on_heartbeat_unsubscription(self, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_unsubscription,
+                generation,
+            )
+
+    def _handle_heartbeat_unsubscription(self, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._unsubscription_events += 1
+        self._heartbeat_subscribed = False
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_stale = True
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        LOGGER.warning(
+            "ig_heartbeat_subscription_ended",
+            extra={"generation": generation},
+        )
+
+    def _on_heartbeat_subscription_error(self, code: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_subscription_error,
+                code,
+                generation,
+            )
+
+    def _handle_heartbeat_subscription_error(self, code: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._subscription_errors += 1
+        self._heartbeat_subscribed = False
+        self._heartbeat_stale = True
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        self._readiness_error = RuntimeError(f"IG heartbeat subscription failed with code {code}")
+        self._ready_event.set()
+        LOGGER.error(
+            "ig_heartbeat_subscription_error",
+            extra={"code": code, "generation": generation},
+        )
+
+    def _on_heartbeat_real_max_frequency(
+        self,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_real_max_frequency,
+                frequency,
+                generation,
+            )
+
+    def _handle_heartbeat_real_max_frequency(
+        self,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
+        if not bounded_frequency:
+            raise ValueError("Lightstreamer heartbeat frequency must not be empty")
+        self._heartbeat_real_max_frequency = bounded_frequency
+        LOGGER.info(
+            "ig_heartbeat_frequency",
+            extra={"generation": generation, "real_max_frequency": bounded_frequency},
+        )
 
     def _on_subscription(self, epic: str, generation: int) -> None:
         if self._loop is not None:
@@ -1107,6 +1338,8 @@ class IgDemoMarketDataAdapter:
             return
         if (
             not self._transport_connected
+            or not self._heartbeat_subscribed
+            or self._last_heartbeat_at is None
             or self._subscribed_epics != self._expected_epics
             or self._updated_epics != self._expected_epics
             or any(
@@ -1591,6 +1824,11 @@ class IgDemoMarketDataAdapter:
         self._updated_epics.clear()
         self._quote_received_times.clear()
         self._stale_epics.clear()
+        self._heartbeat_subscribed = False
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_real_max_frequency = None
+        self._heartbeat_stale = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
         self._subscriptions.clear()

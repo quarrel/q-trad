@@ -61,6 +61,19 @@ Subscription renewal must clear q-trad's item field state, side timestamps and f
 readiness requires a new complete healthy update. These additions are prospective evidence only and
 cannot reclassify the failed candidate.
 
+IG's official Java and JavaScript samples also subscribe to the application data item
+`TRADE:HB.U.HEARTBEAT.IP` in MERGE mode with field `HEARTBEAT`; the JavaScript sample explicitly uses
+it to verify the connection. This is separate from Lightstreamer's protocol keepalive. No primary
+source found in this investigation supports the stronger claim that the application subscription is
+required to stop an IG session expiring. The next candidate nevertheless requires a fresh heartbeat
+as independent whole-connection evidence and records it separately from every PRICE channel.
+
+`trading-ig` 0.0.24 pins the superseded Lightstreamer Python 1.0.3 client. The maintained 2.2.2 API
+passes q-trad's used-surface compatibility probe; its official changelog records improved
+high-update-rate performance in 2.1.0. A local uv override and tests are candidate evidence only:
+provider compatibility must be proven on the same single connection before release. Proposed ADR
+0025 records this transition.
+
 ## Experiments
 
 ### A. Corrected seven-instrument endurance
@@ -86,6 +99,25 @@ Before a release, deterministic local tests must cover:
 The load test passes only with zero q-trad drops, zero unreported Lightstreamer loss, bounded queue
 and persistence latency, no correction feedback loop, and verified process exit.
 
+The checked-in `ops/dev/stream-load-experiment.sh` creates a uniquely named tmpfs-backed test
+database, migrates it to head, drives a worker-thread callback stream through the actual adapter
+handoff, ingestion service and PostgreSQL store, then removes the database. It writes self-hashed,
+non-overwriting evidence. Calibration at 40 subscriptions and 200 callbacks/second produced:
+
+- 2,000/2,000 raw and canonical quotes with zero drops and 9.9 ms maximum lag with a 1 ms injected
+  persistence delay;
+- 2,000/2,000 with zero drops, queue high-water 799/10,000, p95 lag 6.58 seconds and maximum lag
+  6.91 seconds with a 5 ms injected delay; and
+- 1,000/1,000 with zero drops under the same slow-store profile after selecting Lightstreamer 2.2.2;
+- 60,000/60,000 over five minutes at 200 callbacks/second with zero loss, queue high-water 51/10,000,
+  p95 lag 4.33 ms and maximum lag 257 ms; and
+- 2,000/2,000 with an all-item renewal at five seconds, 40 renewal events and complete state
+  re-established for every subscription.
+
+These bounded profiles prove sustained local handoff, finite backlog drain and renewal ordering.
+They do not prove provider compatibility, real Lightstreamer recovery or IG per-item delivery;
+those remain provider-backed gates.
+
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
 the existing full stream-rebuild path so REST and streaming credentials cannot diverge; a standalone
@@ -105,10 +137,11 @@ to both IG feed types for the same explicitly reviewed epics on one Lightstreame
 
 IG documents a default limit of 40 subscriptions on one connection, describes MERGE PRICE delivery
 as rate-regulated, and explicitly warns that multiple concurrent connections can suspend the API
-key. Seven PRICE plus seven CHART subscriptions remain within the published single-connection limit.
+key. Seven PRICE plus seven CHART subscriptions and the heartbeat remain within the published
+single-connection limit.
 See the [IG streaming guide](https://labs.ig.com/streaming-api-guide.html) and
 [streaming field reference](https://labs.ig.com/streaming-api-reference.html). Because DEMO limits can
-differ, the experiment requires explicit acknowledgement and fresh data from all 14 subscriptions;
+differ, the experiment requires explicit acknowledgement and fresh data from all 15 subscriptions;
 any rejection or partial set fails closed.
 
 Run this as a separate bounded experiment after the corrected collector measurement, not as an
@@ -140,6 +173,7 @@ Corrected `capture-v1` can qualify only after a representative endurance interva
 
 - zero q-trad dropped records and zero Lightstreamer-reported lost updates;
 - every required subscription has current lifecycle and frequency evidence;
+- the independent heartbeat is acknowledged and fresh, without substituting for per-PRICE evidence;
 - bounded event-loop, queue and persistence lag through representative volatility;
 - forced invalid-token and disconnect recovery obtains a fresh session and fresh per-channel data;
 - every retained gap is explained by bounded lifecycle/market evidence, or no gap occurs;

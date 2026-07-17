@@ -278,6 +278,12 @@ def config(**overrides: Any) -> IgDemoConfig:
     return IgDemoConfig(**values)
 
 
+def mark_heartbeat_current(adapter: IgDemoMarketDataAdapter, clock: MutableClock) -> None:
+    adapter._heartbeat_subscribed = True
+    adapter._last_heartbeat_at = clock.now()
+    adapter._heartbeat_events = 1
+
+
 def test_trading_ig_http_session_has_bounded_defaults_and_allows_override() -> None:
     session = RecordingRequestSession()
     _install_default_http_timeout(cast(_ConfigurableHttpSession, session), (5.0, 15.0))
@@ -528,6 +534,7 @@ async def test_stale_stream_degrades_and_schedules_reconnect() -> None:
     adapter._expected_epics = {epic}
     adapter._quote_received_times[epic] = clock.now()
     adapter._stream_connected_at = clock.now()
+    mark_heartbeat_current(adapter, clock)
 
     clock.current += timedelta(seconds=6)
     health = await adapter.health()
@@ -578,6 +585,10 @@ def test_connected_transport_is_not_ready_without_subscription_and_healthy_updat
     assert adapter._status is HealthStatus.STARTING
 
     adapter._accept_update(market_record(clock), epic, generation=3)
+    assert adapter._status is HealthStatus.STARTING
+
+    adapter._handle_heartbeat_subscription(generation=3)
+    adapter._handle_heartbeat("1783065600000", clock.now(), generation=3)
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
 
@@ -600,6 +611,7 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     clock.current += timedelta(seconds=6)
     adapter._accept_update(market_record(clock), epic, generation=3)
@@ -607,6 +619,77 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
 
     assert health.status is HealthStatus.DEGRADED
     assert adapter.scheduled_reconnects == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_heartbeat_does_not_mask_stale_price_channel() -> None:
+    clock = MutableClock()
+    adapter = StaleAdapter(config(), clock)
+    selected_listing = listing()
+    epic = selected_listing.listing_id.external_id
+    adapter._generation = 3
+    adapter._desired_listings = (selected_listing,)
+    adapter._listings_by_epic[epic] = selected_listing
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
+
+    clock.current += timedelta(seconds=6)
+    adapter._handle_heartbeat("1783065606000", clock.now(), generation=3)
+    health = await adapter.health()
+
+    assert health.status is HealthStatus.DEGRADED
+    assert adapter._heartbeat_stale is False
+    assert adapter._stale_epics == {epic}
+    assert adapter.scheduled_reconnects == 0
+    assert "heartbeat_events=2" in (health.detail or "")
+
+    clock.current += timedelta(seconds=115)
+    adapter._handle_heartbeat("1783065721000", clock.now(), generation=3)
+    await adapter.health()
+
+    assert adapter._heartbeat_stale is False
+    assert adapter.scheduled_reconnects == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_callback_crosses_event_loop_with_bounded_evidence() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    adapter._loop = asyncio.get_running_loop()
+    adapter._generation = 7
+    adapter._handle_heartbeat_subscription(generation=7)
+
+    await asyncio.to_thread(
+        adapter._on_heartbeat,
+        FakeUpdate({"HEARTBEAT": "1783065600000"}),
+        7,
+    )
+    await asyncio.sleep(0)
+
+    assert adapter._heartbeat_subscribed is True
+    assert adapter._heartbeat_events == 1
+    assert adapter._last_heartbeat_at == clock.now()
+    assert adapter._last_heartbeat_value == "1783065600000"
+
+
+def test_heartbeat_subscription_error_fails_readiness_closed() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._generation = 2
+
+    adapter._handle_heartbeat_subscription_error(code=41, generation=2)
+
+    assert adapter._heartbeat_subscribed is False
+    assert adapter._heartbeat_stale is True
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+    assert adapter._readiness_error is not None
+    assert adapter._ready_event.is_set()
 
 
 def test_superseded_generation_callbacks_cannot_change_current_readiness() -> None:
@@ -664,6 +747,7 @@ async def test_library_managed_recovery_requires_fresh_healthy_update(status: st
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     adapter._handle_stream_status(status, generation=4)
     adapter._handle_stream_status("CONNECTED:WS-STREAMING", generation=4)
@@ -694,6 +778,7 @@ async def test_library_managed_recovery_preserves_staleness_grace_window() -> No
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     adapter._handle_stream_status("DISCONNECTED:TRYING-RECOVERY", generation=4)
     clock.current += timedelta(seconds=6)
@@ -1175,6 +1260,50 @@ async def test_price_callback_persists_only_changed_fields_and_preserves_explici
     assert third.quote.bid == Decimal("0.65001")
     assert third.quote.ask is None
     assert third.quote.ask_time is None
+
+
+@pytest.mark.asyncio
+async def test_price_callbacks_and_subscription_renewal_share_event_loop_ordering() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._loop = asyncio.get_running_loop()
+    adapter._stream_account_id = "not-a-real-account"
+    epic = "CS.D.AUDUSD.CFD.IP"
+    adapter._listings_by_epic[epic] = listing()
+
+    def dispatch_from_lightstreamer_thread() -> None:
+        adapter._on_update(
+            epic,
+            FakeUpdate(
+                {
+                    "TIMESTAMP": "1783065600000",
+                    "BIDPRICE1": "0.65000",
+                    "ASKPRICE1": "0.65010",
+                    "DLG_FLAG": "DEAL",
+                }
+            ),
+        )
+        adapter._on_subscription(epic, generation=0)
+        adapter._on_update(
+            epic,
+            FakeUpdate(
+                {
+                    "TIMESTAMP": "1783065601000",
+                    "BIDPRICE1": "0.65001",
+                },
+                changed_fields={"TIMESTAMP", "BIDPRICE1"},
+            ),
+        )
+
+    await asyncio.to_thread(dispatch_from_lightstreamer_thread)
+    await asyncio.sleep(0)
+
+    first = adapter._queue.get_nowait().quote
+    after_renewal = adapter._queue.get_nowait().quote
+    assert first is not None
+    assert first.ask == Decimal("0.65010")
+    assert after_renewal is not None
+    assert after_renewal.bid == Decimal("0.65001")
+    assert after_renewal.ask is None
 
 
 def test_backoff_is_exponential_and_capped() -> None:

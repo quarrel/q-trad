@@ -248,7 +248,10 @@ transaction as event projection.
 Lightstreamer raw PRICE messages contain only fields marked changed in that callback, including
 an explicitly changed null. The IG adapter maintains a bounded, per-generation merged field state
 for canonical quote construction; an explicit null removes the prior field and its side-specific
-timestamp. Existing full-state raw messages remain immutable. ADR 0018 records this boundary.
+timestamp. The provider dispatch thread snapshots changed fields, while all merged-state mutation,
+subscription renewal and queue admission occur in event-loop order. Existing full-state raw messages
+remain immutable. ADR 0018 records the representation boundary and proposed ADR 0025 records the
+thread/lifecycle qualification.
 ADR 0020 and migration `0007` add a compact per-row raw payload-representation code. New IG rows are
 `CHANGED_FIELDS`, fixtures are `FIXTURE`, and pre-marker or rollback-writer rows remain conservatively
 `LEGACY_UNCLASSIFIED`; the constant fast default does not rewrite existing raw tuples. The code is
@@ -368,13 +371,16 @@ validation path.
 
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
+Proposed ADR 0025 adds the IG application heartbeat `TRADE:HB.U.HEARTBEAT.IP` in MERGE mode without a
+data-adapter override. Heartbeat receipt is whole-connection evidence, is not raw/canonical market
+data and never substitutes for freshness of an individual PRICE item.
 The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are
 required at the provider boundary but are removed from persisted subscription labels.
 Concurrent streaming connections for the same IG API key are an operational safety violation.
 
 The adapter owns one explicit, generation-tagged connection lifecycle. Transport
-`CONNECTED` is not readiness: `READY` additionally requires every expected subscription
-to acknowledge and deliver a recently received healthy quote. Readiness and staleness are
+`CONNECTED` is not readiness: `READY` additionally requires the heartbeat and every expected PRICE
+subscription to acknowledge and deliver fresh evidence. Readiness and staleness are
 tracked per required subscription so an active instrument cannot mask a silent one, while
 quiet overnight sessions have bounded grace before degradation. Callbacks from superseded
 generations are ignored and per-generation partial quote state is reset. A prolonged
@@ -409,11 +415,14 @@ HTTP connect/read timeouts unless a call explicitly overrides them. An unresolve
 poisons the lifecycle and prevents another connection from being created in that process.
 Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
 fails, and a process-level regression proves an abandoned provider call cannot keep the
-command resident. ADR 0011 records this containment decision. The
-pinned Lightstreamer 1.0.3 disposal defect is repaired narrowly at the adapter boundary
-because IG's deployed server is not compatible with an unverified client upgrade.
+command resident. ADR 0011 records this containment decision. The deployed image still contains the
+pinned Lightstreamer 1.0.3 lifecycle workaround. Proposed ADR 0025 locally selects maintained 2.2.2
+through a uv override after API and synthetic-load compatibility; IG demo connection/recovery
+qualification remains mandatory before that dependency lock can ship.
 Queue insertion remains non-blocking; overflow is counted and reported as degraded
-health without blocking the provider callback. ADR 0010 records these decisions.
+health without blocking the provider callback. Ingestion persists adapter health on an independent
+periodic task, so whole-stream silence cannot suppress heartbeat, lifecycle or terminal-failure
+evidence merely because no market record enters the consumer. ADR 0010 records these decisions.
 
 Historical requests use IG's v2 UTC date format, but the former implicit all-universe
 "last N minutes" command is no longer an operational surface. A strict non-overwriting plan
