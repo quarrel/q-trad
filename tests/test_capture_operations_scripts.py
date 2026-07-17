@@ -936,6 +936,29 @@ def test_qualification_finaliser_preserves_a_failed_operator_decision(tmp_path: 
     assert final["qualification_decision"] == "FAIL"
 
 
+def test_qualification_finaliser_preserves_a_failed_automatic_decision(tmp_path: Path) -> None:
+    environment, automatic_path, _ = _qualification_environment(
+        tmp_path, now="2026-07-17T04:05:33Z", ready=False
+    )
+    automatic_result = _run("qualification-evidence.sh", environment, str(automatic_path))
+    assert automatic_result.returncode != 0
+    evidence = json.loads(automatic_path.read_text())
+    review = _qualification_review(evidence)
+    review_path = tmp_path / "review.json"
+    review_path.write_text(json.dumps(review))
+    output = tmp_path / "failed-automatic-final.json"
+
+    result = _run(
+        "qualification-finalise.sh", {}, str(automatic_path), str(review_path), str(output)
+    )
+
+    assert result.returncode != 0
+    final = json.loads(output.read_text())
+    assert final["automatic_checks_passed"] is False
+    assert final["operator_reviews_passed"] is True
+    assert final["qualification_decision"] == "FAIL"
+
+
 def test_qualification_finaliser_requires_and_binds_each_candidate_gap(tmp_path: Path) -> None:
     gap_id = "00000000-0000-0000-0000-000000000099"
     environment, automatic_path, _ = _qualification_environment(

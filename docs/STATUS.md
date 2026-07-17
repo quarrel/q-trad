@@ -453,6 +453,16 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - That first real local import exposed a psql integration bug hidden by the command mock: psql does
     not expand variables embedded in `--command`. The database-existence guard now feeds its
     parameterised query on stdin, and both focused tests and the real 575 MB snapshot import pass.
+  - Formal closure then exposed that the finaliser could write an operator-review failure but rejected
+    an automatic failure before writing any decision. The local correction verifies consistency of
+    the individual/aggregate automatic checks, preserves their actual value and emits `PASS` only when
+    both automatic and operator gates pass. Regression coverage proves a failed automatic snapshot is
+    retained as a final `FAIL` artifact.
+  - The original post-gap planner failed closed before IG access because its common rectangular range
+    requests 20,741 points against IG's documented 10,000-point weekly allowance. A read-only union of
+    the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
+    local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
+    will not be fabricated and the collector remains untouched.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

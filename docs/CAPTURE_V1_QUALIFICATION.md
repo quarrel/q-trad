@@ -145,6 +145,16 @@ sign-off; they must not be silently deleted or presented as successful runs.
   `2026-07-17T04:45:55Z` snapshot, migration `0003`, 3,047,086 raw messages and 3,478,536 canonical
   events. The first import attempt exposed that psql does not expand variables in `--command`; the
   database-existence guard now supplies its parameterised SQL on stdin and the real import passes.
+- Formal finalisation exposed one further closure defect: the finaliser rejected any automatic-gate
+  failure before it could write a `FAIL` decision. It now requires the recorded aggregate to equal the
+  individual checks, carries the actual aggregate into final evidence and permits `PASS` only when
+  both automatic checks and operator reviews pass. A failed automatic result is therefore preserved
+  as a hash-bound `FAIL`, never accepted or discarded.
+- The original rectangular historical plan was rejected before provider I/O: its 20,741 requested
+  minute-points exceed IG's documented 10,000-point weekly allowance. The minute-aligned union of the
+  same evidence is 56 instrument/range spans and only 267 points. Historical corroboration therefore
+  requires a sparse hash-bound plan set; inflating quota evidence or querying the wasteful rectangle
+  is prohibited.
 
 The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
 After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into
