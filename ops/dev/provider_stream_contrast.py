@@ -337,6 +337,7 @@ class _ContrastState:
                 "transport_status": self._transport_status,
                 "transport_events": self._transport_events,
                 "ever_connected": self._ever_connected,
+                "event_attempts": self._sequence,
                 "discrepancies": list(self._discrepancies),
             }
 

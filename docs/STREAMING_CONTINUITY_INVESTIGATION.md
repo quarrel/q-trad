@@ -133,7 +133,8 @@ It remains unexecuted while the corrected collector measurement owns the API key
 
 `ops/dev/verify_stream_experiment_evidence.py` independently validates either experiment. It
 recomputes the manifest self-hash; for the contrast it additionally confines the event path beside
-the manifest, streams every gzip JSON-lines record, requires increasing callback sequence and
+the manifest, streams every gzip JSON-lines record, rejects unreviewed fields or malformed lifecycle
+records, requires increasing callback sequence, reconciles attempted/written/drop counts, and
 recomputes the uncompressed count and SHA-256. It requires a non-empty boolean check set and verifies
 that `PASS` means every check passed. Schema v1 additionally requires the exact contrast or recovery
 check set, preventing a partial manifest from weakening the gate. A structurally valid `FAIL`

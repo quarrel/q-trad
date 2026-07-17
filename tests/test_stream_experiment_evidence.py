@@ -61,8 +61,12 @@ def test_verifies_contrast_manifest_and_event_stream(tmp_path: Path) -> None:
     count, digest = _write_events(
         events,
         [
-            {"sequence": 1, "kind": "SUBSCRIBED"},
-            {"sequence": 3, "kind": "UPDATE"},
+            {"sequence": 1, "received_at": "2026-07-17T00:00:00Z", "kind": "EXPERIMENT_STARTED"},
+            {
+                "sequence": 3,
+                "received_at": "2026-07-17T00:01:00Z",
+                "kind": "EXPERIMENT_STOP_REQUESTED",
+            },
         ],
     )
     evidence: dict[str, object] = {
@@ -70,6 +74,7 @@ def test_verifies_contrast_manifest_and_event_stream(tmp_path: Path) -> None:
         "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
         "result": "FAIL",
         "checks": {**_CONTRAST_CHECKS, "no_queue_drops": False},
+        "summary": {"event_attempts": 3, "queue_drops": 1},
         "event_stream": {
             "path": events.name,
             "encoding": "gzip-json-lines",
@@ -90,12 +95,16 @@ def test_verifies_contrast_manifest_and_event_stream(tmp_path: Path) -> None:
 def test_rejects_tampered_contrast_event_stream(tmp_path: Path) -> None:
     events = tmp_path / "events.jsonl.gz"
     manifest = tmp_path / "manifest.json"
-    count, digest = _write_events(events, [{"sequence": 1, "kind": "UPDATE"}])
+    count, digest = _write_events(
+        events,
+        [{"sequence": 1, "received_at": "2026-07-17T00:00:00Z", "kind": "EXPERIMENT_STARTED"}],
+    )
     evidence: dict[str, object] = {
         "schema_version": 1,
         "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
         "result": "PASS",
         "checks": _CONTRAST_CHECKS,
+        "summary": {"event_attempts": 1, "queue_drops": 0},
         "event_stream": {
             "path": events.name,
             "encoding": "gzip-json-lines",
@@ -104,9 +113,69 @@ def test_rejects_tampered_contrast_event_stream(tmp_path: Path) -> None:
         },
     }
     write_contrast(manifest, evidence)
-    _write_events(events, [{"sequence": 1, "kind": "SERVER_ERROR"}])
+    _write_events(
+        events,
+        [
+            {
+                "sequence": 1,
+                "received_at": "2026-07-17T00:00:00Z",
+                "kind": "SERVER_ERROR",
+                "code": 1,
+            }
+        ],
+    )
 
     with pytest.raises(ValueError, match="event stream hash"):
+        verify(manifest)
+
+
+def test_rejects_unreviewed_event_fields_and_inconsistent_drop_evidence(tmp_path: Path) -> None:
+    events = tmp_path / "events.jsonl.gz"
+    manifest = tmp_path / "manifest.json"
+    count, digest = _write_events(
+        events,
+        [
+            {
+                "sequence": 1,
+                "received_at": "2026-07-17T00:00:00Z",
+                "kind": "EXPERIMENT_STARTED",
+                "account_id": "must-not-be-retained",
+            }
+        ],
+    )
+    evidence: dict[str, object] = {
+        "schema_version": 1,
+        "experiment": "IG_SINGLE_CONNECTION_PRICE_CHART_TICK_CONTRAST",
+        "result": "FAIL",
+        "checks": {**_CONTRAST_CHECKS, "no_queue_drops": False},
+        "summary": {"event_attempts": 1, "queue_drops": 0},
+        "event_stream": {
+            "path": events.name,
+            "encoding": "gzip-json-lines",
+            "record_count": count,
+            "uncompressed_sha256": digest,
+        },
+    }
+    write_contrast(manifest, evidence)
+
+    with pytest.raises(ValueError, match="unexpected fields"):
+        verify(manifest)
+
+    count, digest = _write_events(
+        events,
+        [{"sequence": 1, "received_at": "2026-07-17T00:00:00Z", "kind": "EXPERIMENT_STARTED"}],
+    )
+    evidence["summary"] = {"event_attempts": 2, "queue_drops": 0}
+    evidence["event_stream"] = {
+        "path": events.name,
+        "encoding": "gzip-json-lines",
+        "record_count": count,
+        "uncompressed_sha256": digest,
+    }
+    del evidence["evidence_sha256"]
+    manifest.unlink()
+    write_contrast(manifest, evidence)
+    with pytest.raises(ValueError, match="do not reconcile"):
         verify(manifest)
 
 

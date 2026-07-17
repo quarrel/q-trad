@@ -8,6 +8,7 @@ import gzip
 import hashlib
 import json
 from collections.abc import Mapping
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -45,6 +46,41 @@ _RECOVERY_CHECKS = {
     "no_abandoned_provider_operation",
     "provider_operations_completed",
 }
+_EVENT_KINDS = {
+    "EXPERIMENT_STARTED",
+    "EXPERIMENT_STOP_REQUESTED",
+    "EXPERIMENT_STOPPED",
+    "SUBSCRIBED",
+    "UNSUBSCRIBED",
+    "UPDATE",
+    "LOST_UPDATES",
+    "SUBSCRIPTION_ERROR",
+    "REAL_MAX_FREQUENCY",
+    "TRANSPORT_STATUS",
+    "SERVER_ERROR",
+}
+_EVENT_KEYS = {
+    "sequence",
+    "received_at",
+    "kind",
+    "channel",
+    "feed",
+    "instrument_id",
+    "epic",
+    "changed_fields",
+    "provider_timestamp",
+    "code",
+    "count",
+    "value",
+}
+_CHANNEL_EVENT_KINDS = {
+    "SUBSCRIBED",
+    "UNSUBSCRIBED",
+    "UPDATE",
+    "LOST_UPDATES",
+    "SUBSCRIPTION_ERROR",
+    "REAL_MAX_FREQUENCY",
+}
 
 
 def _parse_args() -> Path:
@@ -79,6 +115,52 @@ def _integer(value: Mapping[str, object], key: str) -> int:
     return candidate
 
 
+def _verify_event_record(record: Mapping[str, object], context: str) -> int:
+    unexpected = set(record) - _EVENT_KEYS
+    if unexpected:
+        raise ValueError(f"{context} contains unexpected fields: {sorted(unexpected)}")
+    sequence = _integer(record, "sequence")
+    if sequence == 0:
+        raise ValueError(f"{context} sequence must be positive")
+    received_at = _text(record, "received_at")
+    if not received_at.endswith("Z"):
+        raise ValueError(f"{context} received_at must be UTC")
+    try:
+        parsed_received_at = datetime.fromisoformat(received_at.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{context} received_at must be ISO 8601") from error
+    if parsed_received_at.utcoffset() != timedelta(0):
+        raise ValueError(f"{context} received_at must be UTC")
+    kind = _text(record, "kind")
+    if kind not in _EVENT_KINDS:
+        raise ValueError(f"{context} has an unsupported kind")
+    if kind in _CHANNEL_EVENT_KINDS:
+        _text(record, "channel")
+        _text(record, "feed")
+        for key in ("instrument_id", "epic"):
+            candidate = record[key]
+            if candidate is not None and (not isinstance(candidate, str) or not candidate):
+                raise TypeError(f"{context} {key} must be null or a non-empty string")
+    if "changed_fields" in record:
+        fields = record["changed_fields"]
+        if not isinstance(fields, list) or any(
+            not isinstance(field, str) or not field for field in fields
+        ):
+            raise TypeError(f"{context} changed_fields must be a list of non-empty strings")
+    for key in ("provider_timestamp", "value"):
+        if key in record:
+            candidate = _text(record, key)
+            if len(candidate) > 64:
+                raise ValueError(f"{context} {key} exceeds its bounded length")
+    if kind in {"SUBSCRIPTION_ERROR", "SERVER_ERROR"}:
+        _integer(record, "code")
+    if kind == "LOST_UPDATES":
+        _integer(record, "count")
+    if kind in {"REAL_MAX_FREQUENCY", "TRANSPORT_STATUS", "EXPERIMENT_STOPPED"}:
+        _text(record, "value")
+    return sequence
+
+
 def _verify_contrast(manifest_path: Path, manifest: Mapping[str, object]) -> dict[str, object]:
     stream = _object(manifest["event_stream"], "event_stream")
     if _text(stream, "encoding") != "gzip-json-lines":
@@ -98,7 +180,7 @@ def _verify_contrast(manifest_path: Path, manifest: Mapping[str, object]) -> dic
         for line in handle:
             digest.update(line)
             record = _object(json.loads(line), f"event {count + 1}")
-            sequence = _integer(record, "sequence")
+            sequence = _verify_event_record(record, f"event {count + 1}")
             if sequence <= previous_sequence:
                 raise ValueError("contrast event sequences must be strictly increasing")
             previous_sequence = sequence
@@ -107,9 +189,27 @@ def _verify_contrast(manifest_path: Path, manifest: Mapping[str, object]) -> dic
         raise ValueError("contrast event record count does not match its manifest")
     if digest.hexdigest() != _text(stream, "uncompressed_sha256"):
         raise ValueError("contrast event stream hash does not match its manifest")
+    summary_value = manifest["summary"]
+    if summary_value is None:
+        if count != 0:
+            raise ValueError("contrast evidence without a summary must have an empty event stream")
+        event_attempts = 0
+        queue_drops = 0
+    else:
+        summary = _object(summary_value, "summary")
+        event_attempts = _integer(summary, "event_attempts")
+        queue_drops = _integer(summary, "queue_drops")
+        if event_attempts != count + queue_drops:
+            raise ValueError(
+                "contrast event attempts do not reconcile with records and queue drops"
+            )
+        if previous_sequence > event_attempts:
+            raise ValueError("contrast event sequence exceeds the recorded attempt count")
     return {
         "event_path": event_path.name,
         "event_records": count,
+        "event_attempts": event_attempts,
+        "queue_drops": queue_drops,
         "event_sha256": digest.hexdigest(),
     }
 
