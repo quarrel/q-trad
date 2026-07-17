@@ -51,8 +51,8 @@ readonly recorded_evidence_sha calculated_evidence_sha
 
 jq -e '
   .schema == "qtrad-capture-qualification-v1"
-  and .automatic_checks_passed == true
-  and ([.automatic_checks[]] | all)
+  and (.automatic_checks_passed | type == "boolean")
+  and .automatic_checks_passed == ([.automatic_checks[]] | all)
   and .qualification_decision == "PENDING_OPERATOR_REVIEW"
   and (.candidate_start | type == "string")
   and (.not_before_end | type == "string")
@@ -67,6 +67,9 @@ jq -e '
     active_market_representativeness:"REQUIRED"
   }
 ' "$automatic_evidence" > /dev/null
+
+automatic_checks_passed="$(jq -r '.automatic_checks_passed' "$automatic_evidence")"
+readonly automatic_checks_passed
 
 candidate_start="$(jq -er '.candidate_start' "$automatic_evidence")"
 not_before_end="$(jq -er '.not_before_end' "$automatic_evidence")"
@@ -177,7 +180,7 @@ operator_reviews_passed="$(
 )"
 readonly operator_reviews_passed
 qualification_decision=FAIL
-if [[ "$operator_reviews_passed" == true ]]; then
+if [[ "$automatic_checks_passed" == true && "$operator_reviews_passed" == true ]]; then
   qualification_decision=PASS
 fi
 review_canonical="$(jq -cS . "$operator_review")"
@@ -196,6 +199,7 @@ final_identity="$(
     --arg not_before_end "$not_before_end" \
     --arg generated_at "$generated_at" \
     --arg qualification_decision "$qualification_decision" \
+    --argjson automatic_checks_passed "$automatic_checks_passed" \
     --argjson operator_reviews_passed "$operator_reviews_passed" \
     --slurpfile release "$automatic_evidence" \
     --slurpfile review "$operator_review" \
@@ -207,7 +211,7 @@ final_identity="$(
       candidate_start:$candidate_start, not_before_end:$not_before_end,
       automatic_evidence_generated_at:$generated_at,
       release:$release[0].release,
-      automatic_checks_passed:true,
+      automatic_checks_passed:$automatic_checks_passed,
       operator_reviews:$review[0].reviews,
       operator_reviews_passed:$operator_reviews_passed,
       qualification_decision:$qualification_decision}'
