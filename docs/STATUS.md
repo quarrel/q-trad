@@ -538,6 +538,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
       - Ingestion health persistence now runs on its own periodic task rather than only after a market
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
+      - Library-managed `STALLED`/retry recovery now invalidates heartbeat readiness independently of
+        its retained watchdog grace window. Health returns only after a new heartbeat and fresh evidence
+        from every PRICE channel on the recovered transport; a pre-stall heartbeat cannot qualify it.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
             compatibility, all migrations and all 345 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the

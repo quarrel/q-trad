@@ -324,6 +324,7 @@ class IgDemoMarketDataAdapter:
         self._last_heartbeat_value: str | None = None
         self._heartbeat_real_max_frequency: str | None = None
         self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._first_drop_at: datetime | None = None
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
@@ -656,6 +657,7 @@ class IgDemoMarketDataAdapter:
         self._last_heartbeat_value = None
         self._heartbeat_real_max_frequency = None
         self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
@@ -774,6 +776,7 @@ class IgDemoMarketDataAdapter:
         self._check_staleness()
         status = self._status
         now = self._clock.now()
+        heartbeat_transport_current = str(self._heartbeat_current_for_transport).lower()
         return AdapterHealth(
             adapter_name="ig-market-data",
             environment=BrokerEnvironment.IG_DEMO,
@@ -799,6 +802,7 @@ class IgDemoMarketDataAdapter:
                 f"last_heartbeat_at={_health_time(self._last_heartbeat_at)}; "
                 f"last_heartbeat_value={self._last_heartbeat_value}; "
                 f"heartbeat_stale={str(self._heartbeat_stale).lower()}; "
+                f"heartbeat_transport_current={heartbeat_transport_current}; "
                 f"heartbeat_frequency={self._heartbeat_real_max_frequency}; "
                 f"frequency_evidence={len(self._real_max_frequency_by_epic)}/"
                 f"{len(self._expected_epics)}; "
@@ -952,6 +956,7 @@ class IgDemoMarketDataAdapter:
         self._last_heartbeat_at = received
         self._last_heartbeat_value = str(value).strip()[:32]
         self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = True
         self._mark_ready_if_complete(generation)
 
     def _accept_update(self, record: MarketDataRecord, epic: str, generation: int) -> None:
@@ -1088,6 +1093,7 @@ class IgDemoMarketDataAdapter:
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
         self._updated_epics.clear()
+        self._heartbeat_current_for_transport = False
         if clear_channel_evidence:
             self._quote_received_times.clear()
             self._stale_epics.clear()
@@ -1112,6 +1118,7 @@ class IgDemoMarketDataAdapter:
             return
         self._subscription_events += 1
         self._heartbeat_subscribed = True
+        self._heartbeat_current_for_transport = False
         self._last_heartbeat_at = None
         self._last_heartbeat_value = None
         self._heartbeat_stale = False
@@ -1132,6 +1139,7 @@ class IgDemoMarketDataAdapter:
             return
         self._unsubscription_events += 1
         self._heartbeat_subscribed = False
+        self._heartbeat_current_for_transport = False
         self._last_heartbeat_at = None
         self._last_heartbeat_value = None
         self._heartbeat_stale = True
@@ -1155,6 +1163,7 @@ class IgDemoMarketDataAdapter:
             return
         self._subscription_errors += 1
         self._heartbeat_subscribed = False
+        self._heartbeat_current_for_transport = False
         self._heartbeat_stale = True
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
@@ -1350,6 +1359,7 @@ class IgDemoMarketDataAdapter:
         if (
             not self._transport_connected
             or not self._heartbeat_subscribed
+            or not self._heartbeat_current_for_transport
             or self._last_heartbeat_at is None
             or self._subscribed_epics != self._expected_epics
             or self._updated_epics != self._expected_epics
@@ -1875,6 +1885,7 @@ class IgDemoMarketDataAdapter:
         self._last_heartbeat_value = None
         self._heartbeat_real_max_frequency = None
         self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
         self._subscriptions.clear()

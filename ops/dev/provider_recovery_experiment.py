@@ -167,6 +167,7 @@ def _adapter_snapshot(adapter: IgDemoMarketDataAdapter) -> dict[str, object]:
         },
         "frequency_evidence": dict(sorted(health_frequency.items())),
         "heartbeat_subscribed": adapter._heartbeat_subscribed,  # pyright: ignore[reportPrivateUsage]
+        "heartbeat_transport_current": adapter._heartbeat_current_for_transport,  # pyright: ignore[reportPrivateUsage]
         "heartbeat_events": adapter._heartbeat_events,  # pyright: ignore[reportPrivateUsage]
         "heartbeat_frequency": adapter._heartbeat_real_max_frequency,  # pyright: ignore[reportPrivateUsage]
         "lightstreamer_lost_updates": adapter._lightstreamer_lost_updates,  # pyright: ignore[reportPrivateUsage]
@@ -208,6 +209,7 @@ def _phase_ready(adapter: IgDemoMarketDataAdapter, reconnects: int, reauthentica
         == adapter._subscribed_epics  # pyright: ignore[reportPrivateUsage]
         == adapter._updated_epics  # pyright: ignore[reportPrivateUsage]
         and adapter._heartbeat_subscribed  # pyright: ignore[reportPrivateUsage]
+        and adapter._heartbeat_current_for_transport  # pyright: ignore[reportPrivateUsage]
         and adapter._heartbeat_events > 0  # pyright: ignore[reportPrivateUsage]
         and adapter._heartbeat_real_max_frequency  # pyright: ignore[reportPrivateUsage]
         is not None

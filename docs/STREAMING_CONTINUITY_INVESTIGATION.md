@@ -89,7 +89,8 @@ the recurrent window is useful operating evidence but is not an endurance result
 Before a release, deterministic local tests must cover:
 
 - subscription renewal invalidating old state and requiring a fresh complete update;
-- `STALLED`, both library-managed retry states, terminal disconnect and server errors;
+- `STALLED`, both library-managed retry states, terminal disconnect and server errors, with fresh
+  post-recovery PRICE and heartbeat evidence required before readiness returns;
 - positive lost-update notification and sticky degraded health;
 - invalid v2 CST/X-SECURITY-TOKEN recovery with one bounded replay of an idempotent REST read;
 - changing demo request allowances without relying on stale configured numbers;
@@ -125,7 +126,8 @@ actual Lightstreamer client and requires automatic recovery with fresh records f
 instrument. It then replaces only the local CST/XST request headers with a fixed invalid probe value;
 one idempotent listing-review read must cause exactly one bounded reauthentication/replay and a
 second fully ready stream generation. The non-overwriting manifest requires exactly two reconnects,
-one REST reauthentication, positive effective trading/non-trading rates after each login, zero
+one REST reauthentication, current-key-validated published and effective trading/non-trading rates
+after each login, zero
 q-trad/SDK loss or subscription/server errors, no abandoned provider operation and verified cleanup.
 It remains unexecuted while the corrected collector measurement owns the API key.
 
@@ -140,9 +142,12 @@ remains a failure.
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
 the existing full stream-rebuild path so REST and streaming credentials cannot diverge; a standalone
-research/backfill adapter replaces only its REST session. The library's numeric effective trading and
-non-trading limiter rates are retained after each login without making another `get_client_apps()`
-request or recording the returned API key. Any `exceeded-*` response remains authoritative, is
+research/backfill adapter replaces only its REST session. The adapter validates exactly one
+configured-key row in the same `get_client_apps()` response used by the pinned library during each
+login. It retains only the numeric published rates and requires the library's effective rates to equal
+those values minus its reviewed two-request safety margin; missing, duplicate, malformed or changed
+semantics fail closed. This makes no second request and records no returned API key. Any `exceeded-*`
+response remains authoritative, is
 recorded by bounded code and is not automatically retried. Historical remaining allowance continues
 to come from each historical response and remains separate from these short-window rates.
 

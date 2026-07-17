@@ -188,7 +188,8 @@ Implementation status:
                   normalisation now shares event-loop ordering with subscription renewal. The maintained
                   Lightstreamer 2.2.2 used API is compatible locally and is selected through a reviewed uv
                   override because `trading-ig` pins superseded 1.0.3; IG demo qualification remains a
-                  release gate.
+                  release gate. Library-managed transport recovery now separately invalidates heartbeat
+                  readiness as well as PRICE readiness, so pre-stall evidence cannot restore health.
                 - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
                   subscriptions with zero drops. With a 5 ms injected persistence stall it absorbs a
                   queue high-water of 799/10,000 and drains completely with 6.58-second p95 and 6.91-second

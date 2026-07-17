@@ -426,6 +426,9 @@ Queue insertion remains non-blocking; overflow is counted and reported as degrad
 health without blocking the provider callback. Ingestion persists adapter health on an independent
 periodic task, so whole-stream silence cannot suppress heartbeat, lifecycle or terminal-failure
 evidence merely because no market record enters the consumer. ADR 0010 records these decisions.
+Library-managed transport recovery preserves bounded watchdog timing but invalidates readiness for
+both the heartbeat and every PRICE channel; a connected status cannot restore health until new
+post-recovery evidence arrives from each.
 
 Historical requests use IG's v2 UTC date format, but the former implicit all-universe
 "last N minutes" command is no longer an operational surface. A strict non-overwriting plan

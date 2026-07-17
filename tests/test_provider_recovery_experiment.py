@@ -64,6 +64,7 @@ def test_recovery_phase_requires_complete_fresh_lifecycle_evidence() -> None:
     adapter._subscribed_epics = set(epics)
     adapter._updated_epics = set(epics)
     adapter._heartbeat_subscribed = True
+    adapter._heartbeat_current_for_transport = True
     adapter._heartbeat_events = 1
     adapter._heartbeat_real_max_frequency = "unlimited"
     adapter._real_max_frequency_by_epic = {epic: "unlimited" for epic in epics}

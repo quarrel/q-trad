@@ -285,6 +285,7 @@ def mark_heartbeat_current(adapter: IgDemoMarketDataAdapter, clock: MutableClock
     adapter._heartbeat_subscribed = True
     adapter._last_heartbeat_at = clock.now()
     adapter._heartbeat_events = 1
+    adapter._heartbeat_current_for_transport = True
 
 
 def test_trading_ig_http_session_has_bounded_defaults_and_allows_override() -> None:
@@ -738,7 +739,7 @@ async def test_will_retry_watchdog_escalates_stalled_sdk_recovery() -> None:
     "status",
     ["STALLED", "DISCONNECTED:WILL-RETRY", "DISCONNECTED:TRYING-RECOVERY"],
 )
-async def test_library_managed_recovery_requires_fresh_healthy_update(status: str) -> None:
+async def test_library_managed_recovery_requires_fresh_price_and_heartbeat(status: str) -> None:
     clock = MutableClock()
     adapter = IgDemoMarketDataAdapter(config(), clock)
     selected_listing = listing()
@@ -759,6 +760,9 @@ async def test_library_managed_recovery_requires_fresh_healthy_update(status: st
     assert adapter._updated_epics == set()
 
     adapter._accept_update(market_record(clock), epic, generation=4)
+
+    assert adapter._status is HealthStatus.DEGRADED
+    adapter._handle_heartbeat("1", clock.now(), generation=4)
 
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY

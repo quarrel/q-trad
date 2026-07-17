@@ -30,6 +30,8 @@ For the next candidate release:
 - require heartbeat subscription acknowledgement and one fresh heartbeat for readiness;
 - retain heartbeat receive time, bounded value, event count, subscription lifecycle, applied
   frequency and loss/error evidence separately from per-PRICE freshness;
+- invalidate heartbeat readiness on every transport degradation and require a new heartbeat on the
+  recovered transport, independently of the retained staleness/watchdog grace window;
 - never append heartbeat updates to raw market capture or canonical quote history and never claim
   that heartbeat continuity proves an individual PRICE update was emitted;
 - marshal changed-field normalisation and renewal invalidation through the same event-loop boundary;
