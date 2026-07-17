@@ -387,6 +387,12 @@ failure cycles use a finite retry budget and cooldown rather than hammering the 
 `STALLED`, `DISCONNECTED:WILL-RETRY` and `DISCONNECTED:TRYING-RECOVERY` all degrade the
 connection, preserve current channel evidence while the library attempts recovery, and
 require fresh healthy updates from every instrument before readiness is restored.
+Subscription renewal separately invalidates that item's merged field state, side timestamps and
+freshness evidence, as required by the Lightstreamer listener contract. Bounded lifecycle evidence
+records subscription establishment/end, server-applied maximum frequency, subscription/server error
+codes and aggregate SDK-reported lost updates. Provider messages and session identifiers are not
+retained. Any SDK-reported lost update is sticky degraded evidence for the run and cannot be erased
+by later readiness.
 Exhausted recovery is
 propagated through the record iterator and finalises the ingestion run as `FAILED`;
 natural completion is invalid for an unbounded stream. Shutdown invalidates the active

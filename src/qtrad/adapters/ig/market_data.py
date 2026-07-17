@@ -285,6 +285,15 @@ class IgDemoMarketDataAdapter:
         self._stopping = False
         self._reconnect_count = 0
         self._dropped_records = 0
+        self._lightstreamer_lost_updates = 0
+        self._subscription_events = 0
+        self._unsubscription_events = 0
+        self._subscription_errors = 0
+        self._server_errors = 0
+        self._last_server_error_code: int | None = None
+        self._last_stream_status = "UNOBSERVED"
+        self._last_stream_status_at: datetime | None = None
+        self._real_max_frequency_by_epic: dict[str, str] = {}
         self._first_drop_at: datetime | None = None
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
@@ -540,12 +549,28 @@ class IgDemoMarketDataAdapter:
             def onUnsubscription(self) -> None:
                 adapter._on_unsubscription(self._epic, generation)
 
-            def onSubscriptionError(self, code: int, message: str) -> None:
+            def onSubscriptionError(self, code: int, message: str | None) -> None:
                 adapter._on_subscription_error(self._epic, code, generation)
+
+            def onItemLostUpdates(
+                self,
+                itemName: str | None,
+                itemPos: int,
+                lostUpdates: int,
+            ) -> None:
+                del itemName, itemPos
+                adapter._on_item_lost_updates(self._epic, lostUpdates, generation)
+
+            def onRealMaxFrequency(self, frequency: str | None) -> None:
+                adapter._on_real_max_frequency(self._epic, frequency, generation)
 
         class StatusListener(ClientListener):
             def onStatusChange(self, status: str) -> None:
                 adapter._on_stream_status(status, generation)
+
+            def onServerError(self, code: int, message: str | None) -> None:
+                del message
+                adapter._on_server_error(code, generation)
 
         if self._stream_client is not None:
             raise RuntimeError("refusing to create a concurrent IG stream connection")
@@ -563,6 +588,7 @@ class IgDemoMarketDataAdapter:
         self._updated_epics.clear()
         self._quote_received_times.clear()
         self._stale_epics.clear()
+        self._real_max_frequency_by_epic.clear()
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
@@ -680,6 +706,16 @@ class IgDemoMarketDataAdapter:
                 f"subscriptions={len(self._subscribed_epics)}/{len(self._expected_epics)}; "
                 f"updates={len(self._updated_epics)}/{len(self._expected_epics)}; "
                 f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}; "
+                f"lightstreamer_lost_updates={self._lightstreamer_lost_updates}; "
+                f"subscription_events={self._subscription_events}; "
+                f"unsubscription_events={self._unsubscription_events}; "
+                f"subscription_errors={self._subscription_errors}; "
+                f"server_errors={self._server_errors}; "
+                f"last_server_error_code={self._last_server_error_code}; "
+                f"stream_status={self._last_stream_status}; "
+                f"stream_status_at={_health_time(self._last_stream_status_at)}; "
+                f"frequency_evidence={len(self._real_max_frequency_by_epic)}/"
+                f"{len(self._expected_epics)}; "
                 f"first_drop_at={_health_time(self._first_drop_at)}; "
                 f"last_drop_at={_health_time(self._last_drop_at)}; "
                 f"queue={self._queue.qsize()}/{self._queue.maxsize}; "
@@ -868,6 +904,8 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation or self._stopping:
             return
         normalised = status.upper()
+        self._last_stream_status = normalised[:64]
+        self._last_stream_status_at = self._clock.now()
         LOGGER.info(
             "ig_stream_status",
             extra={"generation": observed_generation, "status": normalised[:64]},
@@ -906,7 +944,13 @@ class IgDemoMarketDataAdapter:
     def _handle_subscription(self, epic: str, generation: int) -> None:
         if generation != self._generation or self._stopping:
             return
+        self._subscription_events += 1
+        self._invalidate_subscription_evidence(epic)
         self._subscribed_epics.add(epic)
+        LOGGER.info(
+            "ig_subscription_established",
+            extra={"epic": epic, "generation": generation},
+        )
         self._mark_ready_if_complete(generation)
 
     def _on_unsubscription(self, epic: str, generation: int) -> None:
@@ -916,10 +960,25 @@ class IgDemoMarketDataAdapter:
     def _handle_unsubscription(self, epic: str, generation: int) -> None:
         if generation != self._generation:
             return
+        self._unsubscription_events += 1
         self._subscribed_epics.discard(epic)
+        self._invalidate_subscription_evidence(epic)
+        LOGGER.info(
+            "ig_subscription_ended",
+            extra={"epic": epic, "generation": generation},
+        )
         if not self._stopping:
             self._status = HealthStatus.DEGRADED
             self._connection_state = _ConnectionState.DEGRADED
+
+    def _invalidate_subscription_evidence(self, epic: str) -> None:
+        """Discard state that the SDK declares invalid after a subscription lifecycle change."""
+
+        self._updated_epics.discard(epic)
+        self._quote_received_times.pop(epic, None)
+        self._stale_epics.discard(epic)
+        self._field_state.pop(epic, None)
+        self._side_times.pop(epic, None)
 
     def _on_subscription_error(self, epic: str, code: int, generation: int | None = None) -> None:
         observed_generation = self._generation if generation is None else generation
@@ -934,6 +993,7 @@ class IgDemoMarketDataAdapter:
         observed_generation = self._generation if generation is None else generation
         if observed_generation != self._generation or self._stopping:
             return
+        self._subscription_errors += 1
         establishing = self._connection_state in {
             _ConnectionState.CONNECTING,
             _ConnectionState.SUBSCRIBING,
@@ -949,6 +1009,84 @@ class IgDemoMarketDataAdapter:
             self._ready_event.set()
         else:
             self._schedule_reconnect()
+
+    def _on_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_item_lost_updates,
+                epic,
+                count,
+                generation,
+            )
+
+    def _handle_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        if count <= 0:
+            raise ValueError("Lightstreamer lost-update count must be positive")
+        self._lightstreamer_lost_updates += count
+        self._status = HealthStatus.DEGRADED
+        LOGGER.error(
+            "ig_lightstreamer_updates_lost",
+            extra={
+                "epic": epic,
+                "generation": generation,
+                "lost_updates": count,
+                "lost_updates_total": self._lightstreamer_lost_updates,
+            },
+        )
+
+    def _on_real_max_frequency(
+        self,
+        epic: str,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_real_max_frequency,
+                epic,
+                frequency,
+                generation,
+            )
+
+    def _handle_real_max_frequency(
+        self,
+        epic: str,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
+        if not bounded_frequency:
+            raise ValueError("Lightstreamer real maximum frequency must not be empty")
+        self._real_max_frequency_by_epic[epic] = bounded_frequency
+        LOGGER.info(
+            "ig_subscription_frequency",
+            extra={
+                "epic": epic,
+                "generation": generation,
+                "real_max_frequency": bounded_frequency,
+            },
+        )
+
+    def _on_server_error(self, code: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._handle_server_error, code, generation)
+
+    def _handle_server_error(self, code: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._server_errors += 1
+        self._last_server_error_code = code
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        LOGGER.error(
+            "ig_stream_server_error",
+            extra={"code": code, "generation": generation},
+        )
+        self._schedule_reconnect()
 
     def _mark_ready_if_complete(self, generation: int) -> None:
         if generation != self._generation or self._stopping:
@@ -969,7 +1107,11 @@ class IgDemoMarketDataAdapter:
             watchdog_task.cancel()
         self._retry_watchdog_task = None
         self._connection_state = _ConnectionState.READY
-        self._status = HealthStatus.HEALTHY if self._dropped_records == 0 else HealthStatus.DEGRADED
+        self._status = (
+            HealthStatus.HEALTHY
+            if self._dropped_records == 0 and self._lightstreamer_lost_updates == 0
+            else HealthStatus.DEGRADED
+        )
         self._ready_event.set()
 
     def _start_retry_watchdog(self, generation: int) -> None:

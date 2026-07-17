@@ -159,9 +159,22 @@ Implementation status:
               9,865 weekly points remaining; append-only usage evidence retained that failed attempt.
               A reviewed three-second provider-boundary pacing correction passed CI and the exact same
               set resumed to completion with 9,733 points remaining. The v2 offline artifact found
-              historical data for all 70 gaps and complete coverage for all 210 basis results (834/834
-              expected basis-minute intervals). This warrants deeper streaming/session-path analysis
-              but does not prove what IG's streaming endpoint emitted or repair the failed qualification.
+                historical data for all 70 gaps and complete coverage for all 210 basis results (834/834
+                expected basis-minute intervals). This warrants deeper streaming/session-path analysis
+                but does not prove what IG's streaming endpoint emitted or repair the failed qualification.
+              - Streaming-continuity analysis of the verified snapshot found zero raw callbacks for
+                the affected instrument inside all 70 gaps, while every interval retained 35–723
+                canonical quotes from two to six other subscriptions on the same connection. The bounded
+                lifecycle log contains no disconnect, watchdog, subscription-error or reconnect event
+                during those gaps. This rules out persistence, queue loss and a whole-connection outage,
+                but cannot yet separate provider per-item silence from SDK/subscription delivery failure.
+              - In progress locally and undeployed: the adapter captures bounded subscription
+                establishment/end, server-error, real-frequency and Lightstreamer lost-update evidence.
+                Subscription renewal invalidates prior merged item state and requires a fresh healthy
+                update; SDK-reported loss remains sticky degraded health. The focused lifecycle suite
+                passes all 38 focused tests; the complete isolated PostgreSQL gate passes all 313 tests,
+                formatting, Ruff, Pyright, `ty` and ShellCheck. The experiment and exit gates are in
+                `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was

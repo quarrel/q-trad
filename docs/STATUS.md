@@ -505,6 +505,18 @@ outside the current data-only phase until explicitly admitted by a later plan up
     projection catch-up, zero reconnects/drops/provider operations and queue high-water 7/10,000.
     This begins corrected `capture-v1` measurement; `capture-v2` and 40-instrument stress remain
     separate later stages.
+  - A read-only analysis of the verified failed-candidate snapshot found no raw callback for the
+    affected item inside any of the 70 gaps. Every exact interval nevertheless contained 35–723
+    canonical quotes from two to six other subscriptions on the same Lightstreamer connection, and
+    retained lifecycle logs contain no gap-time transport or subscription failure. The remaining
+    uncertainty is per-item provider silence versus SDK/subscription delivery.
+  - A local undeployed continuity-evidence slice records subscription establishment/end,
+    server-applied real frequency, bounded server errors and SDK-reported lost updates. Renewal
+    invalidates prior item state and loss is sticky degraded health. All 38 focused lifecycle tests
+    pass, and the complete isolated PostgreSQL gate passes all 313 tests plus formatting, Ruff,
+    Pyright, `ty` and ShellCheck. `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
+    endurance, synthetic stress and separately credentialled dual-observer gates; no collector
+    mutation occurred.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

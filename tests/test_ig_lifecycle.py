@@ -753,6 +753,82 @@ def test_subscription_error_degrades_health_without_exposing_message() -> None:
     assert adapter._status is HealthStatus.DEGRADED
 
 
+def test_subscription_renewal_invalidates_prior_item_state_and_requires_fresh_update() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    adapter._generation = 4
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._field_state[epic] = {"BIDPRICE1": "0.65"}
+    adapter._side_times[epic] = {"BID": clock.now()}
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_unsubscription(epic, generation=4)
+    adapter._handle_subscription(epic, generation=4)
+
+    assert adapter._subscribed_epics == {epic}
+    assert adapter._updated_epics == set()
+    assert adapter._quote_received_times == {}
+    assert adapter._field_state == {}
+    assert adapter._side_times == {}
+    assert adapter._subscription_events == 1
+    assert adapter._unsubscription_events == 1
+    assert adapter._status is HealthStatus.DEGRADED
+
+
+@pytest.mark.asyncio
+async def test_lightstreamer_lost_updates_are_sticky_health_evidence() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    adapter._generation = 3
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_item_lost_updates(epic, count=2, generation=3)
+    adapter._mark_ready_if_complete(generation=3)
+
+    health = await adapter.health()
+    assert health.status is HealthStatus.DEGRADED
+    assert "lightstreamer_lost_updates=2" in (health.detail or "")
+
+
+def test_server_error_is_bounded_and_schedules_application_recovery() -> None:
+    adapter = StaleAdapter(config(), MutableClock())
+    adapter._generation = 5
+    adapter._desired_listings = (listing(),)
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_server_error(code=68, generation=5)
+
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+    assert adapter._server_errors == 1
+    assert adapter._last_server_error_code == 68
+    assert adapter.scheduled_reconnects == 1
+
+
+def test_real_max_frequency_is_retained_as_bounded_subscription_evidence() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    epic = listing().listing_id.external_id
+    adapter._generation = 6
+
+    adapter._handle_real_max_frequency(epic, "2.0", generation=6)
+
+    assert adapter._real_max_frequency_by_epic == {epic: "2.0"}
+
+
 @pytest.mark.asyncio
 async def test_queue_saturation_is_sticky_and_rate_limits_logs(
     monkeypatch: pytest.MonkeyPatch,
