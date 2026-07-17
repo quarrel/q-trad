@@ -280,9 +280,13 @@ automatic_checks="$(
       and .restore_last_result == "success"' "$work_dir/units.json" > /dev/null \
       && printf true || printf false)" \
     --argjson data_mount_ok "$(jq -e --arg target "$data_mount" '
-      .filesystems | length == 1 and .[0].target == $target and .[0].fstype == "xfs"
-      and (.[0].source | type == "string" and length > 0)
-      and (.[0].options | split(",") | index("rw") != null)' \
+      .filesystems as $filesystems
+      | all($filesystems[]; .target == $target and (.fstype == "xfs" or .fstype == "autofs"))
+      and ([$filesystems[] | select(
+        .target == $target and .fstype == "xfs"
+        and (.source | type == "string" and length > 0)
+        and (.options | split(",") | index("rw") != null)
+      )] | length == 1)' \
       "$work_dir/data-mount.json" > /dev/null && printf true || printf false)" \
     --argjson compose_ok "$(jq -e \
       --arg image "$expected_image" \

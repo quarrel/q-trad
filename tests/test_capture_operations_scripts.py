@@ -376,6 +376,7 @@ def _qualification_environment(
     include_readiness_configuration_hash: bool = True,
     include_other_current_run: bool = False,
     compose_image_mismatch: bool = False,
+    systemd_automount: bool = False,
     gaps: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
@@ -542,18 +543,25 @@ case "$1" in
 esac
 """,
     )
-    mount_evidence = json.dumps(
+    mount_filesystems = [
         {
-            "filesystems": [
-                {
-                    "target": str(tmp_path),
-                    "source": "/dev/sdb",
-                    "fstype": "xfs",
-                    "options": "rw,relatime",
-                }
-            ]
+            "target": str(tmp_path),
+            "source": "/dev/sdb",
+            "fstype": "xfs",
+            "options": "rw,relatime",
         }
-    )
+    ]
+    if systemd_automount:
+        mount_filesystems.insert(
+            0,
+            {
+                "target": str(tmp_path),
+                "source": "systemd-1",
+                "fstype": "autofs",
+                "options": "rw,relatime,direct",
+            },
+        )
+    mount_evidence = json.dumps({"filesystems": mount_filesystems})
     _write_executable(
         fake_bin / "findmnt",
         f"""#!/usr/bin/env bash
@@ -668,6 +676,20 @@ def test_qualification_evidence_binds_the_frozen_release_through_one_exact_run(
     )
     assert evidence["automatic_checks"]["readiness_configuration_bound"] is True
     assert evidence["automatic_checks"]["exactly_one_current_ingestion_run"] is True
+
+
+def test_qualification_evidence_accepts_xfs_behind_systemd_automount(tmp_path: Path) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        systemd_automount=True,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode == 0, result.stderr
+    evidence = json.loads(output.read_text())
+    assert evidence["automatic_checks"]["data_mount_ok"] is True
 
 
 def test_qualification_evidence_rejects_multiple_running_ingestion_records(
