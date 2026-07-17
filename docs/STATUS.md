@@ -541,9 +541,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
         second connection. Its guarded local harness now records compact hash-bound callback and lifecycle
-        evidence, requires all channels data-ready, fails on loss/discrepancy or incomplete teardown and
-        cannot run without an exact collector-stopped acknowledgement. It remains unexecuted against IG
-        while the corrected collector measurement is active;
+        evidence, requires all channels data-ready, and fails on loss/discrepancy or incomplete stream,
+        REST HTTP-session or bounded-worker teardown. It cannot run without an exact collector-stopped
+        acknowledgement and remains unexecuted while the corrected collector measurement is active;
       no collector mutation occurred.
     - A second guarded provider-recovery harness now uses the production adapter without a database.
       It requires initial PRICE/heartbeat/frequency readiness, terminates the actual Lightstreamer

@@ -201,8 +201,9 @@ Implementation status:
                   evidence store; it is not an undeclared collector sidecar or release change. A
                   guarded local harness is now implemented: it requires an exact collector-stopped
                   acknowledgement, all 15 channels data-ready, non-overwriting hash-bound callback
-                  evidence, zero queue/SDK loss and verified unsubscribe/disconnect. It remains
-                  unexecuted against IG while the corrected collector measurement is active.
+                  evidence, zero queue/SDK loss, verified unsubscribe/disconnect, REST logout and
+                  HTTP-session/provider-worker termination. It remains unexecuted against IG while
+                  the corrected collector measurement is active.
                 - A separate guarded recovery harness now drives the production adapter without a
                   database. It requires fresh initial data, terminates the underlying Lightstreamer
                   client, verifies automatic recovery, injects a fixed invalid local REST token and

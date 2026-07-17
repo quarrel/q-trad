@@ -87,8 +87,9 @@ IG heartbeat on exactly one connection. It writes a mode-0600, non-overwriting, 
 manifest plus a gzip JSON-lines event stream containing receive time, provider timestamp,
 changed-field identity and bounded lifecycle codes. It records no account identifier, token,
 provider message or price value. Partial readiness, queue overflow, Lightstreamer loss, subscription
-or server errors, feed discrepancies and unverified unsubscribe/disconnect all fail the run. A
-failed login still produces an empty hash-bound event stream and failure manifest.
+or server errors, feed discrepancies, unverified unsubscribe/disconnect, incomplete REST logout or
+HTTP-session close, and residual bounded-call workers all fail the run. A failed login still produces
+an empty hash-bound event stream and failure manifest.
 
 After the contrast, retain the same acknowledgement and run the bounded q-trad recovery probe while
 the collector remains stopped:

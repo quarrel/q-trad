@@ -174,7 +174,8 @@ The mode-0600 manifest binds a compact gzip JSON-lines event stream by uncompres
 contain channel identity, receive time, provider timestamp, changed fields and bounded lifecycle
 codes, but no account identifier, session token, provider message or price value. Any writer queue
 loss, SDK loss report, partial subscription, server/subscription error, unexplained feed discrepancy
-or unverified unsubscribe/disconnect fails closed. Provider login/readiness rejection also leaves a
+or unverified unsubscribe/disconnect fails closed. REST logout, HTTP-session close and termination of
+every bounded provider worker are also explicit gates. Provider login/readiness rejection leaves a
 non-overwriting failure artifact rather than disappearing as console output.
 
 Interpretation is mechanical:

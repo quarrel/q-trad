@@ -77,6 +77,10 @@ class _Client(Protocol):
     def getStatus(self) -> str: ...
 
 
+class _ClosableSession(Protocol):
+    def close(self) -> None: ...
+
+
 @dataclass(frozen=True, slots=True)
 class _Arguments:
     output_manifest: Path
@@ -441,6 +445,9 @@ def _bounded_call(name: str, timeout_seconds: int, operation: Callable[[], objec
         successful, value = outcome.get(timeout=timeout_seconds)
     except queue.Empty as error:
         raise TimeoutError(f"provider operation timed out: {name}") from error
+    worker.join(timeout=1)
+    if worker.is_alive():
+        raise RuntimeError(f"provider operation worker did not terminate: {name}")
     if not successful:
         raise cast(BaseException, value)
     return value
@@ -535,6 +542,9 @@ def _prestream_failure(
             "no_unexplained_discrepancies": False,
             "shutdown_verified": False,
             "unsubscriptions_verified": True,
+            "logout_completed": False,
+            "http_session_close_completed": False,
+            "provider_workers_terminated": False,
             "provider_operation_completed": False,
         },
         "failure": {"type": type(error).__name__, "code": _safe_error_code(error)},
@@ -671,6 +681,8 @@ def _run(arguments: _Arguments) -> dict[str, object]:
     run_error: BaseException | None = None
     shutdown_verified = False
     unsubscriptions_verified = False
+    logout_completed = False
+    http_session_close_completed = False
     became_ready = False
     all_channels_current_at_stop = False
     try:
@@ -754,6 +766,16 @@ def _run(arguments: _Arguments) -> dict[str, object]:
                 arguments.provider_operation_timeout_seconds,
                 service.logout,
             )
+            logout_completed = True
+        except BaseException as error:
+            run_error = run_error or error
+        try:
+            _bounded_call(
+                "contrast-http-session-close",
+                arguments.provider_operation_timeout_seconds,
+                cast(_ClosableSession, service.session).close,
+            )
+            http_session_close_completed = True
         except BaseException as error:
             run_error = run_error or error
         state.event(
@@ -780,6 +802,10 @@ def _run(arguments: _Arguments) -> dict[str, object]:
         raise writer_result
     event_count, event_sha256 = writer_result
     summary = state.summary()
+    provider_workers_terminated = not any(
+        thread.is_alive() and thread.name.startswith("qtrad-contrast-")
+        for thread in threading.enumerate()
+    )
     checks = {
         "all_channels_data_ready": became_ready,
         "all_channels_current_at_stop": all_channels_current_at_stop,
@@ -801,6 +827,9 @@ def _run(arguments: _Arguments) -> dict[str, object]:
         "no_unexplained_discrepancies": not summary["discrepancies"],
         "shutdown_verified": shutdown_verified,
         "unsubscriptions_verified": unsubscriptions_verified,
+        "logout_completed": logout_completed,
+        "http_session_close_completed": http_session_close_completed,
+        "provider_workers_terminated": provider_workers_terminated,
         "provider_operation_completed": run_error is None,
     }
     finished_at = datetime.now(UTC)

@@ -114,6 +114,9 @@ def _bounded_call(name: str, timeout_seconds: float, operation: Callable[[], obj
         successful, value = outcome.get(timeout=timeout_seconds)
     except queue.Empty as error:
         raise TimeoutError(f"provider operation timed out: {name}") from error
+    worker.join(timeout=1)
+    if worker.is_alive():
+        raise RuntimeError(f"provider operation worker did not terminate: {name}")
     if not successful:
         raise cast(BaseException, value)
     return value
