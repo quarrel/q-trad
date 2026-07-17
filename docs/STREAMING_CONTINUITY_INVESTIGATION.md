@@ -151,6 +151,16 @@ separate evidence store. It does not write to the collector database or perform 
 Adding the CHART diagnostic feed to an operational collector release would require a separately
 reviewed architecture/release decision.
 
+The checked-in `ops/dev/provider-stream-contrast.sh` enforces this boundary with an exact
+`COLLECTOR_STOPPED_AND_NO_OTHER_STREAM` acknowledgement. It accepts only the reviewed seven-item
+universe, caps duration at six hours and requires all 15 subscriptions to acknowledge and emit data.
+The mode-0600 manifest binds a compact gzip JSON-lines event stream by uncompressed SHA-256. Events
+contain channel identity, receive time, provider timestamp, changed fields and bounded lifecycle
+codes, but no account identifier, session token, provider message or price value. Any writer queue
+loss, SDK loss report, partial subscription, server/subscription error, unexplained feed discrepancy
+or unverified unsubscribe/disconnect fails closed. Provider login/readiness rejection also leaves a
+non-overwriting failure artifact rather than disappearing as console output.
+
 Interpretation is mechanical:
 
 | PRICE callback | CHART callback | Transport/subscription evidence | Result |

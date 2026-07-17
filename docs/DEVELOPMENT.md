@@ -63,3 +63,29 @@ handoff, ingestion service, bar/gap logic and PostgreSQL store, writes one mode-
 result without overwrite, and forcibly removes its database. It fails closed on a non-local host,
 unsafe database name, queue or SDK loss, incomplete persistence, excessive lag or an unclean
 consumer exit. Generated evidence belongs under ignored `tmp/`, not in Git.
+
+## Provider streaming contrast
+
+Do not run the provider contrast while the OCI collector or any other Lightstreamer client uses the
+same IG API key. It is intentionally guarded by an exact acknowledgement and is eligible only after
+the current collector measurement has ended and an operator-approved stop has been verified.
+
+With IG demo credentials available through the normal `QTRAD_IG_*` settings, run one bounded
+three-hour, single-connection contrast spanning the target market window:
+
+```bash
+export QTRAD_PROVIDER_CONTRAST_SINGLE_CONNECTION_ACK=COLLECTOR_STOPPED_AND_NO_OTHER_STREAM
+ops/dev/provider-stream-contrast.sh \
+  tmp/provider-contrast.json \
+  tmp/provider-contrast-events.jsonl.gz \
+  --duration-seconds 10800 \
+  --silence-seconds 180
+```
+
+The probe subscribes to the seven reviewed PRICE items, the matching seven CHART:TICK items and the
+IG heartbeat on exactly one connection. It writes a mode-0600, non-overwriting, self-hashed JSON
+manifest plus a gzip JSON-lines event stream containing receive time, provider timestamp,
+changed-field identity and bounded lifecycle codes. It records no account identifier, token,
+provider message or price value. Partial readiness, queue overflow, Lightstreamer loss, subscription
+or server errors, feed discrepancies and unverified unsubscribe/disconnect all fail the run. A
+failed login still produces an empty hash-bound event stream and failure manifest.

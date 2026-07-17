@@ -36,7 +36,11 @@ For the next candidate release:
 - use uv's reviewed transitive override to lock `lightstreamer-client-lib==2.2.2`, while retaining
   `trading-ig` only for IG REST access; and
 - qualify the exact dependency lock and application image against IG demo before deployment. A
-  successful import/API test or synthetic load result is necessary but not provider compatibility.
+  successful import/API test or synthetic load result is necessary but not provider compatibility;
+  and
+- run the reviewed seven-PRICE/seven-CHART:TICK/heartbeat contrast only after the collector
+  measurement and a verified operator-approved stop. Require one connection, all 15 channels
+  data-ready, bounded non-overwriting callback/lifecycle evidence, zero loss and verified teardown.
 
 The heartbeat consumes one additional subscription: `capture-v1` uses eight, and the proposed
 seven-PRICE/seven-CHART contrast uses fifteen, both below IG's documented default limit of 40.

@@ -535,13 +535,22 @@ outside the current data-only phase until explicitly admitted by a later plan up
       - Ingestion health persistence now runs on its own periodic task rather than only after a market
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
-        The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-        compatibility, all migrations and all 321 tests.
+          The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
+          compatibility, all migrations and all 326 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
-      The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
-      second connection;
-    no collector mutation occurred.
+        The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
+        second connection. Its guarded local harness now records compact hash-bound callback and lifecycle
+        evidence, requires all channels data-ready, fails on loss/discrepancy or incomplete teardown and
+        cannot run without an exact collector-stopped acknowledgement. It remains unexecuted against IG
+        while the corrected collector measurement is active;
+      no collector mutation occurred.
+    - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
+      ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
+      reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70
+      failed-candidate gaps; none began after the corrected run started at `2026-07-17T05:02:02Z`.
+      This run had not yet crossed the recurrent `20:00Z`–`22:00Z` window, so the checkpoint is not
+      endurance or causal closure. Host NTP remained synchronised. No mutation occurred.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

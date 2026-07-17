@@ -197,8 +197,12 @@ Implementation status:
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent
-                connections. This experiment runs only after the current measurement in a separate
-                evidence store; it is not an undeclared collector sidecar or release change.
+                  connections. This experiment runs only after the current measurement in a separate
+                  evidence store; it is not an undeclared collector sidecar or release change. A
+                  guarded local harness is now implemented: it requires an exact collector-stopped
+                  acknowledgement, all 15 channels data-ready, non-overwriting hash-bound callback
+                  evidence, zero queue/SDK loss and verified unsubscribe/disconnect. It remains
+                  unexecuted against IG while the corrected collector measurement is active.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
