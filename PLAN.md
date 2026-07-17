@@ -210,6 +210,10 @@ Implementation status:
                   generation. Exact reconnect/reauthentication counts, zero loss and full process
                   cleanup are release gates. It also remains unexecuted while the collector owns the
                   API key.
+                - An independent offline verifier now recomputes either experiment manifest hash and,
+                  for the contrast, confines and streams the gzip JSON-lines artifact to verify every
+                  record, increasing sequence, count and uncompressed SHA-256. Integrity verification
+                  preserves a truthful FAIL and is required before evidence review.
                 - The release sequence is now explicit: finish the untouched old-lock corrected run
                   through its recurrent windows and weekend; stop it with operator approval; execute
                   both provider probes during active markets; accept ADR 0025 only on PASS; then

@@ -128,6 +128,11 @@ second fully ready stream generation. The non-overwriting manifest requires exac
 one REST reauthentication, zero q-trad/SDK loss or subscription/server errors and verified cleanup.
 It remains unexecuted while the corrected collector measurement owns the API key.
 
+`ops/dev/verify_stream_experiment_evidence.py` independently validates either experiment. It
+recomputes the manifest self-hash; for the contrast it additionally confines the event path beside
+the manifest, streams every gzip JSON-lines record, requires increasing callback sequence and
+recomputes the uncompressed count and SHA-256. A structurally valid `FAIL` remains a failure.
+
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses
 the existing full stream-rebuild path so REST and streaming credentials cannot diverge; a standalone
@@ -199,8 +204,8 @@ The evidence stages are deliberately non-substitutable:
    contrast and then the short q-trad recovery experiment. Market closure is not a valid way to make
    all CHART:TICK channels data-ready.
 3. If either provider experiment fails, retain its failure evidence and do not accept ADR 0025 or
-   deploy the candidate lock. Diagnose or revise locally, then repeat under a new non-overwriting
-   evidence identity.
+   deploy the candidate lock. Independently verify its manifest/event hashes, diagnose or revise
+   locally, then repeat under a new non-overwriting evidence identity.
 4. If both pass, accept ADR 0025 through review, merge the exact green commit, publish its immutable
    amd64/arm64 image and deploy that digest through the capture release procedure. The old-image
    endurance and local provider runs do not substitute for ARM/provider evidence from this image.

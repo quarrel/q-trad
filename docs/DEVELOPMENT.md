@@ -108,3 +108,16 @@ and per-instrument count evidence. The final checks require exactly two reconnec
 reauthentication, zero q-trad/SDK loss or server/subscription errors, and verified termination of the
 stream, REST service, consumer and provider-operation threads. It never records credentials, tokens,
 account identity, provider messages or market values.
+
+Independently verify either retained manifest after copying its complete artifact set:
+
+```bash
+uv run ops/dev/verify_stream_experiment_evidence.py tmp/provider-contrast.json
+uv run ops/dev/verify_stream_experiment_evidence.py tmp/provider-recovery.json
+```
+
+For a contrast, the verifier requires the gzip event stream beside its manifest, recomputes the
+manifest self-hash, streams and parses every event, requires strictly increasing sequence numbers and
+checks the uncompressed record count and SHA-256. For recovery evidence it recomputes the manifest
+self-hash and validates the experiment/result contract. Verification confirms integrity and shape;
+it deliberately preserves a truthful `FAIL` rather than converting it to success.
