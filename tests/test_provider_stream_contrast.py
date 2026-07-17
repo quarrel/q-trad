@@ -111,6 +111,17 @@ def test_contrast_requires_every_channel_subscription_and_update() -> None:
     assert channels[final]["renewals"] == 1
 
 
+def test_contrast_transport_gate_requires_current_connected_status() -> None:
+    state = _ContrastState(channels=_channels())
+    events: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=100)
+
+    assert not state.transport_connected()
+    state.event(events, kind="TRANSPORT_STATUS", value="CONNECTED:WS-STREAMING")
+    assert state.transport_connected()
+    state.event(events, kind="TRANSPORT_STATUS", value="DISCONNECTED:WILL-RETRY")
+    assert not state.transport_connected()
+
+
 def test_contrast_identifies_price_silence_while_chart_and_connection_are_active() -> None:
     state = _ContrastState(channels=_channels())
     events: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=100)
@@ -132,6 +143,30 @@ def test_contrast_identifies_price_silence_while_chart_and_connection_are_active
     state.inspect_silence(now=now, threshold_seconds=180)
     resolved = cast(list[dict[str, object]], state.summary()["discrepancies"])
     assert resolved[0]["resolved_at"] is not None
+
+
+def test_contrast_records_heartbeat_silence_and_requires_time_bounded_terminal_freshness() -> None:
+    state = _ContrastState(channels=_channels())
+    events: queue.Queue[dict[str, object] | None] = queue.Queue(maxsize=100)
+    _make_ready(state, events)
+    now = time.monotonic()
+    state._states["heartbeat"].last_update_monotonic = now - 181
+
+    assert state.ready()
+    assert not state.current(now=now, threshold_seconds=180)
+    state.inspect_silence(now=now, threshold_seconds=180)
+
+    discrepancies = cast(list[dict[str, object]], state.summary()["discrepancies"])
+    heartbeat = [item for item in discrepancies if item["condition"] == "HEARTBEAT_SILENT"]
+    assert len(heartbeat) == 1
+    assert heartbeat[0]["instrument_id"] is None
+    assert heartbeat[0]["heartbeat_fresh"] is False
+    assert heartbeat[0]["resolved_at"] is None
+
+    state._states["heartbeat"].last_update_monotonic = now
+    state.inspect_silence(now=now, threshold_seconds=180)
+    assert heartbeat[0]["resolved_at"] is not None
+    assert state.current(now=now, threshold_seconds=180)
 
 
 def test_contrast_loss_and_queue_overflow_fail_closed() -> None:

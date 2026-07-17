@@ -181,8 +181,9 @@ universe, caps duration at six hours and requires all 15 subscriptions to acknow
 The mode-0600 manifest binds a compact gzip JSON-lines event stream by uncompressed SHA-256. Events
 contain channel identity, receive time, provider timestamp, changed fields and bounded lifecycle
 codes, but no account identifier, session token, provider message or price value. Any writer queue
-loss, SDK loss report, partial subscription, server/subscription error, unexplained feed discrepancy
-or unverified unsubscribe/disconnect fails closed. REST logout, HTTP-session close and termination of
+loss, SDK loss report, partial subscription, server/subscription error, threshold-exceeding heartbeat
+silence, unexplained feed discrepancy, stale terminal channel evidence, non-connected pre-shutdown
+transport or unverified unsubscribe/disconnect fails closed. REST logout, HTTP-session close and termination of
 every bounded provider worker are also explicit gates. Provider login/readiness rejection leaves a
 non-overwriting failure artifact rather than disappearing as console output.
 

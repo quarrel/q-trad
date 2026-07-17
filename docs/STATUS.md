@@ -542,15 +542,18 @@ outside the current data-only phase until explicitly admitted by a later plan up
         its retained watchdog grace window. Health returns only after a new heartbeat and fresh evidence
         from every PRICE channel on the recovered transport; a pre-stall heartbeat cannot qualify it.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 345 tests.
+            compatibility, all migrations and all 347 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
         second connection. Its guarded local harness now records compact hash-bound callback and lifecycle
         evidence, requires all channels data-ready, and fails on loss/discrepancy or incomplete stream,
         REST HTTP-session or bounded-worker teardown. It cannot run without an exact collector-stopped
-        acknowledgement and remains unexecuted while the corrected collector measurement is active;
-      no collector mutation occurred.
+          acknowledgement and remains unexecuted while the corrected collector measurement is active;
+        no collector mutation occurred.
+        Its terminal gate now uses bounded current freshness rather than merely proving a channel once
+        updated. Threshold-exceeding heartbeat silence is explicit, and the transport must remain
+        connected immediately before deliberate shutdown, closing a whole-stream-freeze false pass.
     - A second guarded provider-recovery harness now uses the production adapter without a database.
       It requires initial PRICE/heartbeat/frequency readiness, terminates the actual Lightstreamer
       client, verifies automatic recovery with fresh records from all instruments, then injects a

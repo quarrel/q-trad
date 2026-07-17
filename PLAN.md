@@ -179,7 +179,7 @@ Implementation status:
                 response contains exactly one entry for the configured API key; numeric published
                 rates and the pinned library's published-minus-two effective rates are retained without
                 API-key material. Authoritative allowance failures are not retried. The complete isolated
-                  PostgreSQL gate now passes all 345 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                  PostgreSQL gate now passes all 347 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
                   `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
                 - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
@@ -205,8 +205,11 @@ Implementation status:
                   guarded local harness is now implemented: it requires an exact collector-stopped
                   acknowledgement, all 15 channels data-ready, non-overwriting hash-bound callback
                   evidence, zero queue/SDK loss, verified unsubscribe/disconnect, REST logout and
-                  HTTP-session/provider-worker termination. It remains unexecuted against IG while
-                  the corrected collector measurement is active.
+                    HTTP-session/provider-worker termination. It remains unexecuted against IG while
+                    the corrected collector measurement is active.
+                    Threshold-exceeding heartbeat silence is now an explicit discrepancy, and the
+                    terminal gate requires every channel genuinely fresh plus a connected transport
+                    immediately before deliberate shutdown; historical readiness cannot pass.
                 - A separate guarded recovery harness now drives the production adapter without a
                   database. It requires fresh initial data, terminates the underlying Lightstreamer
                   client, verifies automatic recovery, injects a fixed invalid local REST token and

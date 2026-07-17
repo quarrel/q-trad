@@ -223,6 +223,13 @@ class _ContrastState:
                 for state in self._states.values()
             )
 
+    def current(self, *, now: float, threshold_seconds: int) -> bool:
+        with self._lock:
+            return all(
+                state.subscribed and _fresh(state, now, threshold_seconds)
+                for state in self._states.values()
+            )
+
     def failed(self) -> bool:
         with self._lock:
             return (
@@ -237,10 +244,30 @@ class _ContrastState:
         with self._lock:
             return all(not state.subscribed for state in self._states.values())
 
+    def transport_connected(self) -> bool:
+        with self._lock:
+            return self._transport_status.startswith("CONNECTED")
+
     def inspect_silence(self, *, now: float, threshold_seconds: int) -> None:
         with self._lock:
             heartbeat = self._states["heartbeat"]
             heartbeat_fresh = _fresh(heartbeat, now, threshold_seconds)
+            heartbeat_identity = ("heartbeat", "HEARTBEAT_SILENT")
+            if not heartbeat_fresh and heartbeat_identity not in self._open_discrepancies:
+                self._discrepancies.append(
+                    {
+                        "instrument_id": None,
+                        "condition": "HEARTBEAT_SILENT",
+                        "detected_at": _utc_text(datetime.now(UTC)),
+                        "resolved_at": None,
+                        "transport_status": self._transport_status,
+                        "heartbeat_fresh": False,
+                    }
+                )
+                self._open_discrepancies[heartbeat_identity] = len(self._discrepancies) - 1
+            elif heartbeat_fresh and heartbeat_identity in self._open_discrepancies:
+                index = self._open_discrepancies.pop(heartbeat_identity)
+                self._discrepancies[index]["resolved_at"] = _utc_text(datetime.now(UTC))
             active_instruments = {
                 channel.instrument_id
                 for key, channel in self.channels.items()
@@ -685,6 +712,7 @@ def _run(arguments: _Arguments) -> dict[str, object]:
     http_session_close_completed = False
     became_ready = False
     all_channels_current_at_stop = False
+    transport_connected_at_stop = False
     try:
         state.event(events, kind="EXPERIMENT_STARTED")
         _bounded_call(
@@ -723,7 +751,11 @@ def _run(arguments: _Arguments) -> dict[str, object]:
     except BaseException as error:
         run_error = error
     finally:
-        all_channels_current_at_stop = state.ready()
+        all_channels_current_at_stop = state.current(
+            now=time.monotonic(),
+            threshold_seconds=arguments.silence_seconds,
+        )
+        transport_connected_at_stop = state.transport_connected()
         state.event(events, kind="EXPERIMENT_STOP_REQUESTED")
         for subscription in reversed(subscriptions):
             try:
@@ -813,7 +845,7 @@ def _run(arguments: _Arguments) -> dict[str, object]:
             cast(Mapping[str, object], item)["real_max_frequency"] is not None
             for item in cast(Mapping[str, object], summary["channels"]).values()
         ),
-        "transport_connected": summary["ever_connected"] is True,
+        "transport_connected": transport_connected_at_stop,
         "no_queue_drops": summary["queue_drops"] == 0,
         "no_lightstreamer_lost_updates": all(
             cast(Mapping[str, object], item)["lost_updates"] == 0
