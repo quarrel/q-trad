@@ -138,12 +138,20 @@ def _adapter_snapshot(adapter: IgDemoMarketDataAdapter) -> dict[str, object]:
     quote_times = adapter._quote_received_times  # pyright: ignore[reportPrivateUsage]
     expected = adapter._expected_epics  # pyright: ignore[reportPrivateUsage]
     health_frequency = adapter._real_max_frequency_by_epic  # pyright: ignore[reportPrivateUsage]
+    published_trading_rate = (
+        adapter._published_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+    )
+    published_non_trading_rate = (
+        adapter._published_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+    )
     trading_rate = adapter._effective_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
     non_trading_rate = adapter._effective_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
     return {
         "generation": adapter._generation,  # pyright: ignore[reportPrivateUsage]
         "reconnects": adapter._reconnect_count,  # pyright: ignore[reportPrivateUsage]
         "rest_reauthentications": adapter._rest_reauthentications,  # pyright: ignore[reportPrivateUsage]
+        "published_trading_requests_per_minute": published_trading_rate,
+        "published_non_trading_requests_per_minute": published_non_trading_rate,
         "effective_trading_requests_per_minute": trading_rate,
         "effective_non_trading_requests_per_minute": non_trading_rate,
         "expected_subscriptions": len(expected),
@@ -176,6 +184,16 @@ def _phase_ready(adapter: IgDemoMarketDataAdapter, reconnects: int, reauthentica
         adapter._status is HealthStatus.HEALTHY  # pyright: ignore[reportPrivateUsage]
         and adapter._reconnect_count == reconnects  # pyright: ignore[reportPrivateUsage]
         and adapter._rest_reauthentications == reauthentications  # pyright: ignore[reportPrivateUsage]
+        and isinstance(
+            adapter._published_trading_requests_per_minute,  # pyright: ignore[reportPrivateUsage]
+            int,
+        )
+        and adapter._published_trading_requests_per_minute > 0  # pyright: ignore[reportPrivateUsage]
+        and isinstance(
+            adapter._published_non_trading_requests_per_minute,  # pyright: ignore[reportPrivateUsage]
+            int,
+        )
+        and adapter._published_non_trading_requests_per_minute > 0  # pyright: ignore[reportPrivateUsage]
         and isinstance(
             adapter._effective_trading_requests_per_minute,  # pyright: ignore[reportPrivateUsage]
             int,
@@ -372,8 +390,12 @@ async def _run(arguments: _Arguments) -> dict[str, object]:
         ),
         "exact_reconnect_count": final_snapshot["reconnects"] == 2,
         "exact_rest_reauthentication_count": final_snapshot["rest_reauthentications"] == 1,
-        "effective_rate_limits_observed": (
-            isinstance(final_snapshot["effective_trading_requests_per_minute"], int)
+        "provider_rate_limits_observed": (
+            isinstance(final_snapshot["published_trading_requests_per_minute"], int)
+            and final_snapshot["published_trading_requests_per_minute"] > 0
+            and isinstance(final_snapshot["published_non_trading_requests_per_minute"], int)
+            and final_snapshot["published_non_trading_requests_per_minute"] > 0
+            and isinstance(final_snapshot["effective_trading_requests_per_minute"], int)
             and final_snapshot["effective_trading_requests_per_minute"] > 0
             and isinstance(final_snapshot["effective_non_trading_requests_per_minute"], int)
             and final_snapshot["effective_non_trading_requests_per_minute"] > 0

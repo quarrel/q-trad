@@ -56,6 +56,8 @@ def test_recovery_phase_requires_complete_fresh_lifecycle_evidence() -> None:
     adapter._status = HealthStatus.HEALTHY
     adapter._reconnect_count = 1
     adapter._rest_reauthentications = 0
+    adapter._published_trading_requests_per_minute = 9
+    adapter._published_non_trading_requests_per_minute = 25
     adapter._effective_trading_requests_per_minute = 7
     adapter._effective_non_trading_requests_per_minute = 23
     adapter._expected_epics = set(epics)

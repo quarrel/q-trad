@@ -22,6 +22,7 @@ from qtrad.adapters.ig.market_data import (
     _is_fatal_provider_error,
     _ProviderOperationTimeout,
     _safe_error_code,
+    _validated_client_app_allowances,
 )
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -136,6 +137,8 @@ class RateLimitedService(FakeService):
         super().__init__()
         self._trading_requests_per_minute = 7
         self._non_trading_requests_per_minute = 23
+        self._qtrad_published_trading_requests_per_minute = 9
+        self._qtrad_published_non_trading_requests_per_minute = 25
 
 
 class FakeStreamAdapter(IgDemoMarketDataAdapter):
@@ -930,7 +933,7 @@ async def test_rest_allowance_error_is_retained_without_automatic_retry() -> Non
 
 
 @pytest.mark.asyncio
-async def test_effective_trading_ig_rate_limiter_values_are_retained_without_api_key() -> None:
+async def test_published_and_effective_rate_limits_are_retained_without_api_key() -> None:
     service = RateLimitedService()
     adapter = IgDemoMarketDataAdapter(
         config(),
@@ -941,9 +944,60 @@ async def test_effective_trading_ig_rate_limiter_values_are_retained_without_api
     await adapter.connect()
 
     health_detail = (await adapter.health()).detail or ""
+    assert "published_rest_rates=9/25" in health_detail
     assert "effective_rest_rates=7/23" in health_detail
     assert "not-a-real" not in health_detail
     await adapter.disconnect()
+
+
+def test_client_app_allowances_require_exactly_one_current_api_key() -> None:
+    response = [
+        {
+            "apiKey": "different-key",
+            "allowanceAccountTrading": 100,
+            "allowanceAccountOverall": 100,
+        },
+        {
+            "apiKey": "configured-key",
+            "allowanceAccountTrading": 9,
+            "allowanceAccountOverall": 25,
+        },
+    ]
+
+    assert _validated_client_app_allowances(response, "configured-key") == (9, 25)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [{"apiKey": "different-key", "allowanceAccountTrading": 9, "allowanceAccountOverall": 25}],
+        [
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": 9,
+                "allowanceAccountOverall": 25,
+            },
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": 9,
+                "allowanceAccountOverall": 25,
+            },
+        ],
+        [{"allowanceAccountTrading": 9, "allowanceAccountOverall": 25}],
+        [{"apiKey": "configured-key", "allowanceAccountOverall": 25}],
+        [
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": True,
+                "allowanceAccountOverall": 25,
+            }
+        ],
+        [{"apiKey": "configured-key", "allowanceAccountTrading": 2, "allowanceAccountOverall": 25}],
+    ],
+)
+def test_client_app_allowances_fail_closed(response: object) -> None:
+    with pytest.raises(RuntimeError):
+        _validated_client_app_allowances(response, "configured-key")
 
 
 def test_subscription_error_degrades_health_without_exposing_message() -> None:

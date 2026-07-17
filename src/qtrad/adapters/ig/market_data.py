@@ -58,6 +58,7 @@ _MAX_LISTING_REVIEW_CANDIDATES = 100
 _MAX_LISTING_REVIEW_SEARCH_REQUESTS = 100
 _MAX_LISTING_REVIEW_DETAIL_REQUESTS = 200
 _HEARTBEAT_ITEM = "TRADE:HB.U.HEARTBEAT.IP"
+_TRADING_IG_RATE_LIMIT_SAFETY_MARGIN = 2
 _PRICE_FIELDS = (
     "TIMESTAMP",
     "BIDPRICE1",
@@ -108,6 +109,12 @@ class _RateLimiterControl(Protocol):
 class _RateLimiterEvidence(Protocol):
     _trading_requests_per_minute: int
     _non_trading_requests_per_minute: int
+
+
+@runtime_checkable
+class _PublishedRateLimiterEvidence(Protocol):
+    _qtrad_published_trading_requests_per_minute: int
+    _qtrad_published_non_trading_requests_per_minute: int
 
 
 class _IgRestService(Protocol):
@@ -321,6 +328,8 @@ class IgDemoMarketDataAdapter:
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
         self._historical_allowance_remaining: int | None = None
+        self._published_trading_requests_per_minute: int | None = None
+        self._published_non_trading_requests_per_minute: int | None = None
         self._effective_trading_requests_per_minute: int | None = None
         self._effective_non_trading_requests_per_minute: int | None = None
         self._rest_reauthentications = 0
@@ -799,6 +808,8 @@ class IgDemoMarketDataAdapter:
                 f"queue_high_water={self._queue_high_water}; "
                 f"provider_operations={len(self._provider_threads)}; "
                 f"rest_reauthentications={self._rest_reauthentications}; "
+                f"published_rest_rates={self._published_trading_requests_per_minute}/"
+                f"{self._published_non_trading_requests_per_minute}; "
                 f"effective_rest_rates={self._effective_trading_requests_per_minute}/"
                 f"{self._effective_non_trading_requests_per_minute}; "
                 f"allowance_errors={self._allowance_errors}; "
@@ -1543,9 +1554,28 @@ class IgDemoMarketDataAdapter:
             return cast(_IgRestService, self._service_factory(self._config))
         from trading_ig.rest import IGService
 
+        configured_api_key = self._config.api_key
+
+        class ValidatedRateLimitedIGService(IGService):  # type: ignore[misc]
+            _qtrad_published_trading_requests_per_minute: int
+            _qtrad_published_non_trading_requests_per_minute: int
+
+            def get_client_apps(self, session: object | None = None) -> object:
+                response = cast(
+                    object,
+                    super().get_client_apps(session),  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                )
+                trading, non_trading = _validated_client_app_allowances(
+                    response,
+                    configured_api_key,
+                )
+                self._qtrad_published_trading_requests_per_minute = trading
+                self._qtrad_published_non_trading_requests_per_minute = non_trading
+                return response
+
         service = cast(
             _IgRestService,
-            IGService(
+            ValidatedRateLimitedIGService(
                 self._config.username,
                 self._config.password,
                 self._config.api_key,
@@ -1622,14 +1652,28 @@ class IgDemoMarketDataAdapter:
         )
 
     def _record_rate_limiter_evidence(self, service: _IgRestService) -> None:
-        if not isinstance(service, _RateLimiterEvidence):
+        if not isinstance(service, _RateLimiterEvidence) or not isinstance(
+            service, _PublishedRateLimiterEvidence
+        ):
+            self._published_trading_requests_per_minute = None
+            self._published_non_trading_requests_per_minute = None
             self._effective_trading_requests_per_minute = None
             self._effective_non_trading_requests_per_minute = None
             return
+        published_trading = service._qtrad_published_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        published_non_trading = service._qtrad_published_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
         trading = service._trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
         non_trading = service._non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        expected_trading = published_trading - _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        expected_non_trading = published_non_trading - _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        if trading != expected_trading or non_trading != expected_non_trading:
+            raise RuntimeError(
+                "trading-ig effective REST request rates do not match the reviewed safety margin"
+            )
         if trading <= 0 or non_trading <= 0:
             raise RuntimeError("trading-ig configured a non-positive effective REST request rate")
+        self._published_trading_requests_per_minute = published_trading
+        self._published_non_trading_requests_per_minute = published_non_trading
         self._effective_trading_requests_per_minute = trading
         self._effective_non_trading_requests_per_minute = non_trading
         LOGGER.info(
@@ -1637,6 +1681,8 @@ class IgDemoMarketDataAdapter:
             extra={
                 "effective_trading_requests_per_minute": trading,
                 "effective_non_trading_requests_per_minute": non_trading,
+                "published_trading_requests_per_minute": published_trading,
+                "published_non_trading_requests_per_minute": published_non_trading,
             },
         )
 
@@ -1918,6 +1964,38 @@ def _records(value: object) -> list[Mapping[str, object]]:
         sequence = cast(Sequence[object], value)
         return [cast(Mapping[str, object], item) for item in sequence]
     raise TypeError(f"unsupported IG response type: {type(value).__name__}")
+
+
+def _validated_client_app_allowances(value: object, api_key: str) -> tuple[int, int]:
+    """Return published rates for exactly one current-key client-app response."""
+
+    matches: list[Mapping[str, object]] = []
+    for row in _records(value):
+        if "apiKey" not in row:
+            raise RuntimeError("IG client-app response has no apiKey")
+        if row["apiKey"] == api_key:
+            matches.append(row)
+    if len(matches) != 1:
+        raise RuntimeError(
+            "IG client-app response must contain exactly one entry for the configured API key"
+        )
+    match = matches[0]
+    try:
+        trading = match["allowanceAccountTrading"]
+        non_trading = match["allowanceAccountOverall"]
+    except KeyError as error:
+        raise RuntimeError("IG client-app response lacks a required published allowance") from error
+    for name, allowance in (
+        ("allowanceAccountTrading", trading),
+        ("allowanceAccountOverall", non_trading),
+    ):
+        if (
+            not isinstance(allowance, int)
+            or isinstance(allowance, bool)
+            or allowance <= _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        ):
+            raise RuntimeError(f"IG client-app {name} is not a usable integer allowance")
+    return cast(int, trading), cast(int, non_trading)
 
 
 def _single_record(value: object) -> Mapping[str, object]:

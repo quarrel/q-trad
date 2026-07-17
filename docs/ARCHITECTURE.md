@@ -413,7 +413,10 @@ Synchronous provider calls run as named daemon operations with explicit deadline
 than in asyncio's default executor, and adapter-owned REST requests have bounded default
 HTTP connect/read timeouts unless a call explicitly overrides them. An unresolved timeout
 poisons the lifecycle and prevents another connection from being created in that process.
-Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
+Every real IG login validates that the client-app response contains exactly one row for the configured
+API key, retains only its numeric published allowances, and requires `trading-ig`'s effective rates to
+equal those values minus its pinned two-request safety margin. Missing, duplicate, malformed or changed
+limiter semantics fail session establishment closed. Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
 fails, and a process-level regression proves an abandoned provider call cannot keep the
 command resident. ADR 0011 records this containment decision. The deployed image still contains the
 pinned Lightstreamer 1.0.3 lifecycle workaround. Proposed ADR 0025 locally selects maintained 2.2.2

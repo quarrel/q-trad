@@ -175,9 +175,11 @@ Implementation status:
                 Subscription renewal invalidates prior merged item state and requires a fresh healthy
                 update; SDK-reported loss remains sticky degraded health. The focused lifecycle suite
                   passes all 46 focused tests. Idempotent REST reads now serialise one v2 invalid-token
-                reauthentication and one replay, while effective limiter rates and authoritative
-                allowance failures are retained without API-key material. The complete isolated
-                PostgreSQL gate passes all 317 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                reauthentication and one replay. Each login now fails closed unless IG's client-app
+                response contains exactly one entry for the configured API key; numeric published
+                rates and the pinned library's published-minus-two effective rates are retained without
+                API-key material. Authoritative allowance failures are not retried. The complete isolated
+                  PostgreSQL gate now passes all 345 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
                   `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
                 - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
@@ -209,8 +211,8 @@ Implementation status:
                   client, verifies automatic recovery, injects a fixed invalid local REST token and
                   verifies one bounded reauthentication/replay plus another complete stream
                   generation. Exact reconnect/reauthentication counts, zero loss and full process
-                  cleanup are release gates. Every ready phase now requires the demo-provided
-                  effective trading/non-trading rates, and sticky abandoned-provider-operation state
+                  cleanup are release gates. Every ready phase now requires current-key-validated
+                  published and effective demo trading/non-trading rates, and sticky abandoned-provider-operation state
                   fails shutdown. It also remains unexecuted while the collector owns the API key.
                 - An independent offline verifier now recomputes either experiment manifest hash and,
                   for the contrast, confines and streams the gzip JSON-lines artifact to verify every

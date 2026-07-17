@@ -34,7 +34,7 @@ _RECOVERY_CHECKS = {
     "invalid_token_recovered": True,
     "exact_reconnect_count": True,
     "exact_rest_reauthentication_count": True,
-    "effective_rate_limits_observed": True,
+    "provider_rate_limits_observed": True,
     "zero_qtrad_drops": True,
     "zero_lightstreamer_loss": True,
     "zero_subscription_errors": True,

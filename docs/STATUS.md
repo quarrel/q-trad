@@ -514,8 +514,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - A local undeployed continuity-evidence slice records subscription establishment/end,
     server-applied real frequency, bounded server errors and SDK-reported lost updates. Renewal
     invalidates prior item state and loss is sticky degraded health. Idempotent REST reads additionally
-    perform at most one serialised v2 invalid-token reauthentication/replay, expose only numeric
-    effective limiter rates and retain authoritative allowance-error codes without retrying them.
+    perform at most one serialised v2 invalid-token reauthentication/replay. Each session creation now
+    validates exactly one current-key client-app entry and retains only its numeric published allowances
+    plus the pinned library's published-minus-two effective rates; missing, duplicate, malformed or
+    mismatched evidence fails closed without retaining API-key material. Authoritative allowance errors
+    are retained without retrying them.
       The earlier 42 focused lifecycle tests and complete 317-test isolated PostgreSQL gate passed.
       Proposed ADR 0025 now adds the IG application heartbeat as distinct whole-connection evidence,
       requires it for readiness and moves changed-field state mutation onto the event-loop side of the
@@ -536,7 +539,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
         when no PRICE callback arrives.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 338 tests.
+            compatibility, all migrations and all 345 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
