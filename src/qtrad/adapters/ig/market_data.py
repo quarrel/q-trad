@@ -177,6 +177,7 @@ class IgDemoConfig:
     provider_operation_timeout_seconds: float = 30.0
     http_connect_timeout_seconds: float = 5.0
     http_read_timeout_seconds: float = 15.0
+    historical_request_interval_seconds: float = 3.0
 
     @property
     def account_type(self) -> str:
@@ -202,6 +203,7 @@ class IgDemoConfig:
             or self.provider_operation_timeout_seconds <= 0
             or self.http_connect_timeout_seconds <= 0
             or self.http_read_timeout_seconds <= 0
+            or self.historical_request_interval_seconds < 0
         ):
             raise ValueError(
                 "lifecycle timeouts must be positive and stale reconnect must exceed staleness"
@@ -632,6 +634,8 @@ class IgDemoMarketDataAdapter:
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
         service = self._require_connected()
+        if self._config.historical_request_interval_seconds > 0:
+            await self._sleep(self._config.historical_request_interval_seconds)
         response = await self._run_provider_operation(
             "fetch_historical_prices",
             lambda: service.fetch_historical_prices_by_epic_and_date_range(

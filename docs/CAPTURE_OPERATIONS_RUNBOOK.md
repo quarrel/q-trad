@@ -634,7 +634,10 @@ Make that comparison reproducible as follows:
    Execution uses one IG demo session and records an append-only usage row before every request. The
    row retains the approved maximum and completes with returned points and provider-reported remaining
    allowance. Zero returned points complete the diagnostic request without falsely closing historical
-   coverage. Never point this operation at the collector database.
+   coverage. Historical provider requests are paced at a conservative three-second interval. If IG
+   still reports an exceeded allowance, stop, inspect the usage ledger and resume the same exact set
+   only after the applicable allowance window; do not generate a replacement plan. Never point this
+   operation at the collector database.
 3. Export the enclosing plan-set interval from the isolated database with
    `--snapshot-import-evidence`.
    Retain the version-two manifest ID printed by the command.
