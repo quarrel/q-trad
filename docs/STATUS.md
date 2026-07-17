@@ -552,6 +552,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
       complete stream generation. Exact reconnect and reauthentication counts, zero loss/errors and
       complete adapter/consumer/provider-thread cleanup fail closed. It remains unexecuted while the
       corrected collector owns the API key.
+    - The continuity protocol now prevents evidence substitution: the current old-lock run measures
+      the overload correction through its recurrent windows/weekend; guarded provider probes run only
+      after its approved stop and during active markets; ADR 0025 remains Proposed until both pass;
+      and the resulting immutable ARM image then requires its own fresh 72-hour `capture-v1`
+      endurance before `capture-v2` can be admitted.
     - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
       ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
       reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70

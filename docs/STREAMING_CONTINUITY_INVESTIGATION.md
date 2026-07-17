@@ -187,6 +187,28 @@ same-connection contrast remains ambiguous should a separate-network observer be
 requires a separately scoped demo API key/account, because the collector key must never open a
 second concurrent connection.
 
+## Execution sequence
+
+The evidence stages are deliberately non-substitutable:
+
+1. Leave the currently deployed overload-corrected Lightstreamer 1.0.3 collector untouched through
+   the recurrent `20:00Z`–`22:00Z` windows and a weekend maintenance boundary. This measures whether
+   the callback-overload correction removed the earlier loss, but cannot qualify heartbeat or 2.2.2.
+2. Close and stop that run only through an operator-approved procedure which proves no remaining
+   connection for the API key. During an active market window, run the three-hour 15-subscription
+   contrast and then the short q-trad recovery experiment. Market closure is not a valid way to make
+   all CHART:TICK channels data-ready.
+3. If either provider experiment fails, retain its failure evidence and do not accept ADR 0025 or
+   deploy the candidate lock. Diagnose or revise locally, then repeat under a new non-overwriting
+   evidence identity.
+4. If both pass, accept ADR 0025 through review, merge the exact green commit, publish its immutable
+   amd64/arm64 image and deploy that digest through the capture release procedure. The old-image
+   endurance and local provider runs do not substitute for ARM/provider evidence from this image.
+5. Run the exact candidate image for a fresh 72-hour `capture-v1` endurance interval spanning the
+   recurrent daily window. Require heartbeat and every PRICE lifecycle/frequency channel current,
+   zero q-trad or SDK loss, bounded queue/projection lag, no unexplained gaps and a clean terminal
+   shutdown. Only this final stage can admit `capture-v2` mapping qualification.
+
 ## Exit gate
 
 Corrected `capture-v1` can qualify only after a representative endurance interval demonstrates:

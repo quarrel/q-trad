@@ -210,6 +210,11 @@ Implementation status:
                   generation. Exact reconnect/reauthentication counts, zero loss and full process
                   cleanup are release gates. It also remains unexecuted while the collector owns the
                   API key.
+                - The release sequence is now explicit: finish the untouched old-lock corrected run
+                  through its recurrent windows and weekend; stop it with operator approval; execute
+                  both provider probes during active markets; accept ADR 0025 only on PASS; then
+                  publish/deploy the exact ARM candidate and give that image its own fresh 72-hour
+                  `capture-v1` endurance. Earlier stages cannot qualify the later dependency/image.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
