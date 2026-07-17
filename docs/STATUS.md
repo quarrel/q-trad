@@ -425,6 +425,12 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - The first daily backup after the boundary ran on schedule from `2026-07-17T03:30:04Z` to
     `03:31:41Z` and exited successfully while collector readiness remained HTTP 200. This is useful
     continuing-operations evidence, but does not change the failed no-loss qualification result.
+  - The first post-window reconciliation plan correctly found the five expected stale runs but was
+    not executed because its effective capture source was `local-development`, conflicting with the
+    runbook's assumed `oci-sydney-capture-1`. The deployed environment had omitted the explicit source
+    variable, so the validated application default is the truthful identity already used by this
+    canonical store and its backups. Documentation now preserves that identity rather than relabelling
+    existing history.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

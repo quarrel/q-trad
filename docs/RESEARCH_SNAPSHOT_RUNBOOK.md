@@ -30,7 +30,7 @@ export QTRAD_SNAPSHOT_CHECKSUM="$QTRAD_SNAPSHOT_ARCHIVE.sha256"
 export QTRAD_SNAPSHOT_MANIFEST="$QTRAD_SNAPSHOT_ARCHIVE.manifest.json"
 export QTRAD_RESEARCH_DATABASE=qtrad_research_capture_20260714
 export QTRAD_RESEARCH_IMPORT_EVIDENCE=/private/snapshot/import-20260714.json
-export QTRAD_EXPECTED_CAPTURE_SOURCE_ID=oci-sydney-capture-1
+export QTRAD_EXPECTED_CAPTURE_SOURCE_ID=local-development
 export QTRAD_EXPECTED_UNIVERSE_HASH='<capture-v1 configuration hash>'
 
 # Required only for a legacy v1 backup; use the migration recorded by its restore evidence.
@@ -53,7 +53,7 @@ this workflow.
 ```bash
 export QTRAD_DATABASE_URL='postgresql+asyncpg://qtrad:<private-password>@db:5432/qtrad_research_capture_20260714'
 export QTRAD_MIGRATION_DATABASE_URL='postgresql+psycopg://qtrad:<private-password>@db:5432/qtrad_research_capture_20260714'
-export QTRAD_CAPTURE_SOURCE_ID=oci-sydney-capture-1
+export QTRAD_CAPTURE_SOURCE_ID=local-development
 export QTRAD_RESEARCH_ROOT=/private/research/capture-20260714
 
 uv run qtrad db upgrade
@@ -74,4 +74,3 @@ Keep the source bundle and import evidence until every derived manifest has reac
 retention. The research database is a mutable working copy and is not the durable dataset; verified
 Parquet manifests are. Drop a research database only by an explicit operator action after confirming
 that no active export, replay or investigation uses it.
-
