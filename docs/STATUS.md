@@ -409,6 +409,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
     including exactly 22,029 `ig_queue_saturated` events. This independently corroborates the database
     health total and confirms that the formal non-overwriting log bundle can still preserve the complete
     loss sequence; it has not yet been written.
+  - The first daily backup after the boundary ran on schedule from `2026-07-17T03:30:04Z` to
+    `03:31:41Z` and exited successfully while collector readiness remained HTTP 200. This is useful
+    continuing-operations evidence, but does not change the failed no-loss qualification result.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
