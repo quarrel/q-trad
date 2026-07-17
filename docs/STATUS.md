@@ -542,7 +542,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         its retained watchdog grace window. Health returns only after a new heartbeat and fresh evidence
         from every PRICE channel on the recovered transport; a pre-stall heartbeat cannot qualify it.
           The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
-            compatibility, all migrations and all 348 tests.
+            compatibility, all migrations and all 349 tests.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
     endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
         The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
@@ -558,6 +558,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
         and reconciles total event attempts exactly with written records plus reported queue drops.
         This prevents a PASS artifact from hiding missing callback/lifecycle evidence or accidentally
         retaining an unreviewed account/token field.
+        Recovery verification now likewise recomputes ordered initial/disconnect/token phase evidence,
+        exact recovery counters, seven-instrument count advancement, per-phase heartbeat/PRICE/frequency
+        and current-key rate evidence, zero loss, and final client/session/worker/consumer cleanup.
     - A second guarded provider-recovery harness now uses the production adapter without a database.
       It requires initial PRICE/heartbeat/frequency readiness, terminates the actual Lightstreamer
       client, verifies automatic recovery with fresh records from all instruments, then injects a

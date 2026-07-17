@@ -161,6 +161,173 @@ def _verify_event_record(record: Mapping[str, object], context: str) -> int:
     return sequence
 
 
+def _boolean(value: Mapping[str, object], key: str) -> bool:
+    candidate = value[key]
+    if not isinstance(candidate, bool):
+        raise TypeError(f"{key} must be a boolean")
+    return candidate
+
+
+def _positive_integer_value(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def _rate_evidence_valid(value: Mapping[str, object]) -> bool:
+    published_trading = value["published_trading_requests_per_minute"]
+    published_non_trading = value["published_non_trading_requests_per_minute"]
+    effective_trading = value["effective_trading_requests_per_minute"]
+    effective_non_trading = value["effective_non_trading_requests_per_minute"]
+    positive = (
+        _positive_integer_value(published_trading)
+        and _positive_integer_value(published_non_trading)
+        and _positive_integer_value(effective_trading)
+        and _positive_integer_value(effective_non_trading)
+    )
+    if not positive:
+        return False
+    return (
+        cast(int, effective_trading) == cast(int, published_trading) - 2
+        and cast(int, effective_non_trading) == cast(int, published_non_trading) - 2
+    )
+
+
+def _verify_ready_recovery_phase(
+    phase: Mapping[str, object],
+    *,
+    expected_name: str,
+    expected_reconnects: int,
+    expected_reauthentications: int,
+    previous_counts: Mapping[str, int],
+) -> dict[str, int]:
+    if _text(phase, "phase") != expected_name:
+        raise ValueError("recovery phases are missing or out of order")
+    _text(phase, "observed_at")
+    adapter = _object(phase["adapter"], f"{expected_name} adapter")
+    if _text(adapter, "health_status") != "HEALTHY":
+        raise ValueError(f"{expected_name} adapter is not healthy")
+    if not _boolean(adapter, "stream_client_present") or not _boolean(
+        adapter, "rest_service_present"
+    ):
+        raise ValueError(f"{expected_name} lacks active client/session evidence")
+    if _integer(adapter, "provider_worker_count") != 0 or _boolean(
+        adapter, "reconnect_task_present"
+    ):
+        raise ValueError(f"{expected_name} has incomplete provider operations")
+    if (
+        _integer(adapter, "reconnects") != expected_reconnects
+        or _integer(adapter, "rest_reauthentications") != expected_reauthentications
+    ):
+        raise ValueError(f"{expected_name} has incorrect recovery counters")
+    if not _rate_evidence_valid(adapter):
+        raise ValueError(f"{expected_name} lacks validated provider rate evidence")
+    for key in ("expected_subscriptions", "subscribed_subscriptions", "updated_subscriptions"):
+        if _integer(adapter, key) != 7:
+            raise ValueError(f"{expected_name} lacks seven-channel readiness")
+    if not _boolean(adapter, "heartbeat_subscribed") or not _boolean(
+        adapter, "heartbeat_transport_current"
+    ):
+        raise ValueError(f"{expected_name} lacks current heartbeat evidence")
+    if _integer(adapter, "heartbeat_events") == 0:
+        raise ValueError(f"{expected_name} has no heartbeat event")
+    _text(adapter, "heartbeat_frequency")
+    frequencies = _object(adapter["frequency_evidence"], f"{expected_name} frequencies")
+    fresh_times = _object(adapter["fresh_subscription_times"], f"{expected_name} freshness")
+    if len(frequencies) != 7 or len(fresh_times) != 7:
+        raise ValueError(f"{expected_name} lacks per-channel frequency/freshness evidence")
+    if set(frequencies) != set(fresh_times):
+        raise ValueError(f"{expected_name} frequency and freshness channels differ")
+    for value in frequencies.values():
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"{expected_name} has malformed frequency evidence")
+    for value in fresh_times.values():
+        if not isinstance(value, str) or not value:
+            raise TypeError(f"{expected_name} has malformed freshness evidence")
+    for key in (
+        "lightstreamer_lost_updates",
+        "qtrad_dropped_records",
+        "subscription_errors",
+        "server_errors",
+    ):
+        if _integer(adapter, key) != 0:
+            raise ValueError(f"{expected_name} contains loss or error evidence")
+    if _boolean(adapter, "abandoned_provider_operation"):
+        raise ValueError(f"{expected_name} abandoned a provider operation")
+
+    counts_raw = _object(phase["record_counts"], f"{expected_name} record_counts")
+    if len(counts_raw) != 7:
+        raise ValueError(f"{expected_name} record counts do not cover seven instruments")
+    counts = {instrument: _integer(counts_raw, instrument) for instrument in counts_raw}
+    if previous_counts and set(counts) != set(previous_counts):
+        raise ValueError("recovery phase instrument sets differ")
+    if any(count <= previous_counts.get(instrument, 0) for instrument, count in counts.items()):
+        raise ValueError(f"{expected_name} lacks fresh records for every instrument")
+    return counts
+
+
+def _verify_recovery(
+    manifest: Mapping[str, object], checks: Mapping[str, object]
+) -> dict[str, object]:
+    phases_value = manifest["phases"]
+    if not isinstance(phases_value, list):
+        raise TypeError("recovery phases must be a JSON array")
+    expected = (
+        ("INITIAL_READY", 0, 0),
+        ("DISCONNECT_RECOVERED", 1, 0),
+        ("INVALID_TOKEN_RECOVERED", 2, 1),
+    )
+    if len(phases_value) > len(expected):
+        raise ValueError("recovery evidence contains unexpected phases")
+    previous_counts: dict[str, int] = {}
+    observed_names: list[str] = []
+    for index, value in enumerate(phases_value):
+        phase = _object(value, f"recovery phase {index + 1}")
+        name, reconnects, reauthentications = expected[index]
+        previous_counts = _verify_ready_recovery_phase(
+            phase,
+            expected_name=name,
+            expected_reconnects=reconnects,
+            expected_reauthentications=reauthentications,
+            previous_counts=previous_counts,
+        )
+        observed_names.append(name)
+
+    final = _object(manifest["final_adapter"], "final_adapter")
+    shutdown = _object(manifest["shutdown"], "shutdown")
+    rates_observed = _rate_evidence_valid(final)
+    shutdown_verified = (
+        _text(final, "health_status") == "STOPPED"
+        and not _boolean(final, "stream_client_present")
+        and not _boolean(final, "rest_service_present")
+        and _integer(final, "provider_worker_count") == 0
+        and not _boolean(final, "reconnect_task_present")
+        and _boolean(shutdown, "consumer_created")
+        and _boolean(shutdown, "consumer_done")
+        and not _boolean(shutdown, "consumer_error")
+    )
+    derived = {
+        "initial_ready": "INITIAL_READY" in observed_names,
+        "disconnect_recovered": "DISCONNECT_RECOVERED" in observed_names,
+        "invalid_token_recovered": "INVALID_TOKEN_RECOVERED" in observed_names,
+        "exact_reconnect_count": _integer(final, "reconnects") == 2,
+        "exact_rest_reauthentication_count": _integer(final, "rest_reauthentications") == 1,
+        "provider_rate_limits_observed": rates_observed,
+        "zero_qtrad_drops": _integer(final, "qtrad_dropped_records") == 0,
+        "zero_lightstreamer_loss": _integer(final, "lightstreamer_lost_updates") == 0,
+        "zero_subscription_errors": _integer(final, "subscription_errors") == 0,
+        "zero_server_errors": _integer(final, "server_errors") == 0,
+        "shutdown_verified": shutdown_verified,
+        "no_abandoned_provider_operation": not _boolean(final, "abandoned_provider_operation"),
+        "provider_operations_completed": manifest["failure"] is None,
+    }
+    if any(checks[key] is not value for key, value in derived.items()):
+        raise ValueError("recovery checks do not agree with structured lifecycle evidence")
+    return {
+        "recovery_phases": observed_names,
+        "final_reconnects": _integer(final, "reconnects"),
+        "final_rest_reauthentications": _integer(final, "rest_reauthentications"),
+    }
+
+
 def _verify_contrast(manifest_path: Path, manifest: Mapping[str, object]) -> dict[str, object]:
     stream = _object(manifest["event_stream"], "event_stream")
     if _text(stream, "encoding") != "gzip-json-lines":
@@ -237,6 +404,7 @@ def verify(manifest_path: Path) -> dict[str, object]:
     elif experiment == _RECOVERY:
         if set(checks) != _RECOVERY_CHECKS:
             raise ValueError("recovery evidence does not contain the exact v1 check set")
+        detail = _verify_recovery(manifest, checks)
     else:
         raise ValueError(f"unsupported stream experiment: {experiment}")
     result = _text(manifest, "result")

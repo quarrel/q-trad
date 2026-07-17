@@ -147,6 +147,11 @@ def _adapter_snapshot(adapter: IgDemoMarketDataAdapter) -> dict[str, object]:
     trading_rate = adapter._effective_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
     non_trading_rate = adapter._effective_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
     return {
+        "health_status": adapter._status.value,  # pyright: ignore[reportPrivateUsage]
+        "stream_client_present": adapter._stream_client is not None,  # pyright: ignore[reportPrivateUsage]
+        "rest_service_present": adapter._service is not None,  # pyright: ignore[reportPrivateUsage]
+        "provider_worker_count": len(adapter._provider_threads),  # pyright: ignore[reportPrivateUsage]
+        "reconnect_task_present": adapter._reconnect_task is not None,  # pyright: ignore[reportPrivateUsage]
         "generation": adapter._generation,  # pyright: ignore[reportPrivateUsage]
         "reconnects": adapter._reconnect_count,  # pyright: ignore[reportPrivateUsage]
         "rest_reauthentications": adapter._rest_reauthentications,  # pyright: ignore[reportPrivateUsage]
@@ -419,6 +424,11 @@ async def _run(arguments: _Arguments) -> dict[str, object]:
         "configuration_hash": universe.configuration_hash,
         "phases": phases,
         "final_adapter": final_snapshot,
+        "shutdown": {
+            "consumer_created": consumer is not None,
+            "consumer_done": consumer is not None and consumer.done(),
+            "consumer_error": consumer_error is not None,
+        },
         "checks": checks,
         "failure": None
         if run_error is None

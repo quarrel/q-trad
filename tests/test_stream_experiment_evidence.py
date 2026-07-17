@@ -4,6 +4,7 @@ import gzip
 import hashlib
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -43,6 +44,80 @@ _RECOVERY_CHECKS = {
     "no_abandoned_provider_operation": True,
     "provider_operations_completed": True,
 }
+
+
+def _recovery_snapshot(
+    *, reconnects: int, reauthentications: int, running: bool
+) -> dict[str, object]:
+    epics = [f"epic-{index}" for index in range(7)]
+    return {
+        "health_status": "HEALTHY" if running else "STOPPED",
+        "stream_client_present": running,
+        "rest_service_present": running,
+        "provider_worker_count": 0,
+        "reconnect_task_present": False,
+        "reconnects": reconnects,
+        "rest_reauthentications": reauthentications,
+        "published_trading_requests_per_minute": 9,
+        "published_non_trading_requests_per_minute": 25,
+        "effective_trading_requests_per_minute": 7,
+        "effective_non_trading_requests_per_minute": 23,
+        "expected_subscriptions": 7 if running else 0,
+        "subscribed_subscriptions": 7 if running else 0,
+        "updated_subscriptions": 7 if running else 0,
+        "fresh_subscription_times": {epic: "2026-07-17T00:00:00Z" for epic in epics}
+        if running
+        else {},
+        "frequency_evidence": {epic: "unlimited" for epic in epics} if running else {},
+        "heartbeat_subscribed": running,
+        "heartbeat_transport_current": running,
+        "heartbeat_events": 1 if running else 0,
+        "heartbeat_frequency": "unlimited" if running else None,
+        "lightstreamer_lost_updates": 0,
+        "qtrad_dropped_records": 0,
+        "subscription_errors": 0,
+        "server_errors": 0,
+        "abandoned_provider_operation": False,
+    }
+
+
+def _recovery_evidence(*, checks: dict[str, bool] | None = None) -> dict[str, object]:
+    instruments = [f"instrument-{index}" for index in range(7)]
+    phases = []
+    for index, (name, reconnects, reauthentications) in enumerate(
+        (
+            ("INITIAL_READY", 0, 0),
+            ("DISCONNECT_RECOVERED", 1, 0),
+            ("INVALID_TOKEN_RECOVERED", 2, 1),
+        ),
+        start=1,
+    ):
+        phases.append(
+            {
+                "phase": name,
+                "observed_at": f"2026-07-17T00:0{index}:00+00:00",
+                "adapter": _recovery_snapshot(
+                    reconnects=reconnects,
+                    reauthentications=reauthentications,
+                    running=True,
+                ),
+                "record_counts": {instrument: index for instrument in instruments},
+            }
+        )
+    return {
+        "schema_version": 1,
+        "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
+        "result": "PASS",
+        "phases": phases,
+        "final_adapter": _recovery_snapshot(reconnects=2, reauthentications=1, running=False),
+        "shutdown": {
+            "consumer_created": True,
+            "consumer_done": True,
+            "consumer_error": False,
+        },
+        "failure": None,
+        "checks": checks or dict(_RECOVERY_CHECKS),
+    }
 
 
 def _write_events(path: Path, records: list[dict[str, object]]) -> tuple[int, str]:
@@ -181,12 +256,7 @@ def test_rejects_unreviewed_event_fields_and_inconsistent_drop_evidence(tmp_path
 
 def test_verifies_recovery_manifest_without_event_stream(tmp_path: Path) -> None:
     manifest = tmp_path / "recovery.json"
-    evidence: dict[str, object] = {
-        "schema_version": 1,
-        "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
-        "result": "PASS",
-        "checks": _RECOVERY_CHECKS,
-    }
+    evidence = _recovery_evidence()
     write_recovery(manifest, evidence)
 
     result = verify(manifest)
@@ -197,12 +267,7 @@ def test_verifies_recovery_manifest_without_event_stream(tmp_path: Path) -> None
 
 def test_rejects_manifest_tampering_and_event_path_escape(tmp_path: Path) -> None:
     recovery = tmp_path / "recovery.json"
-    evidence: dict[str, object] = {
-        "schema_version": 1,
-        "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
-        "result": "PASS",
-        "checks": _RECOVERY_CHECKS,
-    }
+    evidence = _recovery_evidence()
     write_recovery(recovery, evidence)
     stored = json.loads(recovery.read_text())
     stored["result"] = "FAIL"
@@ -233,17 +298,27 @@ def test_rejects_manifest_tampering_and_event_path_escape(tmp_path: Path) -> Non
 
 def test_rejects_result_that_disagrees_with_checks(tmp_path: Path) -> None:
     manifest = tmp_path / "recovery.json"
+    evidence = _recovery_evidence()
+    evidence["result"] = "FAIL"
     write_recovery(
         manifest,
-        {
-            "schema_version": 1,
-            "experiment": "IG_QTRAD_STREAM_AND_TOKEN_RECOVERY",
-            "result": "PASS",
-            "checks": {**_RECOVERY_CHECKS, "disconnect_recovered": False},
-        },
+        evidence,
     )
 
     with pytest.raises(ValueError, match="does not agree"):
+        verify(manifest)
+
+
+def test_rejects_recovery_checks_without_matching_structured_lifecycle_evidence(
+    tmp_path: Path,
+) -> None:
+    manifest = tmp_path / "recovery.json"
+    evidence = _recovery_evidence()
+    final = cast(dict[str, object], evidence["final_adapter"])
+    final["reconnects"] = 1
+    write_recovery(manifest, evidence)
+
+    with pytest.raises(ValueError, match="structured lifecycle evidence"):
         verify(manifest)
 
 

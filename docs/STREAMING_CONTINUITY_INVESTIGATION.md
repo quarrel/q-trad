@@ -139,6 +139,10 @@ recomputes the uncompressed count and SHA-256. It requires a non-empty boolean c
 that `PASS` means every check passed. Schema v1 additionally requires the exact contrast or recovery
 check set, preventing a partial manifest from weakening the gate. A structurally valid `FAIL`
 remains a failure.
+For recovery evidence it additionally validates the ordered initial/disconnect/token phases, exact
+reconnect and reauthentication progression, seven advancing instrument counts, per-phase
+PRICE/heartbeat/frequency/rate evidence, zero loss and final client/session/worker/consumer cleanup.
+The named recovery checks must agree with those structured facts.
 
 The REST/session portion is implemented locally. An explicit invalid-token exception serialises
 reauthentication and permits exactly one replay of the idempotent read. With an active stream it uses

@@ -179,7 +179,7 @@ Implementation status:
                 response contains exactly one entry for the configured API key; numeric published
                 rates and the pinned library's published-minus-two effective rates are retained without
                 API-key material. Authoritative allowance failures are not retried. The complete isolated
-                  PostgreSQL gate now passes all 348 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                  PostgreSQL gate now passes all 349 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
                   `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
                 - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
@@ -222,8 +222,12 @@ Implementation status:
                     for the contrast, confines and streams the gzip JSON-lines artifact to verify every
                     record, reviewed schema, increasing sequence, exact attempted/written/drop
                     reconciliation, count and uncompressed SHA-256. Integrity verification
-                  also requires the exact schema-v1 experiment check set, preserves a truthful FAIL
-                  and is required before evidence review.
+                    also requires the exact schema-v1 experiment check set, preserves a truthful FAIL
+                    and is required before evidence review.
+                    Recovery verification recomputes the ordered three-phase lifecycle, exact
+                    reconnect/reauthentication progression, seven-instrument record advancement,
+                    per-phase readiness/rate evidence, loss counters and final cleanup from bounded
+                    structured fields rather than trusting named check booleans.
                 - The release sequence is now explicit: finish the untouched old-lock corrected run
                   through its recurrent windows and weekend; stop it with operator approval; execute
                   both provider probes during active markets; accept ADR 0025 only on PASS; then
