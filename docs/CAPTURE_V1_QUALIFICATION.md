@@ -133,6 +133,18 @@ sign-off; they must not be silently deleted or presented as successful runs.
 - Before any restart or deployment, the snapshot's bounded log bundle was written and independently
   verified with manifest SHA-256
   `093f5267d9ae8a6acd838180d84a60fcb0c2a995d3f8436fa30c991bd3047b43`.
+- A numbered retry using the corrected descriptor and mount assertions was written at
+  `2026-07-17T04:43:57Z`. Its evidence SHA-256 is
+  `62a9227792a6e2c396f394a4c6346da0dde42af3aeef9312443bb7f0b060f0dc`; `adapter_ok` is its only
+  failed automatic check, and its 70-gap log bundle independently verifies at manifest SHA-256
+  `0b1e8eb5593903bf6d02974334b71942bd525f9c91bf35ed664bfc641c7e8e2a`.
+- A post-retry collector backup completed at `2026-07-17T04:46:06Z`. Its archive set was downloaded
+  without transferring OCI credentials, checksum-verified and imported into the isolated local
+  `qtrad_research_capture_20260717` database. Import evidence
+  `0e72c538e1d04726a8ba3dd8d8a0a7579680a67b324a028ff6c2eb40724da5dd` binds the
+  `2026-07-17T04:45:55Z` snapshot, migration `0003`, 3,047,086 raw messages and 3,478,536 canonical
+  events. The first import attempt exposed that psql does not expand variables in `--command`; the
+  database-existence guard now supplies its parameterised SQL on stdin and the real import passes.
 
 The queued comparison is implemented locally as `qtrad qualification gap-history` under ADR 0022.
 After the automatic snapshot, it requires a verified post-evidence collector snapshot imported into

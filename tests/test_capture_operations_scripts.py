@@ -1496,9 +1496,10 @@ def test_research_snapshot_import_is_verified_non_overwriting_and_evidenced(
         fake_bin / "psql",
         f"""#!/usr/bin/env bash
 set -euo pipefail
-printf '%s\\n' "psql $*" >> '{calls}'
-case "$*" in
-  *"SELECT datname FROM pg_database"*) ;;
+  stdin=$(cat)
+  printf '%s stdin=%s\\n' "psql $*" "$stdin" >> '{calls}'
+  case "$* $stdin" in
+    *"SELECT datname FROM pg_database"*) [[ "$stdin" == *":'target_database'"* ]] ;;
   *"SELECT (SELECT version_num"*) printf '0006|12|11\\n' ;;
 esac
 """,

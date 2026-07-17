@@ -89,8 +89,9 @@ pg_restore --list "$archive" > /dev/null
 
 existing_database="$(
   psql --no-psqlrc --tuples-only --no-align --set ON_ERROR_STOP=1 \
-    --set target_database="$target_database" --dbname "$maintenance_database" \
-    --command "SELECT datname FROM pg_database WHERE datname = :'target_database';"
+    --set target_database="$target_database" --dbname "$maintenance_database" <<'SQL'
+SELECT datname FROM pg_database WHERE datname = :'target_database';
+SQL
 )"
 [[ -z "$existing_database" ]]
 
