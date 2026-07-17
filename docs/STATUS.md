@@ -445,6 +445,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - The non-overwriting log bundle was captured before any lifecycle operation and independently
     verified at manifest SHA-256
     `093f5267d9ae8a6acd838180d84a60fcb0c2a995d3f8436fa30c991bd3047b43`.
+  - The corrected numbered snapshot now fails only `adapter_ok`, as intended, and its bound log bundle
+    verifies independently. A subsequent online backup produced a checksum-verified post-evidence
+    snapshot, which was restored into the isolated local `qtrad_research_capture_20260717` database at
+    migration `0003`; its immutable import evidence binds 3,047,086 raw messages and 3,478,536
+    canonical events. The collector remained running and was not migrated.
+  - That first real local import exposed a psql integration bug hidden by the command mock: psql does
+    not expand variables embedded in `--command`. The database-existence guard now feeds its
+    parameterised query on stdin, and both focused tests and the real 575 MB snapshot import pass.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
