@@ -405,6 +405,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
     `2026-07-16T04:25:07.986Z`. This repeated shape is evidence for a provider/session-cycle hypothesis,
     not a classification. The post-closure reviewed historical plan must query all 70 intervals within
     evidenced quota and record whether provider bars exist.
+  - The retained ingestion log still spans the candidate start and contains 22,159 bounded records,
+    including exactly 22,029 `ig_queue_saturated` events. This independently corroborates the database
+    health total and confirms that the formal non-overwriting log bundle can still preserve the complete
+    loss sequence; it has not yet been written.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
