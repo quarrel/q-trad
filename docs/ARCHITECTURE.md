@@ -279,7 +279,9 @@ boundary.
 - One-minute intervals are UTC and half-open: `[start, end)`.
 - Bid, ask and midpoint bars are separate.
 - Midpoint samples require bid and ask timestamps within five seconds.
-- A five-second watermark closes a bar.
+- A five-second transport receive-time watermark closes a bar. Processing wall time does not advance
+  the watermark past queued records, so application or database backlog cannot manufacture late
+  revisions from transport-ordered observations.
 - Late samples create a later revision.
 - Missing prices are not forward-filled.
 - A healthy-stream silence over two minutes creates a gap event. It records missing fresh-quote
