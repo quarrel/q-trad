@@ -107,8 +107,11 @@ fixed invalid probe value. The next idempotent listing-review read must produce 
 reauthentication/replay and another complete stream generation. Each phase records bounded adapter
 and per-instrument count evidence. The final checks require exactly two reconnects, one REST
 reauthentication, zero q-trad/SDK loss or server/subscription errors, and verified termination of the
-stream, REST service, consumer and provider-operation threads. It never records credentials, tokens,
-account identity, provider messages or market values.
+stream, REST service, consumer and provider-operation threads. Every ready phase additionally
+requires positive effective trading and non-trading request rates obtained by `trading-ig` from the
+current demo login; an abandoned provider operation is a terminal failure even if its worker later
+ends. The probe never records credentials, tokens, account identity, provider messages or market
+values.
 
 Independently verify either retained manifest after copying its complete artifact set:
 

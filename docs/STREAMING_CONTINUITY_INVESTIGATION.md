@@ -125,7 +125,8 @@ actual Lightstreamer client and requires automatic recovery with fresh records f
 instrument. It then replaces only the local CST/XST request headers with a fixed invalid probe value;
 one idempotent listing-review read must cause exactly one bounded reauthentication/replay and a
 second fully ready stream generation. The non-overwriting manifest requires exactly two reconnects,
-one REST reauthentication, zero q-trad/SDK loss or subscription/server errors and verified cleanup.
+one REST reauthentication, positive effective trading/non-trading rates after each login, zero
+q-trad/SDK loss or subscription/server errors, no abandoned provider operation and verified cleanup.
 It remains unexecuted while the corrected collector measurement owns the API key.
 
 `ops/dev/verify_stream_experiment_evidence.py` independently validates either experiment. It

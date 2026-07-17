@@ -138,10 +138,14 @@ def _adapter_snapshot(adapter: IgDemoMarketDataAdapter) -> dict[str, object]:
     quote_times = adapter._quote_received_times  # pyright: ignore[reportPrivateUsage]
     expected = adapter._expected_epics  # pyright: ignore[reportPrivateUsage]
     health_frequency = adapter._real_max_frequency_by_epic  # pyright: ignore[reportPrivateUsage]
+    trading_rate = adapter._effective_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+    non_trading_rate = adapter._effective_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
     return {
         "generation": adapter._generation,  # pyright: ignore[reportPrivateUsage]
         "reconnects": adapter._reconnect_count,  # pyright: ignore[reportPrivateUsage]
         "rest_reauthentications": adapter._rest_reauthentications,  # pyright: ignore[reportPrivateUsage]
+        "effective_trading_requests_per_minute": trading_rate,
+        "effective_non_trading_requests_per_minute": non_trading_rate,
         "expected_subscriptions": len(expected),
         "subscribed_subscriptions": len(
             adapter._subscribed_epics  # pyright: ignore[reportPrivateUsage]
@@ -163,6 +167,7 @@ def _adapter_snapshot(adapter: IgDemoMarketDataAdapter) -> dict[str, object]:
         "server_errors": adapter._server_errors,  # pyright: ignore[reportPrivateUsage]
         "queue_high_water": adapter._queue_high_water,  # pyright: ignore[reportPrivateUsage]
         "transport_status": adapter._last_stream_status,  # pyright: ignore[reportPrivateUsage]
+        "abandoned_provider_operation": adapter._abandoned_provider_operation,  # pyright: ignore[reportPrivateUsage]
     }
 
 
@@ -171,6 +176,16 @@ def _phase_ready(adapter: IgDemoMarketDataAdapter, reconnects: int, reauthentica
         adapter._status is HealthStatus.HEALTHY  # pyright: ignore[reportPrivateUsage]
         and adapter._reconnect_count == reconnects  # pyright: ignore[reportPrivateUsage]
         and adapter._rest_reauthentications == reauthentications  # pyright: ignore[reportPrivateUsage]
+        and isinstance(
+            adapter._effective_trading_requests_per_minute,  # pyright: ignore[reportPrivateUsage]
+            int,
+        )
+        and adapter._effective_trading_requests_per_minute > 0  # pyright: ignore[reportPrivateUsage]
+        and isinstance(
+            adapter._effective_non_trading_requests_per_minute,  # pyright: ignore[reportPrivateUsage]
+            int,
+        )
+        and adapter._effective_non_trading_requests_per_minute > 0  # pyright: ignore[reportPrivateUsage]
         and adapter._expected_epics  # pyright: ignore[reportPrivateUsage]
         == adapter._subscribed_epics  # pyright: ignore[reportPrivateUsage]
         == adapter._updated_epics  # pyright: ignore[reportPrivateUsage]
@@ -341,6 +356,7 @@ async def _run(arguments: _Arguments) -> dict[str, object]:
             and adapter._stream_client is None  # pyright: ignore[reportPrivateUsage]
             and adapter._service is None  # pyright: ignore[reportPrivateUsage]
             and not adapter._provider_threads  # pyright: ignore[reportPrivateUsage]
+            and not adapter._abandoned_provider_operation  # pyright: ignore[reportPrivateUsage]
             and adapter._reconnect_task is None  # pyright: ignore[reportPrivateUsage]
             and consumer is not None
             and consumer.done()
@@ -356,11 +372,18 @@ async def _run(arguments: _Arguments) -> dict[str, object]:
         ),
         "exact_reconnect_count": final_snapshot["reconnects"] == 2,
         "exact_rest_reauthentication_count": final_snapshot["rest_reauthentications"] == 1,
+        "effective_rate_limits_observed": (
+            isinstance(final_snapshot["effective_trading_requests_per_minute"], int)
+            and final_snapshot["effective_trading_requests_per_minute"] > 0
+            and isinstance(final_snapshot["effective_non_trading_requests_per_minute"], int)
+            and final_snapshot["effective_non_trading_requests_per_minute"] > 0
+        ),
         "zero_qtrad_drops": final_snapshot["qtrad_dropped_records"] == 0,
         "zero_lightstreamer_loss": final_snapshot["lightstreamer_lost_updates"] == 0,
         "zero_subscription_errors": final_snapshot["subscription_errors"] == 0,
         "zero_server_errors": final_snapshot["server_errors"] == 0,
         "shutdown_verified": shutdown_verified,
+        "no_abandoned_provider_operation": not final_snapshot["abandoned_provider_operation"],
         "provider_operations_completed": run_error is None,
     }
     return {

@@ -550,8 +550,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
       client, verifies automatic recovery with fresh records from all instruments, then injects a
       fixed invalid local REST token and requires one bounded reauthentication/replay plus another
       complete stream generation. Exact reconnect and reauthentication counts, zero loss/errors and
-      complete adapter/consumer/provider-thread cleanup fail closed. It remains unexecuted while the
-      corrected collector owns the API key.
+      complete adapter/consumer/provider-thread cleanup fail closed. Each ready phase requires the
+      positive effective trading/non-trading rates obtained from the current demo login, and sticky
+      abandoned-provider-operation state fails shutdown. It remains unexecuted while the corrected
+      collector owns the API key.
     - Provider experiment evidence now has an independent offline verifier. It recomputes either
       manifest self-hash and, for contrast evidence, confines the adjacent event path, parses every
       gzip JSON-lines record and recomputes increasing sequence, count and uncompressed SHA-256.

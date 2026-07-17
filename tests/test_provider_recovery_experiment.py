@@ -56,6 +56,8 @@ def test_recovery_phase_requires_complete_fresh_lifecycle_evidence() -> None:
     adapter._status = HealthStatus.HEALTHY
     adapter._reconnect_count = 1
     adapter._rest_reauthentications = 0
+    adapter._effective_trading_requests_per_minute = 7
+    adapter._effective_non_trading_requests_per_minute = 23
     adapter._expected_epics = set(epics)
     adapter._subscribed_epics = set(epics)
     adapter._updated_epics = set(epics)
@@ -80,6 +82,7 @@ def test_recovery_snapshot_is_bounded_and_contains_no_credentials() -> None:
     encoded = json.dumps(snapshot)
 
     assert snapshot["expected_subscriptions"] == 1
+    assert snapshot["abandoned_provider_operation"] is False
     assert "username" not in encoded
     assert "password" not in encoded
     assert "api_key" not in encoded

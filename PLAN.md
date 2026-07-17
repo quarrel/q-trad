@@ -209,8 +209,9 @@ Implementation status:
                   client, verifies automatic recovery, injects a fixed invalid local REST token and
                   verifies one bounded reauthentication/replay plus another complete stream
                   generation. Exact reconnect/reauthentication counts, zero loss and full process
-                  cleanup are release gates. It also remains unexecuted while the collector owns the
-                  API key.
+                  cleanup are release gates. Every ready phase now requires the demo-provided
+                  effective trading/non-trading rates, and sticky abandoned-provider-operation state
+                  fails shutdown. It also remains unexecuted while the collector owns the API key.
                 - An independent offline verifier now recomputes either experiment manifest hash and,
                   for the contrast, confines and streams the gzip JSON-lines artifact to verify every
                   record, increasing sequence, count and uncompressed SHA-256. Integrity verification
