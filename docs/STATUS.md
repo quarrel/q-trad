@@ -192,6 +192,14 @@ outside the current data-only phase until explicitly admitted by a later plan up
 
 ## Capture operations preparation
 
+- Local database verification no longer shares the persistent interactive `db`. ADR 0024 adds a
+  separate pinned PostgreSQL 18 `test-db` on tmpfs and a guarded complete-verification helper that
+  mirrors the CI migration sequence in a fresh `qtrad_test_*` database. The Dev Container continues
+  to keep the host Docker socket outside its isolation boundary. The helper passed the `0003`
+  compatibility gate, migration through `0009` and all 298 tests, then removed its database. The new
+  persistent `qtrad_dev` is at `0009`; the older ambiguous `qtrad` database was preserved but is no
+  longer selected by development or tests.
+
 - `capture-v1` is a versioned TOML configuration for the qualified seven-instrument
   collector; the candidate 20-instrument expansion is not admitted until IG mappings and
   a separate 72-hour qualification pass.

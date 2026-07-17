@@ -32,6 +32,7 @@ jobs:
           --health-retries 30
     env:
       QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad_ci:qtrad-ci-only@127.0.0.1:5432/qtrad_ci
+      QTRAD_TEST_DATABASE_URL: postgresql+asyncpg://qtrad_ci:qtrad-ci-only@127.0.0.1:5432/qtrad_ci
       QTRAD_MIGRATION_DATABASE_URL: postgresql+psycopg://qtrad_ci:qtrad-ci-only@127.0.0.1:5432/qtrad_ci
     steps:
       - name: Check out repository
@@ -56,7 +57,7 @@ jobs:
         run: uv run pyright
 
       - name: Check shell scripts
-        run: shellcheck ops/capture/*.sh ops/research/*.sh
+        run: shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh
 
       - name: Migrate to frozen collector schema
         run: uv run alembic upgrade 0003

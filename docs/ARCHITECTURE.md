@@ -209,6 +209,11 @@ reverse this dependency direction.
 
 ## Data stores
 
+- Local development uses two non-production PostgreSQL roles as defined by ADR 0024: persistent
+  `db` for interactive application work and tmpfs-backed `test-db` for a fresh database per full
+  verification run. Integration tests require an explicit test URL and cannot fall back to `db`.
+  Neither service is an operational capture or research store.
+
 - PostgreSQL `raw` schema: redacted provider input.
 - PostgreSQL `canonical` schema: immutable domain events.
 - PostgreSQL `reference` schema: instrument and provider-listing projections.
