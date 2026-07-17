@@ -709,6 +709,54 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
     await store.upsert_provider_listing(listing, {}, universe_hash=plan.universe_hash)
     exact_listing = await store.provider_listing_version(plan.items[0])
     assert exact_listing == listing
+    usage_run_id = await store.start_run(
+        kind=RunKind.BACKFILL,
+        environment=BrokerEnvironment.IG_DEMO,
+        configuration_hash=plan.universe_hash,
+        started_at=datetime(2026, 7, 14, 0, 0, tzinfo=UTC),
+    )
+    usage_request_id = uuid4()
+    await store.start_historical_request_usage(
+        request_id=usage_request_id,
+        run_id=usage_run_id,
+        plan_hash=plan.plan_hash,
+        instrument_id=instrument.instrument_id,
+        listing_id=listing.listing_id,
+        interval_start=plan.start,
+        interval_end=plan.end,
+        requested_points=plan.requested_points,
+        started_at=datetime(2026, 7, 14, 0, 0, 1, tzinfo=UTC),
+    )
+    await store.complete_historical_request_usage(
+        usage_request_id,
+        returned_points=60,
+        provider_remaining=940,
+        completed_at=datetime(2026, 7, 14, 0, 0, 2, tzinfo=UTC),
+    )
+    usage = await store.query(
+        """
+        SELECT plan_hash, requested_points, returned_points, provider_remaining, completed_at
+        FROM ops.historical_request_usage
+        WHERE request_id = :request_id
+        """,
+        {"request_id": usage_request_id},
+    )
+    assert usage == [
+        {
+            "plan_hash": plan.plan_hash,
+            "requested_points": plan.requested_points,
+            "returned_points": 60,
+            "provider_remaining": 940,
+            "completed_at": datetime(2026, 7, 14, 0, 0, 2, tzinfo=UTC),
+        }
+    ]
+    with pytest.raises(RuntimeError, match="already completed"):
+        await store.complete_historical_request_usage(
+            usage_request_id,
+            returned_points=60,
+            provider_remaining=940,
+            completed_at=datetime(2026, 7, 14, 0, 0, 3, tzinfo=UTC),
+        )
 
     rows = await store.query(
         """
@@ -832,6 +880,33 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
         == 3
     )
     assert invalid_limit.status_code == 422
+
+    await store.claim_backfill_plan(repeat_plan.plan_hash)
+    await store.complete_backfill_plan(
+        repeat_plan,
+        observed_points={
+            (instrument.instrument_id, PriceBasis.BID): 0,
+            (instrument.instrument_id, PriceBasis.ASK): 0,
+            (instrument.instrument_id, PriceBasis.MID): 0,
+        },
+        executed_at=datetime(2026, 7, 15, 0, 2, tzinfo=UTC),
+        allow_empty=True,
+    )
+    empty_result = await store.query(
+        """
+        SELECT request_completed_at, returned_points, covered_at,
+               covered_by_plan_hash, observed_points
+        FROM read_model.historical_coverage_gaps
+        WHERE detected_by_plan_hash = :plan_hash
+        """,
+        {"plan_hash": repeat_plan.plan_hash},
+    )
+    assert len(empty_result) == 3
+    assert all(row["request_completed_at"] is not None for row in empty_result)
+    assert {row["returned_points"] for row in empty_result} == {0}
+    assert all(row["covered_at"] is None for row in empty_result)
+    assert all(row["covered_by_plan_hash"] is None for row in empty_result)
+    assert all(row["observed_points"] is None for row in empty_result)
 
     await engine_from_app(app).dispose()
     await engine.dispose()

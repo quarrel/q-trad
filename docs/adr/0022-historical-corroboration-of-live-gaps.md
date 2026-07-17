@@ -19,15 +19,22 @@ result into the collector would conflate historical coverage with immutable obse
 - Investigate qualification gaps only after the frozen candidate window and automatic evidence
   snapshot. Use the existing reviewed IG demo backfill plan/register/execute path in a new writable
   database imported from a verified collector snapshot that postdates the automatic evidence.
-- One plan must cover every investigated gap's instrument and minute-aligned UTC interval, bind the
-  exact effective listing versions and retain quota evidence. It never targets or repairs the
+- A hash-bound sparse plan set must cover every investigated gap's instrument and minute-aligned UTC
+  interval. Each standard plan merges only touching or overlapping gaps for one instrument, binds the
+  exact effective listing version and retains its gap IDs. The set binds all plan hashes, the automatic
+  evidence and verified snapshot import, and rejects an aggregate request that would consume the
+  reviewed allowance reserve. It never targets or repairs the
   collector database or `read_model.data_gaps`. `qualification gap-plan` derives that range and
   instrument set from the self-hashed automatic evidence, requires a verified post-evidence snapshot
   import into the configured `qtrad_research_*` database and proves the database is at the repository's
   single current Alembic head before reading listings.
-- Export the exact plan interval through the version-two research manifest. An offline
+- Record every provider request before it starts, including its approved maximum, plan, listing and
+  UTC interval. Complete that append-only usage record with returned points and the provider-reported
+  remaining allowance. A zero-result diagnostic completes the request and plan but does not mark a
+  historical coverage gap covered; ADR 0013's at-least-one-point-per-basis rule remains intact.
+- Export the enclosing plan-set interval through the version-two research manifest. An offline
   `qualification gap-history` command verifies the automatic evidence self-hash, configuration and
-  capture source; the plan and completed BID/ASK/MID coverage; the snapshot import; the research
+  capture source; every plan and completed BID/ASK/MID request result; the snapshot import; the research
   manifest and Parquet hashes; and an exact copy of every live gap.
 - Emit one bounded, non-overwriting, self-hashed artifact containing per-gap and per-basis returned
   point counts, completeness and semantic bar hashes. The only result labels are

@@ -10,6 +10,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import uvicorn
 from alembic import command
@@ -37,7 +38,7 @@ from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
-from qtrad.domain.historical_coverage import BackfillPlan
+from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.market_data import (
     BarProvenance,
@@ -58,10 +59,18 @@ from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
+    build_qualification_gap_plan_set_history_artifact,
     load_qualification_evidence,
-    qualification_gap_backfill_scope,
+    qualification_gap_backfill_scopes,
     validate_qualification_gap_snapshot,
     write_qualification_gap_history_artifact,
+)
+from qtrad.runtime.qualification_gap_plan_set import (
+    QualificationGapPlanEntry,
+    QualificationGapPlanSet,
+    build_qualification_gap_plan_set,
+    load_qualification_gap_plan_set,
+    write_qualification_gap_plan_set,
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -209,7 +218,9 @@ def build_parser() -> argparse.ArgumentParser:
         "gap-history", help="compare candidate live gaps with verified historical bars"
     )
     gap_history.add_argument("--evidence", type=Path, required=True)
-    gap_history.add_argument("--plan", type=Path, required=True)
+    gap_history_plan = gap_history.add_mutually_exclusive_group(required=True)
+    gap_history_plan.add_argument("--plan", type=Path)
+    gap_history_plan.add_argument("--plan-set", type=Path)
     gap_history.add_argument("--manifest", type=Path, required=True)
     gap_history.add_argument("--output", type=Path, required=True)
     gap_plan = qualification_sub.add_parser(
@@ -220,6 +231,18 @@ def build_parser() -> argparse.ArgumentParser:
     gap_plan.add_argument("--universe", type=Path, required=True)
     gap_plan.add_argument("--remaining-allowance", type=int, required=True)
     gap_plan.add_argument("--output", type=Path, required=True)
+    gap_register = qualification_sub.add_parser(
+        "gap-register", help="register every reviewed plan in an exact sparse plan set"
+    )
+    gap_register.add_argument("--plan-set", type=Path, required=True)
+    gap_register.add_argument("--snapshot-import-evidence", type=Path, required=True)
+    gap_register.add_argument("--confirm-plan-set-hash", required=True)
+    gap_execute = qualification_sub.add_parser(
+        "gap-execute", help="execute an exact sparse plan set through one IG demo session"
+    )
+    gap_execute.add_argument("--plan-set", type=Path, required=True)
+    gap_execute.add_argument("--snapshot-import-evidence", type=Path, required=True)
+    gap_execute.add_argument("--confirm-plan-set-hash", required=True)
 
     research = subparsers.add_parser("research", help="research-store operations")
     research_sub = research.add_subparsers(dest="research_command", required=True)
@@ -382,6 +405,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 evidence_path=args.evidence,
                 plan_path=args.plan,
+                plan_set_path=args.plan_set,
                 manifest_path=args.manifest,
                 output_path=args.output,
             )
@@ -396,6 +420,25 @@ def main(argv: Sequence[str] | None = None) -> None:
                 universe_path=args.universe,
                 remaining_allowance=args.remaining_allowance,
                 output_path=args.output,
+            )
+        )
+    elif args.command == "qualification" and args.qualification_command == "gap-register":
+        asyncio.run(
+            _register_qualification_gap_plan_set(
+                settings,
+                plan_set_path=args.plan_set,
+                snapshot_import_path=args.snapshot_import_evidence,
+                confirmed_plan_set_hash=args.confirm_plan_set_hash,
+            )
+        )
+    elif args.command == "qualification" and args.qualification_command == "gap-execute":
+        asyncio.run(
+            _execute_qualification_gap_plan_set(
+                settings,
+                clock,
+                plan_set_path=args.plan_set,
+                snapshot_import_path=args.snapshot_import_evidence,
+                confirmed_plan_set_hash=args.confirm_plan_set_hash,
             )
         )
     elif args.command == "research" and args.research_command == "export":
@@ -464,12 +507,14 @@ async def _review_qualification_gap_history(
     clock: Clock,
     *,
     evidence_path: Path,
-    plan_path: Path,
+    plan_path: Path | None,
+    plan_set_path: Path | None,
     manifest_path: Path,
     output_path: Path,
 ) -> None:
     evidence = load_qualification_evidence(evidence_path)
-    plan = load_backfill_plan(plan_path)
+    if (plan_path is None) == (plan_set_path is None):
+        raise ValueError("exactly one backfill plan or qualification plan set is required")
     expected_manifest_directory = settings.research_root.resolve() / "manifests"
     if manifest_path.parent.resolve() != expected_manifest_directory:
         raise ValueError("research manifest must be inside the configured research root")
@@ -477,13 +522,27 @@ async def _review_qualification_gap_history(
     research = ParquetResearchStore(settings.research_root, clock)
     manifest = await research.read_manifest(manifest_id)
     bars = await research.read_bars(manifest_id)
-    artifact = build_qualification_gap_history_artifact(
-        evidence=evidence,
-        plan=plan,
-        manifest=manifest,
-        bars=bars,
-        generated_at=clock.now(),
-    )
+    if plan_set_path is not None:
+        plan_set, plans = load_qualification_gap_plan_set(plan_set_path)
+        artifact = build_qualification_gap_plan_set_history_artifact(
+            evidence=evidence,
+            plan_set=plan_set,
+            plans=plans,
+            manifest=manifest,
+            bars=bars,
+            generated_at=clock.now(),
+        )
+    else:
+        if plan_path is None:
+            raise AssertionError("single-plan path must be present")
+        plan = load_backfill_plan(plan_path)
+        artifact = build_qualification_gap_history_artifact(
+            evidence=evidence,
+            plan=plan,
+            manifest=manifest,
+            bars=bars,
+            generated_at=clock.now(),
+        )
     write_qualification_gap_history_artifact(output_path, artifact)
     print(
         json.dumps(
@@ -526,17 +585,327 @@ async def _plan_qualification_gap_history(
         universe_hash=universe.configuration_hash,
     )
     await _require_database_at_migration_head(settings)
-    scope = qualification_gap_backfill_scope(evidence)
-    await _plan_backfill(
-        settings,
-        clock,
-        universe_path=universe_path,
-        start=scope.start,
-        end=scope.end,
-        remaining_allowance=remaining_allowance,
-        output_path=output_path,
-        instrument_ids=scope.instrument_ids,
+    scopes = qualification_gap_backfill_scopes(evidence)
+    if output_path.exists() or output_path.is_symlink():
+        raise FileExistsError(f"qualification gap plan-set output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"qualification gap plan-set output directory does not exist: {output_path.parent}"
+        )
+    plan_paths = tuple(
+        output_path.with_name(f"{output_path.stem}-{index:03d}.json")
+        for index in range(1, len(scopes) + 1)
     )
+    existing = [path for path in plan_paths if path.exists() or path.is_symlink()]
+    if existing:
+        raise FileExistsError(f"qualification gap plan output already exists: {existing[0]}")
+    engine = _engine(settings)
+    try:
+        store = PostgresAuditStore(engine)
+        all_instruments = tuple(
+            sorted({instrument for scope in scopes for instrument in scope.instrument_ids})
+        )
+        listings = await store.active_provider_listings(all_instruments)
+    finally:
+        await engine.dispose()
+    observed_at = clock.now()
+    plans = tuple(
+        build_backfill_plan(
+            universe_name=universe.name,
+            universe_hash=universe.configuration_hash,
+            instrument_ids=scope.instrument_ids,
+            listings=tuple(
+                listing for listing in listings if listing.instrument_id in scope.instrument_ids
+            ),
+            preferred_epics=universe.preferred_epics,
+            start=scope.start,
+            end=scope.end,
+            remaining_allowance=remaining_allowance,
+            quota_observed_at=observed_at,
+            created_at=observed_at,
+        )
+        for scope in scopes
+    )
+    quota = BackfillQuotaEvidence(
+        allowance_name="historical_points_weekly_operator_reported",
+        remaining_points=remaining_allowance,
+        observed_at=observed_at,
+        reserve_fraction=Decimal("0.2"),
+    )
+    entries = tuple(
+        QualificationGapPlanEntry(
+            file=path.name,
+            plan_hash=plan.plan_hash,
+            gap_ids=scope.gap_ids,
+            requested_points=plan.requested_points,
+        )
+        for path, plan, scope in zip(plan_paths, plans, scopes, strict=True)
+    )
+    plan_set = build_qualification_gap_plan_set(
+        qualification_evidence_sha256=evidence.evidence_sha256,
+        snapshot_import_sha256=snapshot.import_sha256,
+        capture_source_id=evidence.release.capture_source_id,
+        universe_name=universe.name,
+        universe_hash=universe.configuration_hash,
+        created_at=observed_at,
+        remaining_allowance=remaining_allowance,
+        reserve_points=remaining_allowance - quota.usable_points,
+        entries=entries,
+    )
+    created_paths: list[Path] = []
+    try:
+        for path, plan in zip(plan_paths, plans, strict=True):
+            write_backfill_plan(path, plan)
+            created_paths.append(path)
+        write_qualification_gap_plan_set(output_path, plan_set)
+    except BaseException:
+        for path in created_paths:
+            path.unlink(missing_ok=True)
+        raise
+    print(
+        json.dumps(
+            {
+                "plan_set_hash": plan_set.plan_set_hash,
+                "plan_count": len(plan_set.entries),
+                "gap_count": sum(len(entry.gap_ids) for entry in plan_set.entries),
+                "requested_points": plan_set.requested_points,
+                "remaining_allowance": plan_set.remaining_allowance,
+                "reserve_points": plan_set.reserve_points,
+                "selection_authority": False,
+                "registered": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _register_qualification_gap_plan_set(
+    settings: Settings,
+    *,
+    plan_set_path: Path,
+    snapshot_import_path: Path,
+    confirmed_plan_set_hash: str,
+) -> None:
+    plan_set, plans = load_qualification_gap_plan_set(plan_set_path)
+    _confirm_qualification_gap_plan_set(
+        settings,
+        plan_set=plan_set,
+        snapshot_import_path=snapshot_import_path,
+        confirmed_plan_set_hash=confirmed_plan_set_hash,
+    )
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    try:
+        store = PostgresAuditStore(engine)
+        statuses = [
+            {
+                "plan_hash": plan.plan_hash,
+                "status": await store.register_backfill_plan(plan, backfill_plan_payload(plan)),
+            }
+            for plan in plans
+        ]
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_set_hash": plan_set.plan_set_hash,
+                "registered_plans": len(statuses),
+                "statuses": statuses,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _execute_qualification_gap_plan_set(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_set_path: Path,
+    snapshot_import_path: Path,
+    confirmed_plan_set_hash: str,
+) -> None:
+    plan_set, plans = load_qualification_gap_plan_set(plan_set_path)
+    _confirm_qualification_gap_plan_set(
+        settings,
+        plan_set=plan_set,
+        snapshot_import_path=snapshot_import_path,
+        confirmed_plan_set_hash=confirmed_plan_set_hash,
+    )
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    store = PostgresAuditStore(engine)
+    adapter = _ig_backfill_adapter(settings, clock)
+    run_id: RunId | None = None
+    terminal_status = "FAILED"
+    results: list[dict[str, JsonValue]] = []
+    current_plan_hash: str | None = None
+    current_plan_claimed = False
+    current_plan_completed = False
+    try:
+        hashes = tuple(plan.plan_hash for plan in plans)
+        rows = await store.query(
+            """
+            SELECT plan_hash, status
+            FROM ops.backfill_plans
+            WHERE plan_hash IN (
+                SELECT jsonb_array_elements_text(CAST(:plan_hashes AS jsonb))
+            )
+            """,
+            {"plan_hashes": json.dumps(hashes)},
+        )
+        statuses = {str(row["plan_hash"]): str(row["status"]) for row in rows}
+        if set(statuses) != set(hashes):
+            raise RuntimeError("qualification gap plan set is not completely registered")
+        run_id = await store.start_run(
+            kind=RunKind.BACKFILL,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=plan_set.universe_hash,
+            started_at=clock.now(),
+        )
+        await store.record_quota_state(
+            provider="ig",
+            environment="demo",
+            allowance_name="historical_points_weekly_operator_reported",
+            remaining=plan_set.remaining_allowance,
+            observed_at=plan_set.created_at,
+        )
+        await adapter.connect()
+        for expected_plan in plans:
+            if statuses[expected_plan.plan_hash] == "COMPLETED":
+                results.append(
+                    {"plan_hash": expected_plan.plan_hash, "status": "ALREADY_COMPLETED"}
+                )
+                continue
+            current_plan_hash = expected_plan.plan_hash
+            current_plan_claimed = False
+            current_plan_completed = False
+            payload = await store.claim_backfill_plan(current_plan_hash)
+            current_plan_claimed = True
+            plan = decode_backfill_plan(json.dumps(payload, sort_keys=True))
+            if plan != expected_plan:
+                raise RuntimeError("claimed backfill plan differs from the reviewed plan set")
+            listings = tuple([await store.provider_listing_version(item) for item in plan.items])
+            received: dict[tuple[InstrumentId, PriceBasis], set[datetime]] = {}
+            written = 0
+            for request in backfill_requests(plan, listings):
+                request_id = uuid4()
+                await store.start_historical_request_usage(
+                    request_id=request_id,
+                    run_id=run_id,
+                    plan_hash=plan.plan_hash,
+                    instrument_id=request.instrument_id,
+                    listing_id=request.listing.listing_id,
+                    interval_start=request.start,
+                    interval_end=request.end,
+                    requested_points=request.maximum_points,
+                    started_at=clock.now(),
+                )
+                returned_points: set[datetime] = set()
+                async for bar in adapter.backfill(request):
+                    _validate_planned_bar(plan, request, bar)
+                    returned_points.add(bar.interval_start)
+                    received.setdefault((bar.instrument_id, bar.basis), set()).add(
+                        bar.interval_start
+                    )
+                    event = await _append_bar(store, bar, received_time=clock.now())
+                    if event is not None:
+                        written += 1
+                await store.complete_historical_request_usage(
+                    request_id,
+                    returned_points=len(returned_points),
+                    provider_remaining=adapter.historical_allowance_remaining,
+                    completed_at=clock.now(),
+                )
+            observed_points = {
+                (item.instrument_id, basis): len(received.get((item.instrument_id, basis), set()))
+                for item in plan.items
+                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID)
+            }
+            point_counts = tuple(observed_points.values())
+            if any(points == 0 for points in point_counts) and not all(
+                points == 0 for points in point_counts
+            ):
+                raise RuntimeError("historical diagnostic returned only a subset of required bases")
+            await store.complete_backfill_plan(
+                plan,
+                observed_points=observed_points,
+                executed_at=clock.now(),
+                allow_empty=True,
+            )
+            current_plan_completed = True
+            results.append(
+                {
+                    "plan_hash": plan.plan_hash,
+                    "status": "COMPLETED",
+                    "points_received": sum(point_counts),
+                    "bars_written": written,
+                }
+            )
+        provider_remaining = adapter.historical_allowance_remaining
+        if provider_remaining is not None:
+            await store.record_quota_state(
+                provider="ig",
+                environment="demo",
+                allowance_name="historical_points_weekly_provider_reported",
+                remaining=provider_remaining,
+                observed_at=clock.now(),
+            )
+        terminal_status = "COMPLETED"
+        print(
+            json.dumps(
+                {
+                    "plan_set_hash": plan_set.plan_set_hash,
+                    "plans": results,
+                    "provider_remaining_allowance": provider_remaining,
+                },
+                sort_keys=True,
+            )
+        )
+    except BaseException:
+        if current_plan_hash is not None and current_plan_claimed and not current_plan_completed:
+            await store.fail_backfill_plan(current_plan_hash, executed_at=clock.now())
+        raise
+    finally:
+        await adapter.disconnect()
+        if run_id is not None:
+            await store.finish_run(
+                run_id,
+                status=terminal_status,
+                finished_at=clock.now(),
+                detail={
+                    "plan_set_hash": plan_set.plan_set_hash,
+                    "plan_count": len(plans),
+                    "completed_or_skipped": len(results),
+                    "provider_remaining_allowance": adapter.historical_allowance_remaining,
+                },
+            )
+        await engine.dispose()
+
+
+def _confirm_qualification_gap_plan_set(
+    settings: Settings,
+    *,
+    plan_set: QualificationGapPlanSet,
+    snapshot_import_path: Path,
+    confirmed_plan_set_hash: str,
+) -> None:
+    if confirmed_plan_set_hash != plan_set.plan_set_hash:
+        raise ValueError("confirmed qualification gap plan-set hash does not match reviewed set")
+    snapshot = load_research_snapshot_import(snapshot_import_path)
+    database_name = make_url(settings.database_url).database
+    if database_name is None or not database_name.startswith("qtrad_research_"):
+        raise ValueError("qualification gap plan set requires an isolated research database")
+    if snapshot.target_database != database_name:
+        raise ValueError("snapshot import evidence does not identify the configured database")
+    if (
+        snapshot.import_sha256 != plan_set.snapshot_import_sha256
+        or snapshot.capture_source_id != plan_set.capture_source_id
+        or settings.capture_source_id != plan_set.capture_source_id
+        or snapshot.universe_hash != plan_set.universe_hash
+    ):
+        raise ValueError("qualification gap plan set differs from snapshot or configured identity")
 
 
 async def _require_database_at_migration_head(settings: Settings) -> None:
@@ -1165,14 +1534,34 @@ async def _execute_backfill(settings: Settings, clock: Clock, *, plan_hash: str)
         try:
             await adapter.connect()
             for request in backfill_requests(plan, listings):
+                request_id = uuid4()
+                await store.start_historical_request_usage(
+                    request_id=request_id,
+                    run_id=run_id,
+                    plan_hash=plan.plan_hash,
+                    instrument_id=request.instrument_id,
+                    listing_id=request.listing.listing_id,
+                    interval_start=request.start,
+                    interval_end=request.end,
+                    requested_points=request.maximum_points,
+                    started_at=clock.now(),
+                )
+                returned_points: set[datetime] = set()
                 async for bar in adapter.backfill(request):
                     _validate_planned_bar(plan, request, bar)
+                    returned_points.add(bar.interval_start)
                     received.setdefault((bar.instrument_id, bar.basis), set()).add(
                         bar.interval_start
                     )
                     event = await _append_bar(store, bar, received_time=clock.now())
                     if event is not None:
                         written += 1
+                await store.complete_historical_request_usage(
+                    request_id,
+                    returned_points=len(returned_points),
+                    provider_remaining=adapter.historical_allowance_remaining,
+                    completed_at=clock.now(),
+                )
         finally:
             await adapter.disconnect()
         observed_points = {
@@ -1511,8 +1900,8 @@ async def _export(
             SELECT instrument_id, source_provider, source_environment, source_external_id,
                    source_listing_valid_from, source_listing_metadata_version,
                    provenance, basis, resolution, interval_start, interval_end,
-                   detected_at, detected_by_plan_hash, covered_at,
-                   covered_by_plan_hash, observed_points
+                     detected_at, detected_by_plan_hash, request_completed_at,
+                     returned_points, covered_at, covered_by_plan_hash, observed_points
             FROM read_model.historical_coverage_gaps
               WHERE instrument_id IN (
                   SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))

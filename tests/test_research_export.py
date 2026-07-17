@@ -37,6 +37,8 @@ def _historical_coverage() -> dict[str, object]:
         "interval_end": NOW + timedelta(hours=1),
         "detected_at": NOW + timedelta(hours=2),
         "detected_by_plan_hash": "b" * 64,
+        "request_completed_at": NOW + timedelta(hours=3),
+        "returned_points": 60,
         "covered_at": NOW + timedelta(hours=3),
         "covered_by_plan_hash": "b" * 64,
         "observed_points": 60,
