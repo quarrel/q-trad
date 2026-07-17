@@ -100,6 +100,10 @@ Implementation status:
     restricted at OCI to the operator's IPv6 range from the WSL host; the Dev Container uses
     Tailscale exclusively because direct Docker/WSL IPv6 forwarding was retired as unreliable.
     Bastion enablement and final alarm tuning are tracked improvements rather than release gates.
+    Future host-hardening work should extend healthwatch with clock-synchronisation evidence from
+    Chrony: OCI's `169.254.169.254` source online, system clock synchronised, normal leap status and a
+    bounded absolute offset. Alert thresholds should be qualified against normal host observations;
+    an initial sustained 100 ms offset threshold is conservative for capture receive timestamps.
       The corrected candidate has passed deliberate container restart and host reboot recovery.
       `capture-v2` remains excluded.
         - The belated 48-hour checkpoint at `2026-07-16T13:30:16Z` was 58.4 hours into the

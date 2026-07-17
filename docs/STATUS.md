@@ -237,6 +237,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
 - The host-local health watcher now publishes readiness, fresh-subscription count,
   projection lag, backup age, restore evidence/age and database-volume free space as OCI
   custom metrics, and fails closed when any required operational evidence is stale.
+- A read-only host audit at `2026-07-17T03:34:29Z` confirmed enabled, active Chrony synchronisation
+  against OCI's link-local `169.254.169.254` service, normal leap state, complete recent reachability
+  and sub-millisecond error. The current watcher does not publish clock health. A future hardening
+  slice should add source-online, synchronised-state, leap-state and absolute-offset metrics/alarms;
+  no running-host change is required for the present healthy configuration.
 - GitHub workflow definitions now provide push/pull-request static and isolated-PostgreSQL
   gates plus manual commit-SHA-tagged dual-architecture publication to Sydney OCIR. The
   protected repository release environment and dedicated publisher credentials are configured.

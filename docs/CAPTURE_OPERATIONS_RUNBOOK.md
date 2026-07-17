@@ -214,6 +214,13 @@ new image against schema `0007` before retrying the migration; never delete an a
   outbound report to the operator's Beszel hub port. Beszel alerts supplement but do not
   replace the collector readiness watcher, OCI alarms, backup-age checks or restore
   evidence.
+- Retain the Oracle Linux Chrony client enabled against OCI's link-local NTP service at
+  `169.254.169.254`; containers inherit the host kernel clock and must not run independent NTP
+  clients. Future healthwatch hardening should publish whether Chrony has an online source, whether
+  the system reports synchronised time, leap status and absolute clock offset. Alarm on a missing
+  source, unsynchronised or abnormal-leap state, and—initially—an absolute offset above 100 ms when
+  sustained; qualify the final offset threshold against observed normal jitter before making it a
+  release gate.
 - Run daily custom-format PostgreSQL backups, validate each archive with `pg_restore
   --list`, and upload it with its checksum and a manifest binding the universe and image
   digests. Bucket lifecycle rules retain 14 daily and 8 weekly copies. A weekly job verifies
