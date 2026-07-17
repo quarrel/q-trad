@@ -148,6 +148,11 @@ Implementation status:
             interval at `04:25Z`. A provider/session-cycle cause is only a hypothesis. After formal
             closure, derive the quota-bounded reviewed historical plan for all 70 intervals and record
             whether IG historical bars exist before assigning any upstream or operational class.
+          - Post-window reconciliation planning exposed that the first deployed environment omitted
+            `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
+            `local-development` as the effective identity of this canonical store. The first plan was
+            not executed. Evidence and snapshot documentation now bind the truthful existing identity;
+            it must not be renamed merely to improve its label.
   - Complete locally and undeployed: a bounded qualification-closure helper will write one
   self-hashed, non-overwriting automatic evidence snapshot and cannot pass before the candidate
   boundary. It reads loopback APIs, systemd/Compose state, backup/restore status, migration and disk

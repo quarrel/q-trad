@@ -138,10 +138,12 @@ requires that mount and must fail rather than write database data to the boot vo
 `capture.env` contains the IG demo credentials, database URLs for `qtrad_capture`, the
 approved `QTRAD_CAPTURE_UNIVERSE_PATH`, immutable image references and a stable
 `QTRAD_CAPTURE_SOURCE_ID`. `QTRAD_DB_PORT` may override the loopback-only PostgreSQL host port;
-leave its default of `15432` unless that port conflicts. Use a non-secret machine identifier such as
-`oci-sydney-capture-1`; retain it across image and universe releases and restores of the same
-canonical history, but never reuse it for an independent event store. The file is never copied
-to a workstation, log, image or repository.
+leave its default of `15432` unless that port conflicts. The first collector release omitted the
+explicit variable and therefore established the validated default `local-development` as this
+canonical store's effective source identity. Preserve that value across image and universe releases
+and restores of the same history despite its generic name; changing it now would falsely create a
+new source boundary. Never reuse it for an independent event store. The file is never copied to a
+workstation, log, image or repository.
 
 Every Compose invocation must pass `--env-file /etc/qtrad/capture.env`. Compose's service
 `env_file` supplies the container environment but does not supply image references while
@@ -454,7 +456,7 @@ sudo env \
   QTRAD_QUALIFICATION_IMAGE="$CURRENT_IMAGE" \
   QTRAD_QUALIFICATION_DESCRIPTOR_COMMIT=89c7553160705ca0fd859fbb0477163efc0e279d \
   QTRAD_QUALIFICATION_DESCRIPTOR_SHA256=c686332b24eff24e57a3c7128279777e2c45882e18b9e15d3149797272d40d84 \
-  QTRAD_QUALIFICATION_SOURCE_ID=oci-sydney-capture-1 \
+    QTRAD_QUALIFICATION_SOURCE_ID=local-development \
   QTRAD_QUALIFICATION_CONFIGURATION_HASH=227ff98752a8f54b5813f0aecaa307bd777cb5a388b0ce15ecd3e5cf5f24873b \
   QTRAD_QUALIFICATION_MIGRATION=0003 \
   "$TOOL_ROOT/ops/capture/qualification-evidence.sh" \
