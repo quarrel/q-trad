@@ -1,12 +1,12 @@
 services:
   db:
-    image: postgres:18
+    image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4
     environment:
-      POSTGRES_DB: qtrad
+      POSTGRES_DB: qtrad_dev
       POSTGRES_USER: qtrad
       POSTGRES_PASSWORD: qtrad-dev-only
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U qtrad -d qtrad"]
+      test: ["CMD-SHELL", "pg_isready -U qtrad -d qtrad_dev"]
       interval: 2s
       timeout: 3s
       retries: 30
@@ -19,7 +19,7 @@ services:
       context: .
     profiles: ["tools"]
     environment: &app_environment
-      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad
+      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
       QTRAD_RESEARCH_ROOT: /app/data/research
     env_file:
       - path: .env

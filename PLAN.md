@@ -59,6 +59,14 @@ A work package is `DONE` only when:
 
 Implementation status:
 
+  - Complete locally: ADR 0024 separates the persistent development database from a pinned,
+    tmpfs-backed PostgreSQL test service. The Dev Container advances only interactive `db` to head;
+    the local verification helper creates and drops a guarded `qtrad_test_*` database while
+    reproducing CI's `0003` compatibility test, head migration and full suite. Integration tests no
+    longer fall back to the application database URL, and the host Docker socket remains unmounted.
+    The clean local gate passes all 298 tests. A new `qtrad_dev` database is at migration `0009`;
+    the ambiguous pre-separation `qtrad` database remains untouched and unselected.
+
   - Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
     coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
     bounded-cloud qualification.

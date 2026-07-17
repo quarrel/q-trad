@@ -46,8 +46,9 @@ tools inside Docker rather than directly in WSL.
 2. Run **Dev Containers: Reopen in Container**.
 3. Sign in to Codex when prompted inside the container.
 
-The Debian Trixie container uses Python 3.13 and `uv`, starts the PostgreSQL 18 `db`
-service, installs the Codex, Python and Ruff extensions, and configures the Tilth,
+The Debian Trixie container uses Python 3.13 and `uv`, starts persistent PostgreSQL 18
+`db` and disposable `test-db` services, installs the Codex, Python and Ruff extensions,
+and configures the Tilth,
 Context7 and repository-scoped GitHub MCP servers through the Codex CLI. Codex is resolved
 from npm's `latest` release when the container
 image is rebuilt without cache; Tilth is installed from a pinned npm package and release
@@ -82,11 +83,18 @@ Run project commands directly in the container:
 
 ```bash
 uv run python -m qtrad db upgrade
-uv run pytest
+ops/dev/verify.sh
+uv run pytest  # database-independent suite unless a test URL is explicitly supplied
 uv run ruff check src tests
 uv run pyright
 uv run ty check
 ```
+
+The persistent `db` is for interactive development and is advanced to migration head whenever
+the Dev Container starts. `ops/dev/verify.sh` never uses it: the command creates a uniquely named
+database inside the tmpfs-backed `test-db`, reproduces the CI `0003` compatibility gate, upgrades
+to head, runs the complete suite and removes the database. See
+[`docs/DEVELOPMENT.md`](docs/DEVELOPMENT.md).
 
 After a feed-capable collector release is separately approved and deployed, a locally established
 SSH or Tailscale tunnel can be probed without persisting a consumer cursor:

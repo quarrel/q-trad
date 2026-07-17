@@ -3,6 +3,21 @@ services:
     networks:
       - qtrad-dev
 
+  test-db:
+    image: postgres:18@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4
+    environment:
+      POSTGRES_USER: qtrad_test_admin
+      POSTGRES_PASSWORD: qtrad-test-only
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U qtrad_test_admin -d postgres"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    tmpfs:
+      - /var/lib/postgresql
+    networks:
+      - qtrad-dev
+
   tailnet-gate:
     build:
       context: .
@@ -48,12 +63,19 @@ services:
         required: false
     environment:
       CODEX_UNSAFE_ALLOW_NO_SANDBOX: "1"
-      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad
+      QTRAD_DATABASE_URL: postgresql+asyncpg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
+      QTRAD_MIGRATION_DATABASE_URL: postgresql+psycopg://qtrad:qtrad-dev-only@db:5432/qtrad_dev
       QTRAD_RESEARCH_ROOT: /workspace/data/research
+      QTRAD_TEST_POSTGRES_HOST: test-db
+      QTRAD_TEST_POSTGRES_PORT: "5432"
+      QTRAD_TEST_POSTGRES_USER: qtrad_test_admin
+      QTRAD_TEST_POSTGRES_PASSWORD: qtrad-test-only
       TMPDIR: /workspace/tmp
       UV_CACHE_DIR: /home/vscode/.cache/uv
     depends_on:
       db:
+        condition: service_healthy
+      test-db:
         condition: service_healthy
       tailnet-gate:
         condition: service_healthy
