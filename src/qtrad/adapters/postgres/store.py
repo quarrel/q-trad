@@ -856,7 +856,7 @@ class PostgresAuditStore(AuditStore):
                 ),
                 {
                     "request_id": request_id,
-                    "run_id": run_id,
+                    "run_id": run_id.value,
                     "plan_hash": plan_hash,
                     "instrument_id": str(instrument_id),
                     "source_provider": listing_id.provider,
