@@ -166,8 +166,10 @@ Implementation status:
                 the affected instrument inside all 70 gaps, while every interval retained 35–723
                 canonical quotes from two to six other subscriptions on the same connection. The bounded
                 lifecycle log contains no disconnect, watchdog, subscription-error or reconnect event
-                during those gaps. This rules out persistence, queue loss and a whole-connection outage,
-                but cannot yet separate provider per-item silence from SDK/subscription delivery failure.
+                during those gaps. Historical MID bars move in all 70 intervals, with no flat gap and
+                three to eight minute bars per interval. This rules out persistence, queue loss, a
+                whole-connection outage and ordinary price inactivity, but cannot yet separate IG demo
+                per-item stream suppression from SDK/subscription delivery failure.
               - In progress locally and undeployed: the adapter captures bounded subscription
                 establishment/end, server-error, real-frequency and Lightstreamer lost-update evidence.
                 Subscription renewal invalidates prior merged item state and requires a fresh healthy
@@ -178,6 +180,11 @@ Implementation status:
                 PostgreSQL gate passes all 317 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
                 The experiment and exit gates are in
                 `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
+              - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
+                contrast for the same seven epics. Fourteen subscriptions remain below IG's published
+                40-subscription limit and avoid its explicit prohibition on multiple concurrent
+                connections. This experiment runs only after the current measurement in a separate
+                evidence store; it is not an undeclared collector sidecar or release change.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was

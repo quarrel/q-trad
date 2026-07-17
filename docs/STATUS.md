@@ -508,8 +508,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
   - A read-only analysis of the verified failed-candidate snapshot found no raw callback for the
     affected item inside any of the 70 gaps. Every exact interval nevertheless contained 35–723
     canonical quotes from two to six other subscriptions on the same Lightstreamer connection, and
-    retained lifecycle logs contain no gap-time transport or subscription failure. The remaining
-    uncertainty is per-item provider silence versus SDK/subscription delivery.
+    retained lifecycle logs contain no gap-time transport or subscription failure. Historical MID
+    prices move in every interval across three to eight minute bars; none is flat. The remaining
+    uncertainty is IG demo per-item stream suppression versus SDK/subscription delivery.
   - A local undeployed continuity-evidence slice records subscription establishment/end,
     server-applied real frequency, bounded server errors and SDK-reported lost updates. Renewal
     invalidates prior item state and loss is sticky degraded health. Idempotent REST reads additionally
@@ -518,8 +519,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
     All 42 focused lifecycle tests pass, and the complete isolated PostgreSQL gate passes all 317 tests
     plus formatting, Ruff, Pyright, `ty` and ShellCheck.
     `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
-    endurance, synthetic stress and separately credentialled dual-observer gates; no collector
-    mutation occurred.
+    endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
+    The latter uses 14 of IG's published 40 subscriptions and avoids the prohibited second connection;
+    no collector mutation occurred.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

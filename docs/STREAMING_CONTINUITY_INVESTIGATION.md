@@ -27,6 +27,8 @@ configured IG `PRICE` subscription:
 - none contains a non-dealable or failed-normalisation callback hidden by the healthy-quote gate;
 - every gap contains continued canonical quotes from other subscriptions on the same connection;
 - the minimum is 35 other quotes from two other instruments, and the maximum is 723 quotes from six.
+- IG historical MID bars show price movement in all 70 intervals; none is completely flat, and each
+  gap overlaps three to eight historical minute bars.
 
 The verified bounded ingestion log contains 11 transport-status changes and ten staleness reports.
 It contains no subscription error, retry-watchdog expiry or reconnect event during any retained gap.
@@ -37,7 +39,7 @@ gaps.
 This evidence rules out PostgreSQL lag, q-trad queue overflow, normalisation rejection and a whole
 Lightstreamer connection outage as causes of the 70 gaps. It does not distinguish:
 
-1. IG's streaming data adapter emitted no update for that item;
+1. IG's demo streaming data adapter emitted no update for that item despite later historical movement;
 2. the server or SDK filtered/conflated updates under an applied item-frequency policy;
 3. a per-subscription server or client lifecycle fault occurred without evidence currently captured;
 4. the pinned SDK failed to deliver an item update without reporting a whole-client status change.
@@ -93,30 +95,44 @@ request or recording the returned API key. Any `exceeded-*` response remains aut
 recorded by bounded code and is not automatically retried. Historical remaining allowance continues
 to come from each historical response and remains separate from these short-window rates.
 
-### C. Provider-backed independent observation
+### C. Provider-backed same-connection feed contrast
 
-If experiment A still produces unexplained per-item silences, run a minimal reference observer for
-the same listings and UTC window on a separate network/process and separate evidence store. It
-records only bounded transport/subscription lifecycle and callback time/changed-field evidence; it
-does not write to the collector database or perform historical backfill.
+If experiment A still produces unexplained per-item silences, run a bounded observer that subscribes
+to both IG feed types for the same explicitly reviewed epics on one Lightstreamer connection:
 
-The current one-connection-per-key rule remains in force. The observer therefore requires either a
-separately scoped IG demo API key/account or an accepted ADR and explicit operator approval for a
-temporary two-connection experiment after confirming IG's effective session limits. It must not be
-quietly attached to the collector credential.
+- operational `PRICE:{account identifier}:{epic}` in MERGE mode;
+- reference `CHART:{epic}:TICK` in DISTINCT mode with `BID`, `OFR` and `UTM`.
+
+IG documents a default limit of 40 subscriptions on one connection, describes MERGE PRICE delivery
+as rate-regulated, and explicitly warns that multiple concurrent connections can suspend the API
+key. Seven PRICE plus seven CHART subscriptions remain within the published single-connection limit.
+See the [IG streaming guide](https://labs.ig.com/streaming-api-guide.html) and
+[streaming field reference](https://labs.ig.com/streaming-api-reference.html). Because DEMO limits can
+differ, the experiment requires explicit acknowledgement and fresh data from all 14 subscriptions;
+any rejection or partial set fails closed.
+
+Run this as a separate bounded experiment after the corrected collector measurement, not as an
+unreviewed sidecar or a concurrent connection. It records callback time, provider timestamp,
+changed-field identity, subscription lifecycle, applied frequency and loss/error counters in a
+separate evidence store. It does not write to the collector database or perform historical backfill.
+Adding the CHART diagnostic feed to an operational collector release would require a separately
+reviewed architecture/release decision.
 
 Interpretation is mechanical:
 
-| Collector callback | Reference callback | Transport/subscription evidence | Result |
+| PRICE callback | CHART callback | Transport/subscription evidence | Result |
 |---|---|---|---|
-| absent | present | collector channel otherwise subscribed | collector client/path fault |
-| absent | absent | both channels continuously subscribed | evidence consistent with provider item silence |
-| present | absent | reference channel otherwise subscribed | reference client/path fault |
-| present | present | collector canonical event absent | q-trad hand-off/queue/persistence fault |
+| absent | present | both subscriptions otherwise current | PRICE adapter/subscription path fault or suppression |
+| absent | absent | both subscriptions current while other epics update | evidence consistent with provider per-item silence |
+| present | absent | both subscriptions otherwise current | CHART adapter/subscription path fault or suppression |
+| present | present | PRICE canonical event absent | q-trad hand-off/queue/persistence fault |
 | absent | any | disconnect, renewal, error or loss brackets interval | explicit lifecycle/loss event |
 
-Agreement between two observers still does not prove the provider generated no hidden update, but it
-is substantially stronger than historical bars and gives a reproducible attribution boundary.
+Agreement between the feeds still does not prove the provider generated no hidden update, but it is
+substantially stronger than historical bars and gives a reproducible attribution boundary. Only if
+same-connection contrast remains ambiguous should a separate-network observer be considered; that
+requires a separately scoped demo API key/account, because the collector key must never open a
+second concurrent connection.
 
 ## Exit gate
 
