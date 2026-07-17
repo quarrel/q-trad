@@ -32,6 +32,10 @@ result into the collector would conflate historical coverage with immutable obse
   UTC interval. Complete that append-only usage record with returned points and the provider-reported
   remaining allowance. A zero-result diagnostic completes the request and plan but does not mark a
   historical coverage gap covered; ADR 0013's at-least-one-point-per-basis rule remains intact.
+- Pace historical requests conservatively at the provider-adapter boundary because `trading-ig`'s
+  built-in limiter does not cover the historical path and IG demo request allowances may be lower than
+  live limits. An exceeded allowance fails the active plan and leaves the exact set resumable; it is not
+  silently retried.
 - Export the enclosing plan-set interval through the version-two research manifest. An offline
   `qualification gap-history` command verifies the automatic evidence self-hash, configuration and
   capture source; every plan and completed BID/ASK/MID request result; the snapshot import; the research

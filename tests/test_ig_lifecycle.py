@@ -244,6 +244,7 @@ def config(**overrides: Any) -> IgDemoConfig:
         "readiness_timeout_seconds": 1,
         "retry_watchdog_seconds": 1,
         "shutdown_timeout_seconds": 1,
+        "historical_request_interval_seconds": 0,
     }
     values.update(overrides)
     return IgDemoConfig(**values)
@@ -830,6 +831,35 @@ async def test_backfill_captures_provider_reported_allowance() -> None:
         clock.now().strftime("%Y-%m-%d %H:%M:%S"),
         (clock.now() + timedelta(minutes=5) - timedelta(seconds=1)).strftime("%Y-%m-%d %H:%M:%S"),
     )
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_backfill_paces_historical_requests_before_provider_access() -> None:
+    clock = MutableClock()
+    service = FakeService(historical_response={"prices": [], "allowance": {}})
+    sleeps: list[float] = []
+
+    async def sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    adapter = IgDemoMarketDataAdapter(
+        config(historical_request_interval_seconds=3),
+        clock,
+        sleep=sleep,
+        service_factory=lambda _: service,
+    )
+    await adapter.connect()
+    request = BackfillRequest(
+        instrument_id=InstrumentId("fx:aud-usd"),
+        listing=listing(),
+        start=clock.now(),
+        end=clock.now() + timedelta(minutes=1),
+        maximum_points=1,
+    )
+
+    assert [bar async for bar in adapter.backfill(request)] == []
+    assert sleeps == [3]
     await adapter.disconnect()
 
 
