@@ -615,6 +615,33 @@ def test_connected_transport_is_not_ready_without_subscription_and_healthy_updat
     assert adapter._connection_state is _ConnectionState.READY
 
 
+def test_heartbeat_continuity_defers_initial_price_readiness_without_claiming_ready() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._transport_connected = True
+    mark_heartbeat_current(adapter, clock)
+
+    assert adapter._defer_initial_price_readiness() is True
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+    assert adapter._ready_event.is_set() is False
+
+
+def test_missing_heartbeat_cannot_defer_initial_price_readiness() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    epic = listing().listing_id.external_id
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._transport_connected = True
+
+    assert adapter._defer_initial_price_readiness() is False
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+
+
 @pytest.mark.asyncio
 async def test_one_active_channel_cannot_mask_another_required_channel_staleness() -> None:
     clock = MutableClock()

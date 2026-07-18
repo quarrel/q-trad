@@ -280,6 +280,13 @@ degrade health and fail readiness, but do not reset a connection whose heartbeat
 prevents closed or quiet markets from creating false reconnect churn while retaining the distinction
 between whole-connection continuity and per-item delivery.
 
+The same distinction applies at process start. Once the bounded initial interval expires, a
+transport-connected stream with current heartbeat and all seven PRICE subscriptions acknowledged may
+continue as `DEGRADED` if closed-market snapshots do not form healthy quotes. Operator readiness
+remains false until all seven channels provide fresh healthy quote evidence. Missing heartbeat,
+transport or subscription acknowledgement still terminates startup and consumes the bounded systemd
+restart budget.
+
 ## Exit gate
 
 Corrected `capture-v1` can qualify only after a representative endurance interval demonstrates:

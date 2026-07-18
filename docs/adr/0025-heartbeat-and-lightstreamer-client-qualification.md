@@ -44,6 +44,11 @@ For the next candidate release:
   as whole-connection reconnect evidence. A stale PRICE channel remains degraded and blocks
   readiness, but cannot by itself force a connection reset while heartbeat is fresh: a quiet or
   closed market is not transport-failure evidence;
+- after the bounded initial readiness interval, permit a transport-connected, heartbeat-current
+  stream with every required PRICE subscription acknowledged to continue in `DEGRADED` state when
+  only healthy PRICE updates are absent. It must not claim readiness until every required channel
+  supplies fresh healthy evidence; missing heartbeat, transport or subscription acknowledgement
+  remains a startup failure;
 - never append heartbeat updates to raw market capture or canonical quote history and never claim
   that heartbeat continuity proves an individual PRICE update was emitted;
 - marshal changed-field normalisation and renewal invalidation through the same event-loop boundary;

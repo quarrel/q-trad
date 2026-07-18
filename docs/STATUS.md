@@ -635,6 +635,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         Heartbeat staleness, explicit transport lifecycle failure and retry-watchdog expiry retain
         reconnect authority. This makes a closed-market endurance run meaningful without treating
         unchanged prices as transport failure.
+      - The first closed-market deployment attempt was stopped after the new bounded ingest unit
+        correctly exhausted initial all-PRICE readiness and began its first supervised retry. All
+        seven PRICE subscriptions and heartbeat had acknowledged, but closed-market updates did not
+        produce healthy quotes. A local undeployed correction permits that exact lifecycle-complete,
+        heartbeat-current case to continue as `DEGRADED`; readiness remains false until all seven
+        fresh healthy quotes arrive. Missing transport, heartbeat or subscription evidence still
+        fails startup.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

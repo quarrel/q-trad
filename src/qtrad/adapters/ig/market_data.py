@@ -724,11 +724,37 @@ class IgDemoMarketDataAdapter:
             if self._readiness_error is not None:
                 raise self._readiness_error
         except TimeoutError as error:
-            self._connection_state = _ConnectionState.DEGRADED
-            self._status = HealthStatus.DEGRADED
+            if self._defer_initial_price_readiness():
+                return
             raise TimeoutError(
                 "IG stream did not establish all-subscription data readiness"
             ) from error
+
+    def _defer_initial_price_readiness(self) -> bool:
+        """Keep a proven connection running when only initial PRICE evidence is incomplete."""
+
+        if (
+            not self._transport_connected
+            or not self._heartbeat_subscribed
+            or not self._heartbeat_current_for_transport
+            or self._last_heartbeat_at is None
+            or self._subscribed_epics != self._expected_epics
+            or not self._expected_epics
+            or self._readiness_error is not None
+        ):
+            self._connection_state = _ConnectionState.DEGRADED
+            self._status = HealthStatus.DEGRADED
+            return False
+        self._connection_state = _ConnectionState.DEGRADED
+        self._status = HealthStatus.DEGRADED
+        LOGGER.warning(
+            "ig_initial_price_readiness_deferred",
+            extra={
+                "ready_instruments": len(self._updated_epics),
+                "expected_instruments": len(self._expected_epics),
+            },
+        )
+        return True
 
     async def records(self) -> AsyncIterator[MarketDataRecord]:
         self._require_connected()

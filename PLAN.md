@@ -228,6 +228,11 @@ Implementation status:
                       block readiness, but no longer force reconnect while heartbeat is current;
                       explicit transport failure, heartbeat staleness and retry-watchdog expiry
                       retain their bounded reconnect paths.
+                    - Closed-market deployment exposed and locally corrected a separate startup
+                      gate: after the bounded wait, fully acknowledged subscriptions plus current
+                      heartbeat may continue running as `DEGRADED` when only healthy PRICE evidence
+                      is absent. Readiness remains false; missing lifecycle or heartbeat evidence
+                      still fails startup.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent
