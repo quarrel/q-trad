@@ -380,19 +380,21 @@ Concurrent streaming connections for the same IG API key are an operational safe
 
 The adapter owns one explicit, generation-tagged connection lifecycle. Transport
 `CONNECTED` is not readiness: `READY` additionally requires the heartbeat and every expected PRICE
-subscription to acknowledge and deliver fresh evidence. Readiness and staleness are
-tracked per required subscription so an active instrument cannot mask a silent one, while
-quiet overnight sessions have bounded grace before degradation. Callbacks from superseded
-generations are ignored and per-generation partial quote state is reset. A prolonged
-`DISCONNECTED:WILL-RETRY` has an application watchdog; terminal disconnect and prolonged
-staleness close the old client, refresh the IG REST session and rebuild one stream.
+subscription to acknowledge and deliver at least one callback. A closed, partial or unchanged
+snapshot is channel-delivery evidence, but not a fresh tradable quote. Quote receive age remains
+per-instrument telemetry so an active instrument cannot mask a silent one; it does not degrade or
+reset an otherwise healthy connection. Callbacks from superseded generations are ignored and
+per-generation partial quote state is reset. A prolonged `DISCONNECTED:WILL-RETRY` has an
+application watchdog; terminal disconnect, heartbeat staleness or watchdog expiry closes the old
+client, refreshes the IG REST session and rebuilds one stream.
 
 REST connection and stream recovery share capped exponential full-jitter retries across
 recreated client objects. Fatal credential/API-key codes fail closed, while retryable
 failure cycles use a finite retry budget and cooldown rather than hammering the provider.
 `STALLED`, `DISCONNECTED:WILL-RETRY` and `DISCONNECTED:TRYING-RECOVERY` all degrade the
 connection, preserve current channel evidence while the library attempts recovery, and
-require fresh healthy updates from every instrument before readiness is restored.
+require fresh heartbeat plus renewed subscription and callback evidence before readiness is
+restored.
 Subscription renewal separately invalidates that item's merged field state, side timestamps and
 freshness evidence, as required by the Lightstreamer listener contract. Bounded lifecycle evidence
 records subscription establishment/end, server-applied maximum frequency, subscription/server error
@@ -406,8 +408,9 @@ generation, retains client ownership while unsubscribing, disconnects and waits 
 confirmed transport closure.
 
 The HTTP readiness query also binds operational evidence to the API's loaded capture-universe
-configuration hash. A healthy adapter, fresh quotes or a running ingestion record from another
-configuration cannot make the served release ready.
+configuration hash. A healthy adapter or running ingestion record from another configuration cannot
+make the served release ready. The count of recently received healthy quotes is exposed alongside
+readiness as strategy-facing telemetry, not as an operational readiness condition.
 
 Synchronous provider calls run as named daemon operations with explicit deadlines rather
 than in asyncio's default executor, and adapter-owned REST requests have bounded default

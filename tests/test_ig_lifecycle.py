@@ -584,7 +584,7 @@ async def test_lightstreamer_terminal_disconnect_schedules_one_reconnect() -> No
     assert adapter.scheduled_reconnects == 1
 
 
-def test_connected_transport_is_not_ready_without_subscription_and_healthy_update() -> None:
+def test_connected_transport_is_not_ready_without_subscription_and_channel_callback() -> None:
     clock = MutableClock()
     adapter = IgDemoMarketDataAdapter(config(), clock)
     epic = listing().listing_id.external_id
@@ -606,40 +606,10 @@ def test_connected_transport_is_not_ready_without_subscription_and_healthy_updat
     )
     assert adapter._status is HealthStatus.STARTING
 
-    adapter._accept_update(market_record(clock), epic, generation=3)
-    assert adapter._status is HealthStatus.STARTING
-
     adapter._handle_heartbeat_subscription(generation=3)
     adapter._handle_heartbeat("1783065600000", clock.now(), generation=3)
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
-
-
-def test_heartbeat_continuity_defers_initial_price_readiness_without_claiming_ready() -> None:
-    clock = MutableClock()
-    adapter = IgDemoMarketDataAdapter(config(), clock)
-    epic = listing().listing_id.external_id
-    adapter._expected_epics = {epic}
-    adapter._subscribed_epics = {epic}
-    adapter._transport_connected = True
-    mark_heartbeat_current(adapter, clock)
-
-    assert adapter._defer_initial_price_readiness() is True
-    assert adapter._status is HealthStatus.DEGRADED
-    assert adapter._connection_state is _ConnectionState.DEGRADED
-    assert adapter._ready_event.is_set() is False
-
-
-def test_missing_heartbeat_cannot_defer_initial_price_readiness() -> None:
-    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
-    epic = listing().listing_id.external_id
-    adapter._expected_epics = {epic}
-    adapter._subscribed_epics = {epic}
-    adapter._transport_connected = True
-
-    assert adapter._defer_initial_price_readiness() is False
-    assert adapter._status is HealthStatus.DEGRADED
-    assert adapter._connection_state is _ConnectionState.DEGRADED
 
 
 @pytest.mark.asyncio
@@ -663,15 +633,18 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
     mark_heartbeat_current(adapter, clock)
 
     clock.current += timedelta(seconds=6)
+    adapter._handle_heartbeat("1783065606000", clock.now(), generation=3)
     adapter._accept_update(market_record(clock), epic, generation=3)
     health = await adapter.health()
 
-    assert health.status is HealthStatus.DEGRADED
+    assert health.status is HealthStatus.HEALTHY
+    assert adapter._stale_epics == {other_epic}
     assert adapter.scheduled_reconnects == 0
+    assert "stale_quote_channels=1" in (health.detail or "")
 
 
 @pytest.mark.asyncio
-async def test_fresh_heartbeat_keeps_stale_price_channel_degraded_without_reconnect() -> None:
+async def test_fresh_heartbeat_reports_stale_quote_recency_without_reconnect() -> None:
     clock = MutableClock()
     adapter = StaleAdapter(config(), clock)
     selected_listing = listing()
@@ -692,7 +665,7 @@ async def test_fresh_heartbeat_keeps_stale_price_channel_degraded_without_reconn
     adapter._handle_heartbeat("1783065606000", clock.now(), generation=3)
     health = await adapter.health()
 
-    assert health.status is HealthStatus.DEGRADED
+    assert health.status is HealthStatus.HEALTHY
     assert adapter._heartbeat_stale is False
     assert adapter._stale_epics == {epic}
     assert adapter.scheduled_reconnects == 0

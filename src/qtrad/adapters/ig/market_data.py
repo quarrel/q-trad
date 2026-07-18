@@ -724,37 +724,9 @@ class IgDemoMarketDataAdapter:
             if self._readiness_error is not None:
                 raise self._readiness_error
         except TimeoutError as error:
-            if self._defer_initial_price_readiness():
-                return
             raise TimeoutError(
                 "IG stream did not establish all-subscription data readiness"
             ) from error
-
-    def _defer_initial_price_readiness(self) -> bool:
-        """Keep a proven connection running when only initial PRICE evidence is incomplete."""
-
-        if (
-            not self._transport_connected
-            or not self._heartbeat_subscribed
-            or not self._heartbeat_current_for_transport
-            or self._last_heartbeat_at is None
-            or self._subscribed_epics != self._expected_epics
-            or not self._expected_epics
-            or self._readiness_error is not None
-        ):
-            self._connection_state = _ConnectionState.DEGRADED
-            self._status = HealthStatus.DEGRADED
-            return False
-        self._connection_state = _ConnectionState.DEGRADED
-        self._status = HealthStatus.DEGRADED
-        LOGGER.warning(
-            "ig_initial_price_readiness_deferred",
-            extra={
-                "ready_instruments": len(self._updated_epics),
-                "expected_instruments": len(self._expected_epics),
-            },
-        )
-        return True
 
     async def records(self) -> AsyncIterator[MarketDataRecord]:
         self._require_connected()
@@ -805,6 +777,14 @@ class IgDemoMarketDataAdapter:
         status = self._status
         now = self._clock.now()
         heartbeat_transport_current = str(self._heartbeat_current_for_transport).lower()
+        oldest_quote_age_seconds = (
+            max(
+                (now - received_at).total_seconds()
+                for received_at in self._quote_received_times.values()
+            )
+            if self._quote_received_times
+            else None
+        )
         return AdapterHealth(
             adapter_name="ig-market-data",
             environment=BrokerEnvironment.IG_DEMO,
@@ -816,6 +796,9 @@ class IgDemoMarketDataAdapter:
                 f"state={self._connection_state}; generation={self._generation}; "
                 f"subscriptions={len(self._subscribed_epics)}/{len(self._expected_epics)}; "
                 f"updates={len(self._updated_epics)}/{len(self._expected_epics)}; "
+                f"recent_quote_channels={len(self._expected_epics - self._stale_epics)}/"
+                f"{len(self._expected_epics)}; stale_quote_channels={len(self._stale_epics)}; "
+                f"oldest_quote_age_seconds={oldest_quote_age_seconds}; "
                 f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}; "
                 f"lightstreamer_lost_updates={self._lightstreamer_lost_updates}; "
                 f"subscription_events={self._subscription_events}; "
@@ -993,10 +976,10 @@ class IgDemoMarketDataAdapter:
         if generation != self._generation or self._stopping:
             return
         self._last_message_at = record.received_time
+        self._updated_epics.add(epic)
         quote = record.quote
         if quote is not None and quote.quality is DataQuality.HEALTHY:
             self._quote_received_times[epic] = record.received_time
-            self._updated_epics.add(epic)
         self._mark_ready_if_complete(generation)
         self._enqueue_record(record, epic)
 
@@ -1051,6 +1034,18 @@ class IgDemoMarketDataAdapter:
                 received_time = self._quote_received_times.get(epic)
                 age = f"{(now - received_time).total_seconds():.1f}" if received_time else "missing"
                 channel_evidence.append(f"{label}:{age}")
+            if heartbeat_current:
+                if stale_epics != self._stale_epics:
+                    LOGGER.info(
+                        "ig_quote_recency_changed",
+                        extra={
+                            "recent_quote_channels": len(self._expected_epics - stale_epics),
+                            "stale_quote_channels": len(stale_epics),
+                        },
+                    )
+                self._stale_epics = stale_epics
+                self._heartbeat_stale = False
+                return
             if not heartbeat_current:
                 heartbeat_age = (
                     f"{(now - self._last_heartbeat_at).total_seconds():.1f}"
@@ -1389,11 +1384,6 @@ class IgDemoMarketDataAdapter:
             or self._last_heartbeat_at is None
             or self._subscribed_epics != self._expected_epics
             or self._updated_epics != self._expected_epics
-            or any(
-                self._clock.now() - self._quote_received_times[epic]
-                > timedelta(seconds=self._config.stale_after_seconds)
-                for epic in self._expected_epics
-            )
         ):
             return
         watchdog_task = self._retry_watchdog_task

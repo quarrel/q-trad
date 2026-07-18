@@ -261,7 +261,7 @@ automatic_checks="$(
     --argjson readiness_configuration_bound "$readiness_configuration_bound" \
     --argjson readiness_ok "$(jq -e --arg now "$now" \
       'def epoch: sub("\\+00:00$"; "Z") | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601;
-       .ready == true and .fresh_quote_count == 7 and .expected_instruments == 7
+         .ready == true and .expected_instruments == 7
        and .reasons == []
        and (.global_position - .checkpoint_position >= 0)
        and (.global_position - .checkpoint_position <= 100)

@@ -223,16 +223,13 @@ Implementation status:
                       an expected `FAIL` on all-channel terminal freshness, with zero provider, SDK or
                       queue loss and verified shutdown. This proves heartbeat delivery during
                       instrument silence but does not satisfy the active-market contrast gate.
-                    - Corrected locally for weekend endurance: fresh heartbeat is the
-                      whole-connection watchdog signal. Stale PRICE channels remain degraded and
-                      block readiness, but no longer force reconnect while heartbeat is current;
-                      explicit transport failure, heartbeat staleness and retry-watchdog expiry
-                      retain their bounded reconnect paths.
-                    - Closed-market deployment exposed and locally corrected a separate startup
-                      gate: after the bounded wait, fully acknowledged subscriptions plus current
-                      heartbeat may continue running as `DEGRADED` when only healthy PRICE evidence
-                      is absent. Readiness remains false; missing lifecycle or heartbeat evidence
-                      still fails startup.
+                    - Corrected locally for weekend endurance: fresh heartbeat plus transport,
+                      subscription and loss evidence governs operational continuity. Quote age is
+                      per-instrument telemetry and cannot itself degrade or reconnect the collector.
+                      Startup still requires one callback from each acknowledged PRICE channel, but
+                      closed or partial snapshots satisfy delivery evidence without claiming the
+                      quote is usable by a strategy. Gap/history corroboration remains paired with
+                      heartbeat evidence while confidence is built.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent

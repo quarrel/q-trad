@@ -90,8 +90,6 @@ class OperatorQueries:
             reasons.append("matching ingestion configuration is not running")
         if not row["adapter_healthy"]:
             reasons.append("IG adapter is not healthy")
-        if int(row["fresh_quote_count"]) != len(expected_instrument_ids):
-            reasons.append("not every required instrument has fresh quote evidence")
         if int(row["global_position"]) - int(row["checkpoint_position"]) > 100:
             reasons.append("projection is more than 100 events behind")
         checkpoint_updated_at = row["checkpoint_updated_at"]

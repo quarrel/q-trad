@@ -274,18 +274,18 @@ errors and server errors were zero. The non-overwriting manifest hash is
 `9ebfc3c8376c14a232dda8e2de679df994000dcfea3d0427999b182f0c43e2cd`; this diagnostic does not
 replace the planned active-market contrast or fresh ARM endurance interval.
 
-For the weekend endurance run, whole-connection recovery is driven by stale heartbeat, an explicit
-transport/lifecycle failure or the bounded library-recovery watchdog. Stale PRICE receive times still
-degrade health and fail readiness, but do not reset a connection whose heartbeat remains fresh. This
-prevents closed or quiet markets from creating false reconnect churn while retaining the distinction
-between whole-connection continuity and per-item delivery.
+For the weekend endurance run, whole-connection health and recovery are driven by current heartbeat,
+explicit transport/subscription lifecycle, loss evidence and the bounded library-recovery watchdog.
+PRICE receive age remains per-instrument telemetry and does not degrade or reset a connection whose
+heartbeat and lifecycle evidence remain healthy. This prevents closed or quiet markets from creating
+false failures while retaining the distinction between whole-connection continuity and per-item
+delivery.
 
-The same distinction applies at process start. Once the bounded initial interval expires, a
-transport-connected stream with current heartbeat and all seven PRICE subscriptions acknowledged may
-continue as `DEGRADED` if closed-market snapshots do not form healthy quotes. Operator readiness
-remains false until all seven channels provide fresh healthy quote evidence. Missing heartbeat,
-transport or subscription acknowledgement still terminates startup and consumes the bounded systemd
-restart budget.
+The same distinction applies at process start. Operational readiness requires a connected transport,
+current heartbeat, all seven PRICE acknowledgements and at least one callback from each PRICE channel.
+That callback need not form a fresh tradable quote: closed and partial snapshots prove channel
+delivery without asserting strategy usability. Missing lifecycle, heartbeat or per-channel callback
+evidence still terminates startup and consumes the bounded systemd restart budget.
 
 ## Exit gate
 

@@ -8,8 +8,9 @@ from qtrad.adapters.postgres.store import PostgresAuditStore
 
 
 class ReadinessStore:
-    def __init__(self, *, ingestion_running: bool = True) -> None:
+    def __init__(self, *, ingestion_running: bool = True, fresh_quote_count: int = 7) -> None:
         self.ingestion_running = ingestion_running
+        self.fresh_quote_count = fresh_quote_count
 
     async def query(
         self, statement: str, parameters: dict[str, object] | None = None
@@ -22,7 +23,7 @@ class ReadinessStore:
             {
                 "ingestion_running": self.ingestion_running,
                 "adapter_healthy": True,
-                "fresh_quote_count": 7,
+                "fresh_quote_count": self.fresh_quote_count,
                 "global_position": 100,
                 "checkpoint_position": 100,
                 "checkpoint_updated_at": datetime(2026, 7, 13, tzinfo=UTC),
@@ -52,3 +53,14 @@ async def test_readiness_fails_when_the_running_ingestion_uses_another_configura
 
     assert result["ready"] is False
     assert "matching ingestion configuration is not running" in result["reasons"]
+
+
+@pytest.mark.asyncio
+async def test_quote_recency_is_reported_without_failing_operational_readiness() -> None:
+    queries = OperatorQueries(cast(PostgresAuditStore, ReadinessStore(fresh_quote_count=0)))
+
+    result = await queries.readiness(("instrument-1",), "a" * 64)
+
+    assert result["ready"] is True
+    assert result["fresh_quote_count"] == 0
+    assert result["reasons"] == []
