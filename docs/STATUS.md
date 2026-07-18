@@ -621,6 +621,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
         an additional name-to-position lookup. Price, heartbeat and provider-contrast callbacks bind
         positions to their subscription field order; focused lifecycle tests preserve delta and
         explicit-null behaviour. This remains local and undeployed pending provider evidence.
+      - The exact merged main commit `6a828c1` passed CI and its dual-architecture image was
+        published as OCI index digest `sha256:fecdd4c9cb1291c91c3434bdab3e50a2a6679b4b50206b43d8c3de830908ba33`.
+        A five-minute closed-market ARM diagnostic, with both collector services stopped and no
+        database access, received 301 heartbeat updates at a 1.000-second median and 1.011-second
+        maximum interval while every PRICE and CHART channel emitted only its initial snapshot.
+        Its hash-bound manifest is `FAIL` solely because the active-market contrast requires every
+        instrument channel current at stop. All 15 channels were initially data-ready, shutdown was
+        verified, and provider/SDK/queue errors were zero. This proves observed heartbeat independence
+        from instrument updates but does not replace the planned active-market contrast.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

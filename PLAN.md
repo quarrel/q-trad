@@ -216,7 +216,13 @@ Implementation status:
                       heartbeat and provider-contrast callbacks use the 1-based numeric positions
                       accepted by 1.0.3 instead of repeatedly resolving field names. Tests bind the
                       positions to subscription order and retain changed-field/null semantics; the
-                      provider contrast will measure its real-update effect. It is not deployed.
+                        provider contrast will measure its real-update effect. It is not deployed.
+                    - Closed-market ARM diagnostic complete: the published `6a828c1` image received
+                      301 heartbeat updates over five minutes at a 1.000-second median interval while
+                      PRICE and CHART channels supplied only initial snapshots. The manifest remains
+                      an expected `FAIL` on all-channel terminal freshness, with zero provider, SDK or
+                      queue loss and verified shutdown. This proves heartbeat delivery during
+                      instrument silence but does not satisfy the active-market contrast gate.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent

@@ -257,6 +257,23 @@ The evidence stages are deliberately non-substitutable:
    zero q-trad or SDK loss, bounded queue/projection lag, no unexplained gaps and a clean terminal
    shutdown. Only this final stage can admit `capture-v2` mapping qualification.
 
+### Closed-market heartbeat diagnostic
+
+An explicitly authorised five-minute diagnostic ran the published ARM64 image for main commit
+`6a828c1c3ed5328a0cb5df96ccbeea92a97baef7` while both collector services were stopped. It made no
+PostgreSQL connection or write. IG demo delivered 301 heartbeat updates from
+`2026-07-18T06:35:31.269795Z` through `06:40:31.176627Z`: the median receive interval was 1.000
+seconds, p95 was 1.005 seconds and the maximum was 1.011 seconds. Each PRICE and CHART:TICK channel
+delivered only its initial snapshot during the closed market. This proves the application heartbeat
+is delivered independently of continuing instrument updates in this observed session.
+
+The full contrast manifest correctly records `FAIL` because `all_channels_current_at_stop` is false;
+closed-market snapshots cannot satisfy the active-market feed-contrast gate. All subscriptions were
+initially data-ready, transport and shutdown were verified, and queue loss, SDK loss, subscription
+errors and server errors were zero. The non-overwriting manifest hash is
+`9ebfc3c8376c14a232dda8e2de679df994000dcfea3d0427999b182f0c43e2cd`; this diagnostic does not
+replace the planned active-market contrast or fresh ARM endurance interval.
+
 ## Exit gate
 
 Corrected `capture-v1` can qualify only after a representative endurance interval demonstrates:
