@@ -120,6 +120,14 @@ These bounded profiles prove sustained local handoff, finite backlog drain and r
 They do not prove provider compatibility, real Lightstreamer recovery or IG per-item delivery;
 those remain provider-backed gates.
 
+Python client 2.0.0 and later explicitly require Server 7.4.0, while IG publishes Server 7.3.3 and
+Python 1.0.3 as its matching deployment. Do not run 2.x against IG. As a separate source audit,
+compare the tagged 1.0.3 and 2.1.0 implementations behind 2.1.0's stated high-update-rate
+improvement. Promote only a minimal understood change whose prerequisites fit 1.0.3, whose licence
+and attribution are retained, and whose synthetic load, renewal and provider-recovery evidence all
+pass. This audit is not a prerequisite for the heartbeat-only candidate unless it exposes a defect in
+the pinned path.
+
 The checked-in `ops/dev/provider-recovery-experiment.sh` prepares the remaining provider-backed
 fault proof without touching PostgreSQL. Under the same exact collector-stopped acknowledgement it
 uses the production adapter, requires initial PRICE/heartbeat/frequency readiness, terminates the

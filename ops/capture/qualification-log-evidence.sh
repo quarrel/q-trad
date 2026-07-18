@@ -182,7 +182,7 @@ for service in api db ingest; do
   record_source container "$service" "$log_file"
 done
 
-for unit in docker.service qtrad-capture.service tailscaled.service; do
+for unit in docker.service qtrad-capture.service qtrad-ingest.service tailscaled.service; do
   file="journal-$unit.log"
   capture_bounded "$work_dir/$file" \
     journalctl --utc --no-pager --output=short-iso-precise \

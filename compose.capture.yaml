@@ -20,7 +20,8 @@ services:
 
   ingest:
     image: ${QTRAD_IMAGE:?set an immutable q-trad application image digest}
-    restart: unless-stopped
+    # systemd owns bounded restart accounting for this evidence-bearing process.
+    restart: "no"
     stop_signal: SIGINT
     stop_grace_period: 90s
     command: ["python", "-m", "qtrad", "ingest", "--environment", "ig-demo"]

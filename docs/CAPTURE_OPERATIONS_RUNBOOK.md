@@ -168,8 +168,11 @@ resolved secrets.
    key and checkout at `/home/opc/q-trad-source`. Run `git -C ~/q-trad-source pull
    --ff-only`, archive that exact commit under `/opt/qtrad-releases/<full-commit>`, then
    atomically repoint `/opt/qtrad-capture`. Never build or use a mutable image tag there.
-3. Run `qtrad db upgrade`, take a successful backup, start `qtrad-capture.service`, then
-   require `GET /health/ready` to return HTTP 200 with all seven expected instruments.
+3. Run `qtrad db upgrade`, take a successful backup, install/enable both
+   `qtrad-capture.service` and `qtrad-ingest.service`, then start `qtrad-capture.service` and
+   require both units to be active plus `GET /health/ready` HTTP 200 with all seven expected
+   instruments. The capture unit owns database/API lifecycle; its wanted ingest unit owns the
+   foreground ingestion container and bounded restart accounting.
 4. Roll back only by restoring the previous digest/configuration and restarting Compose.
    Migrations are expand-only; canonical events and PostgreSQL volumes are never rolled
    back by deployment.
@@ -202,9 +205,16 @@ new image against schema `0007` before retrying the migration; never delete an a
 
 ## Operations
 
-- Install the capture, backup, weekly restore-verification and healthwatch systemd units
+- Install the capture, ingest, backup, weekly restore-verification and healthwatch systemd units
   and timers from `ops/systemd/`. Enable them only after their manual gates pass. The
   collector must continue after SSH or Bastion disconnects.
+- `compose.capture.yaml` deliberately gives ingest no Docker restart policy. Systemd permits at
+  most three failed ingest starts per hour with a 60-second delay and then leaves
+  `qtrad-ingest.service` failed for monitoring/operator review. This prevents process recreation
+  from resetting application retry budgets and hammering IG during maintenance. A deliberate
+  `systemctl reset-failed qtrad-ingest.service` followed by `systemctl start
+  qtrad-ingest.service` is the reviewed manual recovery after the provider condition is resolved;
+  do not loop that command. Database and API retain Docker `unless-stopped` recovery.
 - From the authorised Dev Container, use Tailscale MagicDNS and
   `ssh opc@q-trad-capture` for normal administration. The tailnet policy permits that peer
   to reach only TCP/22 on the collector. The Dev Container deliberately has no direct IPv6

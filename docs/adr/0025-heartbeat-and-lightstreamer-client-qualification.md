@@ -23,6 +23,12 @@ but newer clients can require a later server. Compatibility of Python 2.x with I
 therefore cannot be inferred from source-API compatibility or a synthetic test. ADR 0010 keeps 1.0.3
 until provider compatibility is established independently.
 
+The Python changelog makes the incompatibility explicit: 2.0.0 and every later 2.x release require
+Server 7.4.0, and 2.0.0 is not source-compatible with 1.x. Version 2.1.0 separately records improved
+high-update-rate performance. That improvement is relevant evidence for a source-level audit, but it
+does not authorise the 2.x package against IG or prove that one isolated change can safely be moved to
+1.0.3.
+
 ## Proposed decision
 
 For the next candidate release:
@@ -67,6 +73,11 @@ change under test. This forgoes fixes in later client releases; the existing nar
 remains reviewable and version-guarded. Promotion remains blocked until a single-connection provider
 experiment proves connection, all subscription acknowledgements, fresh data, reconnect, clean
 shutdown and no unexplained loss.
+
+Separately compare the tagged 1.0.3 and 2.1.0 sources to identify the exact performance change and
+its prerequisites. Any proposed backport needs its own narrow patch, attribution/licence review,
+high-rate and renewal-under-load regression evidence, and provider recovery qualification on 1.0.3;
+do not copy the 2.x implementation wholesale or fold that work into heartbeat qualification.
 
 Primary references:
 

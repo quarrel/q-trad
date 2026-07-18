@@ -602,6 +602,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         its reviewed systemd/Compose boundary. No q-trad container or collector connection remained;
         the PostgreSQL block volume remained mounted read-write with unchanged 9.1 GB usage. No deploy,
         migration or data mutation accompanied the stop.
+      - In progress locally and undeployed: ingest no longer uses Docker `unless-stopped` in the
+        candidate descriptor. A dedicated foreground `qtrad-ingest.service` propagates the container
+        exit code, waits 60 seconds and permits at most three failed starts per hour; exhaustion
+        remains a failed unit until reviewed operator recovery. `qtrad-capture.service` continues to
+        own only database/API lifecycle, and stopping it stops ingest through `PartOf`. Qualification
+        evidence now requires both units and preserves both journals. This addresses the observed
+        process-level retry-budget reset without changing collector data.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

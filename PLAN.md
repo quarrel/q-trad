@@ -191,13 +191,19 @@ Implementation status:
                   version-guarded disposal repair. A local 2.2.2 API/load probe cannot establish provider
                   compatibility and that override has been removed. Library-managed transport recovery now separately invalidates heartbeat
                   readiness as well as PRICE readiness, so pre-stall evidence cannot restore health.
-                - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
+                  - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
                   subscriptions with zero drops. With a 5 ms injected persistence stall it absorbs a
                   queue high-water of 799/10,000 and drains completely with 6.58-second p95 and 6.91-second
                   maximum lag. The five-minute 200/s profile also passes all 60,000 callbacks with zero
                   loss, queue high-water 51/10,000 and 0.257-second maximum lag. A separate all-item
                   renewal at load passes 2,000 callbacks and re-establishes complete state for all 40
-                  subscriptions. Provider-backed connection/recovery faults remain pending.
+                    subscriptions. Provider-backed connection/recovery faults remain pending.
+                  - Deferred and separated from heartbeat qualification: compare the upstream Python
+                    1.0.3 and 2.1.0 tags to identify the exact implementation behind 2.1.0's stated
+                    high-update-rate improvement. Python 2.x requires Server 7.4.0 and cannot run
+                    against IG's published 7.3.3 deployment. Any minimal backport requires understood
+                    prerequisites, attribution/licence review and fresh load, renewal and provider-
+                    recovery evidence on the supported 1.0.3 runtime.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent
@@ -247,6 +253,12 @@ Implementation status:
                     remained. Heartbeat/PRICE separation and bounded process-level restart policy are now
                     explicit candidate acceptance concerns, while the provider compatibility and recovery
                     probes remain mandatory before publication.
+                  - In progress locally and undeployed: the candidate removes Docker restart ownership
+                    from ingest. A foreground systemd unit propagates non-zero exit, delays retries by
+                    60 seconds and limits failed starts to three per hour; exhaustion remains visible
+                    until reviewed operator recovery instead of resetting application retry budgets in
+                    hundreds of new processes. Database/API lifecycle remains in the capture unit, and
+                    qualification evidence now binds both unit states and journals.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
