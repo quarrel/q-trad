@@ -616,6 +616,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
         change requires a rebuilt/transpiled Python distribution and is not suitable for q-trad's
         narrow runtime compatibility repair. No backport is proposed without provider evidence that
         isolates 1.0.3 manager dispatch as the bottleneck at the intended 7–40 subscriptions.
+      - The supported 1.0.3 callback path now uses 1-based numeric field positions for
+        `ItemUpdate.getValue` and `isValueChanged`. Lightstreamer documents that name access performs
+        an additional name-to-position lookup. Price, heartbeat and provider-contrast callbacks bind
+        positions to their subscription field order; focused lifecycle tests preserve delta and
+        explicit-null behaviour. This remains local and undeployed pending provider evidence.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

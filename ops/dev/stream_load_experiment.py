@@ -53,11 +53,25 @@ class _SyntheticUpdate:
         self._values = values
         self._changed = changed
 
-    def getValue(self, field: str) -> object | None:
-        return self._values.get(field)
+    @staticmethod
+    def _field_name(field: str | int) -> str:
+        if isinstance(field, int):
+            return (
+                "TIMESTAMP",
+                "BIDPRICE1",
+                "ASKPRICE1",
+                "BIDSIZE1",
+                "ASKSIZE1",
+                "DLG_FLAG",
+                "DELAY",
+            )[field - 1]
+        return field
 
-    def isValueChanged(self, field: str) -> bool:
-        return field in self._changed
+    def getValue(self, field: str | int) -> object | None:
+        return self._values.get(self._field_name(field))
+
+    def isValueChanged(self, field: str | int) -> bool:
+        return self._field_name(field) in self._changed
 
 
 def _parse_args() -> _Arguments:

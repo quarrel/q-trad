@@ -68,6 +68,8 @@ _PRICE_FIELDS = (
     "DLG_FLAG",
     "DELAY",
 )
+_PRICE_FIELDS_BY_POSITION = tuple(enumerate(_PRICE_FIELDS, start=1))
+_HEARTBEAT_FIELD_POSITION = 1
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
     "endpoint.unavailable.for.api-key",
@@ -140,9 +142,9 @@ class _IgRestService(Protocol):
 
 
 class _ItemUpdate(Protocol):
-    def getValue(self, field: str, /) -> object | None: ...
+    def getValue(self, field: str | int, /) -> object | None: ...
 
-    def isValueChanged(self, field: str, /) -> bool: ...
+    def isValueChanged(self, field: str | int, /) -> bool: ...
 
 
 @runtime_checkable
@@ -827,7 +829,9 @@ class IgDemoMarketDataAdapter:
             return
         received = self._clock.now()
         raw = {
-            field: update.getValue(field) for field in _PRICE_FIELDS if update.isValueChanged(field)
+            field: update.getValue(position)
+            for position, field in _PRICE_FIELDS_BY_POSITION
+            if update.isValueChanged(position)
         }
         loop = self._loop
         if loop is None:
@@ -930,7 +934,7 @@ class IgDemoMarketDataAdapter:
         self._accept_update(record, epic, generation)
 
     def _on_heartbeat(self, update: _ItemUpdate, generation: int) -> None:
-        value = update.getValue("HEARTBEAT")
+        value = update.getValue(_HEARTBEAT_FIELD_POSITION)
         received = self._clock.now()
         loop = self._loop
         if loop is None:

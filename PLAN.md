@@ -212,6 +212,11 @@ Implementation status:
                       change requires rebuilding/transpiling the Python distribution, so no backport is
                       proposed unless provider evidence isolates 1.0.3 manager dispatch as a bottleneck
                       at the intended 7–40 subscriptions.
+                    - A narrower supported-client optimisation is implemented locally: price,
+                      heartbeat and provider-contrast callbacks use the 1-based numeric positions
+                      accepted by 1.0.3 instead of repeatedly resolving field names. Tests bind the
+                      positions to subscription order and retain changed-field/null semantics; the
+                      provider contrast will measure its real-update effect. It is not deployed.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent

@@ -183,12 +183,25 @@ class FakeUpdate:
     ) -> None:
         self.values = dict(values)
         self.changed_fields = set(values) if changed_fields is None else changed_fields
+        self.requested_fields: list[str | int] = []
 
-    def getValue(self, field: str) -> str | None:
-        return self.values.get(field)
+    def _field_name(self, field: str | int) -> str:
+        if isinstance(field, int):
+            fields = (
+                ("HEARTBEAT",)
+                if set(self.values) == {"HEARTBEAT"}
+                else ig_market_data._PRICE_FIELDS
+            )
+            return fields[field - 1]
+        return field
 
-    def isValueChanged(self, field: str) -> bool:
-        return field in self.changed_fields
+    def getValue(self, field: str | int) -> str | None:
+        self.requested_fields.append(field)
+        return self.values.get(self._field_name(field))
+
+    def isValueChanged(self, field: str | int) -> bool:
+        self.requested_fields.append(field)
+        return self._field_name(field) in self.changed_fields
 
 
 class FakeConnectionDetails:
@@ -673,10 +686,11 @@ async def test_heartbeat_callback_crosses_event_loop_with_bounded_evidence() -> 
     adapter._loop = asyncio.get_running_loop()
     adapter._generation = 7
     adapter._handle_heartbeat_subscription(generation=7)
+    update = FakeUpdate({"HEARTBEAT": "1783065600000"})
 
     await asyncio.to_thread(
         adapter._on_heartbeat,
-        FakeUpdate({"HEARTBEAT": "1783065600000"}),
+        update,
         7,
     )
     await asyncio.sleep(0)
@@ -685,6 +699,7 @@ async def test_heartbeat_callback_crosses_event_loop_with_bounded_evidence() -> 
     assert adapter._heartbeat_events == 1
     assert adapter._last_heartbeat_at == clock.now()
     assert adapter._last_heartbeat_value == "1783065600000"
+    assert update.requested_fields == [1]
 
 
 def test_heartbeat_subscription_error_fails_readiness_closed() -> None:
@@ -1283,10 +1298,14 @@ async def test_price_callback_persists_only_changed_fields_and_preserves_explici
         "DLG_FLAG": "DEAL",
         "DELAY": "0",
     }
-    adapter._on_update(epic, FakeUpdate(initial))
+    initial_update = FakeUpdate(initial)
+    adapter._on_update(epic, initial_update)
     await asyncio.sleep(0)
     first = adapter._queue.get_nowait()
     assert first.raw_payload == initial
+    assert initial_update.requested_fields == [
+        value for position in range(1, 8) for value in (position, position)
+    ]
     assert first.payload_representation is RawPayloadRepresentation.CHANGED_FIELDS
 
     merged = {

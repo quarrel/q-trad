@@ -137,6 +137,15 @@ into the Python distribution, not a narrow Python runtime repair. With 7–40 su
 200-callback/s handoff evidence already passing, no backport is proposed unless provider evidence
 isolates 1.0.3 manager dispatch as a bottleneck.
 
+The supported 1.0.3 API also exposes a narrower callback optimisation. Lightstreamer confirms that
+`ItemUpdate.getValue(name)` first resolves the name to a numeric field position, while both
+`getValue` and `isValueChanged` accept the 1-based subscription-field position directly. The
+candidate therefore binds positions to the exact subscription field order and uses integer access
+for price and heartbeat callbacks. Tests lock the first field to position 1 and preserve changed-field
+and explicit-null semantics. The provider contrast uses the same access path; its evidence will show
+whether callback pressure improves under real updates. See the
+[Lightstreamer performance discussion](https://forum.lightstreamer.com/d/9325-python-client-itemupdategetvalue-method-very-slow-to-retrieve-value).
+
 The checked-in `ops/dev/provider-recovery-experiment.sh` prepares the remaining provider-backed
 fault proof without touching PostgreSQL. Under the same exact collector-stopped acknowledgement it
 uses the production adapter, requires initial PRICE/heartbeat/frequency readiness, terminates the

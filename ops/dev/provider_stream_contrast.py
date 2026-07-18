@@ -44,9 +44,9 @@ _PROVIDER_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 
 
 class _ItemUpdate(Protocol):
-    def getValue(self, field: str, /) -> object | None: ...
+    def getValue(self, field: str | int, /) -> object | None: ...
 
-    def isValueChanged(self, field: str, /) -> bool: ...
+    def isValueChanged(self, field: str | int, /) -> bool: ...
 
 
 class _ConnectionDetails(Protocol):
@@ -428,10 +428,8 @@ def _channels(universe: CaptureUniverse, account_id: str) -> dict[str, _Channel]
 
 
 def _provider_timestamp(channel: _Channel, update: _ItemUpdate) -> str | None:
-    field = "UTM" if channel.feed == "CHART_TICK" else "TIMESTAMP"
-    if channel.feed == "HEARTBEAT":
-        field = "HEARTBEAT"
-    value = update.getValue(field)
+    position = 3 if channel.feed == "CHART_TICK" else 1
+    value = update.getValue(position)
     return None if value is None else str(value)
 
 
@@ -658,7 +656,11 @@ def _run(arguments: _Arguments) -> dict[str, object]:
             state.event(events, kind="UNSUBSCRIBED", channel_key=self._channel.key)
 
         def onItemUpdate(self, update: ItemUpdate) -> None:
-            changed = tuple(field for field in self._channel.fields if update.isValueChanged(field))
+            changed = tuple(
+                field
+                for position, field in enumerate(self._channel.fields, start=1)
+                if update.isValueChanged(position)
+            )
             state.event(
                 events,
                 kind="UPDATE",
