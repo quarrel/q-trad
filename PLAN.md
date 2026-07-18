@@ -261,11 +261,12 @@ Implementation status:
                     reconnect/reauthentication progression, seven-instrument record advancement,
                     per-phase readiness/rate evidence, loss counters and final cleanup from bounded
                     structured fields rather than trusting named check booleans.
-                  - The release sequence is now explicit: finish the untouched old-lock corrected run
-                    through its recurrent windows and weekend; stop it with operator approval; execute
-                    both provider probes during active markets; accept ADR 0025 only on PASS; then
-                    publish/deploy the exact ARM candidate and give that image its own fresh 72-hour
-                    `capture-v1` endurance. Earlier stages cannot qualify the later dependency/image.
+                  - ADR 0025 is accepted for a controlled heartbeat-driven weekend endurance candidate.
+                    The closed-market contrast proved that the heartbeat advances independently while
+                    PRICE channels may emit only startup snapshots. The exact green ARM candidate is now
+                    deployed before active markets so weekend recovery can be observed. This does not
+                    qualify `capture-v1`: the active-market feed contrast, forced recovery proof, gap/
+                    history corroboration and a representative 72-hour endurance gate remain required.
                   - Weekend-boundary evidence now falsifies old-lock continuity. From approximately
                     `2026-07-17T21:36Z`, market-close PRICE silence repeatedly triggered all-seven
                     readiness recovery despite Lightstreamer reporting a connected transport; durable
@@ -277,9 +278,10 @@ Implementation status:
                     containment completed through the reviewed systemd/Compose stop boundary at
                     `2026-07-18T02:40:45Z`; the data volume remained mounted and no collector connection
                     remained. Heartbeat/PRICE separation and bounded process-level restart policy are now
-                    explicit candidate acceptance concerns, while the provider compatibility and recovery
-                    probes remain mandatory before publication.
-                  - In progress locally and undeployed: the candidate removes Docker restart ownership
+                    explicit candidate acceptance concerns. Provider compatibility and recovery probes
+                    remain mandatory before full qualification rather than before the controlled weekend
+                    deployment.
+                  - Deployed: the candidate removes Docker restart ownership
                     from ingest. A foreground systemd unit propagates non-zero exit, delays retries by
                     60 seconds and limits failed starts to three per hour; exhaustion remains visible
                     until reviewed operator recovery instead of resetting application retry budgets in

@@ -630,7 +630,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         instrument channel current at stop. All 15 channels were initially data-ready, shutdown was
         verified, and provider/SDK/queue errors were zero. This proves observed heartbeat independence
         from instrument updates but does not replace the planned active-market contrast.
-      - Corrected locally and undeployed: quote recency is now per-instrument telemetry rather than
+      - Deployed in the controlled weekend candidate: quote recency is now per-instrument telemetry rather than
         operational failure. Heartbeat, explicit transport/subscription lifecycle, SDK/queue loss and
         retry-watchdog expiry govern collector continuity and reconnects. Startup still requires one
         callback from every acknowledged PRICE channel, but that callback may be a closed or partial
@@ -642,6 +642,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
         produce healthy quotes. The replacement candidate treats those callbacks as channel-delivery
         evidence and reports their quote age separately; missing transport, heartbeat, subscription or
         per-channel callback evidence still fails startup.
+      - Main commit `bdee617c635149b0e3ebaafe530f8a966322230a` passed CI run `29644141097` and
+        publication run `29644309880` produced OCI index digest
+        `sha256:d964db9018cf69c0bf1fc32cfc039ef127cedcaaa7a3b7861c0d3412900ef642`.
+        The ARM deployment started ingestion run `b7b63e74-ff80-4028-af89-15cfab089f89` at
+        `2026-07-18T12:54:09Z`. After all seven quote channels became stale, readiness remained HTTP
+        200 with `fresh_quote_count=0`; adapter health remained `HEALTHY`/`READY`, heartbeat events
+        advanced from 2,259 to 2,265 in six seconds, and reconnect, drop, SDK-loss, provider-error and
+        systemd-restart counts remained zero. This is initial deployment evidence, not an endurance or
+        active-market qualification result.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

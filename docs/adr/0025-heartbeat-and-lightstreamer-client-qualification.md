@@ -1,6 +1,6 @@
 # ADR 0025: heartbeat evidence on IG's supported Lightstreamer client
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-07-17
 
 ## Context
@@ -29,7 +29,7 @@ high-update-rate performance. That improvement is relevant evidence for a source
 does not authorise the 2.x package against IG or prove that one isolated change can safely be moved to
 1.0.3.
 
-## Proposed decision
+## Decision
 
 For the next candidate release:
 
@@ -85,9 +85,10 @@ quota-bounded historical-API corroboration until the provider path earns operati
 
 The heartbeat candidate retains IG's published Python-client match and isolates the behavioural
 change under test. This forgoes fixes in later client releases; the existing narrow disposal repair
-remains reviewable and version-guarded. Promotion remains blocked until a single-connection provider
-experiment proves connection, all subscription acknowledgements, fresh data, reconnect, clean
-shutdown and no unexplained loss.
+remains reviewable and version-guarded. A controlled weekend endurance deployment is permitted after
+local lifecycle gates and the closed-market heartbeat diagnostic pass. Full `capture-v1`
+qualification remains blocked until active-market evidence proves connection, all subscription
+acknowledgements, fresh per-channel data, reconnect, clean shutdown and no unexplained loss.
 
 Separately compare the tagged 1.0.3 and 2.1.0 sources to identify the exact performance change and
 its prerequisites. Any proposed backport needs its own narrow patch, attribution/licence review,

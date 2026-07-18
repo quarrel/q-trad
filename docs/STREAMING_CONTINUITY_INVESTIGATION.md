@@ -239,23 +239,22 @@ second concurrent connection.
 
 The evidence stages are deliberately non-substitutable:
 
-1. Leave the currently deployed overload-corrected Lightstreamer 1.0.3 collector untouched through
-   the recurrent `20:00Z`–`22:00Z` windows and a weekend maintenance boundary. This measures whether
-     the callback-overload correction removed the earlier loss, but cannot qualify heartbeat.
-2. Close and stop that run only through an operator-approved procedure which proves no remaining
-   connection for the API key. During an active market window, run the three-hour 15-subscription
-   contrast and then the short q-trad recovery experiment. Market closure is not a valid way to make
-   all CHART:TICK channels data-ready.
-3. If either provider experiment fails, retain its failure evidence and do not accept ADR 0025 or
-   deploy the candidate. Independently verify its manifest/event hashes, diagnose or revise
-   locally, then repeat under a new non-overwriting evidence identity.
-4. If both pass, accept ADR 0025 through review, merge the exact green commit, publish its immutable
-   amd64/arm64 image and deploy that digest through the capture release procedure. The old-image
-   endurance and local provider runs do not substitute for ARM/provider evidence from this image.
-5. Run the exact candidate image for a fresh 72-hour `capture-v1` endurance interval spanning the
-   recurrent daily window. Require heartbeat and every PRICE lifecycle/frequency channel current,
-   zero q-trad or SDK loss, bounded queue/projection lag, no unexplained gaps and a clean terminal
-   shutdown. Only this final stage can admit `capture-v2` mapping qualification.
+1. The old-lock collector was stopped through the operator-approved boundary after weekend PRICE
+   silence caused repeated recovery. Its evidence remains historical and cannot qualify heartbeat.
+2. The closed-market contrast established independent one-second heartbeat delivery while PRICE and
+   CHART channels emitted only startup snapshots. After local lifecycle gates passed, ADR 0025 was
+   accepted and the exact immutable ARM heartbeat candidate was deployed for controlled weekend
+   endurance. This deployment is evidence collection, not `capture-v1` qualification.
+3. Observe heartbeat, transport/subscription lifecycle, per-channel quote age, loss counters,
+   projection lag and supervised restart state through weekend maintenance and the next active-market
+   transition. Corroborate any live gap with a quota-bounded historical request without repairing it.
+4. At an operator-approved active-market stop, run the three-hour 15-subscription contrast and the
+   short q-trad recovery experiment. Market closure is not a valid way to make all CHART:TICK channels
+   data-ready. Preserve and independently verify every PASS or FAIL manifest.
+5. Only after the provider proofs and a representative 72-hour exact-image endurance interval pass
+   may `capture-v1` qualify and admit `capture-v2` mapping work. Require current heartbeat and PRICE
+   lifecycle/frequency evidence, zero q-trad or SDK loss, bounded queue/projection lag, explained gaps
+   and clean terminal shutdown.
 
 ### Closed-market heartbeat diagnostic
 
