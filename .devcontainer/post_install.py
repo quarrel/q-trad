@@ -67,8 +67,13 @@ def run_codex_mcp(*arguments: str) -> None:
     subprocess.run(["codex", "mcp", *arguments], check=True)
 
 
-def forward_mcp_environment_variable(server_name: str, variable_name: str) -> None:
-    """Add Codex's parent-environment pass-through setting without persisting a secret."""
+def set_mcp_server_setting(
+    server_name: str,
+    setting_name: str,
+    toml_value: str,
+    expected_value: object,
+) -> None:
+    """Atomically add one reviewed setting to a CLI-created MCP server section."""
     config = Path.home() / ".codex" / "config.toml"
     current = config.read_text(encoding="utf-8")
     header = f"[mcp_servers.{server_name}]"
@@ -88,21 +93,21 @@ def forward_mcp_environment_variable(server_name: str, variable_name: str) -> No
         ),
         len(lines),
     )
-    expected_line = f'env_vars = ["{variable_name}"]'
+    expected_line = f"{setting_name} = {toml_value}"
     existing = [
         line.strip()
         for line in lines[section_start + 1 : section_end]
-        if line.strip().startswith("env_vars")
+        if line.partition("=")[0].strip() == setting_name
     ]
     if existing and existing != [expected_line]:
-        raise RuntimeError(f"unexpected MCP environment pass-through for {server_name}")
+        raise RuntimeError(f"unexpected MCP setting {setting_name} for {server_name}")
     if not existing:
         lines.insert(section_end, f"{expected_line}\n")
 
     updated = "".join(lines)
     parsed = tomllib.loads(updated)
-    if parsed["mcp_servers"][server_name]["env_vars"] != [variable_name]:
-        raise RuntimeError(f"failed to configure MCP environment pass-through for {server_name}")
+    if parsed["mcp_servers"][server_name][setting_name] != expected_value:
+        raise RuntimeError(f"failed to configure MCP setting {setting_name} for {server_name}")
 
     mode = config.stat().st_mode & 0o777
     temporary_name: str | None = None
@@ -122,6 +127,16 @@ def forward_mcp_environment_variable(server_name: str, variable_name: str) -> No
     finally:
         if temporary_name is not None:
             Path(temporary_name).unlink(missing_ok=True)
+
+
+def forward_mcp_environment_variable(server_name: str, variable_name: str) -> None:
+    """Add Codex's parent-environment pass-through setting without persisting a secret."""
+    set_mcp_server_setting(
+        server_name,
+        "env_vars",
+        f'["{variable_name}"]',
+        [variable_name],
+    )
 
 
 def configure_mcp_servers() -> None:
@@ -160,6 +175,14 @@ def configure_mcp_servers() -> None:
         "--bearer-token-env-var",
         "GITHUB_PAT_TOKEN",
     )
+    # The CLI currently has no option for streamable-HTTP headers. Enable GitHub's
+    # default and Actions toolsets after it has created the reviewed server section.
+    set_mcp_server_setting(
+        "github",
+        "http_headers",
+        '{ "X-MCP-Toolsets" = "default,actions" }',
+        {"X-MCP-Toolsets": "default,actions"},
+    )
     run_codex_mcp(
         "add",
         "tilth",
@@ -196,6 +219,7 @@ def configure_mcp_servers() -> None:
     if (
         github["url"] != "https://api.githubcopilot.com/mcp/"
         or github["bearer_token_env_var"] != "GITHUB_PAT_TOKEN"
+        or github["http_headers"] != {"X-MCP-Toolsets": "default,actions"}
     ):
         raise RuntimeError("GitHub MCP registration does not match the reviewed endpoint")
 

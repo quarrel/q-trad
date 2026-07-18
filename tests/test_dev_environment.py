@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import json
 import os
+import runpy
 import subprocess
+from collections.abc import Callable
 from pathlib import Path
+from typing import cast
+
+import pytest
 
 REPOSITORY_ROOT = Path(__file__).parents[1]
 
@@ -37,6 +42,59 @@ def test_dev_container_has_one_image_codex_bootstrap() -> None:
         "@openai/codex@latest" in dockerfile
     )
     assert "ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex" in dockerfile
+
+
+def test_post_install_adds_reviewed_github_actions_toolset_header(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        '[mcp_servers.github]\nurl = "https://api.githubcopilot.com/mcp/"\n',
+        encoding="utf-8",
+    )
+    config.chmod(0o600)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    namespace = runpy.run_path(str(REPOSITORY_ROOT / ".devcontainer" / "post_install.py"))
+    setter = cast(Callable[[str, str, str, object], None], namespace["set_mcp_server_setting"])
+
+    setter(
+        "github",
+        "http_headers",
+        '{ "X-MCP-Toolsets" = "default,actions" }',
+        {"X-MCP-Toolsets": "default,actions"},
+    )
+    setter(
+        "github",
+        "http_headers",
+        '{ "X-MCP-Toolsets" = "default,actions" }',
+        {"X-MCP-Toolsets": "default,actions"},
+    )
+
+    assert config.read_text(encoding="utf-8").count("X-MCP-Toolsets") == 1
+    assert config.stat().st_mode & 0o777 == 0o600
+
+
+def test_post_install_rejects_conflicting_mcp_setting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = tmp_path / ".codex" / "config.toml"
+    config.parent.mkdir()
+    config.write_text(
+        '[mcp_servers.github]\nhttp_headers = { "X-MCP-Toolsets" = "default" }\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("HOME", str(tmp_path))
+    namespace = runpy.run_path(str(REPOSITORY_ROOT / ".devcontainer" / "post_install.py"))
+    setter = cast(Callable[[str, str, str, object], None], namespace["set_mcp_server_setting"])
+
+    with pytest.raises(RuntimeError, match="unexpected MCP setting http_headers for github"):
+        setter(
+            "github",
+            "http_headers",
+            '{ "X-MCP-Toolsets" = "default,actions" }',
+            {"X-MCP-Toolsets": "default,actions"},
+        )
 
 
 def test_dev_verification_refuses_a_remote_database_host() -> None:
