@@ -1,4 +1,4 @@
-# ADR 0025: heartbeat evidence and maintained Lightstreamer client qualification
+# ADR 0025: heartbeat evidence on IG's supported Lightstreamer client
 
 - **Status:** Proposed
 - **Date:** 2026-07-17
@@ -16,10 +16,12 @@ an application data item, distinct from Lightstreamer's protocol-level keepalive
 available primary sources do not support treating the subscription as a requirement that renews or
 prevents expiry of the IG session.
 
-`trading-ig` 0.0.24 pins `lightstreamer-client-lib==1.0.3`. Lightstreamer has superseded that release;
-its current Python 2.2.2 client is documented as compatible with code from 2.2.1, and the 2.1.0
-changelog specifically records improved high-update-rate performance. ADR 0010 kept 1.0.3 until
-compatibility could be proven.
+`trading-ig` 0.0.24 pins `lightstreamer-client-lib==1.0.3`. Lightstreamer's IG-specific download
+matrix reports that IG deploys Server 7.3.3 and identifies Python client 1.0.3 as the matching SDK.
+Lightstreamer's general compatibility promise is asymmetric: newer servers support older clients,
+but newer clients can require a later server. Compatibility of Python 2.x with IG's deployed server
+therefore cannot be inferred from source-API compatibility or a synthetic test. ADR 0010 keeps 1.0.3
+until provider compatibility is established independently.
 
 ## Proposed decision
 
@@ -35,11 +37,11 @@ For the next candidate release:
 - never append heartbeat updates to raw market capture or canonical quote history and never claim
   that heartbeat continuity proves an individual PRICE update was emitted;
 - marshal changed-field normalisation and renewal invalidation through the same event-loop boundary;
-- use uv's reviewed transitive override to lock `lightstreamer-client-lib==2.2.2`, while retaining
-  `trading-ig` only for IG REST access; and
-- qualify the exact dependency lock and application image against IG demo before deployment. A
-  successful import/API test or synthetic load result is necessary but not provider compatibility;
-  and
+- retain `trading-ig`'s exact `lightstreamer-client-lib==1.0.3` pin and q-trad's narrow reviewed
+  WebSocket-disposal correction; do not include a Python 2.x override in the heartbeat release; and
+- qualify the exact supported dependency lock and application image against IG demo before
+  deployment. Any later Python-client upgrade is a separate compatibility experiment and ADR change,
+  not part of heartbeat qualification; and
 - run the reviewed seven-PRICE/seven-CHART:TICK/heartbeat contrast only after the collector
   measurement and a verified operator-approved stop. Require one connection, all 15 channels
   data-ready, bounded non-overwriting callback/lifecycle evidence, zero loss and verified teardown;
@@ -60,14 +62,15 @@ Continued heartbeat with one stale PRICE item becomes strong whole-connection co
 loss of both brackets the silence at the transport or provider-session boundary. Neither outcome
 alone establishes what an unobserved provider update contained.
 
-The dependency override intentionally disagrees with `trading-ig`'s exact transitive pin, so q-trad's
-locked uv environment and immutable image are the supported runtime. The override must be removed
-if the upstream package adopts a compatible maintained client. Promotion remains blocked until a
-single-connection provider experiment proves connection, all subscription acknowledgements, fresh
-data, reconnect, clean shutdown and no unexplained loss.
+The heartbeat candidate retains IG's published Python-client match and isolates the behavioural
+change under test. This forgoes fixes in later client releases; the existing narrow disposal repair
+remains reviewable and version-guarded. Promotion remains blocked until a single-connection provider
+experiment proves connection, all subscription acknowledgements, fresh data, reconnect, clean
+shutdown and no unexplained loss.
 
 Primary references:
 
 - [IG Java sample heartbeat subscription](https://github.com/IG-Group/ig-webapi-java-sample/blob/c9d8bcb6b3dede7657f5689c5f4d76a910494eb5/ig-webapi-java-sample-console/src/main/java/com/iggroup/webapi/samples/Application.java)
 - [IG JavaScript sample connection-verification heartbeat](https://github.com/IG-Group/ig-webapi-js-ember-sample/blob/479c6e07d0b1673b4eca391c9956ab04e4156d2f/app/components/heart-beat.js)
+- [IG-specific Lightstreamer server/client compatibility matrix](https://www.lightstreamer.com/share/ig/)
 - [Lightstreamer Python client changelog](https://github.com/Lightstreamer/Lightstreamer-lib-client-haxe/blob/ffc256805539ae7d83ae82f375abf16bfd3ab9fc/CHANGELOG-Python.md)

@@ -524,10 +524,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
       requires it for readiness and moves changed-field state mutation onto the event-loop side of the
       provider callback boundary. Forty-six focused lifecycle tests pass. It does not treat heartbeat as
       session renewal or proof of a PRICE emission.
-    - `trading-ig` 0.0.24 pins superseded Lightstreamer 1.0.3. The maintained 2.2.2 API passes q-trad's
-      used-surface probe and 83 adapter/CLI tests under a local uv override; its official 2.1.0 changelog
-      specifically records higher update-rate performance. Provider compatibility remains unproven and
-      this lock is not deployed.
+    - Lightstreamer's IG-specific matrix identifies deployed Server 7.3.3 and Python client 1.0.3.
+      The heartbeat candidate therefore retains `trading-ig` 0.0.24's exact pin and q-trad's narrow
+      version-guarded WebSocket-disposal repair. The local 2.2.2 used-surface and load probes did not
+      establish provider compatibility; their uv override contradicted accepted ADR 0010 and has been
+      removed before release.
       - The new isolated load helper produced self-hashed PASS evidence for 2,000 callbacks at 200/s over
         40 subscriptions with zero loss. A 5 ms injected persistence stall reached queue high-water
         799/10,000, p95 lag 6.58 seconds and maximum lag 6.91 seconds before complete drain. The five-minute
@@ -580,12 +581,27 @@ outside the current data-only phase until explicitly admitted by a later plan up
       after its approved stop and during active markets; ADR 0025 remains Proposed until both pass;
       and the resulting immutable ARM image then requires its own fresh 72-hour `capture-v1`
       endurance before `capture-v2` can be admitted.
-    - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
-      ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
-      reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70
-      failed-candidate gaps; none began after the corrected run started at `2026-07-17T05:02:02Z`.
-      This run had not yet crossed the recurrent `20:00Z`–`22:00Z` window, so the checkpoint is not
-      endurance or causal closure. Host NTP remained synchronised. No mutation occurred.
+      - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
+        ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
+        reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70
+        failed-candidate gaps; none began after the corrected run started at `2026-07-17T05:02:02Z`.
+        This run had not yet crossed the recurrent `20:00Z`–`22:00Z` window, so the checkpoint is not
+        endurance or causal closure. Host NTP remained synchronised. No mutation occurred.
+      - The read-only weekend-boundary checkpoint at `2026-07-18T02:37:43Z` found that the corrected
+        collector did not survive the full `20:00Z`–`22:00Z` interval. PRICE silence caused repeated
+        all-channel readiness timeouts from approximately `21:36Z`; the projection and global position
+        stopped at `2026-07-17T21:39:12Z`. Lightstreamer repeatedly reached
+        `CONNECTED:WS-STREAMING` but no generation obtained all-seven PRICE readiness. Compose restart
+        policy then amplified the exhausted recovery into 563 container restarts by `02:38Z`, after
+        which IG login attempts also returned `401` invalid-client-security-token during the expected
+        weekend maintenance period. The API, PostgreSQL, timers and host NTP remained healthy, disk use
+        was 9.1/100 GB and every reported attempt retained zero q-trad drops. The gap endpoint contained
+        no newly closed interval in the window, but cannot represent the still-open terminal outage;
+        absence from that projection is therefore not evidence of continuity. The operator approved
+        containment and `qtrad-capture.service` stopped successfully at `2026-07-18T02:40:45Z` through
+        its reviewed systemd/Compose boundary. No q-trad container or collector connection remained;
+        the PostgreSQL block volume remained mounted read-write with unchanged 9.1 GB usage. No deploy,
+        migration or data mutation accompanied the stop.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

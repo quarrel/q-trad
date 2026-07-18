@@ -418,10 +418,10 @@ API key, retains only its numeric published allowances, and requires `trading-ig
 equal those values minus its pinned two-request safety margin. Missing, duplicate, malformed or changed
 limiter semantics fail session establishment closed. Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
 fails, and a process-level regression proves an abandoned provider call cannot keep the
-command resident. ADR 0011 records this containment decision. The deployed image still contains the
-pinned Lightstreamer 1.0.3 lifecycle workaround. Proposed ADR 0025 locally selects maintained 2.2.2
-through a uv override after API and synthetic-load compatibility; IG demo connection/recovery
-qualification remains mandatory before that dependency lock can ship.
+ command resident. ADR 0011 records this containment decision. Lightstreamer's IG-specific matrix
+ identifies deployed Server 7.3.3 and Python client 1.0.3. The deployed image and proposed ADR 0025
+ therefore retain that exact client plus q-trad's narrow version-guarded lifecycle workaround; local
+ source-API or synthetic-load compatibility with a newer client cannot supersede provider compatibility.
 Queue insertion remains non-blocking; overflow is counted and reported as degraded
 health without blocking the provider callback. Ingestion persists adapter health on an independent
 periodic task, so whole-stream silence cannot suppress heartbeat, lifecycle or terminal-failure

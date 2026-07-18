@@ -2,9 +2,6 @@ version = 1
 revision = 3
 requires-python = "==3.13.*"
 
-[manifest]
-overrides = [{ name = "lightstreamer-client-lib", specifier = "==2.2.2" }]
-
 [[package]]
 name = "aiohappyeyeballs"
 version = "2.7.1"
@@ -389,15 +386,15 @@ wheels = [
 
 [[package]]
 name = "lightstreamer-client-lib"
-version = "2.2.2"
+version = "1.0.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "aiohttp" },
     { name = "jsonpatch" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/ab/c2/55cd668d47a25c600de1bb1c2841c57f4b460901795367b0de6c4f628cbf/lightstreamer_client_lib-2.2.2.tar.gz", hash = "sha256:1b967093217d49cb3e19930db4405139d2aa2345b1d868de470ec1d1eee8cc1b", size = 117648, upload-time = "2025-05-23T07:11:07.263Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/1e/da9f259eda2cf3eecfd15813fd2a920144ce282102089ec9beae022350d3/lightstreamer-client-lib-1.0.3.tar.gz", hash = "sha256:21004437584f94de016da5d49745ee4a01c64e6bf98a14e3c1a30294da07b3eb", size = 124846, upload-time = "2023-06-22T07:34:07.135Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b1/48/f5c58bd9407dee034a8580ff8e24bee203b6887a44e05e72edee2d5631ef/lightstreamer_client_lib-2.2.2-py3-none-any.whl", hash = "sha256:b0c41da1b138a8c3dc0f714e4fa532174b5c335dedc74e789bce8dd5f7a34788", size = 119407, upload-time = "2025-05-23T07:11:05.565Z" },
+    { url = "https://files.pythonhosted.org/packages/24/0c/51f3d440058115d05521794a9e6fed6792be7b4bad30110bc39e14899d5c/lightstreamer_client_lib-1.0.3-py3-none-any.whl", hash = "sha256:e566f87d5a1c884802dd44597d304fe30d0d844aece2077d44a73acef98fcbf8", size = 126552, upload-time = "2023-06-22T07:34:05.013Z" },
 ]
 
 [[package]]

@@ -185,10 +185,11 @@ Implementation status:
                 - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
                   application heartbeat as separate whole-connection evidence and requires it for
                   readiness without treating it as token renewal or per-item proof. Stateful delta
-                  normalisation now shares event-loop ordering with subscription renewal. The maintained
-                  Lightstreamer 2.2.2 used API is compatible locally and is selected through a reviewed uv
-                  override because `trading-ig` pins superseded 1.0.3; IG demo qualification remains a
-                  release gate. Library-managed transport recovery now separately invalidates heartbeat
+                  normalisation now shares event-loop ordering with subscription renewal. Lightstreamer's
+                  IG-specific matrix identifies deployed Server 7.3.3 and Python client 1.0.3; the
+                  heartbeat candidate therefore retains `trading-ig`'s exact pin and q-trad's narrow
+                  version-guarded disposal repair. A local 2.2.2 API/load probe cannot establish provider
+                  compatibility and that override has been removed. Library-managed transport recovery now separately invalidates heartbeat
                   readiness as well as PRICE readiness, so pre-stall evidence cannot restore health.
                 - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
                   subscriptions with zero drops. With a 5 ms injected persistence stall it absorbs a
@@ -228,11 +229,24 @@ Implementation status:
                     reconnect/reauthentication progression, seven-instrument record advancement,
                     per-phase readiness/rate evidence, loss counters and final cleanup from bounded
                     structured fields rather than trusting named check booleans.
-                - The release sequence is now explicit: finish the untouched old-lock corrected run
-                  through its recurrent windows and weekend; stop it with operator approval; execute
-                  both provider probes during active markets; accept ADR 0025 only on PASS; then
-                  publish/deploy the exact ARM candidate and give that image its own fresh 72-hour
-                  `capture-v1` endurance. Earlier stages cannot qualify the later dependency/image.
+                  - The release sequence is now explicit: finish the untouched old-lock corrected run
+                    through its recurrent windows and weekend; stop it with operator approval; execute
+                    both provider probes during active markets; accept ADR 0025 only on PASS; then
+                    publish/deploy the exact ARM candidate and give that image its own fresh 72-hour
+                    `capture-v1` endurance. Earlier stages cannot qualify the later dependency/image.
+                  - Weekend-boundary evidence now falsifies old-lock continuity. From approximately
+                    `2026-07-17T21:36Z`, market-close PRICE silence repeatedly triggered all-seven
+                    readiness recovery despite Lightstreamer reporting a connected transport; durable
+                    progress stopped at `21:39:12Z`. The container restart policy amplified exhausted
+                    recovery into hundreds of fresh processes and IG eventually returned invalid-client-
+                    security-token during weekend maintenance. Zero q-trad drops, healthy database/API
+                    services and no newly closed projected gap do not qualify this interval: the terminal
+                    outage remains open and the existing projection cannot express it. Operator-approved
+                    containment completed through the reviewed systemd/Compose stop boundary at
+                    `2026-07-18T02:40:45Z`; the data volume remained mounted and no collector connection
+                    remained. Heartbeat/PRICE separation and bounded process-level restart policy are now
+                    explicit candidate acceptance concerns, while the provider compatibility and recovery
+                    probes remain mandatory before publication.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was

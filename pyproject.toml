@@ -40,12 +40,6 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/qtrad"]
 
-[tool.uv]
-# trading-ig 0.0.24 pins the superseded 1.0.3 client even though q-trad uses the
-# official Lightstreamer API directly. Keep the locked runtime on the maintained,
-# performance-corrected client while retaining trading-ig only for IG REST access.
-override-dependencies = ["lightstreamer-client-lib==2.2.2"]
-
 [tool.pytest.ini_options]
 addopts = "-ra"
 asyncio_mode = "auto"

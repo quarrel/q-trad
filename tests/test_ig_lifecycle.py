@@ -2,6 +2,7 @@ import asyncio
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib.metadata import version
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
@@ -453,6 +454,10 @@ def test_lightstreamer_disposal_uses_a_synchronous_done_callback(
     assert callback is not None
     callback(socket.cancellationToken)
     assert len(close_operations) == 1
+
+
+def test_locked_lightstreamer_version_matches_ig_matrix() -> None:
+    assert version("lightstreamer-client-lib") == "1.0.3"
 
 
 @pytest.mark.asyncio

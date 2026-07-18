@@ -68,11 +68,11 @@ source found in this investigation supports the stronger claim that the applicat
 required to stop an IG session expiring. The next candidate nevertheless requires a fresh heartbeat
 as independent whole-connection evidence and records it separately from every PRICE channel.
 
-`trading-ig` 0.0.24 pins the superseded Lightstreamer Python 1.0.3 client. The maintained 2.2.2 API
-passes q-trad's used-surface compatibility probe; its official changelog records improved
-high-update-rate performance in 2.1.0. A local uv override and tests are candidate evidence only:
-provider compatibility must be proven on the same single connection before release. Proposed ADR
-0025 records this transition.
+`trading-ig` 0.0.24 pins Lightstreamer Python client 1.0.3. Lightstreamer's IG-specific matrix
+reports Server 7.3.3 and Python 1.0.3 as the matching deployment. A newer client's source-API
+compatibility and local synthetic performance cannot establish compatibility with that provider
+server. Proposed ADR 0025 therefore retains 1.0.3 plus q-trad's version-guarded disposal correction;
+any Python 2.x evaluation is a separate future provider experiment.
 
 ## Experiments
 
@@ -109,7 +109,8 @@ non-overwriting evidence. Calibration at 40 subscriptions and 200 callbacks/seco
   persistence delay;
 - 2,000/2,000 with zero drops, queue high-water 799/10,000, p95 lag 6.58 seconds and maximum lag
   6.91 seconds with a 5 ms injected delay; and
-- 1,000/1,000 with zero drops under the same slow-store profile after selecting Lightstreamer 2.2.2;
+- a superseded 1,000/1,000 zero-drop run under 2.2.2, retained only as local handoff evidence and not
+  as provider compatibility or part of the heartbeat candidate;
 - 60,000/60,000 over five minutes at 200 callbacks/second with zero loss, queue high-water 51/10,000,
   p95 lag 4.33 ms and maximum lag 257 ms; and
 - 2,000/2,000 with an all-item renewal at five seconds, 40 renewal events and complete state
@@ -214,13 +215,13 @@ The evidence stages are deliberately non-substitutable:
 
 1. Leave the currently deployed overload-corrected Lightstreamer 1.0.3 collector untouched through
    the recurrent `20:00Z`–`22:00Z` windows and a weekend maintenance boundary. This measures whether
-   the callback-overload correction removed the earlier loss, but cannot qualify heartbeat or 2.2.2.
+     the callback-overload correction removed the earlier loss, but cannot qualify heartbeat.
 2. Close and stop that run only through an operator-approved procedure which proves no remaining
    connection for the API key. During an active market window, run the three-hour 15-subscription
    contrast and then the short q-trad recovery experiment. Market closure is not a valid way to make
    all CHART:TICK channels data-ready.
 3. If either provider experiment fails, retain its failure evidence and do not accept ADR 0025 or
-   deploy the candidate lock. Independently verify its manifest/event hashes, diagnose or revise
+   deploy the candidate. Independently verify its manifest/event hashes, diagnose or revise
    locally, then repeat under a new non-overwriting evidence identity.
 4. If both pass, accept ADR 0025 through review, merge the exact green commit, publish its immutable
    amd64/arm64 image and deploy that digest through the capture release procedure. The old-image
