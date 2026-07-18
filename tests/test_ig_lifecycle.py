@@ -543,7 +543,7 @@ async def test_reconnect_exhaustion_marks_adapter_disconnected() -> None:
 
 
 @pytest.mark.asyncio
-async def test_stale_stream_degrades_and_schedules_reconnect() -> None:
+async def test_stale_heartbeat_degrades_and_schedules_reconnect() -> None:
     clock = MutableClock()
     adapter = StaleAdapter(config(), clock)
     adapter._service = FakeService()
@@ -644,7 +644,7 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
 
 
 @pytest.mark.asyncio
-async def test_fresh_heartbeat_does_not_mask_stale_price_channel() -> None:
+async def test_fresh_heartbeat_keeps_stale_price_channel_degraded_without_reconnect() -> None:
     clock = MutableClock()
     adapter = StaleAdapter(config(), clock)
     selected_listing = listing()
@@ -676,7 +676,8 @@ async def test_fresh_heartbeat_does_not_mask_stale_price_channel() -> None:
     await adapter.health()
 
     assert adapter._heartbeat_stale is False
-    assert adapter.scheduled_reconnects == 1
+    assert adapter._stale_epics == {epic}
+    assert adapter.scheduled_reconnects == 0
 
 
 @pytest.mark.asyncio

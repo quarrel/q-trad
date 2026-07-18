@@ -630,6 +630,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
         instrument channel current at stop. All 15 channels were initially data-ready, shutdown was
         verified, and provider/SDK/queue errors were zero. This proves observed heartbeat independence
         from instrument updates but does not replace the planned active-market contrast.
+      - Corrected locally and undeployed: stale PRICE evidence still degrades health and blocks
+        readiness, but cannot force a whole-connection reconnect while heartbeat remains fresh.
+        Heartbeat staleness, explicit transport lifecycle failure and retry-watchdog expiry retain
+        reconnect authority. This makes a closed-market endurance run meaningful without treating
+        unchanged prices as transport failure.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

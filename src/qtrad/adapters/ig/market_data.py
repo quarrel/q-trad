@@ -1025,10 +1025,6 @@ class IgDemoMarketDataAdapter:
                 received_time = self._quote_received_times.get(epic)
                 age = f"{(now - received_time).total_seconds():.1f}" if received_time else "missing"
                 channel_evidence.append(f"{label}:{age}")
-                if received_time is None or now - received_time > timedelta(
-                    seconds=self._config.stale_reconnect_after_seconds
-                ):
-                    reconnect_required = True
             if not heartbeat_current:
                 heartbeat_age = (
                     f"{(now - self._last_heartbeat_at).total_seconds():.1f}"

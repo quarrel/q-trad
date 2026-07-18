@@ -223,6 +223,11 @@ Implementation status:
                       an expected `FAIL` on all-channel terminal freshness, with zero provider, SDK or
                       queue loss and verified shutdown. This proves heartbeat delivery during
                       instrument silence but does not satisfy the active-market contrast gate.
+                    - Corrected locally for weekend endurance: fresh heartbeat is the
+                      whole-connection watchdog signal. Stale PRICE channels remain degraded and
+                      block readiness, but no longer force reconnect while heartbeat is current;
+                      explicit transport failure, heartbeat staleness and retry-watchdog expiry
+                      retain their bounded reconnect paths.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent

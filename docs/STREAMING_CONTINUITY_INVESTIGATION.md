@@ -274,6 +274,12 @@ errors and server errors were zero. The non-overwriting manifest hash is
 `9ebfc3c8376c14a232dda8e2de679df994000dcfea3d0427999b182f0c43e2cd`; this diagnostic does not
 replace the planned active-market contrast or fresh ARM endurance interval.
 
+For the weekend endurance run, whole-connection recovery is driven by stale heartbeat, an explicit
+transport/lifecycle failure or the bounded library-recovery watchdog. Stale PRICE receive times still
+degrade health and fail readiness, but do not reset a connection whose heartbeat remains fresh. This
+prevents closed or quiet markets from creating false reconnect churn while retaining the distinction
+between whole-connection continuity and per-item delivery.
+
 ## Exit gate
 
 Corrected `capture-v1` can qualify only after a representative endurance interval demonstrates:

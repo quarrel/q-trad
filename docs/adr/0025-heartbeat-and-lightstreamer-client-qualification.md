@@ -40,6 +40,10 @@ For the next candidate release:
   frequency and loss/error evidence separately from per-PRICE freshness;
 - invalidate heartbeat readiness on every transport degradation and require a new heartbeat on the
   recovered transport, independently of the retained staleness/watchdog grace window;
+- use heartbeat staleness, explicit transport lifecycle failures and the library-recovery watchdog
+  as whole-connection reconnect evidence. A stale PRICE channel remains degraded and blocks
+  readiness, but cannot by itself force a connection reset while heartbeat is fresh: a quiet or
+  closed market is not transport-failure evidence;
 - never append heartbeat updates to raw market capture or canonical quote history and never claim
   that heartbeat continuity proves an individual PRICE update was emitted;
 - marshal changed-field normalisation and renewal invalidation through the same event-loop boundary;
@@ -67,6 +71,11 @@ seven-PRICE/seven-CHART contrast uses fifteen, both below IG's documented defaul
 Continued heartbeat with one stale PRICE item becomes strong whole-connection continuity evidence;
 loss of both brackets the silence at the transport or provider-session boundary. Neither outcome
 alone establishes what an unobserved provider update contained.
+
+This separation also permits closed-market endurance evidence: a healthy heartbeat can keep the
+connection under observation without repeated reconnects caused solely by unchanged prices. It does
+not weaken the all-PRICE readiness requirement or repair an isolated item; targeted subscription
+recovery remains evidence-gated by the active-market contrast.
 
 The heartbeat candidate retains IG's published Python-client match and isolates the behavioural
 change under test. This forgoes fixes in later client releases; the existing narrow disposal repair
