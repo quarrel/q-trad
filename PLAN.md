@@ -148,11 +148,130 @@ Implementation status:
             independent qualification loss gate still requires `dropped_records=0`. Historical API
             corroboration may classify the retained gaps after closure, but must not be used to erase
             or reclassify the queue-loss failure.
-          - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
+            - The retained gaps are short and strongly clustered: all last 121–385 seconds; 69 begin
             between `20:00Z` and `21:59Z` across three consecutive days, with one isolated FTSE 100
             interval at `04:25Z`. A provider/session-cycle cause is only a hypothesis. After formal
             closure, derive the quota-bounded reviewed historical plan for all 70 intervals and record
-            whether IG historical bars exist before assigning any upstream or operational class.
+              whether IG historical bars exist before assigning any upstream or operational class.
+            - Complete: merged sparse plan-set execution queried all 70 retained gaps through 56 exact
+              IG demo plans and 267 historical points in the isolated verified-snapshot database. The
+              first unpaced run hit a separate request-rate allowance after 27 requests while reporting
+              9,865 weekly points remaining; append-only usage evidence retained that failed attempt.
+              A reviewed three-second provider-boundary pacing correction passed CI and the exact same
+              set resumed to completion with 9,733 points remaining. The v2 offline artifact found
+                historical data for all 70 gaps and complete coverage for all 210 basis results (834/834
+                expected basis-minute intervals). This warrants deeper streaming/session-path analysis
+                but does not prove what IG's streaming endpoint emitted or repair the failed qualification.
+              - Streaming-continuity analysis of the verified snapshot found zero raw callbacks for
+                the affected instrument inside all 70 gaps, while every interval retained 35–723
+                canonical quotes from two to six other subscriptions on the same connection. The bounded
+                lifecycle log contains no disconnect, watchdog, subscription-error or reconnect event
+                during those gaps. Historical MID bars move in all 70 intervals, with no flat gap and
+                three to eight minute bars per interval. This rules out persistence, queue loss, a
+                whole-connection outage and ordinary price inactivity, but cannot yet separate IG demo
+                per-item stream suppression from SDK/subscription delivery failure.
+                - Complete locally and undeployed: the adapter captures bounded subscription
+                establishment/end, server-error, real-frequency and Lightstreamer lost-update evidence.
+                Subscription renewal invalidates prior merged item state and requires a fresh healthy
+                update; SDK-reported loss remains sticky degraded health. The focused lifecycle suite
+                  passes all 46 focused tests. Idempotent REST reads now serialise one v2 invalid-token
+                reauthentication and one replay. Each login now fails closed unless IG's client-app
+                response contains exactly one entry for the configured API key; numeric published
+                rates and the pinned library's published-minus-two effective rates are retained without
+                API-key material. Authoritative allowance failures are not retried. The complete isolated
+                  PostgreSQL gate now passes all 350 tests, formatting, Ruff, Pyright, `ty` and ShellCheck.
+                The experiment and exit gates are in
+                  `docs/STREAMING_CONTINUITY_INVESTIGATION.md`; the corrected collector remains untouched.
+                - In progress locally and undeployed: proposed ADR 0025 adds IG's documented
+                  application heartbeat as separate whole-connection evidence and requires it for
+                  readiness without treating it as token renewal or per-item proof. Stateful delta
+                  normalisation now shares event-loop ordering with subscription renewal. Lightstreamer's
+                  IG-specific matrix identifies deployed Server 7.3.3 and Python client 1.0.3; the
+                  heartbeat candidate therefore retains `trading-ig`'s exact pin and q-trad's narrow
+                  version-guarded disposal repair. A local 2.2.2 API/load probe cannot establish provider
+                  compatibility and that override has been removed. Library-managed transport recovery now separately invalidates heartbeat
+                  readiness as well as PRICE readiness, so pre-stall evidence cannot restore health.
+                  - The reproducible isolated load probe passes 2,000 callbacks at 200/s over 40 synthetic
+                  subscriptions with zero drops. With a 5 ms injected persistence stall it absorbs a
+                  queue high-water of 799/10,000 and drains completely with 6.58-second p95 and 6.91-second
+                  maximum lag. The five-minute 200/s profile also passes all 60,000 callbacks with zero
+                  loss, queue high-water 51/10,000 and 0.257-second maximum lag. A separate all-item
+                  renewal at load passes 2,000 callbacks and re-establishes complete state for all 40
+                    subscriptions. Provider-backed connection/recovery faults remain pending.
+                  - Deferred and separated from heartbeat qualification: compare the upstream Python
+                    1.0.3 and 2.1.0 tags to identify the exact implementation behind 2.1.0's stated
+                    high-update-rate improvement. Python 2.x requires Server 7.4.0 and cannot run
+                    against IG's published 7.3.3 deployment. Any minimal backport requires understood
+                    prerequisites, attribution/licence review and fresh load, renewal and provider-
+                    recovery evidence on the supported 1.0.3 runtime.
+                    - Audit complete: upstream commit
+                      `3acadac599b06a64ff607b47f8973ae545be5a87` replaces shared Haxe
+                      message/subscription-manager collections with tombstone arrays and an ordered
+                      integer map plus explicit compaction. Its companion tests prove collection
+                      semantics but include no throughput benchmark. The roughly 340-line shared-core
+                      change requires rebuilding/transpiling the Python distribution, so no backport is
+                      proposed unless provider evidence isolates 1.0.3 manager dispatch as a bottleneck
+                      at the intended 7–40 subscriptions.
+                    - A narrower supported-client optimisation is implemented locally: price,
+                      heartbeat and provider-contrast callbacks use the 1-based numeric positions
+                      accepted by 1.0.3 instead of repeatedly resolving field names. Tests bind the
+                      positions to subscription order and retain changed-field/null semantics; the
+                      provider contrast will measure its real-update effect. It is not deployed.
+                - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
+                  contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
+                40-subscription limit and avoid its explicit prohibition on multiple concurrent
+                  connections. This experiment runs only after the current measurement in a separate
+                  evidence store; it is not an undeclared collector sidecar or release change. A
+                  guarded local harness is now implemented: it requires an exact collector-stopped
+                  acknowledgement, all 15 channels data-ready, non-overwriting hash-bound callback
+                  evidence, zero queue/SDK loss, verified unsubscribe/disconnect, REST logout and
+                    HTTP-session/provider-worker termination. It remains unexecuted against IG while
+                    the corrected collector measurement is active.
+                    Threshold-exceeding heartbeat silence is now an explicit discrepancy, and the
+                    terminal gate requires every channel genuinely fresh plus a connected transport
+                    immediately before deliberate shutdown; historical readiness cannot pass.
+                - A separate guarded recovery harness now drives the production adapter without a
+                  database. It requires fresh initial data, terminates the underlying Lightstreamer
+                  client, verifies automatic recovery, injects a fixed invalid local REST token and
+                  verifies one bounded reauthentication/replay plus another complete stream
+                  generation. Exact reconnect/reauthentication counts, zero loss and full process
+                  cleanup are release gates. Every ready phase now requires current-key-validated
+                  published and effective demo trading/non-trading rates, and sticky abandoned-provider-operation state
+                  fails shutdown. It also remains unexecuted while the collector owns the API key.
+                - An independent offline verifier now recomputes either experiment manifest hash and,
+                    for the contrast, confines and streams the gzip JSON-lines artifact to verify every
+                    record, reviewed schema, increasing sequence, exact attempted/written/drop
+                    reconciliation, count and uncompressed SHA-256. Integrity verification
+                    also requires the exact schema-v1 experiment check set, preserves a truthful FAIL
+                    and is required before evidence review.
+                    Recovery verification recomputes the ordered three-phase lifecycle, exact
+                    reconnect/reauthentication progression, seven-instrument record advancement,
+                    per-phase readiness/rate evidence, loss counters and final cleanup from bounded
+                    structured fields rather than trusting named check booleans.
+                  - The release sequence is now explicit: finish the untouched old-lock corrected run
+                    through its recurrent windows and weekend; stop it with operator approval; execute
+                    both provider probes during active markets; accept ADR 0025 only on PASS; then
+                    publish/deploy the exact ARM candidate and give that image its own fresh 72-hour
+                    `capture-v1` endurance. Earlier stages cannot qualify the later dependency/image.
+                  - Weekend-boundary evidence now falsifies old-lock continuity. From approximately
+                    `2026-07-17T21:36Z`, market-close PRICE silence repeatedly triggered all-seven
+                    readiness recovery despite Lightstreamer reporting a connected transport; durable
+                    progress stopped at `21:39:12Z`. The container restart policy amplified exhausted
+                    recovery into hundreds of fresh processes and IG eventually returned invalid-client-
+                    security-token during weekend maintenance. Zero q-trad drops, healthy database/API
+                    services and no newly closed projected gap do not qualify this interval: the terminal
+                    outage remains open and the existing projection cannot express it. Operator-approved
+                    containment completed through the reviewed systemd/Compose stop boundary at
+                    `2026-07-18T02:40:45Z`; the data volume remained mounted and no collector connection
+                    remained. Heartbeat/PRICE separation and bounded process-level restart policy are now
+                    explicit candidate acceptance concerns, while the provider compatibility and recovery
+                    probes remain mandatory before publication.
+                  - In progress locally and undeployed: the candidate removes Docker restart ownership
+                    from ingest. A foreground systemd unit propagates non-zero exit, delays retries by
+                    60 seconds and limits failed starts to three per hour; exhaustion remains visible
+                    until reviewed operator recovery instead of resetting application retry budgets in
+                    hundreds of new processes. Database/API lifecycle remains in the capture unit, and
+                    qualification evidence now binds both unit states and journals.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
@@ -533,6 +652,13 @@ python -m qtrad api
   Docker contains no Tailscale state or network capability. Compose validation,
   authorised SSH gate health, IPv4 internet, collector reachability and PostgreSQL service
   discovery passed.
+- Dev Container startup now clears any stale PID-managed Codex Remote Control daemon state
+  before starting a fresh daemon after the interactive database migration. The existing
+  Codex named volume preserves the host identity and device pairing across ordinary
+  container rebuilds.
+- The image keeps one npm-installed latest Codex bootstrap while Remote Control owns its
+  persistent standalone runtime. The pnpm tool dependency tree now contains Tilth only,
+  removing its unused duplicate Codex installation.
 - The initial Oracle Linux ARM64 collector host has restricted IPv6 SSH, a dedicated XFS
   PostgreSQL volume, Docker Engine and OCI CLI. Capture Compose binds PostgreSQL to the
   required host mount, and backup validation uses the pinned database container's client.

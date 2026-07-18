@@ -29,6 +29,15 @@ Compose network. Dev Container setup registers Tilth, Context7 and the repositor
 GitHub MCP server through the Codex CLI rather than editing Codex configuration text.
 The image includes the Docker CLI and Compose plugin so configuration can be rendered and
 validated inside the Dev Container without granting access to a Docker daemon.
+After the development database migration succeeds, the Dev Container stops any recorded
+Codex Remote Control daemon before starting a fresh local app-server daemon. This clears
+PID and socket metadata retained in the named volume after the prior container process has
+ended. The stop operation does not remove Codex state, host identity or device pairings;
+those persist in the container-local `qtrad-codex-home` named volume across ordinary
+container rebuilds and recreation. The image contains one npm-installed `latest` Codex CLI
+as the fresh-volume bootstrap. Remote Control manages its standalone, auto-updated runtime
+in the persistent Codex volume; the pnpm-managed Tilth dependency tree does not carry a
+redundant Codex package.
 
 The Dev Container retains an ordinary IPv4 Docker network namespace; public IPv6 egress
 is intentionally unsupported under WSL mirrored networking. The WSL host and OCI
@@ -156,16 +165,25 @@ candidate-to-snapshot interval. It retains only filtered inspection identity and
 container environments and rendered Compose configuration are excluded. Its offline verifier has no
 collector, database, provider or cloud I/O and emits only the authenticated manifest hash.
 
-Post-window historical corroboration is a separate offline evidence path. A reviewed IG demo plan
+Post-window historical corroboration is a separate offline evidence path. A reviewed, hash-bound
+sparse IG demo plan set
 runs only in a writable database imported from a verified collector snapshot that postdates the
 automatic qualification evidence. Its exact-range research export binds completed BID/ASK/MID
-coverage and immutable Parquet content. The hash-bound `qualification gap-history` artifact compares
+coverage, completed request results and immutable Parquet content. Each provider call has append-only
+usage evidence for its approved maximum, listing/range, returned points and reported remaining
+allowance; an empty result completes the diagnostic without claiming data coverage. The hash-bound
+`qualification gap-history` artifact compares
 those bars with exact copied live gaps per instrument and basis, but deliberately records no causal
 classification and cannot change live-gap or canonical history.
-The `qualification gap-plan` boundary derives the common minute-aligned range and unique instruments
-from automatic evidence rather than operator transcription. It accepts only the exact verified
+Historical calls are conservatively paced at the adapter boundary because the provider's request-rate
+allowance is distinct from its weekly historical-point allowance. Each attempt is appended before the
+call and completed afterwards, so a rate-limited or interrupted attempt remains visible and the same
+exact plan set can resume completed work without rewriting evidence.
+The `qualification gap-plan` boundary derives per-instrument minute-aligned ranges, merging only
+touching or overlapping gaps, from automatic evidence rather than operator transcription. It accepts
+only the exact verified
 post-evidence snapshot database, source and universe at the repository's current migration head;
-normal plan registration and hash confirmation remain required before the IG demo request.
+every standard plan is registered and the enclosing set hash is confirmed before any IG demo request.
 
 New backup manifests additionally use the self-hashed `qtrad-capture-backup-v2` contract to bind
 capture-source, universe name, migration and source database identity. An operator can download one
@@ -230,7 +248,10 @@ transaction as event projection.
 Lightstreamer raw PRICE messages contain only fields marked changed in that callback, including
 an explicitly changed null. The IG adapter maintains a bounded, per-generation merged field state
 for canonical quote construction; an explicit null removes the prior field and its side-specific
-timestamp. Existing full-state raw messages remain immutable. ADR 0018 records this boundary.
+timestamp. The provider dispatch thread snapshots changed fields, while all merged-state mutation,
+subscription renewal and queue admission occur in event-loop order. Existing full-state raw messages
+remain immutable. ADR 0018 records the representation boundary and proposed ADR 0025 records the
+thread/lifecycle qualification.
 ADR 0020 and migration `0007` add a compact per-row raw payload-representation code. New IG rows are
 `CHANGED_FIELDS`, fixtures are `FIXTURE`, and pre-marker or rollback-writer rows remain conservatively
 `LEGACY_UNCLASSIFIED`; the constant fast default does not rewrite existing raw tuples. The code is
@@ -350,13 +371,16 @@ validation path.
 
 The seven-instrument stream uses one Lightstreamer connection with seven
 `PRICE:{account identifier}:{epic}` subscriptions and the `Pricing` data adapter.
+Proposed ADR 0025 adds the IG application heartbeat `TRADE:HB.U.HEARTBEAT.IP` in MERGE mode without a
+data-adapter override. Heartbeat receipt is whole-connection evidence, is not raw/canonical market
+data and never substitutes for freshness of an individual PRICE item.
 The deprecated `MARKET` and `L1` subscriptions are not used. Account identifiers are
 required at the provider boundary but are removed from persisted subscription labels.
 Concurrent streaming connections for the same IG API key are an operational safety violation.
 
 The adapter owns one explicit, generation-tagged connection lifecycle. Transport
-`CONNECTED` is not readiness: `READY` additionally requires every expected subscription
-to acknowledge and deliver a recently received healthy quote. Readiness and staleness are
+`CONNECTED` is not readiness: `READY` additionally requires the heartbeat and every expected PRICE
+subscription to acknowledge and deliver fresh evidence. Readiness and staleness are
 tracked per required subscription so an active instrument cannot mask a silent one, while
 quiet overnight sessions have bounded grace before degradation. Callbacks from superseded
 generations are ignored and per-generation partial quote state is reset. A prolonged
@@ -369,6 +393,12 @@ failure cycles use a finite retry budget and cooldown rather than hammering the 
 `STALLED`, `DISCONNECTED:WILL-RETRY` and `DISCONNECTED:TRYING-RECOVERY` all degrade the
 connection, preserve current channel evidence while the library attempts recovery, and
 require fresh healthy updates from every instrument before readiness is restored.
+Subscription renewal separately invalidates that item's merged field state, side timestamps and
+freshness evidence, as required by the Lightstreamer listener contract. Bounded lifecycle evidence
+records subscription establishment/end, server-applied maximum frequency, subscription/server error
+codes and aggregate SDK-reported lost updates. Provider messages and session identifiers are not
+retained. Any SDK-reported lost update is sticky degraded evidence for the run and cannot be erased
+by later readiness.
 Exhausted recovery is
 propagated through the record iterator and finalises the ingestion run as `FAILED`;
 natural completion is invalid for an unbounded stream. Shutdown invalidates the active
@@ -383,13 +413,26 @@ Synchronous provider calls run as named daemon operations with explicit deadline
 than in asyncio's default executor, and adapter-owned REST requests have bounded default
 HTTP connect/read timeouts unless a call explicitly overrides them. An unresolved timeout
 poisons the lifecycle and prevents another connection from being created in that process.
-Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
+Every real IG login validates that the client-app response contains exactly one row for the configured
+API key, retains only its numeric published allowances, and requires `trading-ig`'s effective rates to
+equal those values minus its pinned two-request safety margin. Missing, duplicate, malformed or changed
+limiter semantics fail session establishment closed. Local HTTP and `trading-ig` rate-limiter resources are stopped even if remote logout
 fails, and a process-level regression proves an abandoned provider call cannot keep the
-command resident. ADR 0011 records this containment decision. The
-pinned Lightstreamer 1.0.3 disposal defect is repaired narrowly at the adapter boundary
-because IG's deployed server is not compatible with an unverified client upgrade.
+ command resident. ADR 0011 records this containment decision. Lightstreamer's IG-specific matrix
+ identifies deployed Server 7.3.3 and Python client 1.0.3. The deployed image and proposed ADR 0025
+ therefore retain that exact client plus q-trad's narrow version-guarded lifecycle workaround; local
+ source-API or synthetic-load compatibility with a newer client cannot supersede provider compatibility.
 Queue insertion remains non-blocking; overflow is counted and reported as degraded
-health without blocking the provider callback. ADR 0010 records these decisions.
+health without blocking the provider callback. Ingestion persists adapter health on an independent
+periodic task, so whole-stream silence cannot suppress heartbeat, lifecycle or terminal-failure
+evidence merely because no market record enters the consumer. ADR 0010 records these decisions.
+The capture host gives the ingest container no Docker restart policy. A dedicated foreground
+systemd unit preserves its non-zero exit, delays retries by 60 seconds and limits starts to three per
+hour; exhaustion remains a visible failed unit instead of being erased by a fresh process. The
+database and loopback API remain independently supervised by the capture Compose unit.
+Library-managed transport recovery preserves bounded watchdog timing but invalidates readiness for
+both the heartbeat and every PRICE channel; a connected status cannot restore health until new
+post-recovery evidence arrives from each.
 
 Historical requests use IG's v2 UTC date format, but the former implicit all-universe
 "last N minutes" command is no longer an operational surface. A strict non-overwriting plan

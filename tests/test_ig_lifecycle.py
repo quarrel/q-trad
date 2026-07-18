@@ -2,10 +2,12 @@ import asyncio
 from collections.abc import Awaitable, Callable, Generator, Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from importlib.metadata import version
 from typing import Any, cast
 from zoneinfo import ZoneInfo
 
 import pytest
+from trading_ig.rest import TokenInvalidException
 
 from qtrad.adapters.ig import lightstreamer_compat
 from qtrad.adapters.ig import market_data as ig_market_data
@@ -21,6 +23,7 @@ from qtrad.adapters.ig.market_data import (
     _is_fatal_provider_error,
     _ProviderOperationTimeout,
     _safe_error_code,
+    _validated_client_app_allowances,
 )
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -110,6 +113,35 @@ class FailingLogoutService(FakeService):
         self.rate_limiter_stopped = True
 
 
+class TokenInvalidReadService(FakeService):
+    def __init__(self, *, fail_reads: bool) -> None:
+        super().__init__()
+        self.fail_reads = fail_reads
+        self.search_calls = 0
+
+    def search_markets(self, search_term: str) -> object:
+        assert search_term == "probe"
+        self.search_calls += 1
+        if self.fail_reads:
+            raise TokenInvalidException("error.security.client-token-invalid")
+        return {"status": "fresh-session"}
+
+
+class AllowanceExceededService(FakeService):
+    def search_markets(self, search_term: str) -> object:
+        assert search_term == "probe"
+        raise RuntimeError("error.public-api.exceeded-account-allowance")
+
+
+class RateLimitedService(FakeService):
+    def __init__(self) -> None:
+        super().__init__()
+        self._trading_requests_per_minute = 7
+        self._non_trading_requests_per_minute = 23
+        self._qtrad_published_trading_requests_per_minute = 9
+        self._qtrad_published_non_trading_requests_per_minute = 25
+
+
 class FakeStreamAdapter(IgDemoMarketDataAdapter):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -151,12 +183,25 @@ class FakeUpdate:
     ) -> None:
         self.values = dict(values)
         self.changed_fields = set(values) if changed_fields is None else changed_fields
+        self.requested_fields: list[str | int] = []
 
-    def getValue(self, field: str) -> str | None:
-        return self.values.get(field)
+    def _field_name(self, field: str | int) -> str:
+        if isinstance(field, int):
+            fields = (
+                ("HEARTBEAT",)
+                if set(self.values) == {"HEARTBEAT"}
+                else ig_market_data._PRICE_FIELDS
+            )
+            return fields[field - 1]
+        return field
 
-    def isValueChanged(self, field: str) -> bool:
-        return field in self.changed_fields
+    def getValue(self, field: str | int) -> str | None:
+        self.requested_fields.append(field)
+        return self.values.get(self._field_name(field))
+
+    def isValueChanged(self, field: str | int) -> bool:
+        self.requested_fields.append(field)
+        return self._field_name(field) in self.changed_fields
 
 
 class FakeConnectionDetails:
@@ -248,6 +293,13 @@ def config(**overrides: Any) -> IgDemoConfig:
     }
     values.update(overrides)
     return IgDemoConfig(**values)
+
+
+def mark_heartbeat_current(adapter: IgDemoMarketDataAdapter, clock: MutableClock) -> None:
+    adapter._heartbeat_subscribed = True
+    adapter._last_heartbeat_at = clock.now()
+    adapter._heartbeat_events = 1
+    adapter._heartbeat_current_for_transport = True
 
 
 def test_trading_ig_http_session_has_bounded_defaults_and_allows_override() -> None:
@@ -417,6 +469,10 @@ def test_lightstreamer_disposal_uses_a_synchronous_done_callback(
     assert len(close_operations) == 1
 
 
+def test_locked_lightstreamer_version_matches_ig_matrix() -> None:
+    assert version("lightstreamer-client-lib") == "1.0.3"
+
+
 @pytest.mark.asyncio
 async def test_reconnect_refreshes_session_without_concurrent_streams() -> None:
     created_services: list[FakeService] = []
@@ -500,6 +556,7 @@ async def test_stale_stream_degrades_and_schedules_reconnect() -> None:
     adapter._expected_epics = {epic}
     adapter._quote_received_times[epic] = clock.now()
     adapter._stream_connected_at = clock.now()
+    mark_heartbeat_current(adapter, clock)
 
     clock.current += timedelta(seconds=6)
     health = await adapter.health()
@@ -550,6 +607,10 @@ def test_connected_transport_is_not_ready_without_subscription_and_healthy_updat
     assert adapter._status is HealthStatus.STARTING
 
     adapter._accept_update(market_record(clock), epic, generation=3)
+    assert adapter._status is HealthStatus.STARTING
+
+    adapter._handle_heartbeat_subscription(generation=3)
+    adapter._handle_heartbeat("1783065600000", clock.now(), generation=3)
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
 
@@ -572,6 +633,7 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     clock.current += timedelta(seconds=6)
     adapter._accept_update(market_record(clock), epic, generation=3)
@@ -579,6 +641,79 @@ async def test_one_active_channel_cannot_mask_another_required_channel_staleness
 
     assert health.status is HealthStatus.DEGRADED
     assert adapter.scheduled_reconnects == 0
+
+
+@pytest.mark.asyncio
+async def test_fresh_heartbeat_does_not_mask_stale_price_channel() -> None:
+    clock = MutableClock()
+    adapter = StaleAdapter(config(), clock)
+    selected_listing = listing()
+    epic = selected_listing.listing_id.external_id
+    adapter._generation = 3
+    adapter._desired_listings = (selected_listing,)
+    adapter._listings_by_epic[epic] = selected_listing
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
+
+    clock.current += timedelta(seconds=6)
+    adapter._handle_heartbeat("1783065606000", clock.now(), generation=3)
+    health = await adapter.health()
+
+    assert health.status is HealthStatus.DEGRADED
+    assert adapter._heartbeat_stale is False
+    assert adapter._stale_epics == {epic}
+    assert adapter.scheduled_reconnects == 0
+    assert "heartbeat_events=2" in (health.detail or "")
+
+    clock.current += timedelta(seconds=115)
+    adapter._handle_heartbeat("1783065721000", clock.now(), generation=3)
+    await adapter.health()
+
+    assert adapter._heartbeat_stale is False
+    assert adapter.scheduled_reconnects == 1
+
+
+@pytest.mark.asyncio
+async def test_heartbeat_callback_crosses_event_loop_with_bounded_evidence() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    adapter._loop = asyncio.get_running_loop()
+    adapter._generation = 7
+    adapter._handle_heartbeat_subscription(generation=7)
+    update = FakeUpdate({"HEARTBEAT": "1783065600000"})
+
+    await asyncio.to_thread(
+        adapter._on_heartbeat,
+        update,
+        7,
+    )
+    await asyncio.sleep(0)
+
+    assert adapter._heartbeat_subscribed is True
+    assert adapter._heartbeat_events == 1
+    assert adapter._last_heartbeat_at == clock.now()
+    assert adapter._last_heartbeat_value == "1783065600000"
+    assert update.requested_fields == [1]
+
+
+def test_heartbeat_subscription_error_fails_readiness_closed() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._generation = 2
+
+    adapter._handle_heartbeat_subscription_error(code=41, generation=2)
+
+    assert adapter._heartbeat_subscribed is False
+    assert adapter._heartbeat_stale is True
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+    assert adapter._readiness_error is not None
+    assert adapter._ready_event.is_set()
 
 
 def test_superseded_generation_callbacks_cannot_change_current_readiness() -> None:
@@ -624,7 +759,7 @@ async def test_will_retry_watchdog_escalates_stalled_sdk_recovery() -> None:
     "status",
     ["STALLED", "DISCONNECTED:WILL-RETRY", "DISCONNECTED:TRYING-RECOVERY"],
 )
-async def test_library_managed_recovery_requires_fresh_healthy_update(status: str) -> None:
+async def test_library_managed_recovery_requires_fresh_price_and_heartbeat(status: str) -> None:
     clock = MutableClock()
     adapter = IgDemoMarketDataAdapter(config(), clock)
     selected_listing = listing()
@@ -636,6 +771,7 @@ async def test_library_managed_recovery_requires_fresh_healthy_update(status: st
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     adapter._handle_stream_status(status, generation=4)
     adapter._handle_stream_status("CONNECTED:WS-STREAMING", generation=4)
@@ -644,6 +780,9 @@ async def test_library_managed_recovery_requires_fresh_healthy_update(status: st
     assert adapter._updated_epics == set()
 
     adapter._accept_update(market_record(clock), epic, generation=4)
+
+    assert adapter._status is HealthStatus.DEGRADED
+    adapter._handle_heartbeat("1", clock.now(), generation=4)
 
     assert adapter._status is HealthStatus.HEALTHY
     assert adapter._connection_state is _ConnectionState.READY
@@ -666,6 +805,7 @@ async def test_library_managed_recovery_preserves_staleness_grace_window() -> No
     adapter._transport_connected = True
     adapter._connection_state = _ConnectionState.READY
     adapter._status = HealthStatus.HEALTHY
+    mark_heartbeat_current(adapter, clock)
 
     adapter._handle_stream_status("DISCONNECTED:TRYING-RECOVERY", generation=4)
     clock.current += timedelta(seconds=6)
@@ -744,6 +884,146 @@ async def test_logout_failure_still_stops_rate_limiter_and_closes_session() -> N
     assert (await adapter.health()).status is HealthStatus.STOPPED
 
 
+@pytest.mark.asyncio
+async def test_invalid_v2_token_reauthenticates_and_replays_idempotent_read_once() -> None:
+    stale_service = TokenInvalidReadService(fail_reads=True)
+    fresh_service = TokenInvalidReadService(fail_reads=False)
+    services = iter((stale_service, fresh_service))
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: next(services),
+    )
+    await adapter.connect()
+
+    result = await adapter._run_rest_read(
+        "probe",
+        lambda service: service.search_markets("probe"),
+    )
+
+    assert result == {"status": "fresh-session"}
+    assert stale_service.search_calls == 1
+    assert stale_service.logged_out is True
+    assert stale_service.session.closed is True
+    assert fresh_service.search_calls == 1
+    assert adapter._rest_reauthentications == 1
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_invalid_v2_token_is_replayed_at_most_once() -> None:
+    first_service = TokenInvalidReadService(fail_reads=True)
+    second_service = TokenInvalidReadService(fail_reads=True)
+    services = iter((first_service, second_service))
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: next(services),
+    )
+    await adapter.connect()
+
+    with pytest.raises(TokenInvalidException, match="client-token-invalid"):
+        await adapter._run_rest_read(
+            "probe",
+            lambda service: service.search_markets("probe"),
+        )
+
+    assert first_service.search_calls == 1
+    assert second_service.search_calls == 1
+    assert adapter._rest_reauthentications == 1
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_rest_allowance_error_is_retained_without_automatic_retry() -> None:
+    service = AllowanceExceededService()
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: service,
+    )
+    await adapter.connect()
+
+    with pytest.raises(RuntimeError, match="exceeded-account-allowance"):
+        await adapter._run_rest_read(
+            "probe",
+            lambda current: current.search_markets("probe"),
+        )
+
+    health_detail = (await adapter.health()).detail or ""
+    assert "allowance_errors=1" in health_detail
+    assert "last_allowance_error=error.public-api.exceeded-account-allowance" in health_detail
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_published_and_effective_rate_limits_are_retained_without_api_key() -> None:
+    service = RateLimitedService()
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        MutableClock(),
+        service_factory=lambda _: service,
+    )
+
+    await adapter.connect()
+
+    health_detail = (await adapter.health()).detail or ""
+    assert "published_rest_rates=9/25" in health_detail
+    assert "effective_rest_rates=7/23" in health_detail
+    assert "not-a-real" not in health_detail
+    await adapter.disconnect()
+
+
+def test_client_app_allowances_require_exactly_one_current_api_key() -> None:
+    response = [
+        {
+            "apiKey": "different-key",
+            "allowanceAccountTrading": 100,
+            "allowanceAccountOverall": 100,
+        },
+        {
+            "apiKey": "configured-key",
+            "allowanceAccountTrading": 9,
+            "allowanceAccountOverall": 25,
+        },
+    ]
+
+    assert _validated_client_app_allowances(response, "configured-key") == (9, 25)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [{"apiKey": "different-key", "allowanceAccountTrading": 9, "allowanceAccountOverall": 25}],
+        [
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": 9,
+                "allowanceAccountOverall": 25,
+            },
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": 9,
+                "allowanceAccountOverall": 25,
+            },
+        ],
+        [{"allowanceAccountTrading": 9, "allowanceAccountOverall": 25}],
+        [{"apiKey": "configured-key", "allowanceAccountOverall": 25}],
+        [
+            {
+                "apiKey": "configured-key",
+                "allowanceAccountTrading": True,
+                "allowanceAccountOverall": 25,
+            }
+        ],
+        [{"apiKey": "configured-key", "allowanceAccountTrading": 2, "allowanceAccountOverall": 25}],
+    ],
+)
+def test_client_app_allowances_fail_closed(response: object) -> None:
+    with pytest.raises(RuntimeError):
+        _validated_client_app_allowances(response, "configured-key")
+
+
 def test_subscription_error_degrades_health_without_exposing_message() -> None:
     adapter = IgDemoMarketDataAdapter(config(), MutableClock())
     adapter._status = HealthStatus.HEALTHY
@@ -751,6 +1031,82 @@ def test_subscription_error_degrades_health_without_exposing_message() -> None:
     adapter._handle_subscription_error("CS.D.AUDUSD.CFD.IP", 19)
 
     assert adapter._status is HealthStatus.DEGRADED
+
+
+def test_subscription_renewal_invalidates_prior_item_state_and_requires_fresh_update() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    adapter._generation = 4
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._field_state[epic] = {"BIDPRICE1": "0.65"}
+    adapter._side_times[epic] = {"BID": clock.now()}
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_unsubscription(epic, generation=4)
+    adapter._handle_subscription(epic, generation=4)
+
+    assert adapter._subscribed_epics == {epic}
+    assert adapter._updated_epics == set()
+    assert adapter._quote_received_times == {}
+    assert adapter._field_state == {}
+    assert adapter._side_times == {}
+    assert adapter._subscription_events == 1
+    assert adapter._unsubscription_events == 1
+    assert adapter._status is HealthStatus.DEGRADED
+
+
+@pytest.mark.asyncio
+async def test_lightstreamer_lost_updates_are_sticky_health_evidence() -> None:
+    clock = MutableClock()
+    adapter = IgDemoMarketDataAdapter(config(), clock)
+    epic = listing().listing_id.external_id
+    adapter._generation = 3
+    adapter._expected_epics = {epic}
+    adapter._subscribed_epics = {epic}
+    adapter._updated_epics = {epic}
+    adapter._quote_received_times[epic] = clock.now()
+    adapter._transport_connected = True
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_item_lost_updates(epic, count=2, generation=3)
+    adapter._mark_ready_if_complete(generation=3)
+
+    health = await adapter.health()
+    assert health.status is HealthStatus.DEGRADED
+    assert "lightstreamer_lost_updates=2" in (health.detail or "")
+
+
+def test_server_error_is_bounded_and_schedules_application_recovery() -> None:
+    adapter = StaleAdapter(config(), MutableClock())
+    adapter._generation = 5
+    adapter._desired_listings = (listing(),)
+    adapter._connection_state = _ConnectionState.READY
+    adapter._status = HealthStatus.HEALTHY
+
+    adapter._handle_server_error(code=68, generation=5)
+
+    assert adapter._status is HealthStatus.DEGRADED
+    assert adapter._connection_state is _ConnectionState.DEGRADED
+    assert adapter._server_errors == 1
+    assert adapter._last_server_error_code == 68
+    assert adapter.scheduled_reconnects == 1
+
+
+def test_real_max_frequency_is_retained_as_bounded_subscription_evidence() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    epic = listing().listing_id.external_id
+    adapter._generation = 6
+
+    adapter._handle_real_max_frequency(epic, "2.0", generation=6)
+
+    assert adapter._real_max_frequency_by_epic == {epic: "2.0"}
 
 
 @pytest.mark.asyncio
@@ -942,10 +1298,14 @@ async def test_price_callback_persists_only_changed_fields_and_preserves_explici
         "DLG_FLAG": "DEAL",
         "DELAY": "0",
     }
-    adapter._on_update(epic, FakeUpdate(initial))
+    initial_update = FakeUpdate(initial)
+    adapter._on_update(epic, initial_update)
     await asyncio.sleep(0)
     first = adapter._queue.get_nowait()
     assert first.raw_payload == initial
+    assert initial_update.requested_fields == [
+        value for position in range(1, 8) for value in (position, position)
+    ]
     assert first.payload_representation is RawPayloadRepresentation.CHANGED_FIELDS
 
     merged = {
@@ -982,6 +1342,50 @@ async def test_price_callback_persists_only_changed_fields_and_preserves_explici
     assert third.quote.bid == Decimal("0.65001")
     assert third.quote.ask is None
     assert third.quote.ask_time is None
+
+
+@pytest.mark.asyncio
+async def test_price_callbacks_and_subscription_renewal_share_event_loop_ordering() -> None:
+    adapter = IgDemoMarketDataAdapter(config(), MutableClock())
+    adapter._loop = asyncio.get_running_loop()
+    adapter._stream_account_id = "not-a-real-account"
+    epic = "CS.D.AUDUSD.CFD.IP"
+    adapter._listings_by_epic[epic] = listing()
+
+    def dispatch_from_lightstreamer_thread() -> None:
+        adapter._on_update(
+            epic,
+            FakeUpdate(
+                {
+                    "TIMESTAMP": "1783065600000",
+                    "BIDPRICE1": "0.65000",
+                    "ASKPRICE1": "0.65010",
+                    "DLG_FLAG": "DEAL",
+                }
+            ),
+        )
+        adapter._on_subscription(epic, generation=0)
+        adapter._on_update(
+            epic,
+            FakeUpdate(
+                {
+                    "TIMESTAMP": "1783065601000",
+                    "BIDPRICE1": "0.65001",
+                },
+                changed_fields={"TIMESTAMP", "BIDPRICE1"},
+            ),
+        )
+
+    await asyncio.to_thread(dispatch_from_lightstreamer_thread)
+    await asyncio.sleep(0)
+
+    first = adapter._queue.get_nowait().quote
+    after_renewal = adapter._queue.get_nowait().quote
+    assert first is not None
+    assert first.ask == Decimal("0.65010")
+    assert after_renewal is not None
+    assert after_renewal.bid == Decimal("0.65001")
+    assert after_renewal.ask is None
 
 
 def test_backoff_is_exponential_and_capped() -> None:

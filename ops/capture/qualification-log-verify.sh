@@ -97,13 +97,14 @@ jq -e --arg evidence_sha256 "$automatic_sha256" '
     and (.created | timestamp) and (.started_at | timestamp)
     and (.restart_count | type == "number" and . >= 0 and floor == .)
     and (.log_config | type == "object"))
-  and (.sources | type == "array" and length == 6)
+  and (.sources | type == "array" and length == 7)
   and ([.sources[] | {kind, name, file}] | sort_by(.kind, .name)) == [
     {kind:"container",name:"api",file:"container-api.log"},
     {kind:"container",name:"db",file:"container-db.log"},
     {kind:"container",name:"ingest",file:"container-ingest.log"},
     {kind:"systemd",name:"docker.service",file:"journal-docker.service.log"},
     {kind:"systemd",name:"qtrad-capture.service",file:"journal-qtrad-capture.service.log"},
+    {kind:"systemd",name:"qtrad-ingest.service",file:"journal-qtrad-ingest.service.log"},
     {kind:"systemd",name:"tailscaled.service",file:"journal-tailscaled.service.log"}
   ]
   and all(.sources[];
@@ -142,9 +143,10 @@ declare -A expected_files=(
   [container-api.log]=1
   [container-db.log]=1
   [container-ingest.log]=1
-  [journal-docker.service.log]=1
-  [journal-qtrad-capture.service.log]=1
-  [journal-tailscaled.service.log]=1
+    [journal-docker.service.log]=1
+    [journal-qtrad-capture.service.log]=1
+    [journal-qtrad-ingest.service.log]=1
+    [journal-tailscaled.service.log]=1
 )
 shopt -s dotglob nullglob
 bundle_entries=("$bundle"/*)

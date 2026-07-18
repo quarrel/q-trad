@@ -3,12 +3,14 @@ Description=q-trad demo market-data collector
 Requires=docker.service
 RequiresMountsFor=/srv/qtrad/postgres/data
 After=docker.service remote-fs.target
+Wants=qtrad-ingest.service
+Before=qtrad-ingest.service
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 WorkingDirectory=/opt/qtrad-capture
-ExecStart=/usr/bin/docker compose --env-file /etc/qtrad/capture.env --project-directory /opt/qtrad-capture -f compose.capture.yaml up -d --remove-orphans
+ExecStart=/usr/bin/docker compose --env-file /etc/qtrad/capture.env --project-directory /opt/qtrad-capture -f compose.capture.yaml up -d --remove-orphans db api
 ExecStop=/usr/bin/docker compose --env-file /etc/qtrad/capture.env --project-directory /opt/qtrad-capture -f compose.capture.yaml down
 TimeoutStartSec=120
 TimeoutStopSec=120

@@ -57,6 +57,19 @@ _UNAVAILABLE_MARKET_STATES = {"CLOSED", "OFFLINE", "EDITS_ONLY"}
 _MAX_LISTING_REVIEW_CANDIDATES = 100
 _MAX_LISTING_REVIEW_SEARCH_REQUESTS = 100
 _MAX_LISTING_REVIEW_DETAIL_REQUESTS = 200
+_HEARTBEAT_ITEM = "TRADE:HB.U.HEARTBEAT.IP"
+_TRADING_IG_RATE_LIMIT_SAFETY_MARGIN = 2
+_PRICE_FIELDS = (
+    "TIMESTAMP",
+    "BIDPRICE1",
+    "ASKPRICE1",
+    "BIDSIZE1",
+    "ASKSIZE1",
+    "DLG_FLAG",
+    "DELAY",
+)
+_PRICE_FIELDS_BY_POSITION = tuple(enumerate(_PRICE_FIELDS, start=1))
+_HEARTBEAT_FIELD_POSITION = 1
 _PROVIDER_ERROR_CODE = re.compile(r"\b(error\.[a-z0-9._-]+|endpoint\.[a-z0-9._-]+)\b")
 _FATAL_PROVIDER_ERRORS = {
     "endpoint.unavailable.for.api-key",
@@ -94,6 +107,18 @@ class _RateLimiterControl(Protocol):
     def _exit_bucket_threads(self) -> None: ...
 
 
+@runtime_checkable
+class _RateLimiterEvidence(Protocol):
+    _trading_requests_per_minute: int
+    _non_trading_requests_per_minute: int
+
+
+@runtime_checkable
+class _PublishedRateLimiterEvidence(Protocol):
+    _qtrad_published_trading_requests_per_minute: int
+    _qtrad_published_non_trading_requests_per_minute: int
+
+
 class _IgRestService(Protocol):
     @property
     def session(self) -> _HttpSession: ...
@@ -117,9 +142,9 @@ class _IgRestService(Protocol):
 
 
 class _ItemUpdate(Protocol):
-    def getValue(self, field: str, /) -> object | None: ...
+    def getValue(self, field: str | int, /) -> object | None: ...
 
-    def isValueChanged(self, field: str, /) -> bool: ...
+    def isValueChanged(self, field: str | int, /) -> bool: ...
 
 
 @runtime_checkable
@@ -265,6 +290,7 @@ class IgDemoMarketDataAdapter:
         self._jitter = jitter
         self._service_factory = service_factory
         self._service: _IgRestService | None = None
+        self._rest_reauthentication_lock = asyncio.Lock()
         self._session_details: Mapping[str, object] | None = None
         self._stream_client: _StreamClient | None = None
         self._stream_account_id: str | None = None
@@ -285,10 +311,33 @@ class IgDemoMarketDataAdapter:
         self._stopping = False
         self._reconnect_count = 0
         self._dropped_records = 0
+        self._lightstreamer_lost_updates = 0
+        self._subscription_events = 0
+        self._unsubscription_events = 0
+        self._subscription_errors = 0
+        self._server_errors = 0
+        self._last_server_error_code: int | None = None
+        self._last_stream_status = "UNOBSERVED"
+        self._last_stream_status_at: datetime | None = None
+        self._real_max_frequency_by_epic: dict[str, str] = {}
+        self._heartbeat_subscribed = False
+        self._heartbeat_events = 0
+        self._last_heartbeat_at: datetime | None = None
+        self._last_heartbeat_value: str | None = None
+        self._heartbeat_real_max_frequency: str | None = None
+        self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._first_drop_at: datetime | None = None
         self._last_drop_at: datetime | None = None
         self._queue_high_water = 0
         self._historical_allowance_remaining: int | None = None
+        self._published_trading_requests_per_minute: int | None = None
+        self._published_non_trading_requests_per_minute: int | None = None
+        self._effective_trading_requests_per_minute: int | None = None
+        self._effective_non_trading_requests_per_minute: int | None = None
+        self._rest_reauthentications = 0
+        self._allowance_errors = 0
+        self._last_allowance_error: str | None = None
         self._generation = 0
         self._expected_epics: set[str] = set()
         self._subscribed_epics: set[str] = set()
@@ -366,7 +415,6 @@ class IgDemoMarketDataAdapter:
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
     ) -> Sequence[ProviderListing]:
-        service = self._require_connected()
         listings: list[ProviderListing] = []
         for instrument_id in instrument_ids:
             try:
@@ -378,9 +426,9 @@ class IgDemoMarketDataAdapter:
                 ) from error
             by_epic: dict[str, _Candidate] = {}
             for alias in instrument.search_aliases:
-                response = await self._run_provider_operation(
+                response = await self._run_rest_read(
                     "search_markets",
-                    lambda alias=alias: service.search_markets(alias),
+                    lambda service, alias=alias: service.search_markets(alias),
                 )
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
@@ -390,9 +438,9 @@ class IgDemoMarketDataAdapter:
                         or not _search_row_can_match(search_row, instrument)
                     ):
                         continue
-                    detail_response = await self._run_provider_operation(
+                    detail_response = await self._run_rest_read(
                         "fetch_market",
-                        lambda epic=epic: service.fetch_market_by_epic(epic),
+                        lambda service, epic=epic: service.fetch_market_by_epic(epic),
                     )
                     detail = _single_record(detail_response)
                     candidate = _candidate(search_row, detail)
@@ -431,7 +479,6 @@ class IgDemoMarketDataAdapter:
             raise ValueError("listing review requires between one and 100 instruments")
         if len(set(instrument_ids)) != len(instrument_ids):
             raise ValueError("listing review instrument IDs must be unique")
-        service = self._require_connected()
         reviews: list[InstrumentListingReview] = []
         search_request_count = 0
         detail_request_count = 0
@@ -450,9 +497,9 @@ class IgDemoMarketDataAdapter:
                         f"{_MAX_LISTING_REVIEW_SEARCH_REQUESTS}"
                     )
                 search_request_count += 1
-                response = await self._run_provider_operation(
+                response = await self._run_rest_read(
                     "search_markets",
-                    lambda alias=alias: service.search_markets(alias),
+                    lambda service, alias=alias: service.search_markets(alias),
                 )
                 for search_row in _records(response):
                     epic = _string(search_row, "epic")
@@ -477,9 +524,9 @@ class IgDemoMarketDataAdapter:
                                 f"{_MAX_LISTING_REVIEW_DETAIL_REQUESTS}"
                             )
                         detail_request_count += 1
-                        detail_response = await self._run_provider_operation(
+                        detail_response = await self._run_rest_read(
                             "fetch_market",
-                            lambda epic=epic: service.fetch_market_by_epic(epic),
+                            lambda service, epic=epic: service.fetch_market_by_epic(epic),
                         )
                         detail = _single_record(detail_response)
                     by_epic[epic] = _listing_review_candidate(
@@ -540,12 +587,54 @@ class IgDemoMarketDataAdapter:
             def onUnsubscription(self) -> None:
                 adapter._on_unsubscription(self._epic, generation)
 
-            def onSubscriptionError(self, code: int, message: str) -> None:
+            def onSubscriptionError(self, code: int, message: str | None) -> None:
                 adapter._on_subscription_error(self._epic, code, generation)
+
+            def onItemLostUpdates(
+                self,
+                itemName: str | None,
+                itemPos: int,
+                lostUpdates: int,
+            ) -> None:
+                del itemName, itemPos
+                adapter._on_item_lost_updates(self._epic, lostUpdates, generation)
+
+            def onRealMaxFrequency(self, frequency: str | None) -> None:
+                adapter._on_real_max_frequency(self._epic, frequency, generation)
+
+        class HeartbeatListener(SubscriptionListener):
+            def onItemUpdate(self, update: ItemUpdate) -> None:
+                adapter._on_heartbeat(update, generation)
+
+            def onSubscription(self) -> None:
+                adapter._on_heartbeat_subscription(generation)
+
+            def onUnsubscription(self) -> None:
+                adapter._on_heartbeat_unsubscription(generation)
+
+            def onSubscriptionError(self, code: int, message: str | None) -> None:
+                del message
+                adapter._on_heartbeat_subscription_error(code, generation)
+
+            def onItemLostUpdates(
+                self,
+                itemName: str | None,
+                itemPos: int,
+                lostUpdates: int,
+            ) -> None:
+                del itemName, itemPos
+                adapter._on_item_lost_updates(_HEARTBEAT_ITEM, lostUpdates, generation)
+
+            def onRealMaxFrequency(self, frequency: str | None) -> None:
+                adapter._on_heartbeat_real_max_frequency(frequency, generation)
 
         class StatusListener(ClientListener):
             def onStatusChange(self, status: str) -> None:
                 adapter._on_stream_status(status, generation)
+
+            def onServerError(self, code: int, message: str | None) -> None:
+                del message
+                adapter._on_server_error(code, generation)
 
         if self._stream_client is not None:
             raise RuntimeError("refusing to create a concurrent IG stream connection")
@@ -563,6 +652,14 @@ class IgDemoMarketDataAdapter:
         self._updated_epics.clear()
         self._quote_received_times.clear()
         self._stale_epics.clear()
+        self._real_max_frequency_by_epic.clear()
+        self._heartbeat_subscribed = False
+        self._heartbeat_events = 0
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_real_max_frequency = None
+        self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._transport_connected = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
@@ -580,6 +677,20 @@ class IgDemoMarketDataAdapter:
         await self._run_provider_operation("stream_connect", client.connect)
 
         self._connection_state = _ConnectionState.SUBSCRIBING
+        heartbeat = cast(
+            _Subscription,
+            Subscription(
+                mode="MERGE",
+                items=[_HEARTBEAT_ITEM],
+                fields=["HEARTBEAT"],
+            ),
+        )
+        heartbeat.addListener(HeartbeatListener())
+        await self._run_provider_operation(
+            "stream_subscribe_heartbeat",
+            lambda: client.subscribe(heartbeat),
+        )
+        self._subscriptions.append(heartbeat)
         for listing in listings:
             epic = listing.listing_id.external_id
             self._listings_by_epic[epic] = listing
@@ -633,12 +744,11 @@ class IgDemoMarketDataAdapter:
             raise self._fatal_error
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
-        service = self._require_connected()
         if self._config.historical_request_interval_seconds > 0:
             await self._sleep(self._config.historical_request_interval_seconds)
-        response = await self._run_provider_operation(
+        response = await self._run_rest_read(
             "fetch_historical_prices",
-            lambda: service.fetch_historical_prices_by_epic_and_date_range(
+            lambda service: service.fetch_historical_prices_by_epic_and_date_range(
                 request.listing.listing_id.external_id,
                 request.resolution.value,
                 _historical_query_time(request.start),
@@ -668,6 +778,7 @@ class IgDemoMarketDataAdapter:
         self._check_staleness()
         status = self._status
         now = self._clock.now()
+        heartbeat_transport_current = str(self._heartbeat_current_for_transport).lower()
         return AdapterHealth(
             adapter_name="ig-market-data",
             environment=BrokerEnvironment.IG_DEMO,
@@ -680,11 +791,35 @@ class IgDemoMarketDataAdapter:
                 f"subscriptions={len(self._subscribed_epics)}/{len(self._expected_epics)}; "
                 f"updates={len(self._updated_epics)}/{len(self._expected_epics)}; "
                 f"reconnects={self._reconnect_count}; dropped_records={self._dropped_records}; "
+                f"lightstreamer_lost_updates={self._lightstreamer_lost_updates}; "
+                f"subscription_events={self._subscription_events}; "
+                f"unsubscription_events={self._unsubscription_events}; "
+                f"subscription_errors={self._subscription_errors}; "
+                f"server_errors={self._server_errors}; "
+                f"last_server_error_code={self._last_server_error_code}; "
+                f"stream_status={self._last_stream_status}; "
+                f"stream_status_at={_health_time(self._last_stream_status_at)}; "
+                f"heartbeat_subscribed={str(self._heartbeat_subscribed).lower()}; "
+                f"heartbeat_events={self._heartbeat_events}; "
+                f"last_heartbeat_at={_health_time(self._last_heartbeat_at)}; "
+                f"last_heartbeat_value={self._last_heartbeat_value}; "
+                f"heartbeat_stale={str(self._heartbeat_stale).lower()}; "
+                f"heartbeat_transport_current={heartbeat_transport_current}; "
+                f"heartbeat_frequency={self._heartbeat_real_max_frequency}; "
+                f"frequency_evidence={len(self._real_max_frequency_by_epic)}/"
+                f"{len(self._expected_epics)}; "
                 f"first_drop_at={_health_time(self._first_drop_at)}; "
                 f"last_drop_at={_health_time(self._last_drop_at)}; "
                 f"queue={self._queue.qsize()}/{self._queue.maxsize}; "
                 f"queue_high_water={self._queue_high_water}; "
-                f"provider_operations={len(self._provider_threads)}"
+                f"provider_operations={len(self._provider_threads)}; "
+                f"rest_reauthentications={self._rest_reauthentications}; "
+                f"published_rest_rates={self._published_trading_requests_per_minute}/"
+                f"{self._published_non_trading_requests_per_minute}; "
+                f"effective_rest_rates={self._effective_trading_requests_per_minute}/"
+                f"{self._effective_non_trading_requests_per_minute}; "
+                f"allowance_errors={self._allowance_errors}; "
+                f"last_allowance_error={self._last_allowance_error}"
             ),
         )
 
@@ -693,16 +828,38 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation:
             return
         received = self._clock.now()
-        fields = (
-            "TIMESTAMP",
-            "BIDPRICE1",
-            "ASKPRICE1",
-            "BIDSIZE1",
-            "ASKSIZE1",
-            "DLG_FLAG",
-            "DELAY",
+        raw = {
+            field: update.getValue(position)
+            for position, field in _PRICE_FIELDS_BY_POSITION
+            if update.isValueChanged(position)
+        }
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("IG callback received before event loop registration")
+        loop.call_soon_threadsafe(
+            self._handle_update,
+            epic,
+            raw,
+            received,
+            observed_generation,
         )
-        raw = {field: update.getValue(field) for field in fields if update.isValueChanged(field)}
+
+    def _handle_update(
+        self,
+        epic: str,
+        raw: Mapping[str, object | None],
+        received: datetime,
+        generation: int,
+    ) -> None:
+        """Normalise one callback on the event-loop thread.
+
+        Lightstreamer invokes listeners on its dispatch thread. Subscription renewal clears
+        merged field state on the event-loop thread, so updates must cross the same ordered
+        boundary before reading or changing that state.
+        """
+
+        if generation != self._generation or self._stopping:
+            return
         state = self._field_state.setdefault(epic, {})
         for field, value in raw.items():
             if value is None:
@@ -774,14 +931,37 @@ class IgDemoMarketDataAdapter:
             error_code=error_code,
             error_detail=error_detail,
         )
-        if self._loop is None:
-            raise RuntimeError("IG callback received before event loop registration")
-        self._loop.call_soon_threadsafe(
-            self._accept_update,
-            record,
-            epic,
-            observed_generation,
-        )
+        self._accept_update(record, epic, generation)
+
+    def _on_heartbeat(self, update: _ItemUpdate, generation: int) -> None:
+        value = update.getValue(_HEARTBEAT_FIELD_POSITION)
+        received = self._clock.now()
+        loop = self._loop
+        if loop is None:
+            raise RuntimeError("IG heartbeat received before event loop registration")
+        loop.call_soon_threadsafe(self._handle_heartbeat, value, received, generation)
+
+    def _handle_heartbeat(
+        self,
+        value: object | None,
+        received: datetime,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        if value is None or not str(value).strip():
+            self._status = HealthStatus.DEGRADED
+            LOGGER.warning(
+                "ig_heartbeat_invalid",
+                extra={"generation": generation},
+            )
+            return
+        self._heartbeat_events += 1
+        self._last_heartbeat_at = received
+        self._last_heartbeat_value = str(value).strip()[:32]
+        self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = True
+        self._mark_ready_if_complete(generation)
 
     def _accept_update(self, record: MarketDataRecord, epic: str, generation: int) -> None:
         if generation != self._generation or self._stopping:
@@ -821,14 +1001,21 @@ class IgDemoMarketDataAdapter:
         stale_channels = ""
         stale_epics: set[str] = set()
         reconnect_required = False
+        previous_heartbeat_stale = self._heartbeat_stale
+        heartbeat_current = (
+            self._heartbeat_subscribed
+            and self._last_heartbeat_at is not None
+            and now - self._last_heartbeat_at <= timedelta(seconds=self._config.stale_after_seconds)
+        )
         if self._expected_epics:
             current_epics = {
                 epic
                 for epic, received_time in self._quote_received_times.items()
                 if now - received_time <= timedelta(seconds=self._config.stale_after_seconds)
             }
-            if current_epics == self._expected_epics:
+            if current_epics == self._expected_epics and heartbeat_current:
                 self._stale_epics.clear()
+                self._heartbeat_stale = False
                 return
             channel_evidence: list[str] = []
             stale_epics = self._expected_epics - current_epics
@@ -842,6 +1029,17 @@ class IgDemoMarketDataAdapter:
                     seconds=self._config.stale_reconnect_after_seconds
                 ):
                     reconnect_required = True
+            if not heartbeat_current:
+                heartbeat_age = (
+                    f"{(now - self._last_heartbeat_at).total_seconds():.1f}"
+                    if self._last_heartbeat_at is not None
+                    else "missing"
+                )
+                channel_evidence.append(f"heartbeat:{heartbeat_age}")
+                if self._last_heartbeat_at is None or now - self._last_heartbeat_at > timedelta(
+                    seconds=self._config.stale_reconnect_after_seconds
+                ):
+                    reconnect_required = True
             stale_channels = ",".join(channel_evidence)
         else:
             anchor = self._last_message_at or self._stream_connected_at
@@ -852,7 +1050,12 @@ class IgDemoMarketDataAdapter:
             reconnect_required = True
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
-        if stale_epics != self._stale_epics or reconnect_required:
+        self._heartbeat_stale = not heartbeat_current
+        if (
+            stale_epics != self._stale_epics
+            or self._heartbeat_stale != previous_heartbeat_stale
+            or reconnect_required
+        ):
             LOGGER.warning("ig_stream_stale", extra={"stale_channels": stale_channels})
         self._stale_epics = stale_epics
         if reconnect_required or not self._expected_epics:
@@ -868,6 +1071,8 @@ class IgDemoMarketDataAdapter:
         if observed_generation != self._generation or self._stopping:
             return
         normalised = status.upper()
+        self._last_stream_status = normalised[:64]
+        self._last_stream_status_at = self._clock.now()
         LOGGER.info(
             "ig_stream_status",
             extra={"generation": observed_generation, "status": normalised[:64]},
@@ -892,12 +1097,114 @@ class IgDemoMarketDataAdapter:
         self._status = HealthStatus.DEGRADED
         self._connection_state = _ConnectionState.DEGRADED
         self._updated_epics.clear()
+        self._heartbeat_current_for_transport = False
         if clear_channel_evidence:
             self._quote_received_times.clear()
             self._stale_epics.clear()
             self._field_state.clear()
             self._side_times.clear()
             self._last_message_at = None
+            self._heartbeat_subscribed = False
+            self._last_heartbeat_at = None
+            self._last_heartbeat_value = None
+            self._heartbeat_real_max_frequency = None
+            self._heartbeat_stale = False
+
+    def _on_heartbeat_subscription(self, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_subscription,
+                generation,
+            )
+
+    def _handle_heartbeat_subscription(self, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._subscription_events += 1
+        self._heartbeat_subscribed = True
+        self._heartbeat_current_for_transport = False
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_stale = False
+        LOGGER.info(
+            "ig_heartbeat_subscription_established",
+            extra={"generation": generation},
+        )
+
+    def _on_heartbeat_unsubscription(self, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_unsubscription,
+                generation,
+            )
+
+    def _handle_heartbeat_unsubscription(self, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._unsubscription_events += 1
+        self._heartbeat_subscribed = False
+        self._heartbeat_current_for_transport = False
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_stale = True
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        LOGGER.warning(
+            "ig_heartbeat_subscription_ended",
+            extra={"generation": generation},
+        )
+
+    def _on_heartbeat_subscription_error(self, code: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_subscription_error,
+                code,
+                generation,
+            )
+
+    def _handle_heartbeat_subscription_error(self, code: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._subscription_errors += 1
+        self._heartbeat_subscribed = False
+        self._heartbeat_current_for_transport = False
+        self._heartbeat_stale = True
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        self._readiness_error = RuntimeError(f"IG heartbeat subscription failed with code {code}")
+        self._ready_event.set()
+        LOGGER.error(
+            "ig_heartbeat_subscription_error",
+            extra={"code": code, "generation": generation},
+        )
+
+    def _on_heartbeat_real_max_frequency(
+        self,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_heartbeat_real_max_frequency,
+                frequency,
+                generation,
+            )
+
+    def _handle_heartbeat_real_max_frequency(
+        self,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
+        if not bounded_frequency:
+            raise ValueError("Lightstreamer heartbeat frequency must not be empty")
+        self._heartbeat_real_max_frequency = bounded_frequency
+        LOGGER.info(
+            "ig_heartbeat_frequency",
+            extra={"generation": generation, "real_max_frequency": bounded_frequency},
+        )
 
     def _on_subscription(self, epic: str, generation: int) -> None:
         if self._loop is not None:
@@ -906,7 +1213,13 @@ class IgDemoMarketDataAdapter:
     def _handle_subscription(self, epic: str, generation: int) -> None:
         if generation != self._generation or self._stopping:
             return
+        self._subscription_events += 1
+        self._invalidate_subscription_evidence(epic)
         self._subscribed_epics.add(epic)
+        LOGGER.info(
+            "ig_subscription_established",
+            extra={"epic": epic, "generation": generation},
+        )
         self._mark_ready_if_complete(generation)
 
     def _on_unsubscription(self, epic: str, generation: int) -> None:
@@ -916,10 +1229,25 @@ class IgDemoMarketDataAdapter:
     def _handle_unsubscription(self, epic: str, generation: int) -> None:
         if generation != self._generation:
             return
+        self._unsubscription_events += 1
         self._subscribed_epics.discard(epic)
+        self._invalidate_subscription_evidence(epic)
+        LOGGER.info(
+            "ig_subscription_ended",
+            extra={"epic": epic, "generation": generation},
+        )
         if not self._stopping:
             self._status = HealthStatus.DEGRADED
             self._connection_state = _ConnectionState.DEGRADED
+
+    def _invalidate_subscription_evidence(self, epic: str) -> None:
+        """Discard state that the SDK declares invalid after a subscription lifecycle change."""
+
+        self._updated_epics.discard(epic)
+        self._quote_received_times.pop(epic, None)
+        self._stale_epics.discard(epic)
+        self._field_state.pop(epic, None)
+        self._side_times.pop(epic, None)
 
     def _on_subscription_error(self, epic: str, code: int, generation: int | None = None) -> None:
         observed_generation = self._generation if generation is None else generation
@@ -934,6 +1262,7 @@ class IgDemoMarketDataAdapter:
         observed_generation = self._generation if generation is None else generation
         if observed_generation != self._generation or self._stopping:
             return
+        self._subscription_errors += 1
         establishing = self._connection_state in {
             _ConnectionState.CONNECTING,
             _ConnectionState.SUBSCRIBING,
@@ -950,11 +1279,92 @@ class IgDemoMarketDataAdapter:
         else:
             self._schedule_reconnect()
 
+    def _on_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_item_lost_updates,
+                epic,
+                count,
+                generation,
+            )
+
+    def _handle_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        if count <= 0:
+            raise ValueError("Lightstreamer lost-update count must be positive")
+        self._lightstreamer_lost_updates += count
+        self._status = HealthStatus.DEGRADED
+        LOGGER.error(
+            "ig_lightstreamer_updates_lost",
+            extra={
+                "epic": epic,
+                "generation": generation,
+                "lost_updates": count,
+                "lost_updates_total": self._lightstreamer_lost_updates,
+            },
+        )
+
+    def _on_real_max_frequency(
+        self,
+        epic: str,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(
+                self._handle_real_max_frequency,
+                epic,
+                frequency,
+                generation,
+            )
+
+    def _handle_real_max_frequency(
+        self,
+        epic: str,
+        frequency: str | None,
+        generation: int,
+    ) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
+        if not bounded_frequency:
+            raise ValueError("Lightstreamer real maximum frequency must not be empty")
+        self._real_max_frequency_by_epic[epic] = bounded_frequency
+        LOGGER.info(
+            "ig_subscription_frequency",
+            extra={
+                "epic": epic,
+                "generation": generation,
+                "real_max_frequency": bounded_frequency,
+            },
+        )
+
+    def _on_server_error(self, code: int, generation: int) -> None:
+        if self._loop is not None:
+            self._loop.call_soon_threadsafe(self._handle_server_error, code, generation)
+
+    def _handle_server_error(self, code: int, generation: int) -> None:
+        if generation != self._generation or self._stopping:
+            return
+        self._server_errors += 1
+        self._last_server_error_code = code
+        self._status = HealthStatus.DEGRADED
+        self._connection_state = _ConnectionState.DEGRADED
+        LOGGER.error(
+            "ig_stream_server_error",
+            extra={"code": code, "generation": generation},
+        )
+        self._schedule_reconnect()
+
     def _mark_ready_if_complete(self, generation: int) -> None:
         if generation != self._generation or self._stopping:
             return
         if (
             not self._transport_connected
+            or not self._heartbeat_subscribed
+            or not self._heartbeat_current_for_transport
+            or self._last_heartbeat_at is None
             or self._subscribed_epics != self._expected_epics
             or self._updated_epics != self._expected_epics
             or any(
@@ -969,7 +1379,11 @@ class IgDemoMarketDataAdapter:
             watchdog_task.cancel()
         self._retry_watchdog_task = None
         self._connection_state = _ConnectionState.READY
-        self._status = HealthStatus.HEALTHY if self._dropped_records == 0 else HealthStatus.DEGRADED
+        self._status = (
+            HealthStatus.HEALTHY
+            if self._dropped_records == 0 and self._lightstreamer_lost_updates == 0
+            else HealthStatus.DEGRADED
+        )
         self._ready_event.set()
 
     def _start_retry_watchdog(self, generation: int) -> None:
@@ -1111,6 +1525,7 @@ class IgDemoMarketDataAdapter:
                     service.create_session,
                 )
                 self._session_details = _single_record(session_details)
+                self._record_rate_limiter_evidence(service)
                 self._status = HealthStatus.STARTING
                 self._connection_state = _ConnectionState.AUTHENTICATED
                 return
@@ -1153,9 +1568,28 @@ class IgDemoMarketDataAdapter:
             return cast(_IgRestService, self._service_factory(self._config))
         from trading_ig.rest import IGService
 
+        configured_api_key = self._config.api_key
+
+        class ValidatedRateLimitedIGService(IGService):  # type: ignore[misc]
+            _qtrad_published_trading_requests_per_minute: int
+            _qtrad_published_non_trading_requests_per_minute: int
+
+            def get_client_apps(self, session: object | None = None) -> object:
+                response = cast(
+                    object,
+                    super().get_client_apps(session),  # pyright: ignore[reportUnknownMemberType, reportAttributeAccessIssue]
+                )
+                trading, non_trading = _validated_client_app_allowances(
+                    response,
+                    configured_api_key,
+                )
+                self._qtrad_published_trading_requests_per_minute = trading
+                self._qtrad_published_non_trading_requests_per_minute = non_trading
+                return response
+
         service = cast(
             _IgRestService,
-            IGService(
+            ValidatedRateLimitedIGService(
                 self._config.username,
                 self._config.password,
                 self._config.api_key,
@@ -1172,6 +1606,99 @@ class IgDemoMarketDataAdapter:
             ),
         )
         return service
+
+    async def _run_rest_read(
+        self,
+        operation_name: str,
+        operation: Callable[[_IgRestService], _T],
+    ) -> _T:
+        """Run one idempotent REST read with one controlled invalid-token recovery."""
+
+        service = self._require_connected()
+        try:
+            return await self._run_provider_operation(
+                operation_name,
+                lambda: operation(service),
+            )
+        except Exception as error:
+            self._record_allowance_error(error)
+            if not _is_token_invalid_exception(error):
+                raise
+
+        async with self._rest_reauthentication_lock:
+            if self._service is service:
+                LOGGER.warning(
+                    "ig_rest_session_invalid",
+                    extra={"operation": operation_name, "generation": self._generation},
+                )
+                await self._reauthenticate_after_invalid_token()
+                self._rest_reauthentications += 1
+        retry_service = self._require_connected()
+        try:
+            return await self._run_provider_operation(
+                operation_name,
+                lambda: operation(retry_service),
+            )
+        except Exception as error:
+            self._record_allowance_error(error)
+            raise
+
+    async def _reauthenticate_after_invalid_token(self) -> None:
+        if self._reconnecting:
+            raise RuntimeError("cannot reauthenticate REST while stream recovery is active")
+        if self._desired_listings:
+            self._reconnecting = True
+            await self._reconnect_stream()
+            return
+        await self._logout_rest_session()
+        self._connection_state = _ConnectionState.AUTHENTICATING
+        await self._establish_rest_session()
+
+    def _record_allowance_error(self, error: Exception) -> None:
+        error_code = _safe_error_code(error)
+        if not error_code.startswith("error.public-api.exceeded-"):
+            return
+        self._allowance_errors += 1
+        self._last_allowance_error = error_code
+        LOGGER.warning(
+            "ig_rest_allowance_exceeded",
+            extra={"error_code": error_code, "generation": self._generation},
+        )
+
+    def _record_rate_limiter_evidence(self, service: _IgRestService) -> None:
+        if not isinstance(service, _RateLimiterEvidence) or not isinstance(
+            service, _PublishedRateLimiterEvidence
+        ):
+            self._published_trading_requests_per_minute = None
+            self._published_non_trading_requests_per_minute = None
+            self._effective_trading_requests_per_minute = None
+            self._effective_non_trading_requests_per_minute = None
+            return
+        published_trading = service._qtrad_published_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        published_non_trading = service._qtrad_published_non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        trading = service._trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        non_trading = service._non_trading_requests_per_minute  # pyright: ignore[reportPrivateUsage]
+        expected_trading = published_trading - _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        expected_non_trading = published_non_trading - _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        if trading != expected_trading or non_trading != expected_non_trading:
+            raise RuntimeError(
+                "trading-ig effective REST request rates do not match the reviewed safety margin"
+            )
+        if trading <= 0 or non_trading <= 0:
+            raise RuntimeError("trading-ig configured a non-positive effective REST request rate")
+        self._published_trading_requests_per_minute = published_trading
+        self._published_non_trading_requests_per_minute = published_non_trading
+        self._effective_trading_requests_per_minute = trading
+        self._effective_non_trading_requests_per_minute = non_trading
+        LOGGER.info(
+            "ig_rest_rate_limiter_configured",
+            extra={
+                "effective_trading_requests_per_minute": trading,
+                "effective_non_trading_requests_per_minute": non_trading,
+                "published_trading_requests_per_minute": published_trading,
+                "published_non_trading_requests_per_minute": published_non_trading,
+            },
+        )
 
     async def _close_stream(self) -> None:
         client = self._stream_client
@@ -1357,6 +1884,12 @@ class IgDemoMarketDataAdapter:
         self._updated_epics.clear()
         self._quote_received_times.clear()
         self._stale_epics.clear()
+        self._heartbeat_subscribed = False
+        self._last_heartbeat_at = None
+        self._last_heartbeat_value = None
+        self._heartbeat_real_max_frequency = None
+        self._heartbeat_stale = False
+        self._heartbeat_current_for_transport = False
         self._ready_event = asyncio.Event()
         self._readiness_error = None
         self._subscriptions.clear()
@@ -1415,6 +1948,12 @@ def _safe_error_code(error: BaseException) -> str:
     return type(error).__name__.upper()[:96]
 
 
+def _is_token_invalid_exception(error: BaseException) -> bool:
+    from trading_ig.rest import TokenInvalidException
+
+    return isinstance(error, TokenInvalidException)
+
+
 def _is_fatal_provider_error(error_code: str) -> bool:
     return error_code in _FATAL_PROVIDER_ERRORS
 
@@ -1440,6 +1979,38 @@ def _records(value: object) -> list[Mapping[str, object]]:
         sequence = cast(Sequence[object], value)
         return [cast(Mapping[str, object], item) for item in sequence]
     raise TypeError(f"unsupported IG response type: {type(value).__name__}")
+
+
+def _validated_client_app_allowances(value: object, api_key: str) -> tuple[int, int]:
+    """Return published rates for exactly one current-key client-app response."""
+
+    matches: list[Mapping[str, object]] = []
+    for row in _records(value):
+        if "apiKey" not in row:
+            raise RuntimeError("IG client-app response has no apiKey")
+        if row["apiKey"] == api_key:
+            matches.append(row)
+    if len(matches) != 1:
+        raise RuntimeError(
+            "IG client-app response must contain exactly one entry for the configured API key"
+        )
+    match = matches[0]
+    try:
+        trading = match["allowanceAccountTrading"]
+        non_trading = match["allowanceAccountOverall"]
+    except KeyError as error:
+        raise RuntimeError("IG client-app response lacks a required published allowance") from error
+    for name, allowance in (
+        ("allowanceAccountTrading", trading),
+        ("allowanceAccountOverall", non_trading),
+    ):
+        if (
+            not isinstance(allowance, int)
+            or isinstance(allowance, bool)
+            or allowance <= _TRADING_IG_RATE_LIMIT_SAFETY_MARGIN
+        ):
+            raise RuntimeError(f"IG client-app {name} is not a usable integer allowance")
+    return cast(int, trading), cast(int, non_trading)
 
 
 def _single_record(value: object) -> Mapping[str, object]:

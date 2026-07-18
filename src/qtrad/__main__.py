@@ -1337,8 +1337,6 @@ async def _ingest(
         await adapter.subscribe(listings)
         initial_health = await adapter.health()
         await store.record_adapter_health(initial_health)
-        last_health_status = initial_health.status
-        last_health_persisted_at = asyncio.get_running_loop().time()
 
         async def force_reconnect() -> None:
             assert force_reconnect_after_seconds is not None
@@ -1350,27 +1348,40 @@ async def _ingest(
             reconnect_task = asyncio.create_task(force_reconnect())
 
         async def consume() -> None:
-            nonlocal last_health_persisted_at, last_health_status
             async for record in adapter.records():
                 await service.process(record)
                 await service.advance_bars(record.received_time)
-                health = await adapter.health()
-                monotonic_now = asyncio.get_running_loop().time()
-                if (
-                    health.status != last_health_status
-                    or monotonic_now - last_health_persisted_at >= _HEALTH_PERSIST_INTERVAL_SECONDS
-                ):
-                    await store.record_adapter_health(health)
-                    last_health_status = health.status
-                    last_health_persisted_at = monotonic_now
+
+        async def persist_health() -> None:
+            while True:
+                await asyncio.sleep(_HEALTH_PERSIST_INTERVAL_SECONDS)
+                await store.record_adapter_health(await adapter.health())
+
+        async def consume_with_health_supervision() -> None:
+            tasks = (
+                asyncio.create_task(consume()),
+                asyncio.create_task(persist_health()),
+            )
+            done: set[asyncio.Task[None]] = set()
+            try:
+                done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            finally:
+                pending = tuple(task for task in tasks if not task.done())
+                for task in pending:
+                    task.cancel()
+                for task in pending:
+                    with suppress(asyncio.CancelledError):
+                        await task
+            for task in done:
+                task.result()
 
         if maximum_seconds is None:
-            await consume()
+            await consume_with_health_supervision()
             raise RuntimeError("unbounded IG ingestion iterator ended unexpectedly")
         else:
             try:
                 async with asyncio.timeout(maximum_seconds):
-                    await consume()
+                    await consume_with_health_supervision()
             except TimeoutError:
                 bounded_deadline_reached = True
                 terminal_status = "STOPPED"

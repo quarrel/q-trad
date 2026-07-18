@@ -3,7 +3,6 @@
   "private": true,
   "description": "Codex CLI install boundary for the secure devcontainer.",
   "dependencies": {
-    "@openai/codex": "latest",
     "tilth": "0.9.0"
   },
   "engines": {

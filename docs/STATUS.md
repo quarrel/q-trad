@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-07-16
+**Updated:** 2026-07-17
 **Current milestone:** capture operations release
 **State:** IN PROGRESS — `capture-v1` window complete; failed loss gate and closure evidence pending
 
@@ -67,6 +67,13 @@
 - Dev Container setup now registers Tilth, remote Context7 and repository-scoped GitHub
   MCP servers through the Codex CLI. The private GitHub repository is configured as
   `origin` and is the regular synchronisation target for reviewed commits.
+- Dev Container startup now stops stale Codex Remote Control daemon state before starting
+  a fresh daemon after the development database migration. Its host identity and device
+  pairings remain in the persistent container-local Codex named volume across ordinary
+  rebuilds.
+- The Dev Container retains one npm-installed latest Codex CLI as its image bootstrap;
+  Remote Control owns the standalone runtime in persistent Codex state, and the separate
+  pnpm-managed Tilth dependency tree no longer installs a redundant Codex package.
 - The application and Dev Container use Debian Trixie base images. The Dev Container
   copies the host's global Codex guidance without copying credentials or other Codex
   state.
@@ -120,8 +127,13 @@
 - Pyright: `0 errors, 0 warnings, 0 informations` on current source.
 - IG adapter focused static check: included in strict Pyright with no diagnostics.
 - `ty`: passed on current source.
-- Dev Container image: rebuilt without cache; Codex CLI `0.144.1` matches npm's
+- Dev Container image: rebuilt; Codex CLI `0.144.5` matches npm's
   `@openai/codex` `latest` dist-tag.
+- Dev Container Codex Remote Control: stable CLI `0.144.5` reproduced stale PID-managed
+  state after container recreation; `stop` classified it as `notRunning`, cleared it and
+  allowed a fresh daemon to bootstrap with the same persistent environment identity.
+- Dev Container Codex installation boundary: package and Dockerfile regression coverage
+  confirms one npm image bootstrap plus Remote Control's persistent managed runtime.
 - Dev Container MCP configuration: Tilth `0.9.0` and Context7 enabled after the rebuild.
 - Dev Container static gates after the rebuild: Ruff, Pyright and `ty` passed.
 - Dev Container networking: the IPv4-only Compose configuration validates. The
@@ -458,11 +470,29 @@ outside the current data-only phase until explicitly admitted by a later plan up
     the individual/aggregate automatic checks, preserves their actual value and emits `PASS` only when
     both automatic and operator gates pass. Regression coverage proves a failed automatic snapshot is
     retained as a final `FAIL` artifact.
-  - The original post-gap planner failed closed before IG access because its common rectangular range
-    requests 20,741 points against IG's documented 10,000-point weekly allowance. A read-only union of
-    the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
-    local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
-    will not be fabricated and the collector remains untouched.
+    - The original post-gap planner failed closed before IG access because its common rectangular range
+      requests 20,741 points against IG's documented 10,000-point weekly allowance. A read-only union of
+      the 70 minute-aligned gaps yields 56 instrument/range spans totalling only 267 points. The next
+      local slice replaces the quota-wasteful rectangle with a hash-bound sparse plan set; quota evidence
+      will not be fabricated and the collector remains untouched.
+    - PR 9 merged the hash-bound sparse planner, exact set register/execute boundary, migration `0010`,
+      zero-result request evidence and append-only per-request quota ledger after PostgreSQL 18 CI passed
+      all 307 tests. The final set hash `20d8bd4a116499f2240b5b0e78a76c7a8f84fd0cb209dcdc1604507b14599474`
+      binds 56 plans, all 70 unique gaps, 267 requested points, the verified snapshot import and a
+      2,000-point reserve.
+    - The first execution completed 27 requests/135 points before the 28th rapid request raised
+      `ApiExceededException`; IG still reported 9,865 weekly historical points. The active plan and run
+      failed closed, and the usage ledger retained 27 completed attempts plus one incomplete rate-limited
+      attempt. Context7-backed `trading-ig` guidance confirmed that historical requests require separate
+      pacing. PR 10 added a conservative three-second adapter-boundary interval and passed full CI.
+    - The exact set then resumed without replacement or duplicate completion. All 56 plans completed,
+      the ledger records 267 successful requested/returned points plus the retained incomplete attempt,
+      and IG's final provider-reported weekly allowance is 9,733. Research manifest
+      `5289530e6b5d946c626593f74eda8d14774d1454774fff666c9c313a9946565d` binds 62,175 exported bars.
+      Offline v2 artifact `ce5c6e1c2fad69ba909067b67e5c4409a888379af3cb108204aa28df0c273d89`
+      reports `HISTORICAL_DATA_PRESENT` for all 70 live gaps and complete coverage for all 210 basis
+      results (834/834 expected basis-minute intervals). This is evidence for deeper streaming/session
+      investigation, not proof of streaming emission and not remediation of the failed no-drop gate.
   - The failed candidate is now formally closed by final evidence
     `d7bcd88e3179aca9eda89673f14383d6525bcd92e602462c6c56815892fb5c3f`. It binds the corrected
     automatic snapshot, operator review, all 70 `UNEXPLAINED` gaps and the 22,029 dropped records;
@@ -475,6 +505,122 @@ outside the current data-only phase until explicitly admitted by a later plan up
     projection catch-up, zero reconnects/drops/provider operations and queue high-water 7/10,000.
     This begins corrected `capture-v1` measurement; `capture-v2` and 40-instrument stress remain
     separate later stages.
+  - A read-only analysis of the verified failed-candidate snapshot found no raw callback for the
+    affected item inside any of the 70 gaps. Every exact interval nevertheless contained 35–723
+    canonical quotes from two to six other subscriptions on the same Lightstreamer connection, and
+    retained lifecycle logs contain no gap-time transport or subscription failure. Historical MID
+    prices move in every interval across three to eight minute bars; none is flat. The remaining
+    uncertainty is IG demo per-item stream suppression versus SDK/subscription delivery.
+  - A local undeployed continuity-evidence slice records subscription establishment/end,
+    server-applied real frequency, bounded server errors and SDK-reported lost updates. Renewal
+    invalidates prior item state and loss is sticky degraded health. Idempotent REST reads additionally
+    perform at most one serialised v2 invalid-token reauthentication/replay. Each session creation now
+    validates exactly one current-key client-app entry and retains only its numeric published allowances
+    plus the pinned library's published-minus-two effective rates; missing, duplicate, malformed or
+    mismatched evidence fails closed without retaining API-key material. Authoritative allowance errors
+    are retained without retrying them.
+      The earlier 42 focused lifecycle tests and complete 317-test isolated PostgreSQL gate passed.
+      Proposed ADR 0025 now adds the IG application heartbeat as distinct whole-connection evidence,
+      requires it for readiness and moves changed-field state mutation onto the event-loop side of the
+      provider callback boundary. Forty-six focused lifecycle tests pass. It does not treat heartbeat as
+      session renewal or proof of a PRICE emission.
+    - Lightstreamer's IG-specific matrix identifies deployed Server 7.3.3 and Python client 1.0.3.
+      The heartbeat candidate therefore retains `trading-ig` 0.0.24's exact pin and q-trad's narrow
+      version-guarded WebSocket-disposal repair. The local 2.2.2 used-surface and load probes did not
+      establish provider compatibility; their uv override contradicted accepted ADR 0010 and has been
+      removed before release.
+      - The new isolated load helper produced self-hashed PASS evidence for 2,000 callbacks at 200/s over
+        40 subscriptions with zero loss. A 5 ms injected persistence stall reached queue high-water
+        799/10,000, p95 lag 6.58 seconds and maximum lag 6.91 seconds before complete drain. The five-minute
+        200/s profile passed all 60,000 callbacks with zero loss, queue high-water 51/10,000, p95 lag
+        4.33 ms and maximum lag 257 ms. An all-item renewal at load separately passed 2,000 callbacks and
+        recorded 40 renewal events with complete post-renewal state. Provider-backed connection/recovery
+        faults remain outstanding.
+      - Ingestion health persistence now runs on its own periodic task rather than only after a market
+        record. Whole-stream silence can therefore persist heartbeat, lifecycle and failure evidence even
+        when no PRICE callback arrives.
+      - Library-managed `STALLED`/retry recovery now invalidates heartbeat readiness independently of
+        its retained watchdog grace window. Health returns only after a new heartbeat and fresh evidence
+        from every PRICE channel on the recovered transport; a pre-stall heartbeat cannot qualify it.
+          The current complete gate passes formatting, Ruff, Pyright, `ty`, ShellCheck, frozen-schema
+            compatibility, all migrations and all 350 tests.
+    `docs/STREAMING_CONTINUITY_INVESTIGATION.md` defines the
+    endurance and synthetic-stress gates plus a same-connection PRICE-versus-CHART:TICK contrast.
+        The latter uses 15 of IG's published 40 subscriptions including heartbeat and avoids the prohibited
+        second connection. Its guarded local harness now records compact hash-bound callback and lifecycle
+        evidence, requires all channels data-ready, and fails on loss/discrepancy or incomplete stream,
+        REST HTTP-session or bounded-worker teardown. It cannot run without an exact collector-stopped
+          acknowledgement and remains unexecuted while the corrected collector measurement is active;
+        no collector mutation occurred.
+        Its terminal gate now uses bounded current freshness rather than merely proving a channel once
+        updated. Threshold-exceeding heartbeat silence is explicit, and the transport must remain
+        connected immediately before deliberate shutdown, closing a whole-stream-freeze false pass.
+        The independent verifier now rejects unexpected event fields and malformed lifecycle records,
+        and reconciles total event attempts exactly with written records plus reported queue drops.
+        This prevents a PASS artifact from hiding missing callback/lifecycle evidence or accidentally
+        retaining an unreviewed account/token field.
+        Recovery verification now likewise recomputes ordered initial/disconnect/token phase evidence,
+        exact recovery counters, seven-instrument count advancement, per-phase heartbeat/PRICE/frequency
+        and current-key rate evidence, zero loss, and final client/session/worker/consumer cleanup.
+    - A second guarded provider-recovery harness now uses the production adapter without a database.
+      It requires initial PRICE/heartbeat/frequency readiness, terminates the actual Lightstreamer
+      client, verifies automatic recovery with fresh records from all instruments, then injects a
+      fixed invalid local REST token and requires one bounded reauthentication/replay plus another
+      complete stream generation. Exact reconnect and reauthentication counts, zero loss/errors and
+      complete adapter/consumer/provider-thread cleanup fail closed. Each ready phase requires the
+      positive effective trading/non-trading rates obtained from the current demo login, and sticky
+      abandoned-provider-operation state fails shutdown. It remains unexecuted while the corrected
+      collector owns the API key.
+    - Provider experiment evidence now has an independent offline verifier. It recomputes either
+      manifest self-hash and, for contrast evidence, confines the adjacent event path, parses every
+      gzip JSON-lines record and recomputes increasing sequence, count and uncompressed SHA-256.
+      Schema v1 requires the complete experiment-specific check set and exact PASS equivalence;
+      verification preserves rather than masks a valid failure artifact.
+    - The continuity protocol now prevents evidence substitution: the current old-lock run measures
+      the overload correction through its recurrent windows/weekend; guarded provider probes run only
+      after its approved stop and during active markets; ADR 0025 remains Proposed until both pass;
+      and the resulting immutable ARM image then requires its own fresh 72-hour `capture-v1`
+      endurance before `capture-v2` can be admitted.
+      - A bounded read-only corrected-run checkpoint at `2026-07-17T12:01:46Z` found one current
+        ingestion run, HTTP 200 readiness, 7/7 subscriptions, exact projection catch-up, zero drops or
+        reconnects and queue high-water 10/10,000. The gap endpoint still contained exactly the 70
+        failed-candidate gaps; none began after the corrected run started at `2026-07-17T05:02:02Z`.
+        This run had not yet crossed the recurrent `20:00Z`–`22:00Z` window, so the checkpoint is not
+        endurance or causal closure. Host NTP remained synchronised. No mutation occurred.
+      - The read-only weekend-boundary checkpoint at `2026-07-18T02:37:43Z` found that the corrected
+        collector did not survive the full `20:00Z`–`22:00Z` interval. PRICE silence caused repeated
+        all-channel readiness timeouts from approximately `21:36Z`; the projection and global position
+        stopped at `2026-07-17T21:39:12Z`. Lightstreamer repeatedly reached
+        `CONNECTED:WS-STREAMING` but no generation obtained all-seven PRICE readiness. Compose restart
+        policy then amplified the exhausted recovery into 563 container restarts by `02:38Z`, after
+        which IG login attempts also returned `401` invalid-client-security-token during the expected
+        weekend maintenance period. The API, PostgreSQL, timers and host NTP remained healthy, disk use
+        was 9.1/100 GB and every reported attempt retained zero q-trad drops. The gap endpoint contained
+        no newly closed interval in the window, but cannot represent the still-open terminal outage;
+        absence from that projection is therefore not evidence of continuity. The operator approved
+        containment and `qtrad-capture.service` stopped successfully at `2026-07-18T02:40:45Z` through
+        its reviewed systemd/Compose boundary. No q-trad container or collector connection remained;
+        the PostgreSQL block volume remained mounted read-write with unchanged 9.1 GB usage. No deploy,
+        migration or data mutation accompanied the stop.
+      - In progress locally and undeployed: ingest no longer uses Docker `unless-stopped` in the
+        candidate descriptor. A dedicated foreground `qtrad-ingest.service` propagates the container
+        exit code, waits 60 seconds and permits at most three failed starts per hour; exhaustion
+        remains a failed unit until reviewed operator recovery. `qtrad-capture.service` continues to
+        own only database/API lifecycle, and stopping it stops ingest through `PartOf`. Qualification
+        evidence now requires both units and preserves both journals. This addresses the observed
+        process-level retry-budget reset without changing collector data.
+      - The separated Lightstreamer 2.1 performance-source audit identified upstream commit
+        `3acadac599b06a64ff607b47f8973ae545be5a87`. It replaces shared Haxe message/subscription-manager
+        collections with tombstone arrays and an ordered integer map plus explicit compaction. Its
+        follow-up tests cover collection semantics, not throughput. The roughly 340-line shared-core
+        change requires a rebuilt/transpiled Python distribution and is not suitable for q-trad's
+        narrow runtime compatibility repair. No backport is proposed without provider evidence that
+        isolates 1.0.3 manager dispatch as the bottleneck at the intended 7–40 subscriptions.
+      - The supported 1.0.3 callback path now uses 1-based numeric field positions for
+        `ItemUpdate.getValue` and `isValueChanged`. Lightstreamer documents that name access performs
+        an additional name-to-position lookup. Price, heartbeat and provider-contrast callbacks bind
+        positions to their subscription field order; focused lifecycle tests preserve delta and
+        explicit-null behaviour. This remains local and undeployed pending provider evidence.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

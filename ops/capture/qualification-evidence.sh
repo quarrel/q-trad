@@ -166,17 +166,20 @@ jq -e 'type == "object" and (.filesystems | type == "array")' \
 
 jq -n \
   --arg docker "$(unit_state docker.service)" \
-  --arg tailscale "$(unit_state tailscaled.service)" \
-  --arg capture "$(unit_state qtrad-capture.service)" \
-  --arg capture_result "$(unit_result qtrad-capture.service)" \
+    --arg tailscale "$(unit_state tailscaled.service)" \
+    --arg capture "$(unit_state qtrad-capture.service)" \
+    --arg capture_result "$(unit_result qtrad-capture.service)" \
+    --arg ingest "$(unit_state qtrad-ingest.service)" \
+    --arg ingest_result "$(unit_result qtrad-ingest.service)" \
   --arg healthwatch_timer "$(unit_state qtrad-healthwatch.timer)" \
   --arg backup_timer "$(unit_state qtrad-backup.timer)" \
   --arg restore_timer "$(unit_state qtrad-restore-verify.timer)" \
   --arg healthwatch_result "$(unit_result qtrad-healthwatch.service)" \
   --arg backup_result "$(unit_result qtrad-backup.service)" \
   --arg restore_result "$(unit_result qtrad-restore-verify.service)" \
-  '{docker_service:$docker, tailscale_service:$tailscale, capture_service:$capture,
-    capture_last_result:$capture_result,
+    '{docker_service:$docker, tailscale_service:$tailscale, capture_service:$capture,
+      capture_last_result:$capture_result, ingest_service:$ingest,
+      ingest_last_result:$ingest_result,
     healthwatch_timer:$healthwatch_timer,
     backup_timer:$backup_timer, restore_timer:$restore_timer,
     healthwatch_last_result:$healthwatch_result, backup_last_result:$backup_result,
@@ -272,8 +275,9 @@ automatic_checks="$(
         and (.detail | contains("updates=7/7")) and (.detail | contains("dropped_records=0")))]
       | length == 1' "$work_dir/system.json" > /dev/null && printf true || printf false)" \
     --argjson units_ok "$(jq -e '
-      .docker_service == "active" and .tailscale_service == "active"
-      and .capture_service == "active" and .capture_last_result == "success"
+        .docker_service == "active" and .tailscale_service == "active"
+        and .capture_service == "active" and .capture_last_result == "success"
+        and .ingest_service == "active" and .ingest_last_result == "success"
       and .healthwatch_timer == "active"
       and .backup_timer == "active" and .restore_timer == "active"
       and .healthwatch_last_result == "success" and .backup_last_result == "success"

@@ -924,6 +924,7 @@ async def test_ingestion_uses_transport_receive_time_as_bar_watermark(
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: store)
     monkeypatch.setattr(cli, "_ig_adapter", lambda settings, selected_clock: adapter)
     monkeypatch.setattr(cli, "IngestionService", lambda *args, **kwargs: service)
+    monkeypatch.setattr(cli, "_HEALTH_PERSIST_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(
         cli,
         "_capture_universe",
@@ -933,12 +934,12 @@ async def test_ingestion_uses_transport_receive_time_as_bar_watermark(
     await cli._ingest(
         cast(Settings, SimpleNamespace()),
         cast(Clock, clock),
-        maximum_seconds=0.02,
+        maximum_seconds=0.05,
     )
 
     assert service.processed == [record]
     assert service.watermarks == [transport_time]
-    assert store.health_writes == 2
+    assert store.health_writes >= 3
 
 
 def test_main_does_not_leave_an_event_loop_running(

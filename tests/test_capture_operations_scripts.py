@@ -22,6 +22,23 @@ def test_capture_ingest_has_graceful_stop_contract() -> None:
 
     assert "    stop_signal: SIGINT\n" in ingest
     assert "    stop_grace_period: 90s\n" in ingest
+    assert '    restart: "no"\n' in ingest
+
+
+def test_capture_ingest_has_bounded_systemd_restart_contract() -> None:
+    capture_unit = (REPOSITORY_ROOT / "ops/systemd/qtrad-capture.service").read_text()
+    ingest_unit = (REPOSITORY_ROOT / "ops/systemd/qtrad-ingest.service").read_text()
+
+    assert "Wants=qtrad-ingest.service\n" in capture_unit
+    assert "Before=qtrad-ingest.service\n" in capture_unit
+    assert "up -d --remove-orphans db api\n" in capture_unit
+    assert "Requires=qtrad-capture.service\n" in ingest_unit
+    assert "PartOf=qtrad-capture.service\n" in ingest_unit
+    assert "StartLimitIntervalSec=3600\n" in ingest_unit
+    assert "StartLimitBurst=3\n" in ingest_unit
+    assert "--abort-on-container-exit --exit-code-from ingest ingest\n" in ingest_unit
+    assert "Restart=on-failure\n" in ingest_unit
+    assert "RestartSec=60\n" in ingest_unit
 
 
 def test_capture_api_requires_a_stable_source_identity() -> None:
@@ -1189,7 +1206,7 @@ printf '%s\n' \
     assert manifest["schema"] == "qtrad-capture-qualification-log-bundle-v1"
     assert manifest["qualification_evidence_sha256"] == automatic_sha256
     assert len(manifest["containers"]) == 3
-    assert len(manifest["sources"]) == 6
+    assert len(manifest["sources"]) == 7
     identity = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
     canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
     assert hashlib.sha256(canonical.encode()).hexdigest() == manifest["manifest_sha256"]
