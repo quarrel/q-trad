@@ -128,6 +128,15 @@ and attribution are retained, and whose synthetic load, renewal and provider-rec
 pass. This audit is not a prerequisite for the heartbeat-only candidate unless it exposes a defect in
 the pinned path.
 
+The source audit identified upstream commit `3acadac599b06a64ff607b47f8973ae545be5a87` as the
+performance change. It replaces message/subscription-manager linked and associative collections with
+tombstone arrays plus an ordered integer map, and compacts those collections after mutation-prone
+event fan-out. The companion commit tests collection iteration/removal semantics but supplies no
+throughput benchmark. This is approximately 340 lines of shared Haxe core which must be transpiled
+into the Python distribution, not a narrow Python runtime repair. With 7–40 subscriptions and q-trad's
+200-callback/s handoff evidence already passing, no backport is proposed unless provider evidence
+isolates 1.0.3 manager dispatch as a bottleneck.
+
 The checked-in `ops/dev/provider-recovery-experiment.sh` prepares the remaining provider-backed
 fault proof without touching PostgreSQL. Under the same exact collector-stopped acknowledgement it
 uses the production adapter, requires initial PRICE/heartbeat/frequency readiness, terminates the

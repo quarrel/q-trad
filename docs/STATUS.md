@@ -609,6 +609,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         own only database/API lifecycle, and stopping it stops ingest through `PartOf`. Qualification
         evidence now requires both units and preserves both journals. This addresses the observed
         process-level retry-budget reset without changing collector data.
+      - The separated Lightstreamer 2.1 performance-source audit identified upstream commit
+        `3acadac599b06a64ff607b47f8973ae545be5a87`. It replaces shared Haxe message/subscription-manager
+        collections with tombstone arrays and an ordered integer map plus explicit compaction. Its
+        follow-up tests cover collection semantics, not throughput. The roughly 340-line shared-core
+        change requires a rebuilt/transpiled Python distribution and is not suitable for q-trad's
+        narrow runtime compatibility repair. No backport is proposed without provider evidence that
+        isolates 1.0.3 manager dispatch as the bottleneck at the intended 7–40 subscriptions.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

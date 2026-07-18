@@ -204,6 +204,14 @@ Implementation status:
                     against IG's published 7.3.3 deployment. Any minimal backport requires understood
                     prerequisites, attribution/licence review and fresh load, renewal and provider-
                     recovery evidence on the supported 1.0.3 runtime.
+                    - Audit complete: upstream commit
+                      `3acadac599b06a64ff607b47f8973ae545be5a87` replaces shared Haxe
+                      message/subscription-manager collections with tombstone arrays and an ordered
+                      integer map plus explicit compaction. Its companion tests prove collection
+                      semantics but include no throughput benchmark. The roughly 340-line shared-core
+                      change requires rebuilding/transpiling the Python distribution, so no backport is
+                      proposed unless provider evidence isolates 1.0.3 manager dispatch as a bottleneck
+                      at the intended 7–40 subscriptions.
                 - The provider-backed discriminator is now a single-connection PRICE-versus-CHART:TICK
                   contrast for the same seven epics. Fifteen subscriptions including heartbeat remain below IG's published
                 40-subscription limit and avoid its explicit prohibition on multiple concurrent
