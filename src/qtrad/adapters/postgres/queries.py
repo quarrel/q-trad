@@ -6,6 +6,69 @@ from typing import Any
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.ports.storage import EventPage
 
+_HEARTBEAT_OBSERVATION_MAX_AGE_SECONDS = 10.0
+
+
+def _boolean_health_field(fields: dict[str, str], name: str) -> bool | None:
+    value = fields.get(name)
+    if value is None:
+        return None
+    if value == "true":
+        return True
+    if value == "false":
+        return False
+    raise ValueError(f"invalid boolean adapter-health field {name}: {value!r}")
+
+
+def _heartbeat_summary(health_rows: list[dict[str, Any]]) -> dict[str, Any]:
+    row = next((item for item in health_rows if item["adapter_name"] == "ig-market-data"), None)
+    if row is None:
+        return {
+            "status": "UNAVAILABLE",
+            "adapter_status": None,
+            "events": None,
+            "last_heartbeat_at": None,
+            "observed_at": None,
+            "observation_age_seconds": None,
+            "transport_current": None,
+        }
+    detail = row["detail"]
+    if detail is None:
+        fields: dict[str, str] = {}
+    elif isinstance(detail, str):
+        fields = {}
+        for segment in detail.split(";"):
+            key, separator, value = segment.strip().partition("=")
+            if separator:
+                fields[key] = value
+    else:
+        raise TypeError("IG adapter-health detail must be text or null")
+    events_text = fields.get("heartbeat_events")
+    events = int(events_text) if events_text is not None else None
+    last_heartbeat_text = fields.get("last_heartbeat_at")
+    last_heartbeat_at = None if last_heartbeat_text in {None, "none"} else last_heartbeat_text
+    transport_current = _boolean_health_field(fields, "heartbeat_transport_current")
+    heartbeat_stale = _boolean_health_field(fields, "heartbeat_stale")
+    observation_age_seconds = float(row["observation_age_seconds"])
+    has_current_evidence = (
+        row["status"] == "HEALTHY"
+        and transport_current is True
+        and heartbeat_stale is False
+        and events is not None
+        and events > 0
+        and last_heartbeat_at is not None
+        and 0 <= observation_age_seconds <= _HEARTBEAT_OBSERVATION_MAX_AGE_SECONDS
+    )
+    return {
+        "status": "HEALTHY" if has_current_evidence else "UNHEALTHY",
+        "adapter_status": row["status"],
+        "events": events,
+        "last_heartbeat_at": last_heartbeat_at,
+        "observed_at": row["observed_at"],
+        "observation_age_seconds": round(observation_age_seconds, 1),
+        "transport_current": transport_current,
+    }
+
 
 class OperatorQueries:
     def __init__(self, store: PostgresAuditStore) -> None:
@@ -19,19 +82,28 @@ class OperatorQueries:
                 (SELECT COUNT(*) FROM canonical.events) AS canonical_events,
                 (SELECT COUNT(*) FROM read_model.latest_quotes) AS current_quotes,
                 (SELECT COUNT(*) FROM read_model.market_bars) AS bars,
-                (SELECT MAX(global_position) FROM canonical.events) AS global_position
+                (SELECT MAX(global_position) FROM canonical.events) AS global_position,
+                clock_timestamp() AS observed_at
             """
         )
-        health = await self._store.query("SELECT * FROM ops.adapter_health ORDER BY adapter_name")
+        health = await self._store.query(
+            """
+            SELECT *, EXTRACT(EPOCH FROM clock_timestamp() - observed_at) AS observation_age_seconds
+            FROM ops.adapter_health ORDER BY adapter_name
+            """
+        )
         checkpoints = await self._store.query(
             "SELECT * FROM ops.projection_checkpoints ORDER BY projection_name"
         )
         quotas = await self._store.query(
             "SELECT * FROM ops.quota_state ORDER BY provider, allowance_name"
         )
+        count_row = counts[0]
         return {
-            "counts": counts[0],
+            "observed_at": count_row["observed_at"],
+            "counts": {key: value for key, value in count_row.items() if key != "observed_at"},
             "adapter_health": health,
+            "heartbeat": _heartbeat_summary(health),
             "projection_checkpoints": checkpoints,
             "quotas": quotas,
         }

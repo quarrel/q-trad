@@ -336,7 +336,10 @@ boundary.
   review gate result. All except snapshot operate without database access, and none accepts a storage
   decision.
 - Read-only FastAPI endpoints under `/api/v1`.
-- Jinja/HTMX operator console at `/`.
+- Jinja/HTMX operator console at `/`. Its five-second overview refresh renders server observation
+  time plus structured IG heartbeat state, event count, last receipt and sample age. A stored
+  `HEALTHY` row older than ten seconds is displayed as unhealthy, so a static page or dead ingestion
+  process cannot appear live merely because markets are quiet.
 - No order, fill, position or broker-execution interface.
 
 ## Safety boundary

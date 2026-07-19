@@ -575,7 +575,9 @@ Implementation status:
 
 - Expose health, runs, instruments, listings, quotes, bars, gaps, checkpoints and manifests.
 - Use FastAPI, Jinja and HTMX polling.
-- Display `as_of`, projection checkpoint, broker environment and data-quality state.
+- Display `as_of`, projection checkpoint, broker environment and data-quality state. Show the
+  independently advancing IG heartbeat count, last receipt, transport state, health-sample age and
+  console refresh time; stale stored health must not look live during a closed market.
 - Keep the console read-only.
 
 ## WP7 — hardening and soak

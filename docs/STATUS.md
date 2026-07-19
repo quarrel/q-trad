@@ -671,6 +671,11 @@ outside the current data-only phase until explicitly admitted by a later plan up
         `59582a86-2c79-4878-90ab-dee90f07ab56` started at `2026-07-19T05:41:41Z`; readiness was HTTP
         200, the projection was caught up, heartbeat advanced 18 to 24 in six seconds, and reconnect,
         drop and SDK-loss counts were zero. This is the new controlled endurance boundary.
+      - Complete locally and intentionally undeployed: the five-second HTMX overview now shows IG
+        heartbeat health, event count, last receipt, transport-current evidence, adapter status,
+        health-sample age and server refresh time. A stored health observation older than ten seconds
+        renders `UNHEALTHY`, distinguishing a dead/static console from legitimate closed-market quote
+        silence. It can ride the next normal full-image release.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

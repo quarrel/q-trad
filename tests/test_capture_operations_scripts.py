@@ -48,6 +48,16 @@ def test_capture_api_requires_a_stable_source_identity() -> None:
     assert "QTRAD_CAPTURE_SOURCE_ID: ${QTRAD_CAPTURE_SOURCE_ID:?" in api
 
 
+def test_operator_console_displays_live_heartbeat_evidence() -> None:
+    overview = (REPOSITORY_ROOT / "src/qtrad/api/templates/_overview.html").read_text()
+
+    assert "IG streaming heartbeat" in overview
+    assert "system.heartbeat.events" in overview
+    assert "system.heartbeat.last_heartbeat_at" in overview
+    assert "system.heartbeat.observation_age_seconds" in overview
+    assert "Console refreshed {{ system.observed_at }}" in overview
+
+
 def test_capture_database_is_available_only_on_an_explicit_loopback_port() -> None:
     compose = (REPOSITORY_ROOT / "compose.capture.yaml").read_text()
     database = compose.split("  db:\n", maxsplit=1)[1].split("  ingest:\n", maxsplit=1)[0]
