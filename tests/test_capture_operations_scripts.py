@@ -105,7 +105,7 @@ printf '%s\\n' "$*" >> '{docker_calls}'
 case "$*" in
   *"exec -T db pg_dump"*) printf 'archive' ;;
   *"exec -T db pg_restore --list"*) exit 0 ;;
-  *"run --rm --network none --read-only --tmpfs /tmp --env-file"*"python -c"*)
+  *"run --rm --network none --read-only --tmpfs /tmp"*"python -c"*)
     printf '%s\\n' '{{"name":"capture-v1","hash":"{universe_hash}"}}'
     ;;
   *"SELECT version_num FROM alembic_version"*) printf '0006\\n' ;;
@@ -166,6 +166,7 @@ printf '%s\\n' "$*" >> '{calls}'
     assert len(universe_calls) == 1
     assert " compose " not in f" {universe_calls[0]} "
     assert "--network none" in universe_calls[0]
+    assert "--env UV_CACHE_DIR=/tmp/uv-cache" in universe_calls[0]
     assert "example.invalid/qtrad@sha256:" + "1" * 64 in universe_calls[0]
 
 

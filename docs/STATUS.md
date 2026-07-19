@@ -658,6 +658,10 @@ outside the current data-only phase until explicitly admitted by a later plan up
         remained healthy. This is an operational supervision defect, not provider or heartbeat loss,
         and invalidates the interval from that timestamp. The local correction runs the pinned image
         directly with `--network none --read-only`, outside the collector Compose project.
+        Its first remote acceptance run preserved active ingestion but failed before manifest creation
+        because the read-only container retained uv's default home cache. The follow-up sets
+        `UV_CACHE_DIR=/tmp/uv-cache` on the existing tmpfs; the focused regression and all local gates
+        pass before a replacement release.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

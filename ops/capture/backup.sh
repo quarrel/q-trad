@@ -57,6 +57,7 @@ printf '%s  %s\n' "$archive_sha" "$basename" > "$checksum"
 
 universe_evidence="$(
   docker run --rm --network none --read-only --tmpfs /tmp \
+    --env UV_CACHE_DIR=/tmp/uv-cache \
     --env-file "$capture_env" "$capture_image" python -c \
     'import json; from qtrad.runtime.settings import Settings; from qtrad.runtime.universe import load_capture_universe; universe = load_capture_universe(Settings().capture_universe_path); print(json.dumps({"name": universe.name, "hash": universe.configuration_hash}, sort_keys=True))'
 )"
