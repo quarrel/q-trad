@@ -662,6 +662,15 @@ outside the current data-only phase until explicitly admitted by a later plan up
         because the read-only container retained uv's default home cache. The follow-up sets
         `UV_CACHE_DIR=/tmp/uv-cache` on the existing tmpfs; the focused regression and all local gates
         pass before a replacement release.
+      - Follow-up main commit `6cd961575eaba5da7c011046deac6bcaf398af37` passed CI run
+        `29675029054`; publication run `29675082799` produced OCI index digest
+        `sha256:72ad6290c739d8017a9d9eff67702c4166a7644adc72aad764b94bb47a4bbc40`.
+        The exact staged helper completed a live daily/weekly backup from `05:38:31Z` to `05:40:14Z`
+        while heartbeat events advanced 516 to 619, ingestion stayed active and systemd restarts
+        remained zero. After the digest switch, replacement run
+        `59582a86-2c79-4878-90ab-dee90f07ab56` started at `2026-07-19T05:41:41Z`; readiness was HTTP
+        200, the projection was caught up, heartbeat advanced 18 to 24 in six seconds, and reconnect,
+        drop and SDK-loss counts were zero. This is the new controlled endurance boundary.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

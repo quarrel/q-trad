@@ -293,7 +293,9 @@ Implementation status:
                     `--abort-on-container-exit`; graceful SIGINT made systemd treat the stop as success and
                     therefore not restart it. The replacement runs manifest identity directly from the
                     pinned application digest with no network and outside Compose before starting a new
-                    endurance interval. The interrupted interval remains invalid.
+                    endurance interval. The interrupted interval remains invalid. Remote acceptance proved
+                    a full daily/weekly backup while heartbeats advanced and ingestion stayed active; the
+                    replacement exact-image interval began at `2026-07-19T05:41:41Z`.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
