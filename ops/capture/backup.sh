@@ -23,6 +23,9 @@ readonly compose=(
   docker compose --env-file "$capture_env" --project-directory "$root" -f "$compose_file"
 )
 readonly oci=(oci --auth "$oci_auth")
+capture_image="$(sed -n 's/^QTRAD_IMAGE=//p' "$capture_env")"
+readonly capture_image
+[[ "$capture_image" == *@sha256:* ]]
 
 mkdir -p "$backup_dir" "$status_dir"
 partial="$archive.partial"
@@ -53,12 +56,12 @@ printf '%s  %s\n' "$archive_sha" "$basename" > "$checksum"
 "${compose[@]}" exec -T db pg_restore --list < "$archive" > /dev/null
 
 universe_evidence="$(
-  "${compose[@]}" run --rm --no-deps ingest python -c \
+  docker run --rm --network none --read-only --tmpfs /tmp \
+    --env-file "$capture_env" "$capture_image" python -c \
     'import json; from qtrad.runtime.settings import Settings; from qtrad.runtime.universe import load_capture_universe; universe = load_capture_universe(Settings().capture_universe_path); print(json.dumps({"name": universe.name, "hash": universe.configuration_hash}, sort_keys=True))'
 )"
 universe_name="$(jq -er '.name' <<< "$universe_evidence")"
 universe_hash="$(jq -er '.hash' <<< "$universe_evidence")"
-capture_image="$(sed -n 's/^QTRAD_IMAGE=//p' "$capture_env")"
 postgres_image="$(sed -n 's/^QTRAD_POSTGRES_IMAGE=//p' "$capture_env")"
 capture_source_id="$(sed -n 's/^QTRAD_CAPTURE_SOURCE_ID=//p' "$capture_env")"
 migration_version="$(
@@ -67,7 +70,6 @@ migration_version="$(
 )"
 [[ "$universe_name" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
 [[ "$universe_hash" =~ ^[[:xdigit:]]{64}$ ]]
-[[ "$capture_image" == *@sha256:* ]]
 [[ "$postgres_image" == *@sha256:* ]]
 [[ "$capture_source_id" =~ ^[a-z0-9][a-z0-9._-]{0,63}$ ]]
 [[ "$migration_version" =~ ^[0-9a-f]{4,32}$ ]]

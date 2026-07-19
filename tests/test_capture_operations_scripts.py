@@ -95,15 +95,17 @@ def test_backup_writes_manifest_status_and_object_set(tmp_path: Path) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     calls = tmp_path / "oci-calls"
+    docker_calls = tmp_path / "docker-calls"
     universe_hash = "a" * 64
     _write_executable(
         fake_bin / "docker",
         f"""#!/usr/bin/env bash
 set -euo pipefail
+printf '%s\\n' "$*" >> '{docker_calls}'
 case "$*" in
   *"exec -T db pg_dump"*) printf 'archive' ;;
   *"exec -T db pg_restore --list"*) exit 0 ;;
-  *"run --rm --no-deps ingest python -c"*)
+  *"run --rm --network none --read-only --tmpfs /tmp --env-file"*"python -c"*)
     printf '%s\\n' '{{"name":"capture-v1","hash":"{universe_hash}"}}'
     ;;
   *"SELECT version_num FROM alembic_version"*) printf '0006\\n' ;;
@@ -159,6 +161,12 @@ printf '%s\\n' "$*" >> '{calls}'
         == manifest["manifest_sha256"]
     )
     assert len(calls.read_text().splitlines()) == 3
+    observed_docker_calls = docker_calls.read_text().splitlines()
+    universe_calls = [call for call in observed_docker_calls if "python -c" in call]
+    assert len(universe_calls) == 1
+    assert " compose " not in f" {universe_calls[0]} "
+    assert "--network none" in universe_calls[0]
+    assert "example.invalid/qtrad@sha256:" + "1" * 64 in universe_calls[0]
 
 
 def test_storage_snapshot_uses_pinned_one_shot_image_without_dependencies(tmp_path: Path) -> None:

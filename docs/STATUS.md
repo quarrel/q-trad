@@ -651,6 +651,13 @@ outside the current data-only phase until explicitly admitted by a later plan up
         advanced from 2,259 to 2,265 in six seconds, and reconnect, drop, SDK-loss, provider-error and
         systemd-restart counts remained zero. This is initial deployment evidence, not an endurance or
         active-market qualification result.
+      - That interval ended cleanly at `2026-07-19T03:31:25Z` after 52,632 heartbeats when the
+        scheduled backup's one-off universe helper exited inside the same Compose project. Ingestion's
+        `--abort-on-container-exit` then stopped the real container; its graceful zero exit bypassed
+        `Restart=on-failure`. Readiness correctly became HTTP 503 while database/API and the backup
+        remained healthy. This is an operational supervision defect, not provider or heartbeat loss,
+        and invalidates the interval from that timestamp. The local correction runs the pinned image
+        directly with `--network none --read-only`, outside the collector Compose project.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

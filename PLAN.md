@@ -287,6 +287,13 @@ Implementation status:
                     until reviewed operator recovery instead of resetting application retry budgets in
                     hundreds of new processes. Database/API lifecycle remains in the capture unit, and
                     qualification evidence now binds both unit states and journals.
+                  - The first heartbeat-driven weekend interval ended at `2026-07-19T03:31:25Z`
+                    because the daily backup launched its universe-identity helper in the collector's
+                    Compose project. The helper's successful exit activated ingestion's
+                    `--abort-on-container-exit`; graceful SIGINT made systemd treat the stop as success and
+                    therefore not restart it. The replacement runs manifest identity directly from the
+                    pinned application digest with no network and outside Compose before starting a new
+                    endurance interval. The interrupted interval remains invalid.
           - Post-window reconciliation planning exposed that the first deployed environment omitted
             `QTRAD_CAPTURE_SOURCE_ID` and therefore established the validated default
             `local-development` as the effective identity of this canonical store. The first plan was
