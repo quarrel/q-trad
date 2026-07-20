@@ -101,8 +101,9 @@ Implementation status:
     publishes those signals with reconnects, projection lag and fail-closed Chrony
     source/synchronisation/leap/offset evidence. The full-window log bundle has a
     verifier-recomputed lifecycle summary, and the guarded post-window provider contrast/recovery
-    sequence is documented without executing it. The Docker-backed restore step awaits GitHub CI
-    because the Dev Container intentionally has no Docker socket.
+    sequence is documented without executing it. GitHub CI run `29724069858` passed the real
+    Docker/PostgreSQL restore and the complete gate at commit `3ffaaaa`; the Dev Container remains
+    intentionally free of a Docker socket.
 - Complete: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.

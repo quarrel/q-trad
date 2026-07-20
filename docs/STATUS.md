@@ -698,8 +698,9 @@ outside the current data-only phase until explicitly admitted by a later plan up
           Chrony source/synchronisation/leap/absolute-offset metrics. Its initial clock bound is
           100 ms. The bounded log bundle now carries a lifecycle summary independently recomputed from
           retained ingest logs. The exact guarded active-market contrast and recovery commands are
-          documented for operator-approved post-window execution but remain unexecuted. GitHub CI must
-          still prove the Docker-backed restore because the Dev Container has no Docker socket.
+          documented for operator-approved post-window execution but remain unexecuted. GitHub CI run
+          `29724069858` passed the real Docker/PostgreSQL restore and complete gate at commit `3ffaaaa`;
+          the Dev Container remains intentionally free of a Docker socket.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream
