@@ -43,6 +43,7 @@ class UniversePromotion:
     selection_hash: str
     promoted_at: datetime
     instruments: tuple[Instrument, ...]
+    quarantined_instrument_ids: tuple[InstrumentId, ...]
     preferred_epics: Mapping[InstrumentId, str]
 
     def __post_init__(self) -> None:
@@ -93,21 +94,34 @@ def promote_reviewed_universe(
     }
     if len(selections_by_id) != len(selection_set.selections):
         raise ValueError("listing selections must be unique per instrument")
-    _require_exact_ids(
-        expected=set(instruments_by_id),
-        actual=set(selections_by_id),
-        evidence_name="listing selections",
-    )
+    selected_instrument_ids = set(selections_by_id)
+    if not selected_instrument_ids:
+        raise ValueError("listing selections must contain at least one instrument")
+    if extraneous := selected_instrument_ids - set(instruments_by_id):
+        raise ValueError(
+            "listing selections contains extraneous instruments: "
+            + ", ".join(sorted(map(str, extraneous)))
+        )
     selected_listing_ids = [selection.listing_id for selection in selection_set.selections]
     if len(set(selected_listing_ids)) != len(selected_listing_ids):
         raise ValueError("one provider listing cannot be selected for multiple instruments")
 
     preferred_epics: dict[InstrumentId, str] = {}
+    promoted_instruments: list[Instrument] = []
+    quarantined_instrument_ids: list[InstrumentId] = []
     for instrument in instruments:
         review = reviews_by_id[instrument.instrument_id]
         for candidate in review.candidates:
             _validate_eligible_candidate(candidate, instrument)
-        selection = selections_by_id[instrument.instrument_id]
+        selection = selections_by_id.get(instrument.instrument_id)
+        if selection is None:
+            if any(candidate.eligible for candidate in review.candidates):
+                raise ValueError(
+                    "listing selections is missing an instrument with eligible reviewed listings: "
+                    f"{instrument.instrument_id}"
+                )
+            quarantined_instrument_ids.append(instrument.instrument_id)
+            continue
         if selection.listing_id.provider != "ig" or selection.listing_id.environment != "demo":
             raise ValueError("capture promotion accepts only IG demo listing selections")
         matching = [
@@ -125,6 +139,7 @@ def promote_reviewed_universe(
                 f"selected listing is ineligible for {instrument.instrument_id}: "
                 f"{selection.listing_id}"
             )
+        promoted_instruments.append(instrument)
         preferred_epics[instrument.instrument_id] = selection.listing_id.external_id
 
     selection_hash = _selection_hash(selection_set)
@@ -135,7 +150,8 @@ def promote_reviewed_universe(
         source_review_hash=review_hash,
         selection_hash=selection_hash,
         promoted_at=promoted_at,
-        instruments=tuple(instruments),
+        instruments=tuple(promoted_instruments),
+        quarantined_instrument_ids=tuple(quarantined_instrument_ids),
         preferred_epics=MappingProxyType(preferred_epics),
     )
 

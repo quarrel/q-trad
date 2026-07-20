@@ -1,6 +1,10 @@
-# Offline candidate catalogue only. This file contains no provider epics and cannot authorise
-# ingestion. Promote it to a separate approved release only after fail-closed IG demo review.
-name = "capture-v2-candidates"
+name = "capture-v2"
+source_catalogue_name = "capture-v2-candidates"
+source_catalogue_hash = "8d7de8aa8756d617cd4e84ac46b380ba7edcda68fa85a1ca1c4230e2572f5674"
+source_review_hash = "aff32264bfc9dade67bf1df06cf689d55b1b3f5b60550f28332da3826dae0dc9"
+selection_hash = "c3c44a1596a4a1d13321cc4369a7b9257c13971843436e79a21f0574bf51cfb6"
+promoted_at = "2026-07-20T11:26:19.917526Z"
+quarantined_instrument_ids = ["crypto:bitcoin-usd"]
 
 [[instrument]]
 id = "fx:aud-usd"
@@ -9,6 +13,7 @@ asset_class = "FX"
 base_currency = "AUD"
 quote_currency = "USD"
 search_aliases = ["AUD/USD"]
+preferred_epic = "CS.D.AUDUSD.CFD.IP"
 
 [[instrument]]
 id = "fx:eur-usd"
@@ -17,6 +22,7 @@ asset_class = "FX"
 base_currency = "EUR"
 quote_currency = "USD"
 search_aliases = ["EUR/USD"]
+preferred_epic = "CS.D.EURUSD.CFD.IP"
 
 [[instrument]]
 id = "fx:usd-jpy"
@@ -25,6 +31,7 @@ asset_class = "FX"
 base_currency = "USD"
 quote_currency = "JPY"
 search_aliases = ["USD/JPY"]
+preferred_epic = "CS.D.USDJPY.CFD.IP"
 
 [[instrument]]
 id = "fx:gbp-usd"
@@ -33,6 +40,7 @@ asset_class = "FX"
 base_currency = "GBP"
 quote_currency = "USD"
 search_aliases = ["GBP/USD"]
+preferred_epic = "CS.D.GBPUSD.CFD.IP"
 
 [[instrument]]
 id = "fx:usd-chf"
@@ -41,6 +49,7 @@ asset_class = "FX"
 base_currency = "USD"
 quote_currency = "CHF"
 search_aliases = ["USD/CHF"]
+preferred_epic = "CS.D.USDCHF.CFD.IP"
 
 [[instrument]]
 id = "fx:usd-cad"
@@ -49,6 +58,7 @@ asset_class = "FX"
 base_currency = "USD"
 quote_currency = "CAD"
 search_aliases = ["USD/CAD"]
+preferred_epic = "CS.D.USDCAD.CFD.IP"
 
 [[instrument]]
 id = "fx:nzd-usd"
@@ -57,6 +67,7 @@ asset_class = "FX"
 base_currency = "NZD"
 quote_currency = "USD"
 search_aliases = ["NZD/USD"]
+preferred_epic = "CS.D.NZDUSD.CFD.IP"
 
 [[instrument]]
 id = "fx:eur-jpy"
@@ -65,6 +76,7 @@ asset_class = "FX"
 base_currency = "EUR"
 quote_currency = "JPY"
 search_aliases = ["EUR/JPY"]
+preferred_epic = "CS.D.EURJPY.CFD.IP"
 
 [[instrument]]
 id = "index:australia-200"
@@ -72,6 +84,7 @@ display_name = "Australia 200"
 asset_class = "INDEX"
 quote_currency = "AUD"
 search_aliases = ["Australia 200", "ASX 200"]
+preferred_epic = "IX.D.ASX.IFD.IP"
 
 [[instrument]]
 id = "index:us-500"
@@ -79,6 +92,7 @@ display_name = "US 500"
 asset_class = "INDEX"
 quote_currency = "USD"
 search_aliases = ["US 500", "S&P 500"]
+preferred_epic = "IX.D.SPTRD.IFD.IP"
 
 [[instrument]]
 id = "index:ftse-100"
@@ -86,6 +100,7 @@ display_name = "FTSE 100"
 asset_class = "INDEX"
 quote_currency = "GBP"
 search_aliases = ["FTSE 100", "UK 100"]
+preferred_epic = "IX.D.FTSE.CFD.IP"
 
 [[instrument]]
 id = "index:us-tech-100"
@@ -93,6 +108,7 @@ display_name = "US Tech 100"
 asset_class = "INDEX"
 quote_currency = "USD"
 search_aliases = ["US Tech 100", "Nasdaq 100"]
+preferred_epic = "IX.D.NASDAQ.IFD.IP"
 
 [[instrument]]
 id = "index:wall-street"
@@ -100,6 +116,7 @@ display_name = "Wall Street"
 asset_class = "INDEX"
 quote_currency = "USD"
 search_aliases = ["Wall Street", "Dow Jones"]
+preferred_epic = "IX.D.DOW.IFD.IP"
 
 [[instrument]]
 id = "index:germany-40"
@@ -107,6 +124,7 @@ display_name = "Germany 40"
 asset_class = "INDEX"
 quote_currency = "EUR"
 search_aliases = ["Germany 40", "DAX"]
+preferred_epic = "IX.D.DAX.IFD.IP"
 
 [[instrument]]
 id = "index:japan-225"
@@ -114,6 +132,7 @@ display_name = "Japan 225"
 asset_class = "INDEX"
 quote_currency = "AUD"
 search_aliases = ["Japan 225", "Nikkei 225"]
+preferred_epic = "IX.D.NIKKEI.IFA.IP"
 
 [[instrument]]
 id = "index:eu-stocks-50"
@@ -121,6 +140,7 @@ display_name = "EU Stocks 50"
 asset_class = "INDEX"
 quote_currency = "EUR"
 search_aliases = ["EU Stocks 50", "Euro Stoxx 50"]
+preferred_epic = "IX.D.STXE.IFD.IP"
 
 [[instrument]]
 id = "commodity:spot-gold"
@@ -129,6 +149,7 @@ asset_class = "COMMODITY"
 base_currency = "XAU"
 quote_currency = "USD"
 search_aliases = ["GOLD"]
+preferred_epic = "CS.D.CFDGOLD.CFDGC.IP"
 
 [[instrument]]
 id = "commodity:spot-silver"
@@ -137,14 +158,7 @@ asset_class = "COMMODITY"
 base_currency = "XAG"
 quote_currency = "USD"
 search_aliases = ["SILVER"]
-
-[[instrument]]
-id = "crypto:bitcoin-usd"
-display_name = "Bitcoin (USD)"
-asset_class = "CRYPTO"
-base_currency = "BTC"
-quote_currency = "USD"
-search_aliases = ["BITCOIN"]
+preferred_epic = "CS.D.CFDSILVER.CFDSI.IP"
 
 [[instrument]]
 id = "commodity:us-crude"
@@ -152,3 +166,4 @@ display_name = "Oil - US Crude"
 asset_class = "COMMODITY"
 quote_currency = "USD"
 search_aliases = ["WTI"]
+preferred_epic = "CC.D.CL.UNC.IP"

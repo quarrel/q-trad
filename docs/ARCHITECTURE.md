@@ -11,7 +11,13 @@ Implemented today:
 > IG demo/fixtures → raw capture → canonical quote and bar events → PostgreSQL projections → Parquet
 > datasets → deterministic replay → read-only API/console.
 
-Current intended extension:
+Also implemented against verified snapshot/manifest inputs as a deterministic research core:
+
+> completed midpoint bars → versioned strategy forecasts → exact-horizon outcomes; subsequent
+> healthy bid/ask quotes → latency/slippage paper fills → isolated ledgers → hash-bound scores and
+> ranking report.
+
+Current intended integration:
 
 > canonical data → strategy forecasts → shadow paper fills and ledgers → realised outcomes → strategy
 > scores → market-state-aware ranking and experiment reports.

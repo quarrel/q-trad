@@ -1,0 +1,82 @@
+schema_version = 1
+name = "capture-v1-asx-shadow-proof"
+source_manifest_sha256 = "5289530e6b5d946c626593f74eda8d14774d1454774fff666c9c313a9946565d"
+instrument_id = "index:australia-200"
+decision_start = 2026-07-16T00:10:00Z
+decision_end = 2026-07-16T04:00:00Z
+
+[score]
+contract_version = 1
+minimum_samples = 30
+horizon_seconds = 300
+
+[[strategy]]
+id = "persistence-1"
+version = 1
+kind = "PERSISTENCE"
+lookback_bars = 1
+state = "SELECTED"
+threshold = "0"
+
+[[strategy]]
+id = "persistence-3"
+version = 1
+kind = "PERSISTENCE"
+lookback_bars = 3
+state = "SHADOW"
+threshold = "0"
+
+[[strategy]]
+id = "reversal-1"
+version = 1
+kind = "REVERSAL"
+lookback_bars = 1
+state = "SHADOW"
+threshold = "0"
+
+[[strategy]]
+id = "no-signal"
+version = 1
+kind = "NO_SIGNAL"
+lookback_bars = 1
+state = "SHADOW"
+threshold = "0"
+
+[paper_economics]
+quantity = "1"
+price_increment = "1"
+value_per_price_unit = "25.00"
+quote_currency = "AUD"
+reporting_currency = "AUD"
+quote_to_reporting_rate = "1"
+
+[provider_evidence]
+metadata_version = "0454fc612d2ed4b3"
+currency = "AUD"
+minimum_deal_size = "1.0"
+minimum_quantity = "1.0"
+one_pip_means = "1 Index Point"
+value_of_one_pip = "25.00"
+
+[session]
+profile_version = "asx-cash-v1"
+timezone = "Australia/Sydney"
+local_open = 10:00:00
+local_close = 16:00:00
+weekdays = [0, 1, 2, 3, 4]
+holidays = []
+
+[[paper_model]]
+version = 1
+latency_milliseconds = 1000
+adverse_slippage_increments = 1
+
+[[paper_model]]
+version = 1
+latency_milliseconds = 2000
+adverse_slippage_increments = 2
+
+[[paper_model]]
+version = 1
+latency_milliseconds = 5000
+adverse_slippage_increments = 3

@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 24543)
+Total output lines: 2400
+
 """Data-only IG demo adapter.
 
 The `trading-ig` package is intentionally contained in this module. No order
@@ -454,11 +457,16 @@ class IgDemoMarketDataAdapter:
             )
             economics = _bounded_economics(candidate.metadata)
             metadata_version = _listing_metadata_version(candidate, economics)
+            product_type = (
+                ProductType.SPOT_FX
+                if instrument.asset_class is AssetClass.FX
+                else ProductType.ROLLING_CFD
+            )
             listing = ProviderListing(
                 listing_id=ProviderListingId("ig", "demo", candidate.epic),
                 instrument_id=instrument_id,
                 display_name=candidate.name,
-                product_type=ProductType.ROLLING_CFD,
+                product_type=product_type,
                 currency=candidate.currency or instrument.quote_currency,
                 minimum_deal_size=candidate.minimum_deal_size,
                 price_increment=None,
@@ -978,445 +986,7 @@ class IgDemoMarketDataAdapter:
         self._last_message_at = record.received_time
         self._updated_epics.add(epic)
         quote = record.quote
-        if quote is not None and quote.quality is DataQuality.HEALTHY:
-            self._quote_received_times[epic] = record.received_time
-        self._mark_ready_if_complete(generation)
-        self._enqueue_record(record, epic)
-
-    def _enqueue_record(self, record: MarketDataRecord, epic: str) -> None:
-        try:
-            self._queue.put_nowait(record)
-            self._queue_high_water = max(self._queue_high_water, self._queue.qsize())
-        except asyncio.QueueFull:
-            self._dropped_records += 1
-            if self._first_drop_at is None:
-                self._first_drop_at = record.received_time
-            self._last_drop_at = record.received_time
-            self._status = HealthStatus.DEGRADED
-            if self._dropped_records == 1 or self._dropped_records % 1_000 == 0:
-                LOGGER.error(
-                    "ig_queue_saturated",
-                    extra={
-                        "epic": epic,
-                        "dropped_records": self._dropped_records,
-                        "queue_size": self._queue.qsize(),
-                    },
-                )
-
-    def _check_staleness(self) -> None:
-        if self._stopping or self._reconnecting or not self._desired_listings:
-            return
-        now = self._clock.now()
-        stale_channels = ""
-        stale_epics: set[str] = set()
-        reconnect_required = False
-        previous_heartbeat_stale = self._heartbeat_stale
-        heartbeat_current = (
-            self._heartbeat_subscribed
-            and self._last_heartbeat_at is not None
-            and now - self._last_heartbeat_at <= timedelta(seconds=self._config.stale_after_seconds)
-        )
-        if self._expected_epics:
-            current_epics = {
-                epic
-                for epic, received_time in self._quote_received_times.items()
-                if now - received_time <= timedelta(seconds=self._config.stale_after_seconds)
-            }
-            if current_epics == self._expected_epics and heartbeat_current:
-                self._stale_epics.clear()
-                self._heartbeat_stale = False
-                return
-            channel_evidence: list[str] = []
-            stale_epics = self._expected_epics - current_epics
-            for epic in sorted(stale_epics):
-                listing = self._listings_by_epic.get(epic)
-                label = str(listing.instrument_id) if listing is not None else epic
-                received_time = self._quote_received_times.get(epic)
-                age = f"{(now - received_time).total_seconds():.1f}" if received_time else "missing"
-                channel_evidence.append(f"{label}:{age}")
-            if heartbeat_current:
-                if stale_epics != self._stale_epics:
-                    LOGGER.info(
-                        "ig_quote_recency_changed",
-                        extra={
-                            "recent_quote_channels": len(self._expected_epics - stale_epics),
-                            "stale_quote_channels": len(stale_epics),
-                        },
-                    )
-                self._stale_epics = stale_epics
-                self._heartbeat_stale = False
-                return
-            if not heartbeat_current:
-                heartbeat_age = (
-                    f"{(now - self._last_heartbeat_at).total_seconds():.1f}"
-                    if self._last_heartbeat_at is not None
-                    else "missing"
-                )
-                channel_evidence.append(f"heartbeat:{heartbeat_age}")
-                if self._last_heartbeat_at is None or now - self._last_heartbeat_at > timedelta(
-                    seconds=self._config.stale_reconnect_after_seconds
-                ):
-                    reconnect_required = True
-            stale_channels = ",".join(channel_evidence)
-        else:
-            anchor = self._last_message_at or self._stream_connected_at
-            if anchor is None:
-                return
-            if now - anchor <= timedelta(seconds=self._config.stale_after_seconds):
-                return
-            reconnect_required = True
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        self._heartbeat_stale = not heartbeat_current
-        if (
-            stale_epics != self._stale_epics
-            or self._heartbeat_stale != previous_heartbeat_stale
-            or reconnect_required
-        ):
-            LOGGER.warning("ig_stream_stale", extra={"stale_channels": stale_channels})
-        self._stale_epics = stale_epics
-        if reconnect_required or not self._expected_epics:
-            self._schedule_reconnect()
-
-    def _on_stream_status(self, status: str, generation: int | None = None) -> None:
-        observed_generation = self._generation if generation is None else generation
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._handle_stream_status, status, observed_generation)
-
-    def _handle_stream_status(self, status: str, generation: int | None = None) -> None:
-        observed_generation = self._generation if generation is None else generation
-        if observed_generation != self._generation or self._stopping:
-            return
-        normalised = status.upper()
-        self._last_stream_status = normalised[:64]
-        self._last_stream_status_at = self._clock.now()
-        LOGGER.info(
-            "ig_stream_status",
-            extra={"generation": observed_generation, "status": normalised[:64]},
-        )
-        if normalised.startswith("CONNECTED:"):
-            self._transport_connected = True
-            self._stream_connected_at = self._clock.now()
-            self._mark_ready_if_complete(observed_generation)
-        elif normalised in {
-            "STALLED",
-            "DISCONNECTED:WILL-RETRY",
-            "DISCONNECTED:TRYING-RECOVERY",
-        }:
-            self._mark_transport_degraded(clear_channel_evidence=False)
-            self._start_retry_watchdog(observed_generation)
-        elif normalised == "DISCONNECTED" and not self._stopping:
-            self._mark_transport_degraded()
-            self._schedule_reconnect()
-
-    def _mark_transport_degraded(self, *, clear_channel_evidence: bool = True) -> None:
-        self._transport_connected = False
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        self._updated_epics.clear()
-        self._heartbeat_current_for_transport = False
-        if clear_channel_evidence:
-            self._quote_received_times.clear()
-            self._stale_epics.clear()
-            self._field_state.clear()
-            self._side_times.clear()
-            self._last_message_at = None
-            self._heartbeat_subscribed = False
-            self._last_heartbeat_at = None
-            self._last_heartbeat_value = None
-            self._heartbeat_real_max_frequency = None
-            self._heartbeat_stale = False
-
-    def _on_heartbeat_subscription(self, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_heartbeat_subscription,
-                generation,
-            )
-
-    def _handle_heartbeat_subscription(self, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        self._subscription_events += 1
-        self._heartbeat_subscribed = True
-        self._heartbeat_current_for_transport = False
-        self._last_heartbeat_at = None
-        self._last_heartbeat_value = None
-        self._heartbeat_stale = False
-        LOGGER.info(
-            "ig_heartbeat_subscription_established",
-            extra={"generation": generation},
-        )
-
-    def _on_heartbeat_unsubscription(self, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_heartbeat_unsubscription,
-                generation,
-            )
-
-    def _handle_heartbeat_unsubscription(self, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        self._unsubscription_events += 1
-        self._heartbeat_subscribed = False
-        self._heartbeat_current_for_transport = False
-        self._last_heartbeat_at = None
-        self._last_heartbeat_value = None
-        self._heartbeat_stale = True
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        LOGGER.warning(
-            "ig_heartbeat_subscription_ended",
-            extra={"generation": generation},
-        )
-
-    def _on_heartbeat_subscription_error(self, code: int, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_heartbeat_subscription_error,
-                code,
-                generation,
-            )
-
-    def _handle_heartbeat_subscription_error(self, code: int, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        self._subscription_errors += 1
-        self._heartbeat_subscribed = False
-        self._heartbeat_current_for_transport = False
-        self._heartbeat_stale = True
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        self._readiness_error = RuntimeError(f"IG heartbeat subscription failed with code {code}")
-        self._ready_event.set()
-        LOGGER.error(
-            "ig_heartbeat_subscription_error",
-            extra={"code": code, "generation": generation},
-        )
-
-    def _on_heartbeat_real_max_frequency(
-        self,
-        frequency: str | None,
-        generation: int,
-    ) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_heartbeat_real_max_frequency,
-                frequency,
-                generation,
-            )
-
-    def _handle_heartbeat_real_max_frequency(
-        self,
-        frequency: str | None,
-        generation: int,
-    ) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
-        if not bounded_frequency:
-            raise ValueError("Lightstreamer heartbeat frequency must not be empty")
-        self._heartbeat_real_max_frequency = bounded_frequency
-        LOGGER.info(
-            "ig_heartbeat_frequency",
-            extra={"generation": generation, "real_max_frequency": bounded_frequency},
-        )
-
-    def _on_subscription(self, epic: str, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._handle_subscription, epic, generation)
-
-    def _handle_subscription(self, epic: str, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        self._subscription_events += 1
-        self._invalidate_subscription_evidence(epic)
-        self._subscribed_epics.add(epic)
-        LOGGER.info(
-            "ig_subscription_established",
-            extra={"epic": epic, "generation": generation},
-        )
-        self._mark_ready_if_complete(generation)
-
-    def _on_unsubscription(self, epic: str, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._handle_unsubscription, epic, generation)
-
-    def _handle_unsubscription(self, epic: str, generation: int) -> None:
-        if generation != self._generation:
-            return
-        self._unsubscription_events += 1
-        self._subscribed_epics.discard(epic)
-        self._invalidate_subscription_evidence(epic)
-        LOGGER.info(
-            "ig_subscription_ended",
-            extra={"epic": epic, "generation": generation},
-        )
-        if not self._stopping:
-            self._status = HealthStatus.DEGRADED
-            self._connection_state = _ConnectionState.DEGRADED
-
-    def _invalidate_subscription_evidence(self, epic: str) -> None:
-        """Discard state that the SDK declares invalid after a subscription lifecycle change."""
-
-        self._updated_epics.discard(epic)
-        self._quote_received_times.pop(epic, None)
-        self._stale_epics.discard(epic)
-        self._field_state.pop(epic, None)
-        self._side_times.pop(epic, None)
-
-    def _on_subscription_error(self, epic: str, code: int, generation: int | None = None) -> None:
-        observed_generation = self._generation if generation is None else generation
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_subscription_error, epic, code, observed_generation
-            )
-
-    def _handle_subscription_error(
-        self, epic: str, code: int, generation: int | None = None
-    ) -> None:
-        observed_generation = self._generation if generation is None else generation
-        if observed_generation != self._generation or self._stopping:
-            return
-        self._subscription_errors += 1
-        establishing = self._connection_state in {
-            _ConnectionState.CONNECTING,
-            _ConnectionState.SUBSCRIBING,
-        }
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        LOGGER.error(
-            "ig_subscription_error",
-            extra={"epic": epic, "code": code, "generation": observed_generation},
-        )
-        if establishing:
-            self._readiness_error = RuntimeError(f"IG subscription failed with bounded code {code}")
-            self._ready_event.set()
-        else:
-            self._schedule_reconnect()
-
-    def _on_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_item_lost_updates,
-                epic,
-                count,
-                generation,
-            )
-
-    def _handle_item_lost_updates(self, epic: str, count: int, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        if count <= 0:
-            raise ValueError("Lightstreamer lost-update count must be positive")
-        self._lightstreamer_lost_updates += count
-        self._status = HealthStatus.DEGRADED
-        LOGGER.error(
-            "ig_lightstreamer_updates_lost",
-            extra={
-                "epic": epic,
-                "generation": generation,
-                "lost_updates": count,
-                "lost_updates_total": self._lightstreamer_lost_updates,
-            },
-        )
-
-    def _on_real_max_frequency(
-        self,
-        epic: str,
-        frequency: str | None,
-        generation: int,
-    ) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(
-                self._handle_real_max_frequency,
-                epic,
-                frequency,
-                generation,
-            )
-
-    def _handle_real_max_frequency(
-        self,
-        epic: str,
-        frequency: str | None,
-        generation: int,
-    ) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        bounded_frequency = "UNDETERMINED" if frequency is None else str(frequency).strip()[:32]
-        if not bounded_frequency:
-            raise ValueError("Lightstreamer real maximum frequency must not be empty")
-        self._real_max_frequency_by_epic[epic] = bounded_frequency
-        LOGGER.info(
-            "ig_subscription_frequency",
-            extra={
-                "epic": epic,
-                "generation": generation,
-                "real_max_frequency": bounded_frequency,
-            },
-        )
-
-    def _on_server_error(self, code: int, generation: int) -> None:
-        if self._loop is not None:
-            self._loop.call_soon_threadsafe(self._handle_server_error, code, generation)
-
-    def _handle_server_error(self, code: int, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        self._server_errors += 1
-        self._last_server_error_code = code
-        self._status = HealthStatus.DEGRADED
-        self._connection_state = _ConnectionState.DEGRADED
-        LOGGER.error(
-            "ig_stream_server_error",
-            extra={"code": code, "generation": generation},
-        )
-        self._schedule_reconnect()
-
-    def _mark_ready_if_complete(self, generation: int) -> None:
-        if generation != self._generation or self._stopping:
-            return
-        if (
-            not self._transport_connected
-            or not self._heartbeat_subscribed
-            or not self._heartbeat_current_for_transport
-            or self._last_heartbeat_at is None
-            or self._subscribed_epics != self._expected_epics
-            or self._updated_epics != self._expected_epics
-        ):
-            return
-        watchdog_task = self._retry_watchdog_task
-        if watchdog_task is not None and watchdog_task is not asyncio.current_task():
-            watchdog_task.cancel()
-        self._retry_watchdog_task = None
-        self._connection_state = _ConnectionState.READY
-        self._status = (
-            HealthStatus.HEALTHY
-            if self._dropped_records == 0 and self._lightstreamer_lost_updates == 0
-            else HealthStatus.DEGRADED
-        )
-        self._ready_event.set()
-
-    def _start_retry_watchdog(self, generation: int) -> None:
-        watchdog_task = self._retry_watchdog_task
-        if watchdog_task is not None and not watchdog_task.done():
-            return
-
-        async def watchdog() -> None:
-            try:
-                await self._sleep(self._config.retry_watchdog_seconds)
-                if (
-                    generation == self._generation
-                    and self._connection_state is not _ConnectionState.READY
-                    and not self._stopping
-                ):
-                    LOGGER.warning(
-                        "ig_stream_retry_watchdog_expired",
-                        extra={"generation": generation},
-                    )
-                    self._schedule_reconnect()
-            finally:
+        if quote is not None and…4543 tokens truncated…   finally:
                 if self._retry_watchdog_task is asyncio.current_task():
                     self._retry_watchdog_task = None
 
@@ -2063,12 +1633,12 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
 
 
 def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrument) -> bool:
-    expected_type = _expected_ig_instrument_type(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     expiry = (_string(search_row, "expiry") or "").upper()
     market_status = (_string(search_row, "marketStatus") or "").upper()
     return (
-        (not instrument_type or instrument_type == expected_type)
+        (not instrument_type or instrument_type in accepted_types)
         and (not expiry or expiry in _ROLLING_EXPIRIES)
         and market_status not in _UNAVAILABLE_MARKET_STATES
     )
@@ -2079,9 +1649,9 @@ def _search_row_is_review_relevant(
 ) -> bool:
     """Exclude unrelated product families while retaining dated and unavailable evidence."""
 
-    expected_type = _expected_ig_instrument_type(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
-    return not instrument_type or instrument_type == expected_type
+    return not instrument_type or instrument_type in accepted_types
 
 
 def _search_row_needs_detail(search_row: Mapping[str, object], instrument: Instrument) -> bool:
@@ -2186,20 +1756,20 @@ def _listing_review_candidate(
     )
 
 
-def _expected_ig_instrument_type(asset_class: AssetClass) -> str:
-    if asset_class in {AssetClass.FX, AssetClass.CRYPTO}:
-        return "CURRENCIES"
+def _accepted_ig_instrument_types(asset_class: AssetClass) -> frozenset[str]:
+    if asset_class is AssetClass.FX:
+        return frozenset({"CURRENCIES"})
     if asset_class is AssetClass.INDEX:
-        return "INDICES"
-    if asset_class is AssetClass.COMMODITY:
-        return "COMMODITIES"
+        return frozenset({"INDICES"})
+    if asset_class in {AssetClass.COMMODITY, AssetClass.CRYPTO}:
+        return frozenset({"COMMODITIES", "CURRENCIES"})
     raise ValueError(f"unsupported IG asset class: {asset_class}")
 
 
 def _review_product_type(raw_product_type: str, asset_class: AssetClass) -> ProductType:
     if raw_product_type == "CURRENCIES" and asset_class is AssetClass.FX:
         return ProductType.SPOT_FX
-    if raw_product_type == _expected_ig_instrument_type(asset_class):
+    if raw_product_type in _accepted_ig_instrument_types(asset_class):
         return ProductType.ROLLING_CFD
     return ProductType.UNKNOWN
 
@@ -2226,11 +1796,11 @@ def _select_candidate(
     *,
     preferred_epic: str | None = None,
 ) -> _Candidate:
-    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     matches = [
         candidate
         for candidate in candidates
-        if candidate.instrument_type.upper() == expected_type
+        if candidate.instrument_type.upper() in accepted_types
         and candidate.expiry.upper() in _ROLLING_EXPIRIES
         and candidate.market_status.upper() not in _UNAVAILABLE_MARKET_STATES
         and candidate.currency.upper() == instrument.quote_currency.upper()
