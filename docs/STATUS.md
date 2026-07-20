@@ -82,6 +82,8 @@
   the Docker CLI and Compose plugin for offline configuration validation. Its only host
   bind mount is the q-trad repository; it does not mount the host Docker socket, home
   directory, SSH agent or WSL/cloud filesystem.
+- The Dev Container image now includes the GitHub CLI from Debian Trixie; `gh` therefore survives
+  container rebuilds instead of relying on the current container's manual installation.
 - The Dev Container intentionally supports IPv4 rather than public IPv6 egress under WSL
   mirrored networking. Collector administration uses the WSL host's authenticated
   Tailscale client; an unprivileged gate must complete a non-interactive Tailscale SSH
@@ -688,7 +690,7 @@ outside the current data-only phase until explicitly admitted by a later plan up
         pre-download capacity refusal; the Dev Container intentionally has no Docker socket, so an
         actual container restore remains a post-endurance release acceptance gate. Formatting,
         Ruff, Pyright, `ty`, ShellCheck, the frozen-schema compatibility test, migrations through
-          `0010` and all 364 tests pass in a disposable local PostgreSQL database.
+          `0010` and all 365 tests pass in a disposable local PostgreSQL database.
         - Complete locally and intentionally undeployed: a real-Docker CI exercise now creates a
           PostgreSQL 18 archive and v2 backup object set, runs the production restore verifier and
           checks migration/event evidence plus labelled container/volume cleanup. Terminal

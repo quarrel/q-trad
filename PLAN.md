@@ -64,8 +64,10 @@ Implementation status:
     the local verification helper creates and drops a guarded `qtrad_test_*` database while
     reproducing CI's `0003` compatibility test, head migration and full suite. Integration tests no
     longer fall back to the application database URL, and the host Docker socket remains unmounted.
-    The clean local gate passes all 298 tests. A new `qtrad_dev` database is at migration `0009`;
-    the ambiguous pre-separation `qtrad` database remains untouched and unselected.
+      The clean local gate passes all 298 tests. A new `qtrad_dev` database is at migration `0009`;
+      the ambiguous pre-separation `qtrad` database remains untouched and unselected.
+      The reproducible Dev Container image also installs the GitHub CLI from Debian Trixie so branch,
+      PR and Actions workflows do not depend on an interactive post-build package installation.
 
   - Complete: hashed `capture-v1`, ADR 0009 listing events/economics, planned historical
     coverage/backfill, readiness contract, immutable Compose deployment and initial ARM64
@@ -92,7 +94,7 @@ Implementation status:
     The local correction replaces host-RAM storage with a uniquely named Docker disk volume,
     preflights an explicit free-space floor before download and proves cleanup after both successful
     and failed restores. The complete local verification gate passes migrations through `0010` and
-    all 364 tests. It remains undeployed and a real-container restore is still required after the
+    all 365 tests. It remains undeployed and a real-container restore is still required after the
     current endurance interval. A real-Docker CI integration now builds a PostgreSQL 18 custom-format
     archive, serves its exact v2 object set through a deterministic OCI stub, runs the production
     restore helper, verifies migration/event evidence and proves labelled container/volume cleanup.

@@ -27,6 +27,7 @@ RUN apt-get update \
         fd-find \
         file \
         git \
+        gh \
         iproute2 \
         jq \
         less \
