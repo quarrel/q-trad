@@ -11,7 +11,8 @@ from qtrad.adapters.ig.market_data import (
     _search_row_can_match,
     _select_candidate,
 )
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS
+from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import INITIAL_INSTRUMENTS, AssetClass, Instrument
 
 
 def candidate(
@@ -68,6 +69,56 @@ def test_fx_discovery_prefers_standard_contract_over_mini() -> None:
         preferred_epic="CS.D.USDJPY.CFD.IP",
     )
     assert selected.epic == "CS.D.USDJPY.CFD.IP"
+
+
+def test_commodity_discovery_accepts_a_reviewable_rolling_candidate() -> None:
+    instrument = Instrument(
+        instrument_id=InstrumentId("commodity:us-crude"),
+        display_name="Oil - US Crude",
+        asset_class=AssetClass.COMMODITY,
+        base_currency=None,
+        quote_currency="USD",
+        search_aliases=("Oil - US Crude",),
+    )
+
+    selected = _select_candidate(
+        (
+            candidate(
+                "CC.D.CL.UNC.IP",
+                "0.0001",
+                instrument_type="COMMODITIES",
+            ),
+        ),
+        instrument,
+        preferred_epic="CC.D.CL.UNC.IP",
+    )
+
+    assert selected.epic == "CC.D.CL.UNC.IP"
+
+
+def test_spot_commodity_discovery_accepts_the_provider_currency_family() -> None:
+    instrument = Instrument(
+        instrument_id=InstrumentId("commodity:spot-gold"),
+        display_name="Spot Gold",
+        asset_class=AssetClass.COMMODITY,
+        base_currency="XAU",
+        quote_currency="USD",
+        search_aliases=("GOLD",),
+    )
+
+    selected = _select_candidate(
+        (
+            candidate(
+                "CS.D.GOLD.USS.IP",
+                "0.1",
+                instrument_type="CURRENCIES",
+            ),
+        ),
+        instrument,
+        preferred_epic="CS.D.GOLD.USS.IP",
+    )
+
+    assert selected.epic == "CS.D.GOLD.USS.IP"
 
 
 def test_discovery_rejects_listing_in_wrong_quote_currency() -> None:

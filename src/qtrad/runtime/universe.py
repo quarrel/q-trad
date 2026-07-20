@@ -110,6 +110,9 @@ def render_capture_universe_promotion(
         "source_review_hash": promotion.source_review_hash,
         "selection_hash": promotion.selection_hash,
         "promoted_at": promoted_at,
+        "quarantined_instrument_ids": [
+            str(instrument_id) for instrument_id in promotion.quarantined_instrument_ids
+        ],
         "instrument": instrument_entries,
     }
     universe = _capture_universe(document)
@@ -120,6 +123,11 @@ def render_capture_universe_promotion(
         f"source_review_hash = {_toml_string(promotion.source_review_hash)}",
         f"selection_hash = {_toml_string(promotion.selection_hash)}",
         f"promoted_at = {_toml_string(promoted_at)}",
+        "quarantined_instrument_ids = "
+        + json.dumps(
+            [str(instrument_id) for instrument_id in promotion.quarantined_instrument_ids],
+            ensure_ascii=True,
+        ),
     ]
     for entry in instrument_entries:
         lines.extend(

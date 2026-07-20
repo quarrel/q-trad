@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from qtrad.domain.events import EventEnvelope, JsonValue
-from qtrad.domain.market_data import MarketBar
+from qtrad.domain.market_data import MarketBar, MarketQuote
 from qtrad.domain.time import require_utc
 
 
@@ -89,6 +89,37 @@ def semantic_bar_hash(bars: Sequence[MarketBar]) -> str:
                 item.interval_start,
                 item.basis.value,
                 item.revision,
+            ),
+        )
+    ]
+    encoded = json.dumps(rows, sort_keys=True, separators=(",", ":")).encode()
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def semantic_quote_hash(quotes: Sequence[MarketQuote]) -> str:
+    rows = [
+        {
+            "instrument_id": str(quote.instrument_id),
+            "listing_id": str(quote.listing_id),
+            "event_time": quote.event_time.isoformat(),
+            "received_time": quote.received_time.isoformat(),
+            "bid": None if quote.bid is None else str(quote.bid),
+            "ask": None if quote.ask is None else str(quote.ask),
+            "bid_size": None if quote.bid_size is None else str(quote.bid_size),
+            "ask_size": None if quote.ask_size is None else str(quote.ask_size),
+            "bid_time": None if quote.bid_time is None else quote.bid_time.isoformat(),
+            "ask_time": None if quote.ask_time is None else quote.ask_time.isoformat(),
+            "quality": quote.quality.value,
+            "source_sequence": quote.source_sequence,
+            "global_position": quote.global_position,
+        }
+        for quote in sorted(
+            quotes,
+            key=lambda item: (
+                item.received_time,
+                item.global_position or 0,
+                item.event_time,
+                str(item.instrument_id),
             ),
         )
     ]

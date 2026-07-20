@@ -217,7 +217,7 @@ def test_promotion_rejects_omitted_and_duplicate_instrument_selections(tmp_path:
     selection_set = _selections(evidence)
 
     omitted = replace(selection_set, selections=selection_set.selections[:-1])
-    with pytest.raises(ValueError, match="missing instruments"):
+    with pytest.raises(ValueError, match="missing an instrument with eligible reviewed listings"):
         _promote(catalogue, evidence, omitted)
 
     duplicate = replace(
@@ -226,6 +226,37 @@ def test_promotion_rejects_omitted_and_duplicate_instrument_selections(tmp_path:
     )
     with pytest.raises(ValueError, match="unique per instrument"):
         _promote(catalogue, evidence, duplicate)
+
+
+def test_promotion_quarantines_an_omitted_instrument_without_eligible_listings(
+    tmp_path: Path,
+) -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v2-candidates.toml"))
+    path = tmp_path / "review.json"
+    _write_review(path, catalogue)
+    evidence = load_listing_review_evidence(path, catalogue.instruments)
+    last_review = evidence.reviews[-1]
+    quarantined_review = replace(
+        last_review,
+        candidates=tuple(
+            replace(
+                candidate,
+                currency="ZZZ",
+                rejection_reasons=(ListingReviewRejection.WRONG_CURRENCY,),
+            )
+            for candidate in last_review.candidates
+        ),
+    )
+    selections = _selections(evidence)
+    evidence = replace(evidence, reviews=(*evidence.reviews[:-1], quarantined_review))
+    selections = replace(selections, selections=selections.selections[:-1])
+
+    promotion = _promote(catalogue, evidence, selections)
+    rendered, universe = render_capture_universe_promotion(promotion)
+
+    assert promotion.quarantined_instrument_ids == (last_review.instrument_id,)
+    assert len(universe.instruments) == len(catalogue.instruments) - 1
+    assert f'quarantined_instrument_ids = ["{last_review.instrument_id}"]' in rendered
 
 
 def test_promotion_rejects_ineligible_unseen_and_reused_listings(tmp_path: Path) -> None:

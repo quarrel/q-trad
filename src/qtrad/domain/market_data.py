@@ -43,6 +43,7 @@ class MarketQuote:
     ask_time: datetime | None = None
     quality: DataQuality = DataQuality.HEALTHY
     source_sequence: str | None = None
+    global_position: int | None = None
 
     def __post_init__(self) -> None:
         require_utc(self.event_time, "event_time")
@@ -62,6 +63,8 @@ class MarketQuote:
         for name, size in (("bid_size", self.bid_size), ("ask_size", self.ask_size)):
             if size is not None and size < 0:
                 raise ValueError(f"{name} must not be negative")
+        if self.global_position is not None and self.global_position <= 0:
+            raise ValueError("quote global position must be positive")
 
     @property
     def effective_bid_time(self) -> datetime:

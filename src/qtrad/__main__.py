@@ -7,7 +7,7 @@ import os
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from uuid import uuid4
@@ -93,6 +93,11 @@ from qtrad.runtime.storage_measurement import (
     load_storage_snapshot,
     write_storage_evidence_artifact,
     write_storage_snapshot,
+)
+from qtrad.runtime.strategy_experiment import (
+    build_strategy_experiment_report,
+    load_strategy_experiment,
+    write_strategy_experiment_report,
 )
 from qtrad.runtime.universe import (
     CaptureCandidates,
@@ -253,6 +258,13 @@ def build_parser() -> argparse.ArgumentParser:
     research_export.add_argument("--start", type=_utc_minute_argument, required=True)
     research_export.add_argument("--end", type=_utc_minute_argument, required=True)
     research_export.add_argument("--snapshot-import-evidence", type=Path)
+    research_rank = research_sub.add_parser(
+        "rank", help="build a deterministic shadow-strategy report from a verified snapshot"
+    )
+    research_rank.add_argument("--manifest", type=Path, required=True)
+    research_rank.add_argument("--experiment", type=Path, required=True)
+    research_rank.add_argument("--snapshot-import-evidence", type=Path, required=True)
+    research_rank.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -450,6 +462,17 @@ def main(argv: Sequence[str] | None = None) -> None:
                 start=args.start,
                 end=args.end,
                 snapshot_import_path=args.snapshot_import_evidence,
+            )
+        )
+    elif args.command == "research" and args.research_command == "rank":
+        asyncio.run(
+            _rank_research(
+                settings,
+                clock,
+                manifest_path=args.manifest,
+                experiment_path=args.experiment,
+                snapshot_import_path=args.snapshot_import_evidence,
+                output_path=args.output,
             )
         )
     elif args.command == "replay":
@@ -1971,6 +1994,105 @@ async def _export(
                 "interval_end": end.isoformat(),
             },
         )
+        await engine.dispose()
+
+
+async def _rank_research(
+    settings: Settings,
+    clock: Clock,
+    *,
+    manifest_path: Path,
+    experiment_path: Path,
+    snapshot_import_path: Path,
+    output_path: Path,
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"strategy report output already exists: {output_path}")
+    if manifest_path.parent.name != "manifests" or manifest_path.suffix != ".json":
+        raise ValueError("strategy report manifest must be JSON inside a manifests directory")
+    experiment = load_strategy_experiment(experiment_path)
+    snapshot_import = load_research_snapshot_import(snapshot_import_path)
+    database_name = make_url(settings.database_url).database
+    if database_name != snapshot_import.target_database:
+        raise ValueError("strategy report requires the verified snapshot target database")
+    if settings.capture_source_id != snapshot_import.capture_source_id:
+        raise ValueError("strategy report snapshot has a different capture source")
+    store = ParquetResearchStore(manifest_path.parent.parent, clock)
+    manifest = await store.read_manifest(manifest_path.stem)
+    if manifest.configuration_hash != snapshot_import.universe_hash:
+        raise ValueError("strategy report manifest and snapshot universe differ")
+    source_snapshot = manifest.metadata["source_snapshot"]
+    if not isinstance(source_snapshot, dict):
+        raise TypeError("strategy report manifest source_snapshot must be an object")
+    if source_snapshot["import_sha256"] != snapshot_import.import_sha256:
+        raise ValueError("strategy report manifest does not bind the verified snapshot import")
+    bars = tuple(await store.read_bars(manifest.manifest_id))
+
+    engine = _engine(settings)
+    audit = PostgresAuditStore(engine)
+    try:
+        provider_rows = await audit.query(
+            """
+            SELECT metadata_version, currency, minimum_deal_size, economics
+            FROM reference.provider_listings
+            WHERE instrument_id = :instrument_id
+              AND valid_from <= :decision_start
+              AND (valid_to IS NULL OR valid_to > :decision_start)
+            ORDER BY valid_from DESC
+            """,
+            {
+                "instrument_id": str(experiment.instrument_id),
+                "decision_start": experiment.decision_start,
+            },
+        )
+        if len(provider_rows) != 1:
+            raise ValueError("strategy report requires one effective provider economics row")
+        quote_rows = await audit.query(
+            """
+            SELECT global_position, event_time, received_time, payload
+            FROM canonical.events
+            WHERE event_type = 'MarketQuoteObserved'
+              AND payload->>'instrument_id' = :instrument_id
+              AND received_time >= :quote_start
+              AND received_time <= :quote_end
+            ORDER BY global_position
+            """,
+            {
+                "instrument_id": str(experiment.instrument_id),
+                "quote_start": experiment.decision_start,
+                "quote_end": experiment.query_end + timedelta(minutes=1),
+            },
+        )
+        first = build_strategy_experiment_report(
+            experiment=experiment,
+            manifest=manifest,
+            bars=bars,
+            quote_rows=quote_rows,
+            provider_row=provider_rows[0],
+        )
+        second = build_strategy_experiment_report(
+            experiment=experiment,
+            manifest=manifest,
+            bars=tuple(reversed(bars)),
+            quote_rows=quote_rows,
+            provider_row=provider_rows[0],
+        )
+        if first != second:
+            raise RuntimeError("strategy report replay differs")
+        write_strategy_experiment_report(output_path, first)
+        print(
+            json.dumps(
+                {
+                    "output": str(output_path),
+                    "report_sha256": first.report_sha256,
+                    "dataset_sha256": first.payload["dataset_sha256"],
+                    "ranking": first.payload["ranking"],
+                    "profitability_claim": False,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
         await engine.dispose()
 
 

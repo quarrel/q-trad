@@ -9,12 +9,17 @@ shortest path that preserves research validity.
 
 - The seven-market data path, canonical capture, bars, replay, Parquet export and read-only console
   are implemented.
-- An OCI `capture-v1` collector is running according to the operator. This documentation change did
-  not inspect or mutate it.
-- `config/capture-v2-candidates.toml` proposes 20 markets, including the existing seven, but has no
-  approved provider mappings or deployment authority.
-- Paper-domain decisions and acceptance cases exist, but no strategy evaluation/ranking loop is
-  implemented.
+- A bounded read-only observation found the OCI `capture-v1` collector ready on all seven channels
+  with no internal/SDK loss and caught-up projection; no collector or cloud state was mutated.
+- The 20-market candidate catalogue has been reviewed against IG demo. `config/capture-v2.toml` is
+  an undeployed, hash-bound 19-market release; Bitcoin is explicitly quarantined as unavailable.
+- A local deterministic research core now emits versioned forecasts for simple strategies, pairs
+  exact-horizon outcomes, simulates causal bid/ask shadow fills, reconciles isolated ledgers and
+  builds a hash-bound ranking report. The first retained snapshot-backed report reproduced its full
+  trace and ranking; it is a framework proof with negative cost-aware results, not an effectiveness
+  claim.
+- The current callback-to-PostgreSQL path passed a 40-instrument, 200-callback/s bounded load run
+  with zero loss and sub-second maximum lag, providing local headroom beyond the target catalogue.
 
 Historical data-foundation detail is archived under `docs/archive/data-foundation/`; capture
 qualification and incident detail is under `docs/archive/capture-v1/`.
@@ -24,9 +29,9 @@ qualification and incident detail is under `docs/archive/capture-v1/`.
 | Milestone | Status | Exit evidence |
 |---|---|---|
 | M0 — focus and documentation reset | DONE | active docs describe the research loop and archived history is off the reading path |
-| M1 — reviewed 20-market universe | NEXT | eligible IG demo listings and economics reviewed; bounded load/readiness proof; explicit deployment decision |
-| M2 — minimal multi-strategy paper path | NOT STARTED | several simple strategies produce causal shadow fills and independently checked P&L |
-| M3 — deterministic evaluator and rank report | NOT STARTED | forecasts join to defined outcomes; replay reproduces scores and rankings |
+| M1 — reviewed 20-market universe | IN PROGRESS | 19 eligible IG demo listings and economics reviewed; bounded load/readiness proof passed; publication/deployment decision pending |
+| M2 — minimal multi-strategy paper path | DONE | several simple strategies produce causal shadow fills and independently checked P&L |
+| M3 — deterministic evaluator and rank report | DONE | forecasts join to defined outcomes; replay reproduces scores and rankings |
 | M4 — simple market-state comparison | NOT STARTED | contemporaneous state annotation and conditional versus unconditional report |
 | M5 — viability review | NOT STARTED | evidence supports continue, revise or stop without requiring a profitability claim |
 
@@ -37,14 +42,15 @@ Candidate set: the eight FX pairs, eight equity indices, two spot metals, Bitcoi
 
 Work:
 
-1. Perform the existing bounded, non-authoritative IG demo candidate review.
-2. Select only unambiguous, liquid standard contracts with required metadata and economics.
-3. Record rejected or quarantined candidates without blocking the accepted subset.
-4. Prove the single connection, callback hand-off, queue and PostgreSQL path at the approved size.
+1. ~~Perform the existing bounded, non-authoritative IG demo candidate review.~~
+2. ~~Select only unambiguous, liquid standard contracts with required metadata and economics.~~
+3. ~~Record rejected or quarantined candidates without blocking the accepted subset.~~
+4. ~~Prove the single connection, callback hand-off, queue and PostgreSQL path at the approved size.~~
 5. Define a proportionate active-market observation: per-channel delivery, visible gaps, zero
    internal drops and bounded lag. Do not require a perfect market or explanation of every quiet
    interval.
-6. Prepare an immutable release/configuration and a rollback point.
+6. Prepare an immutable application release for the reviewed `config/capture-v2.toml`; the current
+   pinned `capture-v1` image/configuration is the rollback point.
 7. Treat publication and deployment to the running collector as separate explicitly authorised
    operations. Do not interrupt an active reviewed measurement interval.
 

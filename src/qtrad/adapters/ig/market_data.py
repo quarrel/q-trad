@@ -454,11 +454,16 @@ class IgDemoMarketDataAdapter:
             )
             economics = _bounded_economics(candidate.metadata)
             metadata_version = _listing_metadata_version(candidate, economics)
+            product_type = (
+                ProductType.SPOT_FX
+                if instrument.asset_class is AssetClass.FX
+                else ProductType.ROLLING_CFD
+            )
             listing = ProviderListing(
                 listing_id=ProviderListingId("ig", "demo", candidate.epic),
                 instrument_id=instrument_id,
                 display_name=candidate.name,
-                product_type=ProductType.ROLLING_CFD,
+                product_type=product_type,
                 currency=candidate.currency or instrument.quote_currency,
                 minimum_deal_size=candidate.minimum_deal_size,
                 price_increment=None,
@@ -2063,12 +2068,12 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
 
 
 def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrument) -> bool:
-    expected_type = _expected_ig_instrument_type(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     expiry = (_string(search_row, "expiry") or "").upper()
     market_status = (_string(search_row, "marketStatus") or "").upper()
     return (
-        (not instrument_type or instrument_type == expected_type)
+        (not instrument_type or instrument_type in accepted_types)
         and (not expiry or expiry in _ROLLING_EXPIRIES)
         and market_status not in _UNAVAILABLE_MARKET_STATES
     )
@@ -2079,9 +2084,9 @@ def _search_row_is_review_relevant(
 ) -> bool:
     """Exclude unrelated product families while retaining dated and unavailable evidence."""
 
-    expected_type = _expected_ig_instrument_type(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
-    return not instrument_type or instrument_type == expected_type
+    return not instrument_type or instrument_type in accepted_types
 
 
 def _search_row_needs_detail(search_row: Mapping[str, object], instrument: Instrument) -> bool:
@@ -2186,20 +2191,20 @@ def _listing_review_candidate(
     )
 
 
-def _expected_ig_instrument_type(asset_class: AssetClass) -> str:
-    if asset_class in {AssetClass.FX, AssetClass.CRYPTO}:
-        return "CURRENCIES"
+def _accepted_ig_instrument_types(asset_class: AssetClass) -> frozenset[str]:
+    if asset_class is AssetClass.FX:
+        return frozenset({"CURRENCIES"})
     if asset_class is AssetClass.INDEX:
-        return "INDICES"
-    if asset_class is AssetClass.COMMODITY:
-        return "COMMODITIES"
+        return frozenset({"INDICES"})
+    if asset_class in {AssetClass.COMMODITY, AssetClass.CRYPTO}:
+        return frozenset({"COMMODITIES", "CURRENCIES"})
     raise ValueError(f"unsupported IG asset class: {asset_class}")
 
 
 def _review_product_type(raw_product_type: str, asset_class: AssetClass) -> ProductType:
     if raw_product_type == "CURRENCIES" and asset_class is AssetClass.FX:
         return ProductType.SPOT_FX
-    if raw_product_type == _expected_ig_instrument_type(asset_class):
+    if raw_product_type in _accepted_ig_instrument_types(asset_class):
         return ProductType.ROLLING_CFD
     return ProductType.UNKNOWN
 
@@ -2226,11 +2231,11 @@ def _select_candidate(
     *,
     preferred_epic: str | None = None,
 ) -> _Candidate:
-    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
     matches = [
         candidate
         for candidate in candidates
-        if candidate.instrument_type.upper() == expected_type
+        if candidate.instrument_type.upper() in accepted_types
         and candidate.expiry.upper() in _ROLLING_EXPIRIES
         and candidate.market_status.upper() not in _UNAVAILABLE_MARKET_STATES
         and candidate.currency.upper() == instrument.quote_currency.upper()
