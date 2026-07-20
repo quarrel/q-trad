@@ -1,6 +1,3 @@
-Warning: truncated output (original token count: 21940)
-Total output lines: 2194
-
 """q-trad command-line entry point."""
 
 import argparse
@@ -945,7 +942,232 @@ async def _require_database_at_migration_head(settings: Settings) -> None:
         await engine.dispose()
     if len(rows) != 1 or rows[0]["version_num"] != migration_head:
         raise RuntimeError(
-            "isolated research database is not at the reviewe…1940 tokens truncated…ew_adapter(settings, clock, candidates)
+            "isolated research database is not at the reviewed migration head: "
+            f"expected {migration_head}"
+        )
+
+
+def _upgrade_database(settings: Settings) -> None:
+    os.environ["QTRAD_MIGRATION_DATABASE_URL"] = settings.migration_database_url
+    command.upgrade(Config("alembic.ini"), "head")
+
+
+def _engine(settings: Settings) -> AsyncEngine:
+    return create_async_engine(settings.database_url, pool_pre_ping=True)
+
+
+def _ig_adapter(
+    settings: Settings, clock: Clock, *, universe: CaptureUniverse | None = None
+) -> IgDemoMarketDataAdapter:
+    username, password, api_key, account_id = settings.require_ig_credentials()
+    selected_universe = universe if universe is not None else _capture_universe(settings)
+    return IgDemoMarketDataAdapter(
+        IgDemoConfig(
+            username=username,
+            password=password,
+            api_key=api_key,
+            account_id=account_id,
+        ),
+        clock,
+        instruments_by_id=selected_universe.instruments_by_id,
+        preferred_epics=selected_universe.preferred_epics,
+    )
+
+
+def _ig_review_adapter(
+    settings: Settings, clock: Clock, candidates: CaptureCandidates
+) -> IgDemoMarketDataAdapter:
+    username, password, api_key, account_id = settings.require_ig_credentials()
+    return IgDemoMarketDataAdapter(
+        IgDemoConfig(
+            username=username,
+            password=password,
+            api_key=api_key,
+            account_id=account_id,
+        ),
+        clock,
+        instruments_by_id={
+            instrument.instrument_id: instrument for instrument in candidates.instruments
+        },
+        preferred_epics={},
+    )
+
+
+def _ig_backfill_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
+    username, password, api_key, account_id = settings.require_ig_credentials()
+    return IgDemoMarketDataAdapter(
+        IgDemoConfig(
+            username=username,
+            password=password,
+            api_key=api_key,
+            account_id=account_id,
+        ),
+        clock,
+        instruments_by_id={},
+        preferred_epics={},
+    )
+
+
+async def _seed(settings: Settings) -> None:
+    engine = _engine(settings)
+    try:
+        await PostgresAuditStore(engine).seed_instruments(_capture_universe(settings).instruments)
+    finally:
+        await engine.dispose()
+
+
+async def _plan_run_reconciliation(
+    settings: Settings,
+    clock: Clock,
+    *,
+    universe_path: Path | None,
+    cutoff: datetime,
+    output_path: Path,
+) -> None:
+    if output_path.exists():
+        raise FileExistsError(f"run reconciliation plan output already exists: {output_path}")
+    if not output_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"run reconciliation plan output directory does not exist: {output_path.parent}"
+        )
+    universe = load_capture_universe(universe_path or settings.capture_universe_path)
+    engine = _engine(settings)
+    try:
+        store = PostgresAuditStore(engine)
+        database_name = await store.database_name()
+        targets = await store.stale_running_ingestion_runs(
+            cutoff=cutoff,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=universe.configuration_hash,
+        )
+        if not targets:
+            raise ValueError("no eligible stale ingestion runs exist before the cutoff")
+        plan = build_run_reconciliation_plan(
+            targets=targets,
+            created_at=clock.now(),
+            cutoff=cutoff,
+            capture_source_id=settings.capture_source_id,
+            database_name=database_name,
+            universe_name=universe.name,
+            configuration_hash=universe.configuration_hash,
+            application_version=__version__,
+            application_image=settings.image,
+            environment=BrokerEnvironment.IG_DEMO,
+        )
+        write_run_reconciliation_plan(output_path, plan)
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_hash": plan.plan_hash,
+                "target_count": len(plan.targets),
+                "cutoff": plan.cutoff.isoformat().replace("+00:00", "Z"),
+                "application_image": plan.application_image,
+                "executed": False,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _reconcile_runs(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_path: Path,
+    confirmed_plan_hash: str,
+) -> None:
+    _require_sha256_argument(confirmed_plan_hash, "run reconciliation plan hash")
+    plan = load_run_reconciliation_plan(plan_path)
+    if confirmed_plan_hash != plan.plan_hash:
+        raise ValueError("confirmed run reconciliation hash does not match the reviewed plan")
+    universe = _capture_universe(settings)
+    if settings.capture_source_id != plan.capture_source_id:
+        raise ValueError("run reconciliation plan targets a different capture source")
+    if (
+        universe.name != plan.universe_name
+        or universe.configuration_hash != plan.configuration_hash
+    ):
+        raise ValueError("run reconciliation plan targets a different capture universe")
+    if __version__ != plan.application_version or settings.image != plan.application_image:
+        raise ValueError("run reconciliation plan targets a different application image")
+    engine = _engine(settings)
+    try:
+        reconciled = await PostgresAuditStore(engine).reconcile_stale_ingestion_runs(
+            plan,
+            reconciled_at=clock.now(),
+        )
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_hash": plan.plan_hash,
+                "reconciled_run_count": reconciled,
+                "terminal_status": plan.terminal_status,
+                "finished_at_basis": plan.finished_at_basis,
+                "application_image": plan.application_image,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _sync_instruments(
+    settings: Settings, clock: Clock, *, universe_path: Path | None
+) -> None:
+    universe = (
+        load_capture_universe(universe_path)
+        if universe_path is not None
+        else _capture_universe(settings)
+    )
+    engine = _engine(settings)
+    adapter = _ig_adapter(settings, clock, universe=universe)
+    store = PostgresAuditStore(engine)
+    try:
+        await store.seed_instruments(universe.instruments)
+        await adapter.connect()
+        listings = await adapter.discover_listings(
+            [instrument.instrument_id for instrument in universe.instruments]
+        )
+        for listing in listings:
+            await store.validate_provider_listing(
+                listing, universe_hash=universe.configuration_hash, observed_at=clock.now()
+            )
+        print(
+            json.dumps(
+                {
+                    "universe_name": universe.name,
+                    "configuration_hash": universe.configuration_hash,
+                    "listing_count": len(listings),
+                    "listings": [str(item.listing_id) for item in listings],
+                    "ingestion_started": False,
+                },
+                sort_keys=True,
+            )
+        )
+    finally:
+        await adapter.disconnect()
+        await engine.dispose()
+
+
+async def _review_instruments(
+    settings: Settings,
+    clock: Clock,
+    *,
+    catalogue_path: Path,
+    output_path: Path | None,
+) -> None:
+    if output_path is not None:
+        if output_path.exists():
+            raise FileExistsError(f"listing review output already exists: {output_path}")
+        if not output_path.parent.is_dir():
+            raise FileNotFoundError(
+                f"listing review output directory does not exist: {output_path.parent}"
+            )
+    candidates = load_capture_candidates(catalogue_path)
+    adapter = _ig_review_adapter(settings, clock, candidates)
     try:
         await adapter.connect()
         reviews = await adapter.review_listings(
