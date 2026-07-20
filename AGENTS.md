@@ -160,3 +160,9 @@ credentials or evidence could be exposed.
 Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and application code.
 Unexpected required-field and computation failures must propagate with context rather than becoming
 plausible defaults.
+
+## GitHub workflow verification
+
+The GitHub MCP fine-grained PAT cannot be granted Checks API access. This is an expected platform
+limitation, not a missing permission or merge blocker. Verify CI through the GitHub Actions workflow
+run tools for the exact commit instead; do not repeatedly raise unavailable check-run access.
