@@ -11,8 +11,9 @@ shortest path that preserves research validity.
   are implemented.
 - A bounded read-only observation found the OCI `capture-v1` collector ready on all seven channels
   with no internal/SDK loss and caught-up projection; no collector or cloud state was mutated.
-- The 20-market candidate catalogue has been reviewed against IG demo. `config/capture-v2.toml` is
-  an undeployed, hash-bound 19-market release; Bitcoin is explicitly quarantined as unavailable.
+- The 20-market candidate catalogue has been reviewed against IG demo. The hash-bound 19-market
+  `capture-v2` release is deployed and initially ready; Bitcoin is explicitly quarantined as
+  unavailable.
 - A local deterministic research core now emits versioned forecasts for simple strategies, pairs
   exact-horizon outcomes, simulates causal bid/ask shadow fills, reconciles isolated ledgers and
   builds a hash-bound ranking report. The first retained snapshot-backed report reproduced its full
@@ -29,7 +30,7 @@ qualification and incident detail is under `docs/archive/capture-v1/`.
 | Milestone | Status | Exit evidence |
 |---|---|---|
 | M0 — focus and documentation reset | DONE | active docs describe the research loop and archived history is off the reading path |
-| M1 — reviewed 20-market universe | IN PROGRESS | 19 eligible IG demo listings and economics reviewed; bounded load/readiness proof passed; publication/deployment decision pending |
+| M1 — reviewed 20-market universe | DONE | 19 eligible IG demo listings reviewed, published by immutable digest and live with 19/19 channel readiness and zero observed loss |
 | M2 — minimal multi-strategy paper path | DONE | several simple strategies produce causal shadow fills and independently checked P&L |
 | M3 — deterministic evaluator and rank report | DONE | forecasts join to defined outcomes; replay reproduces scores and rankings |
 | M4 — simple market-state comparison | NOT STARTED | contemporaneous state annotation and conditional versus unconditional report |
@@ -46,13 +47,13 @@ Work:
 2. ~~Select only unambiguous, liquid standard contracts with required metadata and economics.~~
 3. ~~Record rejected or quarantined candidates without blocking the accepted subset.~~
 4. ~~Prove the single connection, callback hand-off, queue and PostgreSQL path at the approved size.~~
-5. Define a proportionate active-market observation: per-channel delivery, visible gaps, zero
+5. ~~Define a proportionate active-market observation: per-channel delivery, visible gaps, zero
    internal drops and bounded lag. Do not require a perfect market or explanation of every quiet
-   interval.
-6. Prepare an immutable application release for the reviewed `config/capture-v2.toml`; the current
-   pinned `capture-v1` image/configuration is the rollback point.
-7. Treat publication and deployment to the running collector as separate explicitly authorised
-   operations. Do not interrupt an active reviewed measurement interval.
+   interval.~~
+6. ~~Prepare an immutable application release for the reviewed `config/capture-v2.toml`; retain the
+   pinned `capture-v1` image/configuration as the rollback point.~~
+7. ~~Publish and deploy in separately authorised operations, then require 19/19 readiness and
+   caught-up projection without rewriting retained history.~~
 
 M1 does not require paper eligibility for every accepted capture market. Missing paper economics can
 quarantine that instrument from strategy execution while capture continues.
