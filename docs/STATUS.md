@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-17
+**Updated:** 2026-07-20
 **Current milestone:** capture operations release
-**State:** IN PROGRESS — `capture-v1` window complete; failed loss gate and closure evidence pending
+**State:** IN PROGRESS — heartbeat-driven `capture-v1` endurance active; provider recovery and restore acceptance pending
 
 ## Completed
 
@@ -676,6 +676,30 @@ outside the current data-only phase until explicitly admitted by a later plan up
         health-sample age and server refresh time. A stored health observation older than ten seconds
         renders `UNHEALTHY`, distinguishing a dead/static console from legitimate closed-market quote
         silence. It can ride the next normal full-image release.
+      - The unattended `2026-07-20T03:30:02Z` backup completed at `03:31:45Z` while the same ingestion
+        run, heartbeat, all seven fresh quote channels and caught-up projection continued with zero
+        restart or loss. The `04:30Z` restore verified that archive's checksum, then failed while
+        building the canonical-event unique constraint because the temporary PostgreSQL container's
+        implicit tmpfs was too small for the growing database. The collector remained healthy and the
+        stream interval remains usable, but backup/restore qualification is failed until a full restore
+        passes. A local undeployed correction uses a unique Docker-managed disk volume, refuses to
+        download below a configured Docker-root free-space floor and cleans the container, volume and
+        bundle on every exit. Focused tests cover both manifest versions, forced restore failure and
+        pre-download capacity refusal; the Dev Container intentionally has no Docker socket, so an
+        actual container restore remains a post-endurance release acceptance gate. Formatting,
+        Ruff, Pyright, `ty`, ShellCheck, the frozen-schema compatibility test, migrations through
+          `0010` and all 364 tests pass in a disposable local PostgreSQL database.
+        - Complete locally and intentionally undeployed: a real-Docker CI exercise now creates a
+          PostgreSQL 18 archive and v2 backup object set, runs the production restore verifier and
+          checks migration/event evidence plus labelled container/volume cleanup. Terminal
+          qualification parses and hash-binds current heartbeat, all-seven PRICE lifecycle/frequency,
+          drained queue, q-trad/SDK loss and subscription/server errors instead of relying on broad
+          health text. Healthwatch adds heartbeat, queue, loss, reconnect, projection and fail-closed
+          Chrony source/synchronisation/leap/absolute-offset metrics. Its initial clock bound is
+          100 ms. The bounded log bundle now carries a lifecycle summary independently recomputed from
+          retained ingest logs. The exact guarded active-market contrast and recovery commands are
+          documented for operator-approved post-window execution but remain unexecuted. GitHub CI must
+          still prove the Docker-backed restore because the Dev Container has no Docker socket.
 - Local branch preparation has started without changing the frozen collector. ADR 0014 defines
   a zero-copy, loopback-only canonical-event feed with bounded cursor pages, source/universe
   identity and no raw-record exposure. Its local implementation adds no IG call or downstream

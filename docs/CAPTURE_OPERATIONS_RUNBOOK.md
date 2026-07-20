@@ -117,8 +117,10 @@ sudoedit /etc/qtrad/capture-backup.env
 
 Only `QTRAD_BACKUP_BUCKET` normally needs changing. The file deliberately contains no OCI,
 IG or PostgreSQL credential: backup and restore use the host's instance principal and the
-running database container. Before enabling either timer, prove the policy with one manual
-backup and one manual restore verification.
+running database container. `QTRAD_RESTORE_MIN_FREE_BYTES` is the preflight floor for Docker's
+disk-backed restore volume; keep the 32 GiB initial value only while it comfortably exceeds the
+measured restored database footprint. Before enabling either timer, prove the policy with one
+manual backup and one manual restore verification.
 
 Qualification-era images write `qtrad-capture-backup-v1`. A later reviewed release containing
 ADR 0019 writes self-hashed v2 manifests that additionally bind capture source, universe name and
@@ -208,6 +210,12 @@ new image against schema `0007` before retrying the migration; never delete an a
 - Install the capture, ingest, backup, weekly restore-verification and healthwatch systemd units
   and timers from `ops/systemd/`. Enable them only after their manual gates pass. The
   collector must continue after SSH or Bastion disconnects.
+- Healthwatch reads both readiness and system evidence. Its fail-closed metric set includes current
+  heartbeat health/age/count, queue depth/high-water, q-trad drops, Lightstreamer loss, reconnect and
+  subscription/server errors, projection lag, backup/restore age, disk capacity, and Chrony source,
+  synchronisation, leap and absolute-offset evidence. The initial clock gate is 100 ms; tune it only
+  from retained normal observations. A healthy process or quiet PRICE feed does not substitute for a
+  current heartbeat.
 - `compose.capture.yaml` deliberately gives ingest no Docker restart policy. Systemd permits at
   most three failed ingest starts per hour with a 60-second delay and then leaves
   `qtrad-ingest.service` failed for monitoring/operator review. This prevents process recreation
@@ -237,7 +245,11 @@ new image against schema `0007` before retrying the migration; never delete an a
   --list`, and upload it with its checksum and a manifest binding the universe and image
   digests. Bucket lifecycle rules retain 14 daily and 8 weekly copies. A weekly job verifies
   the latest daily archive in an isolated, networkless, temporary PostgreSQL container
-  using the manifest-pinned database image before recording success.
+  using the manifest-pinned database image before recording success. Restore data uses a uniquely
+  named Docker disk volume rather than host RAM. The helper checks Docker-root free space before
+  downloading anything and removes the container, volume and downloaded bundle after either
+  success or failure. A failed status remains an alarm and qualification failure; do not substitute
+  checksum-only success for a completed logical restore.
 - Generate backup universe identity by running the already-pinned application digest directly with
   no network and a read-only root filesystem. Never launch a backup helper in the collector's Compose
   project: ingestion uses `--abort-on-container-exit`, so an unrelated successful one-off exit would
@@ -531,9 +543,11 @@ evidence reference. A verification failure leaves the bundle untouched and canno
 editing or rehashing it; preserve the failed bundle and recapture to a new directory only when the
 reviewed protocol permits.
 
-This bundle is retained operator evidence, not a third qualification decision and not an automated
-claim that the logs are complete or healthy. Review the first/last timestamps, log-rotation metadata,
-reboots and all relevant messages against the full candidate window. Reference the manifest path and
+This bundle is retained operator evidence, not a third qualification decision. Its manifest contains
+a verifier-recomputed lifecycle summary of exact heartbeat, status, staleness, retry, loss, queue and
+subscription/server-error events from the bounded ingest log. Review that summary together with the
+first/last timestamps, log-rotation metadata, reboots and all relevant messages against the full
+candidate window; it does not by itself prove that retained logs cover the window. Reference the manifest path and
 `manifest_sha256` from bounded gap/log reviews. Never commit the bundle or raw logs to Git, and never
 edit a retained file; a failed capture gets a new output directory.
 

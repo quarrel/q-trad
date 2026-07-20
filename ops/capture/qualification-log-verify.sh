@@ -68,10 +68,10 @@ jq -e --arg evidence_sha256 "$automatic_sha256" '
   def timestamp: type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T");
   type == "object"
   and (keys == [
-    "containers", "created_at", "manifest_sha256", "qualification_evidence_sha256",
+    "containers", "created_at", "lifecycle_summary", "manifest_sha256", "qualification_evidence_sha256",
     "schema", "sources", "tool_sha256", "window_end", "window_start"
   ])
-  and .schema == "qtrad-capture-qualification-log-bundle-v1"
+  and .schema == "qtrad-capture-qualification-log-bundle-v2"
   and .qualification_evidence_sha256 == $evidence_sha256
   and (.created_at | type == "string")
   and (.window_start | type == "string")
@@ -98,6 +98,11 @@ jq -e --arg evidence_sha256 "$automatic_sha256" '
     and (.restart_count | type == "number" and . >= 0 and floor == .)
     and (.log_config | type == "object"))
   and (.sources | type == "array" and length == 7)
+  and (.lifecycle_summary.schema == "qtrad-capture-lifecycle-summary-v1")
+  and (.lifecycle_summary.parsed_records | type == "number" and . > 0 and floor == .)
+  and (.lifecycle_summary.adverse_event_count | type == "number" and . >= 0 and floor == .)
+  and (.lifecycle_summary.tracked_events | type == "array" and length == 15)
+  and (.lifecycle_summary.stream_statuses | type == "array")
   and ([.sources[] | {kind, name, file}] | sort_by(.kind, .name)) == [
     {kind:"container",name:"api",file:"container-api.log"},
     {kind:"container",name:"db",file:"container-db.log"},
@@ -207,5 +212,11 @@ while IFS= read -r row; do
   ((last_epoch <= end_epoch))
   ((first_epoch <= last_epoch))
 done < <(jq -c '.sources[]' "$manifest")
+
+summary_filter="$(dirname "${BASH_SOURCE[0]}")/qualification-log-summary.jq"
+[[ -f "$summary_filter" && ! -L "$summary_filter" ]]
+recomputed_summary="$(jq -ceS -R -s -f "$summary_filter" "$bundle/container-ingest.log")"
+jq -e --argjson recomputed "$recomputed_summary" '.lifecycle_summary == $recomputed' \
+  "$manifest" > /dev/null
 
 printf '%s\n' "$manifest_sha256"

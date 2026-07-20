@@ -413,6 +413,8 @@ def _qualification_environment(
     include_other_current_run: bool = False,
     compose_image_mismatch: bool = False,
     systemd_automount: bool = False,
+    heartbeat_transport_current: bool = True,
+    lightstreamer_lost_updates: int = 0,
     gaps: list[dict[str, object]] | None = None,
 ) -> tuple[dict[str, str], Path, Path]:
     fake_bin = tmp_path / "bin"
@@ -467,8 +469,15 @@ def _qualification_environment(
                 "environment": "IG_DEMO",
                 "status": "HEALTHY",
                 "detail": (
-                    "state=CONNECTED; subscriptions=7/7; updates=7/7; "
-                    "reconnects=2; dropped_records=0; provider_operations=0"
+                    "state=READY; subscriptions=7/7; updates=7/7; frequency_evidence=7/7; "
+                    "heartbeat_subscribed=true; heartbeat_transport_current="
+                    f"{str(heartbeat_transport_current).lower()}; "
+                    "heartbeat_stale=false; heartbeat_events=1234; "
+                    "last_heartbeat_at=2026-07-17T04:05:31+00:00; heartbeat_frequency=20; "
+                    "reconnects=2; dropped_records=0; "
+                    f"lightstreamer_lost_updates={lightstreamer_lost_updates}; "
+                    "subscription_errors=0; server_errors=0; queue=0/10000; "
+                    "queue_high_water=27; provider_operations=0"
                 ),
             }
         ],
@@ -490,7 +499,12 @@ def _qualification_environment(
             "status": "STOPPED",
             "started_at": "2026-07-14T06:00:00+00:00",
             "configuration_hash": configuration_hash,
-            "detail": {"adapter_health": "state=STOPPED; dropped_records=0"},
+            "detail": {
+                "adapter_health": (
+                    "state=STOPPED; dropped_records=0; lightstreamer_lost_updates=0; "
+                    "subscription_errors=0; server_errors=0"
+                )
+            },
         },
         {
             "run_id": "00000000-0000-0000-0000-000000000001",
@@ -498,7 +512,12 @@ def _qualification_environment(
             "status": "STOPPED",
             "started_at": "2026-07-14T03:05:33+00:00",
             "configuration_hash": configuration_hash,
-            "detail": {"adapter_health": "state=STOPPED; dropped_records=0"},
+            "detail": {
+                "adapter_health": (
+                    "state=STOPPED; dropped_records=0; lightstreamer_lost_updates=0; "
+                    "subscription_errors=0; server_errors=0"
+                )
+            },
         },
     ]
     if include_pre_candidate_run:
@@ -664,6 +683,9 @@ def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path:
     assert output.stat().st_mode & 0o777 == 0o600
     assert evidence["schema"] == "qtrad-capture-qualification-v1"
     assert evidence["automatic_checks_passed"] is True
+    assert evidence["automatic_checks"]["heartbeat_ok"] is True
+    assert evidence["automatic_checks"]["adapter_loss_free"] is True
+    assert evidence["adapter_evidence"]["heartbeat_events"] == 1234
     assert len(evidence["release"]["evidence_tool_sha256"]) == 64
     assert evidence["qualification_decision"] == "PENDING_OPERATOR_REVIEW"
     assert evidence["operator_reviews"] == {
@@ -692,6 +714,29 @@ def test_qualification_evidence_is_bounded_hash_verified_and_read_only(tmp_path:
 
     repeated = _run("qualification-evidence.sh", environment, str(output))
     assert repeated.returncode != 0
+
+
+@pytest.mark.parametrize(
+    ("heartbeat_transport_current", "lightstreamer_lost_updates"),
+    [(False, 0), (True, 1)],
+)
+def test_qualification_evidence_fails_closed_on_transport_or_sdk_loss(
+    tmp_path: Path,
+    heartbeat_transport_current: bool,
+    lightstreamer_lost_updates: int,
+) -> None:
+    environment, output, _ = _qualification_environment(
+        tmp_path,
+        now="2026-07-17T04:05:33Z",
+        heartbeat_transport_current=heartbeat_transport_current,
+        lightstreamer_lost_updates=lightstreamer_lost_updates,
+    )
+
+    result = _run("qualification-evidence.sh", environment, str(output))
+
+    assert result.returncode != 0
+    evidence = json.loads(output.read_text())
+    assert evidence["automatic_checks_passed"] is False
 
 
 def test_qualification_evidence_binds_the_frozen_release_through_one_exact_run(
@@ -1222,10 +1267,12 @@ printf '%s\n' \
     assert result.returncode == 0, result.stderr
     manifest = json.loads((output / "manifest.json").read_text())
     assert output.stat().st_mode & 0o777 == 0o700
-    assert manifest["schema"] == "qtrad-capture-qualification-log-bundle-v1"
+    assert manifest["schema"] == "qtrad-capture-qualification-log-bundle-v2"
     assert manifest["qualification_evidence_sha256"] == automatic_sha256
     assert len(manifest["containers"]) == 3
     assert len(manifest["sources"]) == 7
+    assert manifest["lifecycle_summary"]["parsed_records"] == 2
+    assert manifest["lifecycle_summary"]["adverse_event_count"] == 0
     identity = {key: value for key, value in manifest.items() if key != "manifest_sha256"}
     canonical = json.dumps(identity, separators=(",", ":"), sort_keys=True)
     assert hashlib.sha256(canonical.encode()).hexdigest() == manifest["manifest_sha256"]
@@ -1401,8 +1448,9 @@ def test_qualification_log_bundle_refuses_tampered_automatic_evidence(tmp_path: 
 
 
 @pytest.mark.parametrize("manifest_version", [1, 2])
+@pytest.mark.parametrize("restore_succeeds", [True, False])
 def test_restore_verification_uses_manifest_pinned_postgres_image(
-    tmp_path: Path, manifest_version: int
+    tmp_path: Path, manifest_version: int, restore_succeeds: bool
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -1477,6 +1525,8 @@ fi
 set -euo pipefail
 printf '%s\\n' "$*" >> '{docker_calls}'
 case "$*" in
+  "info --format "*) printf '%s\\n' '{tmp_path}' ;;
+  *"pg_restore --exit-on-error"*) [[ "$QTRAD_TEST_RESTORE_FAIL" != 1 ]] ;;
   *"SELECT version_num FROM alembic_version"*) printf '0006\\n' ;;
   *"SELECT count(*) FROM canonical.events"*) printf '42\\n' ;;
 esac
@@ -1491,16 +1541,78 @@ esac
             "QTRAD_BACKUP_BUCKET": "capture-backups",
             "QTRAD_STATUS_DIR": str(status_dir),
             "QTRAD_EXPECTED_V1_MIGRATION_VERSION": "0006",
+            "QTRAD_RESTORE_MIN_FREE_BYTES": "1",
+            "QTRAD_TEST_RESTORE_FAIL": "0" if restore_succeeds else "1",
         },
     )
 
-    assert result.returncode == 0, result.stderr
     status = json.loads((status_dir / "restore-status.json").read_text())
-    assert status["success"] is True
-    assert status["canonical_event_count"] == 42
-    assert status["migration_version"] == "0006"
-    assert status["manifest_schema"] == f"qtrad-capture-backup-v{manifest_version}"
-    assert postgres_image in docker_calls.read_text()
+    if restore_succeeds:
+        assert result.returncode == 0, result.stderr
+        assert status["success"] is True
+        assert status["canonical_event_count"] == 42
+        assert status["migration_version"] == "0006"
+        assert status["manifest_schema"] == f"qtrad-capture-backup-v{manifest_version}"
+    else:
+        assert result.returncode == 1
+        assert status["success"] is False
+        assert status["exit_code"] == 1
+    calls = docker_calls.read_text()
+    assert postgres_image in calls
+    assert "volume create --label qtrad.role=restore-verification" in calls
+    assert "--mount type=volume,source=qtrad-restore-verify-" in calls
+    assert "target=/var/lib/postgresql" in calls
+    assert "--tmpfs /var/lib/postgresql" not in calls
+    if restore_succeeds:
+        assert "volume rm qtrad-restore-verify-" in calls
+    else:
+        assert "volume rm --force qtrad-restore-verify-" in calls
+
+
+def test_restore_verification_refuses_insufficient_docker_storage_before_download(
+    tmp_path: Path,
+) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_calls = tmp_path / "docker-calls"
+    _write_executable(
+        fake_bin / "docker",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+printf '%s\\n' "$*" >> '{docker_calls}'
+case "$*" in
+  "info --format "*) printf '%s\\n' '{tmp_path}' ;;
+esac
+""",
+    )
+    oci_calls = tmp_path / "oci-calls"
+    _write_executable(
+        fake_bin / "oci",
+        f"""#!/usr/bin/env bash
+printf '%s\\n' "$*" >> '{oci_calls}'
+exit 70
+""",
+    )
+    status_dir = tmp_path / "status"
+
+    result = _run(
+        "restore-verify.sh",
+        {
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_BACKUP_BUCKET": "capture-backups",
+            "QTRAD_STATUS_DIR": str(status_dir),
+            "QTRAD_RESTORE_MIN_FREE_BYTES": "8000000000000000000",
+        },
+    )
+
+    assert result.returncode == 75
+    status = json.loads((status_dir / "restore-status.json").read_text())
+    assert status["success"] is False
+    assert status["exit_code"] == 75
+    calls = docker_calls.read_text()
+    assert "info --format {{.DockerRootDir}}" in calls
+    assert "volume create" not in calls
+    assert not oci_calls.exists()
 
 
 @pytest.mark.parametrize("manifest_version", [1, 2])
@@ -1611,33 +1723,85 @@ printf '%s\\n' "pg_restore $*" >> '{calls}'
 
 
 @pytest.mark.parametrize(
-    ("ready", "expected_code"),
-    [(True, 0), (False, 1)],
+    ("ready", "clock_offset", "expected_code"),
+    [(True, 0.000012345, 0), (False, 0.000012345, 1), (True, 0.2, 1)],
 )
 def test_healthwatch_publishes_metrics_and_fails_closed(
-    tmp_path: Path, ready: bool, expected_code: int
+    tmp_path: Path, ready: bool, clock_offset: float, expected_code: int
 ) -> None:
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    response = {
+    readiness_response = {
         "ready": ready,
         "fresh_quote_count": 7,
         "global_position": 102,
         "checkpoint_position": 100,
+    }
+    system_response = {
+        "heartbeat": {
+            "status": "HEALTHY",
+            "events": 1234,
+            "observation_age_seconds": 1.5,
+        },
+        "adapter_health": [
+            {
+                "adapter_name": "ig-market-data",
+                "environment": "IG_DEMO",
+                "detail": (
+                    "queue=0/10000; queue_high_water=27; dropped_records=0; "
+                    "lightstreamer_lost_updates=0; reconnects=2; "
+                    "subscription_errors=0; server_errors=0"
+                ),
+            }
+        ],
     }
     _write_executable(
         fake_bin / "curl",
         f"""#!/usr/bin/env bash
 set -euo pipefail
 output=''
+url=''
 while (($#)); do
   case "$1" in
     --output) output=$2; shift 2 ;;
+    http://*) url=$1; shift ;;
     *) shift ;;
   esac
 done
-printf '%s\\n' '{json.dumps(response)}' > "$output"
-printf '%s' '{200 if ready else 503}'
+case "$url" in
+  */health/ready)
+    printf '%s\\n' '{json.dumps(readiness_response)}' > "$output"
+    printf '%s' '{200 if ready else 503}'
+    ;;
+  */api/v1/system)
+    printf '%s\\n' '{json.dumps(system_response)}' > "$output"
+    printf '%s' 200
+    ;;
+  *) exit 70 ;;
+esac
+""",
+    )
+    _write_executable(
+        fake_bin / "chronyc",
+        f"""#!/usr/bin/env bash
+set -euo pipefail
+if [[ "$*" == tracking ]]; then
+  printf '%s\n' \
+    'Reference ID    : A9FEA9FE (169.254.169.254)' \
+    'System time     : {clock_offset} seconds slow of NTP time' \
+    'Leap status     : Normal'
+elif [[ "$*" == '-n sources' ]]; then
+  printf '%s\n' '^* 169.254.169.254 3 6 377 7 +1us[+2us] +/- 1ms'
+else
+  exit 70
+fi
+""",
+    )
+    _write_executable(
+        fake_bin / "timedatectl",
+        """#!/usr/bin/env bash
+set -euo pipefail
+printf 'yes\n'
 """,
     )
     metrics_copy = tmp_path / "metrics.json"
@@ -1680,3 +1844,10 @@ done
     assert values["collector_ready"] == int(ready)
     assert values["projection_lag_positions"] == 2
     assert values["restore_verified"] == 1
+    assert values["heartbeat_healthy"] == 1
+    assert values["heartbeat_events"] == 1234
+    assert values["ingest_queue_depth"] == 0
+    assert values["dropped_records"] == 0
+    assert values["clock_source_online"] == 1
+    assert values["clock_synchronised"] == 1
+    assert values["clock_offset_seconds"] == clock_offset

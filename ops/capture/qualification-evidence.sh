@@ -204,10 +204,15 @@ run_checks="$(
           and (.status | IN("RUNNING", "STOPPED", "FAILED") | not))] | length),
         candidate_stopped_runs: ([.[] | candidate
           | select(.kind == "INGESTION" and .status == "STOPPED")] | length),
-        candidate_stops_without_zero_drops: ([.[] | candidate
+        candidate_stops_with_loss_or_errors: ([.[] | candidate
           | select(.kind == "INGESTION" and .status == "STOPPED")
-          | select((.detail.adapter_health // "")
-          | contains("dropped_records=0") | not)] | length),
+          | (.detail.adapter_health // "") as $health
+          | select(
+              ($health | contains("dropped_records=0") | not)
+              or ($health | contains("lightstreamer_lost_updates=0") | not)
+              or ($health | contains("subscription_errors=0") | not)
+              or ($health | contains("server_errors=0") | not)
+            )] | length),
         pre_candidate_nonterminal_runs: [.[]
           | select(.kind == "INGESTION" and .status == "RUNNING"
           and (.started_at | epoch) < ($start | fromdateiso8601))
@@ -249,6 +254,46 @@ fi
 readonly readiness_configuration_hash readiness_configuration_basis
 readonly readiness_configuration_bound
 
+adapter_evidence="$(
+  jq -ceS '
+    def detail_fields:
+      .detail
+      | split(";")
+      | map(gsub("^ +| +$"; "") | capture("^(?<key>[^=]+)=(?<value>.*)$"))
+      | from_entries;
+    [.adapter_health[]
+      | select(.adapter_name == "ig-market-data" and .environment == "IG_DEMO")
+      | . as $adapter
+      | detail_fields as $fields
+      | {
+          adapter_name:$adapter.adapter_name,
+          environment:$adapter.environment,
+          status:$adapter.status,
+          state:$fields.state,
+          subscriptions:$fields.subscriptions,
+          updates:$fields.updates,
+          frequency_evidence:$fields.frequency_evidence,
+          heartbeat_subscribed:($fields.heartbeat_subscribed == "true"),
+          heartbeat_transport_current:($fields.heartbeat_transport_current == "true"),
+          heartbeat_stale:($fields.heartbeat_stale == "true"),
+          heartbeat_events:($fields.heartbeat_events | tonumber),
+          last_heartbeat_at:$fields.last_heartbeat_at,
+          heartbeat_frequency:($fields.heartbeat_frequency | tonumber),
+          reconnects:($fields.reconnects | tonumber),
+          dropped_records:($fields.dropped_records | tonumber),
+          lightstreamer_lost_updates:($fields.lightstreamer_lost_updates | tonumber),
+          subscription_errors:($fields.subscription_errors | tonumber),
+          server_errors:($fields.server_errors | tonumber),
+          queue:$fields.queue,
+          queue_high_water:($fields.queue_high_water | tonumber),
+          provider_operations:($fields.provider_operations | tonumber)
+        }
+    ]
+    | if length == 1 then .[0] else error("expected one IG demo adapter") end
+  ' "$work_dir/system.json"
+)"
+readonly adapter_evidence
+
 automatic_checks="$(
   jq -cS -n \
     --argjson now_at_or_after_end "$([[ "$now_epoch" -ge "$end_epoch" ]] && printf true || printf false)" \
@@ -269,11 +314,28 @@ automatic_checks="$(
        and (($now | fromdateiso8601) - (.checkpoint_updated_at | epoch) <= 300)' \
       "$work_dir/readiness.json" > /dev/null \
       && printf true || printf false)" \
-    --argjson adapter_ok "$(jq -e '
-      [.adapter_health[] | select(.adapter_name == "ig-market-data" and .environment == "IG_DEMO"
-        and .status == "HEALTHY" and (.detail | contains("subscriptions=7/7"))
-        and (.detail | contains("updates=7/7")) and (.detail | contains("dropped_records=0")))]
-      | length == 1' "$work_dir/system.json" > /dev/null && printf true || printf false)" \
+      --argjson adapter_identity_ok "$(jq -e '
+        .adapter_name == "ig-market-data" and .environment == "IG_DEMO"
+        and .status == "HEALTHY" and .state == "READY"
+        and .subscriptions == "7/7" and .updates == "7/7"
+        and .frequency_evidence == "7/7"' <<< "$adapter_evidence" > /dev/null &&
+        printf true || printf false)" \
+      --argjson heartbeat_ok "$(jq -e '
+        .heartbeat_subscribed == true and .heartbeat_transport_current == true
+        and .heartbeat_stale == false and .heartbeat_events > 0
+        and (.last_heartbeat_at | test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T"))
+        and .heartbeat_frequency > 0' <<< "$adapter_evidence" > /dev/null &&
+        printf true || printf false)" \
+      --argjson loss_free "$(jq -e '
+        .dropped_records == 0 and .lightstreamer_lost_updates == 0
+        and .subscription_errors == 0 and .server_errors == 0
+        and .provider_operations == 0' <<< "$adapter_evidence" > /dev/null &&
+        printf true || printf false)" \
+      --argjson queue_drained "$(jq -e '
+        (.queue | capture("^(?<depth>[0-9]+)/(?<capacity>[1-9][0-9]*)$")
+          | (.depth | tonumber) == 0 and (.capacity | tonumber) > 0)
+        and .queue_high_water >= 0' <<< "$adapter_evidence" > /dev/null &&
+        printf true || printf false)" \
     --argjson units_ok "$(jq -e '
         .docker_service == "active" and .tailscale_service == "active"
         and .capture_service == "active" and .capture_last_result == "success"
@@ -311,8 +373,10 @@ automatic_checks="$(
         source_matches:$source_matches, migration_matches:$migration_matches,
         readiness_http_200:($readiness_http_code == "200"),
         readiness_ok:$readiness_ok,
-          readiness_configuration_bound:$readiness_configuration_bound,
-          adapter_ok:$adapter_ok, units_ok:$units_ok,
+            readiness_configuration_bound:$readiness_configuration_bound,
+            adapter_identity_ok:$adapter_identity_ok, heartbeat_ok:$heartbeat_ok,
+            adapter_loss_free:$loss_free, adapter_queue_drained:$queue_drained,
+            units_ok:$units_ok,
           compose_ok:$compose_ok, data_mount_ok:$data_mount_ok,
           backup_ok:$backup_ok, restore_ok:$restore_ok, disk_ok:$disk_ok,
           run_history_bounded:$run_checks.response_is_bounded,
@@ -321,7 +385,7 @@ automatic_checks="$(
           no_candidate_failed_runs:($run_checks.candidate_failed_runs == 0),
           no_candidate_unexpected_statuses:($run_checks.candidate_unexpected_status_runs == 0),
           lifecycle_restarts_observed:($run_checks.candidate_stopped_runs >= 2),
-          stopped_runs_report_zero_drops:($run_checks.candidate_stops_without_zero_drops == 0),
+            stopped_runs_report_zero_loss_or_errors:($run_checks.candidate_stops_with_loss_or_errors == 0),
           pre_candidate_runs_reconciled:($run_checks.pre_candidate_nonterminal_runs | length == 0)}'
 )"
 readonly automatic_checks
@@ -348,7 +412,8 @@ evidence_identity="$(
     --argjson backup_age_seconds "$backup_age" \
     --argjson restore_age_seconds "$restore_age" \
     --argjson database_disk_free_percent "$disk_free_percent" \
-    --argjson automatic_checks "$automatic_checks" \
+      --argjson automatic_checks "$automatic_checks" \
+      --argjson adapter_evidence "$adapter_evidence" \
     --argjson automatic_checks_passed "$automatic_passed" \
     --argjson run_checks "$run_checks" \
     --argjson candidate_gaps "$gap_review" \
@@ -367,7 +432,8 @@ evidence_identity="$(
         evidence_tool_sha256:$evidence_tool_sha256,
         capture_source_id:$capture_source_id, configuration_hash:$configuration_hash,
         migration_version:$migration_version},
-      readiness_configuration_basis:$readiness_configuration_basis,
+        readiness_configuration_basis:$readiness_configuration_basis,
+        adapter_evidence:$adapter_evidence,
       readiness:$readiness[0], system:$system[0], units:$units[0],
       compose_services:$compose_services[0], data_mount:$data_mount[0],
       backup:$backup[0], restore:$restore[0],

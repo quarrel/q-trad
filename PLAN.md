@@ -86,6 +86,23 @@ Implementation status:
 - Complete and staged on the disabled collector: daily manifest/checksum backups, weekly
   isolated restore verification, backup/restore/disk/readiness OCI metrics, and deterministic
   operations-script tests.
+  - The first growing-dataset scheduled restore on `2026-07-20` verified the downloaded archive
+    checksum but exhausted the verifier's implicit tmpfs capacity while building the canonical-event
+    uniqueness constraint. Ingestion remained on the same healthy run with zero loss or restart.
+    The local correction replaces host-RAM storage with a uniquely named Docker disk volume,
+    preflights an explicit free-space floor before download and proves cleanup after both successful
+    and failed restores. The complete local verification gate passes migrations through `0010` and
+    all 364 tests. It remains undeployed and a real-container restore is still required after the
+    current endurance interval. A real-Docker CI integration now builds a PostgreSQL 18 custom-format
+    archive, serves its exact v2 object set through a deterministic OCI stub, runs the production
+    restore helper, verifies migration/event evidence and proves labelled container/volume cleanup.
+    Terminal qualification evidence now requires current heartbeat, complete PRICE lifecycle/frequency
+    evidence, a drained queue and zero q-trad/SDK/subscription/server loss or errors. Healthwatch
+    publishes those signals with reconnects, projection lag and fail-closed Chrony
+    source/synchronisation/leap/offset evidence. The full-window log bundle has a
+    verifier-recomputed lifecycle summary, and the guarded post-window provider contrast/recovery
+    sequence is documented without executing it. The Docker-backed restore step awaits GitHub CI
+    because the Dev Container intentionally has no Docker socket.
 - Complete: GitHub push/PR CI and manual commit-tagged `linux/amd64`/`linux/arm64`
   OCIR publication workflows. Registry credentials and the protected release environment
   require operator configuration before the first workflow dispatch.

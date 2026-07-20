@@ -138,9 +138,11 @@ database, Git or deployment side effect, and refuses to infer a missing selectio
 The capture database is backed up daily as a PostgreSQL custom archive accompanied by a
 checksum and a JSON manifest that binds the capture-universe hash and both deployed image
 digests. Object Storage lifecycle rules implement daily/weekly retention. A weekly verifier
-downloads the latest daily set and restores it into a networkless, tmpfs-backed PostgreSQL
-container selected by the manifest digest. Backup and restore status files are atomic local
-evidence inputs to the health watcher; they are not substitutes for the remote objects or a
+downloads the latest daily set and restores it into a networkless PostgreSQL container selected
+by the manifest digest. Its temporary data store is a uniquely named Docker-managed disk volume,
+not host RAM; a configured Docker-root free-space floor is checked before download and all
+temporary resources are removed on success or failure. Backup and restore status files are atomic
+local evidence inputs to the health watcher; they are not substitutes for the remote objects or a
 successful restore.
 
 Qualification closure is a separate read-only snapshot rather than a mutable database status. A
@@ -414,6 +416,14 @@ The HTTP readiness query also binds operational evidence to the API's loaded cap
 configuration hash. A healthy adapter or running ingestion record from another configuration cannot
 make the served release ready. The count of recently received healthy quotes is exposed alongside
 readiness as strategy-facing telemetry, not as an operational readiness condition.
+
+Host-local healthwatch combines that readiness result with the system endpoint's structured
+heartbeat observation and bounded adapter detail. It publishes queue depth/high-water, q-trad and
+Lightstreamer loss, lifecycle errors/reconnects, projection lag, backup/restore age, disk capacity and
+Chrony source/synchronisation/leap/absolute-offset metrics. Missing or malformed evidence fails the
+watcher rather than becoming a healthy default. Qualification terminal evidence independently parses
+and hash-binds the same heartbeat, queue and loss fields; its bounded full-window log bundle includes
+a derived lifecycle-event summary which the verifier recomputes from the retained ingest log.
 
 Synchronous provider calls run as named daemon operations with explicit deadlines rather
 than in asyncio's default executor, and adapter-owned REST requests have bounded default

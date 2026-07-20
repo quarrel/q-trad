@@ -8,14 +8,27 @@ readonly status_dir="${QTRAD_STATUS_DIR:?QTRAD_STATUS_DIR is required}"
 readonly oci_auth="${QTRAD_OCI_AUTH:-instance_principal}"
 readonly status_file="$status_dir/restore-status.json"
 readonly oci=(oci --auth "$oci_auth")
+readonly minimum_free_bytes="${QTRAD_RESTORE_MIN_FREE_BYTES:-34359738368}"
+
+if [[ ! "$minimum_free_bytes" =~ ^[1-9][0-9]*$ ]]; then
+  printf 'QTRAD_RESTORE_MIN_FREE_BYTES must be a positive integer\n' >&2
+  exit 64
+fi
+
 work_dir="$(mktemp -d)"
-container="qtrad-restore-verify-$(date --utc +%s)"
+restore_identity="$(date --utc +%s)-$$"
+container="qtrad-restore-verify-$restore_identity"
+volume="qtrad-restore-verify-$restore_identity"
+volume_created=0
 
 mkdir -p "$status_dir"
 
 record_result() {
   local exit_code=$?
   docker rm --force "$container" > /dev/null 2>&1 || true
+  if ((volume_created == 1)); then
+    docker volume rm --force "$volume" > /dev/null 2>&1 || true
+  fi
   rm -rf "$work_dir"
   if ((exit_code != 0)); then
     local temporary_status
@@ -30,6 +43,22 @@ record_result() {
   exit "$exit_code"
 }
 trap record_result EXIT
+
+docker_root="$(docker info --format '{{.DockerRootDir}}')"
+if [[ "$docker_root" != /* || ! -d "$docker_root" ]]; then
+  printf 'Docker reported an unusable storage root\n' >&2
+  exit 69
+fi
+available_bytes="$(df --output=avail -B1 "$docker_root" | tail -n 1 | tr -d '[:space:]')"
+if [[ ! "$available_bytes" =~ ^[0-9]+$ ]]; then
+  printf 'could not determine free bytes for Docker storage root\n' >&2
+  exit 69
+fi
+if ((available_bytes < minimum_free_bytes)); then
+  printf 'restore verification requires at least %s free bytes; Docker storage has %s\n' \
+    "$minimum_free_bytes" "$available_bytes" >&2
+  exit 75
+fi
 
 latest_object="$(
   "${oci[@]}" os object list --bucket-name "$bucket" --prefix daily/qtrad-capture- \
@@ -96,8 +125,13 @@ case "$manifest_schema" in
 esac
 postgres_image="$(jq -er '.postgres_image' "$manifest_file")"
 
+docker volume create \
+  --label qtrad.role=restore-verification \
+  "$volume" > /dev/null
+volume_created=1
 docker run --detach --name "$container" --network none \
-  --tmpfs /var/lib/postgresql:rw --env POSTGRES_HOST_AUTH_METHOD=trust \
+  --mount "type=volume,source=$volume,target=/var/lib/postgresql" \
+  --env POSTGRES_HOST_AUTH_METHOD=trust \
   "$postgres_image" > /dev/null
 ready=0
 for _ in $(seq 1 30); do
@@ -141,5 +175,7 @@ jq -n \
 mv -f "$temporary_status" "$status_file"
 
 docker rm --force "$container" > /dev/null
+docker volume rm "$volume" > /dev/null
+volume_created=0
 rm -rf "$work_dir"
 trap - EXIT

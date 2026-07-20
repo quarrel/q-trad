@@ -256,6 +256,53 @@ The evidence stages are deliberately non-substitutable:
    lifecycle/frequency evidence, zero q-trad or SDK loss, bounded queue/projection lag, explained gaps
    and clean terminal shutdown.
 
+### Post-window provider experiment checklist
+
+Prepare these commands locally, but do not run them until an operator has stopped the collector and
+confirmed that no other process is using the same IG demo API key. The stop is a separate, explicit
+capture-operations mutation; completing the endurance window does not authorise it automatically.
+
+1. Confirm the reviewed `main` commit is checked out, `git status --short` is empty, the four
+   `QTRAD_IG_*` demo values are exported from a mode-0600 local file, and both evidence destinations
+   do not exist. Never copy collector database or OCI credentials into the local file.
+2. Record the collector's terminal automatic/log evidence first. Then stop it through the runbook,
+   verify its ingest container is absent, and independently confirm there is no other stream using
+   the API key.
+3. Set the exact acknowledgement only for the bounded commands:
+
+   ```bash
+   export QTRAD_PROVIDER_EXPERIMENT_SINGLE_CONNECTION_ACK=COLLECTOR_STOPPED_AND_NO_OTHER_STREAM
+   mkdir -m 0700 -p tmp/provider-evidence
+
+   ops/dev/provider-stream-contrast.sh \
+     tmp/provider-evidence/active-market-contrast.json \
+     tmp/provider-evidence/active-market-contrast.jsonl.gz \
+     --duration-seconds 10800 \
+     --readiness-timeout-seconds 180 \
+     --silence-seconds 120
+
+   uv run ops/dev/verify_stream_experiment_evidence.py \
+     tmp/provider-evidence/active-market-contrast.json
+
+   ops/dev/provider-recovery-experiment.sh \
+     tmp/provider-evidence/provider-recovery.json \
+     --phase-timeout-seconds 180 \
+     --phase-observation-seconds 10 \
+     --provider-operation-timeout-seconds 30
+
+   uv run ops/dev/verify_stream_experiment_evidence.py \
+     tmp/provider-evidence/provider-recovery.json
+   unset QTRAD_PROVIDER_EXPERIMENT_SINGLE_CONNECTION_ACK
+   ```
+
+4. Preserve `PASS` and `FAIL` artifacts unchanged. A non-zero command, partial subscription set,
+   allowance error, missing cleanup proof, or failed independent verification is evidence to retain,
+   not permission to repeat immediately. Review the result and the provider's current allowances
+   before authorising any retry.
+5. Restart the collector only through a separately reviewed deployment/start operation, require a
+   new current heartbeat plus all-seven PRICE lifecycle/frequency evidence, and bind its new run ID
+   to the experiment record. The experiment cannot write to or repair the capture database.
+
 ### Closed-market heartbeat diagnostic
 
 An explicitly authorised five-minute diagnostic ran the published ARM64 image for main commit

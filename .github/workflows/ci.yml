@@ -59,6 +59,9 @@ jobs:
       - name: Check shell scripts
         run: shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh
 
+      - name: Verify backup restore in real PostgreSQL containers
+        run: ops/dev/restore-verification-integration.sh
+
       - name: Migrate to frozen collector schema
         run: uv run alembic upgrade 0003
 
