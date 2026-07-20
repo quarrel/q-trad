@@ -711,8 +711,8 @@ data-source differences and replay determinism.
 - CFDs do not directly reproduce ETF/futures fees, basis, roll or exchange liquidity.
 - Macro calendars, volume, futures depth, options gamma and news are not present.
 
-No strategy research should begin until sufficient representative coverage exists across
-sessions, volatility conditions and events.
+Framework and hypothesis work may begin with short data, but decision-grade strategy conclusions
+require sufficient representative coverage across sessions, volatility conditions and events.
 
 ### 9.3 Suggested q-trad experiment order
 
@@ -754,7 +754,9 @@ sessions, volatility conditions and events.
 
 ## 10. Candidate experiment cards
 
-These are research specifications, not instructions to implement in the current phase.
+These are candidate research specifications. The current framework proof may implement simple
+versions where they exercise the common forecast, shadow outcome and evaluation contracts; it must
+not present the resulting short sample as an effectiveness claim.
 
 ### E01 — intraday volatility baseline
 
@@ -975,8 +977,9 @@ adding more model papers.
 - Separate new evidence from changed judgement in the revision log.
 - Reassess fast-moving ML, foundation-model, 0DTE and market-structure sections every six
   months.
-- Do not turn a research priority into an implementation work package until the current
-  data-only phase is complete and project governance explicitly admits it.
+- Turn a research priority into an implementation work package only when the active plan identifies
+  the hypothesis, minimum data, baseline, falsification condition and result needed for the next
+  viability decision.
 
 ## 15. Revision log
 

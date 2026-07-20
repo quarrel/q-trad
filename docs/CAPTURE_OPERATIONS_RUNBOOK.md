@@ -3,6 +3,11 @@
 This runbook deploys a demo-only market-data collector. It does not authorise any order,
 paper-execution or production-provider operation.
 
+The detailed `capture-v1` qualification and storage sections preserve the original evidence
+procedure for reconstruction. ADR 0026 and the active `PLAN.md` determine which gates apply to a new
+research-universe release. Do not repeat historical ceremony unless it protects a current measured
+risk. Publication, deployment, restart and cloud changes still require explicit authority.
+
 ## OCI operator steps
 
 1. Create a dedicated capture compartment in Sydney and require MFA for the operator.
@@ -117,8 +122,10 @@ sudoedit /etc/qtrad/capture-backup.env
 
 Only `QTRAD_BACKUP_BUCKET` normally needs changing. The file deliberately contains no OCI,
 IG or PostgreSQL credential: backup and restore use the host's instance principal and the
-running database container. Before enabling either timer, prove the policy with one manual
-backup and one manual restore verification.
+running database container. `QTRAD_RESTORE_MIN_FREE_BYTES` is the preflight floor for Docker's
+disk-backed restore volume; keep the 32 GiB initial value only while it comfortably exceeds the
+measured restored database footprint. Before enabling either timer, prove the policy with one
+manual backup and one manual restore verification.
 
 Qualification-era images write `qtrad-capture-backup-v1`. A later reviewed release containing
 ADR 0019 writes self-hashed v2 manifests that additionally bind capture source, universe name and
@@ -208,6 +215,12 @@ new image against schema `0007` before retrying the migration; never delete an a
 - Install the capture, ingest, backup, weekly restore-verification and healthwatch systemd units
   and timers from `ops/systemd/`. Enable them only after their manual gates pass. The
   collector must continue after SSH or Bastion disconnects.
+- Healthwatch reads both readiness and system evidence. Its fail-closed metric set includes current
+  heartbeat health/age/count, queue depth/high-water, q-trad drops, Lightstreamer loss, reconnect and
+  subscription/server errors, projection lag, backup/restore age, disk capacity, and Chrony source,
+  synchronisation, leap and absolute-offset evidence. The initial clock gate is 100 ms; tune it only
+  from retained normal observations. A healthy process or quiet PRICE feed does not substitute for a
+  current heartbeat.
 - `compose.capture.yaml` deliberately gives ingest no Docker restart policy. Systemd permits at
   most three failed ingest starts per hour with a 60-second delay and then leaves
   `qtrad-ingest.service` failed for monitoring/operator review. This prevents process recreation
@@ -237,7 +250,11 @@ new image against schema `0007` before retrying the migration; never delete an a
   --list`, and upload it with its checksum and a manifest binding the universe and image
   digests. Bucket lifecycle rules retain 14 daily and 8 weekly copies. A weekly job verifies
   the latest daily archive in an isolated, networkless, temporary PostgreSQL container
-  using the manifest-pinned database image before recording success.
+  using the manifest-pinned database image before recording success. Restore data uses a uniquely
+  named Docker disk volume rather than host RAM. The helper checks Docker-root free space before
+  downloading anything and removes the container, volume and downloaded bundle after either
+  success or failure. A failed status remains an alarm and qualification failure; do not substitute
+  checksum-only success for a completed logical restore.
 - Generate backup universe identity by running the already-pinned application digest directly with
   no network and a read-only root filesystem. Never launch a backup helper in the collector's Compose
   project: ingestion uses `--abort-on-container-exit`, so an unrelated successful one-off exit would
@@ -481,7 +498,8 @@ The command exits non-zero but still writes reviewable evidence when an expected
 fails, including an HTTP 503 readiness response or unreconciled pre-candidate run. A successful
 automatic result still reports `qualification_decision=PENDING_OPERATOR_REVIEW`: inspect and record
 candidate-gap classification, bounded container-log history, OCI/Beszel monitoring history and the
-active-market representativeness of the candidate window in `docs/CAPTURE_V1_QUALIFICATION.md`.
+  active-market representativeness of the candidate window in
+  `docs/archive/capture-v1/CAPTURE_V1_QUALIFICATION.md`.
 This review is distinct from ADR 0018's later physical-storage comparison. Never edit the generated
 JSON; copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered
 output name for a later retry; the helper will not overwrite the first attempt.
@@ -531,9 +549,11 @@ evidence reference. A verification failure leaves the bundle untouched and canno
 editing or rehashing it; preserve the failed bundle and recapture to a new directory only when the
 reviewed protocol permits.
 
-This bundle is retained operator evidence, not a third qualification decision and not an automated
-claim that the logs are complete or healthy. Review the first/last timestamps, log-rotation metadata,
-reboots and all relevant messages against the full candidate window. Reference the manifest path and
+This bundle is retained operator evidence, not a third qualification decision. Its manifest contains
+a verifier-recomputed lifecycle summary of exact heartbeat, status, staleness, retry, loss, queue and
+subscription/server-error events from the bounded ingest log. Review that summary together with the
+first/last timestamps, log-rotation metadata, reboots and all relevant messages against the full
+candidate window; it does not by itself prove that retained logs cover the window. Reference the manifest path and
 `manifest_sha256` from bounded gap/log reviews. Never commit the bundle or raw logs to Git, and never
 edit a retained file; a failed capture gets a new output directory.
 
@@ -687,9 +707,10 @@ symlinks and overwrite. A valid failed operator review still writes a self-hashe
 and exits non-zero; malformed, incomplete, mismatched or tampered input writes nothing. Only a
 self-hashed final v2 `PASS` closes `capture-v1` qualification.
 
-Only after that evidence passes may the candidate 20-instrument universe receive reviewed
-IG epics and become a new capture configuration. It must pass its own 72-hour
-qualification. A failed or ambiguous mapping leaves the collector on `capture-v1`.
+This was the original `capture-v1` closure gate. Under ADR 0026 it no longer blocks bounded review
+of the candidate 20-market universe. Provider mappings still require explicit review, and any new
+configuration still requires proportionate active-market delivery/loss/lag evidence plus a separate
+approved deployment. A failed or ambiguous mapping is quarantined rather than guessed.
 
 ### Physical storage growth
 
@@ -727,7 +748,7 @@ reports JSON text-rendering sample size, individual index byte/scan deltas, and 
 representation-code counts when migration `0007` is present. Offline comparison attributes combined
 retained growth to heap, indexes and auxiliary PostgreSQL storage, reports the
 canonical-event/raw-message ratio and derives the representations added during the interval. Follow
-`docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or 100,000 new raw messages,
+`docs/archive/capture-v1/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or 100,000 new raw messages,
 whichever is longer, and reject a restart/statistics-reset interval for index-usage conclusions. Do
 not remove an index or change payload representation from one small sample.
 
@@ -803,14 +824,16 @@ relation bytes implied over one, 30 and 365 days if that exact rate continued. T
 sizing scenario only after the evidence gate and active-market review pass; it deliberately excludes
 database-wide catalogue, backup and unrelated-relation growth.
 
-ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
-the active qualification first; do not mix representations within its 72-hour evidence window.
+ADR 0018's changed-field raw representation is a separate candidate release. Do not mix
+representations within an explicitly declared measurement window. Storage optimisation is deferred
+unless current capacity evidence makes it material.
 
 ### `capture-v2` review and explicit promotion
 
-Do not run this provider-backed review until the `capture-v1` qualification gate closes. Run it
-from an isolated operator environment with IG demo credentials; it does not need PostgreSQL and
-must never run on the collector merely to save a workstation REST call.
+Run this provider-backed review from an isolated operator environment with IG demo credentials; it
+does not need PostgreSQL and must never run on the collector merely to save a workstation REST call.
+Before running it while collection continues, confirm the review's REST session cannot disturb the
+active collector session or provider allowance. It must not create a second Lightstreamer connection.
 
 ```bash
 uv run qtrad instruments review \

@@ -67,22 +67,6 @@ quote_currency = "JPY"
 search_aliases = ["EUR/JPY"]
 
 [[instrument]]
-id = "fx:eur-gbp"
-display_name = "EUR/GBP"
-asset_class = "FX"
-base_currency = "EUR"
-quote_currency = "GBP"
-search_aliases = ["EUR/GBP"]
-
-[[instrument]]
-id = "fx:usd-cnh"
-display_name = "USD/CNH"
-asset_class = "FX"
-base_currency = "USD"
-quote_currency = "CNH"
-search_aliases = ["USD/CNH"]
-
-[[instrument]]
 id = "index:australia-200"
 display_name = "Australia 200"
 asset_class = "INDEX"
@@ -125,13 +109,6 @@ quote_currency = "EUR"
 search_aliases = ["Germany 40", "DAX"]
 
 [[instrument]]
-id = "index:france-40"
-display_name = "France 40"
-asset_class = "INDEX"
-quote_currency = "EUR"
-search_aliases = ["France 40", "CAC 40"]
-
-[[instrument]]
 id = "index:japan-225"
 display_name = "Japan 225"
 asset_class = "INDEX"
@@ -139,15 +116,39 @@ quote_currency = "JPY"
 search_aliases = ["Japan 225", "Nikkei 225"]
 
 [[instrument]]
-id = "index:hong-kong-hs50"
-display_name = "Hong Kong HS50"
-asset_class = "INDEX"
-quote_currency = "HKD"
-search_aliases = ["Hong Kong HS50", "Hang Seng"]
-
-[[instrument]]
 id = "index:eu-stocks-50"
 display_name = "EU Stocks 50"
 asset_class = "INDEX"
 quote_currency = "EUR"
 search_aliases = ["EU Stocks 50", "Euro Stoxx 50"]
+
+[[instrument]]
+id = "commodity:spot-gold"
+display_name = "Spot Gold"
+asset_class = "COMMODITY"
+base_currency = "XAU"
+quote_currency = "USD"
+search_aliases = ["Spot Gold", "Gold"]
+
+[[instrument]]
+id = "commodity:spot-silver"
+display_name = "Spot Silver"
+asset_class = "COMMODITY"
+base_currency = "XAG"
+quote_currency = "USD"
+search_aliases = ["Spot Silver", "Silver"]
+
+[[instrument]]
+id = "crypto:bitcoin-usd"
+display_name = "Bitcoin (USD)"
+asset_class = "CRYPTO"
+base_currency = "BTC"
+quote_currency = "USD"
+search_aliases = ["Bitcoin (USD)", "Bitcoin"]
+
+[[instrument]]
+id = "commodity:us-crude"
+display_name = "Oil - US Crude"
+asset_class = "COMMODITY"
+quote_currency = "USD"
+search_aliases = ["Oil - US Crude", "US Crude", "WTI"]

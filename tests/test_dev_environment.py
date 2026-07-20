@@ -44,6 +44,12 @@ def test_dev_container_has_one_image_codex_bootstrap() -> None:
     assert "ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex" in dockerfile
 
 
+def test_dev_container_includes_github_cli() -> None:
+    dockerfile = (REPOSITORY_ROOT / ".devcontainer" / "Dockerfile").read_text()
+
+    assert "\n        gh \\\n" in dockerfile
+
+
 def test_post_install_adds_reviewed_github_actions_toolset_header(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

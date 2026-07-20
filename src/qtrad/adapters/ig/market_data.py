@@ -2063,7 +2063,7 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
 
 
 def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrument) -> bool:
-    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    expected_type = _expected_ig_instrument_type(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     expiry = (_string(search_row, "expiry") or "").upper()
     market_status = (_string(search_row, "marketStatus") or "").upper()
@@ -2079,7 +2079,7 @@ def _search_row_is_review_relevant(
 ) -> bool:
     """Exclude unrelated product families while retaining dated and unavailable evidence."""
 
-    expected_type = "CURRENCIES" if instrument.asset_class is AssetClass.FX else "INDICES"
+    expected_type = _expected_ig_instrument_type(instrument.asset_class)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     return not instrument_type or instrument_type == expected_type
 
@@ -2109,7 +2109,7 @@ def _listing_review_candidate(
     raw_product_type = (
         _string(search_row, "instrumentType") or _string(detail_instrument, "type") or ""
     ).upper()
-    product_type = _review_product_type(raw_product_type)
+    product_type = _review_product_type(raw_product_type, instrument.asset_class)
     raw_expiry = (
         _string(search_row, "expiry") or _string(detail_instrument, "expiry") or ""
     ).upper()
@@ -2186,10 +2186,20 @@ def _listing_review_candidate(
     )
 
 
-def _review_product_type(raw_product_type: str) -> ProductType:
-    if raw_product_type == "CURRENCIES":
+def _expected_ig_instrument_type(asset_class: AssetClass) -> str:
+    if asset_class in {AssetClass.FX, AssetClass.CRYPTO}:
+        return "CURRENCIES"
+    if asset_class is AssetClass.INDEX:
+        return "INDICES"
+    if asset_class is AssetClass.COMMODITY:
+        return "COMMODITIES"
+    raise ValueError(f"unsupported IG asset class: {asset_class}")
+
+
+def _review_product_type(raw_product_type: str, asset_class: AssetClass) -> ProductType:
+    if raw_product_type == "CURRENCIES" and asset_class is AssetClass.FX:
         return ProductType.SPOT_FX
-    if raw_product_type == "INDICES":
+    if raw_product_type == _expected_ig_instrument_type(asset_class):
         return ProductType.ROLLING_CFD
     return ProductType.UNKNOWN
 

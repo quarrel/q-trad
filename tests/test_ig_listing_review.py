@@ -9,7 +9,7 @@ import qtrad.adapters.ig.market_data as ig_market_data
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.instruments import ProductType
+from qtrad.domain.instruments import AssetClass, ProductType
 from qtrad.ports.market_data import (
     InstrumentListingReview,
     ListingExpiryKind,
@@ -85,12 +85,19 @@ def config() -> IgDemoConfig:
     )
 
 
-def detail(*, epic: str, currency: str, minimum: str, bid: str) -> dict[str, object]:
+def detail(
+    *,
+    epic: str,
+    currency: str,
+    minimum: str,
+    bid: str,
+    instrument_type: str = "CURRENCIES",
+) -> dict[str, object]:
     return {
         "instrument": {
             "epic": epic,
             "name": epic,
-            "type": "CURRENCIES",
+            "type": instrument_type,
             "expiry": "DFB",
             "currencies": [{"code": currency}],
             "contractSize": "1",
@@ -211,6 +218,64 @@ async def test_review_enumerates_bounded_candidates_without_selecting_one() -> N
     assert isinstance(first_instrument, dict)
     assert first_instrument["eligible_candidate_count"] == 2
     assert first_instrument["status"] == "OPERATOR_SELECTION_REQUIRED"
+
+
+@pytest.mark.parametrize(
+    ("instrument_id", "provider_type", "asset_class"),
+    (
+        ("commodity:spot-gold", "COMMODITIES", AssetClass.COMMODITY),
+        ("crypto:bitcoin-usd", "CURRENCIES", AssetClass.CRYPTO),
+    ),
+)
+@pytest.mark.asyncio
+async def test_review_supports_non_fx_rolling_cfd_candidates(
+    instrument_id: str,
+    provider_type: str,
+    asset_class: AssetClass,
+) -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v2-candidates.toml"))
+    instrument = next(
+        item for item in catalogue.instruments if item.instrument_id == InstrumentId(instrument_id)
+    )
+    assert instrument.asset_class is asset_class
+    epic = f"CS.D.{instrument_id.upper().replace(':', '').replace('-', '')}.CFD.IP"
+    row: dict[str, object] = {
+        "epic": epic,
+        "instrumentName": instrument.display_name,
+        "instrumentType": provider_type,
+        "expiry": "DFB",
+        "marketStatus": "TRADEABLE",
+    }
+    service = ReviewService(
+        [row],
+        {
+            epic: detail(
+                epic=epic,
+                currency=instrument.quote_currency,
+                minimum="0.1",
+                bid="1",
+                instrument_type=provider_type,
+            )
+        },
+    )
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        FixedClock(),
+        instruments_by_id={instrument.instrument_id: instrument},
+        preferred_epics={},
+        service_factory=lambda _: service,
+    )
+
+    await adapter.connect()
+    try:
+        reviews = await adapter.review_listings((instrument.instrument_id,))
+    finally:
+        await adapter.disconnect()
+
+    assert len(reviews) == 1
+    assert len(reviews[0].candidates) == 1
+    assert reviews[0].candidates[0].eligible is True
+    assert reviews[0].candidates[0].product_type is ProductType.ROLLING_CFD
 
 
 @pytest.mark.asyncio

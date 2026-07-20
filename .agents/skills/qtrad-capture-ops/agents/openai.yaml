@@ -1,4 +1,0 @@
-interface:
-  display_name: "q-trad Capture Operations"
-  short_description: "Safely operate q-trad capture infrastructure"
-  default_prompt: "Use $qtrad-capture-ops to perform this collector operation against the reviewed q-trad runbook and evidence gates."

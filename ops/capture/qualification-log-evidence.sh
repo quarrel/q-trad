@@ -190,11 +190,17 @@ for unit in docker.service qtrad-capture.service qtrad-ingest.service tailscaled
   record_source systemd "$unit" "$file"
 done
 
+summary_filter="$(dirname "${BASH_SOURCE[0]}")/qualification-log-summary.jq"
+readonly summary_filter
+[[ -f "$summary_filter" && ! -L "$summary_filter" ]]
+lifecycle_summary="$(jq -ceS -R -s -f "$summary_filter" "$work_dir/container-ingest.log")"
+readonly lifecycle_summary
+
 rm "$work_dir/compose.json"
 created_at="$now"
 identity="$(
   jq -cS -n \
-    --arg schema qtrad-capture-qualification-log-bundle-v1 \
+    --arg schema qtrad-capture-qualification-log-bundle-v2 \
     --arg created_at "$created_at" \
     --arg window_start "$window_start" \
     --arg window_end "$window_end" \
@@ -202,10 +208,11 @@ identity="$(
     --arg tool_sha256 "$tool_sha256" \
     --argjson containers "$container_rows" \
     --argjson sources "$source_rows" \
+    --argjson lifecycle_summary "$lifecycle_summary" \
     '{schema:$schema,created_at:$created_at,
       qualification_evidence_sha256:$qualification_evidence_sha256,
       window_start:$window_start,window_end:$window_end,tool_sha256:$tool_sha256,
-      containers:$containers,sources:$sources}'
+      containers:$containers,sources:$sources,lifecycle_summary:$lifecycle_summary}'
 )"
 readonly identity
 manifest_sha256="$(printf '%s' "$identity" | sha256sum | cut -d ' ' -f 1)"

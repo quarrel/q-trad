@@ -2,176 +2,167 @@
 
 ## Purpose and authority
 
-This file contains enduring instructions for humans and automated agents working on q-trad. It is not a progress log.
+q-trad exists to find out, as efficiently and honestly as possible, whether short-horizon
+factor-style strategies can produce useful results after realistic costs. The system must support
+many strategies running continuously against live data, mostly in shadow paper mode, so their
+forecasts and hypothetical outcomes can be compared, ranked, selected for the current market state
+and eventually retired when they no longer justify attention.
 
-Read sources in this order:
+Read only the documents needed for the work. The normal critical path is:
 
 1. `AGENTS.md`
-2. accepted records in `docs/adr/`
-3. `docs/ARCHITECTURE.md`
-4. `PLAN.md`
-5. `docs/STATUS.md`
-6. `PREPLAN.md`
-7. executable tests and code
+2. `PLAN.md`
+3. `docs/STATUS.md`
+4. the relevant part of `docs/ARCHITECTURE.md`
+5. accepted ADRs and task-specific runbooks only when the change touches their decision or operation
+6. `PREPLAN.md` for product vocabulary and longer-term intent
 
-When sources disagree, stop and reconcile the higher-authority source. Update this file only when an enduring rule, boundary, term or safety invariant changes. Put current progress in `docs/STATUS.md`.
+`docs/archive/` is historical evidence, not required context. Do not read it unless reconstructing a
+past decision or incident. Progress history belongs in the archive, not in active planning documents.
+
+Keep active documentation concise. Update a document only when its current truth changes. Do not
+make every agent repeatedly ingest completed work, command transcripts, hashes or dated evidence.
+Archive material that remains useful for reconstruction but no longer guides the next decision.
 
 ## Current phase
 
-The current phase is data-only:
+The current phase is the **research-framework proof**:
 
-> IG demo data → raw audit record → canonical quote events → one-minute bars → PostgreSQL → Parquet → deterministic replay → read-only operator console.
+> reliable IG demo data → reviewed research universe → comparable strategy forecasts → causal
+> shadow paper outcomes → simple effectiveness ranking → reproducible experiment report.
 
-No order placement, paper execution, signal strategy, allocation, risk or P&L implementation belongs in this phase.
+The existing seven-market `capture-v1` collector is an ingestion proof and is currently running on
+OCI. Treat it as evidence-bearing operational state. The next intended universe is approximately 20
+liquid IG demo markets, beginning with `config/capture-v2-candidates.toml`; that catalogue has no
+selection or deployment authority.
 
-The fixed canonical universe is:
+This phase may implement historical replay, signal strategies, shadow paper execution, fixed sizing
+and limits, virtual positions/P&L, strategy evaluation, simple market-state observations and
+deterministic ranking. It must not add an IG order operation, production IG endpoint, broker-order
+port, automatic real-capital promotion or live execution.
 
-- `fx:aud-usd`
-- `fx:eur-usd`
-- `fx:usd-jpy`
-- `fx:gbp-usd`
-- `index:australia-200`
-- `index:us-500`
-- `index:ftse-100`
+When experimental learning and operational hardening compete, prefer experimental learning unless
+the missing hardening could make a strategy conclusion materially false, irreproducible, unsafe or
+cause loss of the research data needed to support it.
 
-## Non-negotiable architecture
+## Product model
 
-- Build a modular monolith with one application image.
+- A **signal strategy** emits a timestamped forecast or target for a declared instrument set,
+  horizon and return definition.
+- A **strategy evaluator** pairs forecasts with later outcomes and calculates comparable,
+  time-ordered measures such as Rank IC, cost-aware paper P&L and stability.
+- A **market-state model** describes contemporaneously observable conditions; it does not claim an
+  objective regime or select a strategy by itself.
+- A **strategy selector** ranks strategies using only information available at the decision time and
+  records eligibility or selection.
+- An **allocation engine** applies capital/risk budgets to selected strategies. Selection and sizing
+  are different decisions.
+- Unselected strategies normally remain `SHADOW` so their forecasts and hypothetical outcomes are
+  retained. A bounded lifecycle may later move strategies through `CANDIDATE`, `SHADOW`, `ELIGIBLE`,
+  `SELECTED`, `PAUSED` and `RETIRED`.
+
+The first implementation proves these contracts with a few simple strategies and a transparent
+ranking rule. It does not need sophisticated regime inference, automated pruning or a claim of
+profitability.
+
+## Research validity
+
+Correctness is required where an error could create false confidence:
+
+- no look-ahead, including warm-up, regime labels, selection and outcome windows;
+- explicit source, receive and decision time in UTC;
+- executable bid/ask evidence rather than midpoint fills;
+- explicit spread, latency, adverse slippage and unsupported cost assumptions;
+- `Decimal` for prices, quantities and money;
+- known product economics, sessions and currency conversion for paper eligibility;
+- visible gaps, dropped callbacks, stale inputs and excluded intervals;
+- retained forecasts for selected and unselected strategies;
+- deterministic datasets, configuration, replay, scoring and reports;
+- independent P&L arithmetic and simple benchmarks;
+- time-ordered out-of-sample evaluation before an effectiveness claim.
+
+Rank IC is an evaluation input, not profitability. Its forecast unit, horizon, cross-sectional or
+time-series basis, rolling window, overlapping observations, minimum sample and regime conditioning
+must be versioned before results are compared.
+
+## Architecture and implementation
+
+- Keep one modular Python application and image. Add a process only for demonstrated lifecycle or
+  failure isolation.
 - Dependency direction is `domain ← ports ← application ← adapters/runtime/API`.
-- Domain code must not import FastAPI, SQLAlchemy, `trading-ig`, environment configuration or filesystem code.
-- Broker/provider types and identifiers stop at adapter boundaries.
-- Convert external values to canonical types immediately.
-- Use immutable domain values and append-only canonical events.
-- Treat projections as rebuildable views, never canonical truth.
-- Use timezone-aware UTC internally and inject clocks.
-- Use `Decimal` for prices, sizes, money and quantities.
-- No production IG endpoint or order-submission command may exist during this phase.
-- Secrets and session tokens must never enter events, raw capture, logs, fixtures or version control.
+- Domain code must not import frameworks, provider libraries, environment configuration or
+  filesystem code.
+- Convert provider values at adapter boundaries and prevent provider identifiers from becoming
+  canonical identity.
+- Use frozen domain values, injected clocks and synchronous deterministic transformations.
+- Keep `asyncio` at I/O/orchestration boundaries.
+- Prefer functions and composition over pass-through service layers. Allow local duplication until
+  two concrete uses demonstrate a stable shared invariant.
+- Do not add Redis, Kafka, Celery, TimescaleDB, React, Kubernetes or another top-level runtime
+  product without measured need and an ADR.
+- Do not build a market-state, selector, sleeve, allocation or execution abstraction beyond what a
+  current experiment exercises.
 
-## External I/O safety
+## Experimental compatibility and data retention
 
-- Treat broker, streaming and database connections as explicit state machines, not
-  booleans.
-- A successful method return, socket connection or subscription request is not readiness.
-  Readiness requires bounded, domain-relevant evidence from every required channel.
-- Measure stream freshness per required channel from received transport evidence, not from
-  price movement or aggregate stream activity. Quiet markets are not, by themselves,
-  transport failures.
-- Tag callbacks and queued records with a connection generation and ignore superseded
-  generations.
-- Give library-managed retries an application watchdog; no degraded or retrying state may
-  suppress staleness detection indefinitely.
-- Share retry budgets across recreated client objects, classify provider failures and use
-  capped jittered backoff with a circuit-breaker cooldown.
-- Do not report an unbounded process as `COMPLETED` because an external iterator ended.
-  Recovery exhaustion is `FAILED`; an explicit clean stop is `STOPPED`.
-- Verify transport tasks, threads, sessions and processes have ended before declaring
-  disconnect or restart complete.
+Before the first decision-grade strategy result, internal schemas, events and APIs may change
+incompatibly. Prefer a documented one-time migration, re-export or clean rebuild over dual readers,
+dual writers and indefinite legacy compatibility.
 
-## Operational evidence safety
+Classify state before changing it:
 
-- Treat the collector host, capture database and qualification artifacts as
-  evidence-bearing operational state. Remote inspection is read-only by default.
-- Do not deploy, restart, migrate, reconcile, reprocess or perform operator-initiated
-  database maintenance during a qualification or measurement interval unless that action
-  is explicitly required by its reviewed protocol. An unplanned mutation invalidates the
-  affected interval; stop and report it.
-- Raw capture and canonical events are immutable audit evidence. Do not rewrite or
-  selectively delete historical rows to optimise storage. Apply representation changes
-  only to future versioned capture. Retiring a historical epoch requires an accepted
-  retention decision, hash-bound archive and verified restore/replay.
-- Use checked-in guarded operational commands and immutable image digests. Do not
-  improvise mutating SQL or use mutable image tags against the collector.
-- Never print secret-bearing environment files or rendered Compose configuration. Keep
-  control-plane credentials off workload hosts and prefer scoped workload identities such
-  as OCI instance principals.
-- After an external control-plane write, read the resource back and verify its effective
-  state; command completion alone is not evidence of the intended result.
+- development databases, projections and failed local experiments are disposable;
+- market data or manifests cited by a retained result are research evidence;
+- material collector failures may be retained as incident evidence;
+- the live collector's raw and canonical history is operational evidence until a reviewed snapshot,
+  retention or replacement decision says otherwise.
 
-## Repository synchronisation
+Never rewrite or selectively delete the running collector's raw or canonical history. This rule
+protects current evidence; it does not require every future schema to read every experimental epoch.
 
-- The canonical private Git remote is `https://github.com/quarrel/q-trad.git` as
-  `origin`. Push reviewed, committed work to `origin` regularly in bounded batches so the
-  remote does not materially lag the development checkout.
-- Never push secrets, local credentials, generated capture data or unfinished operational
-  evidence. Check the worktree and outgoing commits before every push.
+## External I/O and collector safety
 
-## Code-intelligence safety
+- The collector is IG demo data-only. No production endpoint or order submission may exist.
+- Treat broker, stream and database connections as explicit lifecycles with bounded readiness,
+  recovery and shutdown.
+- Readiness requires relevant channel evidence; a connected socket or aggregate activity is not
+  sufficient. Quiet prices alone are not transport failure.
+- Tag callbacks with a connection generation and ignore superseded work.
+- Bound queues and make loss, lag and recovery exhaustion visible. An unbounded collector ends only
+  as explicit `STOPPED` or truthful `FAILED`.
+- Do not deploy, restart, migrate, reconcile or maintain the collector during an active measurement
+  interval unless its reviewed protocol requires it.
+- Collector observation is read-only by default. Deployment, provider experiments, evidence writes
+  and cloud changes require their task-specific runbook and explicit authority.
+- Never expose credentials, account identifiers, rendered secret-bearing configuration or session
+  tokens in logs, fixtures, events, tools or version control.
 
-- Tilth may index files ignored by Git. Restrict searches with a tracked-source glob such
-  as `*.py` or `*.md`; never search `.env`, `.devcontainer/local`, caches, captured data or
-  credential material through Tilth.
+## Working method
 
-## Terminology
+Before changing code, read the active `PLAN.md` milestone, `docs/STATUS.md`, existing contracts and
+relevant tests. Confirm the change advances the research-framework proof or a necessary correctness
+boundary.
 
-Use the vocabulary in `PREPLAN.md`. In particular:
+Run checks in proportion to the change:
 
-- operator console
-- market-state model
-- allocation engine
-- strategy sleeve
-- signal strategy
-- execution algorithm
-- broker adapter
-- paper execution engine
-- canonical event store
-- research data store
+- focused tests and static checks while iterating;
+- the complete clean PostgreSQL, formatting, lint, typing and test gate at a milestone or release
+  boundary;
+- credential-gated or endurance checks only when their behaviour is the subject of the change.
 
-Do not use “algorithm” when “signal strategy” or “execution algorithm” is meant. Do not use “trade” where order, fill, position change or round trip is the actual concept.
+Update `PLAN.md`, `docs/STATUS.md` or `docs/ARCHITECTURE.md` only when their claims changed. Add or
+supersede an ADR only for a durable architectural decision, not ordinary implementation detail.
 
-## Python style
+Stop rather than guess when an instrument mapping, timestamp, price basis, product economics or
+currency conversion is ambiguous; when a change could reach a live broker endpoint; or when
+credentials or evidence could be exposed.
 
-- Target Python 3.13.
-- Use en-GB in documentation, comments and operator-facing text.
-- Use frozen dataclasses for domain values and Pydantic at I/O boundaries.
-- Require strict typing in `domain`, `ports` and `application`.
-- Keep domain transformations synchronous and deterministic.
-- Keep `asyncio` at I/O and orchestration boundaries.
-- Prefer protocols and composition over inheritance.
-- Catch broad exceptions only at a process or adapter boundary; classify them before reporting.
-- Use structured logs with stable event names and bounded fields.
-- Add docstrings where they explain a public contract or invariant, not obvious syntax.
+Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and application code.
+Unexpected required-field and computation failures must propagate with context rather than becoming
+plausible defaults.
 
-## Reuse and sprawl controls
+## GitHub workflow verification
 
-- Search before adding an abstraction.
-- Do not create `utils.py`, generic base classes or a “common” package.
-- Allow local duplication until two concrete uses demonstrate the same stable invariant.
-- A new top-level package, process, datastore, queue, framework or runtime dependency requires an ADR.
-- A process split requires evidence of failure isolation, security or scaling need.
-- Spike code must be deleted or promoted through normal contracts and tests.
-- Do not add empty packages for future PREPLAN phases.
-- Do not add Redis, Kafka, Celery, TimescaleDB, React, Kubernetes or NautilusTrader in this phase.
-
-## Required workflow
-
-Before changing code:
-
-1. Read `docs/STATUS.md` and the active `PLAN.md` work package.
-2. Inspect existing contracts and tests.
-3. Confirm the change is inside the current phase.
-
-Before marking work complete:
-
-1. Run formatting checks, linting, strict type checks and relevant tests.
-2. Update `PLAN.md` status and evidence.
-3. Update `docs/STATUS.md`.
-4. Update `docs/ARCHITECTURE.md` if implemented structure or flow changed.
-5. Add or supersede an ADR if an architectural decision changed.
-
-For long-running external I/O, also prove readiness, degraded recovery, retry exhaustion,
-clean shutdown and process exit. A short happy-path smoke cannot substitute for those
-lifecycle gates.
-
-Run projection rebuild and other whole-store integration tests against an isolated,
-migrated database by default. Use a long-lived soak database only when measuring its
-accumulated-data behaviour is the explicit objective.
-
-Stop and report rather than guess if:
-
-- an IG instrument mapping is ambiguous;
-- an event’s timestamp or price basis cannot be established;
-- a schema change would reinterpret existing facts;
-- a proposed change could reach a live broker endpoint;
-- a broker-specific convenience would leak into the domain;
-- credentials or account data could be exposed.
+The GitHub MCP fine-grained PAT cannot be granted Checks API access. This is an expected platform
+limitation, not a missing permission or merge blocker. Verify CI through the GitHub Actions workflow
+run tools for the exact commit instead; do not repeatedly raise unavailable check-run access.

@@ -1,8 +1,33 @@
-# Paper vertical-slice acceptance scenarios
+# Research-framework paper acceptance scenarios
 
-These scenarios are the executable contract for the next phase. Each identifier must map
-to automated tests and, where stated, operational evidence before its work package is
-`DONE`.
+These scenarios are the correctness contract for the framework proof. Implement the smallest set
+needed by the active milestone; longer operational evidence is not a prerequisite for causal domain
+and evaluator work.
+
+## Strategy population and evaluation
+
+### PS-E01 — common eligible observations
+
+Given several applicable strategies in one run, when an eligible completed bar arrives, then every
+strategy receives the same ordered observation and records a versioned forecast or explicit
+no-forecast outcome.
+
+### PS-E02 — causal outcome pairing
+
+Given a forecast with a declared horizon, when its outcome becomes eligible, then evaluation uses
+only later observations, records exclusions for unhealthy intervals and cannot change the earlier
+forecast or selection.
+
+### PS-E03 — deterministic ranking
+
+Given a pinned dataset, score definition and strategy population, when evaluation is replayed, then
+forecast coverage, scores and rank order are identical. Unselected strategies remain in the result.
+
+### PS-E04 — market-state timing
+
+Given a strategy ranking conditioned on market state, when the state is evaluated, then it uses only
+features available at the selection time and compares against an unconditional baseline. `UNKNOWN`
+state cannot be coerced into a favourable label.
 
 ## Causal allocated path
 
@@ -99,9 +124,9 @@ freshness, mode, quality and model versions without ambiguous “trade” termin
 Given stale data, projection lag, risk denial or a halted run, when console data refreshes,
 then the state is visibly distinct from healthy PAPER and SHADOW operation.
 
-### PS-O03 — multi-day paper soak
+### PS-O03 — representative live-paper observation
 
-Given the accepted frozen candidate, when live IG demo data drives allocated and shadow
-paper paths for multiple active sessions and a deliberate restart, then all instruments
-remain observable, no duplicate facts occur, gaps/drops/lag are reviewed, ledgers
-reconcile and final replay is deterministic.
+Given a frozen framework candidate, when live IG demo data drives selected and shadow paper paths
+through a representative active interval and deliberate restart, then no duplicate facts occur,
+gaps/drops/lag are visible, ledgers reconcile and final replay is deterministic. Require a multi-day
+soak only when unattended endurance is the experiment under review.
