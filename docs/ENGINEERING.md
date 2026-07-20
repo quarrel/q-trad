@@ -80,3 +80,15 @@ Do not scaffold future strategy/execution packages until their phase begins.
 - `uv run ruff check src tests`
 - `uv run pyright`
 - `uv run ty check`
+
+Run focused checks during iteration and the complete clean database/static/test gate at a milestone
+or release boundary. Credential-gated and endurance tests are required only when their behaviour is
+under change; never report a skipped gate as passing.
+
+## Documentation budget
+
+- Keep active documentation about current intent, facts, risks and next decisions.
+- Archive completed chronology, hashes and incident narratives outside the routine reading path.
+- Update only documents whose claims changed; an ordinary code change does not require edits to
+  every governance file.
+- Use an ADR for a durable, costly-to-reverse decision, not a reversible experiment detail.

@@ -1,8 +1,8 @@
 # Paper vertical-slice research record
 
-**Status:** In progress while the data-foundation soak runs
-**Purpose:** record bounded questions, evidence and adopt/reject outcomes for the next
-phase. This is not strategy-performance evidence.
+**Status:** Baseline research for the framework proof
+**Purpose:** retain bounded fill, session, economics and data decisions needed to avoid false
+strategy results. This is not itself strategy-performance evidence.
 
 ## S1 — live quote and timestamp evidence
 

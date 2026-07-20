@@ -3,6 +3,11 @@
 This runbook deploys a demo-only market-data collector. It does not authorise any order,
 paper-execution or production-provider operation.
 
+The detailed `capture-v1` qualification and storage sections preserve the original evidence
+procedure for reconstruction. ADR 0026 and the active `PLAN.md` determine which gates apply to a new
+research-universe release. Do not repeat historical ceremony unless it protects a current measured
+risk. Publication, deployment, restart and cloud changes still require explicit authority.
+
 ## OCI operator steps
 
 1. Create a dedicated capture compartment in Sydney and require MFA for the operator.
@@ -493,7 +498,8 @@ The command exits non-zero but still writes reviewable evidence when an expected
 fails, including an HTTP 503 readiness response or unreconciled pre-candidate run. A successful
 automatic result still reports `qualification_decision=PENDING_OPERATOR_REVIEW`: inspect and record
 candidate-gap classification, bounded container-log history, OCI/Beszel monitoring history and the
-active-market representativeness of the candidate window in `docs/CAPTURE_V1_QUALIFICATION.md`.
+  active-market representativeness of the candidate window in
+  `docs/archive/capture-v1/CAPTURE_V1_QUALIFICATION.md`.
 This review is distinct from ADR 0018's later physical-storage comparison. Never edit the generated
 JSON; copy it with its `evidence_sha256` intact. Preserve failed evidence and use a new numbered
 output name for a later retry; the helper will not overwrite the first attempt.
@@ -701,9 +707,10 @@ symlinks and overwrite. A valid failed operator review still writes a self-hashe
 and exits non-zero; malformed, incomplete, mismatched or tampered input writes nothing. Only a
 self-hashed final v2 `PASS` closes `capture-v1` qualification.
 
-Only after that evidence passes may the candidate 20-instrument universe receive reviewed
-IG epics and become a new capture configuration. It must pass its own 72-hour
-qualification. A failed or ambiguous mapping leaves the collector on `capture-v1`.
+This was the original `capture-v1` closure gate. Under ADR 0026 it no longer blocks bounded review
+of the candidate 20-market universe. Provider mappings still require explicit review, and any new
+configuration still requires proportionate active-market delivery/loss/lag evidence plus a separate
+approved deployment. A failed or ambiguous mapping is quarantined rather than guessed.
 
 ### Physical storage growth
 
@@ -741,7 +748,7 @@ reports JSON text-rendering sample size, individual index byte/scan deltas, and 
 representation-code counts when migration `0007` is present. Offline comparison attributes combined
 retained growth to heap, indexes and auxiliary PostgreSQL storage, reports the
 canonical-event/raw-message ratio and derives the representations added during the interval. Follow
-`docs/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or 100,000 new raw messages,
+`docs/archive/capture-v1/CAPTURE_STORAGE_AUDIT.md`: use at least six active-market hours or 100,000 new raw messages,
 whichever is longer, and reject a restart/statistics-reset interval for index-usage conclusions. Do
 not remove an index or change payload representation from one small sample.
 
@@ -817,14 +824,16 @@ relation bytes implied over one, 30 and 365 days if that exact rate continued. T
 sizing scenario only after the evidence gate and active-market review pass; it deliberately excludes
 database-wide catalogue, backup and unrelated-relation growth.
 
-ADR 0018's changed-field raw representation is a separate candidate release. Measure and complete
-the active qualification first; do not mix representations within its 72-hour evidence window.
+ADR 0018's changed-field raw representation is a separate candidate release. Do not mix
+representations within an explicitly declared measurement window. Storage optimisation is deferred
+unless current capacity evidence makes it material.
 
 ### `capture-v2` review and explicit promotion
 
-Do not run this provider-backed review until the `capture-v1` qualification gate closes. Run it
-from an isolated operator environment with IG demo credentials; it does not need PostgreSQL and
-must never run on the collector merely to save a workstation REST call.
+Run this provider-backed review from an isolated operator environment with IG demo credentials; it
+does not need PostgreSQL and must never run on the collector merely to save a workstation REST call.
+Before running it while collection continues, confirm the review's REST session cannot disturb the
+active collector session or provider allowance. It must not create a second Lightstreamer connection.
 
 ```bash
 uv run qtrad instruments review \

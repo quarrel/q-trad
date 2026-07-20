@@ -15,6 +15,8 @@ from qtrad.domain.time import require_utc
 class AssetClass(StrEnum):
     FX = "FX"
     INDEX = "INDEX"
+    COMMODITY = "COMMODITY"
+    CRYPTO = "CRYPTO"
 
 
 class ProductType(StrEnum):

@@ -11,16 +11,18 @@ duplicate the runbook or invent an easier operational path.
 ## Establish authority and scope
 
 1. Work from the repository root and read `AGENTS.md`.
-2. Read the active WP8 section in `PLAN.md` and the capture-operations section in
+2. Read the active universe/collector milestone in `PLAN.md` and the current risks/actions in
    `docs/STATUS.md`.
 3. Read only the relevant headings in `docs/CAPTURE_OPERATIONS_RUNBOOK.md`.
-4. Read the accepted ADR governing the operation. Usually select among:
+4. Read ADR 0026 for the current proportionality boundary plus the accepted ADR governing the
+   operation. Usually select among:
    - `docs/adr/0012-capture-operations-release.md` for isolation, release and recovery;
    - `docs/adr/0018-lightstreamer-delta-capture-and-storage-evidence.md` and
      `docs/adr/0020-raw-payload-representation-and-legacy-epochs.md` for storage;
    - `docs/adr/0019-verified-snapshot-to-research-import.md` for backups and research import.
-5. Confirm the requested action remains demo-only and inside the data-only phase. Stop if it
-   could reach an order API, a production IG endpoint or a paper/research writer on the collector.
+5. Confirm the requested action remains demo-only and inside the active research-framework phase.
+   Stop if it could reach an order API, a production IG endpoint or a paper/research writer on the
+   collector.
 
 ## Classify the operation
 

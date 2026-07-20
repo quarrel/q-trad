@@ -1,7 +1,7 @@
 [project]
 name = "q-trad"
 version = "0.1.0"
-description = "Broker-neutral intraday trading data foundation"
+description = "Experimental framework for short-horizon strategy research and shadow paper evaluation"
 readme = "README.md"
 requires-python = ">=3.13,<3.14"
 dependencies = [
