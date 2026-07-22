@@ -5,8 +5,9 @@
 
 ## Context
 
-The seven-market data foundation is sufficient to begin research-framework work, but capture release
-qualification accumulated production-style compatibility and evidence machinery while strategy
+The former seven-market data foundation was sufficient to begin the original research-framework
+work, but capture-release qualification accumulated production-style compatibility and evidence
+machinery while strategy
 evaluation remained prohibited. q-trad is an experimental single-user project whose continuation
 depends on obtaining trustworthy strategy evidence.
 
