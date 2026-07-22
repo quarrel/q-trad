@@ -6,6 +6,6 @@ universe_configuration_hash = "eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b
 schema_head = "0010"
 
 [rollback]
-release_commit = "1cbfda41d9b57f76c1d33e919fbdc22f949ea688"
-application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:0ebdf75d5abb484c14b0dac7375ceba8533e275ac8072653abb8354746b7a3bb"
+release_commit = "5c1dce7b276f42b7bbf4dde1dff07b0b33844886"
+application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:d66c2525f69130c48d6ce59230bcf4a2972cae3b87f5b9fb702c2bb80a051c7f"
 universe_name = "capture-v4"
