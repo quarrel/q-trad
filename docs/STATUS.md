@@ -1,76 +1,67 @@
 # Current status
 
 **Updated:** 2026-07-22
-**Current milestone:** M4 — simple market-state comparison
-**State:** `capture-v3` deployed; 20/20 channels ready with Bitcoin and VIX quarantined
+**Current milestone:** R0 — alignment, coverage and data readiness
+**State:** `capture-v3` is live with 20/20 channels ready; paper research remains offline/replay
 
 ## Working now
 
 - The modular application captures IG demo quotes, preserves raw/canonical facts, builds one-minute
   bars, exports versioned Parquet, replays deterministically and exposes read-only health views.
-- The original seven instruments have validated mappings and have passed bounded live capture,
-  reconnect and endurance work.
-- The OCI collector runs merged commit `33827d5957216865bbdf399f54e72fbfdebc198e`
-  from immutable OCI index digest `sha256:c4959063abb6f9cad618437f66953daf3b615e3830ed342937d47820cbd8cbc9`
-  with `config/capture-v3.toml`. Its deployment observation reached HTTP 200 readiness, 20/20
-  subscribed, updated and recent channels, caught-up projection, queue depth 0 with high-water 20,
-  and zero reconnects, internal drops, Lightstreamer loss, subscription errors or server errors.
-  The prior `ab86b9de` release and `sha256:5849acc0...` image remain the immediate rollback point.
-- Queue-loss and processing-watermark defects found during qualification were corrected. Historical
-  failed evidence remains archived rather than presented as a pass.
-- `capture-v3` adds the reviewed rolling, tradeable HKD mini Hang Seng listing
-  `IX.D.HANGSENG.IFM.IP`. Bitcoin remains isolated and no eligible VIX Web API listing was found, so
-  neither is guessed into capture. WTI uses the approved `CC.D.LCO.USS.IP` mapping. Configuration
-  hash: `50202ef7218f1d9816ebc88673259ecb5470f9360abe6b40f1f730c06d712836`.
-- The collector reads an atomically replaceable mounted universe file. `SIGHUP` validates and
-  synchronises approved listings before replacing subscriptions and starts a new evidence run; an
-  unchanged-file signal was proved live without reconnecting or losing readiness.
-- The local research core now has versioned selected/shadow forecasts, three simple strategy
-  variants plus a no-signal benchmark, exact-horizon causal outcomes, time-series Spearman Rank IC,
-  later healthy bid/ask fills, explicit latency/slippage, isolated reconciling ledgers and a
-  deterministic hash-bound ranking report.
-- The first retained report uses a verified `capture-v1` snapshot, 714 quote-derived bars and 5,070
-  canonical quotes for Australia 200. Replay was byte-identical. Reversal ranked first by Rank IC,
-  but all active strategies lost after costs under every sensitivity; this is a framework proof,
-  not an effectiveness claim. Evidence is in
-  `docs/archive/research-proof/FIRST_RANKING_REPORT.md`.
-- A pre-deployment backup completed successfully before the 2026-07-22 cutover. The latest weekly
-  restore verification remains failed and is a separate operational repair.
-- A current 40-instrument, 200-callback/s disposable-PostgreSQL run persisted all 12,000 callbacks
-  with zero loss, queue high-water 51/10,000, 5.3 ms p95 and 257.6 ms maximum lag, complete-state
-  renewal and clean termination. This provides local headroom beyond the target size; the initial
-  real-provider 19/19 delivery smoke passed, while longer observation remains required.
-- The `capture-v3` release boundary passed the complete clean PostgreSQL, formatting, Ruff, strict
-  typing and test gate in GitHub Actions. Post-deployment ingest used about 11% CPU and 113 MiB after
-  the queue-drain correction, versus about 95% CPU and 1.95 GiB immediately before replacement.
+- The live OCI collector runs the reviewed 20-market `capture-v3` universe. Its initial observation
+  reached 20/20 subscribed, updated and recent channels with caught-up projection, queue depth zero
+  and no observed reconnect, internal-drop, Lightstreamer-loss, subscription or server error.
+- The collector can validate and atomically replace its mounted universe through the reviewed
+  `SIGHUP` path without a second IG session. The previous immutable release remains the rollback
+  point.
+- The current callback-to-PostgreSQL path passed a 40-instrument, 200-callback/s bounded local run
+  with zero loss and sub-second maximum lag, so China/Korea review does not require another general
+  capacity programme.
+- A retained framework proof uses a verified `capture-v1` snapshot for Australia 200. It produced
+  deterministic single-horizon forecasts/outcomes, causal bid/ask paper fills, isolated reconciling
+  ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
+  sensitivities. This proves the old research path, not forecast effectiveness.
+- The active programme now targets multi-horizon local and cross-asset return forecasts followed by
+  explicit cost/risk states and constrained paper portfolio construction. The first full path will
+  be offline and chronological; continuous shadow paper follows only after the offline MVP.
+- All current 20 markets remain potentially tradable subject to experiment role, reviewed product
+  economics, sessions, conversion and data quality. China A50 and Korea 200 are the only immediate
+  APAC capture candidates and have no approved mapping or deployment yet.
 
-## Current risks
+## Current risks and unknowns
 
-- The replaced `capture-v2` run accumulated 451,041 application-side callback drops while its
-  queue was saturated. That interval is not complete market evidence and must be excluded or
-  explicitly gap-qualified in research datasets.
-- The initial 20/20 observation is a deployment smoke, not representative-session evidence;
-  continue observing gaps, loss and lag without protecting an arbitrary interval.
-- Restore verification is currently failed even though the latest backup succeeded.
-- A short forward capture cannot support a strategy-effectiveness conclusion.
-- Existing paper documents contain more hierarchy than the first framework proof may need.
+- The replaced `capture-v2` run accumulated application-side callback drops while saturated. That
+  interval is incomplete market evidence and must remain excluded or explicitly gap-qualified.
+- The initial `capture-v3` observation is a deployment smoke, not representative-session evidence.
+- Weekly restore verification remains failed even though the latest backup succeeded.
+- Native forward history is still short for model selection or an effectiveness claim.
+- Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
+  qualified a quote-imbalance feature. It is not evidence of executed trade volume or CVD.
+- Exact China A50 and Korea 200 IG demo listings, sessions and product economics are unresolved.
+- The historical-data source and licence decision is open. External history will be
+  provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 
 ## Next actions
 
-1. Continue proportionate read-only observation of 20-market delivery, gaps, loss and lag.
-2. Repair and re-run weekly restore verification independently of universe deployment.
-3. Add the first transparent contemporaneous market-state annotation and compare conditional with
-   unconditional strategy scores in locked time order.
-4. Use longer locked time-ordered data before making any strategy-effectiveness claim.
+1. Finish the R0 documentation/archive reset and retain the old ranking proof as historical evidence.
+2. Review China A50 and Korea 200 through the existing non-authoritative catalogue and fail-closed
+   selection flow; prepare `capture-v4` only for accepted listings.
+3. Continue proportionate read-only observation of `capture-v3` delivery, gaps, loss and lag while
+   the review proceeds.
+4. Audit quote-size, session, gap, revision and aligned-bar coverage for the R1 dataset contract.
+5. Combine the user's historical-source work with bounded IG-candle/external-sample, licence and
+   provenance review.
+6. Repair and re-run weekly restore verification independently of universe deployment.
 
-## Historical records
+## Evidence and current authorities
 
-- Data-foundation plan, status, architecture and original product preplan:
-  `docs/archive/data-foundation/`
-- Initial soak, capture qualification, streaming investigation and storage audit:
-  `docs/archive/capture-v1/`
-- Accepted durable decisions: `docs/adr/`
-- Current operational procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
+- Active milestone: `PLAN.md`
+- Trading-research intent and gates: `docs/TRADING_RESEARCH.md`
+- Implemented and intended system shape: `docs/ARCHITECTURE.md`
+- Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
+- Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
+- First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`
+- Superseded plans, qualification and incident evidence: `docs/archive/`
 
-Historical records are consulted only for incident reconstruction, evidence verification or a
-decision they still govern. They are not routine agent context.
+Historical records are consulted only to reconstruct an incident or decision, verify retained
+evidence or handle a compatibility boundary that still affects current work.

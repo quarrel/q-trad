@@ -1,9 +1,8 @@
 # q-trad
 
-q-trad is a single-user experimental framework for testing short-horizon factor-style strategies
-against historical and live IG demo market data. The current objective is a trustworthy loop from
-market data to continuous shadow paper outcomes and reproducible strategy rankings. It has no
-external order capability.
+q-trad is a single-user experimental framework for testing whether short-horizon multi-asset
+forecasts can justify useful paper portfolio positions after realistic costs and joint risk. It has
+no external order capability.
 
 ## Current and intended paths
 
@@ -11,19 +10,31 @@ Implemented data foundation:
 
 ```text
 IG demo / fixtures → raw and canonical PostgreSQL events → one-minute bars
-→ Parquet research datasets → deterministic replay → read-only health views
+→ immutable Parquet research datasets → deterministic replay → read-only health views
 ```
 
-Current extension:
+Retained framework proof:
 
 ```text
-canonical data → comparable strategy forecasts → shadow paper fills/P&L
-→ causal outcomes → effectiveness scores → market-state-aware ranking
+simple single-horizon forecasts → causal outcomes and executable-side shadow fills
+→ independently checked P&L → reproducible ranking report
 ```
 
-The seven `capture-v1` markets proved ingestion. The next candidate research universe is the 20 FX,
-index, commodity and crypto markets in `config/capture-v2-candidates.toml`; it cannot authorise
-provider mappings or deployment.
+Active programme:
+
+```text
+aligned multi-asset data → chronological multi-horizon forecasts
+→ explicit costs and portfolio risk → horizon-aware constrained paper targets
+→ causal outcomes and component-aware experiment reports
+```
+
+Continuous live shadow paper follows the reproducible offline MVP. The old ranking report remains
+framework evidence, not the intended portfolio architecture or a strategy-effectiveness claim.
+
+The live `capture-v3` collector contains 20 reviewed FX, equity-index and commodity markets. All are
+potentially tradable subject to experiment role and fail-closed paper eligibility. China A50 and
+Korea 200 are the only immediate candidates for a separately reviewed `capture-v4`; candidate files
+cannot authorise provider mappings or deployment.
 
 ## Development
 
@@ -38,46 +49,44 @@ uv run qtrad --help
 ```
 
 `ops/dev/verify.sh` uses a disposable PostgreSQL 18 test database and runs the complete milestone
-gate. Focused tests and static checks are appropriate while iterating. See
-`docs/DEVELOPMENT.md` for the database boundary.
+gate. Focused tests and static checks are appropriate while iterating. See `docs/DEVELOPMENT.md` for
+the database boundary.
 
 Copy `.env.example` to the ignored `.env` only for credential-gated IG demo work. Never commit or
 print credentials, session tokens or account identifiers.
 
 The local operator console is available at `http://localhost:8080` after starting the API role. It is
-a diagnostic surface, not the primary strategy-research product.
+a diagnostic surface, not the primary research product.
 
 ## Collector boundary
 
-An OCI collector currently runs the seven-market `capture-v1` configuration. Routine development
-does not require access to it. Read-only observation, evidence collection, publication, deployment
-and cloud changes are different operation classes; follow `docs/CAPTURE_OPERATIONS_RUNBOOK.md` and
-the q-trad capture-operations skill when one is explicitly required.
+The OCI collector is capture-only and routine development does not require access to it. Read-only
+observation, provider review, publication, activation and cloud changes are distinct operation
+classes. Follow `docs/CAPTURE_OPERATIONS_RUNBOOK.md` and obtain explicit authority for every write or
+lifecycle operation.
 
-Never improvise a collector restart, migration, database write or universe deployment. The candidate
-20-market catalogue must pass bounded IG demo review and explicit operator selection before a release
-is proposed.
+Never improvise a collector restart, migration, database write or universe activation. Keep
+`capture-v3` running until an immutable reviewed replacement is separately authorised. Research and
+paper processes use verified snapshots or exports and never write to the collector database.
 
 ## Documentation
 
-Normal agent reading path:
+Minimum reading path:
 
 1. [Agent instructions](AGENTS.md)
-2. [Active plan](PLAN.md)
-3. [Current status](docs/STATUS.md)
-4. Relevant section of [architecture](docs/ARCHITECTURE.md)
-5. Task-specific ADR or runbook only when needed
+2. Relevant active section of [the milestone plan](PLAN.md)
+3. [Current status](docs/STATUS.md) when live operational or research state matters
 
-[Product direction](PREPLAN.md) explains the longer-term strategy population, evaluation, regime
-and selection loop. [Archived records](docs/archive/) preserve superseded chronology without placing
-it on every task's context path.
+Task-routed references:
 
-Other focused references:
-
-- [Engineering guidelines](docs/ENGINEERING.md)
-- [Research snapshot runbook](docs/RESEARCH_SNAPSHOT_RUNBOOK.md)
-- [Paper framework acceptance](docs/PAPER_SLICE_ACCEPTANCE.md)
-- [Architecture decisions](docs/adr/)
+- [Trading-research programme](docs/TRADING_RESEARCH.md) for targets, forecasts, evaluation, risk,
+  portfolio or paper work
+- Relevant section of [architecture](docs/ARCHITECTURE.md) for system-boundary changes
+- [Engineering guidelines](docs/ENGINEERING.md) for implementation conventions
+- [Capture operations](docs/CAPTURE_OPERATIONS_RUNBOOK.md) for collector operations
+- [Research snapshot import](docs/RESEARCH_SNAPSHOT_RUNBOOK.md) for isolated research datasets
+- [Architecture decisions](docs/adr/) when a task touches an accepted decision
+- [Archived records](docs/archive/) only for historical reconstruction or retained evidence
 
 The canonical private Git remote is `origin` at `https://github.com/quarrel/q-trad.git`. Review the
 worktree and outgoing commits before pushing; never include credentials, captured market data or

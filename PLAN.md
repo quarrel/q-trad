@@ -1,122 +1,124 @@
-# q-trad research-framework plan
+# q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Objective:** reach a reproducible, cost-aware strategy ranking on a useful research universe by the
-shortest path that preserves research validity.
+**Current milestone:** R0 — alignment, coverage and data readiness
+**Objective:** determine, with locked chronological evidence, whether multi-horizon local and
+cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo market data and internal paper outcomes only; no external orders.
+
+`docs/TRADING_RESEARCH.md` defines the stable research programme. This file selects the current
+work and records only the milestone sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
-- The seven-market data path, canonical capture, bars, replay, Parquet export and read-only console
-  are implemented.
-- A bounded read-only observation found the OCI `capture-v1` collector ready on all seven channels
-  with no internal/SDK loss and caught-up projection; no collector or cloud state was mutated.
-- The reviewed universe has advanced to the hash-bound 20-market `capture-v3` release. It is live
-  with Hang Seng added, while Bitcoin and VIX remain explicitly quarantined.
-- A local deterministic research core now emits versioned forecasts for simple strategies, pairs
-  exact-horizon outcomes, simulates causal bid/ask shadow fills, reconciles isolated ledgers and
-  builds a hash-bound ranking report. The first retained snapshot-backed report reproduced its full
-  trace and ranking; it is a framework proof with negative cost-aware results, not an effectiveness
-  claim.
-- The current callback-to-PostgreSQL path passed a 40-instrument, 200-callback/s bounded load run
-  with zero loss and sub-second maximum lag, providing local headroom beyond the target catalogue.
-
-Historical data-foundation detail is archived under `docs/archive/data-foundation/`; capture
-qualification and incident detail is under `docs/archive/capture-v1/`.
+- `capture-v3` is the live reviewed 20-market IG demo universe. All 20 markets remain potentially
+  tradable, subject to experiment role and fail-closed paper eligibility.
+- The capture, canonical event, one-minute bar, snapshot/import, Parquet, deterministic replay and
+  read-only health paths are implemented.
+- A retained single-instrument framework proof produced causal forecasts/outcomes, executable-side
+  shadow fills, independently checked P&L and a reproducible ranking report. Its negative cost-aware
+  result is evidence that the framework path works, not a strategy conclusion or the intended
+  portfolio architecture.
+- The next paper programme replaces runtime strategy ranking and regime selection with
+  multi-horizon expected-return forecasts, explicit cost/risk states, horizon attribution and
+  constrained paper portfolio construction.
+- China A50 and Korea 200 are the only immediate universe additions under consideration. No capture
+  change is authorised until exact IG demo listings pass the existing review and a separate
+  `capture-v4` release is approved.
 
 ## Milestones
 
 | Milestone | Status | Exit evidence |
 |---|---|---|
-| M0 — focus and documentation reset | DONE | active docs describe the research loop and archived history is off the reading path |
-| M1 — reviewed 20-market universe | DONE | 20 reviewed IG demo listings published by immutable digest and live with 20/20 channel readiness and zero observed loss after deployment |
-| M2 — minimal multi-strategy paper path | DONE | several simple strategies produce causal shadow fills and independently checked P&L |
-| M3 — deterministic evaluator and rank report | DONE | forecasts join to defined outcomes; replay reproduces scores and rankings |
-| M4 — simple market-state comparison | NOT STARTED | contemporaneous state annotation and conditional versus unconditional report |
-| M5 — viability review | NOT STARTED | evidence supports continue, revise or stop without requiring a profitability claim |
+| R0 — alignment, coverage and data readiness | ACTIVE | active docs agree; China/Korea review is resolved; native/aligned coverage and historical-source decisions are recorded |
+| R1 — causal multi-asset research foundation | NOT STARTED | deterministic aligned panels, multi-horizon targets, chronological folds and out-of-fold artefacts pass causality/replay checks |
+| R2 — local and pooled baselines | NOT STARTED | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence |
+| R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
+| R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
+| R5 — integrated offline MVP | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set |
+| R6 — continuous shadow paper | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L |
 
-## M1 — reviewed 20-market universe
+## R0 — alignment, coverage and data readiness
 
-Candidate set: the eight FX pairs, eight equity indices, two spot metals, Bitcoin/USD and US crude in
-`config/capture-v2-candidates.toml`. It includes every `capture-v1` instrument.
+1. Realign active planning, architecture, agent-routing and status documents around the multi-asset
+   programme; archive the superseded strategy-ranking plan and planning inputs.
+2. Create a non-authoritative China A50 and Korea 200 candidate catalogue, run the existing bounded
+   IG demo review and record ambiguous or rejected listings without guessing.
+3. For accepted mappings, prepare an immutable `capture-v4` release. Publication, activation and
+   cloud changes remain separate explicitly authorised operations; `capture-v3` keeps running until
+   then.
+4. Audit native quote and bar evidence needed by R1–R3: bid/ask-size coverage, session coverage,
+   gaps, revisions, aligned multi-market intervals and available product economics.
+5. Combine the separately gathered historical-source research with a bounded review of IG candles,
+   external samples, timestamp/correction semantics, licensing and exact instrument coverage.
+6. Record which data can support prototyping, model selection and decision-grade IG paper
+   conclusions. External history never substitutes for native executable-side evidence.
+7. Repair and re-run weekly restore verification independently of research and universe work.
 
-Work:
+R0 does not implement model, optimiser or live-paper interfaces. It removes avoidable data and
+chronology ambiguity before those contracts are fixed.
 
-1. ~~Perform the existing bounded, non-authoritative IG demo candidate review.~~
-2. ~~Select only unambiguous, liquid standard contracts with required metadata and economics.~~
-3. ~~Record rejected or quarantined candidates without blocking the accepted subset.~~
-4. ~~Prove the single connection, callback hand-off, queue and PostgreSQL path at the approved size.~~
-5. ~~Define a proportionate active-market observation: per-channel delivery, visible gaps, zero
-   internal drops and bounded lag. Do not require a perfect market or explanation of every quiet
-   interval.~~
-6. ~~Prepare an immutable application release for the reviewed `config/capture-v2.toml`; retain the
-   pinned `capture-v1` image/configuration as the rollback point.~~
-7. ~~Publish and deploy in separately authorised operations, then require 19/19 readiness and
-   caught-up projection without rewriting retained history.~~
-8. ~~Add reviewed Hang Seng coverage and permit an atomic, validated universe replacement through
-   the mounted active configuration plus `SIGHUP`.~~
+## R1 — causal multi-asset research foundation
 
-M1 does not require paper eligibility for every accepted capture market. Missing paper economics can
-quarantine that instrument from strategy execution while capture continues.
+- Use configurable 5, 15, 30 and 60-minute horizons; prove the first end-to-end path at 15 minutes.
+- Define completed-bar log-return targets, target-availability and overlap intervals, favourable and
+  adverse excursions, and deterministic handling of gaps and closures.
+- Build aligned panels without forward-filling executable prices or hiding unavailable assets.
+- Generate reproducible walk-forward folds with dependency-derived purging/embargo and a locked
+  final holdout.
+- Store immutable out-of-fold forecasts with feature/training cut-offs, model/experiment/fold
+  lineage and later outcomes, independently of model code.
 
-## M2 — minimal multi-strategy paper path
+## R2 — local and pooled baselines
 
-- Use at least three simple, deterministic signal examples or parameter variants.
-- Emit a common forecast containing strategy/configuration, applicability, observation time,
-  horizon, direction/strength and target definition.
-- Retain forecasts and hypothetical outcomes for every shadow strategy.
-- Apply fixed sizing and hard limits through simple domain policies.
-- Fill only from subsequent healthy bid/ask observations with versioned latency and adverse
-  slippage.
-- Maintain per-strategy virtual positions and cost-aware P&L.
-- Prefer a report and inspectable event trace over new operator-console workflows.
+- Retain per-asset Ridge as the required local baseline and add a pooled non-graph cross-asset
+  control.
+- Begin with ablatable returns, volatility, time/session, spread and validated quote-imbalance
+  features. Do not call top-of-book size changes cumulative volume delta.
+- Compare loss, correlation/rank correlation, direction, forecast buckets, coverage and stability
+  by asset, horizon and period.
 
-## M3 — deterministic evaluator and rank report
+## R3 — cost and portfolio baseline
 
-- Define the first score contract before comparing results: outcome return, horizon, IC basis,
-  window, overlapping observations, minimum sample and cost metrics.
-- Pair each forecast with only its later eligible outcome.
-- Report sample coverage, IC, paper P&L, drawdown, turnover and sensitivity to costs/latency.
-- Include no-signal and simple persistence/reversal benchmarks.
-- Produce deterministic unconditional rankings; do not automatically prune or allocate real money.
+- Version observed spread, adverse slippage, commission, financing and supported impact assumptions.
+- Estimate ordered horizon-specific shrinkage covariance and configured group/currency exposures.
+- Maintain virtual asset/horizon positions, optimise each horizon, then net and repair the global
+  physical paper target with stable reason codes.
+- Select solver and numerical dependencies at milestone entry. Preserve `Decimal` at price,
+  quantity, conversion and money boundaries.
 
-## M4 — simple market-state comparison
+## R4 — residual structural graph experiment
 
-- Begin with transparent contemporaneous volatility/correlation/liquidity features.
-- Record `UNKNOWN` when evidence is insufficient.
-- Compare conditional and unconditional strategy scores in locked time order.
-- Grant state control only if it improves held-out evidence after costs; otherwise keep it diagnostic.
+- Derive graph targets only from out-of-fold local residuals.
+- Compare local-only, pooled non-graph, fixed economic graph, learned structural GNN-LSTM and
+  shuffled-graph controls.
+- Complete the experiment even if simpler forecasts are weak; retain the graph only on incremental
+  held-out evidence. Dynamic adjacency and session experts remain deferred.
 
-## M5 — viability review
+## R5 — integrated offline MVP
 
-Decide one of:
+- Compare local threshold, local-plus-optimiser, graph-plus-optimiser and full multi-horizon sleeve
+  configurations.
+- Report forecast, economic and portfolio gates plus cost, feature, graph, horizon and nearby
+  parameter sensitivities.
+- Require attributable constraint/fallback decisions and independently reconciled accounting.
+- Treat a trustworthy negative conclusion as successful completion.
 
-- **continue:** the framework is trustworthy and at least one research direction merits deeper data
-  or forward testing;
-- **revise:** the framework works but data, costs or hypotheses need a bounded change;
-- **stop:** no current path justifies further investment.
+## R6 — continuous shadow paper
 
-Negative findings are successful evidence. Do not extend infrastructure merely to avoid reaching
-this decision.
+- Adapt only stable offline contracts to continuous live data.
+- Retain forecasts for every evaluated configuration and preserve horizon attribution through
+  physical netting.
+- Rebalance persistent virtual positions using later healthy bid/ask observations and record costs,
+  operational vetoes and P&L.
+- Decide checkpoint/process architecture from demonstrated runtime lifecycle needs. Add no broker
+  order port or external submission.
 
 ## Completion and documentation rules
 
-- A milestone is complete when its stated outcome is demonstrated by focused automated checks and a
-  concise evidence reference.
-- Run the complete clean database/static/test gate at milestone and release boundaries, not after
-  every documentation or local domain change.
-- Keep this file forward-looking. Move completed chronology to `docs/archive/`.
-- Keep `docs/STATUS.md` to current facts, risks and next actions.
-- Update architecture only when implemented structure or the intended near-term flow changes.
-- Use an ADR only for a durable, costly-to-reverse decision.
-
-## Deferred
-
-- automatic pruning or strategy promotion;
-- sophisticated factor timing, latent regimes, covariance optimisation and machine learning;
-- broker-demo or live orders;
-- full workstation UI and mutating console controls;
-- new infrastructure products, multi-user operation and high availability;
-- compatibility layers for disposable pre-experiment schemas;
-- capture storage optimisation and further operational qualification unless measured research need
-  or collector risk makes them necessary.
+- A milestone completes only with focused automated evidence and a concise retained reference.
+- Run the full clean PostgreSQL/static/test gate at code, schema, milestone or release boundaries,
+  not for a documentation-only edit.
+- Keep `PLAN.md` forward-looking, `docs/STATUS.md` factual and `docs/TRADING_RESEARCH.md` stable.
+- Archive superseded chronology and source planning material outside the normal reading path.
+- Add an ADR for a durable costly-to-reverse decision, not a reversible model experiment.
