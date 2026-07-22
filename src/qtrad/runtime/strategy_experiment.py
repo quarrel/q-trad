@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime, time, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
 from qtrad.application.paper_execution import evaluate_shadow_paper, verify_paper_evaluation
 from qtrad.application.ranking_report import RankingReport, build_ranking_report
@@ -391,7 +392,7 @@ def _required_table_sequence(
 def _mapping(value: object, field: str) -> Mapping[str, object]:
     if not isinstance(value, dict):
         raise TypeError(f"{field} must be a table")
-    return value
+    return cast(dict[str, object], value)
 
 
 def _required_string(document: Mapping[str, object], field: str) -> str:
@@ -487,7 +488,7 @@ def _required_int_sequence(document: Mapping[str, object], field: str) -> Sequen
         not isinstance(item, int) or isinstance(item, bool) for item in value
     ):
         raise TypeError(f"{field} must be an integer array")
-    return tuple(value)
+    return tuple(cast(list[int], value))
 
 
 def _required_date_sequence(document: Mapping[str, object], field: str) -> Sequence[date]:
@@ -496,4 +497,4 @@ def _required_date_sequence(document: Mapping[str, object], field: str) -> Seque
         not isinstance(item, date) or isinstance(item, datetime) for item in value
     ):
         raise TypeError(f"{field} must be a local-date array")
-    return tuple(value)
+    return tuple(cast(list[date], value))

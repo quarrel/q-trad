@@ -48,6 +48,24 @@ def test_capture_api_requires_a_stable_source_identity() -> None:
     assert "QTRAD_CAPTURE_SOURCE_ID: ${QTRAD_CAPTURE_SOURCE_ID:?" in api
 
 
+def test_capture_deployment_orchestrator_preserves_release_gates() -> None:
+    operator = (SCRIPTS / "deploy.sh").read_text()
+    activation = (SCRIPTS / "activate-release.sh").read_text()
+
+    assert "gh run list --workflow CI --commit" in operator
+    assert 'git -C "$root" archive --format=tar' in operator
+    assert "CONFIRM_DESCRIPTOR_SHA256" in operator
+    assert "systemctl start qtrad-backup.service" in activation
+    assert activation.index("systemctl start qtrad-backup.service") < activation.index("mutated=1")
+    assert 'wait_ready "$previous_hash" "$previous_count"' in activation
+    assert 'wait_ready "$candidate_hash" "$candidate_count"' in activation
+    assert activation.count("docker kill --signal HUP qtrad-capture-ingest-1") == 1
+    assert "rollback_on_failure" in activation
+    assert "capture_universe_reload_rejected" in activation
+    assert "qtrad-capture-deployment-v1" in activation
+    assert "QTRAD_DEPLOYMENT_OBSERVE_SECONDS" in activation
+
+
 def test_operator_console_displays_live_heartbeat_evidence() -> None:
     overview = (REPOSITORY_ROOT / "src/qtrad/api/templates/_overview.html").read_text()
 

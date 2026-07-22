@@ -97,13 +97,31 @@ Release preparation and deployment remain separate operations:
    multi-platform OCI index digest and unique commit tag; never publish or deploy `latest`.
 3. Commit a deployment descriptor binding the application digest, configuration hash and required
    schema state. Publishing this descriptor still does not authorise deployment.
-4. With explicit deployment authority, update the host checkout by fast-forward only, install the
-   reviewed release under `/opt/qtrad-releases/<full-commit>` and atomically repoint
-   `/opt/qtrad-capture`.
-5. Run only reviewed expand-compatible migrations. Take a successful backup before changing the
-   running release.
-6. Activate the reviewed universe through the dynamic procedure below and require readiness for its
-   exact identity.
+4. Run only reviewed expand-compatible migrations before deployment. The automated path currently
+   requires the database to be at the descriptor's exact schema head; it never infers or applies a
+   migration.
+5. With explicit deployment authority and a clean main-branch checkout, calculate and review the
+   descriptor file's SHA-256, then run the single operator command:
+
+   ```bash
+   ops/capture/deploy.sh config/<release>-deployment.toml operator@capture-host <descriptor-sha256>
+   ```
+
+6. The orchestrator requires successful CI for the exact release commit, validates the descriptor
+   and universe, installs the immutable release, pulls the pinned image, proves the declared
+   rollback identity and takes a fresh backup before changing runtime state.
+7. It deploys the candidate image against the unchanged universe first, requires old-universe
+   readiness, performs exactly one dynamic activation, observes the candidate for a bounded period
+   and verifies loss counters, run transition, reload event, image and release identity.
+8. A failed post-mutation gate automatically restores the prior universe, environment and release,
+   restarts through the normal lifecycle and verifies old-universe readiness. Both success and
+   failure produce a sanitised `qtrad-capture-deployment-v1` evidence file under the private
+   deployment evidence directory.
+
+The orchestrator deliberately does not publish an image, apply a migration, repair a rejected
+provider mapping or infer deployment authority. Those remain explicit preceding decisions. The
+lower-level activation sequence below documents the mechanism and is a diagnostic fallback, not
+the normal release interface.
 
 Rollback restores the previous immutable image/configuration and restarts only through an explicitly
 authorised lifecycle operation. Never roll back canonical events, database volumes or retained

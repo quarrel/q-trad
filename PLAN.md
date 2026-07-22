@@ -49,13 +49,16 @@ work and records only the milestone sequence needed to reach the next trustworth
    Korea/Bitcoin without guessing.
 3. **Done:** publish and activate immutable 23-market `capture-v4` under separate authority;
    verify 23/23 readiness, clean v3→v4 run transition and zero observed reconnect/loss counters.
-4. Audit native quote and bar evidence needed by R1–R3: bid/ask-size coverage, session coverage,
+4. **Done:** automate the repeatable capture release/activation path around an exact descriptor,
+   CI run, backup, unchanged-universe checkpoint, one dynamic activation, bounded observation,
+   automatic rollback and sanitised evidence.
+5. Audit native quote and bar evidence needed by R1–R3: bid/ask-size coverage, session coverage,
    gaps, revisions, aligned multi-market intervals and available product economics.
-5. Combine the separately gathered historical-source research with a bounded review of IG candles,
+6. Combine the separately gathered historical-source research with a bounded review of IG candles,
    external samples, timestamp/correction semantics, licensing and exact instrument coverage.
-6. Record which data can support prototyping, model selection and decision-grade IG paper
+7. Record which data can support prototyping, model selection and decision-grade IG paper
    conclusions. External history never substitutes for native executable-side evidence.
-7. Repair and re-run weekly restore verification independently of research and universe work.
+8. Repair and re-run weekly restore verification independently of research and universe work.
 
 R0 does not implement model, optimiser or live-paper interfaces. It removes avoidable data and
 chronology ambiguity before those contracts are fixed.

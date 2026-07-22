@@ -59,6 +59,7 @@ from qtrad.runtime.backfill_plan import (
     write_backfill_plan,
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
+from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -154,6 +155,14 @@ def build_parser() -> argparse.ArgumentParser:
     db = subparsers.add_parser("db", help="database operations")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("upgrade", help="apply migrations and seed instruments")
+
+    deployment = subparsers.add_parser("deployment", help="capture deployment operations")
+    deployment_sub = deployment.add_subparsers(dest="deployment_command", required=True)
+    deployment_inspect = deployment_sub.add_parser(
+        "inspect", help="validate and emit a deployment descriptor"
+    )
+    deployment_inspect.add_argument("--descriptor", type=Path, required=True)
+    deployment_inspect.add_argument("--repository-root", type=Path, default=Path.cwd())
 
     runs = subparsers.add_parser("runs", help="operational run evidence")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
@@ -343,6 +352,11 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "db" and args.db_command == "upgrade":
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
+    elif args.command == "deployment" and args.deployment_command == "inspect":
+        descriptor = load_capture_deployment_descriptor(
+            args.descriptor, repository_root=args.repository_root
+        )
+        print(descriptor.to_json())
     elif args.command == "runs" and args.runs_command == "reconcile-plan":
         asyncio.run(
             _plan_run_reconciliation(

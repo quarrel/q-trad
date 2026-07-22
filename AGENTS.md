@@ -149,6 +149,13 @@ require future research schemas to read every experimental epoch.
   as explicit `STOPPED` or truthful `FAILED`.
 - Collector observation is read-only by default. Publication, deployment, provider experiments,
   evidence writes and cloud changes require the current runbook and explicit authority.
+- For an authorised capture deployment, use `ops/capture/deploy.sh` as the sole normal operator
+  entry point. It owns CI verification, backup, release installation, readiness checkpoints,
+  activation, bounded observation, rollback and sanitised evidence. Do not manually decompose the
+  release into ad-hoc SSH, `sleep`, `curl` and `jq` polling when the orchestrator is available.
+- Start one bounded orchestrator command and wait for its result. Do not emit progress updates for
+  internal polling intervals or repeatedly inspect tiny remote steps. Inspect individual services
+  only after the orchestrator fails or when diagnosing a recorded deployment incident.
 - Keep the active `capture-v4` collector running. Never infer a Korea mapping, promote quarantined
   Bitcoin or activate a candidate catalogue directly.
 - Never expose credentials, account identifiers, rendered secret-bearing configuration or session

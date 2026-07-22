@@ -15,6 +15,10 @@
 - The collector can validate and atomically replace its mounted universe through the reviewed
   `SIGHUP` path without a second IG session. The previous immutable release remains the rollback
   point.
+- The next immutable capture release can use the descriptor-driven deployment orchestrator. It
+  verifies exact main-branch CI, backup/schema/rollback identity, proves the new image on the
+  unchanged universe, activates once, observes readiness/loss/run evidence and automatically
+  restores the prior release on a failed post-mutation gate.
 - The current callback-to-PostgreSQL path passed a 40-instrument, 200-callback/s bounded local run
   with zero loss and sub-second maximum lag, so China/Korea review does not require another general
   capacity programme.
