@@ -75,17 +75,7 @@ class OperatorQueries:
         self._store = store
 
     async def system(self) -> dict[str, Any]:
-        counts = await self._store.query(
-            """
-            SELECT
-                (SELECT COUNT(*) FROM raw.market_messages) AS raw_messages,
-                (SELECT COUNT(*) FROM canonical.events) AS canonical_events,
-                (SELECT COUNT(*) FROM read_model.latest_quotes) AS current_quotes,
-                (SELECT COUNT(*) FROM read_model.market_bars) AS bars,
-                (SELECT MAX(global_position) FROM canonical.events) AS global_position,
-                clock_timestamp() AS observed_at
-            """
-        )
+        observed = await self._store.query("SELECT clock_timestamp() AS observed_at")
         health = await self._store.query(
             """
             SELECT *, EXTRACT(EPOCH FROM clock_timestamp() - observed_at) AS observation_age_seconds
@@ -98,10 +88,8 @@ class OperatorQueries:
         quotas = await self._store.query(
             "SELECT * FROM ops.quota_state ORDER BY provider, allowance_name"
         )
-        count_row = counts[0]
         return {
-            "observed_at": count_row["observed_at"],
-            "counts": {key: value for key, value in count_row.items() if key != "observed_at"},
+            "observed_at": observed[0]["observed_at"],
             "adapter_health": health,
             "heartbeat": _heartbeat_summary(health),
             "projection_checkpoints": checkpoints,

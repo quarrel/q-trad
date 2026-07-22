@@ -34,19 +34,16 @@ class ReadinessStore:
 class SystemStore:
     def __init__(self, *, observation_age_seconds: float = 1.2) -> None:
         self.observation_age_seconds = observation_age_seconds
+        self.statements: list[str] = []
 
     async def query(
         self, statement: str, parameters: dict[str, object] | None = None
     ) -> list[dict[str, Any]]:
         assert parameters is None
-        if "raw.market_messages" in statement:
+        self.statements.append(statement)
+        if "clock_timestamp() AS observed_at" in statement:
             return [
                 {
-                    "raw_messages": 10,
-                    "canonical_events": 9,
-                    "current_quotes": 7,
-                    "bars": 3,
-                    "global_position": 9,
                     "observed_at": datetime(2026, 7, 19, 6, tzinfo=UTC),
                 }
             ]
@@ -108,11 +105,14 @@ async def test_quote_recency_is_reported_without_failing_operational_readiness()
 
 @pytest.mark.asyncio
 async def test_system_reports_current_heartbeat_evidence() -> None:
-    queries = OperatorQueries(cast(PostgresAuditStore, SystemStore()))
+    store = SystemStore()
+    queries = OperatorQueries(cast(PostgresAuditStore, store))
 
     result = await queries.system()
 
     assert result["observed_at"] == datetime(2026, 7, 19, 6, tzinfo=UTC)
+    assert "counts" not in result
+    assert all("COUNT(*)" not in statement for statement in store.statements)
     assert result["heartbeat"] == {
         "status": "HEALTHY",
         "adapter_status": "HEALTHY",

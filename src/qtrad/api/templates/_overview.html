@@ -13,11 +13,6 @@
   </div>
   <p class="muted">Console refreshed {{ system.observed_at }} · this panel refreshes every 5 seconds.</p>
 </section>
-<section class="grid">
-  {% for name, value in system.counts.items() %}
-  <div class="card"><div class="muted">{{ name }}</div><strong>{{ value or 0 }}</strong></div>
-  {% endfor %}
-</section>
 <h2>Instruments</h2>
 <table>
   <thead><tr><th>Instrument</th><th>Bid</th><th>Ask</th><th>Quality</th><th>As of</th><th>Listing</th></tr></thead>
