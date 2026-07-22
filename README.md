@@ -31,11 +31,11 @@ aligned multi-asset data → chronological multi-horizon forecasts
 Continuous live shadow paper follows the reproducible offline MVP. The old ranking report remains
 framework evidence, not the intended portfolio architecture or a strategy-effectiveness claim.
 
-The live `capture-v3` collector contains 20 reviewed FX, equity-index and commodity markets. All are
-potentially tradable subject to experiment role and fail-closed paper eligibility. An undeployed
-`capture-v4` adds the reviewed smaller China A50 and Taiwan contracts plus an AUD-denominated VIX
-for context-only capture. Korea 200 and Bitcoin remain quarantined after fail-closed demo review.
-Publication and activation require separate authority.
+The live `capture-v4` collector contains 23 reviewed FX, equity-index, volatility and commodity
+markets. Its 22 non-VIX markets are potentially tradable subject to experiment role and fail-closed
+paper eligibility; the AUD-denominated VIX is context-only. Korea 200 and Bitcoin remain
+quarantined after fail-closed demo review. Future publication and activation require separate
+authority.
 
 ## Development
 
@@ -66,9 +66,10 @@ observation, provider review, publication, activation and cloud changes are dist
 classes. Follow `docs/CAPTURE_OPERATIONS_RUNBOOK.md` and obtain explicit authority for every write or
 lifecycle operation.
 
-Never improvise a collector restart, migration, database write or universe activation. Keep
-`capture-v3` running until an immutable reviewed replacement is separately authorised. Research and
-paper processes use verified snapshots or exports and never write to the collector database.
+Never improvise a collector restart, migration, database write or universe activation. Keep the
+active `capture-v4` collector running until an immutable reviewed replacement is separately
+authorised. Research and paper processes use verified snapshots or exports and never write to the
+collector database.
 
 ## Documentation
 

@@ -2,16 +2,16 @@
 
 **Updated:** 2026-07-22
 **Current milestone:** R0 — alignment, coverage and data readiness
-**State:** `capture-v3` is live with 20/20 channels ready; undeployed `capture-v4` is prepared;
-paper research remains offline/replay
+**State:** `capture-v4` is live with 23/23 channels ready; paper research remains offline/replay
 
 ## Working now
 
 - The modular application captures IG demo quotes, preserves raw/canonical facts, builds one-minute
   bars, exports versioned Parquet, replays deterministically and exposes read-only health views.
-- The live OCI collector runs the reviewed 20-market `capture-v3` universe. Its initial observation
-  reached 20/20 subscribed, updated and recent channels with caught-up projection, queue depth zero
-  and no observed reconnect, internal-drop, Lightstreamer-loss, subscription or server error.
+- The live OCI collector runs the reviewed 23-market `capture-v4` universe at configuration hash
+  `eca6649c...606078`. Activation reached 23/23 subscribed, updated and recent channels with a
+  caught-up projection, queue depth zero and no observed reconnect, internal-drop,
+  Lightstreamer-loss, subscription or server error.
 - The collector can validate and atomically replace its mounted universe through the reviewed
   `SIGHUP` path without a second IG session. The previous immutable release remains the rollback
   point.
@@ -25,17 +25,16 @@ paper research remains offline/replay
 - The active programme now targets multi-horizon local and cross-asset return forecasts followed by
   explicit cost/risk states and constrained paper portfolio construction. The first full path will
   be offline and chronological; continuous shadow paper follows only after the offline MVP.
-- All current 20 markets remain potentially tradable subject to experiment role, reviewed product
-  economics, sessions, conversion and data quality. The bounded review selected the smaller China
-  A50 and Taiwan contracts plus an AUD-denominated context-only VIX for an undeployed 23-market
-  `capture-v4`. Korea 200 has no eligible demo listing, and all reviewed Bitcoin listings were
-  unavailable; both remain quarantined.
+- The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
+  economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
+  AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
+  reviewed Bitcoin listings were unavailable; both remain quarantined.
 
 ## Current risks and unknowns
 
 - The replaced `capture-v2` run accumulated application-side callback drops while saturated. That
   interval is incomplete market evidence and must remain excluded or explicitly gap-qualified.
-- The initial `capture-v3` observation is a deployment smoke, not representative-session evidence.
+- The initial `capture-v4` observation is a deployment smoke, not representative-session evidence.
 - Weekly restore verification remains failed even though the latest backup succeeded.
 - Native forward history is still short for model selection or an effectiveness claim.
 - Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
@@ -49,7 +48,7 @@ paper research remains offline/replay
 
 ## Next actions
 
-1. Continue proportionate read-only observation of `capture-v3` delivery, gaps, loss and lag.
+1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 2. Audit quote-size, session, gap, revision and aligned-bar coverage for the R1 dataset contract.
 3. Combine the user's historical-source work with bounded IG-candle/external-sample, licence and
    provenance review.

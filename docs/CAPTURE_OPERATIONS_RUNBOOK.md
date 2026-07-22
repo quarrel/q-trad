@@ -23,10 +23,9 @@ When authority is absent, remain read-only and report the exact proposed operati
 
 ## Current operating identity
 
-- Active universe: `config/capture-v3.toml`, 20 instruments.
-- Prepared release: `config/capture-v4.toml`, 23 instruments, adds reviewed China A50 and Taiwan plus
-  context-only AUD VIX. Korea 200 and Bitcoin remain quarantined after fail-closed demo review.
-  Publication and activation are not authorised by release preparation.
+- Active universe: `config/capture-v4.toml`, 23 instruments, including reviewed China A50 and
+  Taiwan plus context-only AUD VIX. Korea 200 and Bitcoin remain quarantined after fail-closed demo
+  review.
 - The active universe is mounted at `/etc/qtrad/universe/active.toml` and synchronised inside the
   existing ingest process before subscriptions are replaced.
 - The collector's canonical source identity remains the established configured value across
@@ -64,7 +63,7 @@ times, reason codes, immutable identities and non-secret evidence references.
 
 ## Candidate review and release preparation
 
-The R0 China A50/Korea 200/Taiwan/VIX/Bitcoin workflow is:
+The provider-review workflow for a future universe is:
 
 1. Add provider-neutral candidate concepts without deployment authority. Use provider epics only as
    explicit bounded review hints when ordinary search omits a user-observed listing.
@@ -76,8 +75,8 @@ The R0 China A50/Korea 200/Taiwan/VIX/Bitcoin workflow is:
    session, currency, quantity rules and value-per-price-unit.
 4. Author an explicit mapping bound to the exact catalogue and provider-review hashes. Missing,
    inconsistent or ambiguous values fail closed.
-5. Render an undeployed `capture-v4` configuration containing only accepted mappings. One rejected
-   candidate may be quarantined without inventing an epic for it.
+5. Render an undeployed, versioned configuration containing only accepted mappings. Rejected
+   candidates remain quarantined without inventing epics for them.
 6. Run normal code/configuration validation and prepare an immutable release descriptor.
 
 Neither a public IG market page nor a candidate/review file authorises capture. Do not select the

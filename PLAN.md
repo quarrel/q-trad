@@ -11,8 +11,9 @@ work and records only the milestone sequence needed to reach the next trustworth
 
 ## Current position
 
-- `capture-v3` is the live reviewed 20-market IG demo universe. All 20 markets remain potentially
-  tradable, subject to experiment role and fail-closed paper eligibility.
+- `capture-v4` is the live reviewed 23-market IG demo universe. Its 22 non-VIX markets remain
+  potentially tradable, subject to experiment role and fail-closed paper eligibility; VIX is
+  context-only.
 - The capture, canonical event, one-minute bar, snapshot/import, Parquet, deterministic replay and
   read-only health paths are implemented.
 - A retained single-instrument framework proof produced causal forecasts/outcomes, executable-side
@@ -24,8 +25,8 @@ work and records only the milestone sequence needed to reach the next trustworth
   constrained paper portfolio construction.
 - The bounded IG demo review accepted China A50 and Taiwan plus an AUD-denominated VIX for
   context-only capture. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings
-  were unavailable; both are quarantined. An immutable 23-market `capture-v4` is prepared but
-  undeployed; publication and activation remain separate authorised operations.
+  were unavailable; both are quarantined. The immutable 23-market `capture-v4` was activated on
+  2026-07-22 after exact release, backup, rollback and readiness gates.
 
 ## Milestones
 
@@ -46,8 +47,8 @@ work and records only the milestone sequence needed to reach the next trustworth
 2. **Done:** review China A50, Korea 200, Taiwan, VIX and Bitcoin through the bounded demo gate;
    accept the smaller China/Taiwan contracts and context-only VIX, and quarantine unavailable
    Korea/Bitcoin without guessing.
-3. **Done:** prepare immutable 23-market `capture-v4`. Publication, activation and cloud changes
-   remain separate explicitly authorised operations; `capture-v3` keeps running until then.
+3. **Done:** publish and activate immutable 23-market `capture-v4` under separate authority;
+   verify 23/23 readiness, clean v3→v4 run transition and zero observed reconnect/loss counters.
 4. Audit native quote and bar evidence needed by R1–R3: bid/ask-size coverage, session coverage,
    gaps, revisions, aligned multi-market intervals and available product economics.
 5. Combine the separately gathered historical-source research with a bounded review of IG candles,
