@@ -1,6 +1,6 @@
 # ADR 0026: research-framework priority and proportionate evidence
 
-- **Status:** Accepted
+- **Status:** Superseded by ADR 0027
 - **Date:** 2026-07-20
 
 ## Context
