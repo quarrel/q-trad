@@ -25,6 +25,7 @@ readonly capture_env=/etc/qtrad/capture.env
 readonly universe_dir=/etc/qtrad/universe
 readonly active_universe="$universe_dir/active.toml"
 readonly evidence_dir="${QTRAD_DEPLOYMENT_EVIDENCE_DIR:-/var/lib/qtrad-capture/deployments}"
+stage=bootstrap
 
 [[ "$release_dir" == "/opt/qtrad-releases/$release_commit" ]]
 [[ "$release_commit" =~ ^[0-9a-f]{40}$ ]]
@@ -71,6 +72,7 @@ for image_reference in "$previous_image" "$bootstrap_rollback_image" "$historica
   fi
 done
 removed_image_ids=()
+stage=image-retention
 mapfile -t repository_image_ids < <(
   docker image ls --no-trunc --format '{{.Repository}}|{{.ID}}' \
     | awk -F'|' -v repository="$image_repository" '$1 == repository { print $2 }' \
@@ -90,6 +92,7 @@ else
 fi
 readonly removed_image_ids_json
 env PATH=/usr/local/bin:/usr/bin:/bin docker pull "$candidate_image" > /dev/null
+stage=descriptor_validation
 
 descriptor_json="$(
   docker run --rm --network none --read-only --tmpfs /tmp \
@@ -157,6 +160,7 @@ readonly current_schema
 
 backup_started_at="$(date --utc +%Y-%m-%dT%H:%M:%SZ)"
 readonly backup_started_at
+stage=backup
 systemctl start qtrad-backup.service
 mapfile -t status_dirs < <(sed -n 's/^QTRAD_STATUS_DIR=//p' /etc/qtrad/capture-backup.env)
 ((${#status_dirs[@]} == 1))
@@ -205,6 +209,8 @@ write_evidence() {
     --arg started_at "$started_at" \
     --arg completed_at "$(date --utc +%Y-%m-%dT%H:%M:%SZ)" \
     --arg result "$result" \
+    --arg failure_stage "$stage" \
+    --argjson exit_code "${failure_exit_code:-0}" \
     --argjson rollback_succeeded "$rollback_succeeded" \
     '{schema:$schema,deployment:$deployment,release_commit:$release_commit,
       application_commit:$application_commit,descriptor_sha256:$descriptor_sha256,
@@ -214,6 +220,7 @@ write_evidence() {
       instrument_count:$instrument_count,previous_configuration_hash:$previous_configuration_hash,
       backup_completed_at:$backup_completed_at,started_at:$started_at,
       completed_at:$completed_at,result:$result,
+      failure_stage:$failure_stage,exit_code:$exit_code,
       rollback_succeeded:$rollback_succeeded}' > "$temporary"
   chmod 0600 "$temporary"
   mv "$temporary" "$evidence"
@@ -236,6 +243,7 @@ wait_ready() {
 }
 rollback_on_failure() {
   local exit_code=$?
+  failure_exit_code=$exit_code
   if ((completed == 1)); then
     exit "$exit_code"
   fi
@@ -267,6 +275,7 @@ rollback_on_failure() {
 trap rollback_on_failure EXIT
 
 mutated=1
+stage=application_swap
 sed "s|^QTRAD_IMAGE=.*|QTRAD_IMAGE=$application_image|" "$capture_env" > "$capture_env.next"
 [[ "$(grep -c '^QTRAD_IMAGE=' "$capture_env.next")" == 1 ]]
 chown root:root "$capture_env.next"
@@ -280,6 +289,7 @@ systemctl restart qtrad-ingest.service
 wait_ready "$previous_hash" "$previous_count"
 
 cp "$release_dir/$universe_file" "$universe_dir/$candidate_name.next.toml"
+stage=universe_activation
 chown root:root "$universe_dir/$candidate_name.next.toml"
 chmod 0644 "$universe_dir/$candidate_name.next.toml"
 mv "$universe_dir/$candidate_name.next.toml" "$active_universe"
@@ -292,6 +302,7 @@ readonly observation_seconds="${QTRAD_DEPLOYMENT_OBSERVE_SECONDS:-60}"
 [[ "$observation_seconds" =~ ^[0-9]+$ ]]
 ((observation_seconds <= 600))
 sleep "$observation_seconds"
+stage=post_deployment_verification
 wait_ready "$candidate_hash" "$candidate_count"
 
 system_json="$(curl --fail --silent http://127.0.0.1:8000/api/v1/system)"
