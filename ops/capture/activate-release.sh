@@ -325,15 +325,27 @@ stage=run_check
 running_json="$(curl --fail --silent http://127.0.0.1:8000/api/v1/runs)"
 readonly running_json
 jq -e --arg hash "$candidate_hash" --arg previous_hash "$previous_hash" \
-  '[.[] | select(.kind == "INGESTION" and .status == "RUNNING")] as $running
-   | ($running | length) == 1 and $running[0].configuration_hash == $hash
-   and any(.[]; .kind == "INGESTION" and .configuration_hash == $previous_hash
-                   and .status == "STOPPED")' <<< "$running_json" > /dev/null
+  'if $hash == $previous_hash then
+     ([.[] | select(.kind == "INGESTION" and .status == "RUNNING")] | length) == 1
+     and ([.[] | select(.kind == "INGESTION" and .status == "RUNNING")][0].configuration_hash == $hash)
+   else
+     ([.[] | select(.kind == "INGESTION" and .status == "RUNNING")] | length) == 1
+     and ([.[] | select(.kind == "INGESTION" and .status == "RUNNING")][0].configuration_hash == $hash)
+     and any(.[]; .kind == "INGESTION" and .configuration_hash == $previous_hash
+                     and .status == "STOPPED")
+   end' <<< "$running_json" > /dev/null
 stage=reload_log_check
-docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
-  | jq -s -e --arg hash "$candidate_hash" \
-    'any(.[]; .event == "capture_universe_reloaded" and .configuration_hash == $hash)' \
-    > /dev/null
+if [[ "$candidate_hash" == "$previous_hash" ]]; then
+  docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
+    | jq -s -e --arg hash "$candidate_hash" \
+      'any(.[]; .event == "capture_universe_reload_unchanged" and .configuration_hash == $hash)' \
+      > /dev/null
+else
+  docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
+    | jq -s -e --arg hash "$candidate_hash" \
+      'any(.[]; .event == "capture_universe_reloaded" and .configuration_hash == $hash)' \
+      > /dev/null
+fi
 if docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
   | jq -s -e 'any(.[]; .event == "capture_universe_reload_rejected")' > /dev/null; then
   exit 1
