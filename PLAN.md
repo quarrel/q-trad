@@ -11,9 +11,8 @@ shortest path that preserves research validity.
   are implemented.
 - A bounded read-only observation found the OCI `capture-v1` collector ready on all seven channels
   with no internal/SDK loss and caught-up projection; no collector or cloud state was mutated.
-- The 20-market candidate catalogue has been reviewed against IG demo. The hash-bound 19-market
-  `capture-v2` release is deployed and initially ready; Bitcoin is explicitly quarantined as
-  unavailable.
+- The reviewed universe has advanced to the hash-bound 20-market `capture-v3` release. It is live
+  with Hang Seng added, while Bitcoin and VIX remain explicitly quarantined.
 - A local deterministic research core now emits versioned forecasts for simple strategies, pairs
   exact-horizon outcomes, simulates causal bid/ask shadow fills, reconciles isolated ledgers and
   builds a hash-bound ranking report. The first retained snapshot-backed report reproduced its full
@@ -30,7 +29,7 @@ qualification and incident detail is under `docs/archive/capture-v1/`.
 | Milestone | Status | Exit evidence |
 |---|---|---|
 | M0 — focus and documentation reset | DONE | active docs describe the research loop and archived history is off the reading path |
-| M1 — reviewed 20-market universe | DONE | 19 eligible IG demo listings reviewed, published by immutable digest and live with 19/19 channel readiness and zero observed loss |
+| M1 — reviewed 20-market universe | DONE | 20 reviewed IG demo listings published by immutable digest and live with 20/20 channel readiness and zero observed loss after deployment |
 | M2 — minimal multi-strategy paper path | DONE | several simple strategies produce causal shadow fills and independently checked P&L |
 | M3 — deterministic evaluator and rank report | DONE | forecasts join to defined outcomes; replay reproduces scores and rankings |
 | M4 — simple market-state comparison | NOT STARTED | contemporaneous state annotation and conditional versus unconditional report |
@@ -54,6 +53,8 @@ Work:
    pinned `capture-v1` image/configuration as the rollback point.~~
 7. ~~Publish and deploy in separately authorised operations, then require 19/19 readiness and
    caught-up projection without rewriting retained history.~~
+8. ~~Add reviewed Hang Seng coverage and permit an atomic, validated universe replacement through
+   the mounted active configuration plus `SIGHUP`.~~
 
 M1 does not require paper eligibility for every accepted capture market. Missing paper economics can
 quarantine that instrument from strategy execution while capture continues.

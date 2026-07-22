@@ -239,7 +239,10 @@ class OperatorQueries:
                     provenance, quality, source_provider, source_environment,
                     source_external_id, global_position
                 FROM read_model.market_bars
-                WHERE (:instrument_id IS NULL OR instrument_id = :instrument_id)
+                  WHERE (
+                      CAST(:instrument_id AS TEXT) IS NULL
+                      OR instrument_id = CAST(:instrument_id AS TEXT)
+                  )
                 ORDER BY instrument_id, basis, interval_start DESC, provenance,
                          source_provider, source_environment, source_external_id,
                          revision DESC
