@@ -20,6 +20,7 @@ readonly expected_descriptor_sha=$4
 readonly ci_run_id=$5
 readonly descriptor="$release_dir/$descriptor_relative"
 readonly active_release=/opt/qtrad-capture
+readonly active_descriptor="$active_release/$descriptor_relative"
 readonly capture_env=/etc/qtrad/capture.env
 readonly universe_dir=/etc/qtrad/universe
 readonly active_universe="$universe_dir/active.toml"
@@ -49,9 +50,19 @@ mapfile -t rollback_images < <(sed -n '/^\[rollback\]/,$ { s/^application_image 
 readonly bootstrap_rollback_image=${rollback_images[0]}
 [[ "$bootstrap_rollback_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
 readonly image_repository="${candidate_image%@sha256:*}"
+historical_rollback_image=''
+if [[ -f "$active_descriptor" && ! -L "$active_descriptor" ]]; then
+  mapfile -t historical_rollback_images < <(
+    sed -n '/^\[rollback\]/,$ { s/^application_image = "\([^"]*\)"$/\1/p; }' "$active_descriptor"
+  )
+  ((${#historical_rollback_images[@]} == 1))
+  historical_rollback_image=${historical_rollback_images[0]}
+  [[ "$historical_rollback_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+fi
 
 preserved_image_ids=()
-for image_reference in "$previous_image" "$bootstrap_rollback_image" "$candidate_image"; do
+for image_reference in "$previous_image" "$bootstrap_rollback_image" "$historical_rollback_image" "$candidate_image"; do
+  [[ -n "$image_reference" ]] || continue
   image_id="$(docker image inspect "$image_reference" --format '{{.Id}}' 2> /dev/null || true)"
   if [[ -n "$image_id" ]]; then
     preserved_image_ids+=("$image_id")
