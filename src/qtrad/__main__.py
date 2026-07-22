@@ -3,7 +3,9 @@
 import argparse
 import asyncio
 import json
+import logging
 import os
+import signal
 from collections.abc import Sequence
 from contextlib import suppress
 from dataclasses import replace
@@ -40,6 +42,7 @@ from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
+from qtrad.domain.instruments import ProviderListing
 from qtrad.domain.market_data import (
     BarProvenance,
     DataQuality,
@@ -112,6 +115,7 @@ from qtrad.runtime.universe_promotion import (
 )
 
 _HEALTH_PERSIST_INTERVAL_SECONDS = 1.0
+LOGGER = logging.getLogger(__name__)
 
 
 def _utc_minute_argument(value: str) -> datetime:
@@ -1319,6 +1323,54 @@ async def _probe_capture_feed(
     )
 
 
+async def _synchronise_capture_universe(
+    store: PostgresAuditStore,
+    adapter: IgDemoMarketDataAdapter,
+    universe: CaptureUniverse,
+    clock: Clock,
+) -> tuple[ProviderListing, ...]:
+    """Validate an approved release through the collector's existing IG session."""
+
+    instrument_ids = tuple(instrument.instrument_id for instrument in universe.instruments)
+    await store.seed_instruments(universe.instruments)
+    active = await store.active_provider_listings(instrument_ids)
+    by_instrument = {listing.instrument_id: listing for listing in active}
+    if len(by_instrument) != len(active):
+        raise RuntimeError("multiple active provider listings exist for a capture instrument")
+    needs_sync = tuple(
+        instrument_id
+        for instrument_id in instrument_ids
+        if instrument_id not in by_instrument
+        or by_instrument[instrument_id].listing_id.external_id
+        != universe.preferred_epics[instrument_id]
+    )
+    if needs_sync:
+        discovered = await adapter.discover_capture_universe(
+            needs_sync,
+            instruments_by_id=universe.instruments_by_id,
+            preferred_epics=universe.preferred_epics,
+        )
+        if len(discovered) != len(needs_sync):
+            raise RuntimeError("IG discovery did not return every approved capture instrument")
+        for listing in discovered:
+            await store.validate_provider_listing(
+                listing,
+                universe_hash=universe.configuration_hash,
+                observed_at=clock.now(),
+            )
+        active = await store.active_provider_listings(instrument_ids)
+        by_instrument = {listing.instrument_id: listing for listing in active}
+    if len(active) != len(instrument_ids) or len(by_instrument) != len(instrument_ids):
+        raise RuntimeError("capture universe listing activation is incomplete")
+    for instrument_id in instrument_ids:
+        listing = by_instrument[instrument_id]
+        if listing.listing_id.external_id != universe.preferred_epics[instrument_id]:
+            raise RuntimeError(
+                f"active provider listing does not match release for {instrument_id}"
+            )
+    return tuple(by_instrument[instrument_id] for instrument_id in instrument_ids)
+
+
 async def _ingest(
     settings: Settings,
     clock: Clock,
@@ -1335,31 +1387,36 @@ async def _ingest(
             raise ValueError("forced reconnect must occur before maximum seconds")
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
+    universe = _capture_universe(settings)
     adapter = _ig_adapter(settings, clock)
     service = IngestionService(store, producer="ig-demo-adapter", producer_version="0.1.0")
-    universe = _capture_universe(settings)
-    run_id = await store.start_run(
-        kind=RunKind.INGESTION,
-        environment=BrokerEnvironment.IG_DEMO,
-        configuration_hash=universe.configuration_hash,
-        started_at=clock.now(),
-    )
+    run_id: RunId | None = None
     terminal_status = "FAILED"
     reconnect_task: asyncio.Task[None] | None = None
     reconnect_error: Exception | None = None
     disconnect_error: Exception | None = None
     forced_reconnect_completed = False
     bounded_deadline_reached = False
+    reload_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    signal_installed = False
     try:
-        listings = await store.active_provider_listings(
-            [instrument.instrument_id for instrument in universe.instruments]
-        )
-        if len(listings) != len(universe.instruments):
-            raise RuntimeError("run 'qtrad instruments sync' before ingestion")
         await adapter.connect()
+        listings = await _synchronise_capture_universe(store, adapter, universe, clock)
         await adapter.subscribe(listings)
         initial_health = await adapter.health()
         await store.record_adapter_health(initial_health)
+        run_id = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IG_DEMO,
+            configuration_hash=universe.configuration_hash,
+            started_at=clock.now(),
+        )
+        try:
+            loop.add_signal_handler(signal.SIGHUP, reload_event.set)
+            signal_installed = True
+        except (NotImplementedError, RuntimeError):
+            LOGGER.warning("capture_universe_reload_signal_unavailable")
 
         async def force_reconnect() -> None:
             assert force_reconnect_after_seconds is not None
@@ -1380,10 +1437,75 @@ async def _ingest(
                 await asyncio.sleep(_HEALTH_PERSIST_INTERVAL_SECONDS)
                 await store.record_adapter_health(await adapter.health())
 
+        async def reload_universe() -> None:
+            nonlocal run_id, universe
+            while True:
+                await reload_event.wait()
+                reload_event.clear()
+                candidate_run_id: RunId | None = None
+                try:
+                    candidate = _capture_universe(settings)
+                    if candidate.configuration_hash == universe.configuration_hash:
+                        LOGGER.info(
+                            "capture_universe_reload_unchanged",
+                            extra={"configuration_hash": universe.configuration_hash},
+                        )
+                        continue
+                    candidate_listings = await _synchronise_capture_universe(
+                        store, adapter, candidate, clock
+                    )
+                    candidate_run_id = await store.start_run(
+                        kind=RunKind.INGESTION,
+                        environment=BrokerEnvironment.IG_DEMO,
+                        configuration_hash=candidate.configuration_hash,
+                        started_at=clock.now(),
+                    )
+                except Exception:
+                    LOGGER.exception("capture_universe_reload_rejected")
+                    continue
+                try:
+                    await adapter.replace_subscriptions(
+                        candidate_listings,
+                        instruments_by_id=candidate.instruments_by_id,
+                        preferred_epics=candidate.preferred_epics,
+                    )
+                except Exception:
+                    await store.finish_run(
+                        candidate_run_id,
+                        status="FAILED",
+                        finished_at=clock.now(),
+                        detail={"reason": "capture universe reload rejected"},
+                    )
+                    LOGGER.exception("capture_universe_reload_rejected")
+                    continue
+                transition_time = clock.now()
+                if run_id is None:
+                    raise RuntimeError("active ingestion run is unavailable during reload")
+                await store.finish_run(
+                    run_id,
+                    status="STOPPED",
+                    finished_at=transition_time,
+                    detail={
+                        "reason": "capture universe replaced",
+                        "replacement_configuration_hash": candidate.configuration_hash,
+                    },
+                )
+                run_id = candidate_run_id
+                universe = candidate
+                await store.record_adapter_health(await adapter.health())
+                LOGGER.info(
+                    "capture_universe_reloaded",
+                    extra={
+                        "configuration_hash": candidate.configuration_hash,
+                        "instrument_count": len(candidate.instruments),
+                    },
+                )
+
         async def consume_with_health_supervision() -> None:
             tasks = (
                 asyncio.create_task(consume()),
                 asyncio.create_task(persist_health()),
+                asyncio.create_task(reload_universe()),
             )
             done: set[asyncio.Task[None]] = set()
             try:
@@ -1413,6 +1535,8 @@ async def _ingest(
     except (KeyboardInterrupt, asyncio.CancelledError):
         terminal_status = "STOPPED"
     finally:
+        if signal_installed:
+            loop.remove_signal_handler(signal.SIGHUP)
         if reconnect_task is not None:
             if reconnect_task.done():
                 try:
@@ -1438,16 +1562,17 @@ async def _ingest(
             terminal_status = "FAILED"
         final_health = await adapter.health()
         await store.record_adapter_health(final_health)
-        await store.finish_run(
-            run_id,
-            status=terminal_status,
-            finished_at=clock.now(),
-            detail={
-                "adapter_health": final_health.detail,
-                "forced_reconnect_requested": force_reconnect_after_seconds is not None,
-                "forced_reconnect_completed": forced_reconnect_completed,
-            },
-        )
+        if run_id is not None:
+            await store.finish_run(
+                run_id,
+                status=terminal_status,
+                finished_at=clock.now(),
+                detail={
+                    "adapter_health": final_health.detail,
+                    "forced_reconnect_requested": force_reconnect_after_seconds is not None,
+                    "forced_reconnect_completed": forced_reconnect_completed,
+                },
+            )
         await engine.dispose()
         if reconnect_error is not None:
             raise reconnect_error

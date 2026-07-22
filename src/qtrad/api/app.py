@@ -78,7 +78,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_async_engine(configuration.database_url, pool_pre_ping=True)
     store = PostgresAuditStore(engine)
     queries = OperatorQueries(store)
-    universe = load_capture_universe(configuration.capture_universe_path)
+
+    def current_universe():
+        return load_capture_universe(configuration.capture_universe_path)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -100,6 +102,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/health/ready")
     async def readiness() -> JSONResponse:
+        universe = current_universe()
         result = await queries.readiness(
             tuple(str(instrument.instrument_id) for instrument in universe.instruments),
             universe.configuration_hash,
@@ -116,6 +119,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         after_position: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=1000)] = 500,
     ) -> FeedPageResponse:
+        universe = current_universe()
         page = await queries.event_page(after_position=after_position, limit=limit)
         if after_position > page.high_water_position:
             raise HTTPException(status_code=409, detail="cursor exceeds source high-water position")

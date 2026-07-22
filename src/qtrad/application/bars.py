@@ -30,19 +30,32 @@ class OneMinuteBarBuilder:
 
     interval = timedelta(minutes=1)
 
-    def __init__(self, *, lateness: timedelta = timedelta(seconds=5)) -> None:
+    def __init__(
+        self,
+        *,
+        lateness: timedelta = timedelta(seconds=5),
+        correction_retention: timedelta = timedelta(hours=1),
+    ) -> None:
         if lateness < timedelta(0):
             raise ValueError("lateness must not be negative")
+        if correction_retention < timedelta(0):
+            raise ValueError("correction retention must not be negative")
         self._lateness = lateness
+        self._correction_retention = correction_retention
         self._buckets: dict[tuple[InstrumentId, datetime], _Bucket] = {}
+        self._open_keys: set[tuple[InstrumentId, datetime]] = set()
+        self._correction_cutoff: datetime | None = None
 
     def on_quote(self, quote: MarketQuote) -> tuple[MarketBar, ...]:
         interval_start = quote.event_time.replace(second=0, microsecond=0)
         key = (quote.instrument_id, interval_start)
         bucket = self._buckets.get(key)
         if bucket is None:
+            if self.correction_expired(quote):
+                return ()
             bucket = _Bucket(quote.instrument_id, quote.listing_id, interval_start)
             self._buckets[key] = bucket
+            self._open_keys.add(key)
 
         changed: set[PriceBasis] = set()
         if quote.bid is not None:
@@ -67,17 +80,39 @@ class OneMinuteBarBuilder:
     def advance(self, watermark: datetime) -> tuple[MarketBar, ...]:
         require_utc(watermark, "watermark")
         bars: list[MarketBar] = []
-        for bucket in sorted(
-            self._buckets.values(),
-            key=lambda item: (str(item.instrument_id), item.interval_start),
-        ):
+        for key in sorted(self._open_keys, key=lambda item: (str(item[0]), item[1])):
+            bucket = self._buckets[key]
             interval_start = bucket.interval_start
-            if bucket.closed or interval_start + self.interval + self._lateness > watermark:
+            if interval_start + self.interval + self._lateness > watermark:
                 continue
             bucket.closed = True
+            self._open_keys.remove(key)
             for basis in sorted(bucket.samples, key=str):
                 bars.append(self._build(bucket, basis))
+        correction_cutoff = watermark - self._correction_retention
+        if self._correction_cutoff is None or correction_cutoff > self._correction_cutoff:
+            self._correction_cutoff = correction_cutoff
+        expired = tuple(
+            key
+            for key, bucket in self._buckets.items()
+            if bucket.closed and bucket.interval_start + self.interval <= correction_cutoff
+        )
+        for key in expired:
+            del self._buckets[key]
         return tuple(bars)
+
+    @property
+    def buffered_interval_count(self) -> int:
+        return len(self._buckets)
+
+    def correction_expired(self, quote: MarketQuote) -> bool:
+        interval_start = quote.event_time.replace(second=0, microsecond=0)
+        key = (quote.instrument_id, interval_start)
+        return (
+            key not in self._buckets
+            and self._correction_cutoff is not None
+            and interval_start + self.interval <= self._correction_cutoff
+        )
 
     @staticmethod
     def _add_sample(

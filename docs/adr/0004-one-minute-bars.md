@@ -3,6 +3,8 @@
 - **Status:** Accepted
 - **Date:** 2026-07-02
 
+ADR 0019 bounds the live correction-state retention implied by this decision.
+
 ## Decision
 
 Build UTC `[start, end)` one-minute bid, ask and midpoint OHLC bars. Midpoint samples require bid

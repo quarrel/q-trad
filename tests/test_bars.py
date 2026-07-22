@@ -67,3 +67,28 @@ def test_late_sample_emits_revision_without_mutating_first_bar() -> None:
     assert corrected_bid.revision == 2
     assert corrected_bid.open == Decimal("0.9998")
     assert corrected_bid.interval_end - corrected_bid.interval_start == timedelta(minutes=1)
+
+
+def test_closed_intervals_are_pruned_after_correction_retention() -> None:
+    builder = OneMinuteBarBuilder(correction_retention=timedelta(minutes=5))
+    builder.on_quote(quote(30, "1.0000", "1.0002"))
+    builder.advance(datetime(2026, 7, 2, 10, 1, 5, tzinfo=UTC))
+
+    builder.advance(datetime(2026, 7, 2, 10, 6, tzinfo=UTC))
+
+    assert builder.buffered_interval_count == 0
+    expired = quote(10, "0.9998", "1.0000")
+    assert builder.correction_expired(expired)
+    assert builder.on_quote(expired) == ()
+
+
+def test_advance_considers_only_open_intervals() -> None:
+    builder = OneMinuteBarBuilder(correction_retention=timedelta(hours=1))
+    builder.on_quote(quote(30, "1.0000", "1.0002"))
+    builder.advance(datetime(2026, 7, 2, 10, 1, 5, tzinfo=UTC))
+    builder.on_quote(quote(30, "1.0003", "1.0005", minute=1))
+
+    bars = builder.advance(datetime(2026, 7, 2, 10, 2, 5, tzinfo=UTC))
+
+    assert len(bars) == 3
+    assert all(bar.interval_start.minute == 1 for bar in bars)

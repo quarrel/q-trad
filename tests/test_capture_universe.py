@@ -132,3 +132,23 @@ search_aliases = ["one", "two", "three", "four", "five", "six"]
 
     with pytest.raises(ValueError, match="cannot exceed five search aliases"):
         load_capture_candidates(too_many_aliases)
+
+
+def test_capture_v3_adds_reviewed_hang_seng_to_capture_v2() -> None:
+    previous = load_capture_universe(Path("config/capture-v2.toml"))
+    universe = load_capture_universe(Path("config/capture-v3.toml"))
+    addition = load_capture_candidates(Path("config/capture-v3-hang-seng-candidate.toml"))
+
+    assert universe.name == "capture-v3"
+    assert len(universe.instruments) == 20
+    assert tuple(universe.instruments[:-1]) == previous.instruments
+    assert str(universe.instruments[-1].instrument_id) == "index:hong-kong-hs50"
+    assert universe.preferred_epics[universe.instruments[-1].instrument_id] == (
+        "IX.D.HANGSENG.IFM.IP"
+    )
+    assert universe.configuration_hash == (
+        "50202ef7218f1d9816ebc88673259ecb5470f9360abe6b40f1f730c06d712836"
+    )
+    assert addition.configuration_hash == (
+        "6bfcf421e650551bddfc3c39326933e7a1f6bc3c58c72b638409aa1d74f09613"
+    )

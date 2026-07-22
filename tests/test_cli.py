@@ -2,6 +2,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator, Sequence
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
@@ -10,8 +11,8 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from qtrad import __main__ as cli
-from qtrad.domain.identifiers import InstrumentId
-from qtrad.domain.instruments import Instrument
+from qtrad.domain.identifiers import InstrumentId, ProviderListingId
+from qtrad.domain.instruments import Instrument, ProductType, ProviderListing
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import InstrumentListingReview
 from qtrad.runtime.settings import Settings
@@ -779,6 +780,66 @@ def test_parser_rejects_non_demo_ingestion_environment() -> None:
 
 
 @pytest.mark.asyncio
+async def test_ingestion_synchronises_missing_approved_listing_before_subscribe() -> None:
+    universe = load_capture_universe(Path("config/capture-v1.toml"))
+    now = datetime(2026, 7, 22, tzinfo=UTC)
+
+    def provider_listing(instrument: Instrument) -> ProviderListing:
+        return ProviderListing(
+            listing_id=ProviderListingId(
+                "ig", "demo", universe.preferred_epics[instrument.instrument_id]
+            ),
+            instrument_id=instrument.instrument_id,
+            display_name=instrument.display_name,
+            product_type=ProductType.ROLLING_CFD,
+            currency=instrument.quote_currency,
+            minimum_deal_size=Decimal("1"),
+            price_increment=None,
+            valid_from=now,
+            valid_to=None,
+            metadata_version="test",
+        )
+
+    class Store:
+        def __init__(self) -> None:
+            self.active = [provider_listing(item) for item in universe.instruments[:-1]]
+            self.seeded = False
+
+        async def seed_instruments(self, instruments: object) -> None:
+            assert tuple(cast(Sequence[Instrument], instruments)) == universe.instruments
+            self.seeded = True
+
+        async def active_provider_listings(self, instrument_ids: object) -> tuple[object, ...]:
+            del instrument_ids
+            return tuple(self.active)
+
+        async def validate_provider_listing(
+            self, listing: ProviderListing, **kwargs: object
+        ) -> None:
+            assert kwargs["universe_hash"] == universe.configuration_hash
+            self.active.append(listing)
+
+    missing = provider_listing(universe.instruments[-1])
+    adapter = SimpleNamespace(
+        discover_capture_universe=AsyncMock(return_value=(missing,)),
+    )
+    store = Store()
+    clock = Mock(spec=Clock)
+    clock.now.return_value = now
+
+    listings = await cli._synchronise_capture_universe(
+        cast(cli.PostgresAuditStore, store),
+        cast(cli.IgDemoMarketDataAdapter, adapter),
+        universe,
+        cast(Clock, clock),
+    )
+
+    assert store.seeded
+    assert len(listings) == 7
+    adapter.discover_capture_universe.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -833,6 +894,11 @@ async def test_bounded_ingestion_fails_when_forced_reconnect_does_not_complete(
     monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: store)
     monkeypatch.setattr(cli, "_ig_adapter", lambda settings, selected_clock: adapter)
+    monkeypatch.setattr(
+        cli,
+        "_synchronise_capture_universe",
+        AsyncMock(return_value=[object() for _ in range(7)]),
+    )
     monkeypatch.setattr(
         cli,
         "_capture_universe",
@@ -923,6 +989,11 @@ async def test_ingestion_uses_transport_receive_time_as_bar_watermark(
     monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: store)
     monkeypatch.setattr(cli, "_ig_adapter", lambda settings, selected_clock: adapter)
+    monkeypatch.setattr(
+        cli,
+        "_synchronise_capture_universe",
+        AsyncMock(return_value=[object() for _ in range(7)]),
+    )
     monkeypatch.setattr(cli, "IngestionService", lambda *args, **kwargs: service)
     monkeypatch.setattr(cli, "_HEALTH_PERSIST_INTERVAL_SECONDS", 0.005)
     monkeypatch.setattr(

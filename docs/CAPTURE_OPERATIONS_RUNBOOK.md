@@ -175,6 +175,11 @@ resolved secrets.
    key and checkout at `/home/opc/q-trad-source`. Run `git -C ~/q-trad-source pull
    --ff-only`, archive that exact commit under `/opt/qtrad-releases/<full-commit>`, then
    atomically repoint `/opt/qtrad-capture`. Never build or use a mutable image tag there.
+   Before the first release using dynamic universes, create `/etc/qtrad/universe`, install the
+   descriptor's approved TOML as `/etc/qtrad/universe/active.toml`, and require its application
+   configuration hash to equal the descriptor. Compose mounts the directory read-only into ingest
+   and API; a directory mount is required so an atomic host-side rename becomes visible in both
+   containers.
 3. Run `qtrad db upgrade`, take a successful backup, install/enable both
    `qtrad-capture.service` and `qtrad-ingest.service`, then start `qtrad-capture.service` and
    require both units to be active plus `GET /health/ready` HTTP 200 with all seven expected
@@ -192,6 +197,35 @@ Publishing does not authorise deployment. A newly published image may be used by
 `--no-deps --pull never` reconciliation or storage-inspector helpers after their documented gates;
 it must not replace the frozen ingestion/API roles before qualification evidence permits that
 release transition.
+
+### Dynamic capture-universe activation
+
+An approved universe change does not require stopping the ingestion process. Never run a separate
+`instruments sync` process on the collector: a second IG REST session can invalidate the collector's
+session, and switching the file before that separate sync creates the invalid pre-sync state seen in
+the first `capture-v2` deployment attempt.
+
+1. Put the reviewed release TOML in `/etc/qtrad/universe` under a temporary name on the same
+   filesystem. Validate it with the pinned application image and confirm its configuration hash.
+2. Atomically rename it to `/etc/qtrad/universe/active.toml`.
+3. Send `SIGHUP` to the Python ingest container. The ingest process loads the complete file,
+   discovers and atomically validates only missing or changed preferred epics through its existing
+   authenticated IG session, opens the replacement subscription set on the same REST session, and
+   rotates the ingestion run to the new configuration hash. The old stream is restored if the new
+   subscription set cannot become ready.
+4. Expect readiness to return HTTP 503 between the file rename and successful stream replacement.
+   Require HTTP 200 with the exact new configuration hash and all expected channels before accepting
+   the activation. Inspect the old and new run records and the `capture_universe_reloaded` event.
+
+For the current Compose layout, signal the container with:
+
+```bash
+sudo docker kill --signal HUP qtrad-capture-ingest-1
+```
+
+Ingestion startup uses the same synchronise-before-subscribe transaction path. It therefore no
+longer depends on a manually timed pre-sync command. Systemd's bounded restart remains useful for
+provider or process failure, but it is not part of universe activation.
 
 Before deploying migration `0008`, run this bounded preflight against the target database. It must
 return no rows; do not let a migration or operator guess which epic is authoritative:
