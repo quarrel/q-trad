@@ -40,6 +40,42 @@ mapfile -t bootstrap_images < <(sed -n 's/^application_image = "\([^"]*\)"$/\1/p
 ((${#bootstrap_images[@]} == 1))
 readonly candidate_image=${bootstrap_images[0]}
 [[ "$candidate_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+mapfile -t active_images < <(sed -n 's/^QTRAD_IMAGE=//p' "$capture_env")
+((${#active_images[@]} == 1))
+readonly previous_image=${active_images[0]}
+[[ "$previous_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+mapfile -t rollback_images < <(sed -n '/^\[rollback\]/,$ { s/^application_image = "\([^"]*\)"$/\1/p; }' "$descriptor")
+((${#rollback_images[@]} == 1))
+readonly bootstrap_rollback_image=${rollback_images[0]}
+[[ "$bootstrap_rollback_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
+readonly image_repository="${candidate_image%@sha256:*}"
+
+preserved_image_ids=()
+for image_reference in "$previous_image" "$bootstrap_rollback_image" "$candidate_image"; do
+  image_id="$(docker image inspect "$image_reference" --format '{{.Id}}' 2> /dev/null || true)"
+  if [[ -n "$image_id" ]]; then
+    preserved_image_ids+=("$image_id")
+  fi
+done
+removed_image_ids=()
+mapfile -t repository_image_ids < <(
+  docker image ls --no-trunc --format '{{.Repository}}|{{.ID}}' \
+    | awk -F'|' -v repository="$image_repository" '$1 == repository { print $2 }' \
+    | sort -u
+)
+for image_id in "${repository_image_ids[@]}"; do
+  if printf '%s\n' "${preserved_image_ids[@]}" | grep -Fxq "$image_id"; then
+    continue
+  fi
+  docker image rm "$image_id" > /dev/null
+  removed_image_ids+=("$image_id")
+done
+if ((${#removed_image_ids[@]} == 0)); then
+  removed_image_ids_json='[]'
+else
+  removed_image_ids_json="$(printf '%s\n' "${removed_image_ids[@]}" | jq -Rsc 'split("\n") | map(select(length > 0))')"
+fi
+readonly removed_image_ids_json
 env PATH=/usr/local/bin:/usr/bin:/bin docker pull "$candidate_image" > /dev/null
 
 descriptor_json="$(
@@ -76,9 +112,6 @@ previous_release="$(readlink -f "$active_release")"
 readonly previous_release
 readonly expected_previous_release="/opt/qtrad-releases/$rollback_release_commit"
 [[ "$previous_release" == "$expected_previous_release" ]]
-mapfile -t active_images < <(sed -n 's/^QTRAD_IMAGE=//p' "$capture_env")
-((${#active_images[@]} == 1))
-readonly previous_image=${active_images[0]}
 [[ "$previous_image" == "$rollback_image" ]]
 
 before_readiness="$(curl --fail --silent http://127.0.0.1:8000/health/ready)"
@@ -149,6 +182,7 @@ write_evidence() {
     --arg release_commit "$release_commit" \
     --arg application_commit "$application_commit" \
     --arg descriptor_sha256 "$expected_descriptor_sha" \
+    --argjson removed_image_ids "$removed_image_ids_json" \
     --arg ci_run_id "$ci_run_id" \
     --arg application_image "$application_image" \
     --arg configuration_hash "$candidate_hash" \
@@ -162,6 +196,7 @@ write_evidence() {
     '{schema:$schema,deployment:$deployment,release_commit:$release_commit,
       application_commit:$application_commit,descriptor_sha256:$descriptor_sha256,
       ci_run_id:$ci_run_id,
+      removed_image_ids:$removed_image_ids,
       application_image:$application_image,configuration_hash:$configuration_hash,
       instrument_count:$instrument_count,previous_configuration_hash:$previous_configuration_hash,
       backup_completed_at:$backup_completed_at,started_at:$started_at,

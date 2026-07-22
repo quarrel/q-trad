@@ -108,8 +108,10 @@ Release preparation and deployment remain separate operations:
    ```
 
 6. The orchestrator requires successful CI for the exact release commit, validates the descriptor
-   and universe, installs the immutable release, pulls the pinned image, proves the declared
-   rollback identity and takes a fresh backup before changing runtime state.
+   and universe, removes only unused images from the application repository while preserving the
+   active, declared rollback and candidate identities, installs the immutable release, pulls the
+   pinned image, proves the declared rollback identity and takes a fresh backup before changing
+   runtime state.
 7. It deploys the candidate image against the unchanged universe first, requires old-universe
    readiness, performs exactly one dynamic activation, observes the candidate for a bounded period
    and verifies loss counters, run transition, reload event, image and release identity.

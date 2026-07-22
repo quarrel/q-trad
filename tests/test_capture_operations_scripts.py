@@ -64,6 +64,10 @@ def test_capture_deployment_orchestrator_preserves_release_gates() -> None:
     assert "capture_universe_reload_rejected" in activation
     assert "qtrad-capture-deployment-v1" in activation
     assert "QTRAD_DEPLOYMENT_OBSERVE_SECONDS" in activation
+    assert "docker image ls --no-trunc" in activation
+    assert "preserved_image_ids" in activation
+    assert "removed_image_ids" in activation
+    assert activation.index("docker image ls --no-trunc") < activation.index("docker pull")
 
 
 def test_operator_console_displays_live_heartbeat_evidence() -> None:
