@@ -78,7 +78,13 @@ QTRAD_FAKE_OBJECT_NAME="daily/$archive" \
 QTRAD_BACKUP_BUCKET=ci-restore \
 QTRAD_STATUS_DIR="$status_dir" \
 QTRAD_RESTORE_MIN_FREE_BYTES=1 \
-  "$root/ops/capture/restore-verify.sh"
+  "$root/ops/capture/restore-verify.sh" || restore_result=$?
+restore_result="${restore_result:-0}"
+printf 'restore verification result: %s\n' "$restore_result"
+cat "$status_dir/restore-status.json"
+if ((restore_result != 0)); then
+  exit "$restore_result"
+fi
 
 jq -e '
   .success == true
