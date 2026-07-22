@@ -534,12 +534,15 @@ async def test_read_only_api_reports_seeded_instruments() -> None:
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         health = await client.get("/health")
         instruments = await client.get("/api/v1/instruments")
+        instrument = await client.get("/api/v1/instruments/fx:aud-usd")
         production_probe = await client.post("/api/v1/orders")
 
     assert health.status_code == 200
     assert health.json()["mode"] == "data-only"
     assert instruments.status_code == 200
     assert len(instruments.json()) == 7
+    assert instrument.status_code == 200
+    assert instrument.json()["instrument"]["instrument_id"] == "fx:aud-usd"
     assert production_probe.status_code == 404
     await engine_from_app(app).dispose()
 
