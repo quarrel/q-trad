@@ -68,6 +68,7 @@ def test_capture_deployment_orchestrator_preserves_release_gates() -> None:
     assert "preserved_image_ids" in activation
     assert "removed_image_ids" in activation
     assert activation.index("docker image ls --no-trunc") < activation.index("docker pull")
+    assert "0,/^\\[rollback\\]/" in activation
 
 
 def test_operator_console_displays_live_heartbeat_evidence() -> None:

@@ -37,7 +37,9 @@ readonly evidence_dir="${QTRAD_DEPLOYMENT_EVIDENCE_DIR:-/var/lib/qtrad-capture/d
 [[ -f "$capture_env" && ! -L "$capture_env" ]]
 [[ -f "$active_universe" && ! -L "$active_universe" ]]
 
-mapfile -t bootstrap_images < <(sed -n 's/^application_image = "\([^"]*\)"$/\1/p' "$descriptor")
+mapfile -t bootstrap_images < <(
+  sed -n '0,/^\[rollback\]/{ s/^application_image = "\([^"]*\)"$/\1/p; }' "$descriptor"
+)
 ((${#bootstrap_images[@]} == 1))
 readonly candidate_image=${bootstrap_images[0]}
 [[ "$candidate_image" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]]
