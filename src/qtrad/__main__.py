@@ -1175,7 +1175,8 @@ async def _review_instruments(
     try:
         await adapter.connect()
         reviews = await adapter.review_listings(
-            [instrument.instrument_id for instrument in candidates.instruments]
+            [instrument.instrument_id for instrument in candidates.instruments],
+            exact_epics=candidates.exact_review_epics,
         )
         manifest = build_listing_review_manifest(
             catalogue_name=candidates.name,

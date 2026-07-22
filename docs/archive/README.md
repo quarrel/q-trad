@@ -13,3 +13,5 @@ understand a compatibility boundary that still affects current state. Current in
 `trading-plan-inputs/` preserves the source material distilled into the active programme.
 `capture-operations/` preserves historical operational and qualification procedures that no longer
 belong in the concise current runbook.
+Versioned `capture-v*/` directories preserve bounded provider-review and release evidence; they are
+not deployment authority or routine task context.

@@ -32,9 +32,10 @@ Continuous live shadow paper follows the reproducible offline MVP. The old ranki
 framework evidence, not the intended portfolio architecture or a strategy-effectiveness claim.
 
 The live `capture-v3` collector contains 20 reviewed FX, equity-index and commodity markets. All are
-potentially tradable subject to experiment role and fail-closed paper eligibility. China A50 and
-Korea 200 are the only immediate candidates for a separately reviewed `capture-v4`; candidate files
-cannot authorise provider mappings or deployment.
+potentially tradable subject to experiment role and fail-closed paper eligibility. An undeployed
+`capture-v4` adds the reviewed smaller China A50 and Taiwan contracts plus an AUD-denominated VIX
+for context-only capture. Korea 200 and Bitcoin remain quarantined after fail-closed demo review.
+Publication and activation require separate authority.
 
 ## Development
 

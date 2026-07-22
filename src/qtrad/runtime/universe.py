@@ -46,6 +46,7 @@ class CaptureCandidates:
 
     name: str
     instruments: tuple[Instrument, ...]
+    exact_review_epics: Mapping[InstrumentId, tuple[str, ...]]
     configuration_hash: str
 
     def __post_init__(self) -> None:
@@ -58,6 +59,10 @@ class CaptureCandidates:
             raise ValueError("capture candidate catalogue cannot exceed 100 instruments")
         if any(len(instrument.search_aliases) > 5 for instrument in self.instruments):
             raise ValueError("capture candidate instrument cannot exceed five search aliases")
+        if set(self.exact_review_epics) - set(identifiers):
+            raise ValueError("exact review hints must belong to candidate instruments")
+        if any(len(epics) > 5 for epics in self.exact_review_epics.values()):
+            raise ValueError("capture candidate cannot exceed five exact review epics")
 
 
 def load_capture_universe(path: Path) -> CaptureUniverse:
@@ -168,6 +173,13 @@ def load_capture_candidates(path: Path) -> CaptureCandidates:
     return CaptureCandidates(
         name=_required_string(document, "name"),
         instruments=tuple(_instruments(entries)),
+        exact_review_epics={
+            InstrumentId(_required_string(entry, "id")): tuple(
+                _string_list(entry, "exact_review_epics")
+            )
+            for entry in entries
+            if "exact_review_epics" in entry
+        },
         configuration_hash=_configuration_hash(document),
     )
 
@@ -202,6 +214,16 @@ def _instruments(entries: list[dict[str, object]]) -> list[Instrument]:
 def _configuration_hash(document: Mapping[str, object]) -> str:
     canonical = json.dumps(document, sort_keys=True, separators=(",", ":")).encode()
     return hashlib.sha256(canonical).hexdigest()
+
+
+def _string_list(document: Mapping[str, object], field: str) -> list[str]:
+    value = document[field]
+    if not isinstance(value, list) or not value or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be a non-empty string array")
+    strings = cast(list[str], value)
+    if len(set(strings)) != len(strings) or any(not item.strip() for item in strings):
+        raise ValueError(f"{field} must contain unique non-empty strings")
+    return strings
 
 
 def _toml_string(value: str) -> str:

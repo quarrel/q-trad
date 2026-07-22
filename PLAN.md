@@ -22,9 +22,10 @@ work and records only the milestone sequence needed to reach the next trustworth
 - The next paper programme replaces runtime strategy ranking and regime selection with
   multi-horizon expected-return forecasts, explicit cost/risk states, horizon attribution and
   constrained paper portfolio construction.
-- China A50 and Korea 200 are the only immediate universe additions under consideration. No capture
-  change is authorised until exact IG demo listings pass the existing review and a separate
-  `capture-v4` release is approved.
+- The bounded IG demo review accepted China A50 and Taiwan plus an AUD-denominated VIX for
+  context-only capture. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings
+  were unavailable; both are quarantined. An immutable 23-market `capture-v4` is prepared but
+  undeployed; publication and activation remain separate authorised operations.
 
 ## Milestones
 
@@ -40,13 +41,13 @@ work and records only the milestone sequence needed to reach the next trustworth
 
 ## R0 — alignment, coverage and data readiness
 
-1. Realign active planning, architecture, agent-routing and status documents around the multi-asset
-   programme; archive the superseded strategy-ranking plan and planning inputs.
-2. Create a non-authoritative China A50 and Korea 200 candidate catalogue, run the existing bounded
-   IG demo review and record ambiguous or rejected listings without guessing.
-3. For accepted mappings, prepare an immutable `capture-v4` release. Publication, activation and
-   cloud changes remain separate explicitly authorised operations; `capture-v3` keeps running until
-   then.
+1. **Done:** realign active planning, architecture, agent-routing and status documents around the
+   multi-asset programme; archive the superseded strategy-ranking plan and planning inputs.
+2. **Done:** review China A50, Korea 200, Taiwan, VIX and Bitcoin through the bounded demo gate;
+   accept the smaller China/Taiwan contracts and context-only VIX, and quarantine unavailable
+   Korea/Bitcoin without guessing.
+3. **Done:** prepare immutable 23-market `capture-v4`. Publication, activation and cloud changes
+   remain separate explicitly authorised operations; `capture-v3` keeps running until then.
 4. Audit native quote and bar evidence needed by R1–R3: bid/ask-size coverage, session coverage,
    gaps, revisions, aligned multi-market intervals and available product economics.
 5. Combine the separately gathered historical-source research with a bounded review of IG candles,

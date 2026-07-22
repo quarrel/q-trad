@@ -2,6 +2,7 @@ from pathlib import Path
 
 import pytest
 
+from qtrad.domain.identifiers import InstrumentId
 from qtrad.runtime.universe import load_capture_candidates, load_capture_universe
 
 
@@ -152,3 +153,34 @@ def test_capture_v3_adds_reviewed_hang_seng_to_capture_v2() -> None:
     assert addition.configuration_hash == (
         "6bfcf421e650551bddfc3c39326933e7a1f6bc3c58c72b638409aa1d74f09613"
     )
+
+
+def test_capture_v4_adds_china_taiwan_and_context_only_vix() -> None:
+    previous = load_capture_universe(Path("config/capture-v3.toml"))
+    universe = load_capture_universe(Path("config/capture-v4.toml"))
+    candidates = load_capture_candidates(Path("config/capture-v4-apac-candidates.toml"))
+
+    assert universe.name == "capture-v4"
+    assert len(universe.instruments) == 23
+    assert universe.configuration_hash == (
+        "eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078"
+    )
+    assert tuple(universe.instruments[:-3]) == previous.instruments
+    assert tuple(str(item.instrument_id) for item in universe.instruments[-3:]) == (
+        "index:china-a50",
+        "index:taiwan",
+        "index:volatility",
+    )
+    assert universe.preferred_epics[universe.instruments[-3].instrument_id] == "IX.D.XINHUA.IFM.IP"
+    assert universe.preferred_epics[universe.instruments[-2].instrument_id] == "IX.D.TAIWAN.IFM.IP"
+    assert universe.preferred_epics[universe.instruments[-1].instrument_id] == "CC.D.VIX.UMA.IP"
+    assert tuple(str(item.instrument_id) for item in candidates.instruments) == (
+        "index:china-a50",
+        "index:korea-200",
+        "index:taiwan",
+        "index:volatility",
+        "crypto:bitcoin-usd",
+    )
+    assert candidates.exact_review_epics == {
+        InstrumentId("crypto:bitcoin-usd"): ("CS.D.BITCOIN.CMA.IP",),
+    }

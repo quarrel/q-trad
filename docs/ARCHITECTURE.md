@@ -64,9 +64,15 @@ database. A verified snapshot is restored into an isolated `qtrad_research_*` da
 to immutable manifested datasets. Routine development requires neither collector credentials nor
 collector access.
 
-The current 20-market `capture-v3` release remains active until a separately reviewed and authorised
-replacement. China A50 and Korea 200 review uses the established catalogue → non-authoritative
-provider review → operator selection → immutable release → separate activation boundary.
+The current 20-market `capture-v3` release remains active. The established catalogue →
+non-authoritative provider review → operator selection flow accepted China A50, Taiwan and a
+context-only AUD VIX, quarantined Korea 200 and Bitcoin, and produced an undeployed immutable
+23-market `capture-v4`. Publication and activation remain separate authorised boundaries.
+
+The IG adapter normally discovers listings by bounded aliases. A candidate catalogue may also bind
+an exact epic as a non-authoritative review hint when provider search omits a known listing. A
+reviewed active preference may use the same direct-detail fallback during discovery; explicit
+selection, identity/economics checks and release hashes remain mandatory.
 
 Canonical market-data conventions remain:
 

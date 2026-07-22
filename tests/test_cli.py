@@ -1,6 +1,6 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator, Sequence
+from collections.abc import AsyncIterator, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -713,8 +713,12 @@ async def test_listing_review_writes_new_non_authoritative_manifest_without_data
             self.disconnect_count += 1
 
         async def review_listings(
-            self, instrument_ids: Sequence[InstrumentId]
+            self,
+            instrument_ids: Sequence[InstrumentId],
+            *,
+            exact_epics: Mapping[InstrumentId, Sequence[str]] | None = None,
         ) -> tuple[InstrumentListingReview, ...]:
+            assert exact_epics == {}
             return tuple(
                 InstrumentListingReview(instrument_id, ()) for instrument_id in instrument_ids
             )

@@ -1,0 +1,203 @@
+name = "capture-v4"
+base_release_name = "capture-v3"
+base_configuration_hash = "50202ef7218f1d9816ebc88673259ecb5470f9360abe6b40f1f730c06d712836"
+addition_catalogue_name = "capture-v4-apac-candidates"
+addition_catalogue_hash = "b9a193d40c8f0ca832dae12caeaec762cc9552a3486d5126f6d72fe3ac5567b8"
+addition_review_hash = "ed17cf86d566f742c0be3e0f003fa24ffc0bbb7a31642c71a386ec3e3782cf13"
+addition_selection_hash = "424aa02defcfe44f6bd5cd4847f9be6c44693ec846259b59e17c595ec43c4a3c"
+promoted_at = "2026-07-22T08:34:41.227744Z"
+quarantined_instrument_ids = ["crypto:bitcoin-usd", "index:korea-200"]
+
+[[instrument]]
+id = "fx:aud-usd"
+display_name = "AUD/USD"
+asset_class = "FX"
+base_currency = "AUD"
+quote_currency = "USD"
+search_aliases = ["AUD/USD"]
+preferred_epic = "CS.D.AUDUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:eur-usd"
+display_name = "EUR/USD"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "USD"
+search_aliases = ["EUR/USD"]
+preferred_epic = "CS.D.EURUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:usd-jpy"
+display_name = "USD/JPY"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "JPY"
+search_aliases = ["USD/JPY"]
+preferred_epic = "CS.D.USDJPY.CFD.IP"
+
+[[instrument]]
+id = "fx:gbp-usd"
+display_name = "GBP/USD"
+asset_class = "FX"
+base_currency = "GBP"
+quote_currency = "USD"
+search_aliases = ["GBP/USD"]
+preferred_epic = "CS.D.GBPUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:usd-chf"
+display_name = "USD/CHF"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "CHF"
+search_aliases = ["USD/CHF"]
+preferred_epic = "CS.D.USDCHF.CFD.IP"
+
+[[instrument]]
+id = "fx:usd-cad"
+display_name = "USD/CAD"
+asset_class = "FX"
+base_currency = "USD"
+quote_currency = "CAD"
+search_aliases = ["USD/CAD"]
+preferred_epic = "CS.D.USDCAD.CFD.IP"
+
+[[instrument]]
+id = "fx:nzd-usd"
+display_name = "NZD/USD"
+asset_class = "FX"
+base_currency = "NZD"
+quote_currency = "USD"
+search_aliases = ["NZD/USD"]
+preferred_epic = "CS.D.NZDUSD.CFD.IP"
+
+[[instrument]]
+id = "fx:eur-jpy"
+display_name = "EUR/JPY"
+asset_class = "FX"
+base_currency = "EUR"
+quote_currency = "JPY"
+search_aliases = ["EUR/JPY"]
+preferred_epic = "CS.D.EURJPY.CFD.IP"
+
+[[instrument]]
+id = "index:australia-200"
+display_name = "Australia 200"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["Australia 200", "ASX 200"]
+preferred_epic = "IX.D.ASX.IFD.IP"
+
+[[instrument]]
+id = "index:us-500"
+display_name = "US 500"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["US 500", "S&P 500"]
+preferred_epic = "IX.D.SPTRD.IFD.IP"
+
+[[instrument]]
+id = "index:ftse-100"
+display_name = "FTSE 100"
+asset_class = "INDEX"
+quote_currency = "GBP"
+search_aliases = ["FTSE 100", "UK 100"]
+preferred_epic = "IX.D.FTSE.CFD.IP"
+
+[[instrument]]
+id = "index:us-tech-100"
+display_name = "US Tech 100"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["US Tech 100", "Nasdaq 100"]
+preferred_epic = "IX.D.NASDAQ.IFD.IP"
+
+[[instrument]]
+id = "index:wall-street"
+display_name = "Wall Street"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["Wall Street", "Dow Jones"]
+preferred_epic = "IX.D.DOW.IFD.IP"
+
+[[instrument]]
+id = "index:germany-40"
+display_name = "Germany 40"
+asset_class = "INDEX"
+quote_currency = "EUR"
+search_aliases = ["Germany 40", "DAX"]
+preferred_epic = "IX.D.DAX.IFD.IP"
+
+[[instrument]]
+id = "index:japan-225"
+display_name = "Japan 225"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["Japan 225", "Nikkei 225"]
+preferred_epic = "IX.D.NIKKEI.IFA.IP"
+
+[[instrument]]
+id = "index:eu-stocks-50"
+display_name = "EU Stocks 50"
+asset_class = "INDEX"
+quote_currency = "EUR"
+search_aliases = ["EU Stocks 50", "Euro Stoxx 50"]
+preferred_epic = "IX.D.STXE.IFD.IP"
+
+[[instrument]]
+id = "commodity:spot-gold"
+display_name = "Spot Gold"
+asset_class = "COMMODITY"
+base_currency = "XAU"
+quote_currency = "USD"
+search_aliases = ["GOLD"]
+preferred_epic = "CS.D.CFDGOLD.CFDGC.IP"
+
+[[instrument]]
+id = "commodity:spot-silver"
+display_name = "Spot Silver"
+asset_class = "COMMODITY"
+base_currency = "XAG"
+quote_currency = "USD"
+search_aliases = ["SILVER"]
+preferred_epic = "CS.D.CFDSILVER.CFDSI.IP"
+
+[[instrument]]
+id = "commodity:us-crude"
+display_name = "Oil - US Crude"
+asset_class = "COMMODITY"
+quote_currency = "USD"
+search_aliases = ["WTI"]
+preferred_epic = "CC.D.CL.UNC.IP"
+
+[[instrument]]
+id = "index:hong-kong-hs50"
+display_name = "Hong Kong HS50"
+asset_class = "INDEX"
+quote_currency = "HKD"
+search_aliases = ["Hang Seng"]
+preferred_epic = "IX.D.HANGSENG.IFM.IP"
+
+[[instrument]]
+id = "index:china-a50"
+display_name = "China A50"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["China A50", "FTSE China A50"]
+preferred_epic = "IX.D.XINHUA.IFM.IP"
+
+[[instrument]]
+id = "index:taiwan"
+display_name = "Taiwan Index"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["Taiwan Index", "Taiwan"]
+preferred_epic = "IX.D.TAIWAN.IFM.IP"
+
+[[instrument]]
+id = "index:volatility"
+display_name = "Volatility Index"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["VIX", "Volatility Index", "US Volatility Index"]
+preferred_epic = "CC.D.VIX.UMA.IP"

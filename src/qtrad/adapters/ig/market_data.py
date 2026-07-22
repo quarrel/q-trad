@@ -460,6 +460,16 @@ class IgDemoMarketDataAdapter:
                     if candidate is not None:
                         by_epic[epic] = candidate
 
+            if preferred_epic not in by_epic:
+                detail_response = await self._run_rest_read(
+                    "fetch_market",
+                    lambda service, epic=preferred_epic: service.fetch_market_by_epic(epic),
+                )
+                detail = _single_record(detail_response)
+                candidate = _candidate({}, detail)
+                if candidate is not None:
+                    by_epic[preferred_epic] = candidate
+
             candidate = _select_candidate(
                 tuple(by_epic.values()),
                 instrument,
@@ -527,7 +537,10 @@ class IgDemoMarketDataAdapter:
             ) from replacement_error
 
     async def review_listings(
-        self, instrument_ids: Sequence[InstrumentId]
+        self,
+        instrument_ids: Sequence[InstrumentId],
+        *,
+        exact_epics: Mapping[InstrumentId, Sequence[str]] | None = None,
     ) -> Sequence[InstrumentListingReview]:
         """Return bounded listing evidence without selecting or persisting a candidate."""
 
@@ -535,6 +548,11 @@ class IgDemoMarketDataAdapter:
             raise ValueError("listing review requires between one and 100 instruments")
         if len(set(instrument_ids)) != len(instrument_ids):
             raise ValueError("listing review instrument IDs must be unique")
+        exact_epics = exact_epics or {}
+        if set(exact_epics) - set(instrument_ids):
+            raise ValueError("exact review epics must belong to requested instruments")
+        if any(len(epics) > 5 for epics in exact_epics.values()):
+            raise ValueError("listing review cannot exceed five exact epics per instrument")
         reviews: list[InstrumentListingReview] = []
         search_request_count = 0
         detail_request_count = 0
@@ -546,6 +564,19 @@ class IgDemoMarketDataAdapter:
                     f"listing review catalogue has no instrument definition for {instrument_id}"
                 ) from error
             by_epic: dict[str, ListingReviewCandidate] = {}
+            for epic in exact_epics.get(instrument_id, ()):
+                if detail_request_count >= _MAX_LISTING_REVIEW_DETAIL_REQUESTS:
+                    raise RuntimeError(
+                        "IG listing review exceeded the global detail-request budget of "
+                        f"{_MAX_LISTING_REVIEW_DETAIL_REQUESTS}"
+                    )
+                detail_request_count += 1
+                detail_response = await self._run_rest_read(
+                    "fetch_market",
+                    lambda service, epic=epic: service.fetch_market_by_epic(epic),
+                )
+                detail = _single_record(detail_response)
+                by_epic[epic] = _listing_review_candidate({}, detail, instrument)
             for alias in instrument.search_aliases:
                 if search_request_count >= _MAX_LISTING_REVIEW_SEARCH_REQUESTS:
                     raise RuntimeError(
@@ -2120,7 +2151,7 @@ def _candidate(search_row: Mapping[str, object], detail: Mapping[str, object]) -
 
 
 def _search_row_can_match(search_row: Mapping[str, object], instrument: Instrument) -> bool:
-    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types_for_instrument(instrument)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     expiry = (_string(search_row, "expiry") or "").upper()
     market_status = (_string(search_row, "marketStatus") or "").upper()
@@ -2136,7 +2167,7 @@ def _search_row_is_review_relevant(
 ) -> bool:
     """Exclude unrelated product families while retaining dated and unavailable evidence."""
 
-    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types_for_instrument(instrument)
     instrument_type = (_string(search_row, "instrumentType") or "").upper()
     return not instrument_type or instrument_type in accepted_types
 
@@ -2166,7 +2197,7 @@ def _listing_review_candidate(
     raw_product_type = (
         _string(search_row, "instrumentType") or _string(detail_instrument, "type") or ""
     ).upper()
-    product_type = _review_product_type(raw_product_type, instrument.asset_class)
+    product_type = _review_product_type(raw_product_type, instrument)
     raw_expiry = (
         _string(search_row, "expiry") or _string(detail_instrument, "expiry") or ""
     ).upper()
@@ -2253,10 +2284,18 @@ def _accepted_ig_instrument_types(asset_class: AssetClass) -> frozenset[str]:
     raise ValueError(f"unsupported IG asset class: {asset_class}")
 
 
-def _review_product_type(raw_product_type: str, asset_class: AssetClass) -> ProductType:
-    if raw_product_type == "CURRENCIES" and asset_class is AssetClass.FX:
+def _accepted_ig_instrument_types_for_instrument(instrument: Instrument) -> frozenset[str]:
+    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
+    if str(instrument.instrument_id) == "index:volatility":
+        return accepted_types | {"COMMODITIES"}
+    return accepted_types
+
+
+def _review_product_type(raw_product_type: str, instrument: Instrument) -> ProductType:
+    if raw_product_type == "CURRENCIES" and instrument.asset_class is AssetClass.FX:
         return ProductType.SPOT_FX
-    if raw_product_type in _accepted_ig_instrument_types(asset_class):
+    accepted_types = _accepted_ig_instrument_types_for_instrument(instrument)
+    if raw_product_type in accepted_types:
         return ProductType.ROLLING_CFD
     return ProductType.UNKNOWN
 
@@ -2283,7 +2322,7 @@ def _select_candidate(
     *,
     preferred_epic: str | None = None,
 ) -> _Candidate:
-    accepted_types = _accepted_ig_instrument_types(instrument.asset_class)
+    accepted_types = _accepted_ig_instrument_types_for_instrument(instrument)
     matches = [
         candidate
         for candidate in candidates

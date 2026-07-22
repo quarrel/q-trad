@@ -24,7 +24,9 @@ When authority is absent, remain read-only and report the exact proposed operati
 ## Current operating identity
 
 - Active universe: `config/capture-v3.toml`, 20 instruments.
-- Candidate additions: China A50 and Korea 200 only; neither currently has selection authority.
+- Prepared release: `config/capture-v4.toml`, 23 instruments, adds reviewed China A50 and Taiwan plus
+  context-only AUD VIX. Korea 200 and Bitcoin remain quarantined after fail-closed demo review.
+  Publication and activation are not authorised by release preparation.
 - The active universe is mounted at `/etc/qtrad/universe/active.toml` and synchronised inside the
   existing ingest process before subscriptions are replaced.
 - The collector's canonical source identity remains the established configured value across
@@ -62,11 +64,14 @@ times, reason codes, immutable identities and non-secret evidence references.
 
 ## Candidate review and release preparation
 
-The R0 China A50/Korea 200 workflow is:
+The R0 China A50/Korea 200/Taiwan/VIX/Bitcoin workflow is:
 
-1. Add provider-neutral candidate concepts without epics or deployment authority.
+1. Add provider-neutral candidate concepts without deployment authority. Use provider epics only as
+   explicit bounded review hints when ordinary search omits a user-observed listing.
 2. Run the existing bounded non-authoritative IG demo review. It may report candidates and stable
-   rejection reasons but cannot choose a listing.
+   rejection reasons but cannot choose a listing. When normal search omits a known listing, an
+   exact-review epic hint may fetch bounded detail; the hint is hash-bound evidence input, not
+   selection authority.
 3. Review product type, rolling/expiry semantics, market state, duplicate/equivalent exposure,
    session, currency, quantity rules and value-per-price-unit.
 4. Author an explicit mapping bound to the exact catalogue and provider-review hashes. Missing,

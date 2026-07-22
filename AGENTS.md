@@ -29,9 +29,10 @@ The current milestone is **R0 — alignment, coverage and data readiness**:
 > continuous shadow paper.
 
 The reviewed 20-market `capture-v3` collector is running on OCI. All 20 markets remain potentially
-tradable subject to experiment role and paper eligibility. China A50 and Korea 200 are the only
-immediate candidates; they have no selection or deployment authority until the existing provider
-review and release boundary passes.
+tradable subject to experiment role and paper eligibility. A bounded provider review selected China
+A50 and Taiwan plus an AUD-denominated, context-only VIX for an undeployed 23-market `capture-v4`.
+Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings were unavailable; both
+remain quarantined. Publication and activation remain separately authorised operations.
 
 The old single-instrument strategy-ranking report is retained framework-proof evidence. It is not
 the intended model/portfolio architecture and its negative cost-aware result is not an effectiveness
@@ -148,8 +149,8 @@ require future research schemas to read every experimental epoch.
   as explicit `STOPPED` or truthful `FAILED`.
 - Collector observation is read-only by default. Publication, deployment, provider experiments,
   evidence writes and cloud changes require the current runbook and explicit authority.
-- Keep `capture-v3` running until a reviewed replacement release is separately authorised. Never
-  infer China/Korea mappings or activate a candidate catalogue directly.
+- Keep `capture-v3` running until prepared `capture-v4` is separately authorised for publication
+  and activation. Never infer a Korea mapping or activate a candidate catalogue directly.
 - Never expose credentials, account identifiers, rendered secret-bearing configuration or session
   tokens in logs, fixtures, events, tools or version control.
 

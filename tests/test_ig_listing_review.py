@@ -220,6 +220,96 @@ async def test_review_enumerates_bounded_candidates_without_selecting_one() -> N
     assert first_instrument["status"] == "OPERATOR_SELECTION_REQUIRED"
 
 
+@pytest.mark.asyncio
+async def test_review_search_accepts_provider_misclassified_vix() -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v4-apac-candidates.toml"))
+    instrument = next(
+        item
+        for item in catalogue.instruments
+        if item.instrument_id == InstrumentId("index:volatility")
+    )
+    epic = "CC.D.VIX.UMA.IP"
+    service = ReviewService(
+        [
+            {
+                "epic": epic,
+                "instrumentName": "Volatility Index (A$1)",
+                "instrumentType": "COMMODITIES",
+                "expiry": "-",
+                "marketStatus": "TRADEABLE",
+            }
+        ],
+        {
+            epic: detail(
+                epic=epic,
+                currency="AUD",
+                minimum="1",
+                bid="17.2",
+                instrument_type="COMMODITIES",
+            )
+        },
+    )
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        FixedClock(),
+        instruments_by_id={instrument.instrument_id: instrument},
+        preferred_epics={},
+        service_factory=lambda _: service,
+    )
+
+    await adapter.connect()
+    try:
+        reviews = await adapter.review_listings((instrument.instrument_id,))
+    finally:
+        await adapter.disconnect()
+
+    assert service.fetched == [epic]
+    assert service.searches == ["VIX", "Volatility Index", "US Volatility Index"]
+    assert reviews[0].candidates[0].listing_id.external_id == epic
+    assert reviews[0].candidates[0].product_type is ProductType.ROLLING_CFD
+    assert reviews[0].candidates[0].eligible is True
+
+
+@pytest.mark.asyncio
+async def test_discovery_fetches_preferred_vix_when_search_does_not_return_it() -> None:
+    catalogue = load_capture_candidates(Path("config/capture-v4-apac-candidates.toml"))
+    instrument = next(
+        item
+        for item in catalogue.instruments
+        if item.instrument_id == InstrumentId("index:volatility")
+    )
+    epic = "CC.D.VIX.UMA.IP"
+    service = ReviewService(
+        [],
+        {
+            epic: detail(
+                epic=epic,
+                currency="AUD",
+                minimum="1",
+                bid="17.2",
+                instrument_type="COMMODITIES",
+            )
+        },
+    )
+    adapter = IgDemoMarketDataAdapter(
+        config(),
+        FixedClock(),
+        instruments_by_id={instrument.instrument_id: instrument},
+        preferred_epics={instrument.instrument_id: epic},
+        service_factory=lambda _: service,
+    )
+
+    await adapter.connect()
+    try:
+        listings = await adapter.discover_listings((instrument.instrument_id,))
+    finally:
+        await adapter.disconnect()
+
+    assert service.fetched == [epic]
+    assert listings[0].listing_id == ProviderListingId("ig", "demo", epic)
+    assert listings[0].currency == "AUD"
+
+
 @pytest.mark.parametrize(
     ("instrument_id", "provider_type", "asset_class"),
     (

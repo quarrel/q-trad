@@ -2,7 +2,8 @@
 
 **Updated:** 2026-07-22
 **Current milestone:** R0 — alignment, coverage and data readiness
-**State:** `capture-v3` is live with 20/20 channels ready; paper research remains offline/replay
+**State:** `capture-v3` is live with 20/20 channels ready; undeployed `capture-v4` is prepared;
+paper research remains offline/replay
 
 ## Working now
 
@@ -25,8 +26,10 @@
   explicit cost/risk states and constrained paper portfolio construction. The first full path will
   be offline and chronological; continuous shadow paper follows only after the offline MVP.
 - All current 20 markets remain potentially tradable subject to experiment role, reviewed product
-  economics, sessions, conversion and data quality. China A50 and Korea 200 are the only immediate
-  APAC capture candidates and have no approved mapping or deployment yet.
+  economics, sessions, conversion and data quality. The bounded review selected the smaller China
+  A50 and Taiwan contracts plus an AUD-denominated context-only VIX for an undeployed 23-market
+  `capture-v4`. Korea 200 has no eligible demo listing, and all reviewed Bitcoin listings were
+  unavailable; both remain quarantined.
 
 ## Current risks and unknowns
 
@@ -37,21 +40,20 @@
 - Native forward history is still short for model selection or an effectiveness claim.
 - Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
   qualified a quote-imbalance feature. It is not evidence of executed trade volume or CVD.
-- Exact China A50 and Korea 200 IG demo listings, sessions and product economics are unresolved.
+- China A50 and Taiwan session/data-quality qualification remains part of the native coverage audit.
+  Korea 200 remains unavailable without a future eligible listing. VIX is capture-only and must not
+  become paper-tradable without a separate economics/role decision. Bitcoin needs a future review
+  while its exact listing is available before it can be promoted as potentially tradable.
 - The historical-data source and licence decision is open. External history will be
   provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 
 ## Next actions
 
-1. Finish the R0 documentation/archive reset and retain the old ranking proof as historical evidence.
-2. Review China A50 and Korea 200 through the existing non-authoritative catalogue and fail-closed
-   selection flow; prepare `capture-v4` only for accepted listings.
-3. Continue proportionate read-only observation of `capture-v3` delivery, gaps, loss and lag while
-   the review proceeds.
-4. Audit quote-size, session, gap, revision and aligned-bar coverage for the R1 dataset contract.
-5. Combine the user's historical-source work with bounded IG-candle/external-sample, licence and
+1. Continue proportionate read-only observation of `capture-v3` delivery, gaps, loss and lag.
+2. Audit quote-size, session, gap, revision and aligned-bar coverage for the R1 dataset contract.
+3. Combine the user's historical-source work with bounded IG-candle/external-sample, licence and
    provenance review.
-6. Repair and re-run weekly restore verification independently of universe deployment.
+4. Repair and re-run weekly restore verification independently of universe deployment.
 
 ## Evidence and current authorities
 
@@ -59,6 +61,7 @@
 - Trading-research intent and gates: `docs/TRADING_RESEARCH.md`
 - Implemented and intended system shape: `docs/ARCHITECTURE.md`
 - Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
+- China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
 - First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`
 - Superseded plans, qualification and incident evidence: `docs/archive/`

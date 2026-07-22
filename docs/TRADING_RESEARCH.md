@@ -48,13 +48,16 @@ All 20 markets in `capture-v3` remain potentially tradable. An experiment may ma
 a forecast target, context-only input or paper-ineligible without changing its capture status. No
 instrument count is a success criterion.
 
-China A50 and Korea 200 are the immediate APAC capture candidates. IG's public
+China A50 and Korea 200 were the immediate APAC capture candidates. IG's public
 [index product details](https://www.ig.com/en/help-and-support/articles/597590-what-are-ig-s-indices-cfd-product-details)
-identify both market concepts, but public pages do not establish an acceptable demo listing. Each
-must pass the existing fail-closed IG demo catalogue, listing, mapping, session and
-product-economics review. The current collector remains on `capture-v3` until an immutable
-`capture-v4` release is separately approved and activated. A rejected or ambiguous candidate is
-recorded rather than guessed. Singapore, India and USD/CNH are not planned additions.
+identify both market concepts, but public pages do not establish an acceptable demo listing. The
+bounded fail-closed demo review accepted the smaller China A50 and Taiwan contracts and found no
+eligible Korea 200 listing. The supplied VIX epic is AUD-denominated and exposed as provider type
+`COMMODITIES`; it is accepted only as a context input and is paper-ineligible. The supplied Bitcoin
+epic and normally searchable Bitcoin listings were unavailable when reviewed, so Bitcoin remains
+quarantined with Korea. The current collector remains on `capture-v3`; the resulting immutable
+23-market `capture-v4` is prepared but requires separate publication and activation authority.
+Singapore, India and USD/CNH are not planned additions.
 
 Capacity already proved above the intended universe size. A release that changes only the reviewed
 universe needs focused channel readiness, delivery, loss and lag evidence rather than another broad
@@ -94,8 +97,9 @@ paper fills, spreads or slippage. A purchase or new adapter requires its own exp
 
 ### R0 — alignment, coverage and data readiness
 
-Realign active documentation; review and, with separate authority, release China A50 and Korea 200;
-audit quote-size, session, gap and aligned-bar coverage; and make a bounded historical-data decision.
+With documentation realigned and undeployed China/Taiwan APAC additions prepared, audit quote-size,
+session, gap and aligned-bar coverage and make a bounded historical-data decision. VIX is
+context-only; Korea 200 and Bitcoin remain quarantined pending eligible exact evidence.
 
 ### R1 — causal multi-asset research foundation
 

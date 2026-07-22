@@ -1,0 +1,40 @@
+# Offline candidates only. Exact-review epics are bounded lookup hints and cannot authorise
+# ingestion or selection. Listings, currencies, expiry semantics and economics require review.
+name = "capture-v4-apac-candidates"
+
+[[instrument]]
+id = "index:china-a50"
+display_name = "China A50"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["China A50", "FTSE China A50"]
+
+[[instrument]]
+id = "index:korea-200"
+display_name = "Korea 200"
+asset_class = "INDEX"
+quote_currency = "KRW"
+search_aliases = ["Korea 200", "KOSPI 200", "Korea", "KOSPI", "South Korea"]
+
+[[instrument]]
+id = "index:taiwan"
+display_name = "Taiwan Index"
+asset_class = "INDEX"
+quote_currency = "USD"
+search_aliases = ["Taiwan Index", "Taiwan"]
+
+[[instrument]]
+id = "index:volatility"
+display_name = "Volatility Index"
+asset_class = "INDEX"
+quote_currency = "AUD"
+search_aliases = ["VIX", "Volatility Index", "US Volatility Index"]
+
+[[instrument]]
+id = "crypto:bitcoin-usd"
+display_name = "Bitcoin/USD"
+asset_class = "CRYPTO"
+base_currency = "BTC"
+quote_currency = "USD"
+search_aliases = ["Bitcoin"]
+exact_review_epics = ["CS.D.BITCOIN.CMA.IP"]
