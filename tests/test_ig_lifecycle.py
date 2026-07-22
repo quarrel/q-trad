@@ -173,6 +173,12 @@ class RejectReplacementOnceAdapter(FakeStreamAdapter):
         await super()._open_stream(listings)
 
 
+class ReplacementRaceAdapter(FakeStreamAdapter):
+    async def _close_stream(self) -> None:
+        await super()._close_stream()
+        self._schedule_reconnect()
+
+
 class StaleAdapter(IgDemoMarketDataAdapter):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -880,6 +886,26 @@ async def test_subscription_replacement_reuses_session_without_concurrent_stream
     assert adapter.close_calls == 1
     assert adapter.open_calls == 1
     assert adapter.maximum_active_streams == 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_replacement_suppresses_stale_reconnect_race() -> None:
+    adapter = ReplacementRaceAdapter(config(), MutableClock())
+    selected_listing = listing()
+    adapter._service = FakeService()
+    adapter._connection_state = _ConnectionState.READY
+    adapter._desired_listings = (selected_listing,)
+    adapter.active_streams = 1
+
+    await adapter.replace_subscriptions(
+        (selected_listing,),
+        instruments_by_id={},
+        preferred_epics={},
+    )
+
+    assert adapter._reconnect_task is None
+    assert adapter._reconnecting is False
+    assert adapter.open_calls == 1
 
 
 @pytest.mark.asyncio

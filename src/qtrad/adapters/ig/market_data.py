@@ -512,6 +512,25 @@ class IgDemoMarketDataAdapter:
             raise RuntimeError("subscribe before replacing subscriptions")
         if not listings:
             raise ValueError("at least one listing is required")
+        if self._reconnecting:
+            raise RuntimeError("IG stream lifecycle operation is already in progress")
+        self._reconnecting = True
+        try:
+            await self._replace_subscriptions(
+                listings,
+                instruments_by_id=instruments_by_id,
+                preferred_epics=preferred_epics,
+            )
+        finally:
+            self._reconnecting = False
+
+    async def _replace_subscriptions(
+        self,
+        listings: Sequence[ProviderListing],
+        *,
+        instruments_by_id: Mapping[InstrumentId, Instrument],
+        preferred_epics: Mapping[InstrumentId, str],
+    ) -> None:
         previous_listings = self._desired_listings
         previous_instruments = self._instruments_by_id
         previous_epics = self._preferred_epics
