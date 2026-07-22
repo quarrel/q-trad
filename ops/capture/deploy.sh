@@ -35,6 +35,13 @@ readonly release_commit
 git -C "$root" fetch --quiet origin main
 [[ "$(git -C "$root" rev-parse origin/main)" == "$release_commit" ]]
 
+if [[ -z "${GH_TOKEN:-}" ]]; then
+  credential_output="$(printf 'protocol=https\nhost=github.com\n\n' | git credential fill)"
+  github_token="$(printf '%s\n' "$credential_output" | sed -n 's/^password=//p')"
+  [[ -n "$github_token" ]]
+  export GH_TOKEN="$github_token"
+fi
+
 descriptor_json="$(
   cd "$root"
   uv run qtrad deployment inspect \
