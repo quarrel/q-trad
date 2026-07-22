@@ -1,0 +1,11 @@
+name = "capture-v4"
+application_commit = "c27a58ab2f103c91433a77bb18404f6837610371"
+application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:a61b2c3337d04dad5e0bbcd2aef5376f9598d9b32cb4a860825a5b9eaed0740f"
+universe_file = "config/capture-v4.toml"
+universe_configuration_hash = "eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078"
+schema_head = "0010"
+
+[rollback]
+release_commit = "33827d5957216865bbdf399f54e72fbfdebc198e"
+application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:c4959063abb6f9cad618437f66953daf3b615e3830ed342937d47820cbd8cbc9"
+universe_name = "capture-v3"
