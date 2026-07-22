@@ -1,6 +1,6 @@
 name = "capture-v4"
-application_commit = "c27a58ab2f103c91433a77bb18404f6837610371"
-application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:a61b2c3337d04dad5e0bbcd2aef5376f9598d9b32cb4a860825a5b9eaed0740f"
+application_commit = "1696c30afd6744e90d065c53517209ba24d3ba89"
+application_image = "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app@sha256:0ebdf75d5abb484c14b0dac7375ceba8533e275ac8072653abb8354746b7a3bb"
 universe_file = "config/capture-v4.toml"
 universe_configuration_hash = "eca6649cfd2477204d9a6d5970596657ad0d94b0a25916f8b26b9c5f0c606078"
 schema_head = "0010"
