@@ -28,11 +28,16 @@ restore_cleanup_image=''
 
 cleanup_restore_data() {
   if [[ -n "$restore_cleanup_image" ]]; then
-    docker run --rm --network none --privileged --user 0:0 --entrypoint /bin/sh \
+    if ! docker run --rm --network none --privileged --user 0:0 --entrypoint /bin/sh \
       --volume "$restore_data_dir:/data:Z" "$restore_cleanup_image" \
-      -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' > /dev/null 2>&1 || true
+      -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' > /dev/null 2>&1; then
+      printf 'restore cleanup container could not remove disposable data\n' >&2
+    fi
   fi
-  rm -rf "$restore_data_dir"
+  if ! rm -rf "$restore_data_dir"; then
+    printf 'restore cleanup could not remove %s\n' "$restore_data_dir" >&2
+    return 1
+  fi
 }
 
 cleanup_container_data() {
