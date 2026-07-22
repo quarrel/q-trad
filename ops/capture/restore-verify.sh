@@ -24,6 +24,8 @@ work_dir="$(mktemp -d "$restore_root/work.XXXXXX")"
 restore_data_dir="$(mktemp -d "$restore_root/data.XXXXXX")"
 restore_identity="$(date --utc +%s)-$$"
 container="qtrad-restore-verify-$restore_identity"
+volume="qtrad-restore-verify-$restore_identity"
+volume_created=0
 restore_cleanup_image=''
 
 cleanup_restore_data() {
@@ -45,10 +47,18 @@ cleanup_container_data() {
     'rm -rf /var/lib/postgresql/* /var/lib/postgresql/.[!.]*' > /dev/null 2>&1 || true
 }
 
+cleanup_restore_volume() {
+  if ((volume_created == 1)); then
+    docker volume rm --force "$volume" > /dev/null 2>&1 || true
+    volume_created=0
+  fi
+}
+
 record_result() {
   local exit_code=$?
   cleanup_container_data
   docker rm --force "$container" > /dev/null 2>&1 || true
+  cleanup_restore_volume
   rm -rf "$work_dir"
   cleanup_restore_data
   if ((exit_code != 0)); then
@@ -147,8 +157,13 @@ esac
 postgres_image="$(jq -er '.postgres_image' "$manifest_file")"
 restore_cleanup_image="$postgres_image"
 
+docker volume create \
+  --driver local --opt type=none --opt o=bind --opt "device=$restore_data_dir" \
+  --label qtrad.role=restore-verification \
+  "$volume" > /dev/null
+volume_created=1
 docker run --detach --name "$container" --network none \
-  --volume "$restore_data_dir:/var/lib/postgresql:Z" \
+  --volume "$volume:/var/lib/postgresql" \
   --env POSTGRES_HOST_AUTH_METHOD=trust \
   "$postgres_image" > /dev/null
 ready=0
@@ -194,6 +209,7 @@ mv -f "$temporary_status" "$status_file"
 
 cleanup_container_data
 docker rm --force "$container" > /dev/null
+cleanup_restore_volume
 rm -rf "$work_dir"
 cleanup_restore_data
 trap - EXIT

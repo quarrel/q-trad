@@ -1584,13 +1584,15 @@ esac
         assert status["exit_code"] == 1
     calls = docker_calls.read_text()
     assert postgres_image in calls
-    assert "--volume " in calls
-    assert ":/var/lib/postgresql:Z" in calls
+    assert "volume create --driver local --opt type=none --opt o=bind" in calls
+    assert "--label qtrad.role=restore-verification" in calls
+    assert "--volume qtrad-restore-verify-" in calls
+    assert ":/var/lib/postgresql" in calls
     assert "--tmpfs /var/lib/postgresql" not in calls
     if restore_succeeds:
-        assert "volume rm" not in calls
+        assert "volume rm --force qtrad-restore-verify-" in calls
     else:
-        assert "volume rm" not in calls
+        assert "volume rm --force qtrad-restore-verify-" in calls
 
 
 def test_restore_verification_refuses_insufficient_docker_storage_before_download(
