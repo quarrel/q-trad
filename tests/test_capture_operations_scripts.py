@@ -178,6 +178,10 @@ printf '%s\\n' "$*" >> '{calls}'
     assert "--network none" in universe_calls[0]
     assert "--volume /etc/qtrad/universe:/etc/qtrad/universe:ro" in universe_calls[0]
     assert "--env UV_CACHE_DIR=/tmp/uv-cache" in universe_calls[0]
+    assert (
+        "--env QTRAD_CAPTURE_UNIVERSE_PATH=/etc/qtrad/universe/active.toml"
+        in universe_calls[0]
+    )
     assert "example.invalid/qtrad@sha256:" + "1" * 64 in universe_calls[0]
 
 
