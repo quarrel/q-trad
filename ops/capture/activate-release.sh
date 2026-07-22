@@ -262,7 +262,9 @@ rollback_on_failure() {
     mv -Tf "$active_release.next" "$active_release"
     docker compose --env-file "$capture_env" --project-directory "$active_release" \
       -f "$active_release/compose.capture.yaml" up -d --no-deps api
-    systemctl restart qtrad-ingest.service
+    systemctl stop qtrad-ingest.service || true
+    systemctl reset-failed qtrad-ingest.service || true
+    systemctl start qtrad-ingest.service
     if wait_ready "$previous_hash" "$previous_count"; then
       rollback_succeeded=true
     fi
