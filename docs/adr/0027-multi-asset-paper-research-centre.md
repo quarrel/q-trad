@@ -34,8 +34,10 @@ physical paper position per instrument. Portfolio risk and cost estimation remai
 expected return and forecast uncertainty. Every constraint, netting, rounding, fallback or
 operational adjustment receives stable attribution.
 
-All 20 `capture-v3` markets remain potentially tradable. China A50 and Korea 200 enter the existing
-fail-closed provider review as capture candidates; there is no numerical universe target and no
+All 22 non-VIX markets in the reviewed 23-market `capture-v4` remain potentially tradable. China
+A50 and Taiwan were accepted through the existing fail-closed provider review; Korea 200 has no
+eligible demo listing and remains quarantined. The AUD-denominated VIX is captured context-only,
+and reviewed Bitcoin listings remain quarantined. There is no numerical universe target and no
 candidate has selection or deployment authority.
 
 Continuous shadow-paper integration follows the offline MVP. Its process/checkpoint architecture is
