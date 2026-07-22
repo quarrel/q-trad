@@ -229,7 +229,7 @@ wait_ready() {
   local expected_hash=$1
   local expected_count=$2
   local payload
-  for _attempt in $(seq 1 60); do
+  for _attempt in $(seq 1 90); do
     payload="$(curl --silent http://127.0.0.1:8000/health/ready || true)"
     if jq -e --arg hash "$expected_hash" --argjson count "$expected_count" \
       '.ready == true and .configuration_hash == $hash
@@ -305,6 +305,7 @@ sleep "$observation_seconds"
 stage=post_deployment_verification
 wait_ready "$candidate_hash" "$candidate_count"
 
+stage=system_check
 system_json="$(curl --fail --silent http://127.0.0.1:8000/api/v1/system)"
 readonly system_json
 health_detail="$(jq -er '.adapter_health[] | select(.adapter_name == "ig-market-data") | .detail' <<< "$system_json")"
@@ -318,6 +319,7 @@ for required in \
   [[ "$health_detail" == *"$required"* ]]
 done
 
+stage=run_check
 running_json="$(curl --fail --silent http://127.0.0.1:8000/api/v1/runs)"
 readonly running_json
 jq -e --arg hash "$candidate_hash" --arg previous_hash "$previous_hash" \
@@ -325,6 +327,7 @@ jq -e --arg hash "$candidate_hash" --arg previous_hash "$previous_hash" \
    | ($running | length) == 1 and $running[0].configuration_hash == $hash
    and any(.[]; .kind == "INGESTION" and .configuration_hash == $previous_hash
                    and .status == "STOPPED")' <<< "$running_json" > /dev/null
+stage=reload_log_check
 docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
   | jq -s -e --arg hash "$candidate_hash" \
     'any(.[]; .event == "capture_universe_reloaded" and .configuration_hash == $hash)' \
@@ -333,9 +336,11 @@ if docker logs --since "$activation_at" qtrad-capture-ingest-1 2>&1 \
   | jq -s -e 'any(.[]; .event == "capture_universe_reload_rejected")' > /dev/null; then
   exit 1
 fi
+stage=image_check
 readonly image_id="sha256:${application_image##*@sha256:}"
 [[ "$(docker inspect qtrad-capture-ingest-1 --format '{{.Image}}')" == "$image_id" ]]
 [[ "$(docker inspect qtrad-capture-api-1 --format '{{.Image}}')" == "$image_id" ]]
+stage=release_check
 [[ "$(readlink -f "$active_release")" == "$release_dir" ]]
 
 write_evidence succeeded null
