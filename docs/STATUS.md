@@ -10,8 +10,8 @@
   bars, exports versioned Parquet, replays deterministically and exposes read-only health views.
 - The original seven instruments have validated mappings and have passed bounded live capture,
   reconnect and endurance work.
-- The OCI collector runs merged commit `f317c1ac0b47586782ac9047bab3bb18f31287ff`
-  from immutable OCI index digest `sha256:9d46c139fc58b580bff8ffeb53b6ed00e4ee3dd8a91c8d40694d96390ce1edba`
+- The OCI collector runs merged commit `33827d5957216865bbdf399f54e72fbfdebc198e`
+  from immutable OCI index digest `sha256:c4959063abb6f9cad618437f66953daf3b615e3830ed342937d47820cbd8cbc9`
   with `config/capture-v3.toml`. Its deployment observation reached HTTP 200 readiness, 20/20
   subscribed, updated and recent channels, caught-up projection, queue depth 0 with high-water 20,
   and zero reconnects, internal drops, Lightstreamer loss, subscription errors or server errors.
@@ -51,9 +51,6 @@
   explicitly gap-qualified in research datasets.
 - The initial 20/20 observation is a deployment smoke, not representative-session evidence;
   continue observing gaps, loss and lag without protecting an arbitrary interval.
-- The single-instrument operator endpoint currently returns HTTP 500 because PostgreSQL cannot
-  infer the nullable bar-filter parameter type. Capture is unaffected; a narrow typed-SQL fix is in
-  progress.
 - Restore verification is currently failed even though the latest backup succeeded.
 - A short forward capture cannot support a strategy-effectiveness conclusion.
 - Existing paper documents contain more hierarchy than the first framework proof may need.
@@ -62,10 +59,9 @@
 
 1. Continue proportionate read-only observation of 20-market delivery, gaps, loss and lag.
 2. Repair and re-run weekly restore verification independently of universe deployment.
-3. Merge and deploy the typed nullable bar-filter repair for the operator endpoint.
-4. Add the first transparent contemporaneous market-state annotation and compare conditional with
+3. Add the first transparent contemporaneous market-state annotation and compare conditional with
    unconditional strategy scores in locked time order.
-5. Use longer locked time-ordered data before making any strategy-effectiveness claim.
+4. Use longer locked time-ordered data before making any strategy-effectiveness claim.
 
 ## Historical records
 

@@ -47,3 +47,15 @@ canonical history was not rewritten or deleted.
 
 The release preserves the previous `ab86b9de` application and `sha256:5849acc0...` image as the
 immediate rollback point.
+
+## Follow-up query repair
+
+Live verification exposed an existing PostgreSQL ambiguity in the optional instrument filter used
+by the bars query. It affected the read-only single-instrument endpoint, not capture. The parameter
+is now explicitly typed as `TEXT`, with the endpoint covered by the real-PostgreSQL integration
+gate. PR 16 passed that gate and was merged as
+`33827d5957216865bbdf399f54e72fbfdebc198e`, published as immutable OCI index digest
+`sha256:c4959063abb6f9cad618437f66953daf3b615e3830ed342937d47820cbd8cbc9`, and deployed. Final
+verification returned HTTP 200 for the Hang Seng instrument with its current quote, quote-derived
+bars and approved listing, while collector readiness remained 20/20 with queue depth and loss at
+zero.
