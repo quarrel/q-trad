@@ -165,6 +165,14 @@ class FakeStreamAdapter(IgDemoMarketDataAdapter):
         self.active_streams = 0
 
 
+class RejectReplacementOnceAdapter(FakeStreamAdapter):
+    async def _open_stream(self, listings: Sequence[ProviderListing]) -> None:
+        if self.open_calls == 1:
+            self.open_calls += 1
+            raise RuntimeError("replacement rejected")
+        await super()._open_stream(listings)
+
+
 class StaleAdapter(IgDemoMarketDataAdapter):
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         super().__init__(*args, **kwargs)
@@ -850,6 +858,50 @@ async def test_close_stream_waits_for_confirmed_disconnect() -> None:
     assert client.disconnected is True
     assert adapter._stream_client is None
     assert adapter._generation == original_generation + 1
+
+
+@pytest.mark.asyncio
+async def test_subscription_replacement_reuses_session_without_concurrent_stream() -> None:
+    adapter = FakeStreamAdapter(config(), MutableClock())
+    service = FakeService()
+    selected_listing = listing()
+    adapter._service = service
+    adapter._connection_state = _ConnectionState.READY
+    adapter._desired_listings = (selected_listing,)
+    adapter.active_streams = 1
+
+    await adapter.replace_subscriptions(
+        (selected_listing,),
+        instruments_by_id={},
+        preferred_epics={},
+    )
+
+    assert adapter._service is service
+    assert adapter.close_calls == 1
+    assert adapter.open_calls == 1
+    assert adapter.maximum_active_streams == 1
+
+
+@pytest.mark.asyncio
+async def test_failed_subscription_replacement_restores_previous_stream() -> None:
+    adapter = RejectReplacementOnceAdapter(config(), MutableClock())
+    selected_listing = listing()
+    adapter._service = FakeService()
+    adapter._connection_state = _ConnectionState.READY
+    adapter._desired_listings = (selected_listing,)
+    adapter.active_streams = 1
+    adapter.open_calls = 1
+
+    with pytest.raises(RuntimeError, match="previous universe restored"):
+        await adapter.replace_subscriptions(
+            (selected_listing,),
+            instruments_by_id={},
+            preferred_epics={},
+        )
+
+    assert adapter._desired_listings == (selected_listing,)
+    assert adapter.active_streams == 1
+    assert adapter.maximum_active_streams == 1
 
 
 @pytest.mark.asyncio

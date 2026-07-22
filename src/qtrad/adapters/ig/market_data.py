@@ -415,11 +415,24 @@ class IgDemoMarketDataAdapter:
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
     ) -> Sequence[ProviderListing]:
+        return await self.discover_capture_universe(
+            instrument_ids,
+            instruments_by_id=self._instruments_by_id,
+            preferred_epics=self._preferred_epics,
+        )
+
+    async def discover_capture_universe(
+        self,
+        instrument_ids: Sequence[InstrumentId],
+        *,
+        instruments_by_id: Mapping[InstrumentId, Instrument],
+        preferred_epics: Mapping[InstrumentId, str],
+    ) -> Sequence[ProviderListing]:
         listings: list[ProviderListing] = []
         for instrument_id in instrument_ids:
             try:
-                instrument = self._instruments_by_id[instrument_id]
-                preferred_epic = self._preferred_epics[instrument_id]
+                instrument = instruments_by_id[instrument_id]
+                preferred_epic = preferred_epics[instrument_id]
             except KeyError as error:
                 raise RuntimeError(
                     f"capture universe has no explicit IG listing preference for {instrument_id}"
@@ -474,6 +487,44 @@ class IgDemoMarketDataAdapter:
             )
             listings.append(listing)
         return tuple(listings)
+
+    async def replace_subscriptions(
+        self,
+        listings: Sequence[ProviderListing],
+        *,
+        instruments_by_id: Mapping[InstrumentId, Instrument],
+        preferred_epics: Mapping[InstrumentId, str],
+    ) -> None:
+        """Replace one stream's subscriptions while retaining its authenticated REST session."""
+
+        self._require_connected()
+        if not self._desired_listings:
+            raise RuntimeError("subscribe before replacing subscriptions")
+        if not listings:
+            raise ValueError("at least one listing is required")
+        previous_listings = self._desired_listings
+        previous_instruments = self._instruments_by_id
+        previous_epics = self._preferred_epics
+        await self._close_stream()
+        self._desired_listings = tuple(listings)
+        self._instruments_by_id = dict(instruments_by_id)
+        self._preferred_epics = dict(preferred_epics)
+        try:
+            await self._open_stream(self._desired_listings)
+        except Exception as replacement_error:
+            await self._close_stream()
+            self._desired_listings = previous_listings
+            self._instruments_by_id = previous_instruments
+            self._preferred_epics = previous_epics
+            try:
+                await self._open_stream(previous_listings)
+            except Exception as rollback_error:
+                raise RuntimeError(
+                    "IG subscription replacement and rollback both failed"
+                ) from rollback_error
+            raise RuntimeError(
+                "IG subscription replacement failed; previous universe restored"
+            ) from replacement_error
 
     async def review_listings(
         self, instrument_ids: Sequence[InstrumentId]
@@ -1901,6 +1952,7 @@ class IgDemoMarketDataAdapter:
         self._updated_epics.clear()
         self._quote_received_times.clear()
         self._stale_epics.clear()
+        self._listings_by_epic.clear()
         self._heartbeat_subscribed = False
         self._last_heartbeat_at = None
         self._last_heartbeat_value = None

@@ -1,0 +1,9 @@
+# Offline candidate only. The preferred epic is selected in the reviewed capture-v3 release.
+name = "hang-seng-candidate"
+
+[[instrument]]
+id = "index:hong-kong-hs50"
+display_name = "Hong Kong HS50"
+asset_class = "INDEX"
+quote_currency = "HKD"
+search_aliases = ["Hang Seng"]

@@ -26,6 +26,7 @@ class IngestionService:
         self._producer_version = producer_version
         self._bar_builder = bar_builder or OneMinuteBarBuilder()
         self._gap_detector = gap_detector or GapDetector()
+        self._stream_versions: dict[str, int] = {}
 
     async def process(self, record: MarketDataRecord) -> AppendResult:
         raw = RawMessage(
@@ -51,7 +52,7 @@ class IngestionService:
 
         quote = record.quote
         stream_id = f"market-quote:{quote.instrument_id}"
-        previous_version = await self._store.latest_stream_version(stream_id)
+        previous_version = await self._stream_version(stream_id)
         event = EventEnvelope.create(
             stream_id=stream_id,
             stream_version=previous_version + 1,
@@ -67,11 +68,24 @@ class IngestionService:
             raw, event, expected_stream_version=previous_version
         )
         if not result.duplicate:
+            self._stream_versions[stream_id] = event.stream_version
             gap = self._gap_detector.observe(quote, detected_at=record.received_time)
             if gap is not None:
                 await self._append_gap(gap)
-            for bar in self._bar_builder.on_quote(quote):
-                await self._append_bar(bar, received_time=record.received_time)
+            if self._bar_builder.correction_expired(quote):
+                interval_start = quote.event_time.replace(second=0, microsecond=0)
+                await self._append_gap(
+                    DataGap(
+                        instrument_id=quote.instrument_id,
+                        interval_start=interval_start,
+                        interval_end=interval_start + self._bar_builder.interval,
+                        reason="BAR_CORRECTION_WINDOW_EXPIRED",
+                        detected_at=record.received_time,
+                    )
+                )
+            else:
+                for bar in self._bar_builder.on_quote(quote):
+                    await self._append_bar(bar, received_time=record.received_time)
         return result
 
     async def advance_bars(self, watermark: datetime) -> tuple[EventEnvelope, ...]:
@@ -82,7 +96,7 @@ class IngestionService:
 
     async def _append_bar(self, bar: MarketBar, *, received_time: datetime) -> EventEnvelope:
         stream_id = f"market-bar:{bar.instrument_id}:{bar.basis}"
-        previous_version = await self._store.latest_stream_version(stream_id)
+        previous_version = await self._stream_version(stream_id)
         event_type = "MarketBarClosed" if bar.revision == 1 else "MarketBarCorrected"
         event = EventEnvelope.create(
             stream_id=stream_id,
@@ -94,11 +108,13 @@ class IngestionService:
             producer_version=self._producer_version,
             payload=bar,
         )
-        return await self._store.append(event, expected_stream_version=previous_version)
+        persisted = await self._store.append(event, expected_stream_version=previous_version)
+        self._stream_versions[stream_id] = event.stream_version
+        return persisted
 
     async def _append_gap(self, gap: DataGap) -> EventEnvelope:
         stream_id = f"data-gap:{gap.instrument_id}"
-        previous_version = await self._store.latest_stream_version(stream_id)
+        previous_version = await self._stream_version(stream_id)
         event = EventEnvelope.create(
             stream_id=stream_id,
             stream_version=previous_version + 1,
@@ -109,4 +125,13 @@ class IngestionService:
             producer_version=self._producer_version,
             payload=gap,
         )
-        return await self._store.append(event, expected_stream_version=previous_version)
+        persisted = await self._store.append(event, expected_stream_version=previous_version)
+        self._stream_versions[stream_id] = event.stream_version
+        return persisted
+
+    async def _stream_version(self, stream_id: str) -> int:
+        version = self._stream_versions.get(stream_id)
+        if version is None:
+            version = await self._store.latest_stream_version(stream_id)
+            self._stream_versions[stream_id] = version
+        return version
