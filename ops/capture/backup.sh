@@ -8,6 +8,7 @@ readonly compose_file="$root/compose.capture.yaml"
 readonly capture_env="${QTRAD_CAPTURE_ENV:-/etc/qtrad/capture.env}"
 readonly backup_dir="${QTRAD_BACKUP_DIR:?QTRAD_BACKUP_DIR is required}"
 readonly status_dir="${QTRAD_STATUS_DIR:?QTRAD_STATUS_DIR is required}"
+readonly universe_dir="/etc/qtrad/universe"
 readonly bucket="${QTRAD_BACKUP_BUCKET:?QTRAD_BACKUP_BUCKET is required}"
 readonly oci_auth="${QTRAD_OCI_AUTH:-instance_principal}"
 readonly weekly_day="${QTRAD_WEEKLY_BACKUP_DAY:-7}"
@@ -57,6 +58,7 @@ printf '%s  %s\n' "$archive_sha" "$basename" > "$checksum"
 
 universe_evidence="$(
   docker run --rm --network none --read-only --tmpfs /tmp \
+    --volume "$universe_dir:$universe_dir:ro" \
     --env UV_CACHE_DIR=/tmp/uv-cache \
     --env-file "$capture_env" "$capture_image" python -c \
     'import json; from qtrad.runtime.settings import Settings; from qtrad.runtime.universe import load_capture_universe; universe = load_capture_universe(Settings().capture_universe_path); print(json.dumps({"name": universe.name, "hash": universe.configuration_hash}, sort_keys=True))'
