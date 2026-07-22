@@ -24,12 +24,22 @@ work_dir="$(mktemp -d "$restore_root/work.XXXXXX")"
 restore_data_dir="$(mktemp -d "$restore_root/data.XXXXXX")"
 restore_identity="$(date --utc +%s)-$$"
 container="qtrad-restore-verify-$restore_identity"
+restore_cleanup_image=''
+
+cleanup_restore_data() {
+  if [[ -n "$restore_cleanup_image" ]]; then
+    docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
+      --volume "$restore_data_dir:/data:Z" "$restore_cleanup_image" \
+      -c 'rm -rf /data/* /data/.[!.]*' > /dev/null 2>&1 || true
+  fi
+  rm -rf "$restore_data_dir"
+}
 
 record_result() {
   local exit_code=$?
   docker rm --force "$container" > /dev/null 2>&1 || true
   rm -rf "$work_dir"
-  rm -rf "$restore_data_dir"
+  cleanup_restore_data
   if ((exit_code != 0)); then
     local temporary_status
     temporary_status="$(mktemp "$status_dir/.restore-status.XXXXXX")"
@@ -124,6 +134,7 @@ case "$manifest_schema" in
     ;;
 esac
 postgres_image="$(jq -er '.postgres_image' "$manifest_file")"
+restore_cleanup_image="$postgres_image"
 
 docker run --detach --name "$container" --network none \
   --volume "$restore_data_dir:/var/lib/postgresql:Z" \
@@ -172,5 +183,5 @@ mv -f "$temporary_status" "$status_file"
 
 docker rm --force "$container" > /dev/null
 rm -rf "$work_dir"
-rm -rf "$restore_data_dir"
+cleanup_restore_data
 trap - EXIT
