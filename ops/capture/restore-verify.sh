@@ -35,8 +35,14 @@ cleanup_restore_data() {
   rm -rf "$restore_data_dir"
 }
 
+cleanup_container_data() {
+  docker exec -u 0 "$container" /bin/sh -c \
+    'rm -rf /var/lib/postgresql/* /var/lib/postgresql/.[!.]*' > /dev/null 2>&1 || true
+}
+
 record_result() {
   local exit_code=$?
+  cleanup_container_data
   docker rm --force "$container" > /dev/null 2>&1 || true
   rm -rf "$work_dir"
   cleanup_restore_data
@@ -181,6 +187,7 @@ jq -n \
   > "$temporary_status"
 mv -f "$temporary_status" "$status_file"
 
+cleanup_container_data
 docker rm --force "$container" > /dev/null
 rm -rf "$work_dir"
 cleanup_restore_data
