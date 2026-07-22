@@ -44,7 +44,7 @@ selector, learned regime veto or automatic promotion lifecycle in the offline MV
 
 ### Universe
 
-All 20 markets in `capture-v3` remain potentially tradable. An experiment may mark an instrument as
+All 22 non-VIX markets in the reviewed 23-market `capture-v4` remain potentially tradable. An experiment may mark an instrument as
 a forecast target, context-only input or paper-ineligible without changing its capture status. No
 instrument count is a success criterion.
 
@@ -55,8 +55,9 @@ bounded fail-closed demo review accepted the smaller China A50 and Taiwan contra
 eligible Korea 200 listing. The supplied VIX epic is AUD-denominated and exposed as provider type
 `COMMODITIES`; it is accepted only as a context input and is paper-ineligible. The supplied Bitcoin
 epic and normally searchable Bitcoin listings were unavailable when reviewed, so Bitcoin remains
-quarantined with Korea. The current collector remains on `capture-v3`; the resulting immutable
-23-market `capture-v4` is prepared but requires separate publication and activation authority.
+quarantined with Korea. The live collector is the immutable 23-market `capture-v4`; its AUD VIX is
+context-only and the 22 non-VIX markets remain potentially tradable subject to experiment role and
+paper eligibility.
 Singapore, India and USD/CNH are not planned additions.
 
 Capacity already proved above the intended universe size. A release that changes only the reviewed
@@ -97,9 +98,10 @@ paper fills, spreads or slippage. A purchase or new adapter requires its own exp
 
 ### R0 — alignment, coverage and data readiness
 
-With documentation realigned and undeployed China/Taiwan APAC additions prepared, audit quote-size,
-session, gap and aligned-bar coverage and make a bounded historical-data decision. VIX is
-context-only; Korea 200 and Bitcoin remain quarantined pending eligible exact evidence.
+The reviewed 23-market `capture-v4` is live. The native quote-size, session, gap, revision and
+aligned-bar audit and bounded historical-data decision are retained in
+`docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain quarantined pending
+eligible exact evidence. Restore verification remains an independent operational gate.
 
 ### R1 — causal multi-asset research foundation
 

@@ -173,8 +173,11 @@ is otherwise ready.
   container environment or `capture.env`.
 - Backups include the database dump, checksum and self-describing manifest. Never rename or separate
   members of one evidence set.
-- Restore verification uses an isolated disposable target, verifies the manifest/checksum and
-  required schema/row evidence, and does not alter the collector database.
+- Restore verification uses an isolated disposable PostgreSQL target on
+  `/srv/qtrad/postgres/restore-verification` (the backup filesystem), verifies the
+  manifest/checksum and required schema/row evidence, and does not alter the collector database.
+  The target is removed after each attempt; the free-space guard applies to that filesystem rather
+  than the small Docker root partition.
 - A successful backup does not override a failed or stale restore verification. Keep the failed
   result visible until an independently authorised repair produces a new result.
 - Never delete retained source bundles while a derived research manifest still depends on them.

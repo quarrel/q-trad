@@ -49,16 +49,15 @@
   Korea 200 remains unavailable without a future eligible listing. VIX is capture-only and must not
   become paper-tradable without a separate economics/role decision. Bitcoin needs a future review
   while its exact listing is available before it can be promoted as potentially tradable.
-- The historical-data source and licence decision is open. External history will be
-  provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
+- R0's bounded historical-data decision is recorded in `docs/R0_DATA_READINESS.md`: no external
+  source, purchase or adapter is approved yet. External history remains provenance-distinct and
+  cannot substantiate native IG fills, spreads or slippage.
 
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Audit quote-size, session, gap, revision and aligned-bar coverage for the R1 dataset contract.
-3. Combine the user's historical-source work with bounded IG-candle/external-sample, licence and
-   provenance review.
-4. Repair and re-run weekly restore verification independently of universe deployment.
+2. Repair and re-run weekly restore verification independently of universe deployment.
+3. Use the retained R0 audit when defining the R1 aligned-panel and revision contracts.
 
 ## Evidence and current authorities
 
@@ -66,6 +65,7 @@
 - Trading-research intent and gates: `docs/TRADING_RESEARCH.md`
 - Implemented and intended system shape: `docs/ARCHITECTURE.md`
 - Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
+- R0 native coverage and historical-source decision: `docs/R0_DATA_READINESS.md`
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
 - First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`

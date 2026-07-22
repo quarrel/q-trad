@@ -7,5 +7,6 @@ Wants=network-online.target
 Type=oneshot
 WorkingDirectory=/opt/qtrad-capture
 EnvironmentFile=/etc/qtrad/capture-backup.env
+Environment=QTRAD_RESTORE_ROOT=/srv/qtrad/postgres/restore-verification
 ExecStart=/opt/qtrad-capture/ops/capture/restore-verify.sh
 UMask=0077
