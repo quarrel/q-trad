@@ -28,9 +28,9 @@ restore_cleanup_image=''
 
 cleanup_restore_data() {
   if [[ -n "$restore_cleanup_image" ]]; then
-    docker run --rm --network none --user 0:0 --entrypoint /bin/sh \
+    docker run --rm --network none --privileged --user 0:0 --entrypoint /bin/sh \
       --volume "$restore_data_dir:/data:Z" "$restore_cleanup_image" \
-      -c 'rm -rf /data/* /data/.[!.]*' > /dev/null 2>&1 || true
+      -c 'find /data -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +' > /dev/null 2>&1 || true
   fi
   rm -rf "$restore_data_dir"
 }
