@@ -64,6 +64,11 @@ manifest, confirmed migration `0010`, counted 10,319,635 canonical events, and r
 disposable PostgreSQL target. The target was backed by `/srv/qtrad/postgres/restore-verification`,
 not the small Docker root filesystem. The live collector database was not modified.
 
+The restore was materially I/O-intensive on the shared host. The preceding ingestion run recorded
+12,738 callback drops from 16:38:29 to 16:50:18 UTC; that run remains visible as incomplete
+evidence. Ingest was restarted at 17:02:04 UTC and the new generation was healthy at 23/23 with
+zero drops. Future restore checks require an explicitly accepted low-load window.
+
 R0 is complete. R1 may now define the aligned panel, target, gap, revision and fold contracts;
 model selection remains blocked on longer and better-qualified native history and the missing
 economics fields.

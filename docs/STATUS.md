@@ -44,6 +44,10 @@
 - The independent restore verification passed on 2026-07-22 at 16:57:59 UTC against
   `daily/qtrad-capture-20260722T161655Z.dump`; the manifest, checksum, migration `0010` and
   10,319,635 canonical events were verified, and the disposable target was removed from `/srv`.
+- That restore was materially I/O-intensive on the shared host: the preceding ingestion run
+  recorded 12,738 callback drops from 16:38:29 to 16:50:18 UTC. The run is retained as incomplete
+  evidence, and the ingest service was restarted at 17:02:04 UTC; the new run is healthy at 23/23
+  with zero drops. Future restore checks need an explicitly accepted low-load window.
 - Native forward history is still short for model selection or an effectiveness claim.
 - Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
   qualified a quote-imbalance feature. It is not evidence of executed trade volume or CVD.

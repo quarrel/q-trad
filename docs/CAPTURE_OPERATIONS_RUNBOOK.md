@@ -178,6 +178,10 @@ is otherwise ready.
   manifest/checksum and required schema/row evidence, and does not alter the collector database.
   The target is removed after each attempt; the free-space guard applies to that filesystem rather
   than the small Docker root partition.
+- Restore and PostgreSQL index creation are materially I/O-intensive. Schedule the check in an
+  explicitly accepted low-load window, observe the collector during the run, and preserve any
+  resulting dropped-callback interval as incomplete evidence rather than treating it as a clean
+  capture period.
 - A successful backup does not override a failed or stale restore verification. Keep the result
   visible and require a fresh independent run after any repair. The installed restore service
   sets `QTRAD_RESTORE_ROOT=/srv/qtrad/postgres/restore-verification` so disposable restore data
