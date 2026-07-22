@@ -99,9 +99,10 @@ paper fills, spreads or slippage. A purchase or new adapter requires its own exp
 ### R0 — alignment, coverage and data readiness
 
 The reviewed 23-market `capture-v4` is live. The native quote-size, session, gap, revision and
-aligned-bar audit and bounded historical-data decision are retained in
-`docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain quarantined pending
-eligible exact evidence. Restore verification remains an independent operational gate.
+aligned-bar audit, bounded historical-data decision and successful independent restore verification
+are retained in `docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain
+quarantined pending eligible exact evidence. R0 is complete and R1 is the active implementation
+milestone.
 
 ### R1 — causal multi-asset research foundation
 

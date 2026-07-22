@@ -1,8 +1,8 @@
 # Current status
 
 **Updated:** 2026-07-22
-**Current milestone:** R0 — alignment, coverage and data readiness
-**State:** `capture-v4` is live with 23/23 channels ready; paper research remains offline/replay
+**Current milestone:** R1 — causal multi-asset research foundation
+**State:** R0 is complete; `capture-v4` is live with 23/23 channels ready and paper research remains offline/replay
 
 ## Working now
 
@@ -15,7 +15,7 @@
 - The collector can validate and atomically replace its mounted universe through the reviewed
   `SIGHUP` path without a second IG session. The previous immutable release remains the rollback
   point.
-- The deployed application release is `5c1dce7`; it includes the console query fix and the
+- The deployed application release is `08879c7`; it includes the console query fix, the
   descriptor-driven deployment orchestrator. The orchestrator verifies exact main-branch CI,
   backup/schema/rollback identity, proves the new image on the unchanged universe, activates once,
   observes readiness/loss/run evidence and automatically restores the prior release on a failed
@@ -41,7 +41,9 @@
 - The replaced `capture-v2` run accumulated application-side callback drops while saturated. That
   interval is incomplete market evidence and must remain excluded or explicitly gap-qualified.
 - The initial `capture-v4` observation is a deployment smoke, not representative-session evidence.
-- Weekly restore verification remains failed even though the latest backup succeeded.
+- The independent restore verification passed on 2026-07-22 at 16:57:59 UTC against
+  `daily/qtrad-capture-20260722T161655Z.dump`; the manifest, checksum, migration `0010` and
+  10,319,635 canonical events were verified, and the disposable target was removed from `/srv`.
 - Native forward history is still short for model selection or an effectiveness claim.
 - Bid/ask size is captured, but its availability and meaning across markets/sessions have not yet
   qualified a quote-imbalance feature. It is not evidence of executed trade volume or CVD.
@@ -56,8 +58,8 @@
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Repair and re-run weekly restore verification independently of universe deployment.
-3. Use the retained R0 audit when defining the R1 aligned-panel and revision contracts.
+2. Define the R1 aligned-panel, target, revision and fold contracts using the retained R0 audit.
+3. Keep native history and product-economics qualification fail-closed while R1 foundations are built.
 
 ## Evidence and current authorities
 

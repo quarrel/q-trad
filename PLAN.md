@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R0 — alignment, coverage and data readiness
+**Current milestone:** R1 — causal multi-asset research foundation
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo market data and internal paper outcomes only; no external orders.
@@ -26,14 +26,16 @@ work and records only the milestone sequence needed to reach the next trustworth
 - The bounded IG demo review accepted China A50 and Taiwan plus an AUD-denominated VIX for
   context-only capture. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings
   were unavailable; both are quarantined. The immutable 23-market `capture-v4` was activated on
-  2026-07-22 after exact release, backup, rollback and readiness gates.
+  2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
+  historical-source decision and restore verification are complete; R1 is now the active
+  implementation milestone.
 
 ## Milestones
 
 | Milestone | Status | Exit evidence |
 |---|---|---|
-| R0 — alignment, coverage and data readiness | ACTIVE | active docs agree; China/Korea review is resolved; native/aligned coverage and historical-source decisions are recorded |
-| R1 — causal multi-asset research foundation | NOT STARTED | deterministic aligned panels, multi-horizon targets, chronological folds and out-of-fold artefacts pass causality/replay checks |
+| R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
+| R1 — causal multi-asset research foundation | ACTIVE | deterministic aligned panels, multi-horizon targets, chronological folds and out-of-fold artefacts pass causality/replay checks |
 | R2 — local and pooled baselines | NOT STARTED | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence |
 | R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
 | R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
@@ -59,7 +61,10 @@ work and records only the milestone sequence needed to reach the next trustworth
 7. **Done:** record which data can support prototyping, model selection and decision-grade IG paper
    conclusions. External history never substitutes for native executable-side evidence; see
    `docs/R0_DATA_READINESS.md`.
-8. Repair and re-run weekly restore verification independently of research and universe work.
+8. **Done:** repair and re-run weekly restore verification independently of research and universe
+   work. The 2026-07-22 run restored `daily/qtrad-capture-20260722T161655Z.dump`, verified
+   manifest schema `qtrad-capture-backup-v2`, migration `0010` and 10,319,635 canonical events,
+   then removed the disposable target.
 
 R0 does not implement model, optimiser or live-paper interfaces. It removes avoidable data and
 chronology ambiguity before those contracts are fixed.

@@ -54,5 +54,16 @@ and a decision that its incremental value justifies the cost.
 
 The native audit and bounded historical-source decision are complete. R1 may define the aligned
 panel, target, gap, revision and fold contracts, while model selection remains blocked on a longer
-and better-qualified native history and the missing economics fields. Weekly restore verification
-remains a separate operational gate.
+and better-qualified native history and the missing economics fields.
+
+## Restore verification
+
+The repaired independent restore check passed on 2026-07-22 at 16:57:59 UTC. It restored
+`daily/qtrad-capture-20260722T161655Z.dump`, verified its checksum and `qtrad-capture-backup-v2`
+manifest, confirmed migration `0010`, counted 10,319,635 canonical events, and removed the
+disposable PostgreSQL target. The target was backed by `/srv/qtrad/postgres/restore-verification`,
+not the small Docker root filesystem. The live collector database was not modified.
+
+R0 is complete. R1 may now define the aligned panel, target, gap, revision and fold contracts;
+model selection remains blocked on longer and better-qualified native history and the missing
+economics fields.

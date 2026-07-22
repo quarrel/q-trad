@@ -22,13 +22,14 @@ affects current work. Keep active documents concise and archive completed chrono
 
 ## Current phase
 
-The current milestone is **R0 — alignment, coverage and data readiness**:
+The current milestone is **R1 — causal multi-asset research foundation**:
 
 > current native capture → reviewed APAC coverage and historical inputs → aligned causal datasets →
 > multi-horizon forecasts → explicit cost/risk states → constrained offline paper portfolio → later
 > continuous shadow paper.
 
-The reviewed 23-market `capture-v4` collector is running on OCI. Its 22 non-VIX markets remain
+R0 alignment, coverage, historical-source decision and independent restore verification are
+complete. The reviewed 23-market `capture-v4` collector is running on OCI. Its 22 non-VIX markets remain
 potentially tradable subject to experiment role and paper eligibility; the AUD-denominated VIX is
 context-only. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings were
 unavailable; both remain quarantined. Any later publication or activation remains a separately

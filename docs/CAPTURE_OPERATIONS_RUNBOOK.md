@@ -178,8 +178,10 @@ is otherwise ready.
   manifest/checksum and required schema/row evidence, and does not alter the collector database.
   The target is removed after each attempt; the free-space guard applies to that filesystem rather
   than the small Docker root partition.
-- A successful backup does not override a failed or stale restore verification. Keep the failed
-  result visible until an independently authorised repair produces a new result.
+- A successful backup does not override a failed or stale restore verification. Keep the result
+  visible and require a fresh independent run after any repair. The installed restore service
+  sets `QTRAD_RESTORE_ROOT=/srv/qtrad/postgres/restore-verification` so disposable restore data
+  does not consume the small Docker root filesystem.
 - Never delete retained source bundles while a derived research manifest still depends on them.
 
 Host systemd units/timers and environment paths are operational state. Inspect their current
