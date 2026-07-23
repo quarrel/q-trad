@@ -122,9 +122,7 @@ def build_frozen_targets(
     """Build frozen endpoint returns directly from observations, never from the panel."""
 
     _require_dataset(dataset, config)
-    selected_horizons = tuple(
-        (config.primary_vertical_horizon,) if horizons is None else horizons
-    )
+    selected_horizons = tuple((config.primary_vertical_horizon,) if horizons is None else horizons)
     if not selected_horizons or any(
         horizon not in config.target_horizons for horizon in selected_horizons
     ):
@@ -450,7 +448,7 @@ def _availability_time(row: ObservationRow, basis: AvailabilityBasis) -> datetim
 
 
 def _revision_key(row: ObservationRow) -> tuple[int, int]:
-    return row.stream_version, row.global_position
+    return row.revision, row.global_position
 
 
 def _source_key(row: ObservationRow) -> tuple[str, str, str]:
@@ -469,3 +467,19 @@ def _grid_times(start: datetime, end: datetime, resolution: timedelta) -> tuple[
 def _require_dataset(dataset: ObservationDataset, config: FoundationConfig) -> None:
     if dataset.dataset_id != config.observation_dataset_id:
         raise ValueError("observation dataset does not match foundation configuration")
+    source_start = _configuration_time(dataset, "interval_start")
+    source_end = _configuration_time(dataset, "interval_end")
+    if source_start > config.required_observation_start:
+        raise ValueError("observation dataset starts after the foundation's required source bound")
+    if source_end < config.required_observation_end:
+        raise ValueError("observation dataset ends before the foundation's required source bound")
+
+
+def _configuration_time(dataset: ObservationDataset, field: str) -> datetime:
+    value = dataset.configuration[field]
+    if not isinstance(value, str):
+        raise TypeError(f"observation configuration {field} must be an ISO-8601 timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"observation configuration {field} must be timezone-aware")
+    return parsed

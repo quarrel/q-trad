@@ -116,8 +116,7 @@ class FoundationConfig:
                 raise ValueError("foundation instrument IDs must be canonical lower-case values")
         if (
             "index:volatility" in self.instrument_roles
-            and InstrumentRole(self.instrument_roles["index:volatility"])
-            is InstrumentRole.TARGET
+            and InstrumentRole(self.instrument_roles["index:volatility"]) is InstrumentRole.TARGET
         ):
             raise ValueError("VIX must remain a CONTEXT instrument")
         _require_interval(self.range_start, self.range_end, "foundation range")
@@ -155,6 +154,8 @@ class FoundationConfig:
             raise ValueError("target horizons must use the configured 5/15/30/60-minute grid")
         if len(set(self.target_horizons)) != len(self.target_horizons):
             raise ValueError("target horizons must be unique")
+        if self.target_horizons != tuple(sorted(self.target_horizons)):
+            raise ValueError("target horizons must use canonical ascending order")
         if self.primary_vertical_horizon != timedelta(minutes=15):
             raise ValueError("R1.B primary vertical horizon must be 15 minutes")
         if self.primary_vertical_horizon not in self.target_horizons:
@@ -174,6 +175,18 @@ class FoundationConfig:
     @property
     def configuration_id(self) -> str:
         return _hash_json(self.as_json())
+
+    @property
+    def required_observation_start(self) -> datetime:
+        """Earliest bar start needed by the configured decision range."""
+
+        return self.range_start - self.selected_feature_lag - self.grid_resolution
+
+    @property
+    def required_observation_end(self) -> datetime:
+        """Conservative source bound covering labels and their revision freeze."""
+
+        return self.range_end + max(self.target_horizons) + self.target_revision_delay
 
     def as_json(self) -> dict[str, JsonValue]:
         return {

@@ -8,8 +8,10 @@ from qtrad.domain.research import (
     AvailabilityDelayReport,
     ObservationCandidate,
     ObservationDataset,
+    RevisionDelayReport,
     build_availability_delay_report,
     build_observation_rows,
+    build_revision_delay_report,
 )
 
 
@@ -48,4 +50,19 @@ def measure_availability_delay(
         configured_percentile=configured_percentile,
         safety_margin=safety_margin,
         grid_resolution=grid_resolution,
+    )
+
+
+def measure_revision_delay(
+    dataset: ObservationDataset,
+    *,
+    calibration_start: datetime,
+    calibration_end: datetime,
+) -> RevisionDelayReport:
+    """Create correction-maturity evidence separately from first-revision lag."""
+
+    return build_revision_delay_report(
+        dataset.rows,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
     )

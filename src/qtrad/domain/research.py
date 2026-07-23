@@ -82,6 +82,11 @@ class ObservationRow:
             raise ValueError("observation identity must be non-empty")
         if self.interval_end <= self.interval_start:
             raise ValueError("observation interval must be positive")
+        expected_event_type = "MarketBarClosed" if self.revision == 1 else "MarketBarCorrected"
+        if self.event_type != expected_event_type:
+            raise ValueError("observation event type does not match its bar revision")
+        if self.stream_id != f"market-bar:{self.instrument_id}:{self.basis}":
+            raise ValueError("observation stream identity does not match its bar")
 
     @property
     def availability_delay(self) -> timedelta:
@@ -97,6 +102,17 @@ class ObservationRow:
             self.source_external_id,
             self.stream_version,
             self.global_position,
+        )
+
+    def revision_key(self) -> tuple[object, ...]:
+        return (
+            self.instrument_id,
+            self.basis,
+            self.interval_start,
+            self.source_provider,
+            self.source_environment,
+            self.source_external_id,
+            self.revision,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -143,6 +159,10 @@ class ObservationDataset:
             raise ValueError("observation rows must use canonical semantic ordering")
         if len({row.semantic_key() for row in self.rows}) != len(self.rows):
             raise ValueError("observation rows must have unique semantic keys")
+        if len({row.revision_key() for row in self.rows}) != len(self.rows):
+            raise ValueError("observation rows must have unique source revision lineage")
+        if len({(row.stream_id, row.stream_version) for row in self.rows}) != len(self.rows):
+            raise ValueError("observation rows must have unique canonical stream versions")
         expected = observation_dataset_id(
             self.rows,
             configuration=self.configuration,
@@ -203,6 +223,53 @@ class AvailabilityDelayReport:
         if self.safety_margin < timedelta(0) or self.selected_lag < timedelta(0):
             raise ValueError("availability durations must not be negative")
 
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "calibration_start": self.calibration_start.isoformat(),
+            "calibration_end": self.calibration_end.isoformat(),
+            "eligible_row_count": self.eligible_row_count,
+            "excluded_row_count": self.excluded_row_count,
+            "delay_percentiles_seconds": dict(self.delay_percentiles),
+            "maximum_delay_seconds": (
+                self.maximum_delay.total_seconds() if self.maximum_delay is not None else None
+            ),
+            "configured_percentile": self.configured_percentile,
+            "safety_margin_seconds": self.safety_margin.total_seconds(),
+            "selected_lag_seconds": self.selected_lag.total_seconds(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class RevisionDelayReport:
+    """Separate maturity evidence for corrections after the first usable revision."""
+
+    calibration_start: datetime
+    calibration_end: datetime
+    eligible_correction_count: int
+    excluded_correction_count: int
+    delay_percentiles: Mapping[str, float]
+    maximum_delay: timedelta | None
+
+    def __post_init__(self) -> None:
+        require_utc(self.calibration_start, "revision calibration_start")
+        require_utc(self.calibration_end, "revision calibration_end")
+        if self.calibration_end <= self.calibration_start:
+            raise ValueError("revision calibration interval must be positive")
+        if self.eligible_correction_count < 0 or self.excluded_correction_count < 0:
+            raise ValueError("revision correction counts must not be negative")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "calibration_start": self.calibration_start.isoformat(),
+            "calibration_end": self.calibration_end.isoformat(),
+            "eligible_correction_count": self.eligible_correction_count,
+            "excluded_correction_count": self.excluded_correction_count,
+            "delay_percentiles_seconds": dict(self.delay_percentiles),
+            "maximum_delay_seconds": (
+                self.maximum_delay.total_seconds() if self.maximum_delay is not None else None
+            ),
+        }
+
 
 def observation_dataset_id(
     rows: Sequence[ObservationRow],
@@ -260,6 +327,14 @@ def build_observation_rows(
             raise ValueError("canonical bar event is not persisted")
         if event.event_time != projection.bar.interval_end:
             raise ValueError("canonical bar event time does not match the bar interval end")
+        expected_event_type = (
+            "MarketBarClosed" if projection.bar.revision == 1 else "MarketBarCorrected"
+        )
+        if event.event_type != expected_event_type:
+            raise ValueError("canonical event type does not match the bar revision")
+        expected_stream_id = f"market-bar:{projection.bar.instrument_id}:{projection.bar.basis}"
+        if event.stream_id != expected_stream_id:
+            raise ValueError("canonical bar event has an unexpected stream identity")
         payload_bar = _market_bar_from_payload(event.payload)
         if _bar_identity(payload_bar) != _bar_identity(projection.bar):
             raise ValueError("projection bar does not match its canonical event payload")
@@ -317,17 +392,28 @@ def build_availability_delay_report(
         raise ValueError("availability safety margin must not be negative")
 
     in_calibration = [
-        row
-        for row in rows
-        if calibration_start <= row.interval_end < calibration_end
+        row for row in rows if calibration_start <= row.interval_end < calibration_end
     ]
-    eligible = [
-        row.availability_delay
+    interval_keys = {
+        (row.instrument_id, row.basis, row.interval_start, row.interval_end)
         for row in in_calibration
-        if row.provenance is BarProvenance.QUOTE_DERIVED
-        and row.persisted_at >= row.interval_end
-    ]
-    excluded = len(in_calibration) - len(eligible)
+    }
+    initial_by_interval: dict[tuple[object, ...], timedelta] = {}
+    for row in in_calibration:
+        if (
+            row.provenance is not BarProvenance.QUOTE_DERIVED
+            or row.event_type != "MarketBarClosed"
+            or row.revision != 1
+            or row.persisted_at < row.interval_end
+        ):
+            continue
+        key = (row.instrument_id, row.basis, row.interval_start, row.interval_end)
+        delay = row.availability_delay
+        previous = initial_by_interval.get(key)
+        if previous is None or delay < previous:
+            initial_by_interval[key] = delay
+    eligible = list(initial_by_interval.values())
+    excluded = len(interval_keys) - len(eligible)
     ordered = sorted(eligible)
     percentiles = {
         str(percentile): _percentile_seconds(ordered, percentile)
@@ -350,6 +436,50 @@ def build_availability_delay_report(
     )
 
 
+def build_revision_delay_report(
+    rows: Sequence[ObservationRow],
+    *,
+    calibration_start: datetime,
+    calibration_end: datetime,
+) -> RevisionDelayReport:
+    """Summarise correction maturity without contaminating initial feature lag."""
+
+    require_utc(calibration_start, "revision calibration_start")
+    require_utc(calibration_end, "revision calibration_end")
+    if calibration_end <= calibration_start:
+        raise ValueError("revision calibration interval must be positive")
+    corrections = [
+        row
+        for row in rows
+        if calibration_start <= row.interval_end < calibration_end
+        and (row.revision > 1 or row.event_type == "MarketBarCorrected")
+    ]
+    eligible = sorted(
+        row.availability_delay
+        for row in corrections
+        if row.provenance is BarProvenance.QUOTE_DERIVED
+        and row.event_type == "MarketBarCorrected"
+        and row.revision > 1
+        and row.persisted_at >= row.interval_end
+    )
+    percentiles = (
+        {
+            str(percentile): _percentile_seconds(eligible, percentile)
+            for percentile in (0.5, 0.9, 0.95, 1.0)
+        }
+        if eligible
+        else {}
+    )
+    return RevisionDelayReport(
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
+        eligible_correction_count=len(eligible),
+        excluded_correction_count=len(corrections) - len(eligible),
+        delay_percentiles=percentiles,
+        maximum_delay=max(eligible, default=None),
+    )
+
+
 def _percentile_seconds(values: Sequence[timedelta], percentile: float) -> float:
     if not values:
         raise ValueError("cannot calculate availability percentiles without eligible rows")
@@ -359,9 +489,10 @@ def _percentile_seconds(values: Sequence[timedelta], percentile: float) -> float
     lower = int(position)
     upper = min(lower + 1, len(values) - 1)
     fraction = position - lower
-    return values[lower].total_seconds() + (
-        values[upper].total_seconds() - values[lower].total_seconds()
-    ) * fraction
+    return (
+        values[lower].total_seconds()
+        + (values[upper].total_seconds() - values[lower].total_seconds()) * fraction
+    )
 
 
 def _ceil_duration(value: timedelta, unit: timedelta) -> timedelta:

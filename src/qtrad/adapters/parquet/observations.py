@@ -425,9 +425,8 @@ def _validate_manifest(manifest: ObservationManifest) -> None:
         _safe_file(relative)
     if manifest.manifest_id != manifest.manifest_sha256[:24]:
         raise ValueError("observation manifest ID must match its hash")
-    if (
-        manifest.created_at.tzinfo is None
-        or manifest.created_at.utcoffset() != UTC.utcoffset(manifest.created_at)
+    if manifest.created_at.tzinfo is None or manifest.created_at.utcoffset() != UTC.utcoffset(
+        manifest.created_at
     ):
         raise ValueError("observation manifest creation time must be UTC")
 

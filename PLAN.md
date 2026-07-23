@@ -29,10 +29,12 @@ work and records only the milestone sequence needed to reach the next trustworth
   2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
   historical-source decision and restore verification are complete; R1 is now the active
   implementation milestone.
-- R1.A–R1.E now provide the causal foundation path: immutable observations, aligned panels,
-  frozen multi-horizon targets, chronological folds, model-independent OOF forecasts and a
-  hash-bound bundle with independent child verification. A real 23-market native bundle remains
-  evidence work; the zero-return probe and short native history make no effectiveness claim.
+- R1.A–R1.E now provide the causal foundation path: isolated-snapshot observation build/verify,
+  separate initial-availability and correction-maturity evidence, aligned panels with retained
+  gap/source-activity audit evidence, frozen multi-horizon targets, chronological folds,
+  model-independent OOF forecasts and a thin bundle over independently manifested children. A real
+  23-market native bundle remains evidence work; the zero-return probe and short native history
+  make no effectiveness claim.
 
 ## Milestones
 
@@ -84,7 +86,8 @@ chronology ambiguity before those contracts are fixed.
 - Store immutable out-of-fold forecasts with feature/training cut-offs, model/experiment/fold
   lineage and later outcomes, independently of model code.
 - Compose the child artefacts into an independently verifiable foundation bundle and build it from
-  a verified observation manifest through the offline CLI. Do not treat bundle infrastructure or
+  a verified observation manifest through the offline CLI. The bundle contains references and
+  cross-dataset metadata rather than duplicated child rows. Do not treat bundle infrastructure or
   the zero-return probe as an effectiveness result.
 
 ## R2 — local and pooled baselines

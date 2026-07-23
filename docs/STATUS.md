@@ -28,13 +28,14 @@
   deterministic single-horizon forecasts/outcomes, causal bid/ask paper fills, isolated reconciling
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
-  - The active programme now targets multi-horizon local and cross-asset return forecasts followed by
-    explicit cost/risk states and constrained paper portfolio construction. The first full path will
-    be offline and chronological; continuous shadow paper follows only after the offline MVP.
-  - R1 now has an immutable foundation bundle with independently verifiable observation, panel, target,
-    fold, forecast and coverage children. The offline CLI can build a bundle from a verified observation
-    manifest and verify it without loading model code; no real native 23-market bundle has been claimed
-    from the zero-return probe or short history.
+- The active programme now targets multi-horizon local and cross-asset return forecasts followed by
+  explicit cost/risk states and constrained paper portfolio construction. The first full path will
+  be offline and chronological; continuous shadow paper follows only after the offline MVP.
+- R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
+  correction-maturity evidence, and a thin immutable bundle over independently manifested
+  observation, configuration, availability, panel, target, fold and forecast children. Verification
+  authenticates child files and cross-references without loading model code; no real native
+  23-market bundle has been claimed from the zero-return probe or short history.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all

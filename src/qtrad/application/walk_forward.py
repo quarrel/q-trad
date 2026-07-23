@@ -52,10 +52,7 @@ def build_expanding_folds(
 
     folds: list[Fold] = []
     validation_start = (
-        config.range_start
-        + config.minimum_training_duration
-        + selected_horizon
-        + config.embargo
+        config.range_start + config.minimum_training_duration + selected_horizon + config.embargo
     )
     while validation_start < holdout_start:
         validation_end = validation_start + duration
@@ -153,10 +150,7 @@ def build_zero_return_forecasts(
                 raise ValueError("fold validation membership is outside its interval")
             if _in_holdout(target.decision_time, config.holdout_range):
                 raise ValueError("holdout target entered forecast validation membership")
-            if (
-                target.horizon != selected_horizon
-                or target.target_basis is not config.target_basis
-            ):
+            if target.horizon != selected_horizon or target.target_basis is not config.target_basis:
                 raise ValueError("fold validation contains an unsupported target")
             panel_row = panel_by_key.get(
                 (target.instrument_id, target.decision_time, config.target_basis)

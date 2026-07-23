@@ -1,98 +1,163 @@
-"""Thin, hash-bound bundle for the causal R1 foundation artefacts."""
+"""Thin, hash-bound references for independently manifested R1 artefacts."""
 
 import json
-from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
+from pathlib import PurePosixPath
 from typing import ClassVar, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
-from qtrad.domain.folds import FoldDataset
-from qtrad.domain.forecasts import ForecastDataset
-from qtrad.domain.foundation import (
-    ExcursionDisposition,
-    FoundationConfig,
-    HorizonCoverageSummary,
-    PanelDataset,
-    ReturnDisposition,
-    TargetDataset,
-)
-from qtrad.domain.research import ObservationDataset
+from qtrad.domain.foundation import HorizonCoverageSummary
+from qtrad.domain.time import require_utc
 
 FOUNDATION_BUNDLE_CONTRACT = "qtrad-research-foundation-bundle-v1"
+AVAILABILITY_EVIDENCE_CONTRACT = "qtrad-research-availability-evidence-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactReference:
+    """The semantic and physical identity needed to verify one child artefact."""
+
+    name: str
+    contract: str
+    schema_version: int
+    dataset_id: str
+    manifest_id: str
+    manifest_sha256: str
+    manifest_path: str
+    row_count: int
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.contract or self.schema_version <= 0:
+            raise ValueError("foundation child reference contract is invalid")
+        _require_sha256(self.dataset_id, "foundation child dataset ID")
+        _require_sha256(self.manifest_sha256, "foundation child manifest hash")
+        if (
+            len(self.manifest_id) != 24
+            or self.manifest_id != self.manifest_sha256[:24]
+            or any(character not in "0123456789abcdef" for character in self.manifest_id)
+        ):
+            raise ValueError("foundation child manifest ID is invalid")
+        if self.row_count < 0:
+            raise ValueError("foundation child row count must not be negative")
+        path = PurePosixPath(self.manifest_path)
+        if (
+            path.is_absolute()
+            or len(path.parts) != 2
+            or path.parts[0] not in {"manifests", "foundation-manifests"}
+            or path.name != f"{self.manifest_id}.json"
+        ):
+            raise ValueError("foundation child manifest path is unsafe or inconsistent")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "name": self.name,
+            "contract": self.contract,
+            "schema_version": self.schema_version,
+            "dataset_id": self.dataset_id,
+            "manifest_id": self.manifest_id,
+            "manifest_sha256": self.manifest_sha256,
+            "manifest_path": self.manifest_path,
+            "row_count": self.row_count,
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class FoundationBundle:
-    """All R1 child artefacts with independently checkable lineage."""
+    """A bounded top-level manifest containing no child dataset rows."""
 
-    configuration: FoundationConfig
-    observations: ObservationDataset
-    panel: PanelDataset
-    targets: TargetDataset
-    folds: FoldDataset
-    forecasts: ForecastDataset
+    configuration: ArtifactReference
+    observations: ArtifactReference
+    availability: ArtifactReference
+    panel: ArtifactReference
+    targets: ArtifactReference
+    folds: ArtifactReference
+    forecasts: ArtifactReference
+    ordered_instruments: tuple[str, ...]
+    range_start: datetime
+    range_end: datetime
     coverage: tuple[HorizonCoverageSummary, ...]
+    build_summary: Mapping[str, JsonValue]
     bundle_id: str
 
     CONTRACT: ClassVar[str] = FOUNDATION_BUNDLE_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
-        if not self.bundle_id:
-            raise ValueError("foundation bundle ID must be non-empty")
-        if tuple(sorted(self.coverage, key=lambda summary: summary.horizon)) != self.coverage:
+        require_utc(self.range_start, "foundation bundle range_start")
+        require_utc(self.range_end, "foundation bundle range_end")
+        if self.range_end <= self.range_start:
+            raise ValueError("foundation bundle range must be positive")
+        if not self.ordered_instruments or len(set(self.ordered_instruments)) != len(
+            self.ordered_instruments
+        ):
+            raise ValueError("foundation bundle instruments must be non-empty and unique")
+        if tuple(sorted(self.coverage, key=lambda item: item.horizon)) != self.coverage:
             raise ValueError("foundation coverage summaries must use horizon ordering")
-        expected = _bundle_hash(self)
-        if self.bundle_id != expected:
-            raise ValueError("foundation bundle ID does not match its child artefacts")
-        self.verify()
+        _verify_reference_contracts(self)
+        if self.bundle_id != _bundle_hash(self):
+            raise ValueError("foundation bundle ID does not match its references")
 
     @classmethod
     def create(
         cls,
         *,
-        configuration: FoundationConfig,
-        observations: ObservationDataset,
-        panel: PanelDataset,
-        targets: TargetDataset,
-        folds: FoldDataset,
-        forecasts: ForecastDataset,
+        configuration: ArtifactReference,
+        observations: ArtifactReference,
+        availability: ArtifactReference,
+        panel: ArtifactReference,
+        targets: ArtifactReference,
+        folds: ArtifactReference,
+        forecasts: ArtifactReference,
+        ordered_instruments: Sequence[str],
+        range_start: datetime,
+        range_end: datetime,
         coverage: Sequence[HorizonCoverageSummary],
+        build_summary: Mapping[str, JsonValue],
     ) -> "FoundationBundle":
-        ordered_coverage = tuple(sorted(coverage, key=lambda summary: summary.horizon))
-        return cls(
+        unbound = _UnboundBundle(
             configuration=configuration,
             observations=observations,
+            availability=availability,
             panel=panel,
             targets=targets,
             folds=folds,
             forecasts=forecasts,
-            coverage=ordered_coverage,
-            bundle_id=_bundle_hash(
-                _UnboundBundle(
-                    configuration=configuration,
-                    observations=observations,
-                    panel=panel,
-                    targets=targets,
-                    folds=folds,
-                    forecasts=forecasts,
-                    coverage=ordered_coverage,
-                )
-            ),
+            ordered_instruments=tuple(ordered_instruments),
+            range_start=range_start,
+            range_end=range_end,
+            coverage=tuple(sorted(coverage, key=lambda item: item.horizon)),
+            build_summary=dict(build_summary),
+        )
+        return cls(
+            configuration=unbound.configuration,
+            observations=unbound.observations,
+            availability=unbound.availability,
+            panel=unbound.panel,
+            targets=unbound.targets,
+            folds=unbound.folds,
+            forecasts=unbound.forecasts,
+            ordered_instruments=unbound.ordered_instruments,
+            range_start=unbound.range_start,
+            range_end=unbound.range_end,
+            coverage=unbound.coverage,
+            build_summary=unbound.build_summary,
+            bundle_id=_bundle_hash(unbound),
         )
 
-    def verify(self) -> None:
-        """Recompute every child identity and reject broken cross-references."""
-
-        _verify_children(self)
-        if (
-            tuple(summary.horizon for summary in self.coverage)
-            != self.configuration.target_horizons
-        ):
-            raise ValueError("foundation coverage does not match configured horizons")
-        _verify_coverage(self.targets, self.coverage)
-        _verify_forecast_lineage(self)
+    @property
+    def children(self) -> tuple[ArtifactReference, ...]:
+        return (
+            self.configuration,
+            self.observations,
+            self.availability,
+            self.panel,
+            self.targets,
+            self.folds,
+            self.forecasts,
+        )
 
     def as_json(self) -> dict[str, JsonValue]:
         payload = _bundle_payload(self)
@@ -102,186 +167,68 @@ class FoundationBundle:
 
 @dataclass(frozen=True, slots=True)
 class _UnboundBundle:
-    configuration: FoundationConfig
-    observations: ObservationDataset
-    panel: PanelDataset
-    targets: TargetDataset
-    folds: FoldDataset
-    forecasts: ForecastDataset
+    configuration: ArtifactReference
+    observations: ArtifactReference
+    availability: ArtifactReference
+    panel: ArtifactReference
+    targets: ArtifactReference
+    folds: ArtifactReference
+    forecasts: ArtifactReference
+    ordered_instruments: tuple[str, ...]
+    range_start: datetime
+    range_end: datetime
     coverage: tuple[HorizonCoverageSummary, ...]
+    build_summary: Mapping[str, JsonValue]
 
 
-def _verify_children(bundle: FoundationBundle) -> None:
-    configuration_id = bundle.configuration.configuration_id
-    if bundle.observations.dataset_id != bundle.configuration.observation_dataset_id:
-        raise ValueError("foundation observations do not match configuration")
-    if bundle.panel.observation_dataset_id != bundle.observations.dataset_id:
-        raise ValueError("foundation panel does not match observations")
-    if bundle.targets.observation_dataset_id != bundle.observations.dataset_id:
-        raise ValueError("foundation targets do not match observations")
-    if bundle.panel.foundation_configuration_id != configuration_id:
-        raise ValueError("foundation panel does not match configuration")
-    if bundle.targets.foundation_configuration_id != configuration_id:
-        raise ValueError("foundation targets do not match configuration")
-    if bundle.folds.target_dataset_id != bundle.targets.dataset_id:
-        raise ValueError("foundation folds do not match targets")
-    if bundle.folds.foundation_configuration_id != configuration_id:
-        raise ValueError("foundation folds do not match configuration")
-    if bundle.forecasts.observation_dataset_id != bundle.observations.dataset_id:
-        raise ValueError("foundation forecasts do not match observations")
-    if bundle.forecasts.panel_dataset_id != bundle.panel.dataset_id:
-        raise ValueError("foundation forecasts do not match panel")
-    if bundle.forecasts.target_dataset_id != bundle.targets.dataset_id:
-        raise ValueError("foundation forecasts do not match targets")
-    if bundle.forecasts.fold_dataset_id != bundle.folds.dataset_id:
-        raise ValueError("foundation forecasts do not match folds")
-
-    rebuilt_observations = ObservationDataset.create(
-        bundle.observations.rows,
-        configuration=bundle.observations.configuration,
-        source_dataset_ids=bundle.observations.source_dataset_ids,
-        selection_policies=bundle.observations.selection_policies,
-    )
-    if rebuilt_observations.dataset_id != bundle.observations.dataset_id:
-        raise ValueError("foundation observations fail independent verification")
-    rebuilt_panel = PanelDataset.create(
-        bundle.panel.rows,
-        observation_dataset_id=bundle.panel.observation_dataset_id,
-        foundation_configuration_id=bundle.panel.foundation_configuration_id,
-    )
-    if rebuilt_panel.dataset_id != bundle.panel.dataset_id:
-        raise ValueError("foundation panel fails independent verification")
-    rebuilt_targets = TargetDataset.create(
-        bundle.targets.rows,
-        observation_dataset_id=bundle.targets.observation_dataset_id,
-        foundation_configuration_id=bundle.targets.foundation_configuration_id,
-    )
-    if rebuilt_targets.dataset_id != bundle.targets.dataset_id:
-        raise ValueError("foundation targets fail independent verification")
-    rebuilt_folds = FoldDataset.create(
-        bundle.folds.folds,
-        target_dataset_id=bundle.folds.target_dataset_id,
-        foundation_configuration_id=bundle.folds.foundation_configuration_id,
-    )
-    if rebuilt_folds.dataset_id != bundle.folds.dataset_id:
-        raise ValueError("foundation folds fail independent verification")
-    rebuilt_forecasts = ForecastDataset.create(
-        bundle.forecasts.rows,
-        observation_dataset_id=bundle.forecasts.observation_dataset_id,
-        panel_dataset_id=bundle.forecasts.panel_dataset_id,
-        target_dataset_id=bundle.forecasts.target_dataset_id,
-        fold_dataset_id=bundle.forecasts.fold_dataset_id,
-    )
-    if rebuilt_forecasts.dataset_id != bundle.forecasts.dataset_id:
-        raise ValueError("foundation forecasts fail independent verification")
-
-
-def _verify_coverage(
-    targets: TargetDataset,
-    summaries: Sequence[HorizonCoverageSummary],
-) -> None:
-    for summary in summaries:
-        rows = tuple(row for row in targets.rows if row.horizon == summary.horizon)
-        returns = Counter(row.return_disposition.value for row in rows)
-        excursions = Counter(row.excursion_disposition.value for row in rows)
-        if summary.total_target_count != len(rows):
-            raise ValueError("foundation coverage target count is inconsistent")
-        if summary.valid_return_count != returns[ReturnDisposition.VALID.value]:
-            raise ValueError("foundation coverage return count is inconsistent")
-        if summary.valid_excursion_count != excursions[ExcursionDisposition.VALID.value]:
-            raise ValueError("foundation coverage excursion count is inconsistent")
-        if (
-            summary.unavailable_by_freeze_count
-            != returns[ReturnDisposition.UNAVAILABLE_BY_FREEZE.value]
-        ):
-            raise ValueError("foundation coverage availability count is inconsistent")
-        expected_return_coverage = (
-            returns[ReturnDisposition.VALID.value] / len(rows) if rows else 0.0
-        )
-        expected_excursion_coverage = (
-            excursions[ExcursionDisposition.VALID.value] / len(rows) if rows else 0.0
-        )
-        if summary.return_coverage != expected_return_coverage:
-            raise ValueError("foundation return coverage ratio is inconsistent")
-        if summary.excursion_coverage != expected_excursion_coverage:
-            raise ValueError("foundation excursion coverage ratio is inconsistent")
-        if summary.return_disposition_counts != tuple(sorted(returns.items())):
-            raise ValueError("foundation coverage return dispositions are inconsistent")
-        if summary.excursion_disposition_counts != tuple(sorted(excursions.items())):
-            raise ValueError("foundation coverage excursion dispositions are inconsistent")
-
-
-def _verify_forecast_lineage(bundle: FoundationBundle) -> None:
-    targets = {row.target_id: row for row in bundle.targets.rows}
-    folds = {fold.fold_id: fold for fold in bundle.folds.folds}
-    for forecast in bundle.forecasts.rows:
-        target = targets.get(forecast.target_id)
-        fold = folds.get(forecast.fold_id)
-        if target is None or fold is None:
-            raise ValueError("foundation forecast references an unknown target or fold")
-        if forecast.target_id not in fold.validation_target_ids:
-            raise ValueError("foundation forecast is not in fold validation membership")
-        if forecast.training_cutoff != fold.training_cutoff:
-            raise ValueError("foundation forecast training cutoff does not match its fold")
-        if (
-            forecast.instrument_id != target.instrument_id
-            or forecast.decision_time != target.decision_time
-            or forecast.horizon != target.horizon
-        ):
-            raise ValueError("foundation forecast does not match its target")
-        if not fold.validation_start <= forecast.decision_time < fold.validation_end:
-            raise ValueError("foundation forecast is outside its fold validation interval")
-        if (
-            bundle.configuration.holdout_range[0]
-            <= forecast.decision_time
-            < bundle.configuration.holdout_range[1]
-        ):
-            raise ValueError("foundation forecast contains a holdout row")
+def _verify_reference_contracts(bundle: FoundationBundle) -> None:
+    expected = {
+        "configuration": "qtrad-research-foundation-config-v1",
+        "observations": "qtrad-research-observations-v1",
+        "availability": AVAILABILITY_EVIDENCE_CONTRACT,
+        "panel": "qtrad-research-panel-v1",
+        "targets": "qtrad-research-targets-v1",
+        "folds": "qtrad-research-folds-v1",
+        "forecasts": "qtrad-research-forecasts-v1",
+    }
+    if {child.name for child in bundle.children} != set(expected):
+        raise ValueError("foundation bundle child names are incomplete or duplicated")
+    for child in bundle.children:
+        if child.contract != expected[child.name]:
+            raise ValueError(f"foundation {child.name} child contract is unsupported")
 
 
 def _bundle_payload(bundle: FoundationBundle | _UnboundBundle) -> dict[str, object]:
     return {
         "contract": FOUNDATION_BUNDLE_CONTRACT,
         "schema_version": 1,
-        "configuration": bundle.configuration.as_json(),
-        "observations": {
-            "contract": "qtrad-research-observations-v1",
-            "dataset_id": bundle.observations.dataset_id,
-            "configuration": bundle.observations.configuration,
-            "source_dataset_ids": list(bundle.observations.source_dataset_ids),
-            "selection_policies": bundle.observations.selection_policies,
-            "rows": [row.as_json() for row in bundle.observations.rows],
+        "children": {
+            child.name: child.as_json()
+            for child in (
+                bundle.configuration,
+                bundle.observations,
+                bundle.availability,
+                bundle.panel,
+                bundle.targets,
+                bundle.folds,
+                bundle.forecasts,
+            )
         },
-        "panel": {
-            "dataset_id": bundle.panel.dataset_id,
-            "observation_dataset_id": bundle.panel.observation_dataset_id,
-            "foundation_configuration_id": bundle.panel.foundation_configuration_id,
-            "rows": [row.as_json() for row in bundle.panel.rows],
-        },
-        "targets": {
-            "dataset_id": bundle.targets.dataset_id,
-            "observation_dataset_id": bundle.targets.observation_dataset_id,
-            "foundation_configuration_id": bundle.targets.foundation_configuration_id,
-            "rows": [row.as_json() for row in bundle.targets.rows],
-        },
-        "folds": {
-            "dataset_id": bundle.folds.dataset_id,
-            "target_dataset_id": bundle.folds.target_dataset_id,
-            "foundation_configuration_id": bundle.folds.foundation_configuration_id,
-            "folds": [fold.as_json() for fold in bundle.folds.folds],
-        },
-        "forecasts": {
-            "dataset_id": bundle.forecasts.dataset_id,
-            "observation_dataset_id": bundle.forecasts.observation_dataset_id,
-            "panel_dataset_id": bundle.forecasts.panel_dataset_id,
-            "target_dataset_id": bundle.forecasts.target_dataset_id,
-            "fold_dataset_id": bundle.forecasts.fold_dataset_id,
-            "rows": [row.as_json() for row in bundle.forecasts.rows],
-        },
+        "ordered_instruments": list(bundle.ordered_instruments),
+        "range_start": bundle.range_start.isoformat(),
+        "range_end": bundle.range_end.isoformat(),
         "coverage": [summary.as_json() for summary in bundle.coverage],
+        "build_summary": dict(bundle.build_summary),
     }
 
 
 def _bundle_hash(bundle: FoundationBundle | _UnboundBundle) -> str:
     canonical = to_json_value(_bundle_payload(bundle))
-    return sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    return sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def _require_sha256(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field} must be a lower-case SHA-256")

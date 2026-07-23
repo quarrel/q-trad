@@ -35,7 +35,7 @@ def _row(
     return ObservationRow(
         event_id=uuid4(),
         stream_id="market-bar:fx:aud-usd:MID",
-        stream_version=revision,
+        stream_version=global_position or revision,
         event_type="MarketBarClosed" if revision == 1 else "MarketBarCorrected",
         event_time=interval_end,
         received_at=persisted,
@@ -60,7 +60,14 @@ def _row(
 
 
 def _dataset(rows: tuple[ObservationRow, ...]) -> ObservationDataset:
-    return ObservationDataset.create(rows, configuration={"fixture": "r1.b"})
+    return ObservationDataset.create(
+        rows,
+        configuration={
+            "fixture": "r1.b",
+            "interval_start": "2026-06-30T00:00:00+00:00",
+            "interval_end": "2026-07-03T00:00:00+00:00",
+        },
+    )
 
 
 def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> FoundationConfig:
@@ -153,9 +160,7 @@ def test_panel_missingness_is_explicit_and_audit_is_not_causal_state() -> None:
         _dataset(()),
         _config(_dataset(()), start=start, end=start + timedelta(minutes=1)),
     )
-    no_evidence_row = next(
-        row for row in no_evidence.rows if row.instrument_id == "fx:aud-usd"
-    )
+    no_evidence_row = next(row for row in no_evidence.rows if row.instrument_id == "fx:aud-usd")
     assert no_evidence_row.audit_disposition is PanelAuditDisposition.NO_NATIVE_EVIDENCE
 
 
@@ -176,6 +181,33 @@ def test_gap_detected_after_cutoff_is_not_exposed_as_known_at_cutoff() -> None:
         if row.instrument_id == "fx:aud-usd"
     )
     assert row.audit_disposition is PanelAuditDisposition.RECORDED_GAP_DETECTED_LATER
+
+
+def test_source_activity_and_required_observation_bounds_fail_closed() -> None:
+    start = datetime(2026, 7, 1, 12, 3, tzinfo=UTC)
+    empty = _dataset(())
+    config = _config(empty, start=start, end=start + timedelta(minutes=1))
+    inactive = next(
+        row
+        for row in build_asof_panel(
+            empty,
+            config,
+            source_active_intervals={"fx:aud-usd": ()},
+        ).rows
+        if row.instrument_id == "fx:aud-usd"
+    )
+    assert inactive.audit_disposition is PanelAuditDisposition.SOURCE_NOT_ACTIVE
+
+    insufficient = ObservationDataset.create(
+        (),
+        configuration={
+            "interval_start": start.isoformat(),
+            "interval_end": (start + timedelta(minutes=20)).isoformat(),
+        },
+    )
+    insufficient_config = replace(config, observation_dataset_id=insufficient.dataset_id)
+    with pytest.raises(ValueError, match="required source bound"):
+        build_asof_panel(insufficient, insufficient_config)
 
 
 def test_targets_freeze_revisions_and_keep_endpoint_return_separate_from_excursion() -> None:
@@ -239,8 +271,10 @@ def test_target_correction_before_freeze_is_selected_and_vix_gets_no_target() ->
         rows[-1],
         close=Decimal("125"),
         high=Decimal("125"),
+        stream_version=41,
         persisted_at=start + timedelta(minutes=15, seconds=45),
         global_position=41,
+        revision=3,
     )
     dataset = _dataset((*rows, early_revision))
     config = _config(dataset, start=start, end=start + timedelta(minutes=1))
@@ -252,8 +286,7 @@ def test_target_correction_before_freeze_is_selected_and_vix_gets_no_target() ->
 
 @pytest.mark.parametrize(
     ("missing_start", "missing_end", "expected"),
-    ((True, False, ReturnDisposition.MISSING_START),
-     (False, True, ReturnDisposition.MISSING_END)),
+    ((True, False, ReturnDisposition.MISSING_START), (False, True, ReturnDisposition.MISSING_END)),
 )
 def test_target_requires_exact_completed_endpoint_bars(
     missing_start: bool,
@@ -277,7 +310,12 @@ def test_ambiguous_target_source_fails_closed_without_selecting_a_price() -> Non
     endpoint = start + timedelta(minutes=15)
     first = _row(start, global_position=1)
     end = _row(endpoint, close="115", global_position=2)
-    other_source = replace(end, source_external_id="OTHER")
+    other_source = replace(
+        end,
+        stream_version=3,
+        global_position=3,
+        source_external_id="OTHER",
+    )
     dataset = _dataset((first, end, other_source))
     target = build_frozen_targets(
         dataset, _config(dataset, start=start, end=start + timedelta(minutes=1))

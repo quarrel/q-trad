@@ -186,9 +186,7 @@ class ParquetResearchStore:
         )
 
     async def read_observations(self, manifest_id: str) -> ObservationDataset:
-        return await ParquetObservationStore(self._root, self._clock).read_observations(
-            manifest_id
-        )
+        return await ParquetObservationStore(self._root, self._clock).read_observations(manifest_id)
 
     def _read_manifest_sync(self, manifest_id: str) -> ResearchManifest:
         _require_manifest_id(manifest_id)
