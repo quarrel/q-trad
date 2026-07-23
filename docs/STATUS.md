@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-07-22
+**Updated:** 2026-07-23
 **Current milestone:** R1 — causal multi-asset research foundation
-**State:** R0 is complete; `capture-v4` is live with 23/23 channels ready and paper research remains offline/replay
+**State:** R0 is complete; R1 foundation bundle infrastructure is implemented, `capture-v4` is live with 23/23 channels ready, and paper research remains offline/replay
 
 ## Working now
 
@@ -28,9 +28,13 @@
   deterministic single-horizon forecasts/outcomes, causal bid/ask paper fills, isolated reconciling
   ledgers and a hash-bound ranking report. Every active strategy lost after costs under the tested
   sensitivities. This proves the old research path, not forecast effectiveness.
-- The active programme now targets multi-horizon local and cross-asset return forecasts followed by
-  explicit cost/risk states and constrained paper portfolio construction. The first full path will
-  be offline and chronological; continuous shadow paper follows only after the offline MVP.
+  - The active programme now targets multi-horizon local and cross-asset return forecasts followed by
+    explicit cost/risk states and constrained paper portfolio construction. The first full path will
+    be offline and chronological; continuous shadow paper follows only after the offline MVP.
+  - R1 now has an immutable foundation bundle with independently verifiable observation, panel, target,
+    fold, forecast and coverage children. The offline CLI can build a bundle from a verified observation
+    manifest and verify it without loading model code; no real native 23-market bundle has been claimed
+    from the zero-return probe or short history.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -62,8 +66,9 @@
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Define the R1 aligned-panel, target, revision and fold contracts using the retained R0 audit.
-3. Keep native history and product-economics qualification fail-closed while R1 foundations are built.
+2. Build and independently verify the real 23-market native R1 bundle when the configured evidence
+   interval and product-role qualification support it.
+3. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
 
 ## Evidence and current authorities
 

@@ -34,11 +34,14 @@ from qtrad.application.backfill_planning import (
     build_backfill_plan,
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
+from qtrad.application.foundation import build_asof_panel, build_frozen_targets
+from qtrad.application.foundation_bundle import build_foundation_bundle
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
+from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
@@ -60,6 +63,11 @@ from qtrad.runtime.backfill_plan import (
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
+from qtrad.runtime.foundation_bundle import (
+    load_foundation_bundle,
+    load_foundation_config,
+    write_foundation_bundle,
+)
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -278,6 +286,23 @@ def build_parser() -> argparse.ArgumentParser:
     research_rank.add_argument("--experiment", type=Path, required=True)
     research_rank.add_argument("--snapshot-import-evidence", type=Path, required=True)
     research_rank.add_argument("--output", type=Path, required=True)
+    research_foundation = research_sub.add_parser(
+        "foundation", help="verify an immutable causal foundation bundle"
+    )
+    research_foundation_sub = research_foundation.add_subparsers(
+        dest="foundation_command", required=True
+    )
+    foundation_verify = research_foundation_sub.add_parser(
+        "verify", help="verify every foundation child and cross-reference"
+    )
+    foundation_verify.add_argument("--bundle", type=Path, required=True)
+    foundation_build = research_foundation_sub.add_parser(
+        "build", help="build an immutable causal foundation bundle from observations"
+    )
+    foundation_build.add_argument("--observations-root", type=Path, required=True)
+    foundation_build.add_argument("--manifest-id", required=True)
+    foundation_build.add_argument("--configuration", type=Path, required=True)
+    foundation_build.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -493,6 +518,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "build"
+    ):
+        asyncio.run(
+            _build_foundation_bundle(
+                clock,
+                observations_root=args.observations_root,
+                manifest_id=args.manifest_id,
+                configuration_path=args.configuration,
+                output_path=args.output,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "verify"
+    ):
+        _verify_foundation_bundle(args.bundle)
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -541,6 +586,76 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         raise RuntimeError("unhandled command")
+
+
+async def _build_foundation_bundle(
+    clock: Clock,
+    *,
+    observations_root: Path,
+    manifest_id: str,
+    configuration_path: Path,
+    output_path: Path,
+) -> None:
+    configuration = load_foundation_config(configuration_path)
+    observations = await ParquetResearchStore(observations_root, clock).read_observations(
+        manifest_id
+    )
+    panel = build_asof_panel(observations, configuration)
+    targets = build_frozen_targets(
+        observations,
+        configuration,
+        horizons=configuration.target_horizons,
+    )
+    folds = build_expanding_folds(targets, configuration)
+    forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
+    bundle = build_foundation_bundle(
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+    )
+    write_foundation_bundle(output_path, bundle)
+    print(json.dumps({"bundle_id": bundle.bundle_id, "output": str(output_path)}))
+
+
+def _verify_foundation_bundle(bundle_path: Path) -> None:
+    bundle = load_foundation_bundle(bundle_path)
+    print(
+        json.dumps(
+            {
+                "contract": bundle.CONTRACT,
+                "bundle_id": bundle.bundle_id,
+                "observation_dataset_id": bundle.observations.dataset_id,
+                "panel_dataset_id": bundle.panel.dataset_id,
+                "target_dataset_id": bundle.targets.dataset_id,
+                "fold_dataset_id": bundle.folds.dataset_id,
+                "forecast_dataset_id": bundle.forecasts.dataset_id,
+                "row_counts": {
+                    "observations": len(bundle.observations.rows),
+                    "panel": len(bundle.panel.rows),
+                    "targets": len(bundle.targets.rows),
+                    "forecasts": len(bundle.forecasts.rows),
+                },
+                "coverage": [summary.as_json() for summary in bundle.coverage],
+                "folds": [
+                    {
+                        "fold_id": fold.fold_id,
+                        "training_start": fold.training_start.isoformat(),
+                        "training_cutoff": fold.training_cutoff.isoformat(),
+                        "validation_start": fold.validation_start.isoformat(),
+                        "validation_end": fold.validation_end.isoformat(),
+                        "embargo_end": fold.embargo_end.isoformat(),
+                        "training_target_count": len(fold.training_target_ids),
+                        "validation_target_count": len(fold.validation_target_ids),
+                    }
+                    for fold in bundle.folds.folds
+                ],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _review_qualification_gap_history(

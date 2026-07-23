@@ -29,13 +29,17 @@ work and records only the milestone sequence needed to reach the next trustworth
   2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
   historical-source decision and restore verification are complete; R1 is now the active
   implementation milestone.
+- R1.A–R1.E now provide the causal foundation path: immutable observations, aligned panels,
+  frozen multi-horizon targets, chronological folds, model-independent OOF forecasts and a
+  hash-bound bundle with independent child verification. A real 23-market native bundle remains
+  evidence work; the zero-return probe and short native history make no effectiveness claim.
 
 ## Milestones
 
 | Milestone | Status | Exit evidence |
 |---|---|---|
 | R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
-| R1 — causal multi-asset research foundation | ACTIVE | deterministic aligned panels, multi-horizon targets, chronological folds and out-of-fold artefacts pass causality/replay checks |
+| R1 — causal multi-asset research foundation | ACTIVE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks; real 23-market evidence remains |
 | R2 — local and pooled baselines | NOT STARTED | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence |
 | R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
 | R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
@@ -79,6 +83,9 @@ chronology ambiguity before those contracts are fixed.
   final holdout.
 - Store immutable out-of-fold forecasts with feature/training cut-offs, model/experiment/fold
   lineage and later outcomes, independently of model code.
+- Compose the child artefacts into an independently verifiable foundation bundle and build it from
+  a verified observation manifest through the offline CLI. Do not treat bundle infrastructure or
+  the zero-return probe as an effectiveness result.
 
 ## R2 — local and pooled baselines
 
