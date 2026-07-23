@@ -1,3 +1,6 @@
+Warning: truncated output (original token count: 24770)
+Total output lines: 2449
+
 """q-trad command-line entry point."""
 
 import argparse
@@ -34,11 +37,14 @@ from qtrad.application.backfill_planning import (
     build_backfill_plan,
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
+from qtrad.application.foundation import build_asof_panel, build_frozen_targets
+from qtrad.application.foundation_bundle import build_foundation_bundle
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
+from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
@@ -60,6 +66,11 @@ from qtrad.runtime.backfill_plan import (
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
+from qtrad.runtime.foundation_bundle import (
+    load_foundation_bundle,
+    load_foundation_config,
+    write_foundation_bundle,
+)
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -278,6 +289,23 @@ def build_parser() -> argparse.ArgumentParser:
     research_rank.add_argument("--experiment", type=Path, required=True)
     research_rank.add_argument("--snapshot-import-evidence", type=Path, required=True)
     research_rank.add_argument("--output", type=Path, required=True)
+    research_foundation = research_sub.add_parser(
+        "foundation", help="verify an immutable causal foundation bundle"
+    )
+    research_foundation_sub = research_foundation.add_subparsers(
+        dest="foundation_command", required=True
+    )
+    foundation_verify = research_foundation_sub.add_parser(
+        "verify", help="verify every foundation child and cross-reference"
+    )
+    foundation_verify.add_argument("--bundle", type=Path, required=True)
+    foundation_build = research_foundation_sub.add_parser(
+        "build", help="build an immutable causal foundation bundle from observations"
+    )
+    foundation_build.add_argument("--observations-root", type=Path, required=True)
+    foundation_build.add_argument("--manifest-id", required=True)
+    foundation_build.add_argument("--configuration", type=Path, required=True)
+    foundation_build.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -493,6 +521,26 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "build"
+    ):
+        asyncio.run(
+            _build_foundation_bundle(
+                clock,
+                observations_root=args.observations_root,
+                manifest_id=args.manifest_id,
+                configuration_path=args.configuration,
+                output_path=args.output,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "verify"
+    ):
+        _verify_foundation_bundle(args.bundle)
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -541,6 +589,76 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         raise RuntimeError("unhandled command")
+
+
+async def _build_foundation_bundle(
+    clock: Clock,
+    *,
+    observations_root: Path,
+    manifest_id: str,
+    configuration_path: Path,
+    output_path: Path,
+) -> None:
+    configuration = load_foundation_config(configuration_path)
+    observations = await ParquetResearchStore(observations_root, clock).read_observations(
+        manifest_id
+    )
+    panel = build_asof_panel(observations, configuration)
+    targets = build_frozen_targets(
+        observations,
+        configuration,
+        horizons=configuration.target_horizons,
+    )
+    folds = build_expanding_folds(targets, configuration)
+    forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
+    bundle = build_foundation_bundle(
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+    )
+    write_foundation_bundle(output_path, bundle)
+    print(json.dumps({"bundle_id": bundle.bundle_id, "output": str(output_path)}))
+
+
+def _verify_foundation_bundle(bundle_path: Path) -> None:
+    bundle = load_foundation_bundle(bundle_path)
+    print(
+        json.dumps(
+            {
+                "contract": bundle.CONTRACT,
+                "bundle_id": bundle.bundle_id,
+                "observation_dataset_id": bundle.observations.dataset_id,
+                "panel_dataset_id": bundle.panel.dataset_id,
+                "target_dataset_id": bundle.targets.dataset_id,
+                "fold_dataset_id": bundle.folds.dataset_id,
+                "forecast_dataset_id": bundle.forecasts.dataset_id,
+                "row_counts": {
+                    "observations": len(bundle.observations.rows),
+                    "panel": len(bundle.panel.rows),
+                    "targets": len(bundle.targets.rows),
+                    "forecasts": len(bundle.forecasts.rows),
+                },
+                "coverage": [summary.as_json() for summary in bundle.coverage],
+                "folds": [
+                    {
+                        "fold_id": fold.fold_id,
+                        "training_start": fold.training_start.isoformat(),
+                        "training_cutoff": fold.training_cutoff.isoformat(),
+                        "validation_start": fold.validation_start.isoformat(),
+                        "validation_end": fold.validation_end.isoformat(),
+                        "embargo_end": fold.embargo_end.isoformat(),
+                        "training_target_count": len(fold.training_target_ids),
+                        "validation_target_count": len(fold.validation_target_ids),
+                    }
+                    for fold in bundle.folds.folds
+                ],
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _review_qualification_gap_history(
@@ -835,518 +953,7 @@ async def _execute_qualification_gap_plan_set(
                 await store.start_historical_request_usage(
                     request_id=request_id,
                     run_id=run_id,
-                    plan_hash=plan.plan_hash,
-                    instrument_id=request.instrument_id,
-                    listing_id=request.listing.listing_id,
-                    interval_start=request.start,
-                    interval_end=request.end,
-                    requested_points=request.maximum_points,
-                    started_at=clock.now(),
-                )
-                returned_points: set[datetime] = set()
-                async for bar in adapter.backfill(request):
-                    _validate_planned_bar(plan, request, bar)
-                    returned_points.add(bar.interval_start)
-                    received.setdefault((bar.instrument_id, bar.basis), set()).add(
-                        bar.interval_start
-                    )
-                    event = await _append_bar(store, bar, received_time=clock.now())
-                    if event is not None:
-                        written += 1
-                await store.complete_historical_request_usage(
-                    request_id,
-                    returned_points=len(returned_points),
-                    provider_remaining=adapter.historical_allowance_remaining,
-                    completed_at=clock.now(),
-                )
-            observed_points = {
-                (item.instrument_id, basis): len(received.get((item.instrument_id, basis), set()))
-                for item in plan.items
-                for basis in (PriceBasis.BID, PriceBasis.ASK, PriceBasis.MID)
-            }
-            point_counts = tuple(observed_points.values())
-            if any(points == 0 for points in point_counts) and not all(
-                points == 0 for points in point_counts
-            ):
-                raise RuntimeError("historical diagnostic returned only a subset of required bases")
-            await store.complete_backfill_plan(
-                plan,
-                observed_points=observed_points,
-                executed_at=clock.now(),
-                allow_empty=True,
-            )
-            current_plan_completed = True
-            results.append(
-                {
-                    "plan_hash": plan.plan_hash,
-                    "status": "COMPLETED",
-                    "points_received": sum(point_counts),
-                    "bars_written": written,
-                }
-            )
-        provider_remaining = adapter.historical_allowance_remaining
-        if provider_remaining is not None:
-            await store.record_quota_state(
-                provider="ig",
-                environment="demo",
-                allowance_name="historical_points_weekly_provider_reported",
-                remaining=provider_remaining,
-                observed_at=clock.now(),
-            )
-        terminal_status = "COMPLETED"
-        print(
-            json.dumps(
-                {
-                    "plan_set_hash": plan_set.plan_set_hash,
-                    "plans": results,
-                    "provider_remaining_allowance": provider_remaining,
-                },
-                sort_keys=True,
-            )
-        )
-    except BaseException:
-        if current_plan_hash is not None and current_plan_claimed and not current_plan_completed:
-            await store.fail_backfill_plan(current_plan_hash, executed_at=clock.now())
-        raise
-    finally:
-        await adapter.disconnect()
-        if run_id is not None:
-            await store.finish_run(
-                run_id,
-                status=terminal_status,
-                finished_at=clock.now(),
-                detail={
-                    "plan_set_hash": plan_set.plan_set_hash,
-                    "plan_count": len(plans),
-                    "completed_or_skipped": len(results),
-                    "provider_remaining_allowance": adapter.historical_allowance_remaining,
-                },
-            )
-        await engine.dispose()
-
-
-def _confirm_qualification_gap_plan_set(
-    settings: Settings,
-    *,
-    plan_set: QualificationGapPlanSet,
-    snapshot_import_path: Path,
-    confirmed_plan_set_hash: str,
-) -> None:
-    if confirmed_plan_set_hash != plan_set.plan_set_hash:
-        raise ValueError("confirmed qualification gap plan-set hash does not match reviewed set")
-    snapshot = load_research_snapshot_import(snapshot_import_path)
-    database_name = make_url(settings.database_url).database
-    if database_name is None or not database_name.startswith("qtrad_research_"):
-        raise ValueError("qualification gap plan set requires an isolated research database")
-    if snapshot.target_database != database_name:
-        raise ValueError("snapshot import evidence does not identify the configured database")
-    if (
-        snapshot.import_sha256 != plan_set.snapshot_import_sha256
-        or snapshot.capture_source_id != plan_set.capture_source_id
-        or settings.capture_source_id != plan_set.capture_source_id
-        or snapshot.universe_hash != plan_set.universe_hash
-    ):
-        raise ValueError("qualification gap plan set differs from snapshot or configured identity")
-
-
-async def _require_database_at_migration_head(settings: Settings) -> None:
-    migration_head = ScriptDirectory.from_config(Config("alembic.ini")).get_current_head()
-    if migration_head is None:
-        raise RuntimeError("migration script directory has no current head")
-    engine = _engine(settings)
-    try:
-        rows = await PostgresAuditStore(engine).query("SELECT version_num FROM alembic_version")
-    finally:
-        await engine.dispose()
-    if len(rows) != 1 or rows[0]["version_num"] != migration_head:
-        raise RuntimeError(
-            "isolated research database is not at the reviewed migration head: "
-            f"expected {migration_head}"
-        )
-
-
-def _upgrade_database(settings: Settings) -> None:
-    os.environ["QTRAD_MIGRATION_DATABASE_URL"] = settings.migration_database_url
-    command.upgrade(Config("alembic.ini"), "head")
-
-
-def _engine(settings: Settings) -> AsyncEngine:
-    return create_async_engine(settings.database_url, pool_pre_ping=True)
-
-
-def _ig_adapter(
-    settings: Settings, clock: Clock, *, universe: CaptureUniverse | None = None
-) -> IgDemoMarketDataAdapter:
-    username, password, api_key, account_id = settings.require_ig_credentials()
-    selected_universe = universe if universe is not None else _capture_universe(settings)
-    return IgDemoMarketDataAdapter(
-        IgDemoConfig(
-            username=username,
-            password=password,
-            api_key=api_key,
-            account_id=account_id,
-        ),
-        clock,
-        instruments_by_id=selected_universe.instruments_by_id,
-        preferred_epics=selected_universe.preferred_epics,
-    )
-
-
-def _ig_review_adapter(
-    settings: Settings, clock: Clock, candidates: CaptureCandidates
-) -> IgDemoMarketDataAdapter:
-    username, password, api_key, account_id = settings.require_ig_credentials()
-    return IgDemoMarketDataAdapter(
-        IgDemoConfig(
-            username=username,
-            password=password,
-            api_key=api_key,
-            account_id=account_id,
-        ),
-        clock,
-        instruments_by_id={
-            instrument.instrument_id: instrument for instrument in candidates.instruments
-        },
-        preferred_epics={},
-    )
-
-
-def _ig_backfill_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
-    username, password, api_key, account_id = settings.require_ig_credentials()
-    return IgDemoMarketDataAdapter(
-        IgDemoConfig(
-            username=username,
-            password=password,
-            api_key=api_key,
-            account_id=account_id,
-        ),
-        clock,
-        instruments_by_id={},
-        preferred_epics={},
-    )
-
-
-async def _seed(settings: Settings) -> None:
-    engine = _engine(settings)
-    try:
-        await PostgresAuditStore(engine).seed_instruments(_capture_universe(settings).instruments)
-    finally:
-        await engine.dispose()
-
-
-async def _plan_run_reconciliation(
-    settings: Settings,
-    clock: Clock,
-    *,
-    universe_path: Path | None,
-    cutoff: datetime,
-    output_path: Path,
-) -> None:
-    if output_path.exists():
-        raise FileExistsError(f"run reconciliation plan output already exists: {output_path}")
-    if not output_path.parent.is_dir():
-        raise FileNotFoundError(
-            f"run reconciliation plan output directory does not exist: {output_path.parent}"
-        )
-    universe = load_capture_universe(universe_path or settings.capture_universe_path)
-    engine = _engine(settings)
-    try:
-        store = PostgresAuditStore(engine)
-        database_name = await store.database_name()
-        targets = await store.stale_running_ingestion_runs(
-            cutoff=cutoff,
-            environment=BrokerEnvironment.IG_DEMO,
-            configuration_hash=universe.configuration_hash,
-        )
-        if not targets:
-            raise ValueError("no eligible stale ingestion runs exist before the cutoff")
-        plan = build_run_reconciliation_plan(
-            targets=targets,
-            created_at=clock.now(),
-            cutoff=cutoff,
-            capture_source_id=settings.capture_source_id,
-            database_name=database_name,
-            universe_name=universe.name,
-            configuration_hash=universe.configuration_hash,
-            application_version=__version__,
-            application_image=settings.image,
-            environment=BrokerEnvironment.IG_DEMO,
-        )
-        write_run_reconciliation_plan(output_path, plan)
-    finally:
-        await engine.dispose()
-    print(
-        json.dumps(
-            {
-                "plan_hash": plan.plan_hash,
-                "target_count": len(plan.targets),
-                "cutoff": plan.cutoff.isoformat().replace("+00:00", "Z"),
-                "application_image": plan.application_image,
-                "executed": False,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-async def _reconcile_runs(
-    settings: Settings,
-    clock: Clock,
-    *,
-    plan_path: Path,
-    confirmed_plan_hash: str,
-) -> None:
-    _require_sha256_argument(confirmed_plan_hash, "run reconciliation plan hash")
-    plan = load_run_reconciliation_plan(plan_path)
-    if confirmed_plan_hash != plan.plan_hash:
-        raise ValueError("confirmed run reconciliation hash does not match the reviewed plan")
-    universe = _capture_universe(settings)
-    if settings.capture_source_id != plan.capture_source_id:
-        raise ValueError("run reconciliation plan targets a different capture source")
-    if (
-        universe.name != plan.universe_name
-        or universe.configuration_hash != plan.configuration_hash
-    ):
-        raise ValueError("run reconciliation plan targets a different capture universe")
-    if __version__ != plan.application_version or settings.image != plan.application_image:
-        raise ValueError("run reconciliation plan targets a different application image")
-    engine = _engine(settings)
-    try:
-        reconciled = await PostgresAuditStore(engine).reconcile_stale_ingestion_runs(
-            plan,
-            reconciled_at=clock.now(),
-        )
-    finally:
-        await engine.dispose()
-    print(
-        json.dumps(
-            {
-                "plan_hash": plan.plan_hash,
-                "reconciled_run_count": reconciled,
-                "terminal_status": plan.terminal_status,
-                "finished_at_basis": plan.finished_at_basis,
-                "application_image": plan.application_image,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-async def _sync_instruments(
-    settings: Settings, clock: Clock, *, universe_path: Path | None
-) -> None:
-    universe = (
-        load_capture_universe(universe_path)
-        if universe_path is not None
-        else _capture_universe(settings)
-    )
-    engine = _engine(settings)
-    adapter = _ig_adapter(settings, clock, universe=universe)
-    store = PostgresAuditStore(engine)
-    try:
-        await store.seed_instruments(universe.instruments)
-        await adapter.connect()
-        listings = await adapter.discover_listings(
-            [instrument.instrument_id for instrument in universe.instruments]
-        )
-        for listing in listings:
-            await store.validate_provider_listing(
-                listing, universe_hash=universe.configuration_hash, observed_at=clock.now()
-            )
-        print(
-            json.dumps(
-                {
-                    "universe_name": universe.name,
-                    "configuration_hash": universe.configuration_hash,
-                    "listing_count": len(listings),
-                    "listings": [str(item.listing_id) for item in listings],
-                    "ingestion_started": False,
-                },
-                sort_keys=True,
-            )
-        )
-    finally:
-        await adapter.disconnect()
-        await engine.dispose()
-
-
-async def _review_instruments(
-    settings: Settings,
-    clock: Clock,
-    *,
-    catalogue_path: Path,
-    output_path: Path | None,
-) -> None:
-    if output_path is not None:
-        if output_path.exists():
-            raise FileExistsError(f"listing review output already exists: {output_path}")
-        if not output_path.parent.is_dir():
-            raise FileNotFoundError(
-                f"listing review output directory does not exist: {output_path.parent}"
-            )
-    candidates = load_capture_candidates(catalogue_path)
-    adapter = _ig_review_adapter(settings, clock, candidates)
-    try:
-        await adapter.connect()
-        reviews = await adapter.review_listings(
-            [instrument.instrument_id for instrument in candidates.instruments],
-            exact_epics=candidates.exact_review_epics,
-        )
-        manifest = build_listing_review_manifest(
-            catalogue_name=candidates.name,
-            catalogue_hash=candidates.configuration_hash,
-            instruments=candidates.instruments,
-            reviews=reviews,
-            observed_at=clock.now(),
-        )
-        encoded = json.dumps(manifest.as_json_value(), sort_keys=True, indent=2) + "\n"
-        if output_path is None:
-            print(encoded, end="")
-        else:
-            with output_path.open("x", encoding="utf-8") as output:
-                output.write(encoded)
-            print(
-                json.dumps(
-                    {
-                        "output": str(output_path),
-                        "review_hash": manifest.review_hash,
-                    },
-                    sort_keys=True,
-                )
-            )
-    finally:
-        await adapter.disconnect()
-
-
-def _promote_universe(
-    clock: Clock,
-    *,
-    catalogue_path: Path,
-    review_path: Path,
-    selections_path: Path,
-    release_name: str,
-    output_path: Path,
-) -> None:
-    if output_path.exists():
-        raise FileExistsError(f"capture universe output already exists: {output_path}")
-    if not output_path.parent.is_dir():
-        raise FileNotFoundError(
-            f"capture universe output directory does not exist: {output_path.parent}"
-        )
-    candidates = load_capture_candidates(catalogue_path)
-    evidence = load_listing_review_evidence(review_path, candidates.instruments)
-    selection_set = load_explicit_selection_set(selections_path)
-    promotion = promote_reviewed_universe(
-        release_name=release_name,
-        catalogue_name=candidates.name,
-        catalogue_hash=candidates.configuration_hash,
-        instruments=candidates.instruments,
-        review_catalogue_name=evidence.catalogue_name,
-        review_catalogue_hash=evidence.catalogue_hash,
-        review_hash=evidence.review_hash,
-        reviews=evidence.reviews,
-        selection_set=selection_set,
-        promoted_at=clock.now(),
-    )
-    rendered, universe = render_capture_universe_promotion(promotion)
-    with output_path.open("x", encoding="utf-8") as output:
-        output.write(rendered)
-    print(
-        json.dumps(
-            {
-                "configuration_hash": universe.configuration_hash,
-                "output": str(output_path),
-                "selection_hash": promotion.selection_hash,
-                "source_review_hash": promotion.source_review_hash,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-def _verify_capture_feed_pages(
-    *,
-    source_id: str,
-    universe_name: str,
-    configuration_hash: str,
-    after_position: int,
-    page_paths: Sequence[Path],
-) -> None:
-    identity = CaptureFeedIdentity(
-        feed_schema_version=1,
-        source_id=source_id,
-        universe_name=universe_name,
-        configuration_hash=configuration_hash,
-    )
-    cursor = CaptureFeedCursor.initial(identity, after_position=after_position)
-    event_count = 0
-    for page_path in page_paths:
-        page = load_capture_feed_page(page_path)
-        cursor = advance_capture_feed_cursor(cursor, page)
-        event_count += len(page.events)
-    print(
-        json.dumps(
-            {
-                "caught_up": cursor.position == cursor.observed_high_water_position,
-                "event_count": event_count,
-                "page_count": len(page_paths),
-                "position": cursor.position,
-                "source_id": cursor.identity.source_id,
-                "universe_name": cursor.identity.universe_name,
-                "configuration_hash": cursor.identity.configuration_hash,
-                "observed_high_water_position": cursor.observed_high_water_position,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-async def _probe_capture_feed(
-    *,
-    endpoint: str,
-    source_id: str,
-    universe_name: str,
-    configuration_hash: str,
-    after_position: int,
-    limit: int,
-) -> None:
-    identity = CaptureFeedIdentity(
-        feed_schema_version=1,
-        source_id=source_id,
-        universe_name=universe_name,
-        configuration_hash=configuration_hash,
-    )
-    cursor = CaptureFeedCursor.initial(identity, after_position=after_position)
-    async with HttpCaptureFeedClient(endpoint) as client:
-        page = await client.fetch_page(after_position=after_position, limit=limit)
-    candidate_cursor = advance_capture_feed_cursor(cursor, page)
-    print(
-        json.dumps(
-            {
-                "caught_up": candidate_cursor.position
-                == candidate_cursor.observed_high_water_position,
-                "event_count": len(page.events),
-                "next_position": candidate_cursor.position,
-                "observed_high_water_position": candidate_cursor.observed_high_water_position,
-                "source_id": candidate_cursor.identity.source_id,
-                "universe_name": candidate_cursor.identity.universe_name,
-                "configuration_hash": candidate_cursor.identity.configuration_hash,
-                "cursor_persisted": False,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-async def _synchronise_capture_universe(
-    store: PostgresAuditStore,
-    adapter: IgDemoMarketDataAdapter,
-    universe: CaptureUniverse,
-    clock: Clock,
-) -> tuple[ProviderListing, ...]:
-    """Validate an approved release through the collector's existing IG session."""
-
-    instrument_ids = tuple(instrument.instrument_id for instrument in universe.instruments)
+   …4770 tokens truncated…nstrument_ids = tuple(instrument.instrument_id for instrument in universe.instruments)
     await store.seed_instruments(universe.instruments)
     active = await store.active_provider_listings(instrument_ids)
     by_instrument = {listing.instrument_id: listing for listing in active}
