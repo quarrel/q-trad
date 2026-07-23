@@ -1,6 +1,6 @@
 """Pure R1.B builders for the causal panel and frozen midpoint targets."""
 
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -10,6 +10,7 @@ from qtrad.domain.foundation import (
     AvailabilityBasis,
     ExcursionDisposition,
     FoundationConfig,
+    HorizonCoverageSummary,
     InstrumentRole,
     PanelAuditDisposition,
     PanelDataset,
@@ -121,11 +122,17 @@ def build_frozen_targets(
     """Build frozen endpoint returns directly from observations, never from the panel."""
 
     _require_dataset(dataset, config)
-    selected_horizons = tuple(horizons or (config.primary_vertical_horizon,))
-    if any(horizon not in config.target_horizons for horizon in selected_horizons):
+    selected_horizons = tuple(
+        (config.primary_vertical_horizon,) if horizons is None else horizons
+    )
+    if not selected_horizons or any(
+        horizon not in config.target_horizons for horizon in selected_horizons
+    ):
         raise ValueError(
             "target builder received a horizon absent from the foundation configuration"
         )
+    if len(set(selected_horizons)) != len(selected_horizons):
+        raise ValueError("target builder horizons must be unique")
     index = _observation_index(dataset.rows)
     rows: list[TargetRow] = []
     target_instruments = tuple(
@@ -196,6 +203,52 @@ def build_frozen_targets(
         observation_dataset_id=dataset.dataset_id,
         foundation_configuration_id=config.configuration_id,
     )
+
+
+def summarise_horizon_coverage(
+    dataset: TargetDataset,
+    config: FoundationConfig,
+    *,
+    horizons: Sequence[timedelta] | None = None,
+) -> tuple[HorizonCoverageSummary, ...]:
+    """Summarise endpoint and path coverage without conflating dispositions."""
+
+    if dataset.observation_dataset_id != config.observation_dataset_id:
+        raise ValueError("target dataset observation lineage does not match configuration")
+    if dataset.foundation_configuration_id != config.configuration_id:
+        raise ValueError("target dataset configuration lineage does not match configuration")
+    selected_horizons = tuple(config.target_horizons if horizons is None else horizons)
+    if not selected_horizons or any(
+        horizon not in config.target_horizons for horizon in selected_horizons
+    ):
+        raise ValueError("coverage summary received an unconfigured horizon")
+    if len(set(selected_horizons)) != len(selected_horizons):
+        raise ValueError("coverage summary horizons must be unique")
+
+    summaries: list[HorizonCoverageSummary] = []
+    for horizon in selected_horizons:
+        rows = tuple(row for row in dataset.rows if row.horizon == horizon)
+        return_counts = Counter(row.return_disposition.value for row in rows)
+        excursion_counts = Counter(row.excursion_disposition.value for row in rows)
+        total = len(rows)
+        valid_returns = return_counts[ReturnDisposition.VALID.value]
+        valid_excursions = excursion_counts[ExcursionDisposition.VALID.value]
+        summaries.append(
+            HorizonCoverageSummary(
+                horizon=horizon,
+                total_target_count=total,
+                valid_return_count=valid_returns,
+                valid_excursion_count=valid_excursions,
+                unavailable_by_freeze_count=return_counts[
+                    ReturnDisposition.UNAVAILABLE_BY_FREEZE.value
+                ],
+                return_coverage=valid_returns / total if total else 0.0,
+                excursion_coverage=valid_excursions / total if total else 0.0,
+                return_disposition_counts=tuple(sorted(return_counts.items())),
+                excursion_disposition_counts=tuple(sorted(excursion_counts.items())),
+            )
+        )
+    return tuple(summaries)
 
 
 def _select_target_row(

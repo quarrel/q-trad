@@ -470,6 +470,64 @@ class TargetDataset:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class HorizonCoverageSummary:
+    """Immutable target and excursion coverage counts for one horizon."""
+
+    horizon: timedelta
+    total_target_count: int
+    valid_return_count: int
+    valid_excursion_count: int
+    unavailable_by_freeze_count: int
+    return_coverage: float
+    excursion_coverage: float
+    return_disposition_counts: tuple[tuple[str, int], ...]
+    excursion_disposition_counts: tuple[tuple[str, int], ...]
+
+    def __post_init__(self) -> None:
+        if self.horizon <= timedelta(0):
+            raise ValueError("coverage horizon must be positive")
+        for value, field in (
+            (self.total_target_count, "total target count"),
+            (self.valid_return_count, "valid return count"),
+            (self.valid_excursion_count, "valid excursion count"),
+            (self.unavailable_by_freeze_count, "unavailable-by-freeze count"),
+        ):
+            if value < 0:
+                raise ValueError(f"{field} must not be negative")
+        if self.valid_return_count > self.total_target_count:
+            raise ValueError("valid return count exceeds total target count")
+        if self.valid_excursion_count > self.total_target_count:
+            raise ValueError("valid excursion count exceeds total target count")
+        for value, field in (
+            (self.return_coverage, "return coverage"),
+            (self.excursion_coverage, "excursion coverage"),
+        ):
+            if not isfinite(value) or not 0 <= value <= 1:
+                raise ValueError(f"{field} must be finite and between zero and one")
+        if sum(count for _, count in self.return_disposition_counts) != self.total_target_count:
+            raise ValueError("return disposition counts do not cover all targets")
+        if sum(count for _, count in self.excursion_disposition_counts) != self.total_target_count:
+            raise ValueError("excursion disposition counts do not cover all targets")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "horizon_seconds": self.horizon.total_seconds(),
+            "total_target_count": self.total_target_count,
+            "valid_return_count": self.valid_return_count,
+            "valid_excursion_count": self.valid_excursion_count,
+            "unavailable_by_freeze_count": self.unavailable_by_freeze_count,
+            "return_coverage": self.return_coverage,
+            "excursion_coverage": self.excursion_coverage,
+            "return_disposition_counts": to_json_value(
+                [[name, count] for name, count in self.return_disposition_counts]
+            ),
+            "excursion_disposition_counts": to_json_value(
+                [[name, count] for name, count in self.excursion_disposition_counts]
+            ),
+        }
+
+
 def _panel_key(row: PanelRow) -> tuple[object, ...]:
     return row.decision_time, row.instrument_id, row.basis.value
 

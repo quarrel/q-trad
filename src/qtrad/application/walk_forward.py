@@ -24,6 +24,7 @@ def build_expanding_folds(
     targets: TargetDataset,
     config: FoundationConfig,
     *,
+    horizon: timedelta | None = None,
     validation_duration: timedelta | None = None,
 ) -> FoldDataset:
     """Build expanding folds with maturity-based training eligibility and embargo."""
@@ -38,17 +39,24 @@ def build_expanding_folds(
     if holdout_start < config.range_start or holdout_end > config.range_end:
         raise ValueError("holdout range must be contained in the foundation range")
 
-    primary_horizon = config.primary_vertical_horizon
+    selected_horizon = config.primary_vertical_horizon if horizon is None else horizon
+    if selected_horizon not in config.target_horizons:
+        raise ValueError("fold builder received a horizon absent from the foundation configuration")
     target_rows = tuple(
         row
         for row in targets.rows
-        if row.horizon == primary_horizon and row.target_basis is config.target_basis
+        if row.horizon == selected_horizon and row.target_basis is config.target_basis
     )
     if len({row.target_id for row in target_rows}) != len(target_rows):
         raise ValueError("target dataset contains duplicate target identities")
 
     folds: list[Fold] = []
-    validation_start = config.range_start + config.minimum_training_duration + config.embargo
+    validation_start = (
+        config.range_start
+        + config.minimum_training_duration
+        + selected_horizon
+        + config.embargo
+    )
     while validation_start < holdout_start:
         validation_end = validation_start + duration
         if validation_end > holdout_start:
@@ -118,11 +126,17 @@ def build_zero_return_forecasts(
     folds: FoldDataset,
     config: FoundationConfig,
     *,
+    horizon: timedelta | None = None,
     experiment_id: str = DEFAULT_PROBE_EXPERIMENT_ID,
 ) -> ForecastDataset:
     """Emit deterministic zero-return forecasts for fold validation rows only."""
 
     _require_panel_and_targets(panel, targets, folds, config)
+    selected_horizon = config.primary_vertical_horizon if horizon is None else horizon
+    if selected_horizon not in config.target_horizons:
+        raise ValueError(
+            "forecast builder received a horizon absent from the foundation configuration"
+        )
     target_by_id = {row.target_id: row for row in targets.rows}
     if len(target_by_id) != len(targets.rows):
         raise ValueError("target dataset contains duplicate target identities")
@@ -140,7 +154,7 @@ def build_zero_return_forecasts(
             if _in_holdout(target.decision_time, config.holdout_range):
                 raise ValueError("holdout target entered forecast validation membership")
             if (
-                target.horizon != config.primary_vertical_horizon
+                target.horizon != selected_horizon
                 or target.target_basis is not config.target_basis
             ):
                 raise ValueError("fold validation contains an unsupported target")
