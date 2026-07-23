@@ -14,6 +14,7 @@ from typing import Literal
 import polars as pl
 from pydantic import BaseModel, ConfigDict, Field
 
+from qtrad.adapters.parquet.observations import ObservationManifest, ParquetObservationStore
 from qtrad.domain.events import JsonValue
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.market_data import (
@@ -22,6 +23,7 @@ from qtrad.domain.market_data import (
     MarketBar,
     PriceBasis,
 )
+from qtrad.domain.research import ObservationDataset
 from qtrad.ports.clock import Clock
 from qtrad.ports.storage import ResearchManifest
 
@@ -161,6 +163,32 @@ class ParquetResearchStore:
 
     async def read_manifest(self, manifest_id: str) -> ResearchManifest:
         return await asyncio.to_thread(self._read_manifest_sync, manifest_id)
+
+    async def write_observations(
+        self,
+        dataset: ObservationDataset,
+        *,
+        metadata: Mapping[str, JsonValue] | None = None,
+        application_version: str = "development",
+        image_identity: str = "development",
+        source_snapshot: Mapping[str, JsonValue] | None = None,
+        build_evidence: Mapping[str, JsonValue] | None = None,
+    ) -> ObservationManifest:
+        """Write R1 observations without changing the established bars-v2 path."""
+
+        return await ParquetObservationStore(self._root, self._clock).write_observations(
+            dataset,
+            metadata=metadata,
+            application_version=application_version,
+            image_identity=image_identity,
+            source_snapshot=source_snapshot,
+            build_evidence=build_evidence,
+        )
+
+    async def read_observations(self, manifest_id: str) -> ObservationDataset:
+        return await ParquetObservationStore(self._root, self._clock).read_observations(
+            manifest_id
+        )
 
     def _read_manifest_sync(self, manifest_id: str) -> ResearchManifest:
         _require_manifest_id(manifest_id)
