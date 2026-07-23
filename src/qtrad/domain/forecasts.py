@@ -1,0 +1,283 @@
+"""Model-independent forecast artefacts for the R1.C offline evaluator."""
+
+import json
+from collections.abc import Sequence
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from enum import StrEnum
+from hashlib import sha256
+from math import isfinite
+from typing import ClassVar
+
+from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.time import require_utc
+
+FORECAST_DATASET_CONTRACT = "qtrad-research-forecasts-v1"
+
+
+class ReturnUnit(StrEnum):
+    """The unit used by a point forecast."""
+
+    LOG_RETURN = "LOG_RETURN"
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastRow:
+    """One point forecast with complete fold and dataset lineage."""
+
+    forecast_id: str
+    instrument_id: str
+    decision_time: datetime
+    horizon: timedelta
+    expected_return: float
+    return_unit: ReturnUnit
+    feature_data_asof: datetime
+    training_cutoff: datetime
+    observation_dataset_id: str
+    panel_dataset_id: str
+    target_dataset_id: str
+    target_id: str
+    fold_dataset_id: str
+    experiment_id: str
+    fold_id: str
+    model_id: str
+    model_contract: str
+
+    CONTRACT: ClassVar[str] = FORECAST_DATASET_CONTRACT
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.decision_time, "forecast decision_time"),
+            (self.feature_data_asof, "forecast feature_data_asof"),
+            (self.training_cutoff, "forecast training_cutoff"),
+        ):
+            require_utc(value, field)
+        if self.horizon <= timedelta(0):
+            raise ValueError("forecast horizon must be positive")
+        if not isfinite(self.expected_return):
+            raise ValueError("forecast expected_return must be finite")
+        if self.return_unit != "LOG_RETURN":
+            raise ValueError("forecast return_unit must be LOG_RETURN")
+        for value, field in (
+            (self.forecast_id, "forecast ID"),
+            (self.instrument_id, "forecast instrument ID"),
+            (self.observation_dataset_id, "forecast observation dataset ID"),
+            (self.panel_dataset_id, "forecast panel dataset ID"),
+            (self.target_dataset_id, "forecast target dataset ID"),
+            (self.target_id, "forecast target ID"),
+            (self.fold_dataset_id, "forecast fold dataset ID"),
+            (self.experiment_id, "forecast experiment ID"),
+            (self.fold_id, "forecast fold ID"),
+            (self.model_id, "forecast model ID"),
+            (self.model_contract, "forecast model contract"),
+        ):
+            if not value:
+                raise ValueError(f"{field} must be non-empty")
+        if self.forecast_id != _hash_json(_forecast_semantic(self)):
+            raise ValueError("forecast ID does not match its semantic content")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        instrument_id: str,
+        decision_time: datetime,
+        horizon: timedelta,
+        expected_return: float,
+        return_unit: ReturnUnit,
+        feature_data_asof: datetime,
+        training_cutoff: datetime,
+        observation_dataset_id: str,
+        panel_dataset_id: str,
+        target_dataset_id: str,
+        target_id: str,
+        fold_dataset_id: str,
+        experiment_id: str,
+        fold_id: str,
+        model_id: str,
+        model_contract: str,
+    ) -> "ForecastRow":
+        semantic = {
+            "contract": FORECAST_DATASET_CONTRACT,
+            "schema_version": 1,
+            "instrument_id": instrument_id,
+            "decision_time": decision_time,
+            "horizon_seconds": horizon.total_seconds(),
+            "expected_return": expected_return,
+            "return_unit": return_unit,
+            "feature_data_asof": feature_data_asof,
+            "training_cutoff": training_cutoff,
+            "observation_dataset_id": observation_dataset_id,
+            "panel_dataset_id": panel_dataset_id,
+            "target_dataset_id": target_dataset_id,
+            "target_id": target_id,
+            "fold_dataset_id": fold_dataset_id,
+            "experiment_id": experiment_id,
+            "fold_id": fold_id,
+            "model_id": model_id,
+            "model_contract": model_contract,
+        }
+        forecast_id = _hash_json(semantic)
+        return cls(
+            forecast_id=forecast_id,
+            instrument_id=instrument_id,
+            decision_time=decision_time,
+            horizon=horizon,
+            expected_return=expected_return,
+            return_unit=return_unit,
+            feature_data_asof=feature_data_asof,
+            training_cutoff=training_cutoff,
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            target_dataset_id=target_dataset_id,
+            target_id=target_id,
+            fold_dataset_id=fold_dataset_id,
+            experiment_id=experiment_id,
+            fold_id=fold_id,
+            model_id=model_id,
+            model_contract=model_contract,
+        )
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "forecast_id": self.forecast_id,
+            "instrument_id": self.instrument_id,
+            "decision_time": self.decision_time.isoformat(),
+            "horizon_seconds": self.horizon.total_seconds(),
+            "expected_return": self.expected_return,
+            "return_unit": self.return_unit,
+            "feature_data_asof": self.feature_data_asof.isoformat(),
+            "training_cutoff": self.training_cutoff.isoformat(),
+            "observation_dataset_id": self.observation_dataset_id,
+            "panel_dataset_id": self.panel_dataset_id,
+            "target_dataset_id": self.target_dataset_id,
+            "target_id": self.target_id,
+            "fold_dataset_id": self.fold_dataset_id,
+            "experiment_id": self.experiment_id,
+            "fold_id": self.fold_id,
+            "model_id": self.model_id,
+            "model_contract": self.model_contract,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class ForecastDataset:
+    """Immutable forecasts consumable without loading model code."""
+
+    rows: tuple[ForecastRow, ...]
+    observation_dataset_id: str
+    panel_dataset_id: str
+    target_dataset_id: str
+    fold_dataset_id: str
+    dataset_id: str
+
+    CONTRACT: ClassVar[str] = FORECAST_DATASET_CONTRACT
+
+    def __post_init__(self) -> None:
+        expected_order = tuple(
+            sorted(
+                self.rows,
+                key=lambda row: (row.decision_time, row.instrument_id, row.target_id, row.fold_id),
+            )
+        )
+        if expected_order != self.rows:
+            raise ValueError("forecast rows must use deterministic ordering")
+        expected = _dataset_hash(
+            self.rows,
+            observation_dataset_id=self.observation_dataset_id,
+            panel_dataset_id=self.panel_dataset_id,
+            target_dataset_id=self.target_dataset_id,
+            fold_dataset_id=self.fold_dataset_id,
+        )
+        if self.dataset_id != expected:
+            raise ValueError("forecast dataset ID does not match its semantic rows")
+        if any(
+            (
+                row.observation_dataset_id != self.observation_dataset_id
+                or row.panel_dataset_id != self.panel_dataset_id
+                or row.target_dataset_id != self.target_dataset_id
+                or row.fold_dataset_id != self.fold_dataset_id
+            )
+            for row in self.rows
+        ):
+            raise ValueError("forecast row lineage does not match its dataset")
+
+    @classmethod
+    def create(
+        cls,
+        rows: Sequence[ForecastRow],
+        *,
+        observation_dataset_id: str,
+        panel_dataset_id: str,
+        target_dataset_id: str,
+        fold_dataset_id: str,
+    ) -> "ForecastDataset":
+        ordered = tuple(
+            sorted(
+                rows,
+                key=lambda row: (row.decision_time, row.instrument_id, row.target_id, row.fold_id),
+            )
+        )
+        return cls(
+            rows=ordered,
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            target_dataset_id=target_dataset_id,
+            fold_dataset_id=fold_dataset_id,
+            dataset_id=_dataset_hash(
+                ordered,
+                observation_dataset_id=observation_dataset_id,
+                panel_dataset_id=panel_dataset_id,
+                target_dataset_id=target_dataset_id,
+                fold_dataset_id=fold_dataset_id,
+            ),
+        )
+
+
+def _dataset_hash(
+    rows: Sequence[ForecastRow],
+    *,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    target_dataset_id: str,
+    fold_dataset_id: str,
+) -> str:
+    return _hash_json(
+        {
+            "contract": FORECAST_DATASET_CONTRACT,
+            "schema_version": 1,
+            "observation_dataset_id": observation_dataset_id,
+            "panel_dataset_id": panel_dataset_id,
+            "target_dataset_id": target_dataset_id,
+            "fold_dataset_id": fold_dataset_id,
+            "rows": [row.as_json() for row in rows],
+        }
+    )
+
+
+def _forecast_semantic(row: ForecastRow) -> dict[str, object]:
+    return {
+        "contract": FORECAST_DATASET_CONTRACT,
+        "schema_version": 1,
+        "instrument_id": row.instrument_id,
+        "decision_time": row.decision_time,
+        "horizon_seconds": row.horizon.total_seconds(),
+        "expected_return": row.expected_return,
+        "return_unit": row.return_unit,
+        "feature_data_asof": row.feature_data_asof,
+        "training_cutoff": row.training_cutoff,
+        "observation_dataset_id": row.observation_dataset_id,
+        "panel_dataset_id": row.panel_dataset_id,
+        "target_dataset_id": row.target_dataset_id,
+        "target_id": row.target_id,
+        "fold_dataset_id": row.fold_dataset_id,
+        "experiment_id": row.experiment_id,
+        "fold_id": row.fold_id,
+        "model_id": row.model_id,
+        "model_contract": row.model_contract,
+    }
+
+
+def _hash_json(value: object) -> str:
+    canonical = to_json_value(value)
+    return sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
