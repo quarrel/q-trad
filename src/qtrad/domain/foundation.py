@@ -360,6 +360,16 @@ class TargetRow:
 
     CONTRACT: ClassVar[str] = TARGET_DATASET_CONTRACT
 
+    @property
+    def target_id(self) -> str:
+        return target_identity(
+            instrument_id=self.instrument_id,
+            decision_time=self.decision_time,
+            horizon=self.horizon,
+            target_basis=self.target_basis,
+            target_revision_policy=self.target_revision_policy,
+        )
+
     def __post_init__(self) -> None:
         for value, field in (
             (self.decision_time, "target decision_time"),
@@ -466,6 +476,28 @@ def _panel_key(row: PanelRow) -> tuple[object, ...]:
 
 def _target_key(row: TargetRow) -> tuple[object, ...]:
     return row.instrument_id, row.decision_time, row.horizon.total_seconds(), row.target_basis.value
+
+
+def target_identity(
+    *,
+    instrument_id: str,
+    decision_time: datetime,
+    horizon: timedelta,
+    target_basis: PriceBasis,
+    target_revision_policy: str,
+) -> str:
+    """Return the stable identity of one frozen target key."""
+
+    return _hash_json(
+        {
+            "contract": TARGET_DATASET_CONTRACT,
+            "instrument_id": instrument_id,
+            "decision_time": decision_time.isoformat(),
+            "horizon_seconds": horizon.total_seconds(),
+            "target_basis": target_basis.value,
+            "target_revision_policy": target_revision_policy,
+        }
+    )
 
 
 def _hash_json(value: object) -> str:
