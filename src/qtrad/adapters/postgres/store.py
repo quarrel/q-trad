@@ -19,13 +19,14 @@ from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
-from qtrad.domain.market_data import BarProvenance, PriceBasis
+from qtrad.domain.market_data import BarProvenance, DataQuality, MarketBar, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.operations import (
     AdapterHealth,
     RunReconciliationPlan,
     RunReconciliationTarget,
 )
+from qtrad.domain.research import ObservationCandidate, ProjectedBar
 from qtrad.domain.time import require_utc
 from qtrad.ports.storage import (
     AppendResult,
@@ -1311,6 +1312,128 @@ class PostgresAuditStore(AuditStore):
             )
             high_water_position = int(high_water_result.scalar_one())
         return EventPage(events=events, high_water_position=high_water_position)
+
+    async def read_quote_derived_bar_candidates(
+        self,
+        *,
+        instrument_ids: Sequence[InstrumentId],
+        interval_start: datetime,
+        interval_end: datetime,
+    ) -> tuple[ObservationCandidate, ...]:
+        """Read every native bar revision with a fail-closed lineage join."""
+
+        require_utc(interval_start, "observation interval_start")
+        require_utc(interval_end, "observation interval_end")
+        if interval_end <= interval_start:
+            raise ValueError("observation interval must be positive")
+        if not instrument_ids:
+            raise ValueError("observation export requires at least one instrument")
+        encoded_instruments = json.dumps([str(instrument_id) for instrument_id in instrument_ids])
+        async with self._engine.connect() as connection:
+            result = await connection.execute(
+                text(
+                    """
+                    SELECT m.*, 
+                           e.event_id AS canonical_event_id,
+                           e.stream_id AS canonical_stream_id,
+                           e.stream_version AS canonical_stream_version,
+                           e.event_type AS canonical_event_type,
+                           e.schema_version AS canonical_schema_version,
+                           e.event_time AS canonical_event_time,
+                           e.received_time AS canonical_received_time,
+                           e.persisted_time AS canonical_persisted_time,
+                           e.correlation_id AS canonical_correlation_id,
+                           e.causation_id AS canonical_causation_id,
+                           e.producer AS canonical_producer,
+                           e.producer_version AS canonical_producer_version,
+                           e.payload AS canonical_payload,
+                           e.raw_record_id AS canonical_raw_record_id
+                    FROM read_model.market_bars AS m
+                    LEFT JOIN canonical.events AS e
+                      ON e.global_position = m.global_position
+                    WHERE m.instrument_id IN (
+                        SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                    )
+                      AND m.interval_start >= :interval_start
+                      AND m.interval_end <= :interval_end
+                      AND m.provenance = 'QUOTE_DERIVED'
+                    ORDER BY m.instrument_id, m.basis, m.interval_start,
+                             m.source_provider, m.source_environment,
+                             m.source_external_id, m.revision, m.global_position
+                    """
+                ),
+                {
+                    "instrument_ids": encoded_instruments,
+                    "interval_start": interval_start,
+                    "interval_end": interval_end,
+                },
+            )
+            candidates: list[ObservationCandidate] = []
+            for row in result.mappings():
+                projection = ProjectedBar(
+                    bar=_market_bar_from_projection(dict(row)),
+                    global_position=int(str(row["global_position"])),
+                )
+                event = (
+                    None
+                    if row["canonical_event_id"] is None
+                    else _event_from_joined_row(dict(row))
+                )
+                candidates.append(ObservationCandidate(projection=projection, event=event))
+        return tuple(candidates)
+
+
+def _event_from_joined_row(row: Mapping[str, object]) -> EventEnvelope:
+    payload = row["canonical_payload"]
+    if not isinstance(payload, dict):
+        raise TypeError("canonical event payload is not an object")
+    return EventEnvelope(
+        event_id=UUID(str(row["canonical_event_id"])),
+        stream_id=str(row["canonical_stream_id"]),
+        stream_version=int(str(row["canonical_stream_version"])),
+        event_type=str(row["canonical_event_type"]),
+        schema_version=int(str(row["canonical_schema_version"])),
+        event_time=_utc(row["canonical_event_time"]),
+        received_time=_utc(row["canonical_received_time"]),
+        persisted_time=_utc(row["canonical_persisted_time"]),
+        correlation_id=UUID(str(row["canonical_correlation_id"])),
+        causation_id=(
+            UUID(str(row["canonical_causation_id"]))
+            if row["canonical_causation_id"]
+            else None
+        ),
+        producer=str(row["canonical_producer"]),
+        producer_version=str(row["canonical_producer_version"]),
+        payload=cast(dict[str, JsonValue], payload),
+        global_position=int(str(row["global_position"])),
+        raw_record_id=(
+            int(str(row["canonical_raw_record_id"]))
+            if row["canonical_raw_record_id"]
+            else None
+        ),
+    )
+
+
+def _market_bar_from_projection(row: Mapping[str, object]) -> MarketBar:
+    return MarketBar(
+        instrument_id=InstrumentId(str(row["instrument_id"])),
+        basis=PriceBasis(str(row["basis"])),
+        interval_start=_utc(row["interval_start"]),
+        interval_end=_utc(row["interval_end"]),
+        open=Decimal(str(row["open"])),
+        high=Decimal(str(row["high"])),
+        low=Decimal(str(row["low"])),
+        close=Decimal(str(row["close"])),
+        sample_count=int(str(row["sample_count"])),
+        revision=int(str(row["revision"])),
+        provenance=BarProvenance(str(row["provenance"])),
+        quality=DataQuality(str(row["quality"])),
+        source_listing_id=ProviderListingId(
+            provider=str(row["source_provider"]),
+            environment=str(row["source_environment"]),
+            external_id=str(row["source_external_id"]),
+        ),
+    )
 
 
 def _event_from_row(row: RowMapping) -> EventEnvelope:
