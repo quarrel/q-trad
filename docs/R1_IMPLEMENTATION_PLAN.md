@@ -360,9 +360,14 @@ training_cutoff
 
 Do not conflate decision delay with feature-bar age.
 
+For the R1 transform, `feature_data_asof` is the decision cutoff and
+`latest_feature_bar_end = decision_time - selected_feature_lag`. A bar is eligible when it ends at
+that lagged boundary and its configured availability time is no later than `feature_data_asof`.
+
 ## Feature-lag selection
 
 The implementation must measure persisted native bar-availability delays over an explicit calibration range.
+That calibration range must end no later than the decision range start.
 
 Delay is:
 
@@ -619,7 +624,8 @@ MEASURED
 PROVISIONAL_CONSERVATIVE
 ```
 
-and retain the evidence used to select it.
+and retain the evidence used to select it. A provisional policy must also record a non-empty reason;
+its configured delay may not be less conservative than correction-maturity evidence already present.
 
 ## Return disposition
 
@@ -919,7 +925,11 @@ Inputs:
 --universe
 --start
 --end
+--calibration-start
+--calibration-end
 --snapshot-import-evidence
+--availability-percentile
+--availability-safety-margin-seconds
 ```
 
 Output:
@@ -937,7 +947,8 @@ Inputs:
 
 ```text
 --observations-manifest
---config
+--configuration
+--output
 ```
 
 Output:

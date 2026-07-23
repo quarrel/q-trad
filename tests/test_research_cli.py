@@ -190,6 +190,8 @@ async def test_export_binds_selected_universe_and_real_gap_evidence(
         "kind": "verified-capture-snapshot",
         "import_sha256": snapshot_identity["import_sha256"],
         "capture_source_id": "oci-sydney-capture-1",
+        "universe_name": universe.name,
+        "universe_hash": universe.configuration_hash,
         "source_created_at": "2026-07-14T00:00:00Z",
         "source_archive_sha256": "3" * 64,
         "source_manifest_schema": "qtrad-capture-backup-v2",

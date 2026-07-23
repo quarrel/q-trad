@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
+from math import ceil
 from pathlib import Path
 from typing import cast
 from uuid import UUID
@@ -14,10 +15,16 @@ from qtrad.adapters.parquet.foundation import (
     ParquetFoundationArtifactStore,
 )
 from qtrad.adapters.parquet.observations import ObservationManifest, ParquetObservationStore
+from qtrad.application.foundation import (
+    build_asof_panel,
+    build_frozen_targets,
+    summarise_horizon_coverage,
+)
 from qtrad.application.foundation_bundle import (
     build_foundation_bundle,
     verify_foundation_children,
 )
+from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import Fold, FoldDataset
 from qtrad.domain.forecasts import ForecastDataset, ForecastRow, ReturnUnit
@@ -42,7 +49,13 @@ from qtrad.domain.foundation_bundle import (
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import DataGap, DataQuality, PriceBasis
-from qtrad.domain.research import ObservationDataset
+from qtrad.domain.research import (
+    AvailabilityDelayReport,
+    ObservationDataset,
+    RevisionDelayReport,
+    build_availability_delay_report,
+    build_revision_delay_report,
+)
 from qtrad.domain.time import require_utc
 from qtrad.ports.clock import Clock
 
@@ -67,6 +80,7 @@ _CONFIGURATION_KEYS = {
     "primary_vertical_horizon_seconds",
     "target_revision_delay_seconds",
     "target_revision_policy",
+    "target_revision_policy_reason",
     "required_feature_bases",
     "target_basis",
     "fold_policy",
@@ -81,6 +95,8 @@ _CONFIGURATION_KEYS = {
 class ObservationBuildEvidence:
     gaps: tuple[DataGap, ...]
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
+    availability_report: AvailabilityDelayReport
+    revision_report: RevisionDelayReport
     payload: Mapping[str, JsonValue]
 
 
@@ -99,14 +115,18 @@ class VerifiedFoundationBundle:
 def write_foundation_bundle(path: Path, bundle: FoundationBundle) -> None:
     """Write one bounded thin bundle without replacing evidence."""
 
-    if path.is_symlink() or path.exists():
-        raise ValueError("foundation bundle output must be a new regular file")
+    _preflight_bundle_output(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = json.dumps(bundle.as_json(), sort_keys=True, indent=2) + "\n"
     if len(encoded.encode("utf-8")) > _MAX_BUNDLE_BYTES:
         raise ValueError("foundation bundle exceeds the 4 MiB limit")
     with path.open("x", encoding="utf-8") as output:
         output.write(encoded)
+
+
+def _preflight_bundle_output(path: Path) -> None:
+    if path.is_symlink() or path.exists():
+        raise ValueError("foundation bundle output must be a new regular file")
 
 
 def load_foundation_bundle(path: Path) -> FoundationBundle:
@@ -207,6 +227,7 @@ def decode_foundation_config(payload: Mapping[str, object]) -> FoundationConfig:
         primary_vertical_horizon=_duration(payload["primary_vertical_horizon_seconds"]),
         target_revision_delay=_duration(payload["target_revision_delay_seconds"]),
         target_revision_policy=_text(payload["target_revision_policy"]),
+        target_revision_policy_reason=_optional_text(payload["target_revision_policy_reason"]),
         required_feature_bases=tuple(
             PriceBasis(_text(item)) for item in _sequence(payload["required_feature_bases"])
         ),
@@ -220,7 +241,7 @@ def decode_foundation_config(payload: Mapping[str, object]) -> FoundationConfig:
 
 
 def load_observation_build_evidence(manifest: ObservationManifest) -> ObservationBuildEvidence:
-    """Decode bounded causal gap/activity evidence authenticated by the observation manifest."""
+    """Strictly decode causal delay, gap, activity and lineage evidence."""
 
     payload = manifest.build_evidence
     required = {
@@ -233,6 +254,22 @@ def load_observation_build_evidence(manifest: ObservationManifest) -> Observatio
     }
     if set(payload) != required:
         raise ValueError("observation build evidence is incomplete or unexpected")
+    availability_report = _availability_delay_report(_mapping(payload["availability_delay_report"]))
+    revision_report = _revision_delay_report(_mapping(payload["revision_delay_report"]))
+    lineage = _mapping(payload["lineage_summary"])
+    if set(lineage) != {
+        "row_count",
+        "event_type_counts",
+        "minimum_global_position",
+        "maximum_global_position",
+    }:
+        raise ValueError("observation lineage summary has an unexpected schema")
+    _int(lineage["row_count"])
+    for event_type, count in _mapping(lineage["event_type_counts"]).items():
+        _text(event_type)
+        _int(count)
+    _optional_int(lineage["minimum_global_position"])
+    _optional_int(lineage["maximum_global_position"])
     bounds = _mapping(payload["observation_bounds"])
     if set(bounds) != {"interval_start", "interval_end"}:
         raise ValueError("observation build bounds have an unexpected schema")
@@ -257,8 +294,169 @@ def load_observation_build_evidence(manifest: ObservationManifest) -> Observatio
     return ObservationBuildEvidence(
         gaps=gaps,
         source_active_intervals=intervals,
+        availability_report=availability_report,
+        revision_report=revision_report,
         payload=payload,
     )
+
+
+def verify_observation_build_evidence(
+    manifest: ObservationManifest, dataset: ObservationDataset
+) -> ObservationBuildEvidence:
+    """Recompute authenticated observation evidence and verify source-universe lineage."""
+
+    evidence = load_observation_build_evidence(manifest)
+    expected_configuration_keys = {
+        "universe_name",
+        "universe_configuration_hash",
+        "ordered_instruments",
+        "interval_start",
+        "interval_end",
+    }
+    if set(dataset.configuration) != expected_configuration_keys:
+        raise ValueError("observation configuration has unknown or missing fields")
+    ordered_instruments = tuple(
+        _text(item) for item in _sequence(dataset.configuration["ordered_instruments"])
+    )
+    if not ordered_instruments or len(set(ordered_instruments)) != len(ordered_instruments):
+        raise ValueError("observation universe must be non-empty and unique")
+    if any(
+        ":" not in instrument_id or instrument_id != instrument_id.lower()
+        for instrument_id in ordered_instruments
+    ):
+        raise ValueError("observation universe must use canonical instrument IDs")
+    if set(evidence.source_active_intervals) != set(ordered_instruments):
+        raise ValueError("source-active evidence does not match the observation universe")
+    if any(str(gap.instrument_id) not in ordered_instruments for gap in evidence.gaps):
+        raise ValueError("observation gap evidence references an unknown instrument")
+    expected_selection_policies: dict[str, JsonValue] = {
+        "provenance": "QUOTE_DERIVED",
+        "availability_basis": "persisted_at",
+        "canonical_lineage": "GLOBAL_POSITION_EXACT",
+    }
+    if dataset.selection_policies != expected_selection_policies:
+        raise ValueError("observation selection policies are unsupported")
+
+    snapshot = manifest.source_snapshot
+    if snapshot.get("kind") != "verified-capture-snapshot":
+        raise ValueError("observation manifest lacks verified snapshot/import evidence")
+    import_sha256 = _text(snapshot["import_sha256"])
+    _require_sha256(import_sha256, "snapshot import identity")
+    if dataset.source_dataset_ids != (import_sha256,):
+        raise ValueError("observation source dataset identity differs from its snapshot import")
+    universe_name = _text(dataset.configuration["universe_name"])
+    universe_hash = _text(dataset.configuration["universe_configuration_hash"])
+    _require_sha256(universe_hash, "observation universe hash")
+    snapshot_universe_name = _text(snapshot["universe_name"])
+    snapshot_universe_hash = _text(snapshot["universe_hash"])
+    _require_sha256(snapshot_universe_hash, "snapshot universe hash")
+    if universe_name != snapshot_universe_name or universe_hash != snapshot_universe_hash:
+        raise ValueError("observation universe identity differs from its source snapshot")
+
+    source_start = _datetime(dataset.configuration["interval_start"])
+    source_end = _datetime(dataset.configuration["interval_end"])
+    if source_end <= source_start:
+        raise ValueError("observation source bounds must be positive")
+    if any(
+        active_start < source_start or active_end > source_end
+        for intervals in evidence.source_active_intervals.values()
+        for active_start, active_end in intervals
+    ):
+        raise ValueError("source-active evidence falls outside observation bounds")
+    for report in (evidence.availability_report, evidence.revision_report):
+        if report.calibration_start < source_start or report.calibration_end > source_end:
+            raise ValueError("delay calibration range falls outside observation bounds")
+    rebuilt_availability = build_availability_delay_report(
+        dataset.rows,
+        calibration_start=evidence.availability_report.calibration_start,
+        calibration_end=evidence.availability_report.calibration_end,
+        configured_percentile=evidence.availability_report.configured_percentile,
+        safety_margin=evidence.availability_report.safety_margin,
+        grid_resolution=timedelta(minutes=1),
+    )
+    rebuilt_revisions = build_revision_delay_report(
+        dataset.rows,
+        calibration_start=evidence.revision_report.calibration_start,
+        calibration_end=evidence.revision_report.calibration_end,
+    )
+    if rebuilt_availability != evidence.availability_report:
+        raise ValueError("availability-delay evidence does not match observation rows")
+    if rebuilt_revisions != evidence.revision_report:
+        raise ValueError("revision-delay evidence does not match observation rows")
+
+    event_type_counts: dict[str, int] = {}
+    for row in dataset.rows:
+        event_type_counts[row.event_type] = event_type_counts.get(row.event_type, 0) + 1
+    expected_lineage: dict[str, JsonValue] = {
+        "row_count": len(dataset.rows),
+        "event_type_counts": dict(sorted(event_type_counts.items())),
+        "minimum_global_position": min((row.global_position for row in dataset.rows), default=None),
+        "maximum_global_position": max((row.global_position for row in dataset.rows), default=None),
+    }
+    if evidence.payload["lineage_summary"] != expected_lineage:
+        raise ValueError("observation lineage summary does not match its rows")
+    return evidence
+
+
+def verify_foundation_configuration_evidence(
+    configuration: FoundationConfig,
+    observations: ObservationDataset,
+    evidence: ObservationBuildEvidence,
+) -> None:
+    ordered_observation_instruments = tuple(
+        _text(item) for item in _sequence(observations.configuration["ordered_instruments"])
+    )
+    if configuration.ordered_instruments != ordered_observation_instruments:
+        raise ValueError("foundation instrument universe differs from observations")
+    if set(evidence.source_active_intervals) != set(configuration.ordered_instruments):
+        raise ValueError("source-active evidence differs from the foundation universe")
+    if configuration.availability_basis is not AvailabilityBasis.PERSISTED_AT:
+        raise ValueError("R1 delay evidence supports only persisted-at availability")
+
+    report = evidence.availability_report
+    if (
+        configuration.feature_lag_calibration_range
+        != (report.calibration_start, report.calibration_end)
+        or configuration.feature_lag_percentile != report.configured_percentile
+        or configuration.feature_lag_safety_margin != report.safety_margin
+    ):
+        raise ValueError("foundation feature-lag policy differs from measured evidence")
+    if configuration.feature_lag_policy == "MEASURED":
+        if configuration.selected_feature_lag != report.selected_lag:
+            raise ValueError("measured feature lag differs from availability evidence")
+    elif configuration.selected_feature_lag < report.selected_lag:
+        raise ValueError("provisional feature lag is less conservative than measured evidence")
+
+    revision_report = evidence.revision_report
+    if (
+        revision_report.calibration_start != report.calibration_start
+        or revision_report.calibration_end != report.calibration_end
+    ):
+        raise ValueError("feature and revision delay evidence use different calibration ranges")
+    measured_revision_delay = (
+        _ceil_to_grid(revision_report.maximum_delay, configuration.grid_resolution)
+        if revision_report.maximum_delay is not None
+        else None
+    )
+    if configuration.target_revision_policy == "MEASURED":
+        if measured_revision_delay is None:
+            raise ValueError("measured target revision policy lacks correction evidence")
+        if configuration.target_revision_delay != measured_revision_delay:
+            raise ValueError("target revision delay differs from measured maturity evidence")
+    else:
+        if configuration.target_revision_delay <= timedelta(0):
+            raise ValueError("provisional target revision delay must be positive")
+        if (
+            measured_revision_delay is not None
+            and configuration.target_revision_delay < measured_revision_delay
+        ):
+            raise ValueError(
+                "provisional target revision delay is less conservative than maturity evidence"
+            )
+
+
+def _ceil_to_grid(value: timedelta, grid: timedelta) -> timedelta:
+    return grid * ceil(value.total_seconds() / grid.total_seconds())
 
 
 async def persist_foundation_bundle(
@@ -279,6 +477,11 @@ async def persist_foundation_bundle(
 ) -> FoundationBundle:
     """Persist each child independently and write a thin bundle of references."""
 
+    _preflight_bundle_output(output_path)
+    evidence = verify_observation_build_evidence(observation_manifest, observations)
+    if evidence.payload != availability_evidence:
+        raise ValueError("availability evidence differs from the observation manifest")
+    verify_foundation_configuration_evidence(configuration, observations, evidence)
     store = ParquetFoundationArtifactStore(root, clock)
     config_manifest = await store.write(
         kind="configuration",
@@ -405,12 +608,8 @@ async def verify_foundation_bundle(
     observation_store = ParquetObservationStore(root, clock)
     observation_manifest = await observation_store.verify(bundle.observations.manifest_id)
     _verify_observation_reference(bundle.observations, observation_manifest)
-    if observation_manifest.source_snapshot.get("kind") != "verified-capture-snapshot":
-        raise ValueError("foundation observations lack verified snapshot/import evidence")
-    if not observation_manifest.source_snapshot.get("import_sha256"):
-        raise ValueError("foundation observations lack snapshot import identity")
     observations = await observation_store.read_observations(observation_manifest.manifest_id)
-    evidence = load_observation_build_evidence(observation_manifest)
+    evidence = verify_observation_build_evidence(observation_manifest, observations)
 
     store = ParquetFoundationArtifactStore(root, clock)
     manifests: dict[str, FoundationChildManifest] = {}
@@ -429,6 +628,7 @@ async def verify_foundation_bundle(
         rows[reference.name] = await store.read_rows(reference.manifest_id)
 
     configuration = decode_foundation_config(_single_row(rows, "configuration"))
+    verify_foundation_configuration_evidence(configuration, observations, evidence)
     availability = cast(Mapping[str, JsonValue], _single_row(rows, "availability"))
     if availability != evidence.payload:
         raise ValueError("availability child differs from observation build evidence")
@@ -535,6 +735,35 @@ async def verify_foundation_bundle(
         fold_dataset_id=_lineage_text(manifests["forecasts"], "fold_dataset_id"),
         dataset_id=manifests["forecasts"].dataset_id,
     )
+    expected_panel = build_asof_panel(
+        observations,
+        configuration,
+        gaps=evidence.gaps,
+        source_active_intervals=evidence.source_active_intervals,
+    )
+    if panel != expected_panel:
+        raise ValueError("foundation panel differs from deterministic causal replay")
+    expected_targets = build_frozen_targets(
+        observations,
+        configuration,
+        horizons=configuration.target_horizons,
+    )
+    if targets != expected_targets:
+        raise ValueError("foundation targets differ from deterministic causal replay")
+    expected_folds = build_expanding_folds(expected_targets, configuration)
+    if folds != expected_folds:
+        raise ValueError("foundation folds differ from deterministic causal replay")
+    expected_forecasts = build_zero_return_forecasts(
+        expected_panel,
+        expected_targets,
+        expected_folds,
+        configuration,
+    )
+    if forecasts != expected_forecasts:
+        raise ValueError("foundation forecasts differ from deterministic causal replay")
+    expected_coverage = summarise_horizon_coverage(expected_targets, configuration)
+    if bundle.coverage != expected_coverage:
+        raise ValueError("foundation coverage differs from deterministic target replay")
     verify_foundation_children(
         configuration=configuration,
         observations=observations,
@@ -775,6 +1004,70 @@ def _data_gap(payload: Mapping[str, object]) -> DataGap:
     )
 
 
+def _availability_delay_report(payload: Mapping[str, object]) -> AvailabilityDelayReport:
+    expected = {
+        "calibration_start",
+        "calibration_end",
+        "eligible_row_count",
+        "excluded_row_count",
+        "delay_percentiles_seconds",
+        "maximum_delay_seconds",
+        "configured_percentile",
+        "safety_margin_seconds",
+        "selected_lag_seconds",
+    }
+    if set(payload) != expected:
+        raise ValueError("availability-delay report has an unexpected schema")
+    percentiles = {
+        _text(name): _float(value)
+        for name, value in _mapping(payload["delay_percentiles_seconds"]).items()
+    }
+    maximum = _optional_float(payload["maximum_delay_seconds"])
+    report = AvailabilityDelayReport(
+        calibration_start=_datetime(payload["calibration_start"]),
+        calibration_end=_datetime(payload["calibration_end"]),
+        eligible_row_count=_int(payload["eligible_row_count"]),
+        excluded_row_count=_int(payload["excluded_row_count"]),
+        delay_percentiles=percentiles,
+        maximum_delay=timedelta(seconds=maximum) if maximum is not None else None,
+        configured_percentile=_float(payload["configured_percentile"]),
+        safety_margin=_duration(payload["safety_margin_seconds"]),
+        selected_lag=_duration(payload["selected_lag_seconds"]),
+    )
+    if report.as_json() != payload:
+        raise ValueError("availability-delay report is not canonical")
+    return report
+
+
+def _revision_delay_report(payload: Mapping[str, object]) -> RevisionDelayReport:
+    expected = {
+        "calibration_start",
+        "calibration_end",
+        "eligible_correction_count",
+        "excluded_correction_count",
+        "delay_percentiles_seconds",
+        "maximum_delay_seconds",
+    }
+    if set(payload) != expected:
+        raise ValueError("revision-delay report has an unexpected schema")
+    percentiles = {
+        _text(name): _float(value)
+        for name, value in _mapping(payload["delay_percentiles_seconds"]).items()
+    }
+    maximum = _optional_float(payload["maximum_delay_seconds"])
+    report = RevisionDelayReport(
+        calibration_start=_datetime(payload["calibration_start"]),
+        calibration_end=_datetime(payload["calibration_end"]),
+        eligible_correction_count=_int(payload["eligible_correction_count"]),
+        excluded_correction_count=_int(payload["excluded_correction_count"]),
+        delay_percentiles=percentiles,
+        maximum_delay=timedelta(seconds=maximum) if maximum is not None else None,
+    )
+    if report.as_json() != payload:
+        raise ValueError("revision-delay report is not canonical")
+    return report
+
+
 def _counts(value: object) -> tuple[tuple[str, int], ...]:
     counts: list[tuple[str, int]] = []
     for item in _sequence(value):
@@ -801,6 +1094,10 @@ def _text(value: object) -> str:
     if not isinstance(value, str) or not value:
         raise TypeError("expected non-empty text")
     return value
+
+
+def _optional_text(value: object) -> str | None:
+    return None if value is None else _text(value)
 
 
 def _datetime(value: object) -> datetime:
@@ -861,3 +1158,8 @@ def _hash_json(value: object) -> str:
     return hashlib.sha256(
         json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _require_sha256(value: str, field: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{field} must be a lower-case SHA-256")

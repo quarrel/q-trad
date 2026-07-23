@@ -71,9 +71,10 @@ from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.foundation_bundle import (
     load_foundation_config,
-    load_observation_build_evidence,
     persist_foundation_bundle,
     verify_foundation_bundle,
+    verify_foundation_configuration_evidence,
+    verify_observation_build_evidence,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
@@ -306,6 +307,8 @@ def build_parser() -> argparse.ArgumentParser:
     observations_build.add_argument("--universe", type=Path, required=True)
     observations_build.add_argument("--start", type=_utc_minute_argument, required=True)
     observations_build.add_argument("--end", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--calibration-start", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--calibration-end", type=_utc_minute_argument, required=True)
     observations_build.add_argument("--snapshot-import-evidence", type=Path, required=True)
     observations_build.add_argument("--availability-percentile", type=float, required=True)
     observations_build.add_argument(
@@ -558,6 +561,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 universe_path=args.universe,
                 start=args.start,
                 end=args.end,
+                calibration_start=args.calibration_start,
+                calibration_end=args.calibration_end,
                 snapshot_import_path=args.snapshot_import_evidence,
                 availability_percentile=args.availability_percentile,
                 availability_safety_margin=timedelta(
@@ -648,12 +653,16 @@ async def _build_research_observations(
     universe_path: Path,
     start: datetime,
     end: datetime,
+    calibration_start: datetime,
+    calibration_end: datetime,
     snapshot_import_path: Path,
     availability_percentile: float,
     availability_safety_margin: timedelta,
 ) -> None:
     if end <= start:
         raise ValueError("observation build end must follow start")
+    if calibration_end <= calibration_start or calibration_start < start or calibration_end > end:
+        raise ValueError("availability calibration range must be contained in observation bounds")
     if availability_safety_margin < timedelta(0):
         raise ValueError("availability safety margin must not be negative")
     universe = load_capture_universe(universe_path)
@@ -711,6 +720,7 @@ async def _build_research_observations(
         configuration={
             "universe_name": universe.name,
             "universe_configuration_hash": universe.configuration_hash,
+            "ordered_instruments": [str(instrument_id) for instrument_id in instruments],
             "interval_start": start.isoformat(),
             "interval_end": end.isoformat(),
         },
@@ -723,16 +733,16 @@ async def _build_research_observations(
     )
     availability = measure_availability_delay(
         dataset,
-        calibration_start=start,
-        calibration_end=end,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
         configured_percentile=availability_percentile,
         safety_margin=availability_safety_margin,
         grid_resolution=timedelta(minutes=1),
     )
     revisions = measure_revision_delay(
         dataset,
-        calibration_start=start,
-        calibration_end=end,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
     )
     gaps = tuple(_data_gap_from_row(row) for row in gap_rows)
     active_intervals = _source_active_intervals(instruments, listing_rows, start=start, end=end)
@@ -797,9 +807,7 @@ async def _verify_research_observations(
     dataset = await ParquetObservationStore(settings.research_root, clock).read_observations(
         manifest_path.stem
     )
-    evidence = load_observation_build_evidence(verified)
-    if verified.source_snapshot.get("kind") != "verified-capture-snapshot":
-        raise ValueError("observation manifest lacks verified snapshot/import evidence")
+    evidence = verify_observation_build_evidence(verified, dataset)
     print(
         json.dumps(
             {
@@ -833,8 +841,9 @@ async def _build_foundation_bundle(
     observation_manifest = await ParquetObservationStore(settings.research_root, clock).verify(
         observations_manifest_path.stem
     )
-    evidence = load_observation_build_evidence(observation_manifest)
+    evidence = verify_observation_build_evidence(observation_manifest, observations)
     configuration = load_foundation_config(configuration_path)
+    verify_foundation_configuration_evidence(configuration, observations, evidence)
     panel = build_asof_panel(
         observations,
         configuration,

@@ -1,24 +1,37 @@
 import json
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
+from typing import cast
+from uuid import uuid4
 
 import pytest
 
 from qtrad import __main__ as cli
 from qtrad.adapters.parquet.foundation import ParquetFoundationArtifactStore
 from qtrad.adapters.parquet.observations import ParquetObservationStore
+from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
-from qtrad.domain.research import ObservationDataset
+from qtrad.domain.foundation import AvailabilityBasis, PanelDataset
+from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
+from qtrad.domain.research import (
+    ObservationDataset,
+    ObservationRow,
+    build_availability_delay_report,
+    build_revision_delay_report,
+)
 from qtrad.runtime.foundation_bundle import (
     load_foundation_bundle,
     load_foundation_config,
     persist_foundation_bundle,
     verify_foundation_bundle,
+    verify_foundation_configuration_evidence,
+    verify_observation_build_evidence,
 )
 from qtrad.runtime.settings import Settings
-from tests.test_r1_walk_forward import _config, _panel, _targets
+from tests.test_r1_walk_forward import _config
 
 
 class FixedClock:
@@ -29,32 +42,111 @@ class FixedClock:
         return self.value
 
 
-def _evidence() -> dict[str, JsonValue]:
-    return {
-        "availability_delay_report": {"selected_lag_seconds": 60.0},
-        "revision_delay_report": {"eligible_correction_count": 0},
+def _observations() -> ObservationDataset:
+    config = _config()
+    source_start = config.required_observation_start
+    source_end = config.required_observation_end
+    rows: list[ObservationRow] = []
+    interval_end = source_start + timedelta(minutes=1)
+    position = 1
+    while interval_end <= source_end:
+        available_at = interval_end + timedelta(seconds=5)
+        rows.append(
+            ObservationRow(
+                event_id=uuid4(),
+                stream_id="market-bar:fx:aud-usd:MID",
+                stream_version=position,
+                event_type="MarketBarClosed",
+                event_time=interval_end,
+                received_at=available_at,
+                persisted_at=available_at,
+                global_position=position,
+                instrument_id="fx:aud-usd",
+                basis=PriceBasis.MID,
+                interval_start=interval_end - timedelta(minutes=1),
+                interval_end=interval_end,
+                open=Decimal("100"),
+                high=Decimal("101"),
+                low=Decimal("99"),
+                close=Decimal("100") + Decimal(position) / Decimal("100"),
+                sample_count=1,
+                revision=1,
+                provenance=BarProvenance.QUOTE_DERIVED,
+                quality=DataQuality.HEALTHY,
+                source_provider="ig",
+                source_environment="demo",
+                source_external_id="AUDUSD",
+            )
+        )
+        interval_end += timedelta(minutes=1)
+        position += 1
+    return ObservationDataset.create(
+        rows,
+        configuration={
+            "universe_name": "capture-v4",
+            "universe_configuration_hash": "b" * 64,
+            "ordered_instruments": ["fx:aud-usd"],
+            "interval_start": source_start.isoformat(),
+            "interval_end": source_end.isoformat(),
+        },
+        source_dataset_ids=("a" * 64,),
+        selection_policies={
+            "provenance": "QUOTE_DERIVED",
+            "availability_basis": "persisted_at",
+            "canonical_lineage": "GLOBAL_POSITION_EXACT",
+        },
+    )
+
+
+def _evidence(
+    observations: ObservationDataset, calibration_range: tuple[datetime, datetime]
+) -> dict[str, JsonValue]:
+    availability = build_availability_delay_report(
+        observations.rows,
+        calibration_start=calibration_range[0],
+        calibration_end=calibration_range[1],
+        configured_percentile=0.95,
+        safety_margin=timedelta(0),
+        grid_resolution=timedelta(minutes=1),
+    )
+    revisions = build_revision_delay_report(
+        observations.rows,
+        calibration_start=calibration_range[0],
+        calibration_end=calibration_range[1],
+    )
+    event_counts: dict[str, JsonValue] = {"MarketBarClosed": len(observations.rows)}
+    evidence: dict[str, JsonValue] = {
+        "availability_delay_report": availability.as_json(),
+        "revision_delay_report": revisions.as_json(),
         "data_gaps": [],
         "source_active_intervals": {
-            "fx:aud-usd": [["2026-07-01T11:00:00+00:00", "2026-07-01T15:00:00+00:00"]]
+            "fx:aud-usd": [
+                [
+                    observations.configuration["interval_start"],
+                    observations.configuration["interval_end"],
+                ]
+            ]
         },
-        "lineage_summary": {"row_count": 0},
+        "lineage_summary": {
+            "row_count": len(observations.rows),
+            "event_type_counts": event_counts,
+            "minimum_global_position": 1,
+            "maximum_global_position": len(observations.rows),
+        },
         "observation_bounds": {
-            "interval_start": "2026-07-01T11:00:00+00:00",
-            "interval_end": "2026-07-01T15:00:00+00:00",
+            "interval_start": observations.configuration["interval_start"],
+            "interval_end": observations.configuration["interval_end"],
         },
     }
+    return evidence
 
 
 async def _bundle(tmp_path: Path):
     clock = FixedClock(datetime(2026, 7, 2, tzinfo=UTC))
-    observations = ObservationDataset.create(
-        (),
-        configuration={
-            "fixture": "r1.e",
-            "interval_start": "2026-07-01T11:00:00+00:00",
-            "interval_end": "2026-07-01T15:00:00+00:00",
-        },
-    )
+    observations = _observations()
+    base_configuration = _config()
+    calibration_range = base_configuration.feature_lag_calibration_range
+    evidence = _evidence(observations, calibration_range)
     observation_manifest = await ParquetObservationStore(tmp_path, clock).write_observations(
         observations,
         application_version="test",
@@ -62,12 +154,33 @@ async def _bundle(tmp_path: Path):
         source_snapshot={
             "kind": "verified-capture-snapshot",
             "import_sha256": "a" * 64,
+            "universe_name": "capture-v4",
+            "universe_hash": "b" * 64,
         },
-        build_evidence=_evidence(),
+        build_evidence=evidence,
     )
-    configuration = replace(_config(), observation_dataset_id=observations.dataset_id)
-    targets = _targets(configuration)
-    panel = _panel(configuration, targets)
+    configuration = replace(
+        base_configuration,
+        observation_dataset_id=observations.dataset_id,
+        availability_basis=AvailabilityBasis.PERSISTED_AT,
+        feature_lag_calibration_range=calibration_range,
+        feature_lag_safety_margin=timedelta(0),
+    )
+    panel = build_asof_panel(
+        observations,
+        configuration,
+        source_active_intervals={
+            "fx:aud-usd": (
+                (
+                    datetime.fromisoformat(str(observations.configuration["interval_start"])),
+                    datetime.fromisoformat(str(observations.configuration["interval_end"])),
+                ),
+            )
+        },
+    )
+    targets = build_frozen_targets(
+        observations, configuration, horizons=configuration.target_horizons
+    )
     folds = build_expanding_folds(targets, configuration)
     forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
     path = tmp_path / "foundation.json"
@@ -82,7 +195,7 @@ async def _bundle(tmp_path: Path):
         targets=targets,
         folds=folds,
         forecasts=forecasts,
-        availability_evidence=_evidence(),
+        availability_evidence=evidence,
         application_version="test",
         image_identity="test@sha256:" + "1" * 64,
     )
@@ -113,6 +226,7 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
         "forecasts",
     }
     assert all("rows" not in child for child in payload["children"].values())
+    manifests_before = {item.name for item in (tmp_path / "manifests").glob("*.json")}
     with pytest.raises(ValueError, match="new regular file"):
         await persist_foundation_bundle(
             root=tmp_path,
@@ -127,10 +241,13 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
             targets=verified.targets,
             folds=verified.folds,
             forecasts=verified.forecasts,
-            availability_evidence=_evidence(),
+            availability_evidence=_evidence(
+                verified.observations, configuration.feature_lag_calibration_range
+            ),
             application_version="test",
             image_identity="test@sha256:" + "1" * 64,
         )
+    assert {item.name for item in (tmp_path / "manifests").glob("*.json")} == manifests_before
 
 
 @pytest.mark.asyncio
@@ -144,6 +261,102 @@ async def test_tampering_with_a_child_invalidates_the_bundle(tmp_path: Path) -> 
 
     with pytest.raises(ValueError, match="file hash"):
         await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+
+
+@pytest.mark.asyncio
+async def test_verifier_replays_children_instead_of_only_authenticating_them(
+    tmp_path: Path,
+) -> None:
+    bundle, path, clock, configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    changed_row = replace(verified.panel.rows[0], close=Decimal("999"))
+    changed_panel = PanelDataset.create(
+        (changed_row, *verified.panel.rows[1:]),
+        observation_dataset_id=verified.observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+    )
+    changed_forecasts = build_zero_return_forecasts(
+        changed_panel,
+        verified.targets,
+        verified.folds,
+        configuration,
+    )
+    observation_manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+        bundle.observations.manifest_id
+    )
+
+    with pytest.raises(ValueError, match="deterministic causal replay"):
+        await persist_foundation_bundle(
+            root=tmp_path,
+            clock=clock,
+            output_path=tmp_path / "wrong-foundation.json",
+            observation_manifest=observation_manifest,
+            configuration=configuration,
+            observations=verified.observations,
+            panel=changed_panel,
+            targets=verified.targets,
+            folds=verified.folds,
+            forecasts=changed_forecasts,
+            availability_evidence=_evidence(
+                verified.observations, configuration.feature_lag_calibration_range
+            ),
+            application_version="test",
+            image_identity="test@sha256:" + "1" * 64,
+        )
+
+
+@pytest.mark.asyncio
+async def test_measured_feature_policy_is_bound_to_authenticated_delay_evidence(
+    tmp_path: Path,
+) -> None:
+    bundle, _, clock, configuration = await _bundle(tmp_path)
+    manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+        bundle.observations.manifest_id
+    )
+    observations = await ParquetObservationStore(tmp_path, clock).read_observations(
+        bundle.observations.manifest_id
+    )
+    evidence = verify_observation_build_evidence(manifest, observations)
+    inconsistent = replace(
+        configuration,
+        feature_lag_policy="MEASURED",
+        selected_feature_lag=timedelta(minutes=2),
+    )
+
+    with pytest.raises(ValueError, match="measured feature lag"):
+        verify_foundation_configuration_evidence(inconsistent, observations, evidence)
+
+    unsupported_maturity = replace(
+        configuration,
+        target_revision_policy="MEASURED",
+        target_revision_policy_reason=None,
+    )
+    with pytest.raises(ValueError, match="lacks correction evidence"):
+        verify_foundation_configuration_evidence(unsupported_maturity, observations, evidence)
+
+
+@pytest.mark.asyncio
+async def test_observation_verifier_recomputes_delay_evidence(tmp_path: Path) -> None:
+    observations = _observations()
+    configuration = _config()
+    evidence = _evidence(observations, configuration.feature_lag_calibration_range)
+    availability = dict(cast(dict[str, JsonValue], evidence["availability_delay_report"]))
+    availability["selected_lag_seconds"] = 120.0
+    evidence["availability_delay_report"] = availability
+    clock = FixedClock(datetime(2026, 7, 2, tzinfo=UTC))
+    manifest = await ParquetObservationStore(tmp_path, clock).write_observations(
+        observations,
+        source_snapshot={
+            "kind": "verified-capture-snapshot",
+            "import_sha256": "a" * 64,
+            "universe_name": "capture-v4",
+            "universe_hash": "b" * 64,
+        },
+        build_evidence=evidence,
+    )
+
+    with pytest.raises(ValueError, match="does not match observation rows"):
+        verify_observation_build_evidence(manifest, observations)
 
 
 def test_foundation_config_rejects_unknown_fields(tmp_path: Path) -> None:

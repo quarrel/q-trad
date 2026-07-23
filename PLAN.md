@@ -78,8 +78,8 @@ chronology ambiguity before those contracts are fixed.
 ## R1 — causal multi-asset research foundation
 
 - Use configurable 5, 15, 30 and 60-minute horizons; prove the first end-to-end path at 15 minutes.
-- Define completed-bar log-return targets, target-availability and overlap intervals, favourable and
-  adverse excursions, and deterministic handling of gaps and closures.
+- Define completed-bar log-return targets, target-availability and overlap intervals,
+  direction-independent upper and lower excursions, and deterministic handling of gaps and closures.
 - Build aligned panels without forward-filling executable prices or hiding unavailable assets.
 - Generate reproducible walk-forward folds with dependency-derived purging/embargo and a locked
   final holdout.

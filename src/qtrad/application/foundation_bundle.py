@@ -1,6 +1,5 @@
 """Cross-artefact verification and composition for the thin R1 bundle."""
 
-from collections import Counter
 from collections.abc import Mapping, Sequence
 
 from qtrad.application.foundation import summarise_horizon_coverage
@@ -8,11 +7,10 @@ from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import (
-    ExcursionDisposition,
     FoundationConfig,
     HorizonCoverageSummary,
     PanelDataset,
-    ReturnDisposition,
+    PanelStatus,
     TargetDataset,
 )
 from qtrad.domain.foundation_bundle import ArtifactReference, FoundationBundle
@@ -155,7 +153,7 @@ def verify_foundation_children(
     if rebuilt != expected:
         raise ValueError("foundation child fails independent semantic verification")
     _verify_coverage(targets, coverage, configuration)
-    _verify_forecast_lineage(configuration, targets, folds, forecasts)
+    _verify_forecast_lineage(configuration, panel, targets, folds, forecasts)
 
 
 def _verify_coverage(
@@ -165,26 +163,20 @@ def _verify_coverage(
 ) -> None:
     if tuple(summary.horizon for summary in summaries) != configuration.target_horizons:
         raise ValueError("foundation coverage does not match configured horizons")
-    for summary in summaries:
-        rows = tuple(row for row in targets.rows if row.horizon == summary.horizon)
-        returns = Counter(row.return_disposition.value for row in rows)
-        excursions = Counter(row.excursion_disposition.value for row in rows)
-        if summary.total_target_count != len(rows):
-            raise ValueError("foundation coverage target count is inconsistent")
-        if summary.valid_return_count != returns[ReturnDisposition.VALID.value]:
-            raise ValueError("foundation coverage return count is inconsistent")
-        if summary.valid_excursion_count != excursions[ExcursionDisposition.VALID.value]:
-            raise ValueError("foundation coverage excursion count is inconsistent")
+    if tuple(summaries) != summarise_horizon_coverage(targets, configuration):
+        raise ValueError("foundation coverage is inconsistent with target dispositions")
 
 
 def _verify_forecast_lineage(
     configuration: FoundationConfig,
+    panel: PanelDataset,
     targets: TargetDataset,
     folds: FoldDataset,
     forecasts: ForecastDataset,
 ) -> None:
     target_by_id = {row.target_id: row for row in targets.rows}
     fold_by_id = {fold.fold_id: fold for fold in folds.folds}
+    panel_by_key = {(row.instrument_id, row.decision_time, row.basis): row for row in panel.rows}
     for forecast in forecasts.rows:
         target = target_by_id.get(forecast.target_id)
         fold = fold_by_id.get(forecast.fold_id)
@@ -194,6 +186,15 @@ def _verify_forecast_lineage(
             raise ValueError("foundation forecast is not in fold validation membership")
         if forecast.training_cutoff != fold.training_cutoff:
             raise ValueError("foundation forecast training cutoff does not match its fold")
+        panel_row = panel_by_key.get(
+            (forecast.instrument_id, forecast.decision_time, configuration.target_basis)
+        )
+        if (
+            panel_row is None
+            or panel_row.status is not PanelStatus.OBSERVED
+            or forecast.feature_data_asof != panel_row.feature_data_asof
+        ):
+            raise ValueError("foundation forecast feature cutoff does not match its panel row")
         if (
             forecast.instrument_id != target.instrument_id
             or forecast.decision_time != target.decision_time
@@ -202,6 +203,12 @@ def _verify_forecast_lineage(
             raise ValueError("foundation forecast does not match its target")
         if not fold.validation_start <= forecast.decision_time < fold.validation_end:
             raise ValueError("foundation forecast is outside its fold validation interval")
+        if (
+            target.target_end_time > configuration.holdout_range[0]
+            or target.target_freeze_at > configuration.holdout_range[0]
+            or target.target_available_at > configuration.holdout_range[0]
+        ):
+            raise ValueError("foundation forecast target dependency enters the holdout")
         if (
             configuration.holdout_range[0]
             <= forecast.decision_time

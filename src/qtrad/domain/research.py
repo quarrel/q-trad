@@ -163,6 +163,7 @@ class ObservationDataset:
             raise ValueError("observation rows must have unique source revision lineage")
         if len({(row.stream_id, row.stream_version) for row in self.rows}) != len(self.rows):
             raise ValueError("observation rows must have unique canonical stream versions")
+        _require_contiguous_revisions(self.rows)
         expected = observation_dataset_id(
             self.rows,
             configuration=self.configuration,
@@ -498,6 +499,24 @@ def _percentile_seconds(values: Sequence[timedelta], percentile: float) -> float
 def _ceil_duration(value: timedelta, unit: timedelta) -> timedelta:
     units = ceil(value.total_seconds() / unit.total_seconds())
     return unit * units
+
+
+def _require_contiguous_revisions(rows: Sequence[ObservationRow]) -> None:
+    revisions_by_interval: dict[tuple[object, ...], set[int]] = {}
+    for row in rows:
+        key = (
+            row.instrument_id,
+            row.basis,
+            row.interval_start,
+            row.interval_end,
+            row.source_provider,
+            row.source_environment,
+            row.source_external_id,
+        )
+        revisions_by_interval.setdefault(key, set()).add(row.revision)
+    for revisions in revisions_by_interval.values():
+        if revisions != set(range(1, max(revisions) + 1)):
+            raise ValueError("observation interval has missing intermediate revisions")
 
 
 def _bar_identity(bar: MarketBar) -> tuple[object, ...]:

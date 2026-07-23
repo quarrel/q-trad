@@ -38,11 +38,12 @@ def build_asof_panel(
     index = _observation_index(dataset.rows)
     rows: list[PanelRow] = []
     for decision_time in _grid_times(config.range_start, config.range_end, config.grid_resolution):
-        feature_data_asof = decision_time - config.selected_feature_lag
+        feature_data_asof = decision_time
+        latest_feature_bar_end = decision_time - config.selected_feature_lag
         for instrument_id in config.ordered_instruments:
             for basis in config.required_feature_bases:
-                interval_start = feature_data_asof - config.grid_resolution
-                candidates = index.get((instrument_id, basis, feature_data_asof), ())
+                interval_start = latest_feature_bar_end - config.grid_resolution
+                candidates = index.get((instrument_id, basis, latest_feature_bar_end), ())
                 eligible = [
                     row
                     for row in candidates
@@ -56,6 +57,7 @@ def build_asof_panel(
                             instrument_id=instrument_id,
                             basis=basis,
                             feature_data_asof=feature_data_asof,
+                            latest_feature_bar_end=latest_feature_bar_end,
                             audit_disposition=PanelAuditDisposition.AMBIGUOUS_OR_INVALID_SOURCE,
                         )
                     )
@@ -68,7 +70,7 @@ def build_asof_panel(
                             instrument_id=instrument_id,
                             basis=basis,
                             feature_data_asof=feature_data_asof,
-                            latest_feature_bar_end=feature_data_asof,
+                            latest_feature_bar_end=latest_feature_bar_end,
                             status=PanelStatus.OBSERVED,
                             audit_disposition=None,
                             selected_event_id=selected.event_id,
@@ -95,11 +97,12 @@ def build_asof_panel(
                             instrument_id=instrument_id,
                             basis=basis,
                             feature_data_asof=feature_data_asof,
+                            latest_feature_bar_end=latest_feature_bar_end,
                             audit_disposition=_panel_audit_disposition(
                                 candidates=candidates,
                                 instrument_id=instrument_id,
                                 interval_start=interval_start,
-                                interval_end=feature_data_asof,
+                                interval_end=latest_feature_bar_end,
                                 feature_data_asof=feature_data_asof,
                                 gaps=gaps,
                                 source_active_intervals=source_active_intervals,
@@ -371,6 +374,7 @@ def _missing_panel_row(
     instrument_id: str,
     basis: PriceBasis,
     feature_data_asof: datetime,
+    latest_feature_bar_end: datetime,
     audit_disposition: PanelAuditDisposition,
 ) -> PanelRow:
     return PanelRow(
@@ -378,7 +382,7 @@ def _missing_panel_row(
         instrument_id=instrument_id,
         basis=basis,
         feature_data_asof=feature_data_asof,
-        latest_feature_bar_end=feature_data_asof,
+        latest_feature_bar_end=latest_feature_bar_end,
         status=PanelStatus.MISSING_AS_OF_CUTOFF,
         audit_disposition=audit_disposition,
         selected_event_id=None,
@@ -467,6 +471,13 @@ def _grid_times(start: datetime, end: datetime, resolution: timedelta) -> tuple[
 def _require_dataset(dataset: ObservationDataset, config: FoundationConfig) -> None:
     if dataset.dataset_id != config.observation_dataset_id:
         raise ValueError("observation dataset does not match foundation configuration")
+    raw_instruments = dataset.configuration["ordered_instruments"]
+    if not isinstance(raw_instruments, list) or any(
+        not isinstance(instrument_id, str) for instrument_id in raw_instruments
+    ):
+        raise TypeError("observation ordered instruments must be an array of strings")
+    if tuple(raw_instruments) != config.ordered_instruments:
+        raise ValueError("observation instrument universe does not match foundation configuration")
     source_start = _configuration_time(dataset, "interval_start")
     source_end = _configuration_time(dataset, "interval_end")
     if source_start > config.required_observation_start:

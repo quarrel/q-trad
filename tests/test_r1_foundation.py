@@ -64,6 +64,7 @@ def _dataset(rows: tuple[ObservationRow, ...]) -> ObservationDataset:
         rows,
         configuration={
             "fixture": "r1.b",
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
             "interval_start": "2026-06-30T00:00:00+00:00",
             "interval_end": "2026-07-03T00:00:00+00:00",
         },
@@ -85,7 +86,7 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
         grid_resolution=timedelta(minutes=1),
         availability_basis=AvailabilityBasis.PERSISTED_AT,
         feature_lag_policy="PROVISIONAL_CONSERVATIVE",
-        feature_lag_calibration_range=(start, end),
+        feature_lag_calibration_range=(start - timedelta(hours=1), start),
         feature_lag_percentile=0.95,
         feature_lag_safety_margin=timedelta(minutes=1),
         selected_feature_lag=timedelta(minutes=1),
@@ -93,6 +94,7 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
         primary_vertical_horizon=timedelta(minutes=15),
         target_revision_delay=timedelta(minutes=1),
         target_revision_policy="PROVISIONAL_CONSERVATIVE",
+        target_revision_policy_reason="fixture uses a conservative one-minute maturity delay",
         required_feature_bases=(PriceBasis.MID,),
         target_basis=PriceBasis.MID,
         fold_policy="EXPANDING_WALK_FORWARD",
@@ -103,19 +105,19 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
     )
 
 
-def test_panel_selects_only_revisions_available_at_the_feature_cutoff() -> None:
+def test_panel_uses_a_delayed_bar_available_before_the_later_decision() -> None:
     start = datetime(2026, 7, 1, 12, 3, tzinfo=UTC)
     first = _row(
         datetime(2026, 7, 1, 12, 2, tzinfo=UTC),
         close="101",
-        persisted_at=datetime(2026, 7, 1, 12, 2, tzinfo=UTC),
+        persisted_at=datetime(2026, 7, 1, 12, 2, 5, tzinfo=UTC),
         global_position=1,
     )
     late_correction = _row(
         first.interval_end,
         close="102",
         revision=2,
-        persisted_at=datetime(2026, 7, 1, 12, 3, tzinfo=UTC),
+        persisted_at=datetime(2026, 7, 1, 12, 3, 1, tzinfo=UTC),
         global_position=2,
     )
     dataset = _dataset((late_correction, first))
@@ -126,7 +128,9 @@ def test_panel_selects_only_revisions_available_at_the_feature_cutoff() -> None:
     assert aud_rows[0].status is PanelStatus.OBSERVED
     assert aud_rows[0].selected_revision == 1
     assert aud_rows[0].close == Decimal("101")
-    assert aud_rows[0].feature_data_asof != aud_rows[0].decision_time
+    assert aud_rows[0].feature_data_asof == aud_rows[0].decision_time
+    assert aud_rows[0].latest_feature_bar_end == first.interval_end
+    assert aud_rows[0].selected_availability_time == first.persisted_at
 
     rebuilt = build_asof_panel(dataset, config)
     assert rebuilt.rows[0].selected_revision == aud_rows[0].selected_revision
@@ -201,6 +205,7 @@ def test_source_activity_and_required_observation_bounds_fail_closed() -> None:
     insufficient = ObservationDataset.create(
         (),
         configuration={
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
             "interval_start": start.isoformat(),
             "interval_end": (start + timedelta(minutes=20)).isoformat(),
         },

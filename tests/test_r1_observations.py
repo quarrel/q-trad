@@ -215,6 +215,24 @@ def test_conflicting_canonical_revision_lineage_fails_closed(
         _dataset((candidate,))
 
 
+def test_missing_intermediate_bar_revision_fails_closed() -> None:
+    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    initial = _candidate(
+        _bar(start),
+        position=7,
+        received=start + timedelta(minutes=1),
+        persisted=start + timedelta(minutes=1),
+    )
+    third = _candidate(
+        _bar(start, revision=3),
+        position=9,
+        received=start + timedelta(minutes=2),
+        persisted=start + timedelta(minutes=2),
+    )
+    with pytest.raises(ValueError, match="missing intermediate revisions"):
+        _dataset((initial, third))
+
+
 @pytest.mark.asyncio
 async def test_observation_manifest_has_separate_semantic_and_physical_identity(
     tmp_path: Path,
@@ -275,6 +293,10 @@ def test_observation_build_and_verify_are_wired_to_the_cli() -> None:
             "2026-07-01T00:00:00Z",
             "--end",
             "2026-07-02T00:00:00Z",
+            "--calibration-start",
+            "2026-07-01T06:00:00Z",
+            "--calibration-end",
+            "2026-07-01T18:00:00Z",
             "--snapshot-import-evidence",
             "snapshot.json",
             "--availability-percentile",
@@ -289,4 +311,6 @@ def test_observation_build_and_verify_are_wired_to_the_cli() -> None:
 
     assert build.observations_command == "build"
     assert build.availability_percentile == 0.95
+    assert build.calibration_start == datetime(2026, 7, 1, 6, tzinfo=UTC)
+    assert build.calibration_end == datetime(2026, 7, 1, 18, tzinfo=UTC)
     assert verify.observations_command == "verify"

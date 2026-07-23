@@ -34,8 +34,9 @@
 - R1 now has isolated-snapshot observation build/verify commands, separate initial-availability and
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
-  authenticates child files and cross-references without loading model code; no real native
-  23-market bundle has been claimed from the zero-return probe or short history.
+  recomputes delay evidence, binds the complete observation universe and deterministically replays
+  every causal child transformation without loading model code; no real native 23-market bundle has
+  been claimed from the zero-return probe or short history.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
