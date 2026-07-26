@@ -1,8 +1,9 @@
 # Current status
 
-**Updated:** 2026-07-23
-**Current milestone:** R1 — causal multi-asset research foundation
-**State:** R0 is complete; R1 foundation bundle infrastructure is implemented, `capture-v4` is live with 23/23 channels ready, and paper research remains offline/replay
+**Updated:** 2026-07-26
+**Current milestone:** R2 — local and pooled baselines (planning)
+**State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
+remains offline/replay
 
 ## Working now
 
@@ -35,8 +36,10 @@
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
   recomputes delay evidence, binds the complete observation universe and deterministically replays
-  every causal child transformation without loading model code; no real native 23-market bundle has
-  been claimed from the zero-return probe or short history.
+  every causal child transformation without loading model code. The implementation passed the full
+  clean PostgreSQL, formatting, linting, typing and 456-test gate and R1 is complete. No real native
+  23-market bundle or effectiveness result has been claimed from the zero-return probe or short
+  history.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -68,9 +71,10 @@
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Build and independently verify the real 23-market native R1 bundle when the configured evidence
-   interval and product-role qualification support it.
-3. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
+2. Finish the R2 implementation plan without weakening R1's causal artefact contracts.
+3. As the R2 entry gate, build and independently verify the real 23-market native foundation bundle
+   when the configured evidence interval and product-role qualification support it.
+4. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
 
 ## Evidence and current authorities
 

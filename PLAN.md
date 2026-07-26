@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R1 — causal multi-asset research foundation
+**Current milestone:** R2 — local and pooled baselines (planning)
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo market data and internal paper outcomes only; no external orders.
@@ -27,22 +27,23 @@ work and records only the milestone sequence needed to reach the next trustworth
   context-only capture. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings
   were unavailable; both are quarantined. The immutable 23-market `capture-v4` was activated on
   2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
-  historical-source decision and restore verification are complete; R1 is now the active
-  implementation milestone.
+  historical-source decision and restore verification are complete.
 - R1.A–R1.E now provide the causal foundation path: isolated-snapshot observation build/verify,
   separate initial-availability and correction-maturity evidence, aligned panels with retained
   gap/source-activity audit evidence, frozen multi-horizon targets, chronological folds,
   model-independent OOF forecasts and a thin bundle over independently manifested children. A real
   23-market native bundle remains evidence work; the zero-return probe and short native history
-  make no effectiveness claim.
+  make no effectiveness claim. R1 implementation is complete; producing the first real 23-market
+  bundle remains a fail-closed R2 entry prerequisite once the configured evidence interval and
+  product-role qualification support it.
 
 ## Milestones
 
 | Milestone | Status | Exit evidence |
 |---|---|---|
 | R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
-| R1 — causal multi-asset research foundation | ACTIVE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks; real 23-market evidence remains |
-| R2 — local and pooled baselines | NOT STARTED | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence |
+| R1 — causal multi-asset research foundation | COMPLETE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks |
+| R2 — local and pooled baselines | PLANNING | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence; execution starts only after a real 23-market foundation bundle verifies |
 | R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
 | R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
 | R5 — integrated offline MVP | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set |
@@ -92,6 +93,9 @@ chronology ambiguity before those contracts are fixed.
 
 ## R2 — local and pooled baselines
 
+- Before model execution, build and independently verify the first real 23-market native R1 bundle;
+  fail closed if native history, calibration maturity, product roles or fold durations are
+  insufficient.
 - Retain per-asset Ridge as the required local baseline and add a pooled non-graph cross-asset
   control.
 - Begin with ablatable returns, volatility, time/session, spread and validated quote-imbalance

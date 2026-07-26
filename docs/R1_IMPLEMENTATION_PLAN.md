@@ -1,5 +1,12 @@
 # R1 implementation design — causal multi-asset research foundation
 
+**Status:** COMPLETE (2026-07-26)
+
+R1 delivered and independently verified the causal dataset, fold, zero-forecast and thin-bundle
+infrastructure. The first real 23-market bundle remains an R2 entry prerequisite because the run
+depends on sufficient mature native evidence and completed product-role qualification; R1 completion
+does not claim that evidence exists or that any forecast is effective.
+
 ## Purpose
 
 Implement the minimum trustworthy research foundation needed to determine whether short-horizon multi-asset forecasting is worth pursuing.
@@ -1083,7 +1090,7 @@ Do not add new feature families or model abstractions.
 * Complete CLI wiring.
 * Add independent verification.
 * Run the full clean project gate.
-* Build a real 23-market native bundle.
+* Make the real 23-market native bundle operational through the verified offline workflow.
 * Record coverage, missingness, target disposition and fold summaries.
 * Update active documentation.
 
@@ -1092,7 +1099,8 @@ Do not add new feature families or model abstractions.
 * Every child artefact verifies independently.
 * The top-level bundle verifies all cross-references.
 * Tampering with any child invalidates the bundle.
-* A real 23-market bundle replays deterministically.
+* Fixture-backed multi-market bundles replay deterministically; the first real 23-market run is an
+  explicit R2 entry gate.
 * Real-data folds are emitted only when configured minimum durations are satisfied.
 * The locked holdout never appears in OOF data.
 * No effectiveness claim is made from the zero probe or short native history.
@@ -1243,7 +1251,8 @@ R1 is complete when:
 * physical manifests authenticate files, metadata and run evidence;
 * a thin foundation bundle binds all source data, configuration, folds and outputs;
 * existing retained `bars-v2` evidence remains readable;
-* a real 23-market bundle is produced from a verified isolated native snapshot;
+* a real 23-market bundle can be produced and independently verified from an isolated native snapshot,
+  with the first evidence run deferred fail-closed to the R2 entry gate;
 * insufficient native history is reported honestly rather than converted into artificial folds; and
 * no forecasting, economic or profitability claim is made from the zero probe.
 
