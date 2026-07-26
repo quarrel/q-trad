@@ -187,8 +187,10 @@ Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and a
 Unexpected required-field and computation failures propagate with context rather than becoming
 plausible defaults.
 
-## GitHub workflow verification
+## GitHub
 
 The GitHub MCP fine-grained PAT cannot be granted Checks API access. This is an expected platform
 limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
 runs for the exact commit instead of repeatedly raising unavailable check-run access.
+
+Do not use any GitHUB CLI (`gh`) calls. Only the GitHub MCP or the ChatGPT GitHub Connector.
