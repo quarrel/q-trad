@@ -398,6 +398,8 @@ class R2ReadinessReport:
     r1_bundle_id: str
     software_contract_ready: ReadinessState
     representative_integration_ready: ReadinessState
+    confirmatory_data_ready: ReadinessState
+    inner_validation_rows_ready: ReadinessState
     confirmatory_oof_ready: ReadinessState
     locked_holdout_ready: ReadinessState
     feature_family_states: Mapping[FeatureFamily, ReadinessState]
@@ -415,6 +417,8 @@ class R2ReadinessReport:
             "r1_bundle_id": self.r1_bundle_id,
             "software_contract_ready": self.software_contract_ready.value,
             "representative_integration_ready": self.representative_integration_ready.value,
+            "confirmatory_data_ready": self.confirmatory_data_ready.value,
+            "inner_validation_rows_ready": self.inner_validation_rows_ready.value,
             "confirmatory_oof_ready": self.confirmatory_oof_ready.value,
             "locked_holdout_ready": self.locked_holdout_ready.value,
             "feature_family_states": {

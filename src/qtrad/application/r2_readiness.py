@@ -87,6 +87,25 @@ def evaluate_r2_readiness(
         for cells in coverage_matrix.values()
         for cell in cells
     )
+    training_counts, validation_counts = _membership_counts(
+        experiment=experiment,
+        targets=verified.targets,
+        folds=folds,
+    )
+    training_rows_pass = all(
+        training_counts.get(instrument, 0) >= experiment.minimum_training_rows
+        for instrument in experiment.confirmatory_target_instruments
+    )
+    validation_rows_pass = len(validation_counts) == 3 and all(
+        counts.get(instrument, 0) >= experiment.minimum_outer_validation_rows
+        for counts in validation_counts
+        for instrument in experiment.confirmatory_target_instruments
+    )
+    holdout_rows_pass = all(
+        next(cell.valid_targets for cell in coverage_matrix[instrument] if cell.block == "holdout")
+        >= experiment.minimum_outer_validation_rows
+        for instrument in experiment.confirmatory_target_instruments
+    )
     bounds = tuple(
         _activity_bounds(source_active[instrument])
         for instrument in experiment.confirmatory_target_instruments
@@ -116,6 +135,21 @@ def evaluate_r2_readiness(
             "one or more instrument/research-block cells has no active opportunities or valid "
             "15-minute target coverage below 90%",
         ),
+        (
+            training_rows_pass,
+            "one or more confirmatory instruments has fewer first-fold training members than "
+            "minimum_training_rows",
+        ),
+        (
+            validation_rows_pass,
+            "one or more confirmatory instrument/fold cells has fewer valid members than "
+            "minimum_outer_validation_rows",
+        ),
+        (
+            holdout_rows_pass,
+            "one or more confirmatory instruments has fewer valid holdout targets than "
+            "minimum_outer_validation_rows",
+        ),
         (len(folds) == 3, "confirmatory bundle must have exactly 3 OOF folds"),
         (
             bool(folds)
@@ -139,12 +173,18 @@ def evaluate_r2_readiness(
             "feature-family eligibility has pending pre-holdout decisions",
         ),
     )
-    confirmatory = _state_from_conditions(confirmatory_conditions, unmet)
+    confirmatory_data = _state_from_conditions(confirmatory_conditions, unmet)
+    inner_validation_rows = ReadinessState.PARTIALLY_READY
+    unmet.append(
+        "minimum_inner_validation_rows requires a verified R2.C chronological inner-split artefact"
+    )
+    confirmatory = ReadinessState.NOT_READY
+    unmet.append("confirmatory OOF readiness requires representative integration readiness")
     if (
         experiment.evidence_class is EvidenceClass.CONFIRMATORY
-        and confirmatory is not ReadinessState.READY
+        and confirmatory_data is not ReadinessState.READY
     ):
-        unmet.append("CONFIRMATORY evidence class requires every confirmatory readiness gate")
+        unmet.append("CONFIRMATORY evidence class requires every confirmatory data gate")
     locked = ReadinessState.NOT_READY
     unmet.append("locked holdout requires a verified immutable confirmatory OOF selection manifest")
     return R2ReadinessReport(
@@ -152,6 +192,8 @@ def evaluate_r2_readiness(
         r1_bundle_id=verified.bundle.bundle_id,
         software_contract_ready=ReadinessState.READY,
         representative_integration_ready=representative,
+        confirmatory_data_ready=confirmatory_data,
+        inner_validation_rows_ready=inner_validation_rows,
         confirmatory_oof_ready=confirmatory,
         locked_holdout_ready=locked,
         feature_family_states=feature_states,
@@ -274,6 +316,35 @@ def _source_active_intervals(
             intervals.append((start, end))
         result[instrument] = tuple(intervals)
     return result
+
+
+def _membership_counts(
+    *,
+    experiment: R2ExperimentConfig,
+    targets: TargetDataset,
+    folds: tuple[Fold, ...],
+) -> tuple[dict[str, int], tuple[dict[str, int], ...]]:
+    target_by_id = {row.target_id: row for row in targets.rows}
+    if len(target_by_id) != len(targets.rows):
+        raise ValueError("target dataset contains duplicate identities")
+    if not folds:
+        return {}, ()
+
+    def counts(target_ids: tuple[str, ...]) -> dict[str, int]:
+        result = {instrument: 0 for instrument in experiment.confirmatory_target_instruments}
+        for target_id in target_ids:
+            row = target_by_id[target_id]
+            if (
+                row.instrument_id in result
+                and row.horizon == experiment.primary_horizon
+                and row.return_disposition is ReturnDisposition.VALID
+            ):
+                result[row.instrument_id] += 1
+        return result
+
+    return counts(folds[0].training_target_ids), tuple(
+        counts(fold.validation_target_ids) for fold in folds
+    )
 
 
 def _datetime(value: JsonValue) -> datetime:

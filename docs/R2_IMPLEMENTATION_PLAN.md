@@ -343,6 +343,8 @@ The readiness command should report the states independently:
 ```text
 R2 software implementation: READY
 R2 representative integration: READY
+R2 confirmatory foundation data: READY
+R2 inner-validation row evidence: READY
 R2 confirmatory OOF experiment: NOT_READY
 R2 locked holdout evaluation: NOT_READY
 ```
@@ -1851,9 +1853,17 @@ The readiness command reports separately:
 ```text
 software_contract_ready
 representative_integration_ready
+confirmatory_data_ready
+inner_validation_rows_ready
 confirmatory_oof_ready
 locked_holdout_ready
 ```
+
+`confirmatory_data_ready` checks the frozen R1 foundation's duration, source-active per-instrument
+and per-block coverage, first-fold training membership and outer-validation/holdout row minima.
+`inner_validation_rows_ready` remains `PARTIALLY_READY` until R2.C has produced a verified
+chronological inner-split artefact. Overall confirmatory OOF readiness cannot be `READY` while that
+model-specific row evidence or representative integration evidence is pending.
 
 `CONFIRMATORY` OOF execution fails unless the configured data-readiness gate passes.
 

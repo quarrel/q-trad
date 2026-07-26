@@ -145,7 +145,8 @@ def _target_rows(
     *,
     failing_instrument: str | None = None,
     failing_block: str | None = None,
-) -> tuple[object, ...]:
+    sparse: bool = False,
+) -> tuple[Any, ...]:
     first = cast(Any, folds[0])
     blocks = [("initial_training", first.training_start, first.training_cutoff)]
     blocks.extend(
@@ -153,14 +154,18 @@ def _target_rows(
         for index, fold in enumerate(folds, start=1)
     )
     blocks.append(("holdout", END - timedelta(weeks=4), END))
-    rows: list[object] = []
+    rows: list[Any] = []
     for instrument in QUALIFYING:
         for block, start, _ in blocks:
-            for offset in range(10):
+            required_count = 100 if block == "initial_training" else 20
+            count = required_count - 1 if sparse else required_count
+            for offset in range(count):
                 decision_time = start + timedelta(minutes=offset)
-                invalid = instrument == failing_instrument and block == failing_block and offset < 2
+                invalid = instrument == failing_instrument and block == failing_block and offset < 3
                 rows.append(
                     SimpleNamespace(
+                        target_id=f"{instrument}:{block}:{offset}",
+                        block=block,
                         instrument_id=instrument,
                         horizon=timedelta(minutes=15),
                         decision_time=decision_time,
@@ -181,8 +186,30 @@ def _verified(
     failing_instrument: str | None = None,
     failing_block: str | None = None,
     late_instrument: str | None = None,
+    sparse: bool = False,
 ) -> Any:
-    selected_folds = folds or _folds()
+    raw_folds = folds or _folds()
+    rows = _target_rows(
+        raw_folds,
+        failing_instrument=failing_instrument,
+        failing_block=failing_block,
+        sparse=sparse,
+    )
+    selected_folds = tuple(
+        SimpleNamespace(
+            training_start=cast(Any, fold).training_start,
+            training_cutoff=cast(Any, fold).training_cutoff,
+            validation_start=cast(Any, fold).validation_start,
+            validation_end=cast(Any, fold).validation_end,
+            training_target_ids=tuple(
+                row.target_id for row in rows if row.block == "initial_training"
+            ),
+            validation_target_ids=tuple(
+                row.target_id for row in rows if row.block == f"validation_{index}"
+            ),
+        )
+        for index, fold in enumerate(raw_folds, start=1)
+    )
     active = {
         instrument: [
             [
@@ -216,11 +243,7 @@ def _verified(
         panel=SimpleNamespace(dataset_id=config.panel_dataset_id),
         targets=SimpleNamespace(
             dataset_id=config.target_dataset_id,
-            rows=_target_rows(
-                selected_folds,
-                failing_instrument=failing_instrument,
-                failing_block=failing_block,
-            ),
+            rows=rows,
         ),
         folds=SimpleNamespace(dataset_id=config.fold_dataset_id, folds=selected_folds),
         forecasts=SimpleNamespace(),
@@ -277,7 +300,9 @@ def test_six_target_three_group_fixture_passes_confirmatory_data_gate() -> None:
 
     assert report.software_contract_ready.value == "READY"
     assert report.representative_integration_ready.value == "NOT_READY"
-    assert report.confirmatory_oof_ready.value == "READY"
+    assert report.confirmatory_data_ready.value == "READY"
+    assert report.inner_validation_rows_ready.value == "PARTIALLY_READY"
+    assert report.confirmatory_oof_ready.value == "NOT_READY"
     assert len(report.coverage_matrix) == 6
     assert all(len(cells) == 5 for cells in report.coverage_matrix.values())
 
@@ -293,17 +318,43 @@ def test_per_cell_coverage_cannot_be_masked_by_aggregate_coverage() -> None:
         config,
     )
 
-    assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert report.confirmatory_data_ready.value == "NOT_READY"
     cell = report.coverage_matrix[QUALIFYING[0]][2]
-    assert cell.coverage == 0.8
+    assert cell.coverage == 0.85
 
 
 def test_common_usable_history_not_nominal_range_controls_readiness() -> None:
     config = experiment()
     report = evaluate_r2_readiness(_verified(config, late_instrument=QUALIFYING[0]), config)
 
-    assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert report.confirmatory_data_ready.value == "NOT_READY"
     assert any("common evidence" in condition for condition in report.unmet_conditions)
+
+
+def test_sparse_disjoint_activity_cannot_pass_from_first_and_last_timestamps() -> None:
+    config = experiment()
+    verified = _verified(config, sparse=True)
+    block_starts = (
+        START,
+        START + timedelta(weeks=6),
+        START + timedelta(weeks=8),
+        START + timedelta(weeks=10),
+        START + timedelta(weeks=12),
+    )
+    disjoint = [
+        [start.isoformat(), (start + timedelta(hours=2)).isoformat()] for start in block_starts
+    ]
+    disjoint.append([(END - timedelta(minutes=1)).isoformat(), END.isoformat()])
+    for instrument in QUALIFYING:
+        verified.availability_evidence["source_active_intervals"][instrument] = disjoint
+
+    report = evaluate_r2_readiness(verified, config)
+
+    assert report.confirmatory_data_ready.value == "NOT_READY"
+    assert any("minimum_training_rows" in condition for condition in report.unmet_conditions)
+    assert any(
+        "minimum_outer_validation_rows" in condition for condition in report.unmet_conditions
+    )
 
 
 @pytest.mark.parametrize(
@@ -317,7 +368,7 @@ def test_declared_fold_durations_are_enforced(folds: tuple[object, ...], message
     config = experiment()
     report = evaluate_r2_readiness(_verified(config, folds=folds), config)
 
-    assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert report.confirmatory_data_ready.value == "NOT_READY"
     assert any(message in condition for condition in report.unmet_conditions)
 
 
@@ -325,6 +376,8 @@ def test_inactive_intervals_are_excluded_but_active_missing_targets_reduce_cover
     config = experiment()
     verified = _verified(config)
     extra_inactive = SimpleNamespace(
+        target_id="inactive-gap-target",
+        block="initial_training",
         instrument_id=QUALIFYING[0],
         horizon=timedelta(minutes=15),
         decision_time=START + timedelta(minutes=45),
@@ -347,8 +400,8 @@ def test_inactive_intervals_are_excluded_but_active_missing_targets_reduce_cover
         config,
     )
 
-    assert ready.confirmatory_oof_ready.value == "READY"
-    assert missing.confirmatory_oof_ready.value == "NOT_READY"
+    assert ready.confirmatory_data_ready.value == "READY"
+    assert missing.confirmatory_data_ready.value == "NOT_READY"
 
 
 def test_required_feature_cannot_be_not_eligible_and_evidence_cannot_enter_holdout() -> None:
