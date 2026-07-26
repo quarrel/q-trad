@@ -43,6 +43,59 @@ class FeatureEligibility(StrEnum):
     PENDING = "PENDING"
 
 
+@dataclass(frozen=True, slots=True)
+class EligibilityDecision:
+    """Authenticated pre-holdout eligibility evidence embedded in experiment identity."""
+
+    subject: str
+    state: FeatureEligibility
+    evidence_start: datetime
+    evidence_end: datetime
+    reason: str
+    evidence_id: str
+
+    def __post_init__(self) -> None:
+        if not self.subject or not self.reason.strip():
+            raise ValueError("eligibility subject and reason must be non-empty")
+        require_utc(self.evidence_start, "eligibility evidence start")
+        require_utc(self.evidence_end, "eligibility evidence end")
+        if self.evidence_end <= self.evidence_start:
+            raise ValueError("eligibility evidence range must be positive")
+        if self.evidence_id != _eligibility_id(
+            self.subject, self.state, self.evidence_start, self.evidence_end, self.reason
+        ):
+            raise ValueError("eligibility evidence ID does not authenticate its content")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        subject: str,
+        state: FeatureEligibility,
+        evidence_start: datetime,
+        evidence_end: datetime,
+        reason: str,
+    ) -> "EligibilityDecision":
+        return cls(
+            subject=subject,
+            state=state,
+            evidence_start=evidence_start,
+            evidence_end=evidence_end,
+            reason=reason,
+            evidence_id=_eligibility_id(subject, state, evidence_start, evidence_end, reason),
+        )
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "subject": self.subject,
+            "state": self.state.value,
+            "evidence_start": self.evidence_start.isoformat(),
+            "evidence_end": self.evidence_end.isoformat(),
+            "reason": self.reason,
+            "evidence_id": self.evidence_id,
+        }
+
+
 class ModelFamily(StrEnum):
     ZERO_RETURN = "ZERO_RETURN"
     LOCAL_RIDGE = "LOCAL_RIDGE"
@@ -83,15 +136,16 @@ class R2ExperimentConfig:
     r1_image_identity: str
     ordered_instruments: tuple[str, ...]
     instrument_roles: Mapping[str, InstrumentRole]
+    target_instrument_eligibility: Mapping[str, EligibilityDecision]
     target_instruments: tuple[str, ...]
+    confirmatory_target_instruments: tuple[str, ...]
     market_groups: Mapping[str, str]
     horizons: tuple[timedelta, ...]
     primary_horizon: timedelta
     feature_sets: tuple[FeatureSet, ...]
     feature_windows: tuple[timedelta, ...]
     feature_coverage_thresholds: Mapping[FeatureFamily, float]
-    feature_eligibility: Mapping[FeatureFamily, FeatureEligibility]
-    feature_eligibility_evidence_ids: Mapping[FeatureFamily, str]
+    feature_eligibility: Mapping[FeatureFamily, EligibilityDecision]
     preprocessing_policy: str
     alpha_grid: tuple[float, ...]
     inner_validation_policy: str
@@ -136,19 +190,41 @@ class R2ExperimentConfig:
             raise ValueError("ordered instrument universe must be non-empty and unique")
         if set(self.instrument_roles) != set(self.ordered_instruments):
             raise ValueError("instrument roles must exactly match the ordered universe")
-        expected_targets = tuple(
+        r1_targets = tuple(
             instrument
             for instrument in self.ordered_instruments
             if InstrumentRole(self.instrument_roles[instrument]) is InstrumentRole.TARGET
         )
-        if self.target_instruments != expected_targets:
-            raise ValueError("target instruments must exactly follow ordered TARGET roles")
-        if "index:volatility" in self.target_instruments:
+        if set(self.target_instrument_eligibility) != set(r1_targets):
+            raise ValueError("target eligibility must exactly cover the R1 TARGET universe")
+        for instrument in r1_targets:
+            decision = self.target_instrument_eligibility[instrument]
+            if decision.subject != instrument:
+                raise ValueError("target eligibility subject differs from its instrument")
+            if decision.evidence_end > self.holdout_range[0]:
+                raise ValueError("target eligibility evidence must end before the holdout")
+        eligible_targets = tuple(
+            instrument
+            for instrument in r1_targets
+            if self.target_instrument_eligibility[instrument].state is FeatureEligibility.ELIGIBLE
+        )
+        if self.target_instruments != eligible_targets:
+            raise ValueError("target instruments must exactly follow ELIGIBLE target decisions")
+        if (
+            not self.confirmatory_target_instruments
+            or any(
+                item not in self.target_instruments for item in self.confirmatory_target_instruments
+            )
+            or len(set(self.confirmatory_target_instruments))
+            != len(self.confirmatory_target_instruments)
+        ):
+            raise ValueError("confirmatory targets must be a unique non-empty eligible subset")
+        if "index:volatility" in r1_targets or "index:volatility" in self.target_instruments:
             raise ValueError("VIX must not be an R2 target")
-        if set(self.market_groups) != set(self.target_instruments) or any(
+        if set(self.market_groups) != set(self.confirmatory_target_instruments) or any(
             not group for group in self.market_groups.values()
         ):
-            raise ValueError("market groups must exactly cover target instruments")
+            raise ValueError("market groups must exactly cover confirmatory targets")
         if (
             not self.horizons
             or self.horizons != tuple(sorted(self.horizons))
@@ -170,15 +246,27 @@ class R2ExperimentConfig:
             raise ValueError("coverage thresholds must cover every feature family")
         if set(self.feature_eligibility) != declared_families:
             raise ValueError("eligibility decisions must cover every feature family")
-        if set(self.feature_eligibility_evidence_ids) != declared_families:
-            raise ValueError("eligibility evidence IDs must cover every feature family")
         for family in declared_families:
             threshold = self.feature_coverage_thresholds[family]
-            evidence_id = self.feature_eligibility_evidence_ids[family]
+            decision = self.feature_eligibility[family]
             if not isfinite(threshold) or not 0 <= threshold <= 1:
                 raise ValueError(f"invalid feature coverage threshold for {family.value}")
-            if not evidence_id:
-                raise ValueError(f"pre-holdout eligibility evidence is required for {family.value}")
+            if decision.subject != family.value:
+                raise ValueError("feature eligibility subject differs from its family")
+            if decision.evidence_end > self.holdout_range[0]:
+                raise ValueError("feature eligibility evidence must end before the holdout")
+        required_families = {
+            FeatureFamily.LOCAL_RETURNS,
+            FeatureFamily.LOCAL_VOLATILITY_RANGE,
+            FeatureFamily.TIME_AVAILABILITY,
+            FeatureFamily.POOLED_CROSS_ASSET,
+        }
+        if any(
+            self.feature_eligibility[family].state is not FeatureEligibility.ELIGIBLE
+            for family in required_families
+        ):
+            raise ValueError("core R2 feature families must be ELIGIBLE")
+        _validate_feature_ladder(self.feature_sets, self.feature_eligibility)
         if (
             not self.feature_windows
             or self.feature_windows != tuple(sorted(self.feature_windows))
@@ -264,19 +352,23 @@ class R2ExperimentConfig:
                 item: InstrumentRole(self.instrument_roles[item]).value
                 for item in self.ordered_instruments
             },
+            "target_instrument_eligibility": {
+                item: self.target_instrument_eligibility[item].as_json()
+                for item in sorted(self.target_instrument_eligibility)
+            },
             "target_instruments": list(self.target_instruments),
-            "market_groups": {item: self.market_groups[item] for item in self.target_instruments},
+            "confirmatory_target_instruments": list(self.confirmatory_target_instruments),
+            "market_groups": {
+                item: self.market_groups[item] for item in self.confirmatory_target_instruments
+            },
             "horizons_seconds": [item.total_seconds() for item in self.horizons],
             "primary_horizon_seconds": self.primary_horizon.total_seconds(),
             "feature_sets": [item.as_json() for item in self.feature_sets],
             "feature_windows_seconds": [item.total_seconds() for item in self.feature_windows],
             "feature_coverage_thresholds": _family_mapping(self.feature_coverage_thresholds),
             "feature_eligibility": {
-                family.value: self.feature_eligibility[family].value for family in FeatureFamily
+                family.value: self.feature_eligibility[family].as_json() for family in FeatureFamily
             },
-            "feature_eligibility_evidence_ids": _family_mapping(
-                self.feature_eligibility_evidence_ids
-            ),
             "preprocessing_policy": self.preprocessing_policy,
             "alpha_grid": list(self.alpha_grid),
             "inner_validation_policy": self.inner_validation_policy,
@@ -309,6 +401,7 @@ class R2ReadinessReport:
     confirmatory_oof_ready: ReadinessState
     locked_holdout_ready: ReadinessState
     feature_family_states: Mapping[FeatureFamily, ReadinessState]
+    coverage_matrix: Mapping[str, tuple["CoverageCell", ...]]
     unmet_conditions: tuple[str, ...]
     evidence_class: EvidenceClass
 
@@ -327,13 +420,104 @@ class R2ReadinessReport:
             "feature_family_states": {
                 family.value: self.feature_family_states[family].value for family in FeatureFamily
             },
+            "coverage_matrix": {
+                instrument: [cell.as_json() for cell in self.coverage_matrix[instrument]]
+                for instrument in sorted(self.coverage_matrix)
+            },
             "unmet_conditions": list(self.unmet_conditions),
             "evidence_class": self.evidence_class.value,
         }
 
 
+@dataclass(frozen=True, slots=True)
+class CoverageCell:
+    instrument_id: str
+    block: str
+    block_start: datetime
+    block_end: datetime
+    expected_active_opportunities: int
+    valid_targets: int
+
+    def __post_init__(self) -> None:
+        require_utc(self.block_start, "coverage block start")
+        require_utc(self.block_end, "coverage block end")
+        if self.block_end <= self.block_start:
+            raise ValueError("coverage block range must be positive")
+        if (
+            not self.instrument_id
+            or not self.block
+            or self.expected_active_opportunities < 0
+            or self.valid_targets < 0
+            or self.valid_targets > self.expected_active_opportunities
+        ):
+            raise ValueError("coverage cell counts or identity are invalid")
+
+    @property
+    def coverage(self) -> float | None:
+        if self.expected_active_opportunities == 0:
+            return None
+        return self.valid_targets / self.expected_active_opportunities
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "instrument_id": self.instrument_id,
+            "block": self.block,
+            "block_start": self.block_start.isoformat(),
+            "block_end": self.block_end.isoformat(),
+            "expected_active_opportunities": self.expected_active_opportunities,
+            "valid_targets": self.valid_targets,
+            "coverage": self.coverage,
+        }
+
+
 def _family_mapping(values: Mapping[FeatureFamily, object]) -> dict[str, JsonValue]:
     return {family.value: to_json_value(values[family]) for family in FeatureFamily}
+
+
+def _validate_feature_ladder(
+    feature_sets: tuple[FeatureSet, ...],
+    decisions: Mapping[FeatureFamily, EligibilityDecision],
+) -> None:
+    local = (
+        FeatureFamily.LOCAL_RETURNS,
+        FeatureFamily.TIME_AVAILABILITY,
+    )
+    expected = [FeatureSet("L0", local)]
+    local += (FeatureFamily.LOCAL_VOLATILITY_RANGE,)
+    expected.append(FeatureSet("L1", local))
+    if decisions[FeatureFamily.SPREAD].state is FeatureEligibility.ELIGIBLE:
+        local += (FeatureFamily.SPREAD,)
+        expected.append(FeatureSet("L2", local))
+    if decisions[FeatureFamily.QUOTE_IMBALANCE].state is FeatureEligibility.ELIGIBLE:
+        local += (FeatureFamily.QUOTE_IMBALANCE,)
+        expected.append(FeatureSet("L3", local))
+    expected.extend(
+        (
+            FeatureSet("P0", local),
+            FeatureSet("P1", (*local, FeatureFamily.POOLED_CROSS_ASSET)),
+        )
+    )
+    if feature_sets != tuple(expected):
+        raise ValueError("feature sets must exactly follow the eligible cumulative R2 ladder")
+
+
+def _eligibility_id(
+    subject: str,
+    state: FeatureEligibility,
+    evidence_start: datetime,
+    evidence_end: datetime,
+    reason: str,
+) -> str:
+    return _hash_json(
+        {
+            "contract": "qtrad-r2-eligibility-evidence-v1",
+            "subject": subject,
+            "state": state.value,
+            "evidence_start": evidence_start.isoformat(),
+            "evidence_end": evidence_end.isoformat(),
+            "reason": reason,
+        }
+    )
 
 
 def _require_sha256(value: str, field: str) -> None:

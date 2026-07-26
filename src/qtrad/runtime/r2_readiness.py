@@ -8,6 +8,7 @@ from typing import cast
 
 from qtrad.domain.foundation import InstrumentRole
 from qtrad.domain.r2_readiness import (
+    EligibilityDecision,
     EvidenceClass,
     FeatureEligibility,
     FeatureFamily,
@@ -33,7 +34,9 @@ _KEYS = frozenset(
         "r1_image_identity",
         "ordered_instruments",
         "instrument_roles",
+        "target_instrument_eligibility",
         "target_instruments",
+        "confirmatory_target_instruments",
         "market_groups",
         "horizons_seconds",
         "primary_horizon_seconds",
@@ -41,7 +44,6 @@ _KEYS = frozenset(
         "feature_windows_seconds",
         "feature_coverage_thresholds",
         "feature_eligibility",
-        "feature_eligibility_evidence_ids",
         "preprocessing_policy",
         "alpha_grid",
         "inner_validation_policy",
@@ -86,12 +88,7 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
     families = tuple(FeatureFamily)
     coverage = _mapping(payload["feature_coverage_thresholds"])
     eligibility = _mapping(payload["feature_eligibility"])
-    evidence = _mapping(payload["feature_eligibility_evidence_ids"])
-    if (
-        set(coverage) != {item.value for item in families}
-        or set(eligibility) != set(coverage)
-        or set(evidence) != set(coverage)
-    ):
+    if set(coverage) != {item.value for item in families} or set(eligibility) != set(coverage):
         raise ValueError("R2 feature-family mappings must use the complete declared family set")
     return R2ExperimentConfig(
         name=_text(payload["name"]),
@@ -111,7 +108,14 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
             key: InstrumentRole(_text(value))
             for key, value in _mapping(payload["instrument_roles"]).items()
         },
+        target_instrument_eligibility={
+            key: _eligibility_decision(_mapping(value))
+            for key, value in _mapping(payload["target_instrument_eligibility"]).items()
+        },
         target_instruments=tuple(_text(item) for item in _sequence(payload["target_instruments"])),
+        confirmatory_target_instruments=tuple(
+            _text(item) for item in _sequence(payload["confirmatory_target_instruments"])
+        ),
         market_groups={
             key: _text(value) for key, value in _mapping(payload["market_groups"]).items()
         },
@@ -125,10 +129,8 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
         ),
         feature_coverage_thresholds={family: _float(coverage[family.value]) for family in families},
         feature_eligibility={
-            family: FeatureEligibility(_text(eligibility[family.value])) for family in families
-        },
-        feature_eligibility_evidence_ids={
-            family: _text(evidence[family.value]) for family in families
+            family: _eligibility_decision(_mapping(eligibility[family.value]))
+            for family in families
         },
         preprocessing_policy=_text(payload["preprocessing_policy"]),
         alpha_grid=tuple(_float(item) for item in _sequence(payload["alpha_grid"])),
@@ -174,6 +176,26 @@ def _feature_set(value: Mapping[str, object]) -> FeatureSet:
     return FeatureSet(
         name=_text(value["name"]),
         families=tuple(FeatureFamily(_text(item)) for item in _sequence(value["families"])),
+    )
+
+
+def _eligibility_decision(value: Mapping[str, object]) -> EligibilityDecision:
+    if set(value) != {
+        "subject",
+        "state",
+        "evidence_start",
+        "evidence_end",
+        "reason",
+        "evidence_id",
+    }:
+        raise ValueError("eligibility decision has unknown or missing fields")
+    return EligibilityDecision(
+        subject=_text(value["subject"]),
+        state=FeatureEligibility(_text(value["state"])),
+        evidence_start=_datetime(value["evidence_start"]),
+        evidence_end=_datetime(value["evidence_end"]),
+        reason=_text(value["reason"]),
+        evidence_id=_text(value["evidence_id"]),
     )
 
 

@@ -528,7 +528,9 @@ fold_dataset_id
 
 ordered_instruments
 instrument_roles
+target_instrument_eligibility
 target_instruments
+confirmatory_target_instruments
 market_groups
 horizons
 primary_horizon
@@ -536,7 +538,7 @@ primary_horizon
 feature_sets
 feature_windows
 feature_coverage_thresholds
-quote_state_eligibility_ids
+feature_eligibility
 
 preprocessing_policy
 alpha_grid
@@ -560,6 +562,12 @@ holdout_range
 numeric_replay_tolerances
 evidence_class
 ```
+
+Target and feature-family eligibility decisions contain an authenticated semantic evidence ID,
+subject, state, reason and bounded evidence interval. Their evidence interval ends before the locked
+holdout. The full R1 target universe remains present even when an instrument is explicitly
+`NOT_ELIGIBLE` or `PENDING`; `target_instruments` contains the model-eligible set and
+`confirmatory_target_instruments` freezes the subset used by the confirmatory readiness gates.
 
 Unknown fields fail closed.
 

@@ -8,8 +8,9 @@ from typing import Any, cast
 import pytest
 
 from qtrad.application.r2_readiness import evaluate_r2_readiness
-from qtrad.domain.foundation import InstrumentRole
+from qtrad.domain.foundation import InstrumentRole, ReturnDisposition
 from qtrad.domain.r2_readiness import (
+    EligibilityDecision,
     EvidenceClass,
     FeatureEligibility,
     FeatureFamily,
@@ -21,12 +22,42 @@ from qtrad.runtime.r2_readiness import decode_r2_experiment, load_r2_experiment
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 END = START + timedelta(weeks=16)
+TARGETS = tuple(f"index:target-{index}" for index in range(1, 8))
+QUALIFYING = TARGETS[:6]
+CONTEXT = "index:volatility"
 SHA = "a" * 64
 
 
+def _decision(subject: str, state: FeatureEligibility) -> EligibilityDecision:
+    return EligibilityDecision.create(
+        subject=subject,
+        state=state,
+        evidence_start=START,
+        evidence_end=START + timedelta(weeks=5),
+        reason=f"pre-holdout fixture evidence for {subject}",
+    )
+
+
 def experiment() -> R2ExperimentConfig:
-    instruments = ("fx:aud-usd", "index:volatility")
-    families = tuple(FeatureFamily)
+    instruments = (*TARGETS, CONTEXT)
+    roles = {instrument: InstrumentRole.TARGET for instrument in TARGETS}
+    roles[CONTEXT] = InstrumentRole.CONTEXT
+    feature_decisions = {
+        family: _decision(
+            family.value,
+            (
+                FeatureEligibility.NOT_ELIGIBLE
+                if family in {FeatureFamily.SPREAD, FeatureFamily.QUOTE_IMBALANCE}
+                else FeatureEligibility.ELIGIBLE
+            ),
+        )
+        for family in FeatureFamily
+    }
+    local = (
+        FeatureFamily.LOCAL_RETURNS,
+        FeatureFamily.TIME_AVAILABILITY,
+        FeatureFamily.LOCAL_VOLATILITY_RANGE,
+    )
     return R2ExperimentConfig(
         name="r2-a-fixture",
         schema_version=1,
@@ -39,33 +70,34 @@ def experiment() -> R2ExperimentConfig:
         r1_application_version="0.1.0",
         r1_image_identity="qtrad@sha256:" + "1" * 64,
         ordered_instruments=instruments,
-        instrument_roles={
-            "fx:aud-usd": InstrumentRole.TARGET,
-            "index:volatility": InstrumentRole.CONTEXT,
+        instrument_roles=roles,
+        target_instrument_eligibility={
+            instrument: _decision(
+                instrument,
+                (
+                    FeatureEligibility.ELIGIBLE
+                    if instrument in QUALIFYING
+                    else FeatureEligibility.NOT_ELIGIBLE
+                ),
+            )
+            for instrument in TARGETS
         },
-        target_instruments=("fx:aud-usd",),
-        market_groups={"fx:aud-usd": "FX"},
+        target_instruments=QUALIFYING,
+        confirmatory_target_instruments=QUALIFYING,
+        market_groups={
+            instrument: f"GROUP-{index // 2}" for index, instrument in enumerate(QUALIFYING)
+        },
         horizons=(timedelta(minutes=5), timedelta(minutes=15)),
         primary_horizon=timedelta(minutes=15),
         feature_sets=(
-            FeatureSet(
-                name="L0",
-                families=(FeatureFamily.LOCAL_RETURNS, FeatureFamily.TIME_AVAILABILITY),
-            ),
+            FeatureSet("L0", local[:2]),
+            FeatureSet("L1", local),
+            FeatureSet("P0", local),
+            FeatureSet("P1", (*local, FeatureFamily.POOLED_CROSS_ASSET)),
         ),
         feature_windows=(timedelta(minutes=1), timedelta(minutes=5)),
-        feature_coverage_thresholds={family: 0.9 for family in families},
-        feature_eligibility={
-            family: (
-                FeatureEligibility.PENDING
-                if family is FeatureFamily.QUOTE_IMBALANCE
-                else FeatureEligibility.ELIGIBLE
-            )
-            for family in families
-        },
-        feature_eligibility_evidence_ids={
-            family: f"pre-holdout:{family.value}" for family in families
-        },
+        feature_coverage_thresholds={family: 0.9 for family in FeatureFamily},
+        feature_eligibility=feature_decisions,
         preprocessing_policy="TRAINING_MEDIAN_STANDARDISE_V1",
         alpha_grid=(0.01, 0.1, 1.0, 10.0),
         inner_validation_policy="CHRONOLOGICAL_TAIL_PURGED_V1",
@@ -89,6 +121,113 @@ def experiment() -> R2ExperimentConfig:
     )
 
 
+def _folds(*, short_validation: bool = False, short_training: bool = False) -> tuple[object, ...]:
+    training_start = START + (timedelta(days=1) if short_training else timedelta(0))
+    folds: list[object] = []
+    for index in range(3):
+        validation_start = START + timedelta(weeks=6 + 2 * index)
+        validation_end = validation_start + timedelta(
+            days=13 if short_validation and index == 0 else 14
+        )
+        folds.append(
+            SimpleNamespace(
+                training_start=training_start,
+                training_cutoff=START + timedelta(weeks=6 + 2 * index),
+                validation_start=validation_start,
+                validation_end=validation_end,
+            )
+        )
+    return tuple(folds)
+
+
+def _target_rows(
+    folds: tuple[object, ...],
+    *,
+    failing_instrument: str | None = None,
+    failing_block: str | None = None,
+) -> tuple[object, ...]:
+    first = cast(Any, folds[0])
+    blocks = [("initial_training", first.training_start, first.training_cutoff)]
+    blocks.extend(
+        (f"validation_{index}", cast(Any, fold).validation_start, cast(Any, fold).validation_end)
+        for index, fold in enumerate(folds, start=1)
+    )
+    blocks.append(("holdout", END - timedelta(weeks=4), END))
+    rows: list[object] = []
+    for instrument in QUALIFYING:
+        for block, start, _ in blocks:
+            for offset in range(10):
+                decision_time = start + timedelta(minutes=offset)
+                invalid = instrument == failing_instrument and block == failing_block and offset < 2
+                rows.append(
+                    SimpleNamespace(
+                        instrument_id=instrument,
+                        horizon=timedelta(minutes=15),
+                        decision_time=decision_time,
+                        target_start_time=decision_time,
+                        target_end_time=decision_time + timedelta(minutes=15),
+                        return_disposition=(
+                            ReturnDisposition.MISSING_END if invalid else ReturnDisposition.VALID
+                        ),
+                    )
+                )
+    return tuple(rows)
+
+
+def _verified(
+    config: R2ExperimentConfig,
+    *,
+    folds: tuple[object, ...] | None = None,
+    failing_instrument: str | None = None,
+    failing_block: str | None = None,
+    late_instrument: str | None = None,
+) -> Any:
+    selected_folds = folds or _folds()
+    active = {
+        instrument: [
+            [
+                (
+                    START + timedelta(weeks=1) if instrument == late_instrument else START
+                ).isoformat(),
+                END.isoformat(),
+            ]
+        ]
+        for instrument in config.ordered_instruments
+    }
+    r1_config = SimpleNamespace(
+        configuration_id=config.foundation_configuration_id,
+        ordered_instruments=config.ordered_instruments,
+        instrument_roles=config.instrument_roles,
+        target_horizons=config.horizons,
+        holdout_range=config.holdout_range,
+        range_start=START,
+        range_end=END,
+    )
+    return SimpleNamespace(
+        bundle=SimpleNamespace(
+            bundle_id=config.r1_bundle_id,
+            build_summary={
+                "application_version": config.r1_application_version,
+                "image_identity": config.r1_image_identity,
+            },
+        ),
+        configuration=r1_config,
+        observations=SimpleNamespace(dataset_id=config.observation_dataset_id),
+        panel=SimpleNamespace(dataset_id=config.panel_dataset_id),
+        targets=SimpleNamespace(
+            dataset_id=config.target_dataset_id,
+            rows=_target_rows(
+                selected_folds,
+                failing_instrument=failing_instrument,
+                failing_block=failing_block,
+            ),
+        ),
+        folds=SimpleNamespace(dataset_id=config.fold_dataset_id, folds=selected_folds),
+        forecasts=SimpleNamespace(),
+        availability_evidence={"source_active_intervals": active},
+    )
+
+
 def test_experiment_round_trip_preserves_semantic_identity(tmp_path: Path) -> None:
     original = experiment()
     path = tmp_path / "experiment.json"
@@ -106,20 +245,24 @@ def test_unknown_field_and_semantic_tampering_fail_closed() -> None:
     with pytest.raises(ValueError, match="unknown or missing"):
         decode_r2_experiment(payload)
 
-    with pytest.raises(ValueError, match="R1 bundle ID"):
-        replace(experiment(), r1_bundle_id="changed")
+    decision = _decision(FeatureFamily.LOCAL_RETURNS.value, FeatureEligibility.ELIGIBLE)
+    with pytest.raises(ValueError, match="does not authenticate"):
+        replace(decision, reason="tampered")
 
 
 def test_vix_cannot_be_promoted_to_target() -> None:
+    config = experiment()
+    roles = dict(config.instrument_roles)
+    roles[CONTEXT] = InstrumentRole.TARGET
+    eligibility = dict(config.target_instrument_eligibility)
+    eligibility[CONTEXT] = _decision(CONTEXT, FeatureEligibility.ELIGIBLE)
     with pytest.raises(ValueError, match="VIX"):
         replace(
-            experiment(),
-            instrument_roles={
-                "fx:aud-usd": InstrumentRole.TARGET,
-                "index:volatility": InstrumentRole.TARGET,
-            },
-            target_instruments=("fx:aud-usd", "index:volatility"),
-            market_groups={"fx:aud-usd": "FX", "index:volatility": "VOLATILITY"},
+            config,
+            instrument_roles=roles,
+            target_instrument_eligibility=eligibility,
+            target_instruments=(*config.target_instruments, CONTEXT),
+            confirmatory_target_instruments=(*config.confirmatory_target_instruments, CONTEXT),
         )
 
 
@@ -128,41 +271,113 @@ def test_numerical_decision_rejects_auto_solver() -> None:
         replace(experiment(), ridge_solver="auto")
 
 
-def test_software_readiness_is_independent_of_short_representative_history() -> None:
+def test_six_target_three_group_fixture_passes_confirmatory_data_gate() -> None:
     config = experiment()
-    r1_config = SimpleNamespace(
-        configuration_id=config.foundation_configuration_id,
-        ordered_instruments=config.ordered_instruments,
-        instrument_roles=config.instrument_roles,
-        target_horizons=config.horizons,
-        holdout_range=config.holdout_range,
-        range_start=START,
-        range_end=START + timedelta(weeks=2),
-    )
-    target = SimpleNamespace(
-        horizon=timedelta(minutes=15),
-        instrument_id="fx:aud-usd",
-        return_disposition="VALID",
-    )
-    verified = SimpleNamespace(
-        bundle=SimpleNamespace(
-            bundle_id=config.r1_bundle_id,
-            build_summary={
-                "application_version": config.r1_application_version,
-                "image_identity": config.r1_image_identity,
-            },
-        ),
-        configuration=r1_config,
-        observations=SimpleNamespace(dataset_id=config.observation_dataset_id),
-        panel=SimpleNamespace(dataset_id=config.panel_dataset_id),
-        targets=SimpleNamespace(dataset_id=config.target_dataset_id, rows=(target,)),
-        folds=SimpleNamespace(dataset_id=config.fold_dataset_id, folds=(object(),)),
-    )
-
-    report = evaluate_r2_readiness(cast(Any, verified), config)
+    report = evaluate_r2_readiness(_verified(config), config)
 
     assert report.software_contract_ready.value == "READY"
-    assert report.representative_integration_ready.value == "READY"
+    assert report.representative_integration_ready.value == "NOT_READY"
+    assert report.confirmatory_oof_ready.value == "READY"
+    assert len(report.coverage_matrix) == 6
+    assert all(len(cells) == 5 for cells in report.coverage_matrix.values())
+
+
+def test_per_cell_coverage_cannot_be_masked_by_aggregate_coverage() -> None:
+    config = experiment()
+    report = evaluate_r2_readiness(
+        _verified(
+            config,
+            failing_instrument=QUALIFYING[0],
+            failing_block="validation_2",
+        ),
+        config,
+    )
+
     assert report.confirmatory_oof_ready.value == "NOT_READY"
-    assert report.locked_holdout_ready.value == "NOT_READY"
-    assert report.feature_family_states[FeatureFamily.QUOTE_IMBALANCE].value == "PARTIALLY_READY"
+    cell = report.coverage_matrix[QUALIFYING[0]][2]
+    assert cell.coverage == 0.8
+
+
+def test_common_usable_history_not_nominal_range_controls_readiness() -> None:
+    config = experiment()
+    report = evaluate_r2_readiness(_verified(config, late_instrument=QUALIFYING[0]), config)
+
+    assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert any("common evidence" in condition for condition in report.unmet_conditions)
+
+
+@pytest.mark.parametrize(
+    ("folds", "message"),
+    [
+        (_folds(short_validation=True), "validation intervals"),
+        (_folds(short_training=True), "initial training"),
+    ],
+)
+def test_declared_fold_durations_are_enforced(folds: tuple[object, ...], message: str) -> None:
+    config = experiment()
+    report = evaluate_r2_readiness(_verified(config, folds=folds), config)
+
+    assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert any(message in condition for condition in report.unmet_conditions)
+
+
+def test_inactive_intervals_are_excluded_but_active_missing_targets_reduce_coverage() -> None:
+    config = experiment()
+    verified = _verified(config)
+    extra_inactive = SimpleNamespace(
+        instrument_id=QUALIFYING[0],
+        horizon=timedelta(minutes=15),
+        decision_time=START + timedelta(minutes=45),
+        target_start_time=START + timedelta(minutes=45),
+        target_end_time=START + timedelta(minutes=60),
+        return_disposition=ReturnDisposition.MISSING_END,
+    )
+    verified.targets.rows += (extra_inactive,)
+    verified.availability_evidence["source_active_intervals"][QUALIFYING[0]] = [
+        [START.isoformat(), (START + timedelta(minutes=30)).isoformat()],
+        [(START + timedelta(minutes=60)).isoformat(), END.isoformat()],
+    ]
+    ready = evaluate_r2_readiness(verified, config)
+    missing = evaluate_r2_readiness(
+        _verified(
+            config,
+            failing_instrument=QUALIFYING[0],
+            failing_block="holdout",
+        ),
+        config,
+    )
+
+    assert ready.confirmatory_oof_ready.value == "READY"
+    assert missing.confirmatory_oof_ready.value == "NOT_READY"
+
+
+def test_required_feature_cannot_be_not_eligible_and_evidence_cannot_enter_holdout() -> None:
+    config = experiment()
+    decisions = dict(config.feature_eligibility)
+    decisions[FeatureFamily.LOCAL_RETURNS] = _decision(
+        FeatureFamily.LOCAL_RETURNS.value, FeatureEligibility.NOT_ELIGIBLE
+    )
+    with pytest.raises(ValueError, match="core R2 feature"):
+        replace(config, feature_eligibility=decisions)
+
+    contaminated = EligibilityDecision.create(
+        subject=FeatureFamily.LOCAL_RETURNS.value,
+        state=FeatureEligibility.ELIGIBLE,
+        evidence_start=START,
+        evidence_end=config.holdout_range[0] + timedelta(minutes=1),
+        reason="fixture evidence enters holdout",
+    )
+    decisions[FeatureFamily.LOCAL_RETURNS] = contaminated
+    with pytest.raises(ValueError, match="before the holdout"):
+        replace(config, feature_eligibility=decisions)
+
+
+def test_qualifying_subset_preserves_wider_r1_target_universe() -> None:
+    config = experiment()
+
+    assert len(config.target_instrument_eligibility) == 7
+    assert config.target_instruments == QUALIFYING
+    assert config.confirmatory_target_instruments == QUALIFYING
+    assert (
+        config.target_instrument_eligibility[TARGETS[-1]].state is FeatureEligibility.NOT_ELIGIBLE
+    )
