@@ -404,6 +404,8 @@ class R2ReadinessReport:
     locked_holdout_ready: ReadinessState
     feature_family_states: Mapping[FeatureFamily, ReadinessState]
     coverage_matrix: Mapping[str, tuple["CoverageCell", ...]]
+    usable_common_week_count: int
+    active_source_duration_seconds: Mapping[str, float]
     unmet_conditions: tuple[str, ...]
     evidence_class: EvidenceClass
 
@@ -427,6 +429,11 @@ class R2ReadinessReport:
             "coverage_matrix": {
                 instrument: [cell.as_json() for cell in self.coverage_matrix[instrument]]
                 for instrument in sorted(self.coverage_matrix)
+            },
+            "usable_common_week_count": self.usable_common_week_count,
+            "active_source_duration_seconds": {
+                instrument: self.active_source_duration_seconds[instrument]
+                for instrument in sorted(self.active_source_duration_seconds)
             },
             "unmet_conditions": list(self.unmet_conditions),
             "evidence_class": self.evidence_class.value,

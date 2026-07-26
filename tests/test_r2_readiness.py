@@ -146,6 +146,7 @@ def _target_rows(
     failing_instrument: str | None = None,
     failing_block: str | None = None,
     sparse: bool = False,
+    concentrated: bool = False,
 ) -> tuple[Any, ...]:
     first = cast(Any, folds[0])
     blocks = [("initial_training", first.training_start, first.training_cutoff)]
@@ -156,11 +157,16 @@ def _target_rows(
     blocks.append(("holdout", END - timedelta(weeks=4), END))
     rows: list[Any] = []
     for instrument in QUALIFYING:
-        for block, start, _ in blocks:
+        for block, start, end in blocks:
             required_count = 100 if block == "initial_training" else 20
             count = required_count - 1 if sparse else required_count
             for offset in range(count):
-                decision_time = start + timedelta(minutes=offset)
+                usable_span = end - start - timedelta(minutes=15)
+                decision_time = (
+                    start + timedelta(minutes=offset)
+                    if concentrated
+                    else start + usable_span * (offset / (count - 1))
+                )
                 invalid = instrument == failing_instrument and block == failing_block and offset < 3
                 rows.append(
                     SimpleNamespace(
@@ -187,6 +193,7 @@ def _verified(
     failing_block: str | None = None,
     late_instrument: str | None = None,
     sparse: bool = False,
+    concentrated: bool = False,
 ) -> Any:
     raw_folds = folds or _folds()
     rows = _target_rows(
@@ -194,6 +201,7 @@ def _verified(
         failing_instrument=failing_instrument,
         failing_block=failing_block,
         sparse=sparse,
+        concentrated=concentrated,
     )
     selected_folds = tuple(
         SimpleNamespace(
@@ -303,6 +311,11 @@ def test_six_target_three_group_fixture_passes_confirmatory_data_gate() -> None:
     assert report.confirmatory_data_ready.value == "READY"
     assert report.inner_validation_rows_ready.value == "PARTIALLY_READY"
     assert report.confirmatory_oof_ready.value == "NOT_READY"
+    assert report.usable_common_week_count == 16
+    assert all(
+        duration == timedelta(weeks=16).total_seconds()
+        for duration in report.active_source_duration_seconds.values()
+    )
     assert len(report.coverage_matrix) == 6
     assert all(len(cells) == 5 for cells in report.coverage_matrix.values())
 
@@ -328,12 +341,12 @@ def test_common_usable_history_not_nominal_range_controls_readiness() -> None:
     report = evaluate_r2_readiness(_verified(config, late_instrument=QUALIFYING[0]), config)
 
     assert report.confirmatory_data_ready.value == "NOT_READY"
-    assert any("common evidence" in condition for condition in report.unmet_conditions)
+    assert any("weekly buckets" in condition for condition in report.unmet_conditions)
 
 
 def test_sparse_disjoint_activity_cannot_pass_from_first_and_last_timestamps() -> None:
     config = experiment()
-    verified = _verified(config, sparse=True)
+    verified = _verified(config, concentrated=True)
     block_starts = (
         START,
         START + timedelta(weeks=6),
@@ -351,8 +364,14 @@ def test_sparse_disjoint_activity_cannot_pass_from_first_and_last_timestamps() -
     report = evaluate_r2_readiness(verified, config)
 
     assert report.confirmatory_data_ready.value == "NOT_READY"
-    assert any("minimum_training_rows" in condition for condition in report.unmet_conditions)
-    assert any(
+    assert report.usable_common_week_count < 16
+    assert all(
+        duration < timedelta(days=1).total_seconds()
+        for duration in report.active_source_duration_seconds.values()
+    )
+    assert any("weekly buckets" in condition for condition in report.unmet_conditions)
+    assert not any("minimum_training_rows" in condition for condition in report.unmet_conditions)
+    assert not any(
         "minimum_outer_validation_rows" in condition for condition in report.unmet_conditions
     )
 

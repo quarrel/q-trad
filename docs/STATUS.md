@@ -45,11 +45,12 @@ remains offline/replay
   frozen confirmatory subset separate. Its declared cumulative feature ladder and baseline-model
   families use a pinned scikit-learn numerical decision. The offline readiness command verifies exact
   R1 identities and reports source-active coverage for each qualifying instrument and research block,
-  along with the documented 6+2+2+2+4-week gates and configured training, outer-validation and
-  holdout row minima. Inner-validation row readiness remains explicitly partial until R2.C produces
-  its verified chronological split. Representative native integration also remains pending until
-  later R2 feature, fit, persistence, replay and evaluation evidence actually exercises it; current
-  native history supports no model-selection or effectiveness claim.
+  active-source duration, and usable common weeks rather than a first/last timestamp span. It enforces
+  the documented 6+2+2+2+4-week gates and configured training, outer-validation and holdout row
+  minima. Inner-validation row readiness remains explicitly partial until R2.C produces its verified
+  chronological split. Representative native integration also remains pending until later R2
+  feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
+  history supports no model-selection or effectiveness claim.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all

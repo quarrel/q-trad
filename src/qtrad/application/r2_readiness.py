@@ -22,7 +22,8 @@ from qtrad.domain.r2_readiness import (
 )
 from qtrad.domain.research import ObservationDataset
 
-_CONFIRMATORY_DURATION = timedelta(weeks=16)
+_REQUIRED_COMMON_WEEKS = 16
+_WEEK = timedelta(weeks=1)
 _INITIAL_TRAINING_DURATION = timedelta(weeks=6)
 _VALIDATION_DURATION = timedelta(weeks=2)
 _HOLDOUT_DURATION = timedelta(weeks=4)
@@ -106,20 +107,26 @@ def evaluate_r2_readiness(
         >= experiment.minimum_outer_validation_rows
         for instrument in experiment.confirmatory_target_instruments
     )
-    bounds = tuple(
-        _activity_bounds(source_active[instrument])
-        for instrument in experiment.confirmatory_target_instruments
+    candidate_start = folds[0].training_start if folds else verified.configuration.range_start
+    candidate_end = experiment.holdout_range[1]
+    usable_common_weeks = _usable_common_week_count(
+        experiment=experiment,
+        targets=verified.targets,
+        source_active=source_active,
+        candidate_start=candidate_start,
+        candidate_end=candidate_end,
     )
-    common_duration = timedelta(0)
-    if all(bound is not None for bound in bounds):
-        present = tuple(bound for bound in bounds if bound is not None)
-        common_start = max(start for start, _ in present)
-        common_end = min(end for _, end in present)
-        common_duration = max(common_end - common_start, timedelta(0))
+    active_source_durations = {
+        instrument: _union_duration(
+            source_active[instrument], start=candidate_start, end=candidate_end
+        ).total_seconds()
+        for instrument in experiment.confirmatory_target_instruments
+    }
     confirmatory_conditions = (
         (
-            common_duration >= _CONFIRMATORY_DURATION,
-            "confirmatory common evidence is shorter than 16 calendar weeks",
+            usable_common_weeks >= _REQUIRED_COMMON_WEEKS,
+            "confirmatory evidence has fewer than 16 weekly buckets with source-active target "
+            "opportunities for every confirmatory instrument",
         ),
         (
             len(experiment.confirmatory_target_instruments) >= 6,
@@ -198,6 +205,8 @@ def evaluate_r2_readiness(
         locked_holdout_ready=locked,
         feature_family_states=feature_states,
         coverage_matrix=coverage_matrix,
+        usable_common_week_count=usable_common_weeks,
+        active_source_duration_seconds=active_source_durations,
         unmet_conditions=tuple(unmet),
         evidence_class=experiment.evidence_class,
     )
@@ -258,12 +267,14 @@ def _coverage_matrix(
         for index, fold in enumerate(folds, start=1)
     )
     blocks.append(("holdout", experiment.holdout_range[0], experiment.holdout_range[1]))
-    rows = tuple(
-        row
-        for row in targets.rows
-        if row.horizon == experiment.primary_horizon
-        and row.instrument_id in experiment.confirmatory_target_instruments
-    )
+    rows_by_instrument = {
+        instrument: tuple(
+            row
+            for row in targets.rows
+            if row.horizon == experiment.primary_horizon and row.instrument_id == instrument
+        )
+        for instrument in experiment.confirmatory_target_instruments
+    }
     matrix: dict[str, tuple[CoverageCell, ...]] = {}
     for instrument in experiment.confirmatory_target_instruments:
         intervals = source_active[instrument]
@@ -271,7 +282,7 @@ def _coverage_matrix(
         for block, start, end in blocks:
             active_rows = tuple(
                 row
-                for row in rows
+                for row in rows_by_instrument[instrument]
                 if row.instrument_id == instrument
                 and start <= row.decision_time < end
                 and any(
@@ -353,12 +364,65 @@ def _datetime(value: JsonValue) -> datetime:
     return datetime.fromisoformat(value.replace("Z", "+00:00"))
 
 
-def _activity_bounds(
+def _usable_common_week_count(
+    *,
+    experiment: R2ExperimentConfig,
+    targets: TargetDataset,
+    source_active: Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    candidate_start: datetime,
+    candidate_end: datetime,
+) -> int:
+    full_weeks = int((candidate_end - candidate_start) // _WEEK)
+    rows_by_instrument = {
+        instrument: tuple(
+            row
+            for row in targets.rows
+            if row.horizon == experiment.primary_horizon and row.instrument_id == instrument
+        )
+        for instrument in experiment.confirmatory_target_instruments
+    }
+    usable = 0
+    for index in range(full_weeks):
+        week_start = candidate_start + index * _WEEK
+        week_end = week_start + _WEEK
+        if all(
+            any(
+                row.instrument_id == instrument
+                and week_start <= row.decision_time < week_end
+                and any(
+                    active_start <= row.target_start_time and row.target_end_time <= active_end
+                    for active_start, active_end in source_active[instrument]
+                )
+                for row in rows_by_instrument[instrument]
+            )
+            for instrument in experiment.confirmatory_target_instruments
+        ):
+            usable += 1
+    return usable
+
+
+def _union_duration(
     intervals: tuple[tuple[datetime, datetime], ...],
-) -> tuple[datetime, datetime] | None:
-    if not intervals:
-        return None
-    return min(start for start, _ in intervals), max(end for _, end in intervals)
+    *,
+    start: datetime,
+    end: datetime,
+) -> timedelta:
+    clipped = sorted(
+        (max(interval_start, start), min(interval_end, end))
+        for interval_start, interval_end in intervals
+        if interval_end > start and interval_start < end
+    )
+    if not clipped:
+        return timedelta(0)
+    merged: list[tuple[datetime, datetime]] = []
+    for interval_start, interval_end in clipped:
+        if merged and interval_start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], interval_end))
+        else:
+            merged.append((interval_start, interval_end))
+    return sum(
+        (interval_end - interval_start for interval_start, interval_end in merged), timedelta()
+    )
 
 
 def _state_from_conditions(

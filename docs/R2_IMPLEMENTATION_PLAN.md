@@ -52,6 +52,30 @@ Status reporting and descriptions of completed implementation belong in `PLAN.md
 
 Minor spelling, formatting and unambiguous CLI corrections do not require an amendment, but must remain visible in review.
 
+### Amendment 1 — explicit eligibility subsets and staged readiness evidence
+
+- **Original requirement:** the experiment bound the exact R1 universe and roles, named one target
+  set and reported the four high-level software, representative, confirmatory and holdout readiness
+  states. Feature-family evidence was represented by quote-state eligibility identifiers.
+- **Revised requirement:** the experiment retains the full R1 target universe while authenticating
+  separate model-eligibility decisions and a frozen confirmatory subset; feature eligibility is
+  generic and identity-bearing; readiness separately reports contract, representative integration,
+  confirmatory foundation data, inner-validation row evidence, overall confirmatory OOF and locked
+  holdout states. Foundation-data readiness includes source-active per-instrument/block coverage,
+  configured row minima, active-source duration and 16 anchored weekly buckets in which every
+  confirmatory instrument has a qualifying target opportunity.
+- **Rationale:** a smaller qualifying core must not require rebuilding R1 or deleting wider evidence,
+  optional features must not weaken core controls, and an R1-only preflight must not imply that later
+  R2.C inner-split or representative-integration evidence already exists. Weekly opportunity presence
+  distinguishes 16 usable weeks from isolated activity with only a 16-week outer span without
+  requiring continuous activity through genuine market closures.
+- **Evidence impact:** no decision-grade R2 evidence exists, so none is invalidated. Synthetic R2.A
+  readiness evidence produced before this amendment is superseded and cannot support a readiness
+  claim under the revised contract.
+- **Approving pull request:** PR #22; this amendment takes effect only if that PR is approved and
+  merged.
+- **Amendment date:** 2026-07-26.
+
 ---
 
 ## 3. Research questions
@@ -341,13 +365,17 @@ Holdout machinery may be developed and tested earlier using synthetic fixtures o
 The readiness command should report the states independently:
 
 ```text
-R2 software implementation: READY
-R2 representative integration: READY
-R2 confirmatory foundation data: READY
-R2 inner-validation row evidence: READY
+R2 software contract: READY
+R2 representative integration: NOT_READY
+R2 confirmatory foundation data: NOT_READY
+R2 inner-validation row evidence: PARTIALLY_READY
 R2 confirmatory OOF experiment: NOT_READY
 R2 locked holdout evaluation: NOT_READY
 ```
+
+This example is the expected R2.A state before representative feature/fit/replay evidence, a
+qualifying frozen native foundation and the R2.C inner split exist. Those pending dependencies keep
+overall confirmatory OOF readiness unavailable independently of contract readiness.
 
 A single `READY` or `NOT_READY` value is insufficient because it would either block useful implementation work or imply scientific readiness prematurely.
 
@@ -1859,8 +1887,9 @@ confirmatory_oof_ready
 locked_holdout_ready
 ```
 
-`confirmatory_data_ready` checks the frozen R1 foundation's duration, source-active per-instrument
-and per-block coverage, first-fold training membership and outer-validation/holdout row minima.
+`confirmatory_data_ready` checks the frozen R1 foundation's 16 anchored weekly common-opportunity
+buckets, source-active duration, per-instrument and per-block coverage, first-fold training
+membership and outer-validation/holdout row minima.
 `inner_validation_rows_ready` remains `PARTIALLY_READY` until R2.C has produced a verified
 chronological inner-split artefact. Overall confirmatory OOF readiness cannot be `READY` while that
 model-specific row evidence or representative integration evidence is pending.
