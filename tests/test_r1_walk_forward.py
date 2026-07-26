@@ -44,7 +44,7 @@ def _config() -> FoundationConfig:
         grid_resolution=timedelta(minutes=1),
         availability_basis=AvailabilityBasis.RECEIVED_AT,
         feature_lag_policy="PROVISIONAL_CONSERVATIVE",
-        feature_lag_calibration_range=(start - timedelta(minutes=10), start),
+        feature_lag_calibration_range=(start - timedelta(minutes=10), start - timedelta(minutes=1)),
         feature_lag_percentile=0.95,
         feature_lag_safety_margin=timedelta(minutes=1),
         selected_feature_lag=timedelta(minutes=1),

@@ -325,6 +325,8 @@ def verify_observation_build_evidence(
         for instrument_id in ordered_instruments
     ):
         raise ValueError("observation universe must use canonical instrument IDs")
+    if any(row.instrument_id not in ordered_instruments for row in dataset.rows):
+        raise ValueError("observation row is outside the declared instrument universe")
     if set(evidence.source_active_intervals) != set(ordered_instruments):
         raise ValueError("source-active evidence does not match the observation universe")
     if any(str(gap.instrument_id) not in ordered_instruments for gap in evidence.gaps):
@@ -421,6 +423,11 @@ def verify_foundation_configuration_evidence(
         or configuration.feature_lag_safety_margin != report.safety_margin
     ):
         raise ValueError("foundation feature-lag policy differs from measured evidence")
+    if (
+        report.maximum_delay is not None
+        and report.calibration_end + report.maximum_delay > configuration.range_start
+    ):
+        raise ValueError("availability calibration was not mature before the decision range")
     if configuration.feature_lag_policy == "MEASURED":
         if configuration.selected_feature_lag != report.selected_lag:
             raise ValueError("measured feature lag differs from availability evidence")
@@ -433,6 +440,12 @@ def verify_foundation_configuration_evidence(
         or revision_report.calibration_end != report.calibration_end
     ):
         raise ValueError("feature and revision delay evidence use different calibration ranges")
+    if (
+        revision_report.maximum_delay is not None
+        and revision_report.calibration_end + revision_report.maximum_delay
+        > configuration.range_start
+    ):
+        raise ValueError("revision calibration was not mature before the decision range")
     measured_revision_delay = (
         _ceil_to_grid(revision_report.maximum_delay, configuration.grid_resolution)
         if revision_report.maximum_delay is not None

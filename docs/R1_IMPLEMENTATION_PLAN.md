@@ -368,6 +368,9 @@ that lagged boundary and its configured availability time is no later than `feat
 
 The implementation must measure persisted native bar-availability delays over an explicit calibration range.
 That calibration range must end no later than the decision range start.
+Both initial-availability and correction-maturity evidence must be fully mature before the decision
+range starts: each report's calibration end plus its maximum observed delay must not exceed
+`range_start`.
 
 Delay is:
 

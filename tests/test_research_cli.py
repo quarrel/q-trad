@@ -13,6 +13,7 @@ from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.domain.events import JsonValue
 from qtrad.domain.identifiers import RunId
 from qtrad.ports.storage import ResearchManifest
+from qtrad.runtime.research_snapshot import ResearchSnapshotImport
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import load_capture_universe
 from tests.test_quota_replay import sample_bar
@@ -60,6 +61,38 @@ class FakeAuditStore:
 
     async def finish_run(self, _: RunId, **kwargs: object) -> None:
         self.finished = kwargs
+
+
+def test_observation_snapshot_precheck_rejects_unknown_universe_name() -> None:
+    universe = load_capture_universe(Path("config/capture-v1.toml"))
+    settings = Settings(
+        database_url="postgresql+asyncpg://qtrad@db/qtrad_research_capture_20260714",
+        capture_source_id="oci-sydney-capture-1",
+    )
+    snapshot = ResearchSnapshotImport.model_validate(
+        {
+            "schema": "qtrad-research-snapshot-import-v1",
+            "imported_at": NOW,
+            "target_database": "qtrad_research_capture_20260714",
+            "source_manifest_schema": "qtrad-capture-backup-v2",
+            "source_manifest_file_sha256": "1" * 64,
+            "source_manifest_identity_sha256": "2" * 64,
+            "source_archive_sha256": "3" * 64,
+            "source_created_at": NOW,
+            "capture_source_id": "oci-sydney-capture-1",
+            "universe_name": "unknown-v1",
+            "universe_hash": universe.configuration_hash,
+            "capture_image": "example.invalid/qtrad@sha256:" + "4" * 64,
+            "postgres_image": "postgres@sha256:" + "5" * 64,
+            "migration_version": "0010",
+            "raw_message_count": 1,
+            "canonical_event_count": 1,
+            "import_sha256": "6" * 64,
+        }
+    )
+
+    with pytest.raises(ValueError, match="different universe name"):
+        cli._validate_observation_snapshot(settings, universe, snapshot, required_end=NOW)
 
 
 def _projection_row() -> dict[str, object]:

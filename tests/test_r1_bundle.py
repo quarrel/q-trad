@@ -336,6 +336,103 @@ async def test_measured_feature_policy_is_bound_to_authenticated_delay_evidence(
 
 
 @pytest.mark.asyncio
+async def test_late_initial_bar_makes_calibration_immature_at_decision_start(
+    tmp_path: Path,
+) -> None:
+    bundle, _, clock, configuration = await _bundle(tmp_path)
+    manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+        bundle.observations.manifest_id
+    )
+    observations = await ParquetObservationStore(tmp_path, clock).read_observations(
+        bundle.observations.manifest_id
+    )
+    evidence = verify_observation_build_evidence(manifest, observations)
+    calibration_row = next(
+        row
+        for row in observations.rows
+        if evidence.availability_report.calibration_start
+        <= row.interval_end
+        < evidence.availability_report.calibration_end
+    )
+    late_at = configuration.range_start + timedelta(minutes=30)
+    late_row = replace(calibration_row, received_at=late_at, persisted_at=late_at)
+    late_observations = ObservationDataset.create(
+        tuple(
+            late_row if row.event_id == calibration_row.event_id else row
+            for row in observations.rows
+        ),
+        configuration=observations.configuration,
+        source_dataset_ids=observations.source_dataset_ids,
+        selection_policies=observations.selection_policies,
+    )
+    late_report = build_availability_delay_report(
+        late_observations.rows,
+        calibration_start=evidence.availability_report.calibration_start,
+        calibration_end=evidence.availability_report.calibration_end,
+        configured_percentile=evidence.availability_report.configured_percentile,
+        safety_margin=evidence.availability_report.safety_margin,
+        grid_resolution=configuration.grid_resolution,
+    )
+
+    with pytest.raises(ValueError, match="availability calibration was not mature"):
+        verify_foundation_configuration_evidence(
+            configuration,
+            late_observations,
+            replace(evidence, availability_report=late_report),
+        )
+
+
+@pytest.mark.asyncio
+async def test_late_correction_makes_calibration_immature_at_decision_start(
+    tmp_path: Path,
+) -> None:
+    bundle, _, clock, configuration = await _bundle(tmp_path)
+    manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+        bundle.observations.manifest_id
+    )
+    observations = await ParquetObservationStore(tmp_path, clock).read_observations(
+        bundle.observations.manifest_id
+    )
+    evidence = verify_observation_build_evidence(manifest, observations)
+    initial = next(
+        row
+        for row in observations.rows
+        if evidence.revision_report.calibration_start
+        <= row.interval_end
+        < evidence.revision_report.calibration_end
+    )
+    late_at = configuration.range_start + timedelta(minutes=30)
+    correction = replace(
+        initial,
+        event_id=uuid4(),
+        stream_version=max(row.stream_version for row in observations.rows) + 1,
+        event_type="MarketBarCorrected",
+        received_at=late_at,
+        persisted_at=late_at,
+        global_position=max(row.global_position for row in observations.rows) + 1,
+        revision=2,
+    )
+    corrected_observations = ObservationDataset.create(
+        (*observations.rows, correction),
+        configuration=observations.configuration,
+        source_dataset_ids=observations.source_dataset_ids,
+        selection_policies=observations.selection_policies,
+    )
+    late_report = build_revision_delay_report(
+        corrected_observations.rows,
+        calibration_start=evidence.revision_report.calibration_start,
+        calibration_end=evidence.revision_report.calibration_end,
+    )
+
+    with pytest.raises(ValueError, match="revision calibration was not mature"):
+        verify_foundation_configuration_evidence(
+            configuration,
+            corrected_observations,
+            replace(evidence, revision_report=late_report),
+        )
+
+
+@pytest.mark.asyncio
 async def test_observation_verifier_recomputes_delay_evidence(tmp_path: Path) -> None:
     observations = _observations()
     configuration = _config()
@@ -357,6 +454,41 @@ async def test_observation_verifier_recomputes_delay_evidence(tmp_path: Path) ->
 
     with pytest.raises(ValueError, match="does not match observation rows"):
         verify_observation_build_evidence(manifest, observations)
+
+
+@pytest.mark.asyncio
+async def test_observation_verifier_rejects_rows_outside_the_declared_universe(
+    tmp_path: Path,
+) -> None:
+    observations = _observations()
+    first = observations.rows[0]
+    outside = replace(
+        first,
+        stream_id="market-bar:fx:eur-usd:MID",
+        instrument_id="fx:eur-usd",
+    )
+    invalid = ObservationDataset.create(
+        (outside, *observations.rows[1:]),
+        configuration=observations.configuration,
+        source_dataset_ids=observations.source_dataset_ids,
+        selection_policies=observations.selection_policies,
+    )
+    configuration = _config()
+    evidence = _evidence(invalid, configuration.feature_lag_calibration_range)
+    clock = FixedClock(datetime(2026, 7, 2, tzinfo=UTC))
+    manifest = await ParquetObservationStore(tmp_path, clock).write_observations(
+        invalid,
+        source_snapshot={
+            "kind": "verified-capture-snapshot",
+            "import_sha256": "a" * 64,
+            "universe_name": "capture-v4",
+            "universe_hash": "b" * 64,
+        },
+        build_evidence=evidence,
+    )
+
+    with pytest.raises(ValueError, match="outside the declared instrument universe"):
+        verify_observation_build_evidence(manifest, invalid)
 
 
 def test_foundation_config_rejects_unknown_fields(tmp_path: Path) -> None:

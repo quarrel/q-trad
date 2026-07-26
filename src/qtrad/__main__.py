@@ -926,7 +926,7 @@ def _validate_observation_snapshot(
         raise ValueError("research snapshot evidence does not identify the configured source")
     if universe.configuration_hash != snapshot.universe_hash:
         raise ValueError("research snapshot evidence does not identify the selected universe")
-    if snapshot.universe_name not in {"unknown-v1", universe.name}:
+    if snapshot.universe_name != universe.name:
         raise ValueError("research snapshot evidence has a different universe name")
     if snapshot.source_created_at < required_end:
         raise ValueError("research snapshot predates the required observation range")
