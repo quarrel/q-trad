@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-26
-**Current milestone:** R2 — local and pooled baselines (planning)
+**Current milestone:** R2 — local and pooled baselines (R2.A software complete)
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay
 
@@ -40,6 +40,12 @@ remains offline/replay
   clean PostgreSQL, formatting, linting, typing and 456-test gate and R1 is complete. No real native
   23-market bundle or effectiveness result has been claimed from the zero-return probe or short
   history.
+- R2.A now has a strict identity-bearing experiment contract, explicit feature-set and baseline-model
+  declarations, a pinned scikit-learn numerical decision and an offline readiness command. The
+  command verifies exact R1 bundle, dataset, universe, role, horizon, holdout and build identities,
+  reports feature-family eligibility independently, and keeps software, representative-data,
+  confirmatory OOF and locked-holdout readiness separate. This is implementation evidence only;
+  current native history still supports no model-selection or effectiveness claim.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -71,8 +77,8 @@ remains offline/replay
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Finish the R2 implementation plan without weakening R1's causal artefact contracts.
-3. As the R2 entry gate, build and independently verify the real 23-market native foundation bundle
+2. Implement R2.B causal raw features against the R2.A experiment and readiness contracts.
+3. As the confirmatory R2 entry gate, build and independently verify the real 23-market native foundation bundle
    when the configured evidence interval and product-role qualification support it.
 4. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
 

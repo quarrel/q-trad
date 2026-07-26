@@ -38,6 +38,7 @@ from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_fe
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
+from qtrad.application.r2_readiness import evaluate_r2_readiness
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
     build_observation_dataset,
@@ -92,6 +93,7 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
+from qtrad.runtime.r2_readiness import load_r2_experiment, write_r2_readiness
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
     ResearchSnapshotImport,
@@ -334,6 +336,14 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_build.add_argument("--observations-manifest", type=Path, required=True)
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
+    baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
+    baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
+    baselines_readiness = baselines_sub.add_parser(
+        "readiness", help="verify R2 experiment bindings and report independent readiness gates"
+    )
+    baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_readiness.add_argument("--experiment", type=Path, required=True)
+    baselines_readiness.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -596,6 +606,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.foundation_command == "verify"
     ):
         asyncio.run(_verify_foundation_bundle(settings, clock, args.bundle))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "readiness"
+    ):
+        asyncio.run(
+            _report_r2_readiness(
+                settings,
+                clock,
+                foundation_bundle_path=args.foundation_bundle,
+                experiment_path=args.experiment,
+                output_path=args.output,
+            )
+        )
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -644,6 +668,25 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         raise RuntimeError("unhandled command")
+
+
+async def _report_r2_readiness(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    experiment_path: Path,
+    output_path: Path,
+) -> None:
+    verified = await verify_foundation_bundle(
+        root=settings.research_root,
+        bundle_path=foundation_bundle_path,
+        clock=clock,
+    )
+    experiment = load_r2_experiment(experiment_path)
+    report = evaluate_r2_readiness(verified, experiment)
+    write_r2_readiness(output_path, report)
+    print(json.dumps(report.as_json(), sort_keys=True))
 
 
 async def _build_research_observations(
