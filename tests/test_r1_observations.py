@@ -5,10 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from qtrad import __main__ as cli
 from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.application.research_observations import (
     build_observation_dataset,
     measure_availability_delay,
+    measure_revision_delay,
 )
 from qtrad.domain.events import EventEnvelope
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
@@ -42,11 +44,20 @@ def _bar(interval_start: datetime, *, close: str = "1.1", revision: int = 1) -> 
     )
 
 
-def _candidate(bar: MarketBar, *, position: int, received: datetime, persisted: datetime):
+def _candidate(
+    bar: MarketBar,
+    *,
+    position: int,
+    received: datetime,
+    persisted: datetime,
+    stream_version: int | None = None,
+    event_type: str | None = None,
+    stream_id: str | None = None,
+):
     event = EventEnvelope.create(
-        stream_id=f"market-bar:{bar.instrument_id}:{bar.basis}",
-        stream_version=bar.revision,
-        event_type="MarketBarClosed" if bar.revision == 1 else "MarketBarCorrected",
+        stream_id=stream_id or f"market-bar:{bar.instrument_id}:{bar.basis}",
+        stream_version=stream_version or position,
+        event_type=event_type or ("MarketBarClosed" if bar.revision == 1 else "MarketBarCorrected"),
         event_time=bar.interval_end,
         received_time=received,
         producer="fixture",
@@ -141,6 +152,87 @@ def test_availability_delay_report_is_explicit_and_grid_rounded() -> None:
     assert report.selected_lag == timedelta(minutes=2)
 
 
+def test_late_corrections_are_reported_separately_from_initial_feature_lag() -> None:
+    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    initial = _candidate(
+        _bar(start),
+        position=7,
+        received=start + timedelta(minutes=1, seconds=1),
+        persisted=start + timedelta(minutes=1, seconds=2),
+        stream_version=100,
+    )
+    correction = _candidate(
+        _bar(start, close="1.2", revision=2),
+        position=8,
+        received=start + timedelta(hours=2),
+        persisted=start + timedelta(hours=2, seconds=1),
+        stream_version=101,
+    )
+    dataset = _dataset((correction, initial))
+
+    feature = measure_availability_delay(
+        dataset,
+        calibration_start=start,
+        calibration_end=start + timedelta(minutes=2),
+        configured_percentile=0.95,
+        safety_margin=timedelta(0),
+        grid_resolution=timedelta(minutes=1),
+    )
+    revisions = measure_revision_delay(
+        dataset,
+        calibration_start=start,
+        calibration_end=start + timedelta(minutes=2),
+    )
+
+    assert feature.eligible_row_count == 1
+    assert feature.maximum_delay == timedelta(seconds=2)
+    assert revisions.eligible_correction_count == 1
+    assert revisions.maximum_delay == timedelta(hours=1, minutes=59, seconds=1)
+
+
+@pytest.mark.parametrize(
+    ("event_type", "stream_id", "message"),
+    (
+        ("MarketBarCorrected", None, "event type"),
+        (None, "market-bar:fx:other:MID", "stream identity"),
+    ),
+)
+def test_conflicting_canonical_revision_lineage_fails_closed(
+    event_type: str | None,
+    stream_id: str | None,
+    message: str,
+) -> None:
+    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    candidate = _candidate(
+        _bar(start),
+        position=7,
+        received=start + timedelta(minutes=1),
+        persisted=start + timedelta(minutes=1),
+        event_type=event_type,
+        stream_id=stream_id,
+    )
+    with pytest.raises(ValueError, match=message):
+        _dataset((candidate,))
+
+
+def test_missing_intermediate_bar_revision_fails_closed() -> None:
+    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+    initial = _candidate(
+        _bar(start),
+        position=7,
+        received=start + timedelta(minutes=1),
+        persisted=start + timedelta(minutes=1),
+    )
+    third = _candidate(
+        _bar(start, revision=3),
+        position=9,
+        received=start + timedelta(minutes=2),
+        persisted=start + timedelta(minutes=2),
+    )
+    with pytest.raises(ValueError, match="missing intermediate revisions"):
+        _dataset((initial, third))
+
+
 @pytest.mark.asyncio
 async def test_observation_manifest_has_separate_semantic_and_physical_identity(
     tmp_path: Path,
@@ -187,3 +279,38 @@ def test_historical_bars_are_rejected_from_native_observations() -> None:
     candidate = _candidate(historical, position=7, received=start, persisted=start)
     with pytest.raises(ValueError, match="QUOTE_DERIVED"):
         build_observation_dataset((candidate,), configuration={"name": "fixture"})
+
+
+def test_observation_build_and_verify_are_wired_to_the_cli() -> None:
+    build = cli.build_parser().parse_args(
+        [
+            "research",
+            "observations",
+            "build",
+            "--universe",
+            "universe.toml",
+            "--start",
+            "2026-07-01T00:00:00Z",
+            "--end",
+            "2026-07-02T00:00:00Z",
+            "--calibration-start",
+            "2026-07-01T06:00:00Z",
+            "--calibration-end",
+            "2026-07-01T18:00:00Z",
+            "--snapshot-import-evidence",
+            "snapshot.json",
+            "--availability-percentile",
+            "0.95",
+            "--availability-safety-margin-seconds",
+            "30",
+        ]
+    )
+    verify = cli.build_parser().parse_args(
+        ["research", "observations", "verify", "--manifest", "manifest.json"]
+    )
+
+    assert build.observations_command == "build"
+    assert build.availability_percentile == 0.95
+    assert build.calibration_start == datetime(2026, 7, 1, 6, tzinfo=UTC)
+    assert build.calibration_end == datetime(2026, 7, 1, 18, tzinfo=UTC)
+    assert verify.observations_command == "verify"

@@ -4,6 +4,8 @@ from decimal import Decimal
 from hashlib import sha256
 from uuid import uuid4
 
+import pytest
+
 from qtrad.application.walk_forward import (
     ZERO_RETURN_MODEL_CONTRACT,
     ZERO_RETURN_MODEL_ID,
@@ -42,7 +44,7 @@ def _config() -> FoundationConfig:
         grid_resolution=timedelta(minutes=1),
         availability_basis=AvailabilityBasis.RECEIVED_AT,
         feature_lag_policy="PROVISIONAL_CONSERVATIVE",
-        feature_lag_calibration_range=(start, end),
+        feature_lag_calibration_range=(start - timedelta(minutes=10), start - timedelta(minutes=1)),
         feature_lag_percentile=0.95,
         feature_lag_safety_margin=timedelta(minutes=1),
         selected_feature_lag=timedelta(minutes=1),
@@ -50,6 +52,7 @@ def _config() -> FoundationConfig:
         primary_vertical_horizon=timedelta(minutes=15),
         target_revision_delay=timedelta(minutes=1),
         target_revision_policy="PROVISIONAL_CONSERVATIVE",
+        target_revision_policy_reason="fixture uses a conservative one-minute maturity delay",
         required_feature_bases=(PriceBasis.MID,),
         target_basis=PriceBasis.MID,
         fold_policy="EXPANDING_WALK_FORWARD",
@@ -100,7 +103,7 @@ def _panel(config: FoundationConfig, targets: TargetDataset) -> PanelDataset:
             decision_time=target.decision_time,
             instrument_id=target.instrument_id,
             basis=PriceBasis.MID,
-            feature_data_asof=target.decision_time - timedelta(minutes=1),
+            feature_data_asof=target.decision_time,
             latest_feature_bar_end=target.decision_time - timedelta(minutes=1),
             status=PanelStatus.OBSERVED,
             audit_disposition=None,
@@ -133,7 +136,14 @@ def test_expanding_folds_require_maturity_and_exclude_holdout() -> None:
 
     folds = build_expanding_folds(targets, config)
 
-    assert len(folds.folds) >= 2
+    assert folds.folds
+    crossing_holdout = {
+        row.target_id for row in targets.rows if row.target_end_time > config.holdout_range[0]
+    }
+    assert crossing_holdout
+    assert crossing_holdout.isdisjoint(
+        target_id for fold in folds.folds for target_id in fold.validation_target_ids
+    )
     for fold in folds.folds:
         assert fold.holdout_excluded
         assert fold.training_cutoff == fold.validation_start - config.embargo
@@ -144,11 +154,10 @@ def test_expanding_folds_require_maturity_and_exclude_holdout() -> None:
             assert target.target_end_time <= fold.training_cutoff
             assert target.target_available_at <= fold.training_cutoff
         for target_id in fold.validation_target_ids:
-            assert not (
-                config.holdout_range[0]
-                <= training[target_id].decision_time
-                < config.holdout_range[1]
-            )
+            target = training[target_id]
+            assert target.target_end_time <= config.holdout_range[0]
+            assert target.target_freeze_at <= config.holdout_range[0]
+            assert target.target_available_at <= config.holdout_range[0]
 
     rebuilt = build_expanding_folds(
         TargetDataset.create(
@@ -160,6 +169,18 @@ def test_expanding_folds_require_maturity_and_exclude_holdout() -> None:
     )
     assert rebuilt.dataset_id == folds.dataset_id
     assert rebuilt.folds == folds.folds
+
+
+def test_locked_holdout_must_be_the_final_foundation_interval() -> None:
+    config = _config()
+    with pytest.raises(ValueError, match="final interval"):
+        replace(
+            config,
+            holdout_range=(
+                config.holdout_range[0] - timedelta(minutes=5),
+                config.holdout_range[1] - timedelta(minutes=5),
+            ),
+        )
 
 
 def test_zero_return_forecasts_are_validation_only_and_model_independent() -> None:

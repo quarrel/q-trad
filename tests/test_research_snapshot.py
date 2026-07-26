@@ -54,6 +54,8 @@ def test_research_snapshot_import_is_verified_and_exposes_bounded_metadata(
     assert metadata["kind"] == "verified-capture-snapshot"
     assert metadata["import_sha256"] == evidence.import_sha256
     assert metadata["capture_source_id"] == "oci-sydney-capture-1"
+    assert metadata["universe_name"] == "capture-v1"
+    assert metadata["universe_hash"] == "4" * 64
     assert metadata["source_archive_sha256"] == "3" * 64
 
 

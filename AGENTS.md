@@ -22,18 +22,19 @@ affects current work. Keep active documents concise and archive completed chrono
 
 ## Current phase
 
-The current milestone is **R1 — causal multi-asset research foundation**:
+The current milestone is **R2 — local and pooled baselines (planning)**:
 
 > current native capture → reviewed APAC coverage and historical inputs → aligned causal datasets →
 > multi-horizon forecasts → explicit cost/risk states → constrained offline paper portfolio → later
 > continuous shadow paper.
 
-R0 alignment, coverage, historical-source decision and independent restore verification are
-complete. The reviewed 23-market `capture-v4` collector is running on OCI. Its 22 non-VIX markets remain
-potentially tradable subject to experiment role and paper eligibility; the AUD-denominated VIX is
-context-only. Korea 200 has no eligible demo listing, and the reviewed Bitcoin listings were
-unavailable; both remain quarantined. Any later publication or activation remains a separately
-authorised operation.
+R0 and the R1 causal multi-asset research foundation are complete. R2 execution remains gated on a
+real 23-market foundation bundle that independently verifies against sufficient mature native
+evidence and completed product-role qualification. The reviewed 23-market `capture-v4` collector is
+running on OCI. Its 22 non-VIX markets remain potentially tradable subject to experiment role and
+paper eligibility; the AUD-denominated VIX is context-only. Korea 200 has no eligible demo listing,
+and the reviewed Bitcoin listings were unavailable; both remain quarantined. Any later publication
+or activation remains a separately authorised operation.
 
 The old single-instrument strategy-ranking report is retained framework-proof evidence. It is not
 the intended model/portfolio architecture and its negative cost-aware result is not an effectiveness
@@ -186,8 +187,10 @@ Use Python 3.13, `uv`, en-GB text, Ruff and strict typing in domain, ports and a
 Unexpected required-field and computation failures propagate with context rather than becoming
 plausible defaults.
 
-## GitHub workflow verification
+## GitHub
 
 The GitHub MCP fine-grained PAT cannot be granted Checks API access. This is an expected platform
 limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
 runs for the exact commit instead of repeatedly raising unavailable check-run access.
+
+Do not use any GitHUB CLI (`gh`) calls. Only the GitHub MCP or the ChatGPT GitHub Connector.

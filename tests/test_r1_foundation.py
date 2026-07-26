@@ -35,7 +35,7 @@ def _row(
     return ObservationRow(
         event_id=uuid4(),
         stream_id="market-bar:fx:aud-usd:MID",
-        stream_version=revision,
+        stream_version=global_position or revision,
         event_type="MarketBarClosed" if revision == 1 else "MarketBarCorrected",
         event_time=interval_end,
         received_at=persisted,
@@ -60,7 +60,15 @@ def _row(
 
 
 def _dataset(rows: tuple[ObservationRow, ...]) -> ObservationDataset:
-    return ObservationDataset.create(rows, configuration={"fixture": "r1.b"})
+    return ObservationDataset.create(
+        rows,
+        configuration={
+            "fixture": "r1.b",
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
+            "interval_start": "2026-06-30T00:00:00+00:00",
+            "interval_end": "2026-07-03T00:00:00+00:00",
+        },
+    )
 
 
 def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> FoundationConfig:
@@ -78,7 +86,7 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
         grid_resolution=timedelta(minutes=1),
         availability_basis=AvailabilityBasis.PERSISTED_AT,
         feature_lag_policy="PROVISIONAL_CONSERVATIVE",
-        feature_lag_calibration_range=(start, end),
+        feature_lag_calibration_range=(start - timedelta(hours=1), start),
         feature_lag_percentile=0.95,
         feature_lag_safety_margin=timedelta(minutes=1),
         selected_feature_lag=timedelta(minutes=1),
@@ -86,6 +94,7 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
         primary_vertical_horizon=timedelta(minutes=15),
         target_revision_delay=timedelta(minutes=1),
         target_revision_policy="PROVISIONAL_CONSERVATIVE",
+        target_revision_policy_reason="fixture uses a conservative one-minute maturity delay",
         required_feature_bases=(PriceBasis.MID,),
         target_basis=PriceBasis.MID,
         fold_policy="EXPANDING_WALK_FORWARD",
@@ -96,19 +105,19 @@ def _config(dataset: ObservationDataset, *, start: datetime, end: datetime) -> F
     )
 
 
-def test_panel_selects_only_revisions_available_at_the_feature_cutoff() -> None:
+def test_panel_uses_a_delayed_bar_available_before_the_later_decision() -> None:
     start = datetime(2026, 7, 1, 12, 3, tzinfo=UTC)
     first = _row(
         datetime(2026, 7, 1, 12, 2, tzinfo=UTC),
         close="101",
-        persisted_at=datetime(2026, 7, 1, 12, 2, tzinfo=UTC),
+        persisted_at=datetime(2026, 7, 1, 12, 2, 5, tzinfo=UTC),
         global_position=1,
     )
     late_correction = _row(
         first.interval_end,
         close="102",
         revision=2,
-        persisted_at=datetime(2026, 7, 1, 12, 3, tzinfo=UTC),
+        persisted_at=datetime(2026, 7, 1, 12, 3, 1, tzinfo=UTC),
         global_position=2,
     )
     dataset = _dataset((late_correction, first))
@@ -119,7 +128,9 @@ def test_panel_selects_only_revisions_available_at_the_feature_cutoff() -> None:
     assert aud_rows[0].status is PanelStatus.OBSERVED
     assert aud_rows[0].selected_revision == 1
     assert aud_rows[0].close == Decimal("101")
-    assert aud_rows[0].feature_data_asof != aud_rows[0].decision_time
+    assert aud_rows[0].feature_data_asof == aud_rows[0].decision_time
+    assert aud_rows[0].latest_feature_bar_end == first.interval_end
+    assert aud_rows[0].selected_availability_time == first.persisted_at
 
     rebuilt = build_asof_panel(dataset, config)
     assert rebuilt.rows[0].selected_revision == aud_rows[0].selected_revision
@@ -153,9 +164,7 @@ def test_panel_missingness_is_explicit_and_audit_is_not_causal_state() -> None:
         _dataset(()),
         _config(_dataset(()), start=start, end=start + timedelta(minutes=1)),
     )
-    no_evidence_row = next(
-        row for row in no_evidence.rows if row.instrument_id == "fx:aud-usd"
-    )
+    no_evidence_row = next(row for row in no_evidence.rows if row.instrument_id == "fx:aud-usd")
     assert no_evidence_row.audit_disposition is PanelAuditDisposition.NO_NATIVE_EVIDENCE
 
 
@@ -176,6 +185,34 @@ def test_gap_detected_after_cutoff_is_not_exposed_as_known_at_cutoff() -> None:
         if row.instrument_id == "fx:aud-usd"
     )
     assert row.audit_disposition is PanelAuditDisposition.RECORDED_GAP_DETECTED_LATER
+
+
+def test_source_activity_and_required_observation_bounds_fail_closed() -> None:
+    start = datetime(2026, 7, 1, 12, 3, tzinfo=UTC)
+    empty = _dataset(())
+    config = _config(empty, start=start, end=start + timedelta(minutes=1))
+    inactive = next(
+        row
+        for row in build_asof_panel(
+            empty,
+            config,
+            source_active_intervals={"fx:aud-usd": ()},
+        ).rows
+        if row.instrument_id == "fx:aud-usd"
+    )
+    assert inactive.audit_disposition is PanelAuditDisposition.SOURCE_NOT_ACTIVE
+
+    insufficient = ObservationDataset.create(
+        (),
+        configuration={
+            "ordered_instruments": ["fx:aud-usd", "index:volatility"],
+            "interval_start": start.isoformat(),
+            "interval_end": (start + timedelta(minutes=20)).isoformat(),
+        },
+    )
+    insufficient_config = replace(config, observation_dataset_id=insufficient.dataset_id)
+    with pytest.raises(ValueError, match="required source bound"):
+        build_asof_panel(insufficient, insufficient_config)
 
 
 def test_targets_freeze_revisions_and_keep_endpoint_return_separate_from_excursion() -> None:
@@ -239,8 +276,10 @@ def test_target_correction_before_freeze_is_selected_and_vix_gets_no_target() ->
         rows[-1],
         close=Decimal("125"),
         high=Decimal("125"),
+        stream_version=41,
         persisted_at=start + timedelta(minutes=15, seconds=45),
         global_position=41,
+        revision=3,
     )
     dataset = _dataset((*rows, early_revision))
     config = _config(dataset, start=start, end=start + timedelta(minutes=1))
@@ -252,8 +291,7 @@ def test_target_correction_before_freeze_is_selected_and_vix_gets_no_target() ->
 
 @pytest.mark.parametrize(
     ("missing_start", "missing_end", "expected"),
-    ((True, False, ReturnDisposition.MISSING_START),
-     (False, True, ReturnDisposition.MISSING_END)),
+    ((True, False, ReturnDisposition.MISSING_START), (False, True, ReturnDisposition.MISSING_END)),
 )
 def test_target_requires_exact_completed_endpoint_bars(
     missing_start: bool,
@@ -277,7 +315,12 @@ def test_ambiguous_target_source_fails_closed_without_selecting_a_price() -> Non
     endpoint = start + timedelta(minutes=15)
     first = _row(start, global_position=1)
     end = _row(endpoint, close="115", global_position=2)
-    other_source = replace(end, source_external_id="OTHER")
+    other_source = replace(
+        end,
+        stream_version=3,
+        global_position=3,
+        source_external_id="OTHER",
+    )
     dataset = _dataset((first, end, other_source))
     target = build_frozen_targets(
         dataset, _config(dataset, start=start, end=start + timedelta(minutes=1))

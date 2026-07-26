@@ -36,8 +36,8 @@ def build_expanding_folds(
     if duration <= timedelta(0):
         raise ValueError("validation duration must be positive")
     holdout_start, holdout_end = config.holdout_range
-    if holdout_start < config.range_start or holdout_end > config.range_end:
-        raise ValueError("holdout range must be contained in the foundation range")
+    if holdout_start < config.range_start or holdout_end != config.range_end:
+        raise ValueError("locked holdout must be the final foundation interval")
 
     selected_horizon = config.primary_vertical_horizon if horizon is None else horizon
     if selected_horizon not in config.target_horizons:
@@ -52,10 +52,7 @@ def build_expanding_folds(
 
     folds: list[Fold] = []
     validation_start = (
-        config.range_start
-        + config.minimum_training_duration
-        + selected_horizon
-        + config.embargo
+        config.range_start + config.minimum_training_duration + selected_horizon + config.embargo
     )
     while validation_start < holdout_start:
         validation_end = validation_start + duration
@@ -78,6 +75,9 @@ def build_expanding_folds(
                 row.target_id
                 for row in target_rows
                 if validation_start <= row.decision_time < validation_end
+                and row.target_end_time <= holdout_start
+                and row.target_freeze_at <= holdout_start
+                and row.target_available_at <= holdout_start
                 and not _in_holdout(row.decision_time, config.holdout_range)
             )
         )
@@ -154,9 +154,12 @@ def build_zero_return_forecasts(
             if _in_holdout(target.decision_time, config.holdout_range):
                 raise ValueError("holdout target entered forecast validation membership")
             if (
-                target.horizon != selected_horizon
-                or target.target_basis is not config.target_basis
+                target.target_end_time > config.holdout_range[0]
+                or target.target_freeze_at > config.holdout_range[0]
+                or target.target_available_at > config.holdout_range[0]
             ):
+                raise ValueError("forecast validation target dependency enters the holdout")
+            if target.horizon != selected_horizon or target.target_basis is not config.target_basis:
                 raise ValueError("fold validation contains an unsupported target")
             panel_row = panel_by_key.get(
                 (target.instrument_id, target.decision_time, config.target_basis)

@@ -1,5 +1,12 @@
 # R1 implementation design — causal multi-asset research foundation
 
+**Status:** COMPLETE (2026-07-26)
+
+R1 delivered and independently verified the causal dataset, fold, zero-forecast and thin-bundle
+infrastructure. The first real 23-market bundle remains an R2 entry prerequisite because the run
+depends on sufficient mature native evidence and completed product-role qualification; R1 completion
+does not claim that evidence exists or that any forecast is effective.
+
 ## Purpose
 
 Implement the minimum trustworthy research foundation needed to determine whether short-horizon multi-asset forecasting is worth pursuing.
@@ -360,9 +367,17 @@ training_cutoff
 
 Do not conflate decision delay with feature-bar age.
 
+For the R1 transform, `feature_data_asof` is the decision cutoff and
+`latest_feature_bar_end = decision_time - selected_feature_lag`. A bar is eligible when it ends at
+that lagged boundary and its configured availability time is no later than `feature_data_asof`.
+
 ## Feature-lag selection
 
 The implementation must measure persisted native bar-availability delays over an explicit calibration range.
+That calibration range must end no later than the decision range start.
+Both initial-availability and correction-maturity evidence must be fully mature before the decision
+range starts: each report's calibration end plus its maximum observed delay must not exceed
+`range_start`.
 
 Delay is:
 
@@ -619,7 +634,8 @@ MEASURED
 PROVISIONAL_CONSERVATIVE
 ```
 
-and retain the evidence used to select it.
+and retain the evidence used to select it. A provisional policy must also record a non-empty reason;
+its configured delay may not be less conservative than correction-maturity evidence already present.
 
 ## Return disposition
 
@@ -919,7 +935,11 @@ Inputs:
 --universe
 --start
 --end
+--calibration-start
+--calibration-end
 --snapshot-import-evidence
+--availability-percentile
+--availability-safety-margin-seconds
 ```
 
 Output:
@@ -937,7 +957,8 @@ Inputs:
 
 ```text
 --observations-manifest
---config
+--configuration
+--output
 ```
 
 Output:
@@ -1069,7 +1090,7 @@ Do not add new feature families or model abstractions.
 * Complete CLI wiring.
 * Add independent verification.
 * Run the full clean project gate.
-* Build a real 23-market native bundle.
+* Make the real 23-market native bundle operational through the verified offline workflow.
 * Record coverage, missingness, target disposition and fold summaries.
 * Update active documentation.
 
@@ -1078,7 +1099,8 @@ Do not add new feature families or model abstractions.
 * Every child artefact verifies independently.
 * The top-level bundle verifies all cross-references.
 * Tampering with any child invalidates the bundle.
-* A real 23-market bundle replays deterministically.
+* Fixture-backed multi-market bundles replay deterministically; the first real 23-market run is an
+  explicit R2 entry gate.
 * Real-data folds are emitted only when configured minimum durations are satisfied.
 * The locked holdout never appears in OOF data.
 * No effectiveness claim is made from the zero probe or short native history.
@@ -1229,7 +1251,8 @@ R1 is complete when:
 * physical manifests authenticate files, metadata and run evidence;
 * a thin foundation bundle binds all source data, configuration, folds and outputs;
 * existing retained `bars-v2` evidence remains readable;
-* a real 23-market bundle is produced from a verified isolated native snapshot;
+* a real 23-market bundle can be produced and independently verified from an isolated native snapshot,
+  with the first evidence run deferred fail-closed to the R2 entry gate;
 * insufficient native history is reported honestly rather than converted into artificial folds; and
 * no forecasting, economic or profitability claim is made from the zero probe.
 

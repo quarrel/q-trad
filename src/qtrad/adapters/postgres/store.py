@@ -1375,9 +1375,7 @@ class PostgresAuditStore(AuditStore):
                     global_position=int(str(row["global_position"])),
                 )
                 event = (
-                    None
-                    if row["canonical_event_id"] is None
-                    else _event_from_joined_row(dict(row))
+                    None if row["canonical_event_id"] is None else _event_from_joined_row(dict(row))
                 )
                 candidates.append(ObservationCandidate(projection=projection, event=event))
         return tuple(candidates)
@@ -1398,18 +1396,14 @@ def _event_from_joined_row(row: Mapping[str, object]) -> EventEnvelope:
         persisted_time=_utc(row["canonical_persisted_time"]),
         correlation_id=UUID(str(row["canonical_correlation_id"])),
         causation_id=(
-            UUID(str(row["canonical_causation_id"]))
-            if row["canonical_causation_id"]
-            else None
+            UUID(str(row["canonical_causation_id"])) if row["canonical_causation_id"] else None
         ),
         producer=str(row["canonical_producer"]),
         producer_version=str(row["canonical_producer_version"]),
         payload=cast(dict[str, JsonValue], payload),
         global_position=int(str(row["global_position"])),
         raw_record_id=(
-            int(str(row["canonical_raw_record_id"]))
-            if row["canonical_raw_record_id"]
-            else None
+            int(str(row["canonical_raw_record_id"])) if row["canonical_raw_record_id"] else None
         ),
     )
 

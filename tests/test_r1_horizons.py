@@ -3,6 +3,8 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
 
+import pytest
+
 from qtrad.application.foundation import build_frozen_targets, summarise_horizon_coverage
 from qtrad.domain.foundation import (
     AvailabilityBasis,
@@ -29,7 +31,7 @@ def _observations() -> ObservationDataset:
             ObservationRow(
                 event_id=uuid4(),
                 stream_id="market-bar:fx:aud-usd:MID",
-                stream_version=1,
+                stream_version=minute + 1,
                 event_type="MarketBarClosed",
                 event_time=interval_end,
                 received_at=available_at,
@@ -52,7 +54,15 @@ def _observations() -> ObservationDataset:
                 source_external_id="AUDUSD",
             )
         )
-    return ObservationDataset.create(tuple(rows), configuration={"fixture": "r1.d"})
+    return ObservationDataset.create(
+        tuple(rows),
+        configuration={
+            "fixture": "r1.d",
+            "ordered_instruments": ["fx:aud-usd"],
+            "interval_start": (START - timedelta(minutes=2)).isoformat(),
+            "interval_end": (END + timedelta(minutes=61)).isoformat(),
+        },
+    )
 
 
 def _config(dataset: ObservationDataset) -> FoundationConfig:
@@ -67,7 +77,7 @@ def _config(dataset: ObservationDataset) -> FoundationConfig:
         grid_resolution=timedelta(minutes=1),
         availability_basis=AvailabilityBasis.RECEIVED_AT,
         feature_lag_policy="PROVISIONAL_CONSERVATIVE",
-        feature_lag_calibration_range=(START, END),
+        feature_lag_calibration_range=(START - timedelta(minutes=2), START),
         feature_lag_percentile=0.95,
         feature_lag_safety_margin=timedelta(minutes=1),
         selected_feature_lag=timedelta(minutes=1),
@@ -75,6 +85,7 @@ def _config(dataset: ObservationDataset) -> FoundationConfig:
         primary_vertical_horizon=timedelta(minutes=15),
         target_revision_delay=timedelta(minutes=1),
         target_revision_policy="PROVISIONAL_CONSERVATIVE",
+        target_revision_policy_reason="fixture uses a conservative one-minute maturity delay",
         required_feature_bases=(PriceBasis.MID,),
         target_basis=PriceBasis.MID,
         fold_policy="EXPANDING_WALK_FORWARD",
@@ -137,3 +148,12 @@ def test_coverage_summary_can_report_a_horizon_absent_from_a_subset_dataset() ->
     assert summaries[0].total_target_count == 0
     assert summaries[1].total_target_count == 1
     assert summaries[1].valid_return_count == 1
+
+
+def test_foundation_config_requires_canonical_horizon_order() -> None:
+    config = _config(_observations())
+    with pytest.raises(ValueError, match="canonical ascending"):
+        replace(
+            config,
+            target_horizons=tuple(timedelta(minutes=minutes) for minutes in (60, 5, 15, 30)),
+        )

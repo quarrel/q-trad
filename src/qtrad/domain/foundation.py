@@ -86,6 +86,7 @@ class FoundationConfig:
     primary_vertical_horizon: timedelta
     target_revision_delay: timedelta
     target_revision_policy: str
+    target_revision_policy_reason: str | None
     required_feature_bases: tuple[PriceBasis, ...]
     target_basis: PriceBasis
     fold_policy: str
@@ -116,8 +117,7 @@ class FoundationConfig:
                 raise ValueError("foundation instrument IDs must be canonical lower-case values")
         if (
             "index:volatility" in self.instrument_roles
-            and InstrumentRole(self.instrument_roles["index:volatility"])
-            is InstrumentRole.TARGET
+            and InstrumentRole(self.instrument_roles["index:volatility"]) is InstrumentRole.TARGET
         ):
             raise ValueError("VIX must remain a CONTEXT instrument")
         _require_interval(self.range_start, self.range_end, "foundation range")
@@ -128,13 +128,27 @@ class FoundationConfig:
             self.feature_lag_calibration_range[1],
             "feature lag calibration range",
         )
+        if self.feature_lag_calibration_range[1] > self.range_start:
+            raise ValueError("feature lag calibration must end by the decision range start")
         _require_interval(self.holdout_range[0], self.holdout_range[1], "holdout range")
+        if self.holdout_range[0] < self.range_start or self.holdout_range[1] != self.range_end:
+            raise ValueError("locked holdout must be the final interval of the foundation range")
         if not 0 <= self.feature_lag_percentile <= 1:
             raise ValueError("feature lag percentile must be between zero and one")
         if self.feature_lag_policy not in {"MEASURED", "PROVISIONAL_CONSERVATIVE"}:
             raise ValueError("feature lag policy is unsupported")
         if self.target_revision_policy not in {"MEASURED", "PROVISIONAL_CONSERVATIVE"}:
             raise ValueError("target revision policy is unsupported")
+        if (
+            self.target_revision_policy == "MEASURED"
+            and self.target_revision_policy_reason is not None
+        ):
+            raise ValueError("measured target revision policy cannot have a provisional reason")
+        if self.target_revision_policy == "PROVISIONAL_CONSERVATIVE" and (
+            self.target_revision_policy_reason is None
+            or not self.target_revision_policy_reason.strip()
+        ):
+            raise ValueError("provisional target revision policy requires a reason")
         for value, field in (
             (self.feature_lag_safety_margin, "feature lag safety margin"),
             (self.selected_feature_lag, "selected feature lag"),
@@ -155,6 +169,8 @@ class FoundationConfig:
             raise ValueError("target horizons must use the configured 5/15/30/60-minute grid")
         if len(set(self.target_horizons)) != len(self.target_horizons):
             raise ValueError("target horizons must be unique")
+        if self.target_horizons != tuple(sorted(self.target_horizons)):
+            raise ValueError("target horizons must use canonical ascending order")
         if self.primary_vertical_horizon != timedelta(minutes=15):
             raise ValueError("R1.B primary vertical horizon must be 15 minutes")
         if self.primary_vertical_horizon not in self.target_horizons:
@@ -174,6 +190,21 @@ class FoundationConfig:
     @property
     def configuration_id(self) -> str:
         return _hash_json(self.as_json())
+
+    @property
+    def required_observation_start(self) -> datetime:
+        """Earliest bar start needed by the configured decision range."""
+
+        return min(
+            self.feature_lag_calibration_range[0],
+            self.range_start - self.selected_feature_lag - self.grid_resolution,
+        )
+
+    @property
+    def required_observation_end(self) -> datetime:
+        """Conservative source bound covering labels and their revision freeze."""
+
+        return self.range_end + max(self.target_horizons) + self.target_revision_delay
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -204,6 +235,7 @@ class FoundationConfig:
             "primary_vertical_horizon_seconds": self.primary_vertical_horizon.total_seconds(),
             "target_revision_delay_seconds": self.target_revision_delay.total_seconds(),
             "target_revision_policy": self.target_revision_policy,
+            "target_revision_policy_reason": self.target_revision_policy_reason,
             "required_feature_bases": [basis.value for basis in self.required_feature_bases],
             "target_basis": self.target_basis.value,
             "fold_policy": self.fold_policy,
@@ -245,14 +277,16 @@ class PanelRow:
         require_utc(self.decision_time, "panel decision_time")
         require_utc(self.feature_data_asof, "panel feature_data_asof")
         require_utc(self.latest_feature_bar_end, "panel latest_feature_bar_end")
-        if self.latest_feature_bar_end != self.feature_data_asof:
-            raise ValueError(
-                "panel feature cutoff and latest bar end must remain distinct concepts"
-            )
-        if self.status is PanelStatus.OBSERVED and (
-            self.selected_event_id is None or self.selected_availability_time is None
-        ):
-            raise ValueError("observed panel rows require selected lineage")
+        if self.latest_feature_bar_end > self.feature_data_asof:
+            raise ValueError("panel latest bar end cannot follow its feature cutoff")
+        if self.status is PanelStatus.OBSERVED:
+            if self.selected_event_id is None or self.selected_availability_time is None:
+                raise ValueError("observed panel rows require selected lineage")
+            if (
+                self.selected_availability_time > self.feature_data_asof
+                or self.interval_end != self.latest_feature_bar_end
+            ):
+                raise ValueError("observed panel row violates its causal feature cutoff")
         if self.status is PanelStatus.MISSING_AS_OF_CUTOFF:
             if any(value is not None for value in (self.open, self.high, self.low, self.close)):
                 raise ValueError("missing panel rows cannot contain prices")
