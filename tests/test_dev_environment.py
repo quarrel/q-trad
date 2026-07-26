@@ -37,10 +37,15 @@ def test_dev_container_has_one_image_codex_bootstrap() -> None:
     )
 
     assert "@openai/codex" not in package["dependencies"]
+    assert 'amd64) codex_target="x64"' in dockerfile
+    assert 'arm64) codex_target="arm64"' in dockerfile
+    assert 'codex_version="$(npm view @openai/codex@latest version)"' in dockerfile
+    assert '"@openai/codex@${codex_version}"' in dockerfile
     assert (
-        "npm install --global --prefix /opt/codex-latest --ignore-scripts "
-        "@openai/codex@latest" in dockerfile
+        '"@openai/codex-linux-${codex_target}@npm:@openai/codex@${codex_version}'
+        '-linux-${codex_target}"' in dockerfile
     )
+    assert "/opt/codex-latest/bin/codex --version" in dockerfile
     assert "ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex" in dockerfile
 
 

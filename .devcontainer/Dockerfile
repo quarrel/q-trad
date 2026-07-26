@@ -62,12 +62,16 @@ COPY .devcontainer/codex-install /opt/codex-install
 
 RUN cd /opt/codex-install \
     && corepack pnpm install --no-frozen-lockfile --ignore-scripts \
-    && npm install --global --prefix /opt/codex-latest --ignore-scripts @openai/codex@latest \
     && case "$(dpkg --print-architecture)" in \
-        amd64) tilth_target="x86_64-unknown-linux-musl" ;; \
-        arm64) tilth_target="aarch64-unknown-linux-musl" ;; \
-        *) echo "Unsupported Tilth architecture" >&2; exit 1 ;; \
+        amd64) codex_target="x64"; tilth_target="x86_64-unknown-linux-musl" ;; \
+        arm64) codex_target="arm64"; tilth_target="aarch64-unknown-linux-musl" ;; \
+        *) echo "Unsupported development-container architecture" >&2; exit 1 ;; \
     esac \
+    && codex_version="$(npm view @openai/codex@latest version)" \
+    && npm install --global --prefix /opt/codex-latest --ignore-scripts \
+        "@openai/codex@${codex_version}" \
+        "@openai/codex-linux-${codex_target}@npm:@openai/codex@${codex_version}-linux-${codex_target}" \
+    && /opt/codex-latest/bin/codex --version \
     && mkdir -p node_modules/tilth/bin \
     && curl -fsSL \
         "https://github.com/jahala/tilth/releases/download/v0.9.0/tilth-${tilth_target}.tar.gz" \
