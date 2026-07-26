@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from qtrad import __version__
 from qtrad.adapters.clock import SystemClock
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
+from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.adapters.postgres.storage_measurement import PostgresStorageInspector
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
@@ -34,17 +35,25 @@ from qtrad.application.backfill_planning import (
     build_backfill_plan,
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
+from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.replay import semantic_bar_hash
+from qtrad.application.research_observations import (
+    build_observation_dataset,
+    measure_availability_delay,
+    measure_revision_delay,
+)
 from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
+from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import ProviderListing
 from qtrad.domain.market_data import (
     BarProvenance,
+    DataGap,
     DataQuality,
     MarketBar,
     PriceBasis,
@@ -60,6 +69,13 @@ from qtrad.runtime.backfill_plan import (
 )
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
+from qtrad.runtime.foundation_bundle import (
+    load_foundation_config,
+    persist_foundation_bundle,
+    verify_foundation_bundle,
+    verify_foundation_configuration_evidence,
+    verify_observation_build_evidence,
+)
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -78,6 +94,7 @@ from qtrad.runtime.qualification_gap_plan_set import (
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
+    ResearchSnapshotImport,
     load_research_snapshot_import,
     research_snapshot_metadata,
 )
@@ -278,6 +295,45 @@ def build_parser() -> argparse.ArgumentParser:
     research_rank.add_argument("--experiment", type=Path, required=True)
     research_rank.add_argument("--snapshot-import-evidence", type=Path, required=True)
     research_rank.add_argument("--output", type=Path, required=True)
+    research_observations = research_sub.add_parser(
+        "observations", help="build or verify causal native observation datasets"
+    )
+    research_observations_sub = research_observations.add_subparsers(
+        dest="observations_command", required=True
+    )
+    observations_build = research_observations_sub.add_parser(
+        "build", help="build observations from an isolated verified snapshot"
+    )
+    observations_build.add_argument("--universe", type=Path, required=True)
+    observations_build.add_argument("--start", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--end", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--calibration-start", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--calibration-end", type=_utc_minute_argument, required=True)
+    observations_build.add_argument("--snapshot-import-evidence", type=Path, required=True)
+    observations_build.add_argument("--availability-percentile", type=float, required=True)
+    observations_build.add_argument(
+        "--availability-safety-margin-seconds", type=float, required=True
+    )
+    observations_verify = research_observations_sub.add_parser(
+        "verify", help="independently verify an observation manifest and its Parquet files"
+    )
+    observations_verify.add_argument("--manifest", type=Path, required=True)
+    research_foundation = research_sub.add_parser(
+        "foundation", help="verify an immutable causal foundation bundle"
+    )
+    research_foundation_sub = research_foundation.add_subparsers(
+        dest="foundation_command", required=True
+    )
+    foundation_verify = research_foundation_sub.add_parser(
+        "verify", help="verify every foundation child and cross-reference"
+    )
+    foundation_verify.add_argument("--bundle", type=Path, required=True)
+    foundation_build = research_foundation_sub.add_parser(
+        "build", help="build an immutable causal foundation bundle from observations"
+    )
+    foundation_build.add_argument("--observations-manifest", type=Path, required=True)
+    foundation_build.add_argument("--configuration", type=Path, required=True)
+    foundation_build.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -493,6 +549,53 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
+        and args.observations_command == "build"
+    ):
+        asyncio.run(
+            _build_research_observations(
+                settings,
+                clock,
+                universe_path=args.universe,
+                start=args.start,
+                end=args.end,
+                calibration_start=args.calibration_start,
+                calibration_end=args.calibration_end,
+                snapshot_import_path=args.snapshot_import_evidence,
+                availability_percentile=args.availability_percentile,
+                availability_safety_margin=timedelta(
+                    seconds=args.availability_safety_margin_seconds
+                ),
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
+        and args.observations_command == "verify"
+    ):
+        asyncio.run(_verify_research_observations(settings, clock, args.manifest))
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "build"
+    ):
+        asyncio.run(
+            _build_foundation_bundle(
+                settings,
+                clock,
+                observations_manifest_path=args.observations_manifest,
+                configuration_path=args.configuration,
+                output_path=args.output,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "verify"
+    ):
+        asyncio.run(_verify_foundation_bundle(settings, clock, args.bundle))
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -541,6 +644,338 @@ def main(argv: Sequence[str] | None = None) -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         raise RuntimeError("unhandled command")
+
+
+async def _build_research_observations(
+    settings: Settings,
+    clock: Clock,
+    *,
+    universe_path: Path,
+    start: datetime,
+    end: datetime,
+    calibration_start: datetime,
+    calibration_end: datetime,
+    snapshot_import_path: Path,
+    availability_percentile: float,
+    availability_safety_margin: timedelta,
+) -> None:
+    if end <= start:
+        raise ValueError("observation build end must follow start")
+    if calibration_end <= calibration_start or calibration_start < start or calibration_end > end:
+        raise ValueError("availability calibration range must be contained in observation bounds")
+    if availability_safety_margin < timedelta(0):
+        raise ValueError("availability safety margin must not be negative")
+    universe = load_capture_universe(universe_path)
+    snapshot = load_research_snapshot_import(snapshot_import_path)
+    _validate_observation_snapshot(settings, universe, snapshot, required_end=end)
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    store = PostgresAuditStore(engine)
+    instruments = tuple(instrument.instrument_id for instrument in universe.instruments)
+    encoded_instruments = json.dumps([str(instrument_id) for instrument_id in instruments])
+    try:
+        candidates = await store.read_quote_derived_bar_candidates(
+            instrument_ids=instruments,
+            interval_start=start,
+            interval_end=end,
+        )
+        gap_rows = await store.query(
+            """
+            SELECT instrument_id, interval_start, interval_end, reason, detected_at, repaired_at
+            FROM read_model.data_gaps
+            WHERE instrument_id IN (
+                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+            )
+              AND interval_start < :interval_end
+              AND interval_end > :interval_start
+            ORDER BY instrument_id, interval_start, detected_at
+            """,
+            {
+                "instrument_ids": encoded_instruments,
+                "interval_start": start,
+                "interval_end": end,
+            },
+        )
+        listing_rows = await store.query(
+            """
+            SELECT instrument_id, valid_from, valid_to
+            FROM reference.provider_listings
+            WHERE instrument_id IN (
+                SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+            )
+              AND valid_from < :interval_end
+              AND COALESCE(valid_to, :interval_end) > :interval_start
+            ORDER BY instrument_id, valid_from, valid_to
+            """,
+            {
+                "instrument_ids": encoded_instruments,
+                "interval_start": start,
+                "interval_end": end,
+            },
+        )
+    finally:
+        await engine.dispose()
+    dataset = build_observation_dataset(
+        candidates,
+        configuration={
+            "universe_name": universe.name,
+            "universe_configuration_hash": universe.configuration_hash,
+            "ordered_instruments": [str(instrument_id) for instrument_id in instruments],
+            "interval_start": start.isoformat(),
+            "interval_end": end.isoformat(),
+        },
+        source_dataset_ids=(snapshot.import_sha256,),
+        selection_policies={
+            "provenance": BarProvenance.QUOTE_DERIVED.value,
+            "availability_basis": "persisted_at",
+            "canonical_lineage": "GLOBAL_POSITION_EXACT",
+        },
+    )
+    availability = measure_availability_delay(
+        dataset,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
+        configured_percentile=availability_percentile,
+        safety_margin=availability_safety_margin,
+        grid_resolution=timedelta(minutes=1),
+    )
+    revisions = measure_revision_delay(
+        dataset,
+        calibration_start=calibration_start,
+        calibration_end=calibration_end,
+    )
+    gaps = tuple(_data_gap_from_row(row) for row in gap_rows)
+    active_intervals = _source_active_intervals(instruments, listing_rows, start=start, end=end)
+    event_types: dict[str, int] = {}
+    for row in dataset.rows:
+        event_types[row.event_type] = event_types.get(row.event_type, 0) + 1
+    build_evidence: dict[str, JsonValue] = {
+        "availability_delay_report": availability.as_json(),
+        "revision_delay_report": revisions.as_json(),
+        "data_gaps": [_data_gap_json(gap) for gap in gaps],
+        "source_active_intervals": {
+            instrument_id: [[left.isoformat(), right.isoformat()] for left, right in intervals]
+            for instrument_id, intervals in active_intervals.items()
+        },
+        "lineage_summary": {
+            "row_count": len(dataset.rows),
+            "event_type_counts": dict(sorted(event_types.items())),
+            "minimum_global_position": min(
+                (row.global_position for row in dataset.rows), default=None
+            ),
+            "maximum_global_position": max(
+                (row.global_position for row in dataset.rows), default=None
+            ),
+        },
+        "observation_bounds": {
+            "interval_start": start.isoformat(),
+            "interval_end": end.isoformat(),
+        },
+    }
+    research = ParquetResearchStore(settings.research_root, clock)
+    manifest = await research.write_observations(
+        dataset,
+        metadata={
+            "universe_name": universe.name,
+            "universe_configuration_hash": universe.configuration_hash,
+            "revision_count": sum(row.revision > 1 for row in dataset.rows),
+        },
+        application_version=__version__,
+        image_identity=settings.image,
+        source_snapshot=research_snapshot_metadata(snapshot),
+        build_evidence=build_evidence,
+    )
+    await ParquetResearchStore(settings.research_root, clock).read_observations(
+        manifest.manifest_id
+    )
+    await _verify_research_observations(
+        settings,
+        clock,
+        settings.research_root / "manifests" / f"{manifest.manifest_id}.json",
+    )
+
+
+async def _verify_research_observations(
+    settings: Settings, clock: Clock, manifest_path: Path
+) -> None:
+    expected_directory = settings.research_root.resolve() / "manifests"
+    if manifest_path.parent.resolve() != expected_directory:
+        raise ValueError("observation manifest must be inside the configured research root")
+    verified = await ParquetObservationStore(settings.research_root, clock).verify(
+        manifest_path.stem
+    )
+    dataset = await ParquetObservationStore(settings.research_root, clock).read_observations(
+        manifest_path.stem
+    )
+    evidence = verify_observation_build_evidence(verified, dataset)
+    print(
+        json.dumps(
+            {
+                "contract": verified.contract,
+                "dataset_id": dataset.dataset_id,
+                "manifest_id": verified.manifest_id,
+                "manifest_sha256": verified.manifest_sha256,
+                "rows": len(dataset.rows),
+                "files": len(verified.files),
+                "availability_delay_report": evidence.payload["availability_delay_report"],
+                "revision_delay_report": evidence.payload["revision_delay_report"],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _build_foundation_bundle(
+    settings: Settings,
+    clock: Clock,
+    *,
+    observations_manifest_path: Path,
+    configuration_path: Path,
+    output_path: Path,
+) -> None:
+    expected_directory = settings.research_root.resolve() / "manifests"
+    if observations_manifest_path.parent.resolve() != expected_directory:
+        raise ValueError("observation manifest must be inside the configured research root")
+    observation_store = ParquetResearchStore(settings.research_root, clock)
+    observations = await observation_store.read_observations(observations_manifest_path.stem)
+    observation_manifest = await ParquetObservationStore(settings.research_root, clock).verify(
+        observations_manifest_path.stem
+    )
+    evidence = verify_observation_build_evidence(observation_manifest, observations)
+    configuration = load_foundation_config(configuration_path)
+    verify_foundation_configuration_evidence(configuration, observations, evidence)
+    panel = build_asof_panel(
+        observations,
+        configuration,
+        gaps=evidence.gaps,
+        source_active_intervals=evidence.source_active_intervals,
+    )
+    targets = build_frozen_targets(
+        observations,
+        configuration,
+        horizons=configuration.target_horizons,
+    )
+    folds = build_expanding_folds(targets, configuration)
+    forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
+    bundle = await persist_foundation_bundle(
+        root=settings.research_root,
+        clock=clock,
+        output_path=output_path,
+        observation_manifest=observation_manifest,
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+        availability_evidence=evidence.payload,
+        application_version=__version__,
+        image_identity=settings.image,
+    )
+    print(
+        json.dumps(
+            {
+                "bundle_id": bundle.bundle_id,
+                "output": str(output_path),
+                "children": {child.name: child.manifest_id for child in bundle.children},
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_path: Path) -> None:
+    verified = await verify_foundation_bundle(
+        root=settings.research_root,
+        bundle_path=bundle_path,
+        clock=clock,
+    )
+    print(
+        json.dumps(
+            {
+                "contract": verified.bundle.CONTRACT,
+                "bundle_id": verified.bundle.bundle_id,
+                "children": {
+                    child.name: {
+                        "dataset_id": child.dataset_id,
+                        "manifest_id": child.manifest_id,
+                        "rows": child.row_count,
+                    }
+                    for child in verified.bundle.children
+                },
+                "coverage": [summary.as_json() for summary in verified.bundle.coverage],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _validate_observation_snapshot(
+    settings: Settings,
+    universe: CaptureUniverse,
+    snapshot: ResearchSnapshotImport,
+    *,
+    required_end: datetime,
+) -> None:
+    database_name = make_url(settings.database_url).database
+    if database_name is None or not database_name.startswith("qtrad_research_"):
+        raise ValueError("observation build requires an isolated research database")
+    if database_name != snapshot.target_database:
+        raise ValueError("research snapshot evidence does not identify the configured database")
+    if settings.capture_source_id != snapshot.capture_source_id:
+        raise ValueError("research snapshot evidence does not identify the configured source")
+    if universe.configuration_hash != snapshot.universe_hash:
+        raise ValueError("research snapshot evidence does not identify the selected universe")
+    if snapshot.universe_name != universe.name:
+        raise ValueError("research snapshot evidence has a different universe name")
+    if snapshot.source_created_at < required_end:
+        raise ValueError("research snapshot predates the required observation range")
+
+
+def _data_gap_from_row(row: dict[str, object]) -> DataGap:
+    repaired = row["repaired_at"]
+    return DataGap(
+        instrument_id=InstrumentId(str(row["instrument_id"])),
+        interval_start=_as_utc(row["interval_start"]),
+        interval_end=_as_utc(row["interval_end"]),
+        reason=str(row["reason"]),
+        detected_at=_as_utc(row["detected_at"]),
+        repaired_at=None if repaired is None else _as_utc(repaired),
+    )
+
+
+def _data_gap_json(gap: DataGap) -> dict[str, JsonValue]:
+    return {
+        "instrument_id": str(gap.instrument_id),
+        "interval_start": gap.interval_start.isoformat(),
+        "interval_end": gap.interval_end.isoformat(),
+        "reason": gap.reason,
+        "detected_at": gap.detected_at.isoformat(),
+        "repaired_at": gap.repaired_at.isoformat() if gap.repaired_at is not None else None,
+    }
+
+
+def _source_active_intervals(
+    instruments: Sequence[InstrumentId],
+    rows: Sequence[dict[str, object]],
+    *,
+    start: datetime,
+    end: datetime,
+) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+    intervals: dict[str, list[tuple[datetime, datetime]]] = {
+        str(instrument_id): [] for instrument_id in instruments
+    }
+    for row in rows:
+        instrument_id = str(row["instrument_id"])
+        active_start = max(start, _as_utc(row["valid_from"]))
+        valid_to = row["valid_to"]
+        active_end = min(end, end if valid_to is None else _as_utc(valid_to))
+        if active_end > active_start:
+            intervals[instrument_id].append((active_start, active_end))
+    return {
+        instrument_id: tuple(sorted(set(values)))
+        for instrument_id, values in sorted(intervals.items())
+    }
 
 
 async def _review_qualification_gap_history(

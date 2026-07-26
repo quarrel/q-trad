@@ -16,6 +16,7 @@ from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConfl
 from qtrad.api.app import create_app, engine_from_app
 from qtrad.application.backfill_planning import backfill_plan_payload, build_backfill_plan
 from qtrad.application.ingestion import IngestionService
+from qtrad.application.research_observations import build_observation_dataset
 from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.events import EventEnvelope
@@ -42,6 +43,85 @@ DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
     not DATABASE_URL, reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration"
 )
+
+
+@pytest.mark.asyncio
+async def test_quote_derived_observation_query_joins_every_revision_to_canonical_lineage() -> None:
+    assert DATABASE_URL is not None
+    engine = create_async_engine(DATABASE_URL)
+    store = PostgresAuditStore(engine)
+    await store.seed_instruments()
+    offset = int(uuid4().hex[:8], 16) % 1_000_000
+    interval_start = datetime(2035, 1, 1, tzinfo=UTC) + timedelta(minutes=offset)
+    instrument_id = InstrumentId("fx:aud-usd")
+    listing_id = ProviderListingId("fixture", "integration", f"AUDUSD-{uuid4().hex}")
+    stream_id = f"market-bar:{instrument_id}:{PriceBasis.MID}"
+    previous = await store.latest_stream_version(stream_id)
+    bars = (
+        MarketBar(
+            instrument_id=instrument_id,
+            basis=PriceBasis.MID,
+            interval_start=interval_start,
+            interval_end=interval_start + timedelta(minutes=1),
+            open=Decimal("1.00"),
+            high=Decimal("1.01"),
+            low=Decimal("0.99"),
+            close=Decimal("1.00"),
+            sample_count=2,
+            revision=1,
+            provenance=BarProvenance.QUOTE_DERIVED,
+            quality=DataQuality.HEALTHY,
+            source_listing_id=listing_id,
+        ),
+        MarketBar(
+            instrument_id=instrument_id,
+            basis=PriceBasis.MID,
+            interval_start=interval_start,
+            interval_end=interval_start + timedelta(minutes=1),
+            open=Decimal("1.00"),
+            high=Decimal("1.02"),
+            low=Decimal("0.99"),
+            close=Decimal("1.01"),
+            sample_count=3,
+            revision=2,
+            provenance=BarProvenance.QUOTE_DERIVED,
+            quality=DataQuality.HEALTHY,
+            source_listing_id=listing_id,
+        ),
+    )
+    for index, bar in enumerate(bars, start=1):
+        event = EventEnvelope.create(
+            stream_id=stream_id,
+            stream_version=previous + index,
+            event_type="MarketBarClosed" if bar.revision == 1 else "MarketBarCorrected",
+            event_time=bar.interval_end,
+            received_time=bar.interval_end + timedelta(seconds=index),
+            producer="integration-test",
+            producer_version="1",
+            payload=bar,
+        )
+        await store.append(event, expected_stream_version=previous + index - 1)
+
+    candidates = await store.read_quote_derived_bar_candidates(
+        instrument_ids=(instrument_id,),
+        interval_start=interval_start,
+        interval_end=interval_start + timedelta(minutes=1),
+    )
+    dataset = build_observation_dataset(
+        candidates,
+        configuration={
+            "interval_start": interval_start.isoformat(),
+            "interval_end": (interval_start + timedelta(minutes=1)).isoformat(),
+        },
+    )
+
+    assert tuple(row.revision for row in dataset.rows) == (1, 2)
+    assert tuple(row.stream_version for row in dataset.rows) == (previous + 1, previous + 2)
+    assert tuple(row.event_type for row in dataset.rows) == (
+        "MarketBarClosed",
+        "MarketBarCorrected",
+    )
+    await engine.dispose()
 
 
 @pytest.mark.asyncio

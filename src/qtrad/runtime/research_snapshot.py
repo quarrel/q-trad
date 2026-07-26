@@ -50,6 +50,8 @@ def research_snapshot_metadata(evidence: ResearchSnapshotImport) -> dict[str, Js
         "kind": "verified-capture-snapshot",
         "import_sha256": evidence.import_sha256,
         "capture_source_id": evidence.capture_source_id,
+        "universe_name": evidence.universe_name,
+        "universe_hash": evidence.universe_hash,
         "source_created_at": _utc_text(evidence.source_created_at),
         "source_archive_sha256": evidence.source_archive_sha256,
         "source_manifest_schema": evidence.source_manifest_schema,
