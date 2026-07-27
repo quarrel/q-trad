@@ -38,6 +38,7 @@ from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_fe
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
+from qtrad.application.r2_features import materialise_r2_features, verify_raw_feature_dataset
 from qtrad.application.r2_readiness import evaluate_r2_readiness
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
@@ -344,6 +345,12 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
     baselines_readiness.add_argument("--output", type=Path, required=True)
+    baselines_features = baselines_sub.add_parser(
+        "features", help="materialise and verify an OOF R2 raw-feature child"
+    )
+    baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_features.add_argument("--experiment", type=Path, required=True)
+    baselines_features.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -620,6 +627,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "features"
+    ):
+        asyncio.run(
+            _materialise_r2_features(
+                settings,
+                clock,
+                foundation_bundle_path=args.foundation_bundle,
+                experiment_path=args.experiment,
+                output_path=args.output,
+            )
+        )
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -687,6 +708,34 @@ async def _report_r2_readiness(
     report = evaluate_r2_readiness(verified, experiment)
     write_r2_readiness(output_path, report)
     print(json.dumps(report.as_json(), sort_keys=True))
+
+
+async def _materialise_r2_features(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    experiment_path: Path,
+    output_path: Path,
+) -> None:
+    if output_path.exists() or output_path.is_symlink():
+        raise ValueError("R2 feature output must be a new regular file")
+    verified = await verify_foundation_bundle(
+        root=settings.research_root,
+        bundle_path=foundation_bundle_path,
+        clock=clock,
+    )
+    experiment = load_r2_experiment(experiment_path)
+    dataset = materialise_r2_features(verified.observations, verified.panel, experiment)
+    verify_raw_feature_dataset(dataset, verified.observations, experiment)
+    payload = {
+        "contract": dataset.CONTRACT,
+        "manifest": dataset.manifest_json(),
+        "rows": [row.as_json() for row in dataset.rows],
+    }
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    print(json.dumps(dataset.manifest_json(), sort_keys=True))
 
 
 async def _build_research_observations(

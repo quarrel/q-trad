@@ -51,6 +51,13 @@ remains offline/replay
   chronological split. Representative native integration also remains pending until later R2
   feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
   history supports no model-selection or effectiveness claim.
+- R2.B software implementation now provides the identity-bound `qtrad-r2-features-v1` raw-feature
+  contract, deterministic current-cutoff revision selector, local return/volatility/time features,
+  pooled leave-one-out context, eligibility-gated spread handling, OOF holdout exclusion, a
+  JSON-emitting `research baselines features` command and independent lineage/cutoff verification.
+  Quote imbalance remains explicitly null until quote-size semantics are separately eligible. This
+  is implementation evidence only; representative integration and any model conclusion remain
+  pending.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
