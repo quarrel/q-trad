@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-26
-**Current milestone:** R2 — local and pooled baselines (planning)
+**Current milestone:** R2 — local and pooled baselines (R2.A contract complete; integration pending)
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay
 
@@ -40,6 +40,17 @@ remains offline/replay
   clean PostgreSQL, formatting, linting, typing and 456-test gate and R1 is complete. No real native
   23-market bundle or effectiveness result has been claimed from the zero-return probe or short
   history.
+- The R2.A contract and readiness preflight are implemented. The identity-bearing experiment keeps
+  the full R1 target universe, authenticated pre-holdout target/feature eligibility decisions and a
+  frozen confirmatory subset separate. Its declared cumulative feature ladder and baseline-model
+  families use a pinned scikit-learn numerical decision. The offline readiness command verifies exact
+  R1 identities and reports source-active coverage for each qualifying instrument and research block,
+  active-source duration, and usable common weeks rather than a first/last timestamp span. It enforces
+  the documented 6+2+2+2+4-week gates and configured training, outer-validation and holdout row
+  minima. Inner-validation row readiness remains explicitly partial until R2.C produces its verified
+  chronological split. Representative native integration also remains pending until later R2
+  feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
+  history supports no model-selection or effectiveness claim.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -71,8 +82,9 @@ remains offline/replay
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Finish the R2 implementation plan without weakening R1's causal artefact contracts.
-3. As the R2 entry gate, build and independently verify the real 23-market native foundation bundle
+2. Implement R2.B causal raw features against the R2.A experiment and readiness contracts, then
+   retain the representative native integration evidence required to complete R2.A.
+3. As the confirmatory R2 entry gate, build and independently verify the real 23-market native foundation bundle
    when the configured evidence interval and product-role qualification support it.
 4. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
 
