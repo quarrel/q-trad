@@ -38,7 +38,11 @@ from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_fe
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
-from qtrad.application.r2_features import materialise_r2_features, verify_raw_feature_dataset
+from qtrad.application.r2_features import (
+    R2FoundationInputs,
+    materialise_r2_features,
+    verify_raw_feature_dataset,
+)
 from qtrad.application.r2_readiness import evaluate_r2_readiness
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
@@ -94,6 +98,7 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
+from qtrad.runtime.r2_features import load_r2_feature_dataset, write_r2_feature_dataset
 from qtrad.runtime.r2_readiness import load_r2_experiment, write_r2_readiness
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -348,6 +353,12 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_features = baselines_sub.add_parser(
         "features", help="materialise and verify an OOF R2 raw-feature child"
     )
+    baselines_features_verify = baselines_sub.add_parser(
+        "features-verify", help="independently verify a persisted R2 raw-feature child"
+    )
+    baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_features_verify.add_argument("--experiment", type=Path, required=True)
+    baselines_features_verify.add_argument("--dataset", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features.add_argument("--experiment", type=Path, required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
@@ -641,6 +652,20 @@ def main(argv: Sequence[str] | None = None) -> None:
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "features-verify"
+    ):
+        asyncio.run(
+            _verify_persisted_r2_features(
+                settings,
+                clock,
+                foundation_bundle_path=args.foundation_bundle,
+                experiment_path=args.experiment,
+                dataset_path=args.dataset,
+            )
+        )
     elif args.command == "replay":
         asyncio.run(_replay(settings, clock, args.manifest))
     elif args.command == "projections" and args.projection_command == "rebuild":
@@ -726,15 +751,46 @@ async def _materialise_r2_features(
         clock=clock,
     )
     experiment = load_r2_experiment(experiment_path)
-    dataset = materialise_r2_features(verified.observations, verified.panel, experiment)
-    verify_raw_feature_dataset(dataset, verified.observations, experiment)
-    payload = {
-        "contract": dataset.CONTRACT,
-        "manifest": dataset.manifest_json(),
-        "rows": [row.as_json() for row in dataset.rows],
-    }
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    foundation = R2FoundationInputs(
+        bundle_id=verified.bundle.bundle_id,
+        configuration=verified.configuration,
+        observations=verified.observations,
+        panel=verified.panel,
+        targets=verified.targets,
+        folds=verified.folds,
+        source_active_intervals=verified.source_active_intervals,
+    )
+    dataset = materialise_r2_features(foundation, experiment)
+    verify_raw_feature_dataset(dataset, foundation, experiment)
+    write_r2_feature_dataset(output_path, dataset)
+    print(json.dumps(dataset.manifest_json(), sort_keys=True))
+
+
+async def _verify_persisted_r2_features(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    experiment_path: Path,
+    dataset_path: Path,
+) -> None:
+    verified = await verify_foundation_bundle(
+        root=settings.research_root,
+        bundle_path=foundation_bundle_path,
+        clock=clock,
+    )
+    experiment = load_r2_experiment(experiment_path)
+    foundation = R2FoundationInputs(
+        bundle_id=verified.bundle.bundle_id,
+        configuration=verified.configuration,
+        observations=verified.observations,
+        panel=verified.panel,
+        targets=verified.targets,
+        folds=verified.folds,
+        source_active_intervals=verified.source_active_intervals,
+    )
+    dataset = load_r2_feature_dataset(dataset_path)
+    verify_raw_feature_dataset(dataset, foundation, experiment)
     print(json.dumps(dataset.manifest_json(), sort_keys=True))
 
 
