@@ -51,14 +51,17 @@ remains offline/replay
   chronological split. Representative native integration also remains pending until later R2
   feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
   history supports no model-selection or effectiveness claim.
-- R2.B software now provides the identity-bound `qtrad-r2-features-v1` raw-feature contract;
-  current-cutoff revision, missingness and source-activity selection; exact local return and causal
-  rolling features; leave-one-out global, market-group and VIX context; aligned eligibility-gated
-  spread handling; and locked-holdout exclusion. `research baselines features` persists the child,
-  while `features-verify` strictly loads it and independently replays every row, value and lineage
-  from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size semantics are
-  separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative integration and any
-  model conclusion remain pending.
+- R2.B software now provides the identity-bound `qtrad-r2-features-v1` raw-feature contract.
+  Materialisation authenticates the complete R1 bundle, its availability evidence and every child
+  binding before using exact interval start/end and configured current-cutoff selection. It provides
+  exact local return and causal N-return rolling features, activity-adjusted missingness, fixed
+  leave-one-out model and market-group universes, VIX context, aligned eligibility-gated spreads and
+  locked-holdout exclusion. `research baselines features` writes a bounded immutable chunked-Parquet
+  child with separate semantic dataset and physical manifest identities; `features-verify` validates
+  its strict wide schema, chunk and lineage hashes, then independently replays every row, value and
+  lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
+  semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
+  integration and any model conclusion remain pending.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all

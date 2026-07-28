@@ -7,8 +7,12 @@ from typing import Any, cast
 
 import pytest
 
-from qtrad.application.r2_readiness import evaluate_r2_readiness
-from qtrad.domain.foundation import InstrumentRole, ReturnDisposition
+from qtrad.application.r2_readiness import (
+    _availability_dataset_id,
+    evaluate_r2_readiness,
+)
+from qtrad.domain.events import JsonValue
+from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, ReturnDisposition
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
     EvidenceClass,
@@ -218,44 +222,91 @@ def _verified(
         )
         for index, fold in enumerate(raw_folds, start=1)
     )
-    active = {
-        instrument: [
+    active: dict[str, JsonValue] = {
+        instrument: cast(
+            JsonValue,
             [
-                (
-                    START + timedelta(weeks=1) if instrument == late_instrument else START
-                ).isoformat(),
-                END.isoformat(),
-            ]
-        ]
+                [
+                    (
+                        START + timedelta(weeks=1) if instrument == late_instrument else START
+                    ).isoformat(),
+                    END.isoformat(),
+                ]
+            ],
+        )
         for instrument in config.ordered_instruments
     }
+    evidence: dict[str, JsonValue] = {
+        "availability_delay_report": {},
+        "revision_delay_report": {},
+        "data_gaps": [],
+        "source_active_intervals": active,
+        "lineage_summary": {},
+        "observation_bounds": {
+            "interval_start": START.isoformat(),
+            "interval_end": END.isoformat(),
+        },
+    }
+    availability_id = _availability_dataset_id(config.observation_dataset_id, evidence)
     r1_config = SimpleNamespace(
         configuration_id=config.foundation_configuration_id,
+        observation_dataset_id=config.observation_dataset_id,
         ordered_instruments=config.ordered_instruments,
         instrument_roles=config.instrument_roles,
         target_horizons=config.horizons,
         holdout_range=config.holdout_range,
         range_start=START,
         range_end=END,
+        availability_basis=AvailabilityBasis.PERSISTED_AT,
     )
     return SimpleNamespace(
         bundle=SimpleNamespace(
             bundle_id=config.r1_bundle_id,
+            ordered_instruments=config.ordered_instruments,
+            range_start=START,
+            range_end=END,
+            configuration=SimpleNamespace(dataset_id=config.foundation_configuration_id),
+            observations=SimpleNamespace(dataset_id=config.observation_dataset_id),
+            availability=SimpleNamespace(dataset_id=availability_id),
+            panel=SimpleNamespace(dataset_id=config.panel_dataset_id),
+            targets=SimpleNamespace(dataset_id=config.target_dataset_id),
+            folds=SimpleNamespace(dataset_id=config.fold_dataset_id),
             build_summary={
                 "application_version": config.r1_application_version,
                 "image_identity": config.r1_image_identity,
             },
         ),
         configuration=r1_config,
-        observations=SimpleNamespace(dataset_id=config.observation_dataset_id),
-        panel=SimpleNamespace(dataset_id=config.panel_dataset_id),
+        observations=SimpleNamespace(
+            dataset_id=config.observation_dataset_id,
+            selection_policies={"availability_basis": AvailabilityBasis.PERSISTED_AT.value},
+        ),
+        panel=SimpleNamespace(
+            dataset_id=config.panel_dataset_id,
+            observation_dataset_id=config.observation_dataset_id,
+            foundation_configuration_id=config.foundation_configuration_id,
+        ),
         targets=SimpleNamespace(
             dataset_id=config.target_dataset_id,
+            observation_dataset_id=config.observation_dataset_id,
+            foundation_configuration_id=config.foundation_configuration_id,
             rows=rows,
         ),
-        folds=SimpleNamespace(dataset_id=config.fold_dataset_id, folds=selected_folds),
+        folds=SimpleNamespace(
+            dataset_id=config.fold_dataset_id,
+            foundation_configuration_id=config.foundation_configuration_id,
+            target_dataset_id=config.target_dataset_id,
+            folds=selected_folds,
+        ),
         forecasts=SimpleNamespace(),
-        availability_evidence={"source_active_intervals": active},
+        availability_evidence=evidence,
+    )
+
+
+def _refresh_availability_identity(verified: Any) -> None:
+    verified.bundle.availability.dataset_id = _availability_dataset_id(
+        verified.observations.dataset_id,
+        verified.availability_evidence,
     )
 
 
@@ -360,6 +411,7 @@ def test_sparse_disjoint_activity_cannot_pass_from_first_and_last_timestamps() -
     disjoint.append([(END - timedelta(minutes=1)).isoformat(), END.isoformat()])
     for instrument in QUALIFYING:
         verified.availability_evidence["source_active_intervals"][instrument] = disjoint
+    _refresh_availability_identity(verified)
 
     report = evaluate_r2_readiness(verified, config)
 
@@ -409,6 +461,7 @@ def test_inactive_intervals_are_excluded_but_active_missing_targets_reduce_cover
         [START.isoformat(), (START + timedelta(minutes=30)).isoformat()],
         [(START + timedelta(minutes=60)).isoformat(), END.isoformat()],
     ]
+    _refresh_availability_identity(verified)
     ready = evaluate_r2_readiness(verified, config)
     missing = evaluate_r2_readiness(
         _verified(

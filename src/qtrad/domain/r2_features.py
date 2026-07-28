@@ -51,6 +51,8 @@ class RawFeatureValue:
             raise ValueError("raw feature values must be finite or null")
         if len(set(self.source_event_ids)) != len(self.source_event_ids):
             raise ValueError("raw feature lineage must not contain duplicate events")
+        if any(not item for item in self.source_event_ids):
+            raise ValueError("raw feature lineage identifiers must be non-empty")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -84,8 +86,8 @@ class RawFeatureRow:
 
     def semantic_key(self) -> tuple[object, ...]:
         return (
-            self.target_instrument_id,
             self.decision_time,
+            self.target_instrument_id,
             self.feature_data_asof,
             self.latest_feature_bar_end,
             self.feature_set_id,
@@ -108,6 +110,8 @@ class R2FeatureDataset:
 
     rows: tuple[RawFeatureRow, ...]
     feature_schema: tuple[FeatureDefinition, ...]
+    feature_set_name: str
+    feature_set_id: str
     raw_feature_schema_id: str
     observation_dataset_id: str
     panel_dataset_id: str
@@ -122,6 +126,8 @@ class R2FeatureDataset:
     SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
+        if not self.feature_set_name or not self.feature_set_id:
+            raise ValueError("feature dataset requires explicit feature-set identity")
         if not self.holdout_excluded:
             raise ValueError("an OOF feature dataset must exclude the locked holdout")
         ordered = tuple(sorted(self.rows, key=RawFeatureRow.semantic_key))
@@ -130,7 +136,16 @@ class R2FeatureDataset:
         if len({item.name for item in self.feature_schema}) != len(self.feature_schema):
             raise ValueError("feature schema names must be unique")
         expected_names = tuple(item.name for item in self.feature_schema)
+        expected_set_id = feature_set_id(
+            self.experiment_configuration_id,
+            self.feature_set_name,
+            self.feature_schema,
+        )
+        if self.feature_set_id != expected_set_id:
+            raise ValueError("feature set ID does not match its declared name and schema")
         for row in self.rows:
+            if row.feature_set_id != self.feature_set_id:
+                raise ValueError("feature row feature-set ID differs from its dataset")
             if tuple(item.name for item in row.values) != expected_names:
                 raise ValueError("feature row order differs from its raw-feature schema")
         if self.raw_feature_schema_id != feature_schema_id(self.feature_schema):
@@ -138,6 +153,8 @@ class R2FeatureDataset:
         expected = feature_dataset_id(
             rows=self.rows,
             feature_schema=self.feature_schema,
+            feature_set_name=self.feature_set_name,
+            feature_set_identity=self.feature_set_id,
             observation_dataset_id=self.observation_dataset_id,
             panel_dataset_id=self.panel_dataset_id,
             target_dataset_id=self.target_dataset_id,
@@ -155,6 +172,8 @@ class R2FeatureDataset:
         rows: Sequence[RawFeatureRow],
         *,
         feature_schema: Sequence[FeatureDefinition],
+        feature_set_name: str,
+        feature_set_id: str | None = None,
         observation_dataset_id: str,
         panel_dataset_id: str,
         target_dataset_id: str,
@@ -164,9 +183,32 @@ class R2FeatureDataset:
     ) -> "R2FeatureDataset":
         ordered_rows = tuple(sorted(rows, key=RawFeatureRow.semantic_key))
         schema = tuple(feature_schema)
+        expected_set_id = _canonical_feature_set_id(
+            experiment_configuration_id,
+            feature_set_name,
+            schema,
+        )
+        if feature_set_id is not None and feature_set_id != expected_set_id:
+            raise ValueError("feature set ID does not match its declared name and schema")
+        resolved_set_id = expected_set_id
+        dataset_id = _canonical_feature_dataset_id(
+            rows=ordered_rows,
+            feature_schema=schema,
+            feature_set_name=feature_set_name,
+            feature_set_identity=resolved_set_id,
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            target_dataset_id=target_dataset_id,
+            fold_dataset_id=fold_dataset_id,
+            experiment_configuration_id=experiment_configuration_id,
+            evidence_class=evidence_class,
+            holdout_excluded=True,
+        )
         return cls(
             rows=ordered_rows,
             feature_schema=schema,
+            feature_set_name=feature_set_name,
+            feature_set_id=resolved_set_id,
             raw_feature_schema_id=feature_schema_id(schema),
             observation_dataset_id=observation_dataset_id,
             panel_dataset_id=panel_dataset_id,
@@ -175,17 +217,7 @@ class R2FeatureDataset:
             experiment_configuration_id=experiment_configuration_id,
             evidence_class=evidence_class,
             holdout_excluded=True,
-            dataset_id=feature_dataset_id(
-                rows=ordered_rows,
-                feature_schema=schema,
-                observation_dataset_id=observation_dataset_id,
-                panel_dataset_id=panel_dataset_id,
-                target_dataset_id=target_dataset_id,
-                fold_dataset_id=fold_dataset_id,
-                experiment_configuration_id=experiment_configuration_id,
-                evidence_class=evidence_class,
-                holdout_excluded=True,
-            ),
+            dataset_id=dataset_id,
         )
 
     def manifest_json(self) -> dict[str, JsonValue]:
@@ -193,6 +225,8 @@ class R2FeatureDataset:
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "dataset_id": self.dataset_id,
+            "feature_set_name": self.feature_set_name,
+            "feature_set_id": self.feature_set_id,
             "raw_feature_schema_id": self.raw_feature_schema_id,
             "feature_schema": [item.as_json() for item in self.feature_schema],
             "observation_dataset_id": self.observation_dataset_id,
@@ -312,7 +346,8 @@ def feature_registry(experiment: R2ExperimentConfig) -> tuple[FeatureDefinition,
             (
                 FeatureDefinition("cross_market_missing_count", FeatureFamily.POOLED_CROSS_ASSET),
                 FeatureDefinition(
-                    "cross_market_source_active_count", FeatureFamily.POOLED_CROSS_ASSET
+                    "cross_market_source_active_count",
+                    FeatureFamily.POOLED_CROSS_ASSET,
                 ),
             )
         )
@@ -339,24 +374,33 @@ def feature_set_id(experiment_id: str, name: str, schema: Sequence[FeatureDefini
     )
 
 
-def feature_dataset_id(
-    *,
-    rows: Sequence[RawFeatureRow],
-    feature_schema: Sequence[FeatureDefinition],
-    observation_dataset_id: str,
-    panel_dataset_id: str,
-    target_dataset_id: str,
-    fold_dataset_id: str,
-    experiment_configuration_id: str,
-    evidence_class: EvidenceClass,
-    holdout_excluded: bool,
-) -> str:
-    return _hash_json(
-        {
+_canonical_feature_set_id = feature_set_id
+
+
+class FeatureDatasetSemanticHasher:
+    """Incrementally hash the canonical semantic dataset representation."""
+
+    def __init__(
+        self,
+        *,
+        feature_schema: Sequence[FeatureDefinition],
+        feature_set_name: str,
+        feature_set_identity: str,
+        observation_dataset_id: str,
+        panel_dataset_id: str,
+        target_dataset_id: str,
+        fold_dataset_id: str,
+        experiment_configuration_id: str,
+        evidence_class: EvidenceClass,
+        holdout_excluded: bool,
+    ) -> None:
+        self._hash = sha256()
+        identity = {
             "contract": R2_FEATURE_DATASET_CONTRACT,
             "schema_version": 1,
-            "rows": [row.as_json() for row in rows],
             "feature_schema": [item.as_json() for item in feature_schema],
+            "feature_set_name": feature_set_name,
+            "feature_set_id": feature_set_identity,
             "observation_dataset_id": observation_dataset_id,
             "panel_dataset_id": panel_dataset_id,
             "target_dataset_id": target_dataset_id,
@@ -365,7 +409,57 @@ def feature_dataset_id(
             "evidence_class": evidence_class.value,
             "holdout_excluded": holdout_excluded,
         }
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        self._hash.update(encoded[:-1])
+        self._hash.update(b',"rows":[')
+        self._first = True
+
+    def update(self, row: RawFeatureRow) -> None:
+        if not self._first:
+            self._hash.update(b",")
+        self._hash.update(
+            json.dumps(row.as_json(), sort_keys=True, separators=(",", ":")).encode("utf-8")
+        )
+        self._first = False
+
+    def hexdigest(self) -> str:
+        state = self._hash.copy()
+        state.update(b"]}")
+        return state.hexdigest()
+
+
+def feature_dataset_id(
+    *,
+    rows: Sequence[RawFeatureRow],
+    feature_schema: Sequence[FeatureDefinition],
+    feature_set_name: str,
+    feature_set_identity: str,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    target_dataset_id: str,
+    fold_dataset_id: str,
+    experiment_configuration_id: str,
+    evidence_class: EvidenceClass,
+    holdout_excluded: bool,
+) -> str:
+    hasher = FeatureDatasetSemanticHasher(
+        feature_schema=feature_schema,
+        feature_set_name=feature_set_name,
+        feature_set_identity=feature_set_identity,
+        observation_dataset_id=observation_dataset_id,
+        panel_dataset_id=panel_dataset_id,
+        target_dataset_id=target_dataset_id,
+        fold_dataset_id=fold_dataset_id,
+        experiment_configuration_id=experiment_configuration_id,
+        evidence_class=evidence_class,
+        holdout_excluded=holdout_excluded,
     )
+    for row in rows:
+        hasher.update(row)
+    return hasher.hexdigest()
+
+
+_canonical_feature_dataset_id = feature_dataset_id
 
 
 def _window_suffix(window: timedelta) -> str:

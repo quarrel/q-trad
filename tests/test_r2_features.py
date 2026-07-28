@@ -1,28 +1,39 @@
-from collections.abc import Mapping
+import hashlib
+import json
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from math import log
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
+from unittest.mock import AsyncMock
 
+import polars as pl
 import pytest
 
+from qtrad import __main__ as cli
+from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
 from qtrad.application.r2_features import (
     FeatureLineageError,
     R2FoundationInputs,
     _calculate,
     _context,
+    _index,
     _missing_fraction,
     _return,
     _rolling,
+    _RowCache,
     _spread,
+    feature_schema_for_set,
     materialise_r2_features,
     select_current_cutoff,
     verify_raw_feature_dataset,
+    verify_raw_feature_manifest_bindings,
+    verify_raw_feature_rows,
 )
-from qtrad.domain.foundation import PanelRow, PanelStatus
+from qtrad.application.r2_readiness import _availability_dataset_id
+from qtrad.domain.foundation import AvailabilityBasis, PanelRow, PanelStatus
 from qtrad.domain.identifiers import ProviderListingId
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r2_features import (
@@ -42,252 +53,309 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.domain.research import ObservationRow
-from qtrad.runtime.r2_features import load_r2_feature_dataset, write_r2_feature_dataset
+from qtrad.runtime.settings import Settings
 from tests.test_r1_observations import _bar, _candidate, _dataset
-from tests.test_r2_readiness import experiment
+from tests.test_r2_readiness import END, START, TARGETS, experiment
 
 
-def test_feature_registry_is_deterministic_and_rows_follow_schema() -> None:
-    config = experiment()
-    schema = feature_registry(config)
-    assert schema == feature_registry(config)
-    assert len({item.name for item in schema}) == len(schema)
-    feature_set = config.feature_sets[0]
-    names = tuple(item.name for item in schema if item.family in feature_set.families)
-    row = RawFeatureRow(
-        target_instrument_id=config.target_instruments[0],
-        decision_time=datetime(2026, 1, 1, tzinfo=UTC),
-        feature_data_asof=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        latest_feature_bar_end=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        feature_set_id="fixture-set",
-        values=tuple(RawFeatureValue(name, None) for name in names),
-    )
-    assert row.semantic_key()[0] == config.target_instruments[0]
+class FixedClock:
+    def __init__(self, now: datetime = datetime(2026, 7, 28, tzinfo=UTC)) -> None:
+        self._now = now
+
+    def now(self) -> datetime:
+        return self._now
 
 
-def test_feature_dataset_rejects_non_schema_order() -> None:
-    config = experiment()
-    schema = feature_registry(config)
-    names = tuple(item.name for item in schema if item.family in config.feature_sets[0].families)
-    row = RawFeatureRow(
-        target_instrument_id=config.target_instruments[0],
-        decision_time=datetime(2026, 1, 1, tzinfo=UTC),
-        feature_data_asof=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        latest_feature_bar_end=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        feature_set_id="fixture-set",
-        values=tuple(RawFeatureValue(name, None) for name in reversed(names)),
-    )
-    with pytest.raises(ValueError, match="feature row order"):
-        R2FeatureDataset.create(
-            (row,),
-            feature_schema=tuple(
-                item for item in schema if item.family in config.feature_sets[0].families
+def _minimal_foundation(
+    start: datetime,
+    end: datetime,
+    instruments: tuple[str, ...] = ("fx:aud-usd",),
+    *,
+    availability_basis: AvailabilityBasis = AvailabilityBasis.PERSISTED_AT,
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] | None = None,
+) -> R2FoundationInputs:
+    intervals = active or {instrument: ((start, end),) for instrument in instruments}
+    return cast(
+        R2FoundationInputs,
+        SimpleNamespace(
+            configuration=SimpleNamespace(
+                grid_resolution=timedelta(minutes=1),
+                availability_basis=availability_basis,
             ),
-            observation_dataset_id=config.observation_dataset_id,
-            panel_dataset_id=config.panel_dataset_id,
-            target_dataset_id=config.target_dataset_id,
-            fold_dataset_id=config.fold_dataset_id,
-            experiment_configuration_id=config.configuration_id,
-            evidence_class=EvidenceClass.IMPLEMENTATION,
+            source_active_intervals=intervals,
+        ),
+    )
+
+
+def _availability_evidence(
+    config: R2ExperimentConfig,
+    intervals: dict[str, tuple[tuple[datetime, datetime], ...]],
+) -> dict[str, Any]:
+    complete = {
+        instrument: intervals.get(instrument, ()) for instrument in config.ordered_instruments
+    }
+    return {
+        "availability_delay_report": {},
+        "revision_delay_report": {},
+        "data_gaps": [],
+        "source_active_intervals": {
+            instrument: [[left.isoformat(), right.isoformat()] for left, right in values]
+            for instrument, values in complete.items()
+        },
+        "lineage_summary": {},
+        "observation_bounds": {
+            "interval_start": START.isoformat(),
+            "interval_end": END.isoformat(),
+        },
+    }
+
+
+def _foundation(
+    config: R2ExperimentConfig,
+    *,
+    observation_rows: tuple[ObservationRow, ...] = (),
+    panel_rows: tuple[PanelRow, ...] = (),
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] | None = None,
+    overrides: dict[str, str] | None = None,
+) -> R2FoundationInputs:
+    values = overrides or {}
+    observation_id = values.get("observation_id", config.observation_dataset_id)
+    configuration_id = values.get("configuration_id", config.foundation_configuration_id)
+    panel_id = values.get("panel_id", config.panel_dataset_id)
+    target_id = values.get("target_id", config.target_dataset_id)
+    fold_id = values.get("fold_id", config.fold_dataset_id)
+    bundle_id = values.get("bundle_id", config.r1_bundle_id)
+    intervals: dict[str, tuple[tuple[datetime, datetime], ...]] = (
+        active
+        if active is not None
+        else {instrument: () for instrument in config.ordered_instruments}
+    )
+    evidence = _availability_evidence(config, intervals)
+    availability_id = _availability_dataset_id(observation_id, evidence)
+    return R2FoundationInputs(
+        bundle=cast(
+            Any,
+            SimpleNamespace(
+                bundle_id=bundle_id,
+                ordered_instruments=config.ordered_instruments,
+                range_start=START,
+                range_end=END,
+                configuration=SimpleNamespace(dataset_id=configuration_id),
+                observations=SimpleNamespace(dataset_id=observation_id),
+                availability=SimpleNamespace(dataset_id=availability_id),
+                panel=SimpleNamespace(dataset_id=panel_id),
+                targets=SimpleNamespace(dataset_id=target_id),
+                folds=SimpleNamespace(dataset_id=fold_id),
+                build_summary={
+                    "application_version": config.r1_application_version,
+                    "image_identity": config.r1_image_identity,
+                },
+            ),
+        ),
+        configuration=cast(
+            Any,
+            SimpleNamespace(
+                configuration_id=configuration_id,
+                observation_dataset_id=observation_id,
+                ordered_instruments=config.ordered_instruments,
+                instrument_roles=config.instrument_roles,
+                grid_resolution=timedelta(minutes=1),
+                target_horizons=config.horizons,
+                holdout_range=config.holdout_range,
+                range_start=START,
+                range_end=END,
+                availability_basis=AvailabilityBasis.PERSISTED_AT,
+            ),
+        ),
+        observations=cast(
+            Any,
+            SimpleNamespace(
+                dataset_id=observation_id,
+                rows=observation_rows,
+                selection_policies={"availability_basis": AvailabilityBasis.PERSISTED_AT.value},
+            ),
+        ),
+        panel=cast(
+            Any,
+            SimpleNamespace(
+                dataset_id=panel_id,
+                observation_dataset_id=values.get("panel_observation_id", observation_id),
+                foundation_configuration_id=values.get("panel_configuration_id", configuration_id),
+                rows=panel_rows,
+            ),
+        ),
+        targets=cast(
+            Any,
+            SimpleNamespace(
+                dataset_id=target_id,
+                observation_dataset_id=values.get("target_observation_id", observation_id),
+                foundation_configuration_id=values.get("target_configuration_id", configuration_id),
+            ),
+        ),
+        folds=cast(
+            Any,
+            SimpleNamespace(
+                dataset_id=fold_id,
+                foundation_configuration_id=values.get("fold_configuration_id", configuration_id),
+                target_dataset_id=values.get("fold_target_id", target_id),
+            ),
+        ),
+        availability_evidence=evidence,
+    )
+
+
+def _panel(config: R2ExperimentConfig, row: ObservationRow) -> PanelRow:
+    decision_time = config.holdout_range[0] - timedelta(days=1)
+    return PanelRow(
+        decision_time=decision_time,
+        instrument_id=config.target_instruments[0],
+        basis=PriceBasis.MID,
+        feature_data_asof=decision_time,
+        latest_feature_bar_end=row.interval_end,
+        status=PanelStatus.OBSERVED,
+        audit_disposition=None,
+        selected_event_id=row.event_id,
+        selected_stream_version=row.stream_version,
+        selected_global_position=row.global_position,
+        selected_availability_time=row.persisted_at,
+        selected_revision=row.revision,
+        interval_start=row.interval_start,
+        interval_end=row.interval_end,
+        open=row.open,
+        high=row.high,
+        low=row.low,
+        close=row.close,
+        sample_count=row.sample_count,
+        quality=row.quality,
+    )
+
+
+def _with_eligible_family(
+    config: R2ExperimentConfig,
+    family: FeatureFamily,
+) -> R2ExperimentConfig:
+    decisions = dict(config.feature_eligibility)
+    current = decisions[family]
+    decisions[family] = EligibilityDecision.create(
+        subject=current.subject,
+        state=FeatureEligibility.ELIGIBLE,
+        evidence_start=current.evidence_start,
+        evidence_end=current.evidence_end,
+        reason=current.reason,
+    )
+    local = (FeatureFamily.LOCAL_RETURNS, FeatureFamily.TIME_AVAILABILITY)
+    feature_sets = [FeatureSet("L0", local)]
+    local = (*local, FeatureFamily.LOCAL_VOLATILITY_RANGE)
+    feature_sets.append(FeatureSet("L1", local))
+    if decisions[FeatureFamily.SPREAD].state is FeatureEligibility.ELIGIBLE:
+        local = (*local, FeatureFamily.SPREAD)
+        feature_sets.append(FeatureSet("L2", local))
+    if decisions[FeatureFamily.QUOTE_IMBALANCE].state is FeatureEligibility.ELIGIBLE:
+        local = (*local, FeatureFamily.QUOTE_IMBALANCE)
+        feature_sets.append(FeatureSet("L3", local))
+    feature_sets.extend(
+        (
+            FeatureSet("P0", local),
+            FeatureSet("P1", (*local, FeatureFamily.POOLED_CROSS_ASSET)),
         )
+    )
+    return replace(config, feature_sets=tuple(feature_sets), feature_eligibility=decisions)
 
 
-def test_current_cutoff_uses_latest_visible_revision() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+def _wider_target_experiment() -> R2ExperimentConfig:
+    config = experiment()
+    eligibility = dict(config.target_instrument_eligibility)
+    current = eligibility[TARGETS[-1]]
+    eligibility[TARGETS[-1]] = EligibilityDecision.create(
+        subject=current.subject,
+        state=FeatureEligibility.ELIGIBLE,
+        evidence_start=current.evidence_start,
+        evidence_end=current.evidence_end,
+        reason="eligible wider-model target fixture",
+    )
+    return replace(
+        config,
+        target_instrument_eligibility=eligibility,
+        target_instruments=TARGETS,
+    )
+
+
+def test_feature_registry_and_explicit_empty_dataset_identity_are_deterministic() -> None:
+    config = experiment()
+    schema = feature_schema_for_set(config, "L0")
+    assert schema == feature_schema_for_set(config, "L0")
+    assert len({item.name for item in feature_registry(config)}) == len(feature_registry(config))
+    dataset = R2FeatureDataset.create(
+        (),
+        feature_schema=schema,
+        feature_set_name="L0",
+        observation_dataset_id=config.observation_dataset_id,
+        panel_dataset_id=config.panel_dataset_id,
+        target_dataset_id=config.target_dataset_id,
+        fold_dataset_id=config.fold_dataset_id,
+        experiment_configuration_id=config.configuration_id,
+        evidence_class=config.evidence_class,
+    )
+    assert dataset.rows == ()
+    assert dataset.feature_set_id == feature_set_id(config.configuration_id, "L0", schema)
+    assert len(dataset.dataset_id) == 64
+
+
+def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     first = _candidate(
         _bar(start, close="1.1"),
         position=1,
         received=start + timedelta(minutes=1),
-        persisted=start + timedelta(minutes=1),
+        persisted=start + timedelta(minutes=1, seconds=30),
     )
     correction = _candidate(
         _bar(start, close="1.2", revision=2),
         position=2,
-        received=start + timedelta(minutes=2),
-        persisted=start + timedelta(minutes=2),
+        received=start + timedelta(minutes=1, seconds=15),
+        persisted=start + timedelta(minutes=3),
         stream_version=2,
     )
-    dataset = _dataset((first, correction))
-    selected = select_current_cutoff(
-        dataset.rows,
+    rows = _dataset((first, correction)).rows
+    cutoff = start + timedelta(minutes=2)
+    received = select_current_cutoff(
+        rows,
         instrument_id="fx:aud-usd",
         basis=PriceBasis.MID,
         interval_start=start,
         latest_feature_bar_end=start + timedelta(minutes=1),
-        feature_data_asof=start + timedelta(minutes=3),
+        feature_data_asof=cutoff,
+        availability_basis=AvailabilityBasis.RECEIVED_AT,
     )
-    assert selected is not None
-    assert selected.revision == 2
-    early = select_current_cutoff(
-        dataset.rows,
+    persisted = select_current_cutoff(
+        tuple(reversed(rows)),
         instrument_id="fx:aud-usd",
         basis=PriceBasis.MID,
         interval_start=start,
         latest_feature_bar_end=start + timedelta(minutes=1),
-        feature_data_asof=start + timedelta(minutes=1, seconds=30),
+        feature_data_asof=cutoff,
+        availability_basis=AvailabilityBasis.PERSISTED_AT,
     )
-    assert early is not None
-    assert early.revision == 1
+    assert received is not None and received.revision == 2
+    assert persisted is not None and persisted.revision == 1
 
-
-def test_current_cutoff_rejects_ambiguous_sources() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    left = _candidate(
-        _bar(start),
-        position=1,
-        received=start + timedelta(minutes=1),
-        persisted=start + timedelta(minutes=1),
-    )
-    other_bar = replace(
-        _bar(start),
-        source_listing_id=ProviderListingId("other", "demo", "AUDUSD"),
-    )
-    other = _candidate(
-        other_bar,
-        position=2,
-        received=start + timedelta(minutes=1),
-        persisted=start + timedelta(minutes=1),
-        stream_version=2,
-    )
-    dataset = _dataset((left, other))
-    with pytest.raises(FeatureLineageError, match="ambiguous source"):
+    wrong_start = replace(rows[0], interval_start=start - timedelta(minutes=1))
+    assert (
         select_current_cutoff(
-            dataset.rows,
+            (wrong_start,),
             instrument_id="fx:aud-usd",
             basis=PriceBasis.MID,
             interval_start=start,
             latest_feature_bar_end=start + timedelta(minutes=1),
-            feature_data_asof=start + timedelta(minutes=2),
+            feature_data_asof=cutoff,
+            availability_basis=AvailabilityBasis.RECEIVED_AT,
         )
+        is None
+    )
 
 
-def test_exact_and_rolling_features_preserve_endpoints_and_reject_gaps() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    consecutive = _dataset(
-        tuple(
-            _candidate(
-                _bar(start + timedelta(minutes=offset), close=str(1.0 + offset / 100)),
-                position=offset + 1,
-                received=start + timedelta(minutes=offset + 1),
-                persisted=start + timedelta(minutes=offset + 1),
-            )
-            for offset in (0, 1)
-        )
-    ).rows
-    value, lineage = _return(
-        "return_60s",
-        consecutive,
-        start + timedelta(minutes=2),
-        start + timedelta(minutes=3),
-    )
-    assert value == pytest.approx(log(1.01))
-    assert len(lineage) == 2
-    cross_source = (
-        consecutive[0],
-        replace(consecutive[1], source_external_id="OTHER"),
-    )
-    with pytest.raises(FeatureLineageError, match="cross source lineage"):
-        _return(
-            "return_60s",
-            cross_source,
-            start + timedelta(minutes=2),
-            start + timedelta(minutes=3),
-        )
-
-    gapped = _dataset(
-        tuple(
-            _candidate(
-                _bar(start + timedelta(minutes=offset), close=str(1.0 + offset / 100)),
-                position=offset + 1,
-                received=start + timedelta(minutes=offset + 1),
-                persisted=start + timedelta(minutes=offset + 1),
-            )
-            for offset in (0, 2)
-        )
-    ).rows
-    foundation = SimpleNamespace(
-        configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-        source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=3)),)},
-    )
-    rolling, _ = _rolling(
-        "realised_std_180s",
-        "fx:aud-usd",
-        gapped,
-        start + timedelta(minutes=3),
-        start + timedelta(minutes=4),
-        cast(R2FoundationInputs, foundation),
-        experiment(),
-    )
-    assert rolling is None
-
-
-def test_rolling_values_are_causal_order_independent_and_counted() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    rows = _dataset(
-        tuple(
-            _candidate(
-                _bar(start + timedelta(minutes=offset), close=str(2**offset)),
-                position=offset + 1,
-                received=start + timedelta(minutes=offset + 1),
-                persisted=start + timedelta(minutes=offset + 1),
-            )
-            for offset in range(5)
-        )
-    ).rows
-    foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=5)),)},
-        ),
-    )
-    args = (
-        "mean_absolute_return_300s",
-        "fx:aud-usd",
-        rows,
-        start + timedelta(minutes=5),
-        start + timedelta(minutes=6),
-        foundation,
-        experiment(),
-    )
-    value, lineage = _rolling(*args)
-    reversed_value, reversed_lineage = _rolling(
-        args[0],
-        args[1],
-        tuple(reversed(rows)),
-        *args[3:],
-    )
-    assert value == pytest.approx(log(2))
-    assert reversed_value == value
-    assert reversed_lineage == lineage
-    assert len(lineage) == 5
-    cross_source = (*rows[:-1], replace(rows[-1], source_external_id="OTHER"))
-    with pytest.raises(FeatureLineageError, match="crosses source lineage"):
-        _rolling(
-            "mean_absolute_return_300s",
-            "fx:aud-usd",
-            cross_source,
-            start + timedelta(minutes=5),
-            start + timedelta(minutes=6),
-            foundation,
-            experiment(),
-        )
-
-    coverage, empty_lineage = _rolling(
-        "window_coverage_300s",
-        "fx:aud-usd",
-        (),
-        start + timedelta(minutes=5),
-        start + timedelta(minutes=6),
-        foundation,
-        experiment(),
-    )
-    assert coverage == 0.0
-    assert empty_lineage == ()
-
-
-def test_rolling_window_rejects_ambiguous_lineage() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+def test_current_cutoff_rejects_ambiguous_sources_and_highest_revision() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     left = _candidate(
         _bar(start),
         position=1,
@@ -304,39 +372,178 @@ def test_rolling_window_rejects_ambiguous_lineage() -> None:
         persisted=start + timedelta(minutes=1),
         stream_version=2,
     )
-    foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=1)),)},
-        ),
-    )
     with pytest.raises(FeatureLineageError, match="ambiguous source"):
-        _rolling(
-            "mean_log_range_60s",
-            "fx:aud-usd",
+        select_current_cutoff(
             _dataset((left, other)).rows,
-            start + timedelta(minutes=1),
-            start + timedelta(minutes=2),
-            foundation,
-            experiment(),
+            instrument_id="fx:aud-usd",
+            basis=PriceBasis.MID,
+            interval_start=start,
+            latest_feature_bar_end=start + timedelta(minutes=1),
+            feature_data_asof=start + timedelta(minutes=2),
+            availability_basis=AvailabilityBasis.PERSISTED_AT,
+        )
+    left_row = _dataset((left,)).rows[0]
+    duplicate = replace(left_row, global_position=2, stream_version=2)
+    with pytest.raises(FeatureLineageError, match="highest revision"):
+        select_current_cutoff(
+            (left_row, duplicate),
+            instrument_id="fx:aud-usd",
+            basis=PriceBasis.MID,
+            interval_start=start,
+            latest_feature_bar_end=start + timedelta(minutes=1),
+            feature_data_asof=start + timedelta(minutes=2),
+            availability_basis=AvailabilityBasis.PERSISTED_AT,
         )
 
 
-def test_missing_fraction_uses_cutoff_window_and_source_activity() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+def test_exact_return_and_five_minute_window_use_six_endpoints_and_five_pairs() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    rows = _dataset(
+        tuple(
+            _candidate(
+                _bar(start + timedelta(minutes=offset), close=str(2**offset)),
+                position=offset + 1,
+                received=start + timedelta(minutes=offset + 1),
+                persisted=start + timedelta(minutes=offset + 1),
+            )
+            for offset in range(6)
+        )
+    ).rows
+    foundation = _minimal_foundation(start, start + timedelta(minutes=6))
+    index = _index(tuple(reversed(rows)))
+    end = start + timedelta(minutes=6)
+    cutoff = end + timedelta(minutes=1)
+    value, lineage = _return(
+        "return_300s", index, "fx:aud-usd", end, cutoff, foundation, _RowCache()
+    )
+    assert value == pytest.approx(5 * log(2))
+    assert len(lineage) == 2
+    mean, return_lineage = _rolling(
+        "mean_absolute_return_300s",
+        "fx:aud-usd",
+        index,
+        end,
+        cutoff,
+        foundation,
+        experiment(),
+        _RowCache(),
+    )
+    count, range_lineage = _rolling(
+        "available_interval_count_300s",
+        "fx:aud-usd",
+        index,
+        end,
+        cutoff,
+        foundation,
+        experiment(),
+        _RowCache(),
+    )
+    coverage, _ = _rolling(
+        "window_coverage_300s",
+        "fx:aud-usd",
+        index,
+        end,
+        cutoff,
+        foundation,
+        experiment(),
+        _RowCache(),
+    )
+    assert mean == pytest.approx(log(2))
+    assert len(return_lineage) == 6
+    assert count == 5.0
+    assert len(range_lineage) == 5
+    assert coverage == 1.0
+
+
+def test_rolling_gap_inactive_boundary_closure_and_lineage_fail_closed() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    rows = _dataset(
+        tuple(
+            _candidate(
+                _bar(start + timedelta(minutes=offset), close=str(offset + 1)),
+                position=offset + 1,
+                received=start + timedelta(minutes=offset + 1),
+                persisted=start + timedelta(minutes=offset + 1),
+            )
+            for offset in range(6)
+        )
+    ).rows
+    end = start + timedelta(minutes=6)
+    cutoff = end + timedelta(minutes=1)
+    full = _minimal_foundation(start, end)
+    gapped = tuple(row for row in rows if row.interval_start != start + timedelta(minutes=3))
+    value, _ = _rolling(
+        "realised_std_300s",
+        "fx:aud-usd",
+        _index(gapped),
+        end,
+        cutoff,
+        full,
+        experiment(),
+        _RowCache(),
+    )
+    coverage, _ = _rolling(
+        "window_coverage_300s",
+        "fx:aud-usd",
+        _index(gapped),
+        end,
+        cutoff,
+        full,
+        experiment(),
+        _RowCache(),
+    )
+    assert value is None
+    assert coverage == pytest.approx(0.8)
+
+    boundary = _minimal_foundation(start + timedelta(minutes=1), end)
+    boundary_count, _ = _rolling(
+        "available_interval_count_300s",
+        "fx:aud-usd",
+        _index(rows),
+        end,
+        cutoff,
+        boundary,
+        experiment(),
+        _RowCache(),
+    )
+    assert boundary_count == 5.0
+    closed = _minimal_foundation(start, end, active={"fx:aud-usd": ()})
+    closed_coverage, _ = _rolling(
+        "window_coverage_300s",
+        "fx:aud-usd",
+        _index(rows),
+        end,
+        cutoff,
+        closed,
+        experiment(),
+        _RowCache(),
+    )
+    assert closed_coverage is None
+
+    cross_source = (*rows[:-1], replace(rows[-1], source_external_id="OTHER"))
+    with pytest.raises(FeatureLineageError, match="crosses source lineage"):
+        _rolling(
+            "mean_absolute_return_300s",
+            "fx:aud-usd",
+            _index(cross_source),
+            end,
+            cutoff,
+            full,
+            experiment(),
+            _RowCache(),
+        )
+
+
+def test_missing_fraction_uses_activity_adjusted_exact_slots() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     rows = _dataset(
         tuple(
             _candidate(
                 _bar(start + timedelta(minutes=offset)),
                 position=offset + 1,
-                received=(
-                    start + timedelta(minutes=6)
-                    if offset == 4
-                    else start + timedelta(minutes=offset + 1)
-                ),
+                received=start + timedelta(minutes=offset + 1),
                 persisted=(
-                    start + timedelta(minutes=6)
+                    start + timedelta(minutes=7)
                     if offset == 4
                     else start + timedelta(minutes=offset + 1)
                 ),
@@ -349,202 +556,198 @@ def test_missing_fraction_uses_cutoff_window_and_source_activity() -> None:
         SimpleNamespace(
             instrument_id="fx:aud-usd",
             latest_feature_bar_end=start + timedelta(minutes=5),
-            feature_data_asof=start + timedelta(minutes=5, seconds=30),
+            feature_data_asof=start + timedelta(minutes=6),
         ),
     )
-    foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=5)),)},
-        ),
-    )
-    value, lineage = _missing_fraction(rows, panel, foundation, experiment())
+    foundation = _minimal_foundation(start, start + timedelta(minutes=5))
+    value, lineage = _missing_fraction(_index(rows), panel, foundation, experiment(), _RowCache())
     assert value == pytest.approx(0.2)
     assert len(lineage) == 4
-    partial_foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={
-                "fx:aud-usd": ((start + timedelta(seconds=30), start + timedelta(minutes=5)),)
-            },
-        ),
+    partial = _minimal_foundation(
+        start,
+        start + timedelta(minutes=5),
+        active={"fx:aud-usd": ((start + timedelta(minutes=1), start + timedelta(minutes=5)),)},
     )
-    partial_value, partial_lineage = _missing_fraction(
-        rows, panel, partial_foundation, experiment()
-    )
+    partial_value, _ = _missing_fraction(_index(rows), panel, partial, experiment(), _RowCache())
     assert partial_value == pytest.approx(0.25)
-    assert len(partial_lineage) == 3
-
-    closed_foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=3)),)},
-        ),
-    )
-    closed_value, _ = _missing_fraction(rows[:3], panel, closed_foundation, experiment())
-    assert closed_value == 0.0
 
 
-def test_cross_market_missing_count_excludes_inactive_sources() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    decision_time = start + timedelta(minutes=6)
-    available = replace(
-        _dataset(
-            (
-                _candidate(
-                    _bar(start + timedelta(minutes=4)),
-                    position=1,
-                    received=start + timedelta(minutes=5),
-                    persisted=start + timedelta(minutes=5),
+def _peer_rows(
+    start: datetime,
+    scales: dict[str, Decimal],
+) -> tuple[ObservationRow, ...]:
+    rows: list[ObservationRow] = []
+    position = 1
+    for instrument, scale in scales.items():
+        for offset, close in enumerate((Decimal("1"), scale)):
+            candidate = _candidate(
+                replace(
+                    _bar(start + timedelta(minutes=offset)),
+                    close=close,
+                    open=close,
+                    high=close,
+                    low=close,
                 ),
+                position=position,
+                received=start + timedelta(minutes=offset + 1),
+                persisted=start + timedelta(minutes=offset + 1),
             )
-        ).rows[0],
-        instrument_id="index:target-2",
-        stream_id="market-bar:index:target-2:MID",
+            rows.append(
+                replace(
+                    _dataset((candidate,)).rows[0],
+                    instrument_id=instrument,
+                    stream_id=f"market-bar:{instrument}:MID",
+                )
+            )
+            position += 1
+    return tuple(rows)
+
+
+def test_pooled_universes_use_fixed_leave_one_out_and_group_denominators() -> None:
+    config = _wider_target_experiment()
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    scales = {instrument: Decimal("1.1") for instrument in config.target_instruments}
+    scales[config.target_instruments[0]] = Decimal("100")
+    scales["index:volatility"] = Decimal("1.4")
+    rows = _peer_rows(start, scales)
+    missing_peer = config.target_instruments[-1]
+    sparse = tuple(row for row in rows if row.instrument_id != missing_peer)
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] = {
+        instrument: ((start, start + timedelta(minutes=2)),)
+        for instrument in config.ordered_instruments
+    }
+    foundation = _minimal_foundation(
+        start,
+        start + timedelta(minutes=2),
+        config.ordered_instruments,
+        active=active,
     )
     panel = cast(
         PanelRow,
         SimpleNamespace(
-            instrument_id="index:target-1",
-            decision_time=decision_time,
-            latest_feature_bar_end=start + timedelta(minutes=5),
-            feature_data_asof=start + timedelta(minutes=5, seconds=30),
+            instrument_id=config.target_instruments[0],
+            latest_feature_bar_end=start + timedelta(minutes=2),
+            feature_data_asof=start + timedelta(minutes=3),
         ),
     )
-    panels = cast(
-        tuple[PanelRow, ...],
-        tuple(
-            SimpleNamespace(instrument_id=instrument, decision_time=decision_time)
-            for instrument in (
-                "index:target-1",
-                "index:target-2",
-                "index:target-3",
-            )
-        ),
+    sparse_index = _index(tuple(reversed(sparse)))
+    global_mean, _ = _context(
+        "loo_mean_return_60s",
+        panel,
+        sparse_index,
+        config,
+        foundation,
+        _RowCache(),
     )
-    foundation = cast(
-        R2FoundationInputs,
+    available_count, _ = _context(
+        "loo_available_count_60s",
+        panel,
+        sparse_index,
+        config,
+        foundation,
+        _RowCache(),
+    )
+    group_mean, _ = _context(
+        "loo_market_group_mean_return_60s",
+        panel,
+        sparse_index,
+        config,
+        foundation,
+        _RowCache(),
+    )
+    vix, _ = _context(
+        "vix_context_return_60s",
+        panel,
+        _index(rows),
+        config,
+        foundation,
+        _RowCache(),
+    )
+    assert global_mean is None
+    assert available_count == 5.0
+    assert group_mean == pytest.approx(log(1.1))
+    assert vix == pytest.approx(log(1.4))
+
+    no_group_panel = cast(
+        PanelRow,
         SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={
-                "index:target-1": ((start, start + timedelta(minutes=5)),),
-                "index:target-2": ((start, start + timedelta(minutes=5)),),
-                "index:target-3": ((start, start + timedelta(minutes=4)),),
-            },
+            instrument_id=TARGETS[-1],
+            latest_feature_bar_end=start + timedelta(minutes=2),
+            feature_data_asof=start + timedelta(minutes=3),
         ),
     )
-    indexed = {("index:target-2", PriceBasis.MID): (available,)}
+    no_group, lineage = _context(
+        "loo_market_group_mean_return_60s",
+        no_group_panel,
+        _index(rows),
+        config,
+        foundation,
+        _RowCache(),
+    )
+    assert no_group is None and lineage == ()
+
+
+def test_cross_market_counts_use_leave_one_out_model_universe() -> None:
+    config = _wider_target_experiment()
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    peers = config.target_instruments[1:]
+    available_peer = peers[0]
+    rows = _peer_rows(start, {available_peer: Decimal("1.1")})
+    active: dict[str, tuple[tuple[datetime, datetime], ...]] = {
+        instrument: () for instrument in config.ordered_instruments
+    }
+    active[available_peer] = ((start, start + timedelta(minutes=2)),)
+    active[peers[1]] = ((start, start + timedelta(minutes=2)),)
+    foundation = _minimal_foundation(
+        start,
+        start + timedelta(minutes=2),
+        config.ordered_instruments,
+        active=active,
+    )
+    panel = cast(
+        PanelRow,
+        SimpleNamespace(
+            instrument_id=config.target_instruments[0],
+            decision_time=start + timedelta(minutes=3),
+            latest_feature_bar_end=start + timedelta(minutes=2),
+            feature_data_asof=start + timedelta(minutes=3),
+            audit_disposition=None,
+        ),
+    )
+    index = _index(rows)
     active_count, _ = _calculate(
         "cross_market_source_active_count",
         panel,
-        (),
-        indexed,
-        panels,
-        experiment(),
+        index,
+        config,
         foundation,
+        _RowCache(),
     )
     missing_count, lineage = _calculate(
         "cross_market_missing_count",
         panel,
-        (),
-        indexed,
-        panels,
-        experiment(),
+        index,
+        config,
         foundation,
+        _RowCache(),
+    )
+    available_count, _ = _calculate(
+        "cross_market_available_count",
+        panel,
+        index,
+        config,
+        foundation,
+        _RowCache(),
     )
     assert active_count == 2.0
     assert missing_count == 1.0
-    assert lineage == (str(available.event_id),)
+    assert available_count == 1.0
+    assert len(lineage) == 1
 
 
-def test_pooled_context_uses_market_groups_and_vix_context() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
-    base = _dataset(
-        (
-            _candidate(
-                _bar(start, close="1.0"),
-                position=1,
-                received=start + timedelta(minutes=1),
-                persisted=start + timedelta(minutes=1),
-            ),
-            _candidate(
-                _bar(start + timedelta(minutes=1), close="1.1"),
-                position=2,
-                received=start + timedelta(minutes=2),
-                persisted=start + timedelta(minutes=2),
-            ),
-        )
-    ).rows
-    peers = []
-    for instrument, scale in (
-        ("index:target-1", "100"),
-        ("index:target-2", "1.2"),
-        ("index:target-3", "1.3"),
-        ("index:volatility", "1.4"),
-    ):
-        peers.extend(
-            replace(
-                row,
-                instrument_id=instrument,
-                stream_id=f"market-bar:{instrument}:MID",
-                close=Decimal("1.0") if row.interval_start == start else Decimal(scale),
-            )
-            for row in base
-        )
-    indexed = {
-        (instrument, PriceBasis.MID): tuple(row for row in peers if row.instrument_id == instrument)
-        for instrument in (
-            "index:target-1",
-            "index:target-2",
-            "index:target-3",
-            "index:volatility",
-        )
-    }
-    panel = SimpleNamespace(
-        instrument_id="index:target-1",
-        latest_feature_bar_end=start + timedelta(minutes=2),
-        feature_data_asof=start + timedelta(minutes=3),
-    )
-    config = experiment()
-    group_value, _ = _context(
-        "loo_market_group_mean_return_60s",
-        cast("PanelRow", panel),
-        indexed,
-        (),
-        config,
-    )
-    global_value, _ = _context(
-        "loo_mean_return_60s",
-        cast("PanelRow", panel),
-        indexed,
-        (),
-        config,
-    )
-    median_value, _ = _context(
-        "loo_median_return_60s",
-        cast("PanelRow", panel),
-        indexed,
-        (),
-        config,
-    )
-    vix_value, _ = _context(
-        "vix_context_return_60s",
-        cast("PanelRow", panel),
-        indexed,
-        (),
-        config,
-    )
-    assert group_value == pytest.approx(log(1.2))
-    assert global_value == pytest.approx((log(1.2) + log(1.3)) / 2)
-    assert median_value == pytest.approx((log(1.2) + log(1.3)) / 2)
-    assert vix_value == pytest.approx(log(1.4))
-
-
-def test_spread_features_use_aligned_sides_and_declared_window() -> None:
-    start = datetime(2026, 7, 1, 12, tzinfo=UTC)
+def test_spread_alignment_source_identity_invalid_sides_and_coverage() -> None:
+    config = _with_eligible_family(experiment(), FeatureFamily.SPREAD)
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
     candidates = tuple(
         _candidate(
             replace(
@@ -563,23 +766,14 @@ def test_spread_features_use_aligned_sides_and_declared_window() -> None:
         for offset in range(5)
         for index, (basis, price) in enumerate(
             (
-                (
-                    PriceBasis.BID,
-                    Decimal("98") if offset == 4 else Decimal("99"),
-                ),
-                (
-                    PriceBasis.ASK,
-                    Decimal("102") if offset == 4 else Decimal("101"),
-                ),
+                (PriceBasis.BID, Decimal("98") if offset == 4 else Decimal("99")),
+                (PriceBasis.ASK, Decimal("102") if offset == 4 else Decimal("101")),
                 (PriceBasis.MID, Decimal("100")),
             )
         )
     )
     rows = _dataset(candidates).rows
-    indexed = {
-        ("fx:aud-usd", basis): tuple(row for row in rows if row.basis is basis)
-        for basis in PriceBasis
-    }
+    foundation = _minimal_foundation(start, start + timedelta(minutes=5))
     panel = cast(
         PanelRow,
         SimpleNamespace(
@@ -588,166 +782,61 @@ def test_spread_features_use_aligned_sides_and_declared_window() -> None:
             feature_data_asof=start + timedelta(minutes=6),
         ),
     )
-    foundation = cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            configuration=SimpleNamespace(grid_resolution=timedelta(minutes=1)),
-            source_active_intervals={"fx:aud-usd": ((start, start + timedelta(minutes=5)),)},
-        ),
-    )
-    config = experiment()
-    close_spread, _ = _spread("close_spread", panel, indexed, foundation, config)
-    spread_fraction, _ = _spread("spread_fraction", panel, indexed, foundation, config)
-    spread_bps, _ = _spread("spread_bps", panel, indexed, foundation, config)
-    rolling_mean, _ = _spread("rolling_spread_mean", panel, indexed, foundation, config)
-    rolling_change, _ = _spread("rolling_spread_change", panel, indexed, foundation, config)
-    coverage, _ = _spread("spread_coverage", panel, indexed, foundation, config)
-    assert close_spread == 4.0
-    assert spread_fraction == pytest.approx(0.04)
-    assert spread_bps == pytest.approx(400.0)
-    assert rolling_mean == pytest.approx(0.024)
-    assert rolling_change == pytest.approx(0.02)
+    index = _index(rows)
+    close, _ = _spread("close_spread", panel, index, foundation, config, _RowCache())
+    mean, _ = _spread("rolling_spread_mean", panel, index, foundation, config, _RowCache())
+    change, _ = _spread("rolling_spread_change", panel, index, foundation, config, _RowCache())
+    coverage, _ = _spread("spread_coverage", panel, index, foundation, config, _RowCache())
+    assert close == 4.0
+    assert mean == pytest.approx(2.4)
+    assert change == 2.0
     assert coverage == 1.0
-    cross_source_rows = tuple(
+
+    misaligned = tuple(
         replace(row, source_external_id="OTHER")
-        if row.interval_end == start + timedelta(minutes=5)
+        if row.basis is PriceBasis.ASK and row.interval_end == start + timedelta(minutes=5)
         else row
         for row in rows
     )
-    cross_source_indexed = {
-        ("fx:aud-usd", basis): tuple(row for row in cross_source_rows if row.basis is basis)
-        for basis in PriceBasis
-    }
-    with pytest.raises(FeatureLineageError, match="crosses source lineage"):
-        _spread("rolling_spread_mean", panel, cross_source_indexed, foundation, config)
-
-    misaligned = dict(indexed)
-    misaligned[("fx:aud-usd", PriceBasis.ASK)] = tuple(
-        replace(row, source_external_id="OTHER") for row in indexed[("fx:aud-usd", PriceBasis.ASK)]
-    )
-    invalid, _ = _spread("close_spread", panel, misaligned, foundation, config)
+    invalid, _ = _spread("close_spread", panel, _index(misaligned), foundation, config, _RowCache())
     assert invalid is None
+    crossed = tuple(
+        replace(row, close=Decimal("97"))
+        if row.basis is PriceBasis.ASK and row.interval_end == start + timedelta(minutes=5)
+        else row
+        for row in rows
+    )
+    crossed_value, _ = _spread(
+        "close_spread", panel, _index(crossed), foundation, config, _RowCache()
+    )
+    assert crossed_value is None
+    missing = tuple(
+        row
+        for row in rows
+        if not (row.basis is PriceBasis.ASK and row.interval_end == start + timedelta(minutes=3))
+    )
+    sparse_mean, _ = _spread(
+        "rolling_spread_mean", panel, _index(missing), foundation, config, _RowCache()
+    )
+    sparse_coverage, _ = _spread(
+        "spread_coverage", panel, _index(missing), foundation, config, _RowCache()
+    )
+    assert sparse_mean is None
+    assert sparse_coverage == pytest.approx(0.8)
 
 
-def _with_eligible_family(
-    config: R2ExperimentConfig,
-    family: FeatureFamily,
-) -> R2ExperimentConfig:
-    decisions = dict(config.feature_eligibility)
-    current = decisions[family]
-    decisions[family] = EligibilityDecision.create(
-        subject=current.subject,
-        state=FeatureEligibility.ELIGIBLE,
-        evidence_start=current.evidence_start,
-        evidence_end=current.evidence_end,
-        reason=current.reason,
-    )
-    local = (
-        FeatureFamily.LOCAL_RETURNS,
-        FeatureFamily.TIME_AVAILABILITY,
-    )
-    feature_sets = [FeatureSet("L0", local)]
-    local += (FeatureFamily.LOCAL_VOLATILITY_RANGE,)
-    feature_sets.append(FeatureSet("L1", local))
-    if decisions[FeatureFamily.SPREAD].state is FeatureEligibility.ELIGIBLE:
-        local += (FeatureFamily.SPREAD,)
-        feature_sets.append(FeatureSet("L2", local))
-    if decisions[FeatureFamily.QUOTE_IMBALANCE].state is FeatureEligibility.ELIGIBLE:
-        local += (FeatureFamily.QUOTE_IMBALANCE,)
-        feature_sets.append(FeatureSet("L3", local))
-    feature_sets.extend(
-        (
-            FeatureSet("P0", local),
-            FeatureSet("P1", (*local, FeatureFamily.POOLED_CROSS_ASSET)),
-        )
-    )
-    return replace(
-        config,
-        feature_sets=tuple(feature_sets),
-        feature_eligibility=decisions,
-    )
-
-
-def test_optional_family_eligibility_is_implemented_or_rejected() -> None:
-    spread = _with_eligible_family(experiment(), FeatureFamily.SPREAD)
-    dataset = materialise_r2_features(_foundation(spread), spread, feature_set_name="L2")
-    assert {
-        item.name for item in dataset.feature_schema if item.family is FeatureFamily.SPREAD
-    } == {
-        "close_spread",
-        "spread_fraction",
-        "spread_bps",
-        "rolling_spread_mean",
-        "rolling_spread_change",
-        "spread_coverage",
-    }
-
-    imbalance = _with_eligible_family(
-        experiment(),
-        FeatureFamily.QUOTE_IMBALANCE,
-    )
+def test_eligible_l3_fails_closed_without_validated_quote_size() -> None:
+    config = _with_eligible_family(experiment(), FeatureFamily.QUOTE_IMBALANCE)
     with pytest.raises(ValueError, match="validated quote-size source"):
-        materialise_r2_features(_foundation(imbalance), imbalance, feature_set_name="L3")
-
-
-def _foundation(
-    config: R2ExperimentConfig,
-    overrides: Mapping[str, str] | None = None,
-    *,
-    observation_rows: tuple[ObservationRow, ...] = (),
-    panel_rows: tuple[PanelRow, ...] = (),
-    source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]] | None = None,
-) -> R2FoundationInputs:
-    values = overrides or {}
-    observation_id = values.get("observation_id", config.observation_dataset_id)
-    foundation_id = values.get("foundation_id", config.foundation_configuration_id)
-    target_id = values.get("target_id", config.target_dataset_id)
-    active_intervals: dict[str, tuple[tuple[datetime, datetime], ...]] = {
-        instrument: () for instrument in config.ordered_instruments
-    }
-    if source_active_intervals is not None:
-        active_intervals.update(source_active_intervals)
-    return cast(
-        R2FoundationInputs,
-        SimpleNamespace(
-            bundle_id=values.get("bundle_id", config.r1_bundle_id),
-            configuration=SimpleNamespace(
-                configuration_id=foundation_id,
-                observation_dataset_id=observation_id,
-                ordered_instruments=config.ordered_instruments,
-                instrument_roles=config.instrument_roles,
-                grid_resolution=timedelta(minutes=1),
-            ),
-            observations=SimpleNamespace(dataset_id=observation_id, rows=observation_rows),
-            panel=SimpleNamespace(
-                dataset_id=values.get("panel_id", config.panel_dataset_id),
-                observation_dataset_id=values.get("panel_observation_id", observation_id),
-                foundation_configuration_id=values.get("panel_foundation_id", foundation_id),
-                rows=panel_rows,
-            ),
-            targets=SimpleNamespace(
-                dataset_id=target_id,
-                observation_dataset_id=values.get("target_observation_id", observation_id),
-                foundation_configuration_id=values.get("target_foundation_id", foundation_id),
-            ),
-            folds=SimpleNamespace(
-                dataset_id=values.get("fold_id", config.fold_dataset_id),
-                foundation_configuration_id=values.get("fold_foundation_id", foundation_id),
-                target_dataset_id=values.get("fold_target_id", target_id),
-            ),
-            source_active_intervals=active_intervals,
-        ),
-    )
+        feature_schema_for_set(config, "L3")
 
 
 def _replay_foundation(
-    config: R2ExperimentConfig,
-    *,
-    include_holdout: bool = False,
+    config: R2ExperimentConfig, *, include_holdout: bool = False
 ) -> R2FoundationInputs:
     decision_time = config.holdout_range[0] - timedelta(days=1)
-    latest_feature_bar_end = decision_time - timedelta(minutes=1)
-    window_start = latest_feature_bar_end - timedelta(minutes=5)
+    latest_end = decision_time - timedelta(minutes=1)
+    start = latest_end - timedelta(minutes=5)
     rows = tuple(
         replace(
             row,
@@ -758,38 +847,16 @@ def _replay_foundation(
         for row in _dataset(
             tuple(
                 _candidate(
-                    _bar(window_start + timedelta(minutes=offset), close=str(offset + 1)),
+                    _bar(start + timedelta(minutes=offset), close=str(offset + 1)),
                     position=offset + 1,
-                    received=window_start + timedelta(minutes=offset + 1),
-                    persisted=window_start + timedelta(minutes=offset + 1),
+                    received=start + timedelta(minutes=offset + 1),
+                    persisted=start + timedelta(minutes=offset + 1),
                 )
                 for offset in range(5)
             )
         ).rows
     )
-    current = rows[-1]
-    panel = PanelRow(
-        decision_time=decision_time,
-        instrument_id=config.target_instruments[0],
-        basis=PriceBasis.MID,
-        feature_data_asof=decision_time,
-        latest_feature_bar_end=latest_feature_bar_end,
-        status=PanelStatus.OBSERVED,
-        audit_disposition=None,
-        selected_event_id=current.event_id,
-        selected_stream_version=current.stream_version,
-        selected_global_position=current.global_position,
-        selected_availability_time=current.persisted_at,
-        selected_revision=current.revision,
-        interval_start=current.interval_start,
-        interval_end=current.interval_end,
-        open=current.open,
-        high=current.high,
-        low=current.low,
-        close=current.close,
-        sample_count=current.sample_count,
-        quality=current.quality,
-    )
+    panel = _panel(config, rows[-1])
     panels = (panel,)
     if include_holdout:
         panels = (*panels, replace(panel, decision_time=config.holdout_range[0]))
@@ -797,124 +864,36 @@ def _replay_foundation(
         config,
         observation_rows=rows,
         panel_rows=panels,
-        source_active_intervals={
-            config.target_instruments[0]: ((window_start, latest_feature_bar_end),)
-        },
+        active={config.target_instruments[0]: ((start, latest_end),)},
     )
 
 
-def test_materialisation_is_order_independent_and_excludes_holdout() -> None:
+def test_materialisation_is_explicit_order_independent_target_only_and_excludes_holdout() -> None:
     config = experiment()
     foundation = _replay_foundation(config, include_holdout=True)
-    expected = materialise_r2_features(
-        foundation,
-        config,
-        feature_set_name="L0",
-    )
+    dataset = materialise_r2_features(foundation, config, feature_set_name="L0")
     reversed_foundation = _foundation(
         config,
         observation_rows=tuple(reversed(foundation.observations.rows)),
         panel_rows=foundation.panel.rows,
-        source_active_intervals=foundation.source_active_intervals,
+        active={
+            config.target_instruments[0]: tuple(
+                foundation.source_active_intervals[config.target_instruments[0]]
+            )
+        },
     )
     reversed_dataset = materialise_r2_features(
         reversed_foundation,
         config,
         feature_set_name="L0",
     )
-    assert len(expected.rows) == 1
-    values = {item.name: item.value for item in expected.rows[0].values}
+    assert len(dataset.rows) == 1
+    assert dataset.rows[0].target_instrument_id in config.target_instruments
+    assert not (config.holdout_range[0] <= dataset.rows[0].decision_time < config.holdout_range[1])
+    values = {item.name: item.value for item in dataset.rows[0].values}
     assert values["return_60s"] == pytest.approx(log(5 / 4))
-    assert values["return_60s_available"] == 1.0
-    assert values["return_300s"] is None
-    assert values["return_300s_available"] == 0.0
-    assert reversed_dataset == expected
-
-
-def test_independent_verifier_rejects_values_lineage_schema_and_holdout() -> None:
-    config = experiment()
-    foundation = _replay_foundation(config)
-    dataset = materialise_r2_features(foundation, config, feature_set_name="L0")
-    verify_raw_feature_dataset(dataset, foundation, config)
-    row = dataset.rows[0]
-
-    value_index = next(index for index, value in enumerate(row.values) if value.value is not None)
-    changed_values = list(row.values)
-    original_value = changed_values[value_index].value
-    assert original_value is not None
-    changed_values[value_index] = replace(
-        changed_values[value_index],
-        value=original_value + 1.0,
-    )
-    changed_row = replace(row, values=tuple(changed_values))
-    changed_dataset = R2FeatureDataset.create(
-        (changed_row,),
-        feature_schema=dataset.feature_schema,
-        observation_dataset_id=dataset.observation_dataset_id,
-        panel_dataset_id=dataset.panel_dataset_id,
-        target_dataset_id=dataset.target_dataset_id,
-        fold_dataset_id=dataset.fold_dataset_id,
-        experiment_configuration_id=dataset.experiment_configuration_id,
-        evidence_class=dataset.evidence_class,
-    )
-    with pytest.raises(ValueError, match="causal replay"):
-        verify_raw_feature_dataset(changed_dataset, foundation, config)
-
-    lineage_index = next(index for index, value in enumerate(row.values) if value.source_event_ids)
-    changed_lineage = list(row.values)
-    changed_lineage[lineage_index] = replace(
-        changed_lineage[lineage_index],
-        source_event_ids=(),
-    )
-    lineage_dataset = R2FeatureDataset.create(
-        (replace(row, values=tuple(changed_lineage)),),
-        feature_schema=dataset.feature_schema,
-        observation_dataset_id=dataset.observation_dataset_id,
-        panel_dataset_id=dataset.panel_dataset_id,
-        target_dataset_id=dataset.target_dataset_id,
-        fold_dataset_id=dataset.fold_dataset_id,
-        experiment_configuration_id=dataset.experiment_configuration_id,
-        evidence_class=dataset.evidence_class,
-    )
-    with pytest.raises(ValueError, match="causal replay"):
-        verify_raw_feature_dataset(lineage_dataset, foundation, config)
-
-    reduced_schema = dataset.feature_schema[:-1]
-    reduced_row = replace(
-        row,
-        feature_set_id=feature_set_id(
-            config.configuration_id,
-            "L0",
-            reduced_schema,
-        ),
-        values=row.values[:-1],
-    )
-    schema_dataset = R2FeatureDataset.create(
-        (reduced_row,),
-        feature_schema=reduced_schema,
-        observation_dataset_id=dataset.observation_dataset_id,
-        panel_dataset_id=dataset.panel_dataset_id,
-        target_dataset_id=dataset.target_dataset_id,
-        fold_dataset_id=dataset.fold_dataset_id,
-        experiment_configuration_id=dataset.experiment_configuration_id,
-        evidence_class=dataset.evidence_class,
-    )
-    with pytest.raises(ValueError, match="causal replay"):
-        verify_raw_feature_dataset(schema_dataset, foundation, config)
-
-    holdout_row = replace(row, decision_time=config.holdout_range[0])
-    holdout_dataset = R2FeatureDataset.create(
-        (row, holdout_row),
-        feature_schema=dataset.feature_schema,
-        observation_dataset_id=dataset.observation_dataset_id,
-        panel_dataset_id=dataset.panel_dataset_id,
-        target_dataset_id=dataset.target_dataset_id,
-        fold_dataset_id=dataset.fold_dataset_id,
-        experiment_configuration_id=dataset.experiment_configuration_id,
-        evidence_class=dataset.evidence_class,
-    )
-    with pytest.raises(ValueError, match="causal replay"):
-        verify_raw_feature_dataset(holdout_dataset, foundation, config)
+    assert reversed_dataset == dataset
+    verify_raw_feature_dataset(dataset, foundation, config, feature_set_name="L0")
 
 
 @pytest.mark.parametrize(
@@ -922,79 +901,361 @@ def test_independent_verifier_rejects_values_lineage_schema_and_holdout() -> Non
     (
         {"bundle_id": "0" * 64},
         {"observation_id": "0" * 64},
-        {"foundation_id": "0" * 64},
+        {"configuration_id": "0" * 64},
         {"panel_id": "0" * 64},
-        {"panel_observation_id": "0" * 64},
-        {"panel_foundation_id": "0" * 64},
         {"target_id": "0" * 64},
-        {"target_observation_id": "0" * 64},
-        {"target_foundation_id": "0" * 64},
         {"fold_id": "0" * 64},
+        {"panel_observation_id": "0" * 64},
+        {"target_observation_id": "0" * 64},
         {"fold_target_id": "0" * 64},
-        {"fold_foundation_id": "0" * 64},
     ),
 )
-def test_materialisation_rejects_cross_foundation_bindings(
-    override: Mapping[str, str],
-) -> None:
+def test_materialisation_rejects_cross_foundation_bindings(override: dict[str, str]) -> None:
     config = experiment()
     with pytest.raises(ValueError, match="binding"):
-        materialise_r2_features(_foundation(config, override), config)
+        materialise_r2_features(
+            _foundation(config, overrides=override),
+            config,
+            feature_set_name="L0",
+        )
 
 
-def test_feature_verifier_rejects_wrong_observation_child() -> None:
+def test_authenticated_source_active_values_cannot_be_mutated_independently() -> None:
     config = experiment()
-    dataset = R2FeatureDataset.create(
-        (),
-        feature_schema=(),
-        observation_dataset_id="a" * 64,
-        panel_dataset_id=config.panel_dataset_id,
-        target_dataset_id=config.target_dataset_id,
-        fold_dataset_id=config.fold_dataset_id,
-        experiment_configuration_id=config.configuration_id,
-        evidence_class=EvidenceClass.IMPLEMENTATION,
+    foundation = _foundation(config)
+    mutable_intervals = cast(Any, foundation.source_active_intervals)
+    with pytest.raises(TypeError):
+        mutable_intervals[config.ordered_instruments[0]] = ()
+    changed = dict(foundation.availability_evidence)
+    changed["source_active_intervals"] = {}
+    changed_foundation = R2FoundationInputs(
+        bundle=foundation.bundle,
+        configuration=foundation.configuration,
+        observations=foundation.observations,
+        panel=foundation.panel,
+        targets=foundation.targets,
+        folds=foundation.folds,
+        availability_evidence=changed,
     )
-    with pytest.raises(ValueError, match="observation"):
-        verify_raw_feature_dataset(dataset, _foundation(config), config)
+    with pytest.raises(ValueError, match="availability"):
+        materialise_r2_features(
+            changed_foundation,
+            config,
+            feature_set_name="L0",
+        )
 
 
-def test_persisted_feature_dataset_round_trips_and_rejects_tampering(tmp_path: Path) -> None:
-    config = experiment()
-    schema = (FeatureDefinition("fixture", FeatureFamily.LOCAL_RETURNS),)
-    row = RawFeatureRow(
-        target_instrument_id=config.target_instruments[0],
-        decision_time=datetime(2026, 1, 1, tzinfo=UTC),
-        feature_data_asof=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        latest_feature_bar_end=datetime(2026, 1, 1, 0, 5, tzinfo=UTC),
-        feature_set_id="fixture-set",
-        values=(RawFeatureValue("fixture", 0.25),),
+def _feature_rows(
+    count: int,
+    set_identity: str,
+    schema: tuple[FeatureDefinition, ...],
+) -> tuple[RawFeatureRow, ...]:
+    start = datetime(2026, 3, 1, tzinfo=UTC)
+    return tuple(
+        RawFeatureRow(
+            target_instrument_id=f"index:target-{index % 3}",
+            decision_time=start + timedelta(minutes=index),
+            feature_data_asof=start + timedelta(minutes=index, seconds=30),
+            latest_feature_bar_end=start + timedelta(minutes=index),
+            feature_set_id=set_identity,
+            values=tuple(
+                RawFeatureValue(
+                    definition.name,
+                    None if (index + feature_index) % 4 == 0 else float(index + feature_index),
+                    () if feature_index % 2 == 0 else (f"event-{index}",),
+                )
+                for feature_index, definition in enumerate(schema)
+            ),
+        )
+        for index in range(count)
     )
-    dataset = R2FeatureDataset.create(
-        (row,),
+
+
+def _write_store(
+    root: Path,
+    *,
+    manifest_name: str = "features.json",
+    count: int = 5,
+    chunk_rows: int = 2,
+    now: datetime = datetime(2026, 7, 28, tzinfo=UTC),
+    image: str = "image-a",
+) -> tuple[ParquetR2FeatureStore, Any, tuple[RawFeatureRow, ...]]:
+    schema = (
+        FeatureDefinition("return_60s", FeatureFamily.LOCAL_RETURNS),
+        FeatureDefinition("window_coverage_300s", FeatureFamily.LOCAL_VOLATILITY_RANGE),
+    )
+    experiment_id = "c" * 64
+    set_identity = feature_set_id(experiment_id, "fixture", schema)
+    rows = _feature_rows(count, set_identity, schema)
+    store = ParquetR2FeatureStore(root, FixedClock(now), chunk_rows=chunk_rows)
+    manifest = store.write(
+        Path(manifest_name),
+        iter(rows),
+        feature_set_name="fixture",
+        feature_set_id=set_identity,
         feature_schema=schema,
-        observation_dataset_id=config.observation_dataset_id,
-        panel_dataset_id=config.panel_dataset_id,
-        target_dataset_id=config.target_dataset_id,
-        fold_dataset_id=config.fold_dataset_id,
-        experiment_configuration_id=config.configuration_id,
+        observation_dataset_id="a" * 64,
+        panel_dataset_id="b" * 64,
+        target_dataset_id="d" * 64,
+        fold_dataset_id="e" * 64,
+        experiment_configuration_id=experiment_id,
         evidence_class=EvidenceClass.IMPLEMENTATION,
+        holdout_excluded=True,
+        application_version="test",
+        image_identity=image,
     )
-    path = tmp_path / "features.json"
-    write_r2_feature_dataset(path, dataset)
-    assert load_r2_feature_dataset(path) == dataset
-    duplicate_path = tmp_path / "duplicate.json"
-    write_r2_feature_dataset(duplicate_path, dataset)
-    contract_line = '  "contract": "qtrad-r2-features-v1",'
-    duplicate_path.write_text(
-        duplicate_path.read_text(encoding="utf-8").replace(
-            contract_line,
-            f"{contract_line}\n{contract_line}",
-            1,
-        ),
-        encoding="utf-8",
+    return store, manifest, rows
+
+
+def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(
+    tmp_path: Path,
+) -> None:
+    store, manifest, rows = _write_store(tmp_path)
+    assert manifest.row_count == 5
+    assert len(manifest.chunks) == 3
+    assert tuple(store.iter_rows(Path("features.json"))) == rows
+    assert store.load(Path("features.json")).dataset_id == manifest.semantic_dataset_id
+
+    zero_store, zero, _ = _write_store(
+        tmp_path,
+        manifest_name="zero.json",
+        count=0,
+        chunk_rows=3,
     )
-    with pytest.raises(ValueError, match="duplicate field"):
-        load_r2_feature_dataset(duplicate_path)
-    path.write_text(path.read_text(encoding="utf-8").replace("0.25", "0.5"), encoding="utf-8")
-    with pytest.raises(ValueError, match="dataset ID"):
-        load_r2_feature_dataset(path)
+    assert zero.row_count == 0 and zero.chunks == ()
+    assert tuple(zero_store.iter_rows(Path("zero.json"))) == ()
+
+    other_store, physical, _ = _write_store(
+        tmp_path,
+        manifest_name="features-other.json",
+        count=5,
+        chunk_rows=3,
+        now=datetime(2026, 7, 29, tzinfo=UTC),
+        image="image-b",
+    )
+    assert other_store.verify(Path("features-other.json")) == physical
+    assert physical.semantic_dataset_id == manifest.semantic_dataset_id
+    assert physical.manifest_sha256 != manifest.manifest_sha256
+
+
+def test_parquet_manifest_chunk_value_lineage_and_schema_tampering_fail_closed(
+    tmp_path: Path,
+) -> None:
+    store, manifest, _ = _write_store(tmp_path)
+    first = manifest.chunks[0]
+    data_path = tmp_path / first.data_file
+    frame = pl.read_parquet(data_path)
+    frame.with_columns((pl.col("f0000") + 1).alias("f0000")).write_parquet(data_path)
+    with pytest.raises(ValueError, match="data chunk hash"):
+        store.verify(Path("features.json"))
+
+    lineage_root = tmp_path / "lineage-case"
+    lineage_store, lineage_manifest, _ = _write_store(lineage_root)
+    lineage_path = lineage_root / lineage_manifest.chunks[0].lineage_file
+    lineage = pl.read_parquet(lineage_path)
+    lineage.with_columns(pl.lit('["tampered"]').alias("source_event_ids")).write_parquet(
+        lineage_path
+    )
+    with pytest.raises(ValueError, match="lineage chunk hash"):
+        lineage_store.verify(Path("features.json"))
+
+    schema_root = tmp_path / "schema-case"
+    schema_store, schema_manifest, _ = _write_store(schema_root)
+    schema_path = schema_root / schema_manifest.chunks[0].data_file
+    schema_frame = pl.read_parquet(schema_path).rename({"f0000": "wrong"})
+    schema_frame.write_parquet(schema_path)
+    manifest_payload = json.loads((schema_root / "features.json").read_text(encoding="utf-8"))
+    manifest_payload["chunks"][0]["data_sha256"] = hashlib.sha256(
+        schema_path.read_bytes()
+    ).hexdigest()
+    identity = {
+        key: value
+        for key, value in manifest_payload.items()
+        if key not in {"manifest_id", "manifest_sha256"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest_payload["manifest_id"] = digest[:24]
+    manifest_payload["manifest_sha256"] = digest
+    (schema_root / "features.json").write_text(json.dumps(manifest_payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="schema"):
+        schema_store.verify(Path("features.json"))
+
+
+def test_parquet_path_safety_no_clobber_and_failed_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store, _, _ = _write_store(tmp_path)
+    payload = json.loads((tmp_path / "features.json").read_text(encoding="utf-8"))
+    payload["chunks"][0]["data_file"] = "../escape.parquet"
+    identity = {
+        key: value
+        for key, value in payload.items()
+        if key not in {"manifest_id", "manifest_sha256"}
+    }
+    digest = hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    payload["manifest_id"] = digest[:24]
+    payload["manifest_sha256"] = digest
+    (tmp_path / "features.json").write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsafe"):
+        store.read_manifest(Path("features.json"))
+
+    immutable_root = tmp_path / "immutable"
+    _, immutable, rows = _write_store(immutable_root)
+    with pytest.raises(RuntimeError, match="manifest conflicts"):
+        ParquetR2FeatureStore(
+            immutable_root,
+            FixedClock(datetime(2026, 7, 29, tzinfo=UTC)),
+            chunk_rows=2,
+        ).write(
+            Path("features.json"),
+            iter(rows),
+            feature_set_name=immutable.feature_set_name,
+            feature_set_id=immutable.feature_set_id,
+            feature_schema=immutable.feature_schema,
+            observation_dataset_id=immutable.observation_dataset_id,
+            panel_dataset_id=immutable.panel_dataset_id,
+            target_dataset_id=immutable.target_dataset_id,
+            fold_dataset_id=immutable.fold_dataset_id,
+            experiment_configuration_id=immutable.experiment_configuration_id,
+            evidence_class=immutable.evidence_class,
+            holdout_excluded=True,
+            application_version="test",
+            image_identity="changed-image",
+        )
+
+    failed_root = tmp_path / "failed"
+    failed_store = ParquetR2FeatureStore(failed_root, FixedClock(), chunk_rows=2)
+    schema = immutable.feature_schema
+    set_identity = immutable.feature_set_id
+    calls = 0
+    original = ParquetR2FeatureStore._publish_chunk
+
+    def fail_second(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise OSError("injected chunk failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(ParquetR2FeatureStore, "_publish_chunk", fail_second)
+    with pytest.raises(OSError, match="injected"):
+        failed_store.write(
+            Path("features.json"),
+            iter(_feature_rows(5, set_identity, schema)),
+            feature_set_name="fixture",
+            feature_set_id=set_identity,
+            feature_schema=schema,
+            observation_dataset_id="a" * 64,
+            panel_dataset_id="b" * 64,
+            target_dataset_id="d" * 64,
+            fold_dataset_id="e" * 64,
+            experiment_configuration_id="c" * 64,
+            evidence_class=EvidenceClass.IMPLEMENTATION,
+            holdout_excluded=True,
+            application_version="test",
+            image_identity="image",
+        )
+    assert not (failed_root / "features.json").exists()
+
+
+def test_streamed_persisted_verifier_rejects_wrong_set_and_value(tmp_path: Path) -> None:
+    config = experiment()
+    foundation = _replay_foundation(config)
+    dataset = materialise_r2_features(foundation, config, feature_set_name="L0")
+    schema = dataset.feature_schema
+    store = ParquetR2FeatureStore(tmp_path, FixedClock(), chunk_rows=1)
+    manifest = store.write(
+        Path("features.json"),
+        iter(dataset.rows),
+        feature_set_name="L0",
+        feature_set_id=dataset.feature_set_id,
+        feature_schema=schema,
+        observation_dataset_id=dataset.observation_dataset_id,
+        panel_dataset_id=dataset.panel_dataset_id,
+        target_dataset_id=dataset.target_dataset_id,
+        fold_dataset_id=dataset.fold_dataset_id,
+        experiment_configuration_id=dataset.experiment_configuration_id,
+        evidence_class=dataset.evidence_class,
+        holdout_excluded=True,
+        application_version="test",
+        image_identity="image",
+    )
+    verify_raw_feature_manifest_bindings(
+        manifest,
+        foundation,
+        config,
+        feature_set_name="L0",
+    )
+    assert (
+        verify_raw_feature_rows(
+            store.iter_rows(Path("features.json")),
+            foundation,
+            config,
+            feature_set_name="L0",
+        )
+        == 1
+    )
+    with pytest.raises(ValueError, match="feature-set"):
+        verify_raw_feature_manifest_bindings(
+            manifest,
+            foundation,
+            config,
+            feature_set_name="L1",
+        )
+    row = dataset.rows[0]
+    changed_values = list(row.values)
+    index = next(index for index, value in enumerate(changed_values) if value.value is not None)
+    assert changed_values[index].value is not None
+    changed_values[index] = replace(
+        changed_values[index], value=cast(float, changed_values[index].value) + 1
+    )
+    with pytest.raises(ValueError, match="causal replay"):
+        verify_raw_feature_rows(
+            iter((replace(row, values=tuple(changed_values)),)),
+            foundation,
+            config,
+            feature_set_name="L0",
+        )
+
+
+@pytest.mark.asyncio
+async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = experiment()
+    foundation = _replay_foundation(config)
+    verify_bundle = AsyncMock(return_value=foundation)
+    monkeypatch.setattr(cli, "verify_foundation_bundle", verify_bundle)
+    monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
+    settings = Settings(
+        research_root=tmp_path,
+        image="test-image",
+    )
+    await cli._materialise_r2_features(
+        settings,
+        FixedClock(),
+        foundation_bundle_path=Path("foundation.json"),
+        experiment_path=Path("experiment.json"),
+        feature_set_name="L0",
+        output_path=Path("features.json"),
+    )
+    built = json.loads(capsys.readouterr().out)
+    assert built["contract"] == "qtrad-r2-feature-parquet-v1"
+    assert built["rows"] == 1
+    await cli._verify_persisted_r2_features(
+        settings,
+        FixedClock(),
+        foundation_bundle_path=Path("foundation.json"),
+        experiment_path=Path("experiment.json"),
+        feature_set_name="L0",
+        manifest_path=Path("features.json"),
+    )
+    verified = json.loads(capsys.readouterr().out)
+    assert verified == built
+    assert verify_bundle.await_count == 2

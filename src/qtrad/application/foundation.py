@@ -47,7 +47,8 @@ def build_asof_panel(
                 eligible = [
                     row
                     for row in candidates
-                    if _availability_time(row, config.availability_basis) <= feature_data_asof
+                    if observation_availability_time(row, config.availability_basis)
+                    <= feature_data_asof
                 ]
                 source_keys = {_source_key(row) for row in eligible}
                 if len(source_keys) > 1:
@@ -76,7 +77,7 @@ def build_asof_panel(
                             selected_event_id=selected.event_id,
                             selected_stream_version=selected.stream_version,
                             selected_global_position=selected.global_position,
-                            selected_availability_time=_availability_time(
+                            selected_availability_time=observation_availability_time(
                                 selected, config.availability_basis
                             ),
                             selected_revision=selected.revision,
@@ -258,7 +259,9 @@ def _select_target_row(
     availability_basis: AvailabilityBasis,
 ) -> tuple[ObservationRow | None, str]:
     eligible = [
-        row for row in candidates if _availability_time(row, availability_basis) <= freeze_at
+        row
+        for row in candidates
+        if observation_availability_time(row, availability_basis) <= freeze_at
     ]
     if len({_source_key(row) for row in eligible}) > 1:
         return None, "AMBIGUOUS"
@@ -443,7 +446,7 @@ def _observation_index(
     return {key: tuple(value) for key, value in grouped.items()}
 
 
-def _availability_time(row: ObservationRow, basis: AvailabilityBasis) -> datetime:
+def observation_availability_time(row: ObservationRow, basis: AvailabilityBasis) -> datetime:
     return (
         row.persisted_at
         if AvailabilityBasis(basis) is AvailabilityBasis.PERSISTED_AT

@@ -304,6 +304,33 @@ async def test_replay_rejects_ambiguous_manifest_paths_before_database_access(
     database.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("command", "destination"),
+    (("features", "--output"), ("features-verify", "--manifest")),
+)
+def test_r2_feature_commands_require_explicit_feature_set(
+    command: str,
+    destination: str,
+    tmp_path: Path,
+) -> None:
+    parser = cli.build_parser()
+    common = [
+        "research",
+        "baselines",
+        command,
+        "--foundation-bundle",
+        str(tmp_path / "foundation.json"),
+        "--experiment",
+        str(tmp_path / "experiment.json"),
+        destination,
+        str(tmp_path / "features.json"),
+    ]
+    with pytest.raises(SystemExit):
+        parser.parse_args(common)
+    parsed = parser.parse_args([*common, "--feature-set", "L0"])
+    assert parsed.feature_set == "L0"
+
+
 def _mapping(value: JsonValue) -> Mapping[str, JsonValue]:
     if not isinstance(value, dict):
         raise TypeError("expected metadata mapping")

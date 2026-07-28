@@ -25,6 +25,7 @@ from qtrad import __version__
 from qtrad.adapters.clock import SystemClock
 from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.observations import ParquetObservationStore
+from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.adapters.parquet.store import ParquetResearchStore
 from qtrad.adapters.postgres.storage_measurement import PostgresStorageInspector
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
@@ -40,8 +41,10 @@ from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
     R2FoundationInputs,
-    materialise_r2_features,
-    verify_raw_feature_dataset,
+    feature_schema_for_set,
+    iter_raw_feature_rows,
+    verify_raw_feature_manifest_bindings,
+    verify_raw_feature_rows,
 )
 from qtrad.application.r2_readiness import evaluate_r2_readiness
 from qtrad.application.replay import semantic_bar_hash
@@ -65,6 +68,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
+from qtrad.domain.r2_features import feature_set_id
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
@@ -98,7 +102,6 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
-from qtrad.runtime.r2_features import load_r2_feature_dataset, write_r2_feature_dataset
 from qtrad.runtime.r2_readiness import load_r2_experiment, write_r2_readiness
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -358,9 +361,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
-    baselines_features_verify.add_argument("--dataset", type=Path, required=True)
+    baselines_features_verify.add_argument("--feature-set", required=True)
+    baselines_features_verify.add_argument("--manifest", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features.add_argument("--experiment", type=Path, required=True)
+    baselines_features.add_argument("--feature-set", required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
@@ -649,6 +654,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 experiment_path=args.experiment,
+                feature_set_name=args.feature_set,
                 output_path=args.output,
             )
         )
@@ -663,7 +669,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 experiment_path=args.experiment,
-                dataset_path=args.dataset,
+                feature_set_name=args.feature_set,
+                manifest_path=args.manifest,
             )
         )
     elif args.command == "replay":
@@ -741,10 +748,9 @@ async def _materialise_r2_features(
     *,
     foundation_bundle_path: Path,
     experiment_path: Path,
+    feature_set_name: str,
     output_path: Path,
 ) -> None:
-    if output_path.exists() or output_path.is_symlink():
-        raise ValueError("R2 feature output must be a new regular file")
     verified = await verify_foundation_bundle(
         root=settings.research_root,
         bundle_path=foundation_bundle_path,
@@ -752,18 +758,56 @@ async def _materialise_r2_features(
     )
     experiment = load_r2_experiment(experiment_path)
     foundation = R2FoundationInputs(
-        bundle_id=verified.bundle.bundle_id,
+        bundle=verified.bundle,
         configuration=verified.configuration,
         observations=verified.observations,
         panel=verified.panel,
         targets=verified.targets,
         folds=verified.folds,
-        source_active_intervals=verified.source_active_intervals,
+        availability_evidence=verified.availability_evidence,
     )
-    dataset = materialise_r2_features(foundation, experiment)
-    verify_raw_feature_dataset(dataset, foundation, experiment)
-    write_r2_feature_dataset(output_path, dataset)
-    print(json.dumps(dataset.manifest_json(), sort_keys=True))
+    schema = feature_schema_for_set(experiment, feature_set_name)
+    set_identity = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+    )
+    store = ParquetR2FeatureStore(settings.research_root, clock)
+    manifest = store.write(
+        output_path,
+        iter_raw_feature_rows(
+            foundation,
+            experiment,
+            feature_set_name=feature_set_name,
+        ),
+        feature_set_name=feature_set_name,
+        feature_set_id=set_identity,
+        feature_schema=schema,
+        observation_dataset_id=verified.observations.dataset_id,
+        panel_dataset_id=verified.panel.dataset_id,
+        target_dataset_id=verified.targets.dataset_id,
+        fold_dataset_id=verified.folds.dataset_id,
+        experiment_configuration_id=experiment.configuration_id,
+        evidence_class=experiment.evidence_class,
+        holdout_excluded=True,
+        application_version=__version__,
+        image_identity=settings.image,
+    )
+    verify_raw_feature_manifest_bindings(
+        manifest,
+        foundation,
+        experiment,
+        feature_set_name=feature_set_name,
+    )
+    row_count = verify_raw_feature_rows(
+        store.iter_rows(output_path),
+        foundation,
+        experiment,
+        feature_set_name=feature_set_name,
+    )
+    if row_count != manifest.row_count:
+        raise ValueError("verified R2 feature row count differs from its manifest")
+    print(json.dumps(_r2_feature_manifest_summary(manifest), sort_keys=True))
 
 
 async def _verify_persisted_r2_features(
@@ -772,7 +816,8 @@ async def _verify_persisted_r2_features(
     *,
     foundation_bundle_path: Path,
     experiment_path: Path,
-    dataset_path: Path,
+    feature_set_name: str,
+    manifest_path: Path,
 ) -> None:
     verified = await verify_foundation_bundle(
         root=settings.research_root,
@@ -781,17 +826,48 @@ async def _verify_persisted_r2_features(
     )
     experiment = load_r2_experiment(experiment_path)
     foundation = R2FoundationInputs(
-        bundle_id=verified.bundle.bundle_id,
+        bundle=verified.bundle,
         configuration=verified.configuration,
         observations=verified.observations,
         panel=verified.panel,
         targets=verified.targets,
         folds=verified.folds,
-        source_active_intervals=verified.source_active_intervals,
+        availability_evidence=verified.availability_evidence,
     )
-    dataset = load_r2_feature_dataset(dataset_path)
-    verify_raw_feature_dataset(dataset, foundation, experiment)
-    print(json.dumps(dataset.manifest_json(), sort_keys=True))
+    store = ParquetR2FeatureStore(settings.research_root, clock)
+    manifest = store.read_manifest(manifest_path)
+    verify_raw_feature_manifest_bindings(
+        manifest,
+        foundation,
+        experiment,
+        feature_set_name=feature_set_name,
+    )
+    row_count = verify_raw_feature_rows(
+        store.iter_rows(manifest_path),
+        foundation,
+        experiment,
+        feature_set_name=feature_set_name,
+    )
+    if row_count != manifest.row_count:
+        raise ValueError("verified R2 feature row count differs from its manifest")
+    print(json.dumps(_r2_feature_manifest_summary(manifest), sort_keys=True))
+
+
+def _r2_feature_manifest_summary(
+    manifest: R2FeatureManifest,
+) -> dict[str, JsonValue]:
+    return {
+        "contract": manifest.CONTRACT,
+        "semantic_dataset_id": manifest.semantic_dataset_id,
+        "manifest_id": manifest.manifest_id,
+        "manifest_sha256": manifest.manifest_sha256,
+        "manifest_path": manifest.manifest_path,
+        "feature_set_name": manifest.feature_set_name,
+        "feature_set_id": manifest.feature_set_id,
+        "rows": manifest.row_count,
+        "chunks": len(manifest.chunks),
+        "chunk_row_limit": manifest.chunk_row_limit,
+    }
 
 
 async def _build_research_observations(
