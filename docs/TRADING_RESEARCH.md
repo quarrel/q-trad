@@ -8,7 +8,8 @@ targets, forecasts, risk, portfolio construction or paper outcomes.
 
 The programme asks whether short-horizon expected-return forecasts can survive realistic costs and
 be converted into coherent paper positions under joint risk constraints. A negative result is a
-valid outcome. No milestone authorises a broker order, production IG endpoint or real-capital use.
+valid outcome. No milestone authorises a broker order, production broker endpoint, live-account
+connection or real-capital use.
 
 The centre of the decision stack is:
 
@@ -70,14 +71,25 @@ Continue native IG quote capture because lost forward bid/ask history cannot be 
 Audit bid/ask-size coverage and meaning before using quote imbalance. Top-of-book size changes are
 not cumulative volume delta; any trade-volume feature requires a separately validated source.
 
-Use two historical-data tracks:
+Use three provenance-distinct evidence classes:
 
-1. native IG capture and provenance-distinct IG candles for bounded prototyping; and
-2. reviewed external samples/licensing where they materially accelerate chronological model work.
+1. `IG_NATIVE_CAPTURE` for measured IG quote-derived targets/features and eventual IG executable-side
+   paper evidence;
+2. `IBKR_HISTORICAL_RESEARCH` for immutable account-returned historical bars with explicit product,
+   request, availability and correction assumptions; and
+3. `IBKR_NATIVE_CAPTURE` for later q-trad-observed IBKR top-of-book and quote-derived history.
 
-External data must retain venue, product, timestamp and correction provenance. It may support model
-training or hypothesis rejection but may not masquerade as IG CFD quote history or substantiate IG
-paper fills, spreads or slippage. A purchase or new adapter requires its own explicit decision.
+Historical data may support development, training, hypothesis rejection or a conclusion limited to
+the named external product. It may not masquerade as native quote history or substantiate another
+provider's fills, spreads or slippage. Historical BID and ASK extrema are not assumed contemporaneous.
+A new source requires an explicit decision covering venue/product identity, entitlements/licence,
+timestamps, sessions, bar construction, corrections, adjustments and retention. ADR 0028 provides
+that decision for the independently governed IBKR paper source; capability still requires measured
+account review.
+
+Each source-specific experiment consumes one verified foundation. `R2-IBKR-HISTORICAL`,
+`R2-IBKR-NATIVE` and `R2-IG-NATIVE` remain distinct. A later augmentation experiment must compare
+native-only and augmented controls and preserve an untouched native holdout.
 
 ### Chronology and alignment
 
@@ -101,8 +113,8 @@ paper fills, spreads or slippage. A purchase or new adapter requires its own exp
 The reviewed 23-market `capture-v4` is live. The native quote-size, session, gap, revision and
 aligned-bar audit, bounded historical-data decision and successful independent restore verification
 are retained in `docs/R0_DATA_READINESS.md`. VIX is context-only; Korea 200 and Bitcoin remain
-quarantined pending eligible exact evidence. R0 is complete and R1 is the active implementation
-milestone.
+quarantined pending eligible exact evidence. R0 and R1 are complete; R2 is active, with the independent
+IBKR data-acquisition track proceeding in parallel under its normative plan.
 
 ### R1 — causal multi-asset research foundation
 
@@ -113,13 +125,14 @@ load the model that created the data.
 
 ### R2 — local and pooled baselines
 
-Produce chronological per-asset Ridge forecasts and a pooled non-graph cross-asset control. Begin
-with ablatable price-return, volatility, time/session, spread and validated quote-imbalance feature
-families. Fit all transformations inside each training fold.
+Produce chronological per-asset Ridge forecasts and pooled local-feature and non-graph cross-asset
+controls. Begin with ablatable price-return, volatility, time/session, spread and validated
+quote-imbalance feature families. Fit all transformations inside each training fold.
 
 Pass evidence includes predictive loss, linear/rank relationship, direction where meaningful,
 forecast-bucket monotonicity, coverage and stability by asset, horizon and period. Ridge remains a
-retained baseline even when a stronger model is tested.
+retained baseline even when a stronger model is tested. Source-specific experiments retain distinct
+foundations, availability assumptions, report identities and conclusion boundaries.
 
 ### R3 — cost and portfolio baseline
 
@@ -199,6 +212,6 @@ one-time migration, re-export or clean rebuild over dual readers and indefinite 
 archived research-proof configuration and report remain reproducible evidence but do not constrain
 new interfaces.
 
-The running collector's raw and canonical history is never rewritten or selectively deleted. No
-research or paper component connects to an IG order operation, production IG endpoint or external
-capital path.
+The running IG collector's raw and canonical history and any later IBKR collector history are never
+rewritten or selectively deleted. No research or paper component connects to a broker order operation,
+production broker endpoint, live-account connection or external capital path.

@@ -76,6 +76,29 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
   merged.
 - **Amendment date:** 2026-07-26.
 
+### Amendment 2 — source-specific provider-history experiments
+
+- **Original requirement:** every R2 experiment consumed one verified native R1 foundation, external
+  data was permitted for development or later augmentation, and the first confirmatory conclusion was
+  defined only against a qualifying native foundation.
+- **Revised requirement:** the existing `R2-IG-NATIVE` path and gates remain unchanged. R2 may also run
+  `R2-IBKR-HISTORICAL` and later `R2-IBKR-NATIVE` as separate source-specific experiments. Each consumes
+  one independently verified foundation and retains its evidence class, exact product mappings,
+  availability/revision policy, experiment identity and conclusion boundary. Provider history enters
+  through a separately versioned observation contract and never shares a foundation with native rows.
+  A later cross-provider augmentation experiment remains distinct and requires native-only controls
+  and an untouched native holdout.
+- **Rationale:** independently governed IBKR history can accelerate chronological model research while
+  native quote history accumulates, without masquerading as IG evidence or weakening causal, fold,
+  coverage, selection or holdout rules.
+- **Evidence impact:** R2.A and R2.B implementation evidence remains valid because their identity,
+  current-cutoff, source-lineage and independent-verification requirements are unchanged. No
+  decision-grade R2 evidence exists. Provider-history integration requires new source-contract and
+  source-separation tests before it supports even a source-specific conclusion.
+- **Approving review:** Stage 0 documentation review; implementation remains subject to subsequent
+  code and account-capability review.
+- **Amendment date:** 2026-07-28.
+
 ---
 
 ## 3. Research questions

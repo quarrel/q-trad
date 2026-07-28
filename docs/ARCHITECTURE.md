@@ -32,7 +32,8 @@ Later continuous shadow flow:
 > position changes → subsequent executable-side fills → attributed positions/P&L and operational
 > vetoes.
 
-No broker-order port, IG order operation or production IG endpoint exists.
+No broker-order port, provider order operation, production broker endpoint or live-account connection
+exists.
 
 ## Shape
 
@@ -49,8 +50,8 @@ domain ← ports ← application ← adapters/runtime/API
 - `domain`: frozen values and synchronous deterministic transformations;
 - `ports`: narrow provider-neutral I/O contracts;
 - `application`: chronological use cases and orchestration;
-- `adapters`: IG, PostgreSQL, Parquet and fixture implementations;
-- `runtime/API`: settings, composition, commands and read-only presentation.
+- `adapters`: implemented IG/PostgreSQL/Parquet/fixture adapters and the planned isolated IBKR adapter;
+- `runtime/API`: settings, provider composition, commands and read-only presentation.
 
 The source planning document's package tree is not adopted. New research components follow these
 existing boundaries and are added only when their milestone begins. Provider identifiers and
@@ -59,10 +60,16 @@ environment, filesystem or provider library.
 
 ## Collector and research boundary
 
-The OCI collector is capture-only. Research, model training and paper processes do not write to its
-database. A verified snapshot is restored into an isolated `qtrad_research_*` database, then exported
-to immutable manifested datasets. Routine development requires neither collector credentials nor
-collector access.
+The live IG OCI collector is capture-only. Research, model training and paper processes do not write
+to its database. A verified snapshot is restored into an isolated `qtrad_research_*` database, then
+exported to immutable manifested datasets. Routine development requires neither collector credentials
+nor collector access.
+
+ADR 0028 defines the intended IBKR paper source as a second independent capture runtime and
+PostgreSQL event store using the same application image. Its Gateway, ingest, API, universe, backup
+and restore lifecycles remain separate from IG, and it shares no stream-version history. Gateway
+credentials and 2FA remain outside q-trad. The adapter exposes market data only; account access,
+acquisition, deployment and publication remain separately authorised operations.
 
 The current 23-market `capture-v4` release is active. The established catalogue → non-authoritative
 provider review → operator selection flow accepted China A50, Taiwan and a context-only AUD VIX and
@@ -83,6 +90,12 @@ Canonical market-data conventions remain:
 - visible gaps, dropped callbacks, stale inputs and exclusions;
 - no forward-filled executable prices; and
 - stable internal identities independent of provider listing identifiers.
+
+Provider-history research uses a separate manifested observation contract with explicit request,
+contract-mapping, session, availability and revision policies. It does not relabel historical bars as
+native `QUOTE_DERIVED` observations. Each foundation binds one evidence class; historical,
+IBKR-native and IG-native observations remain separate through feature construction, modelling and
+reporting.
 
 ## Research contracts
 
@@ -142,6 +155,6 @@ Before the first decision-grade result, experimental schemas and APIs may change
 Prefer one-time migration, re-export or clean rebuild to indefinite dual compatibility. Retained
 datasets and configurations cited by a result remain reproducible.
 
-The running collector's raw and canonical history is never rewritten or selectively deleted.
-Historical plans, qualification protocols and superseded architecture live under `docs/archive/`;
-durable current decisions remain in `docs/adr/`.
+The running IG collector's raw and canonical history and any later IBKR collector history are never
+rewritten or selectively deleted. Historical proposals, qualification protocols and superseded
+architecture live under `docs/archive/`; durable current decisions remain in `docs/adr/`.

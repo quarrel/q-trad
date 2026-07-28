@@ -1,6 +1,13 @@
-# Proposed plan: independent IBKR capture and historical-data track
+# IBKR collector and history proposal source
 
-This is a high-leverage addition. Build it as a **second independent capture source**, not as an IBKR mode inside the existing IG `capture-v4` collector.
+**Status:** SUPERSEDED AS NORMATIVE PLAN
+
+This proposal is retained as review source material. The approved decisions, corrected sequencing and
+complete implementation gates are now governed by `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` and
+ADR 0028. Where this proposal differs from those authorities, the normative plan and ADR control.
+
+The core proposal is a **second independent capture source**, not an IBKR mode inside the existing IG
+`capture-v4` collector.
 
 Notes on timing for historical data:
 
