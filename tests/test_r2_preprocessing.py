@@ -7,7 +7,7 @@ from typing import TypedDict, cast
 from uuid import UUID
 
 import pytest
-from numpy import ndarray
+from numpy import ndarray, zeros
 
 from qtrad.application.r2_preprocessing import (
     TrainingRow,
@@ -30,9 +30,11 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r2_features import (
     FeatureDefinition,
+    FeatureKind,
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
+    feature_registry,
     feature_set_id,
 )
 from qtrad.domain.r2_models import (
@@ -40,7 +42,12 @@ from qtrad.domain.r2_models import (
     FitDisposition,
     R2PreprocessingSelection,
 )
-from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2ExperimentConfig
+from qtrad.domain.r2_readiness import (
+    EvidenceClass,
+    FeatureFamily,
+    ModelFamily,
+    R2ExperimentConfig,
+)
 from qtrad.runtime.r2_preprocessing_selection import (
     decode_r2_preprocessing_selection,
     serialize_r2_preprocessing_selection,
@@ -64,10 +71,18 @@ class _SelectionKwargs(TypedDict):
 
 _SCHEMA = (
     FeatureDefinition("signal", FeatureFamily.LOCAL_RETURNS),
-    FeatureDefinition("signal_available", FeatureFamily.LOCAL_RETURNS, True),
+    FeatureDefinition(
+        "signal_available",
+        FeatureFamily.LOCAL_RETURNS,
+        kind=FeatureKind.BINARY_INDICATOR,
+        availability_indicator=True,
+    ),
     FeatureDefinition("all_null", FeatureFamily.LOCAL_RETURNS),
     FeatureDefinition("constant", FeatureFamily.LOCAL_RETURNS),
 )
+
+_SELECTION_APPLICATION_IMAGE_IDENTITY = "qtrad@sha256:" + "7" * 64
+_SELECTION_SKLEARN_LIBRARY_IDENTITY = "scikit-learn==locked-test"
 
 
 def _training_rows() -> tuple[TrainingRow, ...]:
@@ -139,6 +154,35 @@ def test_preprocessing_drops_all_null_and_zero_variance_but_leaves_binary_unscal
         fit_preprocessing((replace(rows[0], features=(0.0, 2.0, None, 7.0)), *rows[1:]), _SCHEMA)
 
 
+def test_real_feature_registry_kinds_drive_binary_preprocessing() -> None:
+    schema = feature_registry(base_experiment())
+    binary_names = tuple(item.name for item in schema if item.kind is FeatureKind.BINARY_INDICATOR)
+    assert {"source_active", "quality_healthy", "gap_known_by_cutoff"} <= set(binary_names)
+    assert all(
+        not item.availability_indicator
+        for item in schema
+        if item.name in {"source_active", "quality_healthy", "gap_known_by_cutoff"}
+    )
+    rows = tuple(
+        replace(
+            row,
+            target_id=f"registry-{index}",
+            features=tuple(
+                float((position + index) % 2)
+                if definition.kind is FeatureKind.BINARY_INDICATOR
+                else float(position + index)
+                for position, definition in enumerate(schema)
+            ),
+        )
+        for index, row in enumerate(_training_rows()[:2])
+    )
+
+    fit = fit_preprocessing(rows, schema)
+
+    assert fit.indicator_feature_names == binary_names
+    assert set(fit.unscaled_feature_names) == set(binary_names)
+
+
 def test_pooled_weights_give_every_instrument_equal_total_and_mean_one() -> None:
     rows = _training_rows()
     weights = equal_instrument_total_weights(rows)
@@ -174,6 +218,28 @@ def test_complete_grid_retains_numerical_candidate_failures(
     assert failed.loss is None
     assert failed.failure == "ValueError"
     assert result.disposition is FitDisposition.READY
+
+
+def test_exact_candidate_loss_tie_selects_larger_alpha(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from qtrad.application import r2_preprocessing
+
+    def equal_predictions(
+        _alpha: float,
+        _x_fit: ndarray,
+        _y_fit: ndarray,
+        x_validation: ndarray,
+        _sample_weights: object,
+        **_kwargs: object,
+    ) -> ndarray:
+        return zeros(len(x_validation))
+
+    monkeypatch.setattr(r2_preprocessing, "_ridge_predictions", equal_predictions)
+    result = _select(_training_rows())
+
+    assert len({score.loss for score in result.candidate_scores}) == 1
+    assert result.selected_alpha == 10.0
 
 
 def test_configured_solver_and_loss_fail_closed() -> None:
@@ -349,19 +415,107 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
     return verified, features, config, fold
 
 
-def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
-    verified, features, config, fold = _bound_fixture()
-    fit = build_r2_preprocessing_selection(
+def _build_bound_selection(
+    verified: R1FoundationBindings,
+    features: R2FeatureDataset,
+    config: R2ExperimentConfig,
+    fold: Fold,
+    *,
+    model_family: ModelFamily = ModelFamily.LOCAL_RIDGE,
+    horizon: timedelta | None = None,
+    target_instruments: tuple[str, ...] | None = None,
+) -> R2PreprocessingSelection:
+    return build_r2_preprocessing_selection(
         verified,
         features,
         config,
+        model_family=model_family,
+        horizon=config.primary_horizon if horizon is None else horizon,
         outer_fold_id=fold.fold_id,
+        target_instruments=(config.confirmatory_target_instruments[0],)
+        if target_instruments is None
+        else target_instruments,
+        application_image_identity=_SELECTION_APPLICATION_IMAGE_IDENTITY,
+        sklearn_library_identity=_SELECTION_SKLEARN_LIBRARY_IDENTITY,
+    )
+
+
+def _verify_bound_selection(
+    verified: R1FoundationBindings,
+    features: R2FeatureDataset,
+    config: R2ExperimentConfig,
+    fold: Fold,
+    *,
+    persisted_payload: bytes | str | dict[str, JsonValue],
+    target_instruments: tuple[str, ...] | None = None,
+) -> R2PreprocessingSelection:
+    return verify_r2_preprocessing_selection(
+        verified,
+        features,
+        config,
+        model_family=ModelFamily.LOCAL_RIDGE,
+        horizon=config.primary_horizon,
+        outer_fold_id=fold.fold_id,
+        target_instruments=(config.confirmatory_target_instruments[0],)
+        if target_instruments is None
+        else target_instruments,
+        application_image_identity=_SELECTION_APPLICATION_IMAGE_IDENTITY,
+        sklearn_library_identity=_SELECTION_SKLEARN_LIBRARY_IDENTITY,
+        persisted_payload=persisted_payload,
+    )
+
+
+def _rehashed_selection(
+    artifact: R2PreprocessingSelection, selection: AlphaSelection
+) -> R2PreprocessingSelection:
+    return R2PreprocessingSelection.create(
+        r2_feature_dataset_id=artifact.r2_feature_dataset_id,
+        target_dataset_id=artifact.target_dataset_id,
+        fold_dataset_id=artifact.fold_dataset_id,
+        experiment_configuration_id=artifact.experiment_configuration_id,
+        model_family=artifact.model_family,
+        horizon=artifact.horizon,
+        outer_fold_id=artifact.outer_fold_id,
+        outer_fold_membership_hash=artifact.outer_fold_membership_hash,
+        target_instruments=artifact.target_instruments,
+        inner_validation_start=artifact.inner_validation_start,
+        inner_validation_end=artifact.inner_validation_end,
+        purge_boundary=artifact.purge_boundary,
+        feature_schema_id=artifact.feature_schema_id,
+        feature_set_id=artifact.feature_set_id,
+        evidence_class=artifact.evidence_class,
+        application_image_identity=artifact.application_image_identity,
+        sklearn_library_identity=artifact.sklearn_library_identity,
+        preprocessing_policy=artifact.preprocessing_policy,
+        inner_validation_policy=artifact.inner_validation_policy,
+        alpha_grid=artifact.alpha_grid,
+        ridge_solver=artifact.ridge_solver,
+        ridge_tolerance=artifact.ridge_tolerance,
+        ridge_max_iterations=artifact.ridge_max_iterations,
+        loss_policy=artifact.loss_policy,
+        pooled_weighting_policy=artifact.pooled_weighting_policy,
+        holdout_excluded=artifact.holdout_excluded,
+        selection=selection,
+    )
+
+
+def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
+    verified, features, config, fold = _bound_fixture()
+    fit = _build_bound_selection(
+        verified,
+        features,
+        config,
+        fold,
         target_instruments=(config.confirmatory_target_instruments[0],),
     )
     assert fit.target_dataset_id == verified.targets.dataset_id
     assert fit.fold_dataset_id == verified.folds.dataset_id
     assert fit.r2_feature_dataset_id == features.dataset_id
     assert fit.experiment_configuration_id == config.configuration_id
+    assert fit.model_family is ModelFamily.LOCAL_RIDGE
+    assert fit.horizon == config.primary_horizon
+    assert fit.application_image_identity == _SELECTION_APPLICATION_IMAGE_IDENTITY
+    assert fit.sklearn_library_identity == _SELECTION_SKLEARN_LIBRARY_IDENTITY
     assert fit.evidence_class is features.evidence_class
     assert fit.preprocessing_policy == config.preprocessing_policy
     assert fit.inner_validation_policy == config.inner_validation_policy
@@ -380,25 +534,81 @@ def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
         evidence_class=features.evidence_class,
     )
     with pytest.raises(ValueError, match="panel_dataset_id"):
-        build_r2_preprocessing_selection(verified, mismatched, config, outer_fold_id=fold.fold_id)
+        _build_bound_selection(verified, mismatched, config, fold)
+
+
+@pytest.mark.parametrize(
+    "model_family",
+    (
+        ModelFamily.ZERO_RETURN,
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ),
+)
+def test_build_rejects_every_nonlocal_model_family(model_family: ModelFamily) -> None:
+    verified, features, config, fold = _bound_fixture()
+
+    with pytest.raises(ValueError, match="only LOCAL_RIDGE"):
+        _build_bound_selection(
+            verified,
+            features,
+            config,
+            fold,
+            model_family=model_family,
+        )
+
+
+def test_build_rejects_nonprimary_horizon_and_non_singleton_or_ineligible_scope() -> None:
+    verified, features, config, fold = _bound_fixture()
+    target = (config.confirmatory_target_instruments[0],)
+
+    with pytest.raises(ValueError, match="primary horizon"):
+        _build_bound_selection(
+            verified,
+            features,
+            config,
+            fold,
+            horizon=config.horizons[0],
+            target_instruments=target,
+        )
+    for scope in ((), config.target_instruments[:2], (config.ordered_instruments[-1],)):
+        with pytest.raises(ValueError, match="exactly one eligible target"):
+            _build_bound_selection(
+                verified,
+                features,
+                config,
+                fold,
+                target_instruments=scope,
+            )
+    with pytest.raises(ValueError, match="exactly one eligible target"):
+        build_r2_preprocessing_selection(
+            verified,
+            features,
+            config,
+            model_family=ModelFamily.LOCAL_RIDGE,
+            horizon=config.primary_horizon,
+            outer_fold_id=fold.fold_id,
+            application_image_identity=_SELECTION_APPLICATION_IMAGE_IDENTITY,
+            sklearn_library_identity=_SELECTION_SKLEARN_LIBRARY_IDENTITY,
+        )
 
 
 def test_build_rejects_unsupported_preprocessing_and_inner_validation_policies() -> None:
     verified, features, config, fold = _bound_fixture()
 
     with pytest.raises(ValueError, match="preprocessing policy"):
-        build_r2_preprocessing_selection(
+        _build_bound_selection(
             verified,
             features,
             replace(config, preprocessing_policy="UNSUPPORTED"),
-            outer_fold_id=fold.fold_id,
+            fold,
         )
     with pytest.raises(ValueError, match="inner-validation policy"):
-        build_r2_preprocessing_selection(
+        _build_bound_selection(
             verified,
             features,
             replace(config, inner_validation_policy="UNSUPPORTED"),
-            outer_fold_id=fold.fold_id,
+            fold,
         )
 
 
@@ -422,12 +632,12 @@ def test_build_rejects_feature_evidence_class_mismatch() -> None:
     )
 
     with pytest.raises(ValueError, match="evidence_class"):
-        build_r2_preprocessing_selection(verified, mismatched, config, outer_fold_id=fold.fold_id)
+        _build_bound_selection(verified, mismatched, config, fold)
 
 
 def test_strict_json_decode_recomputes_identity_and_rejects_unknown_fields() -> None:
     verified, features, config, fold = _bound_fixture()
-    fit = build_r2_preprocessing_selection(verified, features, config, outer_fold_id=fold.fold_id)
+    fit = _build_bound_selection(verified, features, config, fold)
     encoded = serialize_r2_preprocessing_selection(fit)
     assert decode_r2_preprocessing_selection(encoded) == fit
 
@@ -448,25 +658,98 @@ def test_strict_json_decode_recomputes_identity_and_rejects_unknown_fields() -> 
 def test_independent_verifier_rebuilds_and_rejects_rehashed_semantic_tampering() -> None:
     verified, features, config, fold = _bound_fixture()
     target_instruments = (config.confirmatory_target_instruments[0],)
-    selection = build_r2_preprocessing_selection(
+    selection = _build_bound_selection(
         verified,
         features,
         config,
-        outer_fold_id=fold.fold_id,
+        fold,
         target_instruments=target_instruments,
     )
     persisted = serialize_r2_preprocessing_selection(selection)
     assert (
-        verify_r2_preprocessing_selection(
+        _verify_bound_selection(
             verified,
             features,
             config,
-            outer_fold_id=fold.fold_id,
+            fold,
             target_instruments=target_instruments,
             persisted_payload=persisted,
         )
         == selection
     )
+
+    inner = selection.selection.inner_preprocessing
+    assert inner is not None
+    position = next(index for index, value in enumerate(inner.medians) if value is not None)
+    baseline_median = inner.medians[position]
+    baseline_mean = inner.means[position]
+    baseline_scale = inner.scales[position]
+    assert baseline_median is not None and baseline_mean is not None and baseline_scale is not None
+    within_delta = config.numeric_replay_absolute_tolerance / 2
+    within_medians = list(inner.medians)
+    within_means = list(inner.means)
+    within_scales = list(inner.scales)
+    within_weights = list(inner.sample_weights)
+    within_medians[position] = baseline_median + within_delta
+    within_means[position] = baseline_mean + within_delta
+    within_scales[position] = baseline_scale + within_delta
+    within_weights[0] += within_delta
+    within_weights[1] -= within_delta
+    within_inner = replace(
+        inner,
+        medians=tuple(within_medians),
+        means=tuple(within_means),
+        scales=tuple(within_scales),
+        sample_weights=tuple(within_weights),
+    )
+    score_position = next(
+        index
+        for index, score in enumerate(selection.selection.candidate_scores)
+        if score.loss is not None
+    )
+    within_scores = list(selection.selection.candidate_scores)
+    score = within_scores[score_position]
+    assert score.loss is not None
+    within_scores[score_position] = replace(score, loss=score.loss + within_delta)
+    within_selection = replace(
+        selection.selection,
+        inner_preprocessing=within_inner,
+        candidate_scores=tuple(within_scores),
+    )
+    within = _rehashed_selection(selection, within_selection)
+    assert within.artifact_id != selection.artifact_id
+    assert (
+        _verify_bound_selection(
+            verified,
+            features,
+            config,
+            fold,
+            target_instruments=target_instruments,
+            persisted_payload=serialize_r2_preprocessing_selection(within),
+        )
+        == within
+    )
+
+    outside_delta = 10 * (
+        config.numeric_replay_absolute_tolerance
+        + config.numeric_replay_relative_tolerance * max(1.0, abs(baseline_median))
+    )
+    outside_medians = list(inner.medians)
+    outside_medians[position] = baseline_median + outside_delta
+    outside_inner = replace(inner, medians=tuple(outside_medians))
+    outside = _rehashed_selection(
+        selection, replace(selection.selection, inner_preprocessing=outside_inner)
+    )
+    assert outside.artifact_id != selection.artifact_id
+    with pytest.raises(ValueError, match="authenticated rebuild"):
+        _verify_bound_selection(
+            verified,
+            features,
+            config,
+            fold,
+            target_instruments=target_instruments,
+            persisted_payload=serialize_r2_preprocessing_selection(outside),
+        )
 
     alternate_alpha = next(
         score.alpha
@@ -475,39 +758,15 @@ def test_independent_verifier_rebuilds_and_rejects_rehashed_semantic_tampering()
         and score.alpha != selection.selection.selected_alpha
     )
     tampered_selection = replace(selection.selection, selected_alpha=alternate_alpha)
-    tampered = R2PreprocessingSelection.create(
-        r2_feature_dataset_id=selection.r2_feature_dataset_id,
-        target_dataset_id=selection.target_dataset_id,
-        fold_dataset_id=selection.fold_dataset_id,
-        experiment_configuration_id=selection.experiment_configuration_id,
-        outer_fold_id=selection.outer_fold_id,
-        outer_fold_membership_hash=selection.outer_fold_membership_hash,
-        target_instruments=selection.target_instruments,
-        inner_validation_start=selection.inner_validation_start,
-        inner_validation_end=selection.inner_validation_end,
-        purge_boundary=selection.purge_boundary,
-        feature_schema_id=selection.feature_schema_id,
-        feature_set_id=selection.feature_set_id,
-        evidence_class=selection.evidence_class,
-        preprocessing_policy=selection.preprocessing_policy,
-        inner_validation_policy=selection.inner_validation_policy,
-        alpha_grid=selection.alpha_grid,
-        ridge_solver=selection.ridge_solver,
-        ridge_tolerance=selection.ridge_tolerance,
-        ridge_max_iterations=selection.ridge_max_iterations,
-        loss_policy=selection.loss_policy,
-        pooled_weighting_policy=selection.pooled_weighting_policy,
-        holdout_excluded=selection.holdout_excluded,
-        selection=tampered_selection,
-    )
+    tampered = _rehashed_selection(selection, tampered_selection)
     assert tampered.artifact_id != selection.artifact_id
 
     with pytest.raises(ValueError, match="authenticated rebuild"):
-        verify_r2_preprocessing_selection(
+        _verify_bound_selection(
             verified,
             features,
             config,
-            outer_fold_id=fold.fold_id,
+            fold,
             target_instruments=target_instruments,
             persisted_payload=serialize_r2_preprocessing_selection(tampered),
         )

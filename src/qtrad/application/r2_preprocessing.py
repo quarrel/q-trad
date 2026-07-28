@@ -12,7 +12,12 @@ from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import ReturnDisposition, TargetDataset
-from qtrad.domain.r2_features import FeatureDefinition, R2FeatureDataset, RawFeatureRow
+from qtrad.domain.r2_features import (
+    FeatureDefinition,
+    FeatureKind,
+    R2FeatureDataset,
+    RawFeatureRow,
+)
 from qtrad.domain.r2_models import (
     AlphaCandidateScore,
     AlphaSelection,
@@ -20,7 +25,7 @@ from qtrad.domain.r2_models import (
     PreprocessingFit,
     R2PreprocessingSelection,
 )
-from qtrad.domain.r2_readiness import R2ExperimentConfig
+from qtrad.domain.r2_readiness import ModelFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
 _SUPPORTED_PREPROCESSING = "TRAINING_MEDIAN_STANDARDISE_V1"
@@ -56,11 +61,15 @@ def build_r2_preprocessing_selection(
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     *,
+    model_family: ModelFamily,
+    horizon: timedelta,
     outer_fold_id: str,
     target_instruments: Sequence[str] | None = None,
+    application_image_identity: str,
+    sklearn_library_identity: str,
 ) -> R2PreprocessingSelection:
     """Build one replayable preprocessing selection from authenticated R1 and R2.B children."""
-    _verify_selection_policies(experiment)
+    _verify_selection_policies(experiment, model_family, horizon)
     verify_exact_r1_bindings(verified, experiment)
     _verify_feature_bindings(verified, feature_dataset, experiment)
     fold = _outer_fold(verified, outer_fold_id)
@@ -78,6 +87,7 @@ def build_r2_preprocessing_selection(
         feature_dataset,
         experiment,
         scope,
+        horizon,
     )
     selection = select_chronological_alpha(
         rows,
@@ -99,6 +109,8 @@ def build_r2_preprocessing_selection(
         target_dataset_id=verified.targets.dataset_id,
         fold_dataset_id=verified.folds.dataset_id,
         experiment_configuration_id=experiment.configuration_id,
+        model_family=model_family,
+        horizon=horizon,
         outer_fold_id=fold.fold_id,
         outer_fold_membership_hash=fold.membership_hash,
         target_instruments=scope,
@@ -108,6 +120,8 @@ def build_r2_preprocessing_selection(
         feature_schema_id=feature_dataset.raw_feature_schema_id,
         feature_set_id=feature_dataset.feature_set_id,
         evidence_class=feature_dataset.evidence_class,
+        application_image_identity=application_image_identity,
+        sklearn_library_identity=sklearn_library_identity,
         preprocessing_policy=experiment.preprocessing_policy,
         inner_validation_policy=experiment.inner_validation_policy,
         alpha_grid=experiment.alpha_grid,
@@ -369,13 +383,13 @@ def fit_preprocessing(
     unscaled: list[str] = []
     all_null: list[str] = []
     zero_variance: list[str] = []
-    indicators = tuple(item.name for item in schema if item.availability_indicator)
+    indicators = tuple(item.name for item in schema if item.kind is FeatureKind.BINARY_INDICATOR)
     for position, definition in enumerate(schema):
         column = matrix[:, position]
-        if definition.availability_indicator:
+        if definition.kind is FeatureKind.BINARY_INDICATOR:
             observed = column[~np.isnan(column)]
             if np.any((observed != 0.0) & (observed != 1.0)):
-                raise ValueError(f"availability indicator is not binary: {definition.name}")
+                raise ValueError(f"binary indicator is not binary: {definition.name}")
             binary = np.where(np.isnan(column), 0.0, column)
             medians.append(None)
             means.append(None)
@@ -437,7 +451,7 @@ def transform(rows: Sequence[TrainingRow], fit: PreprocessingFit) -> np.ndarray:
         if name in indicators:
             observed = column[~np.isnan(column)]
             if np.any((observed != 0.0) & (observed != 1.0)):
-                raise ValueError(f"availability indicator is not binary: {name}")
+                raise ValueError(f"binary indicator is not binary: {name}")
             columns.append(np.where(np.isnan(column), 0.0, column))
         else:
             median = fit.medians[position]
@@ -466,7 +480,13 @@ def equal_instrument_total_weights(
     return tuple(instrument_total / counts[row.target_instrument_id] for row in rows)
 
 
-def _verify_selection_policies(experiment: R2ExperimentConfig) -> None:
+def _verify_selection_policies(
+    experiment: R2ExperimentConfig, model_family: ModelFamily, horizon: timedelta
+) -> None:
+    if model_family is not ModelFamily.LOCAL_RIDGE:
+        raise ValueError("R2.C selection supports only LOCAL_RIDGE")
+    if horizon != experiment.primary_horizon:
+        raise ValueError("R2.C selection supports only the experiment primary horizon")
     if experiment.preprocessing_policy != _SUPPORTED_PREPROCESSING:
         raise ValueError("unsupported preprocessing policy")
     if experiment.inner_validation_policy != _SUPPORTED_INNER_SPLIT:
@@ -509,10 +529,10 @@ def _outer_fold(verified: R1FoundationBindings, fold_id: str) -> Fold:
 def _target_scope(
     experiment: R2ExperimentConfig, requested: Sequence[str] | None
 ) -> tuple[str, ...]:
-    wanted = set(experiment.confirmatory_target_instruments if requested is None else requested)
-    if not wanted or not wanted <= set(experiment.target_instruments):
-        raise ValueError("target scope must be a non-empty eligible experiment subset")
-    return tuple(item for item in experiment.target_instruments if item in wanted)
+    scope = tuple(experiment.confirmatory_target_instruments if requested is None else requested)
+    if len(scope) != 1 or scope[0] not in experiment.target_instruments:
+        raise ValueError("R2.C target scope must contain exactly one eligible target")
+    return scope
 
 
 def _join_training_rows(
@@ -521,6 +541,7 @@ def _join_training_rows(
     features: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     target_scope: tuple[str, ...],
+    horizon: timedelta,
 ) -> tuple[TrainingRow, ...]:
     target_by_id = {row.target_id: row for row in targets.rows}
     if len(target_by_id) != len(targets.rows):
@@ -546,7 +567,7 @@ def _join_training_rows(
         target = target_by_id[target_id]
         if target.instrument_id not in target_scope:
             continue
-        if target.horizon != experiment.primary_horizon:
+        if target.horizon != horizon:
             continue
         if target.return_disposition is not ReturnDisposition.VALID or target.log_return is None:
             raise ValueError(

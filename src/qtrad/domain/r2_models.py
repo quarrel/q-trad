@@ -2,14 +2,14 @@
 
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
 from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
-from qtrad.domain.r2_readiness import EvidenceClass
+from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
 R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
@@ -66,7 +66,7 @@ class PreprocessingFit:
             raise ValueError("active and dropped features must exactly partition the schema")
         indicators = set(self.indicator_feature_names)
         if set(self.unscaled_feature_names) != indicators & set(self.active_feature_names):
-            raise ValueError("exactly active availability indicators must be unscaled")
+            raise ValueError("exactly active binary indicators must be unscaled")
         if len(self.training_target_ids) == 0 or len(set(self.training_target_ids)) != len(
             self.training_target_ids
         ):
@@ -84,7 +84,7 @@ class PreprocessingFit:
             median, mean, scale = self.medians[index], self.means[index], self.scales[index]
             if name in indicators:
                 if median is not None or mean is not None or scale is not None:
-                    raise ValueError("binary availability indicators cannot be imputed or scaled")
+                    raise ValueError("binary indicators cannot be imputed or scaled")
             elif name in active:
                 if median is None or mean is None or scale is None:
                     raise ValueError("active continuous features require complete parameters")
@@ -235,6 +235,8 @@ class _R2PreprocessingSelectionArguments(TypedDict):
     target_dataset_id: str
     fold_dataset_id: str
     experiment_configuration_id: str
+    model_family: ModelFamily
+    horizon: timedelta
     outer_fold_id: str
     outer_fold_membership_hash: str
     target_instruments: tuple[str, ...]
@@ -244,6 +246,8 @@ class _R2PreprocessingSelectionArguments(TypedDict):
     feature_schema_id: str
     feature_set_id: str
     evidence_class: EvidenceClass
+    application_image_identity: str
+    sklearn_library_identity: str
     preprocessing_policy: str
     inner_validation_policy: str
     alpha_grid: tuple[float, ...]
@@ -264,6 +268,8 @@ class R2PreprocessingSelection:
     target_dataset_id: str
     fold_dataset_id: str
     experiment_configuration_id: str
+    model_family: ModelFamily
+    horizon: timedelta
     outer_fold_id: str
     outer_fold_membership_hash: str
     target_instruments: tuple[str, ...]
@@ -273,6 +279,8 @@ class R2PreprocessingSelection:
     feature_schema_id: str
     feature_set_id: str
     evidence_class: EvidenceClass
+    application_image_identity: str
+    sklearn_library_identity: str
     preprocessing_policy: str
     inner_validation_policy: str
     alpha_grid: tuple[float, ...]
@@ -300,12 +308,14 @@ class R2PreprocessingSelection:
             (self.artifact_id, "preprocessing-selection artifact ID"),
         ):
             _require_sha256(value, field)
-        if (
-            not self.outer_fold_id
-            or not self.target_instruments
-            or len(set(self.target_instruments)) != len(self.target_instruments)
-        ):
-            raise ValueError("fold and target scope must be non-empty and unique")
+        if self.model_family is not ModelFamily.LOCAL_RIDGE:
+            raise ValueError("R2.C preprocessing selection supports only LOCAL_RIDGE")
+        if self.horizon != timedelta(minutes=15):
+            raise ValueError("R2.C preprocessing selection supports only the primary horizon")
+        if not self.application_image_identity or not self.sklearn_library_identity:
+            raise ValueError("application image and sklearn library identities are required")
+        if not self.outer_fold_id or len(self.target_instruments) != 1:
+            raise ValueError("R2.C fold and target scope must identify exactly one eligible target")
         for value, field in (
             (self.inner_validation_start, "inner validation start"),
             (self.inner_validation_end, "inner validation end"),
@@ -356,6 +366,8 @@ class R2PreprocessingSelection:
                 "target_dataset_id": self.target_dataset_id,
                 "fold_dataset_id": self.fold_dataset_id,
                 "experiment_configuration_id": self.experiment_configuration_id,
+                "model_family": self.model_family,
+                "horizon": self.horizon,
                 "outer_fold_id": self.outer_fold_id,
                 "outer_fold_membership_hash": self.outer_fold_membership_hash,
                 "target_instruments": self.target_instruments,
@@ -365,6 +377,8 @@ class R2PreprocessingSelection:
                 "feature_schema_id": self.feature_schema_id,
                 "feature_set_id": self.feature_set_id,
                 "evidence_class": self.evidence_class,
+                "application_image_identity": self.application_image_identity,
+                "sklearn_library_identity": self.sklearn_library_identity,
                 "preprocessing_policy": self.preprocessing_policy,
                 "inner_validation_policy": self.inner_validation_policy,
                 "alpha_grid": self.alpha_grid,
@@ -393,6 +407,8 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         "target_dataset_id": str(values["target_dataset_id"]),
         "fold_dataset_id": str(values["fold_dataset_id"]),
         "experiment_configuration_id": str(values["experiment_configuration_id"]),
+        "model_family": ModelFamily(cast(ModelFamily, values["model_family"])).value,
+        "horizon_seconds": cast(timedelta, values["horizon"]).total_seconds(),
         "outer_fold_id": str(values["outer_fold_id"]),
         "outer_fold_membership_hash": str(values["outer_fold_membership_hash"]),
         "target_instruments": list(cast(tuple[str, ...], values["target_instruments"])),
@@ -402,6 +418,8 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         "feature_schema_id": str(values["feature_schema_id"]),
         "feature_set_id": str(values["feature_set_id"]),
         "evidence_class": EvidenceClass(cast(EvidenceClass, values["evidence_class"])).value,
+        "application_image_identity": str(values["application_image_identity"]),
+        "sklearn_library_identity": str(values["sklearn_library_identity"]),
         "preprocessing_policy": str(values["preprocessing_policy"]),
         "inner_validation_policy": str(values["inner_validation_policy"]),
         "alpha_grid": list(cast(tuple[float, ...], values["alpha_grid"])),

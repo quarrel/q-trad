@@ -3,8 +3,8 @@
 import json
 import os
 from collections.abc import Mapping, Sequence
-from datetime import datetime
-from math import isfinite
+from datetime import datetime, timedelta
+from math import isclose, isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import cast
@@ -20,7 +20,7 @@ from qtrad.domain.r2_models import (
     PreprocessingFit,
     R2PreprocessingSelection,
 )
-from qtrad.domain.r2_readiness import EvidenceClass, R2ExperimentConfig
+from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
 _TOP_LEVEL_KEYS = {
@@ -30,6 +30,8 @@ _TOP_LEVEL_KEYS = {
     "target_dataset_id",
     "fold_dataset_id",
     "experiment_configuration_id",
+    "model_family",
+    "horizon_seconds",
     "outer_fold_id",
     "outer_fold_membership_hash",
     "target_instruments",
@@ -39,6 +41,8 @@ _TOP_LEVEL_KEYS = {
     "feature_schema_id",
     "feature_set_id",
     "evidence_class",
+    "application_image_identity",
+    "sklearn_library_identity",
     "preprocessing_policy",
     "inner_validation_policy",
     "alpha_grid",
@@ -123,6 +127,8 @@ def decode_r2_preprocessing_selection(
         experiment_configuration_id=_text(
             obj["experiment_configuration_id"], "experiment_configuration_id"
         ),
+        model_family=ModelFamily(_text(obj["model_family"], "model_family")),
+        horizon=timedelta(seconds=_number(obj["horizon_seconds"], "horizon_seconds")),
         outer_fold_id=_text(obj["outer_fold_id"], "outer_fold_id"),
         outer_fold_membership_hash=_text(
             obj["outer_fold_membership_hash"], "outer_fold_membership_hash"
@@ -134,6 +140,10 @@ def decode_r2_preprocessing_selection(
         feature_schema_id=_text(obj["feature_schema_id"], "feature_schema_id"),
         feature_set_id=_text(obj["feature_set_id"], "feature_set_id"),
         evidence_class=EvidenceClass(_text(obj["evidence_class"], "evidence_class")),
+        application_image_identity=_text(
+            obj["application_image_identity"], "application_image_identity"
+        ),
+        sklearn_library_identity=_text(obj["sklearn_library_identity"], "sklearn_library_identity"),
         preprocessing_policy=_text(obj["preprocessing_policy"], "preprocessing_policy"),
         inner_validation_policy=_text(obj["inner_validation_policy"], "inner_validation_policy"),
         alpha_grid=_numbers(obj["alpha_grid"], "alpha_grid"),
@@ -153,8 +163,12 @@ def verify_r2_preprocessing_selection(
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     *,
+    model_family: ModelFamily,
+    horizon: timedelta,
     outer_fold_id: str,
     target_instruments: Sequence[str] | None,
+    application_image_identity: str,
+    sklearn_library_identity: str,
     persisted_payload: bytes | str | Mapping[str, object],
 ) -> R2PreprocessingSelection:
     """Decode persisted evidence and compare it with a fresh authenticated rebuild."""
@@ -163,14 +177,122 @@ def verify_r2_preprocessing_selection(
         verified,
         feature_dataset,
         experiment,
+        model_family=model_family,
+        horizon=horizon,
         outer_fold_id=outer_fold_id,
         target_instruments=target_instruments,
+        application_image_identity=application_image_identity,
+        sklearn_library_identity=sklearn_library_identity,
     )
-    if persisted != rebuilt:
+    _verify_replay_match(
+        persisted,
+        rebuilt,
+        relative_tolerance=experiment.numeric_replay_relative_tolerance,
+        absolute_tolerance=experiment.numeric_replay_absolute_tolerance,
+    )
+    return persisted
+
+
+def _verify_replay_match(
+    persisted: R2PreprocessingSelection,
+    rebuilt: R2PreprocessingSelection,
+    *,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+) -> None:
+    if _structural_replay_json(persisted) != _structural_replay_json(rebuilt):
         raise ValueError(
             "persisted preprocessing selection does not match the authenticated rebuild"
         )
-    return persisted
+    for actual, expected in (
+        (persisted.selection.inner_preprocessing, rebuilt.selection.inner_preprocessing),
+        (persisted.selection.outer_preprocessing, rebuilt.selection.outer_preprocessing),
+    ):
+        if actual is None or expected is None:
+            continue
+        for actual_values, expected_values in (
+            (actual.medians, expected.medians),
+            (actual.means, expected.means),
+            (actual.scales, expected.scales),
+            (actual.sample_weights, expected.sample_weights),
+        ):
+            if not _numeric_vectors_close(
+                actual_values,
+                expected_values,
+                relative_tolerance=relative_tolerance,
+                absolute_tolerance=absolute_tolerance,
+            ):
+                raise ValueError(
+                    "persisted preprocessing selection does not match the authenticated rebuild"
+                )
+    for actual, expected in zip(
+        persisted.selection.candidate_scores,
+        rebuilt.selection.candidate_scores,
+        strict=True,
+    ):
+        if not _optional_number_close(
+            actual.loss,
+            expected.loss,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        ):
+            raise ValueError(
+                "persisted preprocessing selection does not match the authenticated rebuild"
+            )
+
+
+def _structural_replay_json(selection: R2PreprocessingSelection) -> dict[str, object]:
+    payload = cast(dict[str, object], cast(object, selection.as_json()))
+    payload.pop("artifact_id")
+    nested = cast(dict[str, object], payload["selection"])
+    for field in ("inner_preprocessing", "outer_preprocessing"):
+        value = nested[field]
+        if value is None:
+            continue
+        fit = cast(dict[str, object], value)
+        for vector_field in ("medians", "means", "scales", "sample_weights"):
+            vector = cast(list[object], fit[vector_field])
+            fit[vector_field] = [None if item is None else 0.0 for item in vector]
+    for value in cast(list[object], nested["candidate_scores"]):
+        candidate = cast(dict[str, object], value)
+        if candidate["loss"] is not None:
+            candidate["loss"] = 0.0
+    return payload
+
+
+def _numeric_vectors_close(
+    actual: Sequence[float | None],
+    expected: Sequence[float | None],
+    *,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+) -> bool:
+    return len(actual) == len(expected) and all(
+        _optional_number_close(
+            actual_value,
+            expected_value,
+            relative_tolerance=relative_tolerance,
+            absolute_tolerance=absolute_tolerance,
+        )
+        for actual_value, expected_value in zip(actual, expected, strict=True)
+    )
+
+
+def _optional_number_close(
+    actual: float | None,
+    expected: float | None,
+    *,
+    relative_tolerance: float,
+    absolute_tolerance: float,
+) -> bool:
+    if actual is None or expected is None:
+        return actual is expected
+    return isclose(
+        actual,
+        expected,
+        rel_tol=relative_tolerance,
+        abs_tol=absolute_tolerance,
+    )
 
 
 def write_r2_preprocessing_selection(path: Path, selection: R2PreprocessingSelection) -> None:
