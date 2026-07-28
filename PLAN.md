@@ -1,10 +1,12 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R2 — local and pooled baselines (planning)
+**Current milestone:** R2 — local and pooled baselines (R2.B complete; R2.C next)
+**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
-**Safety boundary:** IG demo market data and internal paper outcomes only; no external orders.
+**Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
+orders or production broker connectivity.
 
 `docs/TRADING_RESEARCH.md` defines the stable research programme. This file selects the current
 work and records only the milestone sequence needed to reach the next trustworthy decision.
@@ -36,6 +38,13 @@ work and records only the milestone sequence needed to reach the next trustworth
   make no effectiveness claim. R1 implementation is complete; producing the first real 23-market
   bundle remains a fail-closed R2 entry prerequisite once the configured evidence interval and
   product-role qualification support it.
+- R2.A and R2.B are software-complete implementation evidence. R2.C through R2.F1 may continue with
+  synthetic and representative bundles while qualifying data accumulate; R2.F2 and the locked
+  holdout remain gated on a frozen qualifying foundation.
+- ADR 0028 approves an independent, market-data-only IBKR paper source. Its contract review,
+  historical bootstrap and later live capture proceed as a parallel data track under
+  `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`. No IBKR adapter, account capability, dataset or host is
+  implemented or qualified yet, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
@@ -43,7 +52,7 @@ work and records only the milestone sequence needed to reach the next trustworth
 |---|---|---|
 | R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
 | R1 — causal multi-asset research foundation | COMPLETE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks |
-| R2 — local and pooled baselines | PLANNING | per-asset Ridge and pooled non-graph forecasts are compared on locked out-of-sample evidence; execution starts only after a real 23-market foundation bundle verifies |
+| R2 — local and pooled baselines | IN PROGRESS | R2.A–R2.B software is complete; R2.C–R2.F1 software and source-specific integration continue before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
 | R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
 | R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
 | R5 — integrated offline MVP | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set |
@@ -94,16 +103,33 @@ chronology ambiguity before those contracts are fixed.
 
 ## R2 — local and pooled baselines
 
-- R2 implementation plan `docs\R2_IMPLEMENTATION_PLAN.md`
-- Before model execution, build and independently verify the first real 23-market native R1 bundle;
-  fail closed if native history, calibration maturity, product roles or fold durations are
-  insufficient.
-- Retain per-asset Ridge as the required local baseline and add a pooled non-graph cross-asset
-  control.
+- R2 implementation plan `docs/R2_IMPLEMENTATION_PLAN.md`.
+- R2.A and R2.B are software-complete; continue R2.C fold-local preprocessing, R2.D local Ridge,
+  R2.E pooled controls, R2.F1 evaluation and the corresponding R2.H software verification.
+- Keep `R2-IG-NATIVE`, `R2-IBKR-HISTORICAL` and any later `R2-IBKR-NATIVE` experiment source-specific.
+  Each consumes one independently verified foundation and makes conclusions only for its evidence
+  class. No source-specific experiment silently replaces another.
+- Retain per-asset Ridge as the required local baseline and add pooled local-feature and pooled
+  non-graph cross-asset controls.
 - Begin with ablatable returns, volatility, time/session, spread and validated quote-imbalance
   features. Do not call top-of-book size changes cumulative volume delta.
-- Compare loss, correlation/rank correlation, direction, forecast buckets, coverage and stability
-  by asset, horizon and period.
+- Compare loss, correlation/rank correlation, direction, forecast buckets, coverage and stability by
+  asset, horizon and period.
+- Keep confirmatory OOF, selection freeze and holdout execution fail-closed until the exact source's
+  history, contract/product roles, availability policy and fold durations pass the unchanged gates.
+
+## Parallel IBKR market-data track
+
+- Normative implementation plan: `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`; durable boundary:
+  `docs/adr/0028-independent-ibkr-market-data-source.md`.
+- First qualify account-visible exact contracts, entitlements, timestamps, sessions and historical
+  capabilities without ingesting or inferring provider mappings.
+- Then implement immutable one-minute historical acquisition and a separate provider-history
+  observation/foundation path. Historical results retain explicit availability/revision assumptions.
+- Add live IBKR top-of-book capture only as an independent runtime and canonical store with
+  operator-authenticated Gateway lifecycle, truthful health, recovery, backups and restore evidence.
+- The adapter remains market-data-only. Account access, acquisition, deployment and publication are
+  separately authorised operations.
 
 ## R3 — cost and portfolio baseline
 

@@ -1,6 +1,13 @@
-# Proposed plan: independent IBKR capture and historical-data track
+# IBKR collector and history proposal source
 
-This is a high-leverage addition. Build it as a **second independent capture source**, not as an IBKR mode inside the existing IG `capture-v4` collector.
+**Status:** SUPERSEDED AS NORMATIVE PLAN
+
+This proposal is retained as review source material. The approved decisions, corrected sequencing and
+complete implementation gates are now governed by `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` and
+ADR 0028. Where this proposal differs from those authorities, the normative plan and ADR control.
+
+The core proposal is a **second independent capture source**, not an IBKR mode inside the existing IG
+`capture-v4` collector.
 
 Notes on timing for historical data:
 
@@ -68,7 +75,7 @@ IBKR recommends identifying exact contracts with `conId` and exchange, rather th
 
 ### 1.3 Keep IBKR and IG research conclusions separate
 
-Introduce three explicit evidence classes:
+Introduce three explicit `MarketDataSourceClass` values, not new R2 evidence classes:
 
 ```text
 IBKR_HISTORICAL_RESEARCH
@@ -76,9 +83,13 @@ IBKR_NATIVE_CAPTURE
 IG_NATIVE_CAPTURE
 ```
 
-An IBKR historical result can answer whether R2’s forecasting hypothesis works on IBKR-provided CFD or reference-price bars. It cannot substantiate IG quote behaviour, IG spreads, IG slippage or IG paper execution.
+R2 `EvidenceClass` remains the orthogonal implementation-versus-confirmatory dimension. Foundations
+and downstream R2 artefacts bind both independently. An IBKR historical result can answer whether
+R2's forecasting hypothesis works on IBKR-provided CFD or reference-price bars. It cannot substantiate
+IG quote behaviour, IG spreads, IG slippage or IG paper execution.
 
-That is already the repository’s stated policy: external data may support training or hypothesis rejection but must retain venue, product, timestamp and correction provenance and must not masquerade as IG CFD history.
+External data may support training or hypothesis rejection but must retain venue, product, timestamp
+and correction provenance and must not masquerade as IG CFD history.
 
 Do not initially combine IBKR and IG rows in one R1 bundle. Run:
 
@@ -424,15 +435,19 @@ session/schedule evidence
 bar bases included
 ```
 
-The availability rule should be explicit, for example:
+The provider-history contract exposes `ProviderHistoricalObservation.available_at` under a versioned
+`ProviderHistoricalAvailabilityPolicy`, for example:
 
 ```text
 BAR_END_PLUS_DECLARED_PROVIDER_DELAY
 ```
 
-rather than pretending the historical request’s later persistence timestamp was the original market-time availability.
-
-This evidence class may drive a chronological external-provider R2 experiment, but its report must say that availability and revision behaviour are historical-data assumptions rather than measured live delivery.
+A versioned foundation availability selector authenticates this field. The policy, delay, request time
+and correction assumptions participate in semantic identity; assumed availability is never written
+into native `received_at` or `persisted_at`. This source class may drive a chronological external-
+provider R2 experiment with an independent implementation or confirmatory `EvidenceClass`, but its
+report must identify historical availability and revision behaviour as assumptions rather than
+measured live delivery.
 
 ---
 
@@ -552,12 +567,15 @@ Prove:
 * contract ambiguity fails closed;
 * conId mappings are deterministic;
 * no order method is reachable;
-* callback ordering does not change semantic output;
-* duplicate callbacks are idempotent;
+* raw callbacks preserve connection-generation and local monotonic arrival order;
+* replaying the same identity-bearing callback sequence is deterministic and idempotent, while
+  payload-equal callbacks with different identities remain distinct;
 * one-sided and crossed quotes behave correctly;
 * delayed/frozen data cannot be marked healthy;
 * timestamps normalise to UTC;
-* historical request chunks are gap-free and non-overlapping;
+* planned request coverage is contiguous and non-overlapping after clipping;
+* returned interval keys are ordered and unique, overlaps reconcile deterministically, active expected
+  absences receive gap dispositions, inactive intervals remain absent and no interval is forward-filled;
 * one-second planning honours the 2,000-second limit;
 * pacing survives restarts;
 * reconnect codes rebuild subscriptions correctly; and
@@ -592,8 +610,13 @@ Require at the full-universe gate:
 * no unexplained gaps;
 * restart and reconnect recovery proven;
 * backup and restore verification passed;
-* exact source/universe/image identities retained; and
-* at least one complete multi-region trading cycle observed.
+* exact source/universe/image identities retained;
+* at least one complete multi-region trading cycle observed; and
+* a complete weekly reauthentication boundary proves expiry detection, fail-closed unavailability,
+  operator alerting, a new recovery generation, exact subscription restoration and gap accounting.
+
+Until the weekly boundary is observed, the Gateway lifecycle remains unqualified and capture cannot
+be declared complete.
 
 ### G4 — historical qualification
 
@@ -663,7 +686,7 @@ This is a separate augmentation experiment. It must not silently replace the sti
 ## 11. Recommended pull-request sequence
 
 1. **ADR and contracts**
-   Independent source decision, evidence classes, candidate universe and Gateway operational boundary.
+   Independent source decision, source/evidence dimensions, candidate universe and Gateway operational boundary.
 
 2. **IBKR capability probe**
    Direct API client, contract review, entitlement report and exact mapping evidence.
@@ -694,7 +717,9 @@ The addition is **software-complete** when the IBKR adapter, historical planner,
 
 The **IBKR historical bootstrap is complete** when the repository has an immutable, verified 16+ week one-minute MIDPOINT bundle that can run the R2 historical experiment.
 
-The **IBKR capture host is complete** when the reviewed universe streams into an independent canonical store with truthful health, reconnect recovery, backups and operator-authenticated Gateway lifecycle.
+The **IBKR capture host is complete** only when the reviewed universe streams into an independent
+canonical store with truthful health, reconnect recovery, backups and an operator-authenticated
+Gateway lifecycle proven across a complete weekly reauthentication boundary.
 
 The **research objective is complete** when R2 produces a positive, negative or inconclusive IBKR historical result, followed where justified by an IBKR live-native comparison—without making an unsupported IG execution claim.
 

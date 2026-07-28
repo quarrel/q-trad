@@ -44,11 +44,12 @@
 | Top-of-book sizes | Candidate quote-imbalance feature after semantic/coverage checks | Not trade volume and never labelled CVD |
 | AUD VIX | Context-only feature candidate | Not paper-tradable |
 
-R0 does not authorise a historical-data purchase, new external adapter or bulk historical request.
-The next research work should use the native stream and, where specifically useful, bounded IG
-candles with provenance-distinct manifests. An external source can be reconsidered only with an
-identified venue/product mapping, timestamp and correction semantics, retention/licensing terms,
-and a decision that its incremental value justifies the cost.
+R0 did not authorise a historical-data purchase, new external adapter or bulk historical request.
+That bounded decision remains the authority for what R0 measured on 2026-07-22. ADR 0028, accepted on
+2026-07-28 after R2.B software completion, separately authorises a staged independent IBKR
+paper-market-data track subject to exact product, entitlement, timestamp, session, correction,
+retention and provenance qualification. It does not change this R0 evidence or permit IBKR history to
+substantiate IG paper conclusions.
 
 ## R0 consequence
 

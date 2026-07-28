@@ -1,9 +1,10 @@
 # Current status
 
-**Updated:** 2026-07-27
-**Current milestone:** R2 — local and pooled baselines (R2.B software complete; representative integration pending)
+**Updated:** 2026-07-28
+**Current milestone:** R2 — local and pooled baselines (R2.B software complete; R2.C next)
+**Parallel track:** IBKR Stage 0 documentation and source decision complete; implementation not started
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
-remains offline/replay
+remains offline/replay.
 
 ## Working now
 
@@ -62,6 +63,11 @@ remains offline/replay
   lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
   semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
   integration and any model conclusion remain pending.
+- ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` now define an independent, market-data-only
+  IBKR paper source and the complete staged path from exact contract review through historical and
+  native source-specific R2 experiments. This is a documentation and architecture decision only: no
+  IBKR adapter, entitlement result, historical dataset, live collector, host or research result has
+  been implemented or qualified.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -86,18 +92,22 @@ remains offline/replay
   Korea 200 remains unavailable without a future eligible listing. VIX is capture-only and must not
   become paper-tradable without a separate economics/role decision. Bitcoin needs a future review
   while its exact listing is available before it can be promoted as potentially tradable.
-- R0's bounded historical-data decision is recorded in `docs/R0_DATA_READINESS.md`: no external
-  source, purchase or adapter is approved yet. External history remains provenance-distinct and
-  cannot substantiate native IG fills, spreads or slippage.
+- R0's 2026-07-22 bounded historical-data decision remains retained evidence. ADR 0028 subsequently
+  approved an independently governed IBKR paper-market-data track, but its exact contracts, account
+  entitlements, timestamp/session semantics and historical availability remain unqualified. Any future
+  IBKR history stays provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 
 ## Next actions
 
-1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. As the confirmatory R2 entry gate, build and independently verify the real 23-market native
-   foundation bundle when the configured evidence interval and product-role qualification support it.
-3. Run R2.B materialisation and independent persisted verification against that bundle, then retain
-   coverage and failure dispositions without making a model-effectiveness claim.
-4. Keep native history and product-economics qualification fail-closed while R2.C is prepared.
+1. Implement the bounded IBKR exact-contract, entitlement and capability probe without ingestion or
+   inferred mappings.
+2. Continue R2.C fold-local preprocessing and alpha selection while the independent IBKR data track
+   proceeds and native IG history accumulates.
+3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+4. Build and independently verify each source-specific foundation only when its configured evidence,
+   availability and product-role gates pass; do not weaken durations or combine sources.
+5. Run R2.B and later R2 integration/verification against representative and qualifying bundles with
+   explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities
 
@@ -105,7 +115,9 @@ remains offline/replay
 - Trading-research intent and gates: `docs/TRADING_RESEARCH.md`
 - Implemented and intended system shape: `docs/ARCHITECTURE.md`
 - Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
-- R0 native coverage and historical-source decision: `docs/R0_DATA_READINESS.md`
+- R0 native coverage and retained historical-source decision: `docs/R0_DATA_READINESS.md`
+- IBKR normative implementation plan: `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`
+- Independent IBKR source decision: `docs/adr/0028-independent-ibkr-market-data-source.md`
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
 - First framework-proof result: `docs/archive/research-proof/FIRST_RANKING_REPORT.md`

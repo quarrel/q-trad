@@ -76,6 +76,33 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
   merged.
 - **Amendment date:** 2026-07-26.
 
+### Amendment 2 — source-specific provider-history experiments
+
+- **Original requirement:** every R2 experiment consumed one verified native R1 foundation, external
+  data was permitted for development or later augmentation, and the first confirmatory conclusion was
+  defined only against a qualifying native foundation.
+- **Revised requirement:** the existing `R2-IG-NATIVE` path and gates remain unchanged. R2 may also run
+  `R2-IBKR-HISTORICAL` and later `R2-IBKR-NATIVE` as separate source-specific experiments. Each consumes
+  one independently verified foundation and binds an independent `MarketDataSourceClass`, exact product
+  mappings, availability/revision policy, experiment identity and conclusion boundary. Existing R2
+  `EvidenceClass` remains orthogonal with values `IMPLEMENTATION_EVIDENCE_ONLY` and `CONFIRMATORY`.
+  Foundation, experiment, feature, fit, forecast and report identities bind both dimensions. Provider
+  history enters through a separately versioned observation contract with authenticated `available_at`
+  and a versioned availability selector; it never shares a foundation with native rows or fabricates
+  native receive/persistence lineage. A later cross-provider augmentation experiment remains distinct
+  and requires native-only controls and an untouched native holdout.
+- **Rationale:** independently governed IBKR history can accelerate chronological model research while
+  native quote history accumulates, without masquerading as IG evidence or weakening causal, fold,
+  coverage, selection or holdout rules.
+- **Evidence impact:** R2.A and R2.B implementation evidence remains valid because their identity,
+  current-cutoff, source-lineage and independent-verification requirements are unchanged. No
+  decision-grade R2 evidence exists. Provider-history integration requires source-class/evidence-class
+  independence, availability-selector and source-separation tests before it supports even a
+  source-specific conclusion.
+- **Approving review:** Stage 0 documentation review; implementation remains subject to subsequent
+  code and account-capability review.
+- **Amendment date:** 2026-07-28.
+
 ---
 
 ## 3. Research questions
@@ -590,6 +617,7 @@ acceptance_thresholds
 
 holdout_range
 numeric_replay_tolerances
+market_data_source_class
 evidence_class
 ```
 
@@ -601,7 +629,10 @@ holdout. The full R1 target universe remains present even when an instrument is 
 
 Unknown fields fail closed.
 
-The configuration has a semantic ID calculated from canonical JSON. All model, forecast and evaluation artefacts bind that ID.
+The configuration has a semantic ID calculated from canonical JSON. All model, feature, fit, forecast
+and evaluation artefacts bind that ID. `market_data_source_class` identifies provider origin and
+`evidence_class` independently identifies implementation-only or confirmatory research status; both
+must match the verified foundation and every downstream artefact.
 
 ### 9.2 Raw feature dataset
 
