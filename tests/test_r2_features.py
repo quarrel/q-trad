@@ -1132,11 +1132,14 @@ def test_parquet_path_safety_no_clobber_and_failed_publication(
     lineage_directory = (immutable_root / immutable.chunks[0].lineage_file).parent
     assert {path.name for path in data_directory.glob("*.parquet")} == expected_data_files
     assert {path.name for path in lineage_directory.glob("*.parquet")} == expected_lineage_files
-    assert ParquetR2FeatureStore(
-        immutable_root,
-        FixedClock(datetime(2026, 7, 29, tzinfo=UTC)),
-        chunk_rows=2,
-    ).verify(Path("features.json")) == immutable
+    assert (
+        ParquetR2FeatureStore(
+            immutable_root,
+            FixedClock(datetime(2026, 7, 29, tzinfo=UTC)),
+            chunk_rows=2,
+        ).verify(Path("features.json"))
+        == immutable
+    )
 
     failed_root = tmp_path / "failed"
     failed_store = ParquetR2FeatureStore(failed_root, FixedClock(), chunk_rows=2)
@@ -1270,6 +1273,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     verified = json.loads(capsys.readouterr().out)
     assert verified == built
     assert verify_bundle.await_count == 2
+
 
 def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(
     tmp_path: Path,

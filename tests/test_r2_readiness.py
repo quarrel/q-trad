@@ -507,6 +507,7 @@ def test_qualifying_subset_preserves_wider_r1_target_universe() -> None:
         config.target_instrument_eligibility[TARGETS[-1]].state is FeatureEligibility.NOT_ELIGIBLE
     )
 
+
 def test_exact_r1_binding_rejects_reclassified_r1_target() -> None:
     from qtrad.application.r2_readiness import verify_exact_r1_bindings
 
