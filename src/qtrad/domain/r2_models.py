@@ -1,4 +1,4 @@
-"""Immutable contracts for authenticated R2.C fold-local fitting."""
+"""Immutable contracts for authenticated R2.C preprocessing selection."""
 
 import json
 from dataclasses import dataclass
@@ -9,9 +9,10 @@ from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.time import require_utc
 
-R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v1"
+R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
 
 
 class FitDisposition(StrEnum):
@@ -229,7 +230,7 @@ class AlphaSelection:
         }
 
 
-class _R2FoldFitArguments(TypedDict):
+class _R2PreprocessingSelectionArguments(TypedDict):
     r2_feature_dataset_id: str
     target_dataset_id: str
     fold_dataset_id: str
@@ -242,7 +243,9 @@ class _R2FoldFitArguments(TypedDict):
     purge_boundary: datetime
     feature_schema_id: str
     feature_set_id: str
+    evidence_class: EvidenceClass
     preprocessing_policy: str
+    inner_validation_policy: str
     alpha_grid: tuple[float, ...]
     ridge_solver: str
     ridge_tolerance: float
@@ -254,8 +257,8 @@ class _R2FoldFitArguments(TypedDict):
 
 
 @dataclass(frozen=True, slots=True)
-class R2FoldFit:
-    """Identity-bearing replay contract for one authenticated outer-fold alpha fit."""
+class R2PreprocessingSelection:
+    """Identity-bearing replay contract for authenticated fold-local preprocessing selection."""
 
     r2_feature_dataset_id: str
     target_dataset_id: str
@@ -269,7 +272,9 @@ class R2FoldFit:
     purge_boundary: datetime
     feature_schema_id: str
     feature_set_id: str
+    evidence_class: EvidenceClass
     preprocessing_policy: str
+    inner_validation_policy: str
     alpha_grid: tuple[float, ...]
     ridge_solver: str
     ridge_tolerance: float
@@ -280,7 +285,7 @@ class R2FoldFit:
     selection: AlphaSelection
     artifact_id: str
 
-    CONTRACT: ClassVar[str] = R2_FOLD_FIT_CONTRACT
+    CONTRACT: ClassVar[str] = R2_PREPROCESSING_SELECTION_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
@@ -292,7 +297,7 @@ class R2FoldFit:
             (self.outer_fold_membership_hash, "outer membership hash"),
             (self.feature_schema_id, "feature schema ID"),
             (self.feature_set_id, "feature set ID"),
-            (self.artifact_id, "fold-fit artifact ID"),
+            (self.artifact_id, "preprocessing-selection artifact ID"),
         ):
             _require_sha256(value, field)
         if (
@@ -313,13 +318,13 @@ class R2FoldFit:
         ):
             raise ValueError("inner validation chronology or purge boundary is invalid")
         if not self.holdout_excluded:
-            raise ValueError("an R2 fold fit must exclude the locked holdout")
-        if (
-            not self.preprocessing_policy
-            or not self.loss_policy
-            or not self.pooled_weighting_policy
-        ):
-            raise ValueError("fold-fit policies must be explicit")
+            raise ValueError("an R2 preprocessing selection must exclude the locked holdout")
+        if self.preprocessing_policy != "TRAINING_MEDIAN_STANDARDISE_V1":
+            raise ValueError("unsupported preprocessing policy")
+        if self.inner_validation_policy != "CHRONOLOGICAL_TAIL_PURGED_V1":
+            raise ValueError("unsupported inner-validation policy")
+        if not self.loss_policy or not self.pooled_weighting_policy:
+            raise ValueError("preprocessing-selection policies must be explicit")
         if tuple(sorted(set(self.alpha_grid))) != self.alpha_grid or any(
             not isfinite(alpha) or alpha <= 0 for alpha in self.alpha_grid
         ):
@@ -333,17 +338,19 @@ class R2FoldFit:
             raise ValueError("ridge solver and tolerance are invalid")
         if self.ridge_max_iterations <= 0:
             raise ValueError("ridge maximum iterations must be positive")
-        if self.artifact_id != fold_fit_id(self.semantic_json()):
-            raise ValueError("fold-fit artifact ID does not match its semantic content")
+        if self.artifact_id != preprocessing_selection_id(self.semantic_json()):
+            raise ValueError(
+                "preprocessing-selection artifact ID does not match its semantic content"
+            )
 
     @classmethod
-    def create(cls, **values: object) -> "R2FoldFit":
-        semantic = _fold_fit_json(values)
-        arguments = cast(_R2FoldFitArguments, values)
-        return cls(**arguments, artifact_id=fold_fit_id(semantic))
+    def create(cls, **values: object) -> "R2PreprocessingSelection":
+        semantic = _preprocessing_selection_json(values)
+        arguments = cast(_R2PreprocessingSelectionArguments, values)
+        return cls(**arguments, artifact_id=preprocessing_selection_id(semantic))
 
     def semantic_json(self) -> dict[str, JsonValue]:
-        return _fold_fit_json(
+        return _preprocessing_selection_json(
             {
                 "r2_feature_dataset_id": self.r2_feature_dataset_id,
                 "target_dataset_id": self.target_dataset_id,
@@ -357,7 +364,9 @@ class R2FoldFit:
                 "purge_boundary": self.purge_boundary,
                 "feature_schema_id": self.feature_schema_id,
                 "feature_set_id": self.feature_set_id,
+                "evidence_class": self.evidence_class,
                 "preprocessing_policy": self.preprocessing_policy,
+                "inner_validation_policy": self.inner_validation_policy,
                 "alpha_grid": self.alpha_grid,
                 "ridge_solver": self.ridge_solver,
                 "ridge_tolerance": self.ridge_tolerance,
@@ -373,12 +382,12 @@ class R2FoldFit:
         return {**self.semantic_json(), "artifact_id": self.artifact_id}
 
 
-def _fold_fit_json(values: dict[str, object]) -> dict[str, JsonValue]:
+def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonValue]:
     selection = values["selection"]
     if not isinstance(selection, AlphaSelection):
-        raise TypeError("fold-fit selection must be an AlphaSelection")
+        raise TypeError("preprocessing selection must contain an AlphaSelection")
     return {
-        "contract": R2_FOLD_FIT_CONTRACT,
+        "contract": R2_PREPROCESSING_SELECTION_CONTRACT,
         "schema_version": 1,
         "r2_feature_dataset_id": str(values["r2_feature_dataset_id"]),
         "target_dataset_id": str(values["target_dataset_id"]),
@@ -392,7 +401,9 @@ def _fold_fit_json(values: dict[str, object]) -> dict[str, JsonValue]:
         "purge_boundary": cast(datetime, values["purge_boundary"]).isoformat(),
         "feature_schema_id": str(values["feature_schema_id"]),
         "feature_set_id": str(values["feature_set_id"]),
+        "evidence_class": EvidenceClass(cast(EvidenceClass, values["evidence_class"])).value,
         "preprocessing_policy": str(values["preprocessing_policy"]),
+        "inner_validation_policy": str(values["inner_validation_policy"]),
         "alpha_grid": list(cast(tuple[float, ...], values["alpha_grid"])),
         "ridge_solver": str(values["ridge_solver"]),
         "ridge_tolerance": float(cast(float, values["ridge_tolerance"])),
@@ -404,7 +415,7 @@ def _fold_fit_json(values: dict[str, object]) -> dict[str, JsonValue]:
     }
 
 
-def fold_fit_id(payload: dict[str, JsonValue]) -> str:
+def preprocessing_selection_id(payload: dict[str, JsonValue]) -> str:
     canonical = to_json_value(payload)
     return sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")

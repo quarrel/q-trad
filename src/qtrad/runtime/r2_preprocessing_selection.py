@@ -1,22 +1,26 @@
-"""Strict JSON serialization and independent verification for R2.C fold fits."""
+"""Strict serialization and independent replay for R2.C preprocessing selection."""
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from math import isfinite
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import cast
 
+from qtrad.application.r2_preprocessing import build_r2_preprocessing_selection
+from qtrad.application.r2_readiness import R1FoundationBindings
+from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_models import (
-    R2_FOLD_FIT_CONTRACT,
+    R2_PREPROCESSING_SELECTION_CONTRACT,
     AlphaCandidateScore,
     AlphaSelection,
     FitDisposition,
     PreprocessingFit,
-    R2FoldFit,
+    R2PreprocessingSelection,
 )
+from qtrad.domain.r2_readiness import EvidenceClass, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
 _TOP_LEVEL_KEYS = {
@@ -34,7 +38,9 @@ _TOP_LEVEL_KEYS = {
     "purge_boundary",
     "feature_schema_id",
     "feature_set_id",
+    "evidence_class",
     "preprocessing_policy",
+    "inner_validation_policy",
     "alpha_grid",
     "ridge_solver",
     "ridge_tolerance",
@@ -79,35 +85,38 @@ _SELECTION_KEYS = {
 }
 
 
-def serialize_r2_fold_fit(fit: R2FoldFit) -> bytes:
+def serialize_r2_preprocessing_selection(selection: R2PreprocessingSelection) -> bytes:
     """Return the one canonical UTF-8 representation."""
-    return (json.dumps(fit.as_json(), sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
+    payload = json.dumps(selection.as_json(), sort_keys=True, separators=(",", ":"))
+    return (payload + "\n").encode("utf-8")
 
 
-def decode_r2_fold_fit(payload: bytes | str | Mapping[str, object]) -> R2FoldFit:
+def decode_r2_preprocessing_selection(
+    payload: bytes | str | Mapping[str, object],
+) -> R2PreprocessingSelection:
     """Strictly decode and reconstruct the domain object, independently checking its digest."""
     raw: object
     if isinstance(payload, bytes):
         try:
             raw = json.loads(payload.decode("utf-8"))
         except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("fold-fit payload is not valid UTF-8 JSON") from error
+            raise ValueError("preprocessing-selection payload is not valid UTF-8 JSON") from error
     elif isinstance(payload, str):
         try:
             raw = json.loads(payload)
         except json.JSONDecodeError as error:
-            raise ValueError("fold-fit payload is not valid JSON") from error
+            raise ValueError("preprocessing-selection payload is not valid JSON") from error
     elif isinstance(payload, Mapping):
         raw = dict(payload)
     else:
-        raise TypeError("fold-fit payload must be bytes, text or a mapping")
-    obj = _exact_object(raw, _TOP_LEVEL_KEYS, "fold fit")
-    if _text(obj["contract"], "contract") != R2_FOLD_FIT_CONTRACT:
-        raise ValueError("unsupported fold-fit contract")
+        raise TypeError("preprocessing-selection payload must be bytes, text or a mapping")
+    obj = _exact_object(raw, _TOP_LEVEL_KEYS, "preprocessing selection")
+    if _text(obj["contract"], "contract") != R2_PREPROCESSING_SELECTION_CONTRACT:
+        raise ValueError("unsupported preprocessing-selection contract")
     if _integer(obj["schema_version"], "schema_version") != 1:
-        raise ValueError("unsupported fold-fit schema version")
+        raise ValueError("unsupported preprocessing-selection schema version")
     selection = _selection(obj["selection"])
-    return R2FoldFit(
+    return R2PreprocessingSelection(
         r2_feature_dataset_id=_text(obj["r2_feature_dataset_id"], "r2_feature_dataset_id"),
         target_dataset_id=_text(obj["target_dataset_id"], "target_dataset_id"),
         fold_dataset_id=_text(obj["fold_dataset_id"], "fold_dataset_id"),
@@ -124,7 +133,9 @@ def decode_r2_fold_fit(payload: bytes | str | Mapping[str, object]) -> R2FoldFit
         purge_boundary=_timestamp(obj["purge_boundary"], "purge_boundary"),
         feature_schema_id=_text(obj["feature_schema_id"], "feature_schema_id"),
         feature_set_id=_text(obj["feature_set_id"], "feature_set_id"),
+        evidence_class=EvidenceClass(_text(obj["evidence_class"], "evidence_class")),
         preprocessing_policy=_text(obj["preprocessing_policy"], "preprocessing_policy"),
+        inner_validation_policy=_text(obj["inner_validation_policy"], "inner_validation_policy"),
         alpha_grid=_numbers(obj["alpha_grid"], "alpha_grid"),
         ridge_solver=_text(obj["ridge_solver"], "ridge_solver"),
         ridge_tolerance=_number(obj["ridge_tolerance"], "ridge_tolerance"),
@@ -137,35 +148,34 @@ def decode_r2_fold_fit(payload: bytes | str | Mapping[str, object]) -> R2FoldFit
     )
 
 
-def verify_r2_fold_fit(
-    payload: bytes | str | Mapping[str, object],
+def verify_r2_preprocessing_selection(
+    verified: R1FoundationBindings,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
     *,
-    r2_feature_dataset_id: str,
-    target_dataset_id: str,
-    fold_dataset_id: str,
-    experiment_configuration_id: str,
     outer_fold_id: str,
-) -> R2FoldFit:
-    fit = decode_r2_fold_fit(payload)
-    expected = {
-        "r2_feature_dataset_id": (fit.r2_feature_dataset_id, r2_feature_dataset_id),
-        "target_dataset_id": (fit.target_dataset_id, target_dataset_id),
-        "fold_dataset_id": (fit.fold_dataset_id, fold_dataset_id),
-        "experiment_configuration_id": (
-            fit.experiment_configuration_id,
-            experiment_configuration_id,
-        ),
-        "outer_fold_id": (fit.outer_fold_id, outer_fold_id),
-    }
-    mismatches = [name for name, (actual, wanted) in expected.items() if actual != wanted]
-    if mismatches:
-        raise ValueError(f"fold-fit binding mismatch: {', '.join(mismatches)}")
-    return fit
+    target_instruments: Sequence[str] | None,
+    persisted_payload: bytes | str | Mapping[str, object],
+) -> R2PreprocessingSelection:
+    """Decode persisted evidence and compare it with a fresh authenticated rebuild."""
+    persisted = decode_r2_preprocessing_selection(persisted_payload)
+    rebuilt = build_r2_preprocessing_selection(
+        verified,
+        feature_dataset,
+        experiment,
+        outer_fold_id=outer_fold_id,
+        target_instruments=target_instruments,
+    )
+    if persisted != rebuilt:
+        raise ValueError(
+            "persisted preprocessing selection does not match the authenticated rebuild"
+        )
+    return persisted
 
 
-def write_r2_fold_fit(path: Path, fit: R2FoldFit) -> None:
+def write_r2_preprocessing_selection(path: Path, selection: R2PreprocessingSelection) -> None:
     """Publish immutably; accept an existing path only when it verifies as identical."""
-    encoded = serialize_r2_fold_fit(fit)
+    encoded = serialize_r2_preprocessing_selection(selection)
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, prefix=f".{path.name}.", delete=False) as handle:
         temporary = Path(handle.name)
@@ -176,10 +186,10 @@ def write_r2_fold_fit(path: Path, fit: R2FoldFit) -> None:
         try:
             os.link(temporary, path)
         except FileExistsError as error:
-            existing = decode_r2_fold_fit(path.read_bytes())
-            if existing != fit:
+            existing = decode_r2_preprocessing_selection(path.read_bytes())
+            if existing != selection:
                 raise FileExistsError(
-                    "existing fold-fit artifact has conflicting semantic content"
+                    "existing preprocessing-selection artifact has conflicting semantic content"
                 ) from error
     finally:
         temporary.unlink(missing_ok=True)

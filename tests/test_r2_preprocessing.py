@@ -11,7 +11,7 @@ from numpy import ndarray
 
 from qtrad.application.r2_preprocessing import (
     TrainingRow,
-    build_r2_fold_fit,
+    build_r2_preprocessing_selection,
     equal_instrument_total_weights,
     fit_preprocessing,
     select_chronological_alpha,
@@ -35,9 +35,17 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
-from qtrad.domain.r2_models import AlphaSelection, FitDisposition
-from qtrad.domain.r2_readiness import FeatureFamily, R2ExperimentConfig
-from qtrad.runtime.r2_fold_fit import decode_r2_fold_fit, serialize_r2_fold_fit
+from qtrad.domain.r2_models import (
+    AlphaSelection,
+    FitDisposition,
+    R2PreprocessingSelection,
+)
+from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2ExperimentConfig
+from qtrad.runtime.r2_preprocessing_selection import (
+    decode_r2_preprocessing_selection,
+    serialize_r2_preprocessing_selection,
+    verify_r2_preprocessing_selection,
+)
 from tests.test_r2_readiness import END, START
 from tests.test_r2_readiness import experiment as base_experiment
 
@@ -67,11 +75,13 @@ def _training_rows() -> tuple[TrainingRow, ...]:
     rows: list[TrainingRow] = []
     for index in range(8):
         decision = start + timedelta(minutes=10 * index)
+        target_available_at = decision + timedelta(minutes=15)
         rows.append(
             TrainingRow(
                 f"t{index}",
                 decision,
-                decision + timedelta(minutes=15),
+                target_available_at,
+                target_available_at,
                 "a" if index < 6 else "b",
                 (float(index), float(index % 2), None, 7.0),
                 float(index % 3),
@@ -95,7 +105,7 @@ def _select(rows: tuple[TrainingRow, ...]) -> AlphaSelection:
     )
 
 
-def test_split_uses_decision_time_exact_membership_and_target_endpoint_purge() -> None:
+def test_split_purges_target_endpoint_and_delayed_availability() -> None:
     rows = _training_rows()
     result = _select(tuple(reversed(rows)))
     assert result.disposition is FitDisposition.READY
@@ -105,10 +115,15 @@ def test_split_uses_decision_time_exact_membership_and_target_endpoint_purge() -
     assert result.inner_fit_target_ids == ("t0", "t1", "t2", "t3", "t4")
 
     boundary = rows[6].decision_time
-    equality = replace(rows[5], target_end_time=boundary)
+    equality = replace(rows[5], target_end_time=boundary, target_available_at=boundary)
     accepted = _select((*rows[:5], equality, *rows[6:]))
     assert "t5" in accepted.inner_fit_target_ids
     assert "t5" not in accepted.purged_target_ids
+
+    delayed = replace(equality, target_available_at=boundary + timedelta(microseconds=1))
+    rejected = _select((*rows[:5], delayed, *rows[6:]))
+    assert "t5" not in rejected.inner_fit_target_ids
+    assert "t5" in rejected.purged_target_ids
 
 
 def test_preprocessing_drops_all_null_and_zero_variance_but_leaves_binary_unscaled() -> None:
@@ -336,7 +351,7 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
 
 def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
     verified, features, config, fold = _bound_fixture()
-    fit = build_r2_fold_fit(
+    fit = build_r2_preprocessing_selection(
         verified,
         features,
         config,
@@ -347,6 +362,9 @@ def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
     assert fit.fold_dataset_id == verified.folds.dataset_id
     assert fit.r2_feature_dataset_id == features.dataset_id
     assert fit.experiment_configuration_id == config.configuration_id
+    assert fit.evidence_class is features.evidence_class
+    assert fit.preprocessing_policy == config.preprocessing_policy
+    assert fit.inner_validation_policy == config.inner_validation_policy
     assert fit.holdout_excluded is True
     assert fit.selection.purged_target_ids == (verified.targets.rows[5].target_id,)
 
@@ -362,24 +380,134 @@ def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
         evidence_class=features.evidence_class,
     )
     with pytest.raises(ValueError, match="panel_dataset_id"):
-        build_r2_fold_fit(verified, mismatched, config, outer_fold_id=fold.fold_id)
+        build_r2_preprocessing_selection(verified, mismatched, config, outer_fold_id=fold.fold_id)
+
+
+def test_build_rejects_unsupported_preprocessing_and_inner_validation_policies() -> None:
+    verified, features, config, fold = _bound_fixture()
+
+    with pytest.raises(ValueError, match="preprocessing policy"):
+        build_r2_preprocessing_selection(
+            verified,
+            features,
+            replace(config, preprocessing_policy="UNSUPPORTED"),
+            outer_fold_id=fold.fold_id,
+        )
+    with pytest.raises(ValueError, match="inner-validation policy"):
+        build_r2_preprocessing_selection(
+            verified,
+            features,
+            replace(config, inner_validation_policy="UNSUPPORTED"),
+            outer_fold_id=fold.fold_id,
+        )
+
+
+def test_build_rejects_feature_evidence_class_mismatch() -> None:
+    verified, features, config, fold = _bound_fixture()
+    mismatched_evidence = (
+        EvidenceClass.CONFIRMATORY
+        if config.evidence_class is EvidenceClass.IMPLEMENTATION
+        else EvidenceClass.IMPLEMENTATION
+    )
+    mismatched = R2FeatureDataset.create(
+        features.rows,
+        feature_schema=features.feature_schema,
+        feature_set_name=features.feature_set_name,
+        observation_dataset_id=features.observation_dataset_id,
+        panel_dataset_id=features.panel_dataset_id,
+        target_dataset_id=features.target_dataset_id,
+        fold_dataset_id=features.fold_dataset_id,
+        experiment_configuration_id=features.experiment_configuration_id,
+        evidence_class=mismatched_evidence,
+    )
+
+    with pytest.raises(ValueError, match="evidence_class"):
+        build_r2_preprocessing_selection(verified, mismatched, config, outer_fold_id=fold.fold_id)
 
 
 def test_strict_json_decode_recomputes_identity_and_rejects_unknown_fields() -> None:
     verified, features, config, fold = _bound_fixture()
-    fit = build_r2_fold_fit(verified, features, config, outer_fold_id=fold.fold_id)
-    encoded = serialize_r2_fold_fit(fit)
-    assert decode_r2_fold_fit(encoded) == fit
+    fit = build_r2_preprocessing_selection(verified, features, config, outer_fold_id=fold.fold_id)
+    encoded = serialize_r2_preprocessing_selection(fit)
+    assert decode_r2_preprocessing_selection(encoded) == fit
 
     payload = fit.as_json()
     payload["unknown"] = True
     with pytest.raises(ValueError, match="unknown or missing"):
-        decode_r2_fold_fit(payload)
+        decode_r2_preprocessing_selection(payload)
     tampered = fit.as_json()
     tampered["ridge_tolerance"] = 0.5
     with pytest.raises(ValueError, match="artifact ID"):
-        decode_r2_fold_fit(tampered)
+        decode_r2_preprocessing_selection(tampered)
     wrong_type = fit.as_json()
     wrong_type["ridge_max_iterations"] = True
     with pytest.raises(TypeError, match="integer"):
-        decode_r2_fold_fit(wrong_type)
+        decode_r2_preprocessing_selection(wrong_type)
+
+
+def test_independent_verifier_rebuilds_and_rejects_rehashed_semantic_tampering() -> None:
+    verified, features, config, fold = _bound_fixture()
+    target_instruments = (config.confirmatory_target_instruments[0],)
+    selection = build_r2_preprocessing_selection(
+        verified,
+        features,
+        config,
+        outer_fold_id=fold.fold_id,
+        target_instruments=target_instruments,
+    )
+    persisted = serialize_r2_preprocessing_selection(selection)
+    assert (
+        verify_r2_preprocessing_selection(
+            verified,
+            features,
+            config,
+            outer_fold_id=fold.fold_id,
+            target_instruments=target_instruments,
+            persisted_payload=persisted,
+        )
+        == selection
+    )
+
+    alternate_alpha = next(
+        score.alpha
+        for score in selection.selection.candidate_scores
+        if score.disposition is FitDisposition.READY
+        and score.alpha != selection.selection.selected_alpha
+    )
+    tampered_selection = replace(selection.selection, selected_alpha=alternate_alpha)
+    tampered = R2PreprocessingSelection.create(
+        r2_feature_dataset_id=selection.r2_feature_dataset_id,
+        target_dataset_id=selection.target_dataset_id,
+        fold_dataset_id=selection.fold_dataset_id,
+        experiment_configuration_id=selection.experiment_configuration_id,
+        outer_fold_id=selection.outer_fold_id,
+        outer_fold_membership_hash=selection.outer_fold_membership_hash,
+        target_instruments=selection.target_instruments,
+        inner_validation_start=selection.inner_validation_start,
+        inner_validation_end=selection.inner_validation_end,
+        purge_boundary=selection.purge_boundary,
+        feature_schema_id=selection.feature_schema_id,
+        feature_set_id=selection.feature_set_id,
+        evidence_class=selection.evidence_class,
+        preprocessing_policy=selection.preprocessing_policy,
+        inner_validation_policy=selection.inner_validation_policy,
+        alpha_grid=selection.alpha_grid,
+        ridge_solver=selection.ridge_solver,
+        ridge_tolerance=selection.ridge_tolerance,
+        ridge_max_iterations=selection.ridge_max_iterations,
+        loss_policy=selection.loss_policy,
+        pooled_weighting_policy=selection.pooled_weighting_policy,
+        holdout_excluded=selection.holdout_excluded,
+        selection=tampered_selection,
+    )
+    assert tampered.artifact_id != selection.artifact_id
+
+    with pytest.raises(ValueError, match="authenticated rebuild"):
+        verify_r2_preprocessing_selection(
+            verified,
+            features,
+            config,
+            outer_fold_id=fold.fold_id,
+            target_instruments=target_instruments,
+            persisted_payload=serialize_r2_preprocessing_selection(tampered),
+        )

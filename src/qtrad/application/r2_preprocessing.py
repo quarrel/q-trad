@@ -18,7 +18,7 @@ from qtrad.domain.r2_models import (
     AlphaSelection,
     FitDisposition,
     PreprocessingFit,
-    R2FoldFit,
+    R2PreprocessingSelection,
 )
 from qtrad.domain.r2_readiness import R2ExperimentConfig
 from qtrad.domain.time import require_utc
@@ -34,6 +34,7 @@ class TrainingRow:
     target_id: str
     decision_time: datetime
     target_end_time: datetime
+    target_available_at: datetime
     target_instrument_id: str
     features: tuple[float | None, ...]
     target: float
@@ -41,6 +42,7 @@ class TrainingRow:
     def __post_init__(self) -> None:
         require_utc(self.decision_time, "R2 training decision_time")
         require_utc(self.target_end_time, "R2 training target_end_time")
+        require_utc(self.target_available_at, "R2 training target_available_at")
         if not self.target_id or not self.target_instrument_id or not isfinite(self.target):
             raise ValueError("training row requires identities and a finite target")
         if self.target_end_time < self.decision_time:
@@ -49,15 +51,16 @@ class TrainingRow:
             raise ValueError("features must be finite or null")
 
 
-def build_r2_fold_fit(
+def build_r2_preprocessing_selection(
     verified: R1FoundationBindings,
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     *,
     outer_fold_id: str,
     target_instruments: Sequence[str] | None = None,
-) -> R2FoldFit:
-    """Build one replayable fold fit from authenticated R1 and R2.B children."""
+) -> R2PreprocessingSelection:
+    """Build one replayable preprocessing selection from authenticated R1 and R2.B children."""
+    _verify_selection_policies(experiment)
     verify_exact_r1_bindings(verified, experiment)
     _verify_feature_bindings(verified, feature_dataset, experiment)
     fold = _outer_fold(verified, outer_fold_id)
@@ -91,7 +94,7 @@ def build_r2_fold_fit(
     validation_start, validation_end = _inner_validation_bounds(
         rows, experiment.minimum_inner_validation_rows
     )
-    return R2FoldFit.create(
+    return R2PreprocessingSelection.create(
         r2_feature_dataset_id=feature_dataset.dataset_id,
         target_dataset_id=verified.targets.dataset_id,
         fold_dataset_id=verified.folds.dataset_id,
@@ -104,7 +107,9 @@ def build_r2_fold_fit(
         purge_boundary=validation_start,
         feature_schema_id=feature_dataset.raw_feature_schema_id,
         feature_set_id=feature_dataset.feature_set_id,
+        evidence_class=feature_dataset.evidence_class,
         preprocessing_policy=experiment.preprocessing_policy,
+        inner_validation_policy=experiment.inner_validation_policy,
         alpha_grid=experiment.alpha_grid,
         ridge_solver=experiment.ridge_solver,
         ridge_tolerance=experiment.ridge_tolerance,
@@ -151,8 +156,16 @@ def select_chronological_alpha(
     validation_start, _ = _inner_validation_bounds(ordered, minimum_inner_validation_rows)
     inner_validation = tuple(row for row in ordered if row.decision_time >= validation_start)
     prefix = tuple(row for row in ordered if row.decision_time < validation_start)
-    inner_fit = tuple(row for row in prefix if row.target_end_time <= validation_start)
-    purged = tuple(row for row in prefix if row.target_end_time > validation_start)
+    inner_fit = tuple(
+        row
+        for row in prefix
+        if row.target_end_time <= validation_start and row.target_available_at <= validation_start
+    )
+    purged = tuple(
+        row
+        for row in prefix
+        if row.target_end_time > validation_start or row.target_available_at > validation_start
+    )
 
     if len(inner_validation) < minimum_inner_validation_rows:
         return _failed_selection(
@@ -453,6 +466,13 @@ def equal_instrument_total_weights(
     return tuple(instrument_total / counts[row.target_instrument_id] for row in rows)
 
 
+def _verify_selection_policies(experiment: R2ExperimentConfig) -> None:
+    if experiment.preprocessing_policy != _SUPPORTED_PREPROCESSING:
+        raise ValueError("unsupported preprocessing policy")
+    if experiment.inner_validation_policy != _SUPPORTED_INNER_SPLIT:
+        raise ValueError("unsupported inner-validation policy")
+
+
 def _verify_feature_bindings(
     verified: R1FoundationBindings,
     features: R2FeatureDataset,
@@ -470,6 +490,7 @@ def _verify_feature_bindings(
             features.experiment_configuration_id,
             experiment.configuration_id,
         ),
+        "evidence_class": (features.evidence_class, experiment.evidence_class),
     }
     mismatches = [name for name, (actual, wanted) in expected.items() if actual != wanted]
     if mismatches:
@@ -545,6 +566,7 @@ def _join_training_rows(
                 target.target_id,
                 target.decision_time,
                 target.target_end_time,
+                target.target_available_at,
                 target.instrument_id,
                 tuple(value.value for value in feature.values),
                 target.log_return,

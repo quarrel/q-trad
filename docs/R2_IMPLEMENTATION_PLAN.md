@@ -666,12 +666,12 @@ Raw features are not imputed or standardised.
 
 The OOF raw-feature child contains no holdout decision rows. A separate holdout feature child is created only after selection freeze.
 
-### 9.3 Fold fit artefact
+### 9.3 Preprocessing-selection artefact
 
 Suggested contract:
 
 ```text
-qtrad-r2-fold-fit-v1
+qtrad-r2-preprocessing-selection-v1
 ```
 
 One artefact is stored for each:
