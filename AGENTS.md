@@ -188,9 +188,7 @@ Unexpected required-field and computation failures propagate with context rather
 plausible defaults.
 
 ## GitHub
+- You have the `gh` CLI tool installed and authenticated locally via your shell context.
+- To view actions, check PRs, or merge queues, run the standard CLI commands via your native shell execution tool (e.g., `gh pr list`, `gh run view`, `gh pr merge --auto`).
+- DO NOT look for or try to invoke dedicated `github__` MCP tools.
 
-The GitHub MCP fine-grained PAT cannot be granted Checks API access. This is an expected platform
-limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
-runs for the exact commit instead of repeatedly raising unavailable check-run access.
-
-Do not use any GitHUB CLI (`gh`) calls. Only the GitHub MCP or the ChatGPT GitHub Connector.

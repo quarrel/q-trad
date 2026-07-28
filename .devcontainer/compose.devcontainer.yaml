@@ -82,6 +82,7 @@ services:
     volumes:
       - .:/workspace
       - qtrad-codex-home:/home/vscode/.codex
+      - qtrad-omp-home:/home/vscode/.omp
       - qtrad-command-history:/commandhistory
       - qtrad-uv-cache:/home/vscode/.cache/uv
       - qtrad-venv:/workspace/.venv
@@ -93,6 +94,7 @@ networks:
 
 volumes:
   qtrad-codex-home:
+  qtrad-omp-home:
   qtrad-command-history:
   qtrad-uv-cache:
   qtrad-venv:

@@ -6,6 +6,7 @@ ARG DEBIAN_FRONTEND=noninteractive
 ARG USERNAME=vscode
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG OMP_VERSION=17.1.7
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -64,8 +65,8 @@ COPY .devcontainer/codex-install /opt/codex-install
 RUN cd /opt/codex-install \
     && corepack pnpm install --no-frozen-lockfile --ignore-scripts \
     && case "$(dpkg --print-architecture)" in \
-        amd64) codex_target="x64"; tilth_target="x86_64-unknown-linux-musl" ;; \
-        arm64) codex_target="arm64"; tilth_target="aarch64-unknown-linux-musl" ;; \
+        amd64) codex_target="x64"; tilth_target="x86_64-unknown-linux-musl"; omp_target="x64"; omp_sha256="33be0232de8fff4d542058d666ee15cf154a660092257d4bfb3fea8bc7f9f6e0" ;; \
+        arm64) codex_target="arm64"; tilth_target="aarch64-unknown-linux-musl"; omp_target="arm64"; omp_sha256="a364f2d87f8634a8ef02d765dfa3061c44be842f80971e34ae7df90359ae27e3" ;; \
         *) echo "Unsupported development-container architecture" >&2; exit 1 ;; \
     esac \
     && codex_version="$(npm view @openai/codex@latest version)" \
@@ -78,6 +79,12 @@ RUN cd /opt/codex-install \
         "https://github.com/jahala/tilth/releases/download/v0.9.0/tilth-${tilth_target}.tar.gz" \
         | tar xz -C node_modules/tilth/bin \
     && chmod 0755 node_modules/tilth/bin/tilth \
+    && curl -fsSL \
+        "https://github.com/can1357/oh-my-pi/releases/download/v${OMP_VERSION}/omp-linux-${omp_target}" \
+        -o /usr/local/bin/omp \
+    && echo "${omp_sha256}  /usr/local/bin/omp" | sha256sum --check --strict \
+    && chmod 0755 /usr/local/bin/omp \
+    && /usr/local/bin/omp --version \
     && ln -s /opt/codex-latest/bin/codex /usr/local/bin/codex
 
 USER vscode

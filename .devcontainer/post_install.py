@@ -12,7 +12,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-MCP_SERVER_NAMES = ("context7", "github", "tilth")
+MCP_SERVER_NAMES = ("context7", "tilth", "token-optimizer")
+RETIRED_MCP_SERVER_NAMES = ("github",)
 
 
 def ensure_owned_directories() -> None:
@@ -22,6 +23,7 @@ def ensure_owned_directories() -> None:
         Path("/commandhistory"),
         Path.home() / ".cache",
         Path.home() / ".codex",
+        Path.home() / ".omp",
         Path("/workspace/.venv"),
     )
     for path in paths:
@@ -32,6 +34,23 @@ def ensure_owned_directories() -> None:
             ["sudo", "chown", "-R", f"{uid}:{gid}", str(path)],
             check=True,
         )
+
+
+def restore_omp_home() -> None:
+    """Seed a new persistent OMP home once, then remove the ignored migration copy."""
+    seed = Path("/workspace/.devcontainer/local/omp-home-seed")
+    destination = Path.home() / ".omp"
+    if not seed.is_dir():
+        return
+    if any(destination.iterdir()):
+        print(
+            "[post_install] preserving populated OMP home; migration seed was not applied",
+            file=sys.stderr,
+        )
+        return
+    shutil.copytree(seed, destination, dirs_exist_ok=True, symlinks=True)
+    shutil.rmtree(seed)
+    print("[post_install] restored OMP home into its persistent volume", file=sys.stderr)
 
 
 def configure_history() -> None:
@@ -141,9 +160,7 @@ def forward_mcp_environment_variable(server_name: str, variable_name: str) -> No
 
 def configure_mcp_servers() -> None:
     """Replace project MCP registrations sequentially and verify safe identities."""
-    missing_environment = [
-        name for name in ("CONTEXT7_API_KEY", "GITHUB_PAT_TOKEN") if not os.environ.get(name)
-    ]
+    missing_environment = [name for name in ("CONTEXT7_API_KEY",) if not os.environ.get(name)]
     if missing_environment:
         missing = ", ".join(missing_environment)
         raise RuntimeError(f"required MCP environment is missing: {missing}")
@@ -157,7 +174,7 @@ def configure_mcp_servers() -> None:
         ).stdout
     )
     configured_names = {server["name"] for server in configured}
-    for name in MCP_SERVER_NAMES:
+    for name in (*MCP_SERVER_NAMES, *RETIRED_MCP_SERVER_NAMES):
         if name in configured_names:
             run_codex_mcp("remove", name)
 
@@ -167,28 +184,23 @@ def configure_mcp_servers() -> None:
     # `codex mcp add --env` accepts only literal KEY=VALUE pairs. Add the
     # documented env_vars pass-through after the CLI has created the section.
     forward_mcp_environment_variable("context7", "CONTEXT7_API_KEY")
-    run_codex_mcp(
-        "add",
-        "github",
-        "--url",
-        "https://api.githubcopilot.com/mcp/",
-        "--bearer-token-env-var",
-        "GITHUB_PAT_TOKEN",
-    )
-    # The CLI currently has no option for streamable-HTTP headers. Enable GitHub's
-    # default and Actions toolsets after it has created the reviewed server section.
-    set_mcp_server_setting(
-        "github",
-        "http_headers",
-        '{ "X-MCP-Toolsets" = "default,actions" }',
-        {"X-MCP-Toolsets": "default,actions"},
-    )
+
     run_codex_mcp(
         "add",
         "tilth",
         "--",
         "/opt/codex-install/node_modules/.bin/tilth",
         "--mcp",
+        "--edit",
+    )
+
+    run_codex_mcp(
+        "add",
+        "token-optimizer",
+        "--",
+        "npx",
+        "-y",
+        "@ooples/token-optimizer-mcp@latest",
     )
 
     verified = json.loads(
@@ -215,24 +227,25 @@ def configure_mcp_servers() -> None:
     ):
         raise RuntimeError("Context7 MCP registration does not match the reviewed command")
 
-    github = by_name["github"]["transport"]
-    if (
-        github["url"] != "https://api.githubcopilot.com/mcp/"
-        or github["bearer_token_env_var"] != "GITHUB_PAT_TOKEN"
-        or github["http_headers"] != {"X-MCP-Toolsets": "default,actions"}
-    ):
-        raise RuntimeError("GitHub MCP registration does not match the reviewed endpoint")
-
     tilth = by_name["tilth"]["transport"]
     if tilth["command"] != "/opt/codex-install/node_modules/.bin/tilth" or tilth["args"] != [
-        "--mcp"
+        "--mcp",
+        "--edit",
     ]:
         raise RuntimeError("Tilth MCP registration does not match the reviewed command")
+
+    token_optimizer = by_name["token-optimizer"]["transport"]
+    if token_optimizer["command"] != "npx" or token_optimizer["args"] != [
+        "-y",
+        "@ooples/token-optimizer-mcp@latest",
+    ]:
+        raise RuntimeError("token-optimizer MCP registration does not match the reviewed command")
 
 
 def main() -> None:
     print("[post_install] configuring q-trad Dev Container", file=sys.stderr)
     ensure_owned_directories()
+    restore_omp_home()
     configure_history()
     configure_codex()
     configure_mcp_servers()
