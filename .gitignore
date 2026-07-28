@@ -21,3 +21,4 @@ data/
 tmp/
 .devcontainer/local/
 oci/
+.omp/

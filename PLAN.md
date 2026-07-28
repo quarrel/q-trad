@@ -78,6 +78,7 @@ chronology ambiguity before those contracts are fixed.
 
 ## R1 — causal multi-asset research foundation
 
+- R1 implementation plan `docs\R1_IMPLEMENTATION_PLAN.md`
 - Use configurable 5, 15, 30 and 60-minute horizons; prove the first end-to-end path at 15 minutes.
 - Define completed-bar log-return targets, target-availability and overlap intervals,
   direction-independent upper and lower excursions, and deterministic handling of gaps and closures.
@@ -93,6 +94,7 @@ chronology ambiguity before those contracts are fixed.
 
 ## R2 — local and pooled baselines
 
+- R2 implementation plan `docs\R2_IMPLEMENTATION_PLAN.md`
 - Before model execution, build and independently verify the first real 23-market native R1 bundle;
   fail closed if native history, calibration maturity, product roles or fold durations are
   insufficient.
