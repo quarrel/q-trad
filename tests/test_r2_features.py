@@ -1104,15 +1104,15 @@ def test_parquet_path_safety_no_clobber_and_failed_publication(
         store.read_manifest(Path("features.json"))
 
     immutable_root = tmp_path / "immutable"
-    _, immutable, rows = _write_store(immutable_root)
-    with pytest.raises(RuntimeError, match="manifest conflicts"):
+    _, immutable, _ = _write_store(immutable_root)
+    with pytest.raises(RuntimeError, match="cannot be republished"):
         ParquetR2FeatureStore(
             immutable_root,
             FixedClock(datetime(2026, 7, 29, tzinfo=UTC)),
             chunk_rows=2,
         ).write(
             Path("features.json"),
-            iter(rows),
+            iter(_feature_rows(6, immutable.feature_set_id, immutable.feature_schema)),
             feature_set_name=immutable.feature_set_name,
             feature_set_id=immutable.feature_set_id,
             feature_schema=immutable.feature_schema,
@@ -1126,6 +1126,17 @@ def test_parquet_path_safety_no_clobber_and_failed_publication(
             application_version="test",
             image_identity="changed-image",
         )
+    expected_data_files = {Path(chunk.data_file).name for chunk in immutable.chunks}
+    expected_lineage_files = {Path(chunk.lineage_file).name for chunk in immutable.chunks}
+    data_directory = (immutable_root / immutable.chunks[0].data_file).parent
+    lineage_directory = (immutable_root / immutable.chunks[0].lineage_file).parent
+    assert {path.name for path in data_directory.glob("*.parquet")} == expected_data_files
+    assert {path.name for path in lineage_directory.glob("*.parquet")} == expected_lineage_files
+    assert ParquetR2FeatureStore(
+        immutable_root,
+        FixedClock(datetime(2026, 7, 29, tzinfo=UTC)),
+        chunk_rows=2,
+    ).verify(Path("features.json")) == immutable
 
     failed_root = tmp_path / "failed"
     failed_store = ParquetR2FeatureStore(failed_root, FixedClock(), chunk_rows=2)
@@ -1259,3 +1270,61 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     verified = json.loads(capsys.readouterr().out)
     assert verified == built
     assert verify_bundle.await_count == 2
+
+def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(
+    tmp_path: Path,
+) -> None:
+    first_store, first, _ = _write_store(tmp_path, count=4, chunk_rows=2)
+    second_store, second, _ = _write_store(
+        tmp_path,
+        manifest_name="features-second.json",
+        count=6,
+        chunk_rows=2,
+    )
+
+    assert first_store.verify(Path("features.json")) == first
+    assert second_store.verify(Path("features-second.json")) == second
+    assert first.chunks[0].data_file == second.chunks[0].data_file
+
+
+def test_gap_known_by_cutoff_excludes_source_inactive_closures() -> None:
+    from qtrad.domain.foundation import PanelAuditDisposition
+
+    decision = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    panel = cast(
+        PanelRow,
+        SimpleNamespace(
+            instrument_id=experiment().target_instruments[0],
+            latest_feature_bar_end=decision,
+            feature_data_asof=decision,
+            audit_disposition=PanelAuditDisposition.SOURCE_NOT_ACTIVE,
+        ),
+    )
+    foundation = _minimal_foundation(decision, decision + timedelta(minutes=1))
+    inactive, _ = _calculate(
+        "gap_known_by_cutoff",
+        panel,
+        {},
+        experiment(),
+        foundation,
+        _RowCache(),
+    )
+    known_gap, _ = _calculate(
+        "gap_known_by_cutoff",
+        cast(
+            PanelRow,
+            SimpleNamespace(
+                instrument_id=panel.instrument_id,
+                latest_feature_bar_end=panel.latest_feature_bar_end,
+                feature_data_asof=panel.feature_data_asof,
+                audit_disposition=PanelAuditDisposition.RECORDED_GAP_KNOWN_BY_CUTOFF,
+            ),
+        ),
+        {},
+        experiment(),
+        foundation,
+        _RowCache(),
+    )
+
+    assert inactive == 0.0
+    assert known_gap == 1.0

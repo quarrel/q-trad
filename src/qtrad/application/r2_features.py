@@ -20,6 +20,7 @@ from qtrad.domain.foundation import (
     AvailabilityBasis,
     FoundationConfig,
     InstrumentRole,
+    PanelAuditDisposition,
     PanelDataset,
     PanelRow,
     PanelStatus,
@@ -409,8 +410,12 @@ def _calculate(
         return (1.0 if active else 0.0), _ids(current)
     if name == "quality_healthy":
         return (1.0 if current and current.quality.value == "HEALTHY" else 0.0), _ids(current)
-    if name == "gap_disposition_present":
-        return (1.0 if panel.audit_disposition else 0.0), ()
+    if name == "gap_known_by_cutoff":
+        return (
+            1.0
+            if panel.audit_disposition is PanelAuditDisposition.RECORDED_GAP_KNOWN_BY_CUTOFF
+            else 0.0
+        ), ()
     if name.startswith("utc_"):
         minute = panel.decision_time.hour * 60 + panel.decision_time.minute
         if name == "utc_minute_sin":

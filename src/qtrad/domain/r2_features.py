@@ -301,7 +301,7 @@ def feature_registry(experiment: R2ExperimentConfig) -> tuple[FeatureDefinition,
             "target_feature_missing_fraction",
             "cross_market_available_count",
             "quality_healthy",
-            "gap_disposition_present",
+            "gap_known_by_cutoff",
         ):
             definitions.append(FeatureDefinition(name, FeatureFamily.TIME_AVAILABILITY))
     if FeatureFamily.SPREAD in families:

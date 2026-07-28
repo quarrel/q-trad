@@ -506,3 +506,21 @@ def test_qualifying_subset_preserves_wider_r1_target_universe() -> None:
     assert (
         config.target_instrument_eligibility[TARGETS[-1]].state is FeatureEligibility.NOT_ELIGIBLE
     )
+
+def test_exact_r1_binding_rejects_reclassified_r1_target() -> None:
+    from qtrad.application.r2_readiness import verify_exact_r1_bindings
+
+    config = experiment()
+    reclassified = TARGETS[-1]
+    roles = dict(config.instrument_roles)
+    roles[reclassified] = InstrumentRole.CONTEXT
+    eligibility = dict(config.target_instrument_eligibility)
+    del eligibility[reclassified]
+    contradictory = replace(
+        config,
+        instrument_roles=roles,
+        target_instrument_eligibility=eligibility,
+    )
+
+    with pytest.raises(ValueError, match="instrument_roles"):
+        verify_exact_r1_bindings(_verified(config), contradictory)

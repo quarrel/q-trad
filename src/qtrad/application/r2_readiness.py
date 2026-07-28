@@ -247,6 +247,7 @@ def verify_exact_r1_bindings(
         ),
         "r1_image_identity": (experiment.r1_image_identity, build_summary["image_identity"]),
         "ordered_instruments": (experiment.ordered_instruments, config.ordered_instruments),
+        "instrument_roles": (dict(experiment.instrument_roles), dict(config.instrument_roles)),
         "bundle_ordered_instruments": (
             config.ordered_instruments,
             bundle.ordered_instruments,

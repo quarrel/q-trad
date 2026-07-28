@@ -144,8 +144,14 @@ class ParquetR2FeatureStore:
         application_version: str,
         image_identity: str,
     ) -> R2FeatureManifest:
-        """Publish chunks first and the manifest last; never overwrite evidence."""
+        """Publish a new immutable manifest and its bounded chunks."""
         path = self._resolve_manifest_path(manifest_path)
+        if path.is_symlink():
+            raise ValueError("R2 feature manifest must not be a symlink")
+        if path.exists():
+            if not path.is_file():
+                raise ValueError("R2 feature manifest must be a regular file")
+            raise RuntimeError("existing R2 feature manifest cannot be republished")
         _require_text(feature_set_name, "feature set name")
         _require_sha256(feature_set_id, "feature set ID")
         _require_text(application_version, "application version")
@@ -276,7 +282,7 @@ class ParquetR2FeatureStore:
             raise ValueError("R2 feature row count differs from its manifest")
         if semantic_hasher.hexdigest() != manifest.semantic_dataset_id:
             raise ValueError("R2 feature semantic dataset identity mismatch")
-        _reject_extra_chunks(path.parent, manifest)
+        _validate_chunk_directories(manifest)
 
     def verify(self, manifest_path: Path) -> R2FeatureManifest:
         """Verify manifest, every bounded chunk, lineage and semantic identity."""
@@ -321,10 +327,10 @@ class ParquetR2FeatureStore:
     ) -> R2FeatureChunkReference:
         semantic_id = _chunk_semantic_hash(rows)
         relative_base = f"{_DATA_ROOT}/{_chunk_directory(rows[0].feature_set_id, self._chunk_rows)}"
-        data_file = f"{relative_base}/chunk-{index:08d}.parquet"
+        data_file = f"{relative_base}/chunk-{semantic_id}.parquet"
         lineage_file = (
             f"{_LINEAGE_ROOT}/{_chunk_directory(rows[0].feature_set_id, self._chunk_rows)}"
-            f"/chunk-{index:08d}.parquet"
+            f"/chunk-{semantic_id}.parquet"
         )
         data_path = _safe_child(manifest_path.parent, data_file, _DATA_ROOT)
         lineage_path = _safe_child(manifest_path.parent, lineage_file, _LINEAGE_ROOT)
@@ -829,7 +835,7 @@ def _atomic_write(path: Path, content: bytes, *, verify_existing: Callable[[], N
         temporary.unlink(missing_ok=True)
 
 
-def _reject_extra_chunks(parent: Path, manifest: R2FeatureManifest) -> None:
+def _validate_chunk_directories(manifest: R2FeatureManifest) -> None:
     expected_data_parent = PurePosixPath(_DATA_ROOT) / _chunk_directory(
         manifest.feature_set_id,
         manifest.chunk_row_limit,
@@ -854,18 +860,16 @@ def _reject_extra_chunks(parent: Path, manifest: R2FeatureManifest) -> None:
         raise ValueError("R2 feature chunks use multiple data directories")
     if any(PurePosixPath(item.lineage_file).parent != lineage_parent for item in manifest.chunks):
         raise ValueError("R2 feature chunks use multiple lineage directories")
-    expected_data = {PurePosixPath(item.data_file).name for item in manifest.chunks}
-    expected_lineage = {PurePosixPath(item.lineage_file).name for item in manifest.chunks}
-    data_directory = parent / data_parent
-    lineage_directory = parent / lineage_parent
-    if data_directory.exists():
-        actual_data = {item.name for item in data_directory.glob("*.parquet")}
-        if actual_data != expected_data:
-            raise ValueError("R2 feature store has missing or extra data chunks")
-    if lineage_directory.exists():
-        actual_lineage = {item.name for item in lineage_directory.glob("*.parquet")}
-        if actual_lineage != expected_lineage:
-            raise ValueError("R2 feature store has missing or extra lineage chunks")
+    if any(
+        PurePosixPath(item.data_file).name != f"chunk-{item.semantic_hash}.parquet"
+        for item in manifest.chunks
+    ):
+        raise ValueError("R2 feature data chunks are not content-addressed")
+    if any(
+        PurePosixPath(item.lineage_file).name != f"chunk-{item.semantic_hash}.parquet"
+        for item in manifest.chunks
+    ):
+        raise ValueError("R2 feature lineage chunks are not content-addressed")
 
 
 def _validate_manifest_chunk_path(relative: str, expected_root: str) -> None:
