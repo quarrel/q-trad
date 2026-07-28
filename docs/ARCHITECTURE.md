@@ -92,10 +92,14 @@ Canonical market-data conventions remain:
 - stable internal identities independent of provider listing identifiers.
 
 Provider-history research uses a separate manifested observation contract with explicit request,
-contract-mapping, session, availability and revision policies. It does not relabel historical bars as
-native `QUOTE_DERIVED` observations. Each foundation binds one evidence class; historical,
-IBKR-native and IG-native observations remain separate through feature construction, modelling and
-reporting.
+contract-mapping, session, correction and availability policies plus an authenticated `available_at`.
+A versioned foundation availability selector consumes that field without writing assumed values into
+native `received_at` or `persisted_at`; the native selector continues to use measured lineage.
+
+Each foundation binds one `MarketDataSourceClass`; historical, IBKR-native and IG-native observations
+remain separate through feature construction, modelling and reporting. That source dimension is
+orthogonal to R2 `EvidenceClass`. Foundation, experiment, feature, fit, forecast and report identities
+bind both independently.
 
 ## Research contracts
 

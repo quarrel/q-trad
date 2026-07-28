@@ -73,15 +73,29 @@ Provider identifiers and TWS API types stop at `adapters/ibkr`. Domain and appli
 explicit provider, environment, listing and source identities through provider-neutral contracts.
 Ambiguous mappings, overlapping eligible listings or changed contract identity fail closed.
 
-### 4.3 Evidence classes and experiment separation
+### 4.3 Source class, R2 evidence class and experiment separation
 
-Use these evidence classes:
+Define a provider-source dimension independent of R2 research status:
 
 ```text
-IBKR_HISTORICAL_RESEARCH
-IBKR_NATIVE_CAPTURE
-IG_NATIVE_CAPTURE
+MarketDataSourceClass
+    IBKR_HISTORICAL_RESEARCH
+    IBKR_NATIVE_CAPTURE
+    IG_NATIVE_CAPTURE
 ```
+
+R2 `EvidenceClass` retains its existing orthogonal values:
+
+```text
+IMPLEMENTATION_EVIDENCE_ONLY
+CONFIRMATORY
+```
+
+An `R2-IBKR-HISTORICAL` artefact may therefore bind
+`market_data_source_class = IBKR_HISTORICAL_RESEARCH` and
+`evidence_class = CONFIRMATORY`. Provider-history observations and every foundation, experiment,
+feature, fit, forecast, evaluation report and evidence bundle bind both dimensions independently into
+their semantic identities. Verification rejects a missing, substituted or inconsistent dimension.
 
 Use distinct experiment identities:
 
@@ -91,12 +105,11 @@ R2-IBKR-NATIVE
 R2-IG-NATIVE
 ```
 
-One foundation bundle contains one source class. Historical, IBKR-native and IG-native rows are not
-silently combined. Any later augmentation experiment has a separate identity, compares native-only
-and augmented controls and retains an untouched native holdout.
-
-Historical bars may support development, training or a conclusion about the named IBKR product.
-They are not native delivery evidence and cannot prove contemporaneous quotes or executable fills.
+One foundation bundle contains one `MarketDataSourceClass`. Historical, IBKR-native and IG-native
+rows are not silently combined. Any later augmentation experiment has a separate identity, compares
+native-only and augmented controls and retains an untouched native holdout. Historical bars may
+support development, training or a conclusion about the named IBKR product, but are not native
+delivery evidence and cannot prove contemporaneous quotes or executable fills.
 
 ### 4.4 No order capability
 
@@ -110,13 +123,16 @@ logs, fixtures or evidence.
 
 IBKR historical rows retain how and when they were requested. Their research availability policy is
 an explicit source assumption, initially `BAR_END_PLUS_DECLARED_PROVIDER_DELAY`; later persistence
-must not masquerade as original market-time availability. The declared delay and policy are included
-in semantic identity.
+must not masquerade as original market-time availability. Provider-history rows expose an
+authenticated `available_at` selected through a versioned `ProviderHistoricalAvailabilityPolicy`;
+they do not populate native `received_at` or `persisted_at` with assumed times.
 
-Historical responses are frozen exactly as returned. Repeated requests never overwrite evidence.
-Changed rows become a new immutable dataset or explicit revisions with request lineage. Historical
-BID and ASK extrema are not assumed contemporaneous and remain ineligible for spread features until
-validated against observed IBKR top-of-book capture.
+The policy name, declared delay, derived `available_at`, request/response time and correction/revision
+assumptions participate in observation, foundation and downstream semantic identities. Historical
+responses are frozen exactly as returned. Repeated requests never overwrite evidence. Changed rows
+become a new immutable dataset or explicit revisions with request lineage. Historical BID and ASK
+extrema are not assumed contemporaneous and remain ineligible for spread features until validated
+against observed IBKR top-of-book capture.
 
 ### 4.6 Acquisition priorities
 
@@ -159,26 +175,45 @@ Add immutable contract `qtrad-ibkr-historical-plan-v1`. Each request binds:
 
 Execution records request ID, attempt and completion times, response disposition, rows, bounds,
 hashes, pacing state and errors. Restarting execution resumes from retained successful chunks without
-silently duplicating or replacing them.
+silently duplicating or replacing them. Planned request coverage is contiguous and non-overlapping
+after clipping to the exact requested half-open range; this requirement does not imply that returned
+market bars form a continuous grid.
 
-### 6.3 Provider-history observations
+### 6.3 Provider-history observations and availability selection
 
 Add a separate manifested observation contract, initially
-`qtrad-provider-historical-observations-v1`. It declares provider, environment, provenance,
-historical availability and correction policies, request manifests, contract mappings, session
-evidence and included bar bases.
+`qtrad-provider-historical-observations-v1`, with a frozen
+`ProviderHistoricalObservation.available_at` and a versioned
+`ProviderHistoricalAvailabilityPolicy`. It declares `MarketDataSourceClass`, provider, environment,
+provenance, request/completion times, historical availability and correction policies, request
+manifests, contract mappings, session evidence and included bar bases.
 
-It reuses the existing deterministic panel, target, fold and thin foundation-bundle transformations
-only after adapters translate rows into the explicit provider-history contract. It does not broaden
-or relabel `qtrad-research-observations-v1`, whose first path remains native `QUOTE_DERIVED` evidence.
-Every child remains independently verifiable.
+Add a versioned foundation availability-selector protocol. Its native implementation continues to
+select measured `received_at` or `persisted_at` from `qtrad-research-observations-v1`. Its
+provider-history implementation authenticates the stored `available_at` against interval end, the
+declared policy and delay, request lineage and correction assumptions. It never writes an assumed
+historical availability into either native timestamp field. Unknown selector versions or mismatched
+recomputation fail closed.
 
-### 6.4 Live records and health
+The existing deterministic panel, target, fold and thin foundation-bundle transformations may be
+reused only through that selector after adapters translate rows into the explicit provider-history
+contract. Every child remains independently verifiable. One foundation binds one
+`MarketDataSourceClass`; the foundation and downstream R2 identities independently bind both source
+class and R2 `EvidenceClass`.
 
-Normalise actual Level 1 updates to provider-neutral records retaining bid, ask, sizes, separate side
-times where available, local receive time, market-data type, request ID and exact contract identity.
-Never invent a side or manufacture periodic quotes by carrying state forward. Crossed or invalid
-states produce bounded visible dispositions.
+### 6.4 Live records, callback chronology and health
+
+Persist actual Level 1 adapter callbacks in arrival order. Every callback carries its connection
+generation and a local monotonic arrival sequence in addition to provider sequence where available,
+provider/event time, local receive time, request ID, exact contract identity and update fields. Two
+payload-equal callbacks with different callback identities remain separate evidence.
+
+Normalisation may emit one-sided quotes and retain separate side times, but never invents a side or
+manufactures periodic quotes by carrying state forward. A derived snapshot may be order-independent
+only at an explicitly defined coalescing boundary where that property is mathematically valid; it
+does not replace or reorder native callback/event history. Replaying the same identity-bearing
+callback sequence is deterministic and idempotent. Crossed or invalid states produce bounded visible
+dispositions.
 
 Healthy live capture requires socket connection, next-valid-ID and server-time evidence, healthy
 market-data farms, available historical farm, exact subscriptions, required `LIVE` data type, first
@@ -269,10 +304,17 @@ Fixture exit evidence proves:
 
 - contract ambiguity fails closed and mapping identity is deterministic;
 - no order capability is reachable;
-- callback order does not change semantic output and duplicates are idempotent;
+- raw callbacks preserve generation-authenticated local arrival order;
+- replay of the same identity-bearing callback sequence is deterministic and idempotent, while
+  payload-equal callbacks with different identities remain distinct;
+- any order-independent derived coalescing is confined to an explicit valid boundary;
 - one-sided, crossed, delayed and frozen states behave explicitly;
 - timestamps normalise to UTC;
-- historical chunks are gap-free and non-overlapping;
+- planned historical request coverage is contiguous and non-overlapping after clipping;
+- returned interval keys are ordered and unique, with deterministic reconciliation of overlapping
+  responses;
+- absent expected active intervals receive explicit gap dispositions, inactive intervals remain absent
+  without being called gaps, and no interval is forward-filled;
 - one-second planning honours the provider limit;
 - pacing state survives restart;
 - reconnect generations reconstruct subscriptions exactly; and
@@ -288,13 +330,18 @@ Acquire in order:
 3. One active-day, one-second MIDPOINT investigation for those candidates only when tied to a declared
    feature or microstructure question.
 
-Build and independently verify request/result manifests, provider-history observations, panels,
-targets, folds and a thin source-specific foundation bundle.
+Build and independently verify request/result manifests, provider-history observations with
+authenticated `available_at`, the versioned availability selector, panels, targets, folds and a thin
+source-specific foundation bundle. Verify contiguous/non-overlapping planned coverage separately from
+returned market intervals: returned keys are ordered and unique, overlaps reconcile deterministically,
+expected active absences have explicit gap dispositions, inactive intervals remain absent and nothing
+is forward-filled.
 
 Exit gate: an immutable deterministic dataset has explicit active-session evidence, at least six
 qualifying targets across three declared groups if a confirmatory R2 run is intended, per-block
-coverage, request lineage and successful replay. Failure to meet those thresholds is retained as
-`INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION`, not repaired by weakening folds or coverage gates.
+coverage, request lineage and successful availability/panel replay. Failure to meet those thresholds
+is retained as `INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION`, not repaired by weakening folds or
+coverage gates.
 
 ### Stage 4 — R2 software continuation and historical integration
 
@@ -326,7 +373,12 @@ and explicit upgrades. It does not automate credentials or 2FA.
 
 Qualify progressively with two instruments, six confirmatory instruments and then the accepted full
 universe. Require exact source/universe/image identity, recovery testing, backup/restore verification,
-no unexplained gaps or drops and at least one complete multi-region trading cycle.
+no unexplained gaps or drops and at least one complete multi-region trading cycle. Capture completion
+also requires observation across at least one complete weekly reauthentication boundary: expiry is
+detected, capture fails closed while authentication is unavailable, the operator alert is delivered,
+manual login recovery creates a new connection generation, subscriptions are reconstructed exactly
+and any unavailable interval is accounted for without hidden loss. Until that boundary is observed,
+report `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED`; the host and capture track are not complete.
 
 ### Stage 7 — R2-IBKR-NATIVE
 
@@ -382,14 +434,22 @@ Required evidence categories include:
 
 - mapping ambiguity, entitlement and market-data-type failures;
 - no-order reachability and credential redaction;
-- callback ordering, duplication, one-sided/crossed states and reconnect generations;
+- generation-authenticated callback arrival order, identity-specific replay/idempotency, distinct
+  payload-equal callbacks, one-sided/crossed states and reconnect generations;
 - UTC, session, RTH and half-open interval semantics;
+- contiguous/non-overlapping request plans, ordered unique returned keys, deterministic overlap
+  reconciliation, active-interval gap dispositions, absent inactive intervals and no forward filling;
 - pacing limits, resumability, chunk continuity and restart behaviour;
 - immutable refetch, file/hash, manifest and semantic identity verification;
 - source-separated observations and rejection of mixed or substituted children;
-- historical availability/revision-policy identity;
-- deterministic rebuild under reversed input ordering;
-- R1 causal target/fold/holdout invariants and R2 feature/fit/forecast/metric replay; and
+- independent `MarketDataSourceClass` and R2 `EvidenceClass` bindings through foundation, feature,
+  forecast and report identities;
+- provider-history `available_at` and versioned availability-selector replay without fabricated native
+  receive/persistence lineage;
+- deterministic rebuild under reversed input iteration where ordering is not itself market evidence;
+- R1 causal target/fold/holdout invariants and R2 feature/fit/forecast/metric replay;
+- weekly Gateway reauthentication expiry, fail-closed state, alert, new generation, exact subscription
+  recovery and interval accounting; and
 - progressive account-gated and live qualification scenarios.
 
 Tests and verification assets encode the observable contract and are never weakened to accommodate
@@ -421,7 +481,9 @@ independent verification and host lifecycle pass fixture evidence without claimi
 enter the frozen source-specific R2 workflow.
 
 **Capture complete:** the accepted universe streams into its independent canonical store with
-truthful health, reconnect recovery, backup, restore and operator-authenticated Gateway lifecycle.
+truthful health, reconnect recovery, backup and restore evidence, and the operator-authenticated
+Gateway lifecycle has passed a complete weekly reauthentication boundary. A host observed for less
+than that boundary remains `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED` and is not capture-complete.
 
 **Research objective complete:** R2 reports a verified positive, negative or inconclusive IBKR
 historical result and, where justified, an IBKR-native comparison, without exceeding source evidence.

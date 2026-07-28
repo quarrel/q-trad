@@ -10,9 +10,12 @@ does not claim that evidence exists or that any forecast is effective.
 **Provider-history extension (2026-07-28):** R1 remains complete and its first observation contract
 remains native `QUOTE_DERIVED` evidence only. ADR 0028 and
 `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` govern a separate provider-history observation contract
-that may reuse the deterministic panel, target, fold and thin-bundle transformations only after
-explicit source decoding and independent verification. It does not amend R1 evidence, broaden
-`qtrad-research-observations-v1` or permit mixed-source foundations.
+with authenticated `available_at`, `ProviderHistoricalAvailabilityPolicy` and a versioned foundation
+availability-selector protocol. Native selection continues to use measured `received_at` or
+`persisted_at`; assumed history availability is never written into those fields. Downstream
+deterministic panel, target, fold and thin-bundle transformations may be reused only through the
+selector after explicit source decoding and independent verification. This extension does not amend
+R1 evidence, broaden `qtrad-research-observations-v1` or permit mixed-source foundations.
 
 ## Purpose
 
@@ -228,8 +231,10 @@ provenance = QUOTE_DERIVED
 ```
 
 Historical candles must not be silently included. A separately versioned provider-history
-observation contract may reuse downstream deterministic transformations only under ADR 0028; it is
-not an alternative reader for this native contract and cannot share a foundation with native rows.
+observation contract may reuse downstream deterministic transformations only under ADR 0028 through
+its authenticated `available_at` and versioned availability selector. It is not an alternative reader
+for this native contract, cannot fabricate its receive/persistence lineage and cannot share a
+foundation with native rows.
 
 All 23 captured markets are included in the native observation dataset. VIX remains context-only in
 later foundation configuration.

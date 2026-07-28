@@ -37,7 +37,7 @@ The IBKR adapter is market-data-only. It exposes no order operation, imports no 
 broker-order command, endpoint or production connectivity. Gateway credentials and 2FA remain in an
 operator-controlled login boundary and never enter q-trad settings, logs or evidence.
 
-IBKR evidence is classified separately:
+Provider origin is classified by an independent `MarketDataSourceClass` dimension:
 
 ```text
 IBKR_HISTORICAL_RESEARCH
@@ -45,16 +45,23 @@ IBKR_NATIVE_CAPTURE
 IG_NATIVE_CAPTURE
 ```
 
+This does not replace R2 `EvidenceClass`, whose values remain `IMPLEMENTATION_EVIDENCE_ONLY` and
+`CONFIRMATORY`. Provider-history observations and every foundation, experiment, feature, fit,
+forecast, report and evidence bundle bind both dimensions independently into semantic identity.
 Historical, IBKR-native and IG-native observations are not combined in one foundation bundle.
 Source-specific R2 experiments use distinct immutable identities. A later augmentation experiment
 must be separately registered, compare native-only and augmented controls and retain an untouched
 native holdout.
 
 IBKR historical bars use a separate provider-history observation contract. They are never relabelled
-as native `QUOTE_DERIVED` observations. Their declared availability and correction assumptions,
-request lineage, contract mapping, session evidence and bar basis are part of semantic identity.
-Refetches never overwrite retained evidence. Historical BID and ASK extrema do not establish a
-contemporaneous spread without separate validation against observed top-of-book capture.
+as native `QUOTE_DERIVED` observations and never put assumed availability into native `received_at`
+or `persisted_at`. A frozen `ProviderHistoricalObservation.available_at`, its versioned
+`ProviderHistoricalAvailabilityPolicy`, declared delay, request time, correction assumptions,
+contract mapping, session evidence and bar basis participate in semantic identity. A versioned
+foundation availability selector authenticates this field; native selection continues to use measured
+receive/persistence lineage. Refetches never overwrite retained evidence. Historical BID and ASK
+extrema do not establish a contemporaneous spread without separate validation against observed
+top-of-book capture.
 
 One-minute historical MIDPOINT acquisition is the initial research bootstrap. BID/ASK requests are
 bounded follow-up evidence. One-second history is limited to predeclared investigations; live
@@ -72,8 +79,9 @@ assumptions. It cannot support IG quote, spread, slippage, fill, product-economi
 and does not remove the pending `R2-IG-NATIVE` experiment.
 
 The provider-history path may reuse deterministic R1 panel, target, fold and bundle transformations
-after explicit source decoding and verification, but it does not weaken the first R1 native source
-restriction. The live runtime may reuse provider-neutral ports and ingestion services, but must not
+after explicit source decoding and versioned availability selection, but it does not weaken the first
+R1 native source or timestamp restrictions. The live runtime may reuse provider-neutral ports and
+ingestion services, but must preserve generation-authenticated callback arrival order and must not
 create a second application architecture or allow provider library types into domain code.
 
 Operational duplication is accepted only where source identity, Gateway lifecycle and failure

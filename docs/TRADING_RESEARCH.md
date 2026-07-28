@@ -71,13 +71,18 @@ Continue native IG quote capture because lost forward bid/ask history cannot be 
 Audit bid/ask-size coverage and meaning before using quote imbalance. Top-of-book size changes are
 not cumulative volume delta; any trade-volume feature requires a separately validated source.
 
-Use three provenance-distinct evidence classes:
+Use a `MarketDataSourceClass` dimension with three provenance-distinct values:
 
 1. `IG_NATIVE_CAPTURE` for measured IG quote-derived targets/features and eventual IG executable-side
    paper evidence;
 2. `IBKR_HISTORICAL_RESEARCH` for immutable account-returned historical bars with explicit product,
    request, availability and correction assumptions; and
 3. `IBKR_NATIVE_CAPTURE` for later q-trad-observed IBKR top-of-book and quote-derived history.
+
+`MarketDataSourceClass` is independent of R2 `EvidenceClass` (`IMPLEMENTATION_EVIDENCE_ONLY` or
+`CONFIRMATORY`). Observations, foundations, experiments, features, fits, forecasts and reports bind
+both. Thus a confirmatory `R2-IBKR-HISTORICAL` result retains historical source provenance without
+being misclassified as implementation-only evidence.
 
 Historical data may support development, training, hypothesis rejection or a conclusion limited to
 the named external product. It may not masquerade as native quote history or substantiate another
@@ -87,9 +92,9 @@ timestamps, sessions, bar construction, corrections, adjustments and retention. 
 that decision for the independently governed IBKR paper source; capability still requires measured
 account review.
 
-Each source-specific experiment consumes one verified foundation. `R2-IBKR-HISTORICAL`,
-`R2-IBKR-NATIVE` and `R2-IG-NATIVE` remain distinct. A later augmentation experiment must compare
-native-only and augmented controls and preserve an untouched native holdout.
+Each source-specific experiment consumes one verified single-source-class foundation.
+`R2-IBKR-HISTORICAL`, `R2-IBKR-NATIVE` and `R2-IG-NATIVE` remain distinct. A later augmentation
+experiment must compare native-only and augmented controls and preserve an untouched native holdout.
 
 ### Chronology and alignment
 
