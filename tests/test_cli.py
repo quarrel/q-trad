@@ -756,6 +756,44 @@ async def test_listing_review_writes_new_non_authoritative_manifest_without_data
 
 
 @pytest.mark.asyncio
+async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        cli,
+        "_ig_review_adapter",
+        Mock(side_effect=AssertionError("IG adapter must not be composed")),
+    )
+    settings = Settings(ibkr_gateway_host="127.0.0.1", ibkr_gateway_port=4002, ibkr_client_id=71)
+    output = tmp_path / "ibkr-preflight.json"
+
+    await cli._review_instruments(
+        settings,
+        Mock(spec=Clock),
+        catalogue_path=Path("config/capture-ibkr-v1-candidates.toml"),
+        output_path=output,
+        provider="ibkr",
+        environment="paper",
+        preflight=True,
+    )
+
+    payload = json.loads(output.read_text())
+    assert payload["status"] == "OPERATOR_AUTHENTICATION_REQUIRED"
+    assert payload["candidate_count"] == 20
+    assert payload["external_io_performed"] is False
+
+    with pytest.raises(RuntimeError, match="account-gated"):
+        await cli._review_instruments(
+            settings,
+            Mock(spec=Clock),
+            catalogue_path=None,
+            output_path=None,
+            provider="ibkr",
+            environment="paper",
+        )
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("maximum_seconds", "reconnect_seconds", "message"),
     [

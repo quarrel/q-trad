@@ -24,6 +24,10 @@ class Settings(BaseSettings):
     ig_account_id: str | None = None
     ig_environment: Literal["demo"] = "demo"
 
+    ibkr_gateway_host: str = "127.0.0.1"
+    ibkr_gateway_port: int = 4002
+    ibkr_client_id: int = 71
+
     @field_validator("database_url")
     @classmethod
     def async_postgres_only(cls, value: str) -> str:
@@ -40,6 +44,27 @@ class Settings(BaseSettings):
             raise ValueError(
                 "capture source ID must use lowercase letters, digits, '.', '_' or '-'"
             )
+        return value
+
+    @field_validator("ibkr_gateway_host")
+    @classmethod
+    def valid_ibkr_gateway_host(cls, value: str) -> str:
+        if not value or len(value) > 253 or any(character.isspace() for character in value):
+            raise ValueError("IBKR Gateway host must be a bounded non-whitespace value")
+        return value
+
+    @field_validator("ibkr_gateway_port")
+    @classmethod
+    def valid_ibkr_gateway_port(cls, value: int) -> int:
+        if not 1 <= value <= 65535:
+            raise ValueError("IBKR Gateway port must be between 1 and 65535")
+        return value
+
+    @field_validator("ibkr_client_id")
+    @classmethod
+    def valid_ibkr_client_id(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("IBKR client ID must be positive; client ID zero is not permitted")
         return value
 
     @field_validator("image")

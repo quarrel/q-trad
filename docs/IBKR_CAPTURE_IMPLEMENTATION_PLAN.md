@@ -293,6 +293,32 @@ Exit gate: at least twenty exact mappings, or an explicitly accepted smaller uni
 unmatched or ambiguous concept quarantined. No mapping, price basis, product equivalence, session or
 currency is inferred.
 
+#### Current partial implementation and next boundary
+
+The repository implements only the local, non-secret preflight: the canonical candidate catalogue,
+validated Gateway host/port/client ID and deterministic `OPERATOR_AUTHENTICATION_REQUIRED` output.
+It performs no socket connection, account query or provider request and is not Stage 1 exit evidence.
+
+The approved next boundary uses an **IBC-managed paper IB Gateway** and a **pinned wheel built from an
+official IBKR TWS API distribution**. Before account-gated implementation begins:
+
+- select and record the official TWS API release, download origin, licence and SHA-256; build the wheel
+  reproducibly and make it available as a controlled local/private dependency rather than using the
+  stale public PyPI `ibapi` release;
+- install and configure IB Gateway and IBC outside q-trad; IBC owns login, restart and 2FA handling,
+  and its credentials or rendered secret-bearing configuration never enter q-trad settings, logs,
+  fixtures, evidence or version control;
+- authenticate a paper session, expose its read-only socket only to the intended host, and confirm the
+  configured port and positive non-zero client ID without enabling an order path;
+- qualify the weekly reauthentication lifecycle separately; until a complete boundary has been
+  observed, retain `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED`; and
+- implement and fixture-test the direct API transport, bounded callback/request lifecycle, sanitised
+  errors and exact-contract evidence before an explicitly authorised live capability probe.
+
+q-trad receives only the Gateway endpoint and client ID. Operator credentials remain outside the
+application. A reachable or authenticated Gateway alone does not qualify contracts, entitlements,
+historical availability, restart recovery or Stage 1 completion.
+
 ### Stage 2 — contracts, adapter and fixture qualification
 
 Implement the official direct TWS Python API inside `adapters/ibkr`, bridging callbacks to a bounded

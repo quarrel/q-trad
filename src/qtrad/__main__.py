@@ -37,6 +37,7 @@ from qtrad.application.backfill_planning import (
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
+from qtrad.application.ibkr_capability import build_ibkr_capability_preflight
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
@@ -215,13 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit reviewed universe; defaults to QTRAD_CAPTURE_UNIVERSE_PATH",
     )
     review = instrument_sub.add_parser(
-        "review", help="emit bounded IG demo listing candidates without selecting one"
+        "review", help="review provider listings or preflight an account-gated review"
     )
-    review.add_argument(
-        "--catalogue",
-        type=Path,
-        default=Path("config/capture-v2-candidates.toml"),
-    )
+    review.add_argument("--provider", choices=("ig", "ibkr"), default="ig")
+    review.add_argument("--environment", choices=("demo", "paper"))
+    review.add_argument("--catalogue", type=Path)
+    review.add_argument("--preflight", action="store_true")
     review.add_argument("--output", type=Path)
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -474,6 +474,9 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 catalogue_path=args.catalogue,
                 output_path=args.output,
+                provider=args.provider,
+                environment=args.environment,
+                preflight=args.preflight,
             )
         )
     elif args.command == "instruments" and args.instrument_command == "promote":
@@ -1833,8 +1836,11 @@ async def _review_instruments(
     settings: Settings,
     clock: Clock,
     *,
-    catalogue_path: Path,
+    catalogue_path: Path | None,
     output_path: Path | None,
+    provider: str = "ig",
+    environment: str | None = None,
+    preflight: bool = False,
 ) -> None:
     if output_path is not None:
         if output_path.exists():
@@ -1843,7 +1849,37 @@ async def _review_instruments(
             raise FileNotFoundError(
                 f"listing review output directory does not exist: {output_path.parent}"
             )
-    candidates = load_capture_candidates(catalogue_path)
+    if provider == "ibkr":
+        if environment not in (None, "paper"):
+            raise ValueError("IBKR listing review supports only the paper environment")
+        if not preflight:
+            raise RuntimeError(
+                "IBKR capability review is account-gated; run with --preflight before "
+                "operator-authenticated Gateway access is authorised"
+            )
+        candidates = load_capture_candidates(
+            catalogue_path or Path("config/capture-ibkr-v1-candidates.toml")
+        )
+        result = build_ibkr_capability_preflight(
+            catalogue_name=candidates.name,
+            catalogue_hash=candidates.configuration_hash,
+            candidate_count=len(candidates.instruments),
+            gateway_host=settings.ibkr_gateway_host,
+            gateway_port=settings.ibkr_gateway_port,
+            client_id=settings.ibkr_client_id,
+        )
+        _emit_json_artifact(result.as_json_value(), output_path)
+        return
+    if provider != "ig":
+        raise ValueError(f"unsupported listing-review provider: {provider}")
+    if environment not in (None, "demo"):
+        raise ValueError("IG listing review supports only the demo environment")
+    if preflight:
+        raise ValueError("--preflight is only valid for the IBKR provider")
+
+    candidates = load_capture_candidates(
+        catalogue_path or Path("config/capture-v2-candidates.toml")
+    )
     adapter = _ig_review_adapter(settings, clock, candidates)
     try:
         await adapter.connect()
@@ -1858,23 +1894,26 @@ async def _review_instruments(
             reviews=reviews,
             observed_at=clock.now(),
         )
-        encoded = json.dumps(manifest.as_json_value(), sort_keys=True, indent=2) + "\n"
-        if output_path is None:
-            print(encoded, end="")
-        else:
-            with output_path.open("x", encoding="utf-8") as output:
-                output.write(encoded)
-            print(
-                json.dumps(
-                    {
-                        "output": str(output_path),
-                        "review_hash": manifest.review_hash,
-                    },
-                    sort_keys=True,
-                )
-            )
+        _emit_json_artifact(manifest.as_json_value(), output_path, manifest.review_hash)
     finally:
         await adapter.disconnect()
+
+
+def _emit_json_artifact(
+    payload: dict[str, JsonValue], output_path: Path | None, artifact_hash: str | None = None
+) -> None:
+    encoded = json.dumps(payload, sort_keys=True, indent=2) + "\n"
+    if output_path is None:
+        print(encoded, end="")
+        return
+    with output_path.open("x", encoding="utf-8") as output:
+        output.write(encoded)
+    response: dict[str, JsonValue] = {"output": str(output_path)}
+    if artifact_hash is not None:
+        response["review_hash"] = artifact_hash
+    else:
+        response["preflight_hash"] = payload["preflight_hash"]
+    print(json.dumps(response, sort_keys=True))
 
 
 def _promote_universe(

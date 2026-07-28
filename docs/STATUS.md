@@ -2,7 +2,7 @@
 
 **Updated:** 2026-07-28
 **Current milestone:** R2 — local and pooled baselines (R2.B software complete; R2.C next)
-**Parallel track:** IBKR Stage 0 documentation and source decision complete; implementation not started
+**Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -63,10 +63,12 @@ remains offline/replay.
   lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
   semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
   integration and any model conclusion remain pending.
-- ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` now define an independent, market-data-only
-  IBKR paper source and the complete staged path from exact contract review through historical and
-  native source-specific R2 experiments. This is a documentation and architecture decision only: no
-  IBKR adapter, entitlement result, historical dataset, live collector, host or research result has
+- ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
+  IBKR paper source and its complete staged path. The local Stage 1 boundary now includes the canonical
+  20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
+  deterministic `instruments review --provider ibkr --environment paper --preflight` artefact. It
+  performs no external I/O and reports `OPERATOR_AUTHENTICATION_REQUIRED`. No IBKR adapter, exact
+  contract or entitlement result, historical dataset, live collector, host or research result has
   been implemented or qualified.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
@@ -99,8 +101,9 @@ remains offline/replay.
 
 ## Next actions
 
-1. Implement the bounded IBKR exact-contract, entitlement and capability probe without ingestion or
-   inferred mappings.
+1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
+   official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
+   mappings.
 2. Continue R2.C fold-local preprocessing and alpha selection while the independent IBKR data track
    proceeds and native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
