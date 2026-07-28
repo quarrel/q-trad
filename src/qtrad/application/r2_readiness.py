@@ -1,15 +1,17 @@
 """Pure R2.A readiness evaluation against one verified R1 foundation."""
 
+import json
 from collections import Counter
 from collections.abc import Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
+from hashlib import sha256
 from typing import Protocol
 
-from qtrad.domain.events import JsonValue
+from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import Fold, FoldDataset
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import FoundationConfig, PanelDataset, ReturnDisposition, TargetDataset
-from qtrad.domain.foundation_bundle import FoundationBundle
+from qtrad.domain.foundation_bundle import AVAILABILITY_EVIDENCE_CONTRACT, FoundationBundle
 from qtrad.domain.r2_readiness import (
     CoverageCell,
     EligibilityDecision,
@@ -21,6 +23,7 @@ from qtrad.domain.r2_readiness import (
     ReadinessState,
 )
 from qtrad.domain.research import ObservationDataset
+from qtrad.domain.time import require_utc
 
 _REQUIRED_COMMON_WEEKS = 16
 _WEEK = timedelta(weeks=1)
@@ -30,7 +33,9 @@ _HOLDOUT_DURATION = timedelta(weeks=4)
 _MINIMUM_COVERAGE = 0.90
 
 
-class VerifiedFoundation(Protocol):
+class R1FoundationBindings(Protocol):
+    """Verified R1 identities required by every R2 consumer."""
+
     @property
     def bundle(self) -> FoundationBundle: ...
 
@@ -50,10 +55,12 @@ class VerifiedFoundation(Protocol):
     def folds(self) -> FoldDataset: ...
 
     @property
-    def forecasts(self) -> ForecastDataset: ...
-
-    @property
     def availability_evidence(self) -> Mapping[str, JsonValue]: ...
+
+
+class VerifiedFoundation(R1FoundationBindings, Protocol):
+    @property
+    def forecasts(self) -> ForecastDataset: ...
 
 
 def evaluate_r2_readiness(
@@ -61,7 +68,7 @@ def evaluate_r2_readiness(
 ) -> R2ReadinessReport:
     """Fail closed while keeping software and scientific readiness independent."""
 
-    _verify_exact_r1_bindings(verified, experiment)
+    verify_exact_r1_bindings(verified, experiment)
     unmet: list[str] = []
     feature_states = {
         family: _feature_state(experiment.feature_eligibility[family]) for family in FeatureFamily
@@ -74,7 +81,7 @@ def evaluate_r2_readiness(
 
     group_counts = Counter(experiment.market_groups.values())
     folds = verified.folds.folds
-    source_active = _source_active_intervals(verified.availability_evidence)
+    source_active = source_active_intervals_from_evidence(verified.availability_evidence)
     coverage_matrix = _coverage_matrix(
         experiment=experiment,
         targets=verified.targets,
@@ -212,23 +219,28 @@ def evaluate_r2_readiness(
     )
 
 
-def _verify_exact_r1_bindings(verified: VerifiedFoundation, experiment: R2ExperimentConfig) -> None:
+def verify_exact_r1_bindings(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+) -> None:
+    """Authenticate the complete R1 identity before any R2 calculation."""
     bundle = verified.bundle
     config = verified.configuration
+    observations = verified.observations
+    panel = verified.panel
+    targets = verified.targets
+    folds = verified.folds
     build_summary = bundle.build_summary
     expected = {
         "r1_bundle_id": (experiment.r1_bundle_id, bundle.bundle_id),
-        "observation_dataset_id": (
-            experiment.observation_dataset_id,
-            verified.observations.dataset_id,
-        ),
+        "observation_dataset_id": (experiment.observation_dataset_id, observations.dataset_id),
         "foundation_configuration_id": (
             experiment.foundation_configuration_id,
             config.configuration_id,
         ),
-        "panel_dataset_id": (experiment.panel_dataset_id, verified.panel.dataset_id),
-        "target_dataset_id": (experiment.target_dataset_id, verified.targets.dataset_id),
-        "fold_dataset_id": (experiment.fold_dataset_id, verified.folds.dataset_id),
+        "panel_dataset_id": (experiment.panel_dataset_id, panel.dataset_id),
+        "target_dataset_id": (experiment.target_dataset_id, targets.dataset_id),
+        "fold_dataset_id": (experiment.fold_dataset_id, folds.dataset_id),
         "r1_application_version": (
             experiment.r1_application_version,
             build_summary["application_version"],
@@ -236,14 +248,140 @@ def _verify_exact_r1_bindings(verified: VerifiedFoundation, experiment: R2Experi
         "r1_image_identity": (experiment.r1_image_identity, build_summary["image_identity"]),
         "ordered_instruments": (experiment.ordered_instruments, config.ordered_instruments),
         "instrument_roles": (dict(experiment.instrument_roles), dict(config.instrument_roles)),
+        "bundle_ordered_instruments": (
+            config.ordered_instruments,
+            bundle.ordered_instruments,
+        ),
+        "availability_basis": (
+            verified.observations.selection_policies["availability_basis"],
+            verified.configuration.availability_basis.value,
+        ),
         "horizons": (experiment.horizons, config.target_horizons),
         "holdout_range": (experiment.holdout_range, config.holdout_range),
+        "bundle_range_start": (config.range_start, bundle.range_start),
+        "bundle_range_end": (config.range_end, bundle.range_end),
+        "bundle_configuration_id": (config.configuration_id, bundle.configuration.dataset_id),
+        "bundle_observation_id": (observations.dataset_id, bundle.observations.dataset_id),
+        "bundle_availability_id": (
+            _availability_dataset_id(observations.dataset_id, verified.availability_evidence),
+            bundle.availability.dataset_id,
+        ),
+        "bundle_panel_id": (panel.dataset_id, bundle.panel.dataset_id),
+        "bundle_target_id": (targets.dataset_id, bundle.targets.dataset_id),
+        "bundle_fold_id": (folds.dataset_id, bundle.folds.dataset_id),
+        "configuration_observation_id": (
+            observations.dataset_id,
+            config.observation_dataset_id,
+        ),
+        "panel_observation_id": (observations.dataset_id, panel.observation_dataset_id),
+        "panel_configuration_id": (
+            config.configuration_id,
+            panel.foundation_configuration_id,
+        ),
+        "target_observation_id": (observations.dataset_id, targets.observation_dataset_id),
+        "target_configuration_id": (
+            config.configuration_id,
+            targets.foundation_configuration_id,
+        ),
+        "fold_configuration_id": (
+            config.configuration_id,
+            folds.foundation_configuration_id,
+        ),
+        "fold_target_id": (targets.dataset_id, folds.target_dataset_id),
     }
     mismatches = [name for name, (actual, wanted) in expected.items() if actual != wanted]
     if mismatches:
+        raise ValueError(f"R2 experiment or foundation binding mismatch: {', '.join(mismatches)}")
+    _validate_authenticated_availability(
+        verified.availability_evidence,
+        universe=config.ordered_instruments,
+        observation_dataset_id=observations.dataset_id,
+    )
+
+
+def source_active_intervals_from_evidence(
+    evidence: Mapping[str, JsonValue],
+) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+    """Decode the one authenticated source-active evidence representation."""
+    raw = evidence["source_active_intervals"]
+    if not isinstance(raw, dict):
+        raise TypeError("source-active evidence must be a JSON object")
+    result: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
+    for instrument, raw_intervals in raw.items():
+        if not instrument:
+            raise TypeError("source-active evidence has an invalid instrument")
+        if not isinstance(raw_intervals, list):
+            raise TypeError("source-active evidence has an invalid interval list")
+        intervals: list[tuple[datetime, datetime]] = []
+        for raw_interval in raw_intervals:
+            if not isinstance(raw_interval, list) or len(raw_interval) != 2:
+                raise TypeError("source-active interval must contain two timestamps")
+            start = _datetime(raw_interval[0])
+            end = _datetime(raw_interval[1])
+            if end <= start:
+                raise ValueError("source-active interval must be positive")
+            intervals.append((start, end))
+        result[instrument] = tuple(intervals)
+    return result
+
+
+def _validate_authenticated_availability(
+    evidence: Mapping[str, JsonValue],
+    *,
+    universe: tuple[str, ...],
+    observation_dataset_id: str,
+) -> None:
+    expected_keys = {
+        "availability_delay_report",
+        "revision_delay_report",
+        "data_gaps",
+        "source_active_intervals",
+        "lineage_summary",
+        "observation_bounds",
+    }
+    if set(evidence) != expected_keys:
+        raise ValueError("authenticated availability evidence has unknown or missing fields")
+    intervals = source_active_intervals_from_evidence(evidence)
+    if set(intervals) != set(universe):
         raise ValueError(
-            f"R2 experiment differs from verified R1 foundation: {', '.join(mismatches)}"
+            "authenticated source-active evidence differs from the foundation universe"
         )
+    if tuple(universe) != tuple(dict.fromkeys(universe)):
+        raise ValueError("foundation universe is not canonical and unique")
+    bounds = evidence["observation_bounds"]
+    if not isinstance(bounds, dict) or set(bounds) != {"interval_start", "interval_end"}:
+        raise ValueError("authenticated observation bounds are malformed")
+    bound_start = _datetime(bounds["interval_start"])
+    bound_end = _datetime(bounds["interval_end"])
+    if bound_end <= bound_start:
+        raise ValueError("authenticated observation bounds must be positive")
+    for instrument, instrument_intervals in intervals.items():
+        if instrument_intervals != tuple(sorted(instrument_intervals)):
+            raise ValueError(f"authenticated source-active intervals are not ordered: {instrument}")
+        if any(start < bound_start or end > bound_end for start, end in instrument_intervals):
+            raise ValueError(
+                f"authenticated source-active intervals exceed observation bounds: {instrument}"
+            )
+    policies = evidence.get("selection_policies")
+    if policies is not None:
+        raise ValueError("availability evidence contains an unexpected selection policy field")
+    expected_id = _availability_dataset_id(observation_dataset_id, evidence)
+    if not expected_id:
+        raise ValueError("availability evidence identity is invalid")
+
+
+def _availability_dataset_id(
+    observation_dataset_id: str,
+    evidence: Mapping[str, JsonValue],
+) -> str:
+    canonical = {
+        "contract": AVAILABILITY_EVIDENCE_CONTRACT,
+        "observation_dataset_id": observation_dataset_id,
+        "evidence": to_json_value(dict(evidence)),
+    }
+    return sha256(
+        json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 def _feature_state(decision: EligibilityDecision) -> ReadinessState:
@@ -306,29 +444,6 @@ def _coverage_matrix(
     return matrix
 
 
-def _source_active_intervals(
-    evidence: Mapping[str, JsonValue],
-) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
-    raw = evidence["source_active_intervals"]
-    if not isinstance(raw, dict):
-        raise TypeError("source-active evidence must be a JSON object")
-    result: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
-    for instrument, raw_intervals in raw.items():
-        if not isinstance(raw_intervals, list):
-            raise TypeError("source-active evidence has an invalid instrument or interval list")
-        intervals: list[tuple[datetime, datetime]] = []
-        for raw_interval in raw_intervals:
-            if not isinstance(raw_interval, list) or len(raw_interval) != 2:
-                raise TypeError("source-active interval must contain two timestamps")
-            start = _datetime(raw_interval[0])
-            end = _datetime(raw_interval[1])
-            if end <= start:
-                raise ValueError("source-active interval must be positive")
-            intervals.append((start, end))
-        result[instrument] = tuple(intervals)
-    return result
-
-
 def _membership_counts(
     *,
     experiment: R2ExperimentConfig,
@@ -361,7 +476,9 @@ def _membership_counts(
 def _datetime(value: JsonValue) -> datetime:
     if not isinstance(value, str):
         raise TypeError("source-active timestamp must be a string")
-    return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    require_utc(parsed, "authenticated source-active timestamp")
+    return parsed.astimezone(UTC)
 
 
 def _usable_common_week_count(

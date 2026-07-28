@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-07-26
-**Current milestone:** R2 — local and pooled baselines (R2.A contract complete; integration pending)
+**Updated:** 2026-07-27
+**Current milestone:** R2 — local and pooled baselines (R2.B software complete; representative integration pending)
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay
 
@@ -36,9 +36,9 @@ remains offline/replay
   correction-maturity evidence, and a thin immutable bundle over independently manifested
   observation, configuration, availability, panel, target, fold and forecast children. Verification
   recomputes delay evidence, binds the complete observation universe and deterministically replays
-  every causal child transformation without loading model code. The implementation passed the full
-  clean PostgreSQL, formatting, linting, typing and 456-test gate and R1 is complete. No real native
-  23-market bundle or effectiveness result has been claimed from the zero-return probe or short
+  every causal child transformation without loading model code. The current implementation passed
+  the full clean PostgreSQL, formatting, linting, typing and 503-test gate; R1 remains complete. No
+  real native 23-market bundle or effectiveness result has been claimed from the zero-return probe or
   history.
 - The R2.A contract and readiness preflight are implemented. The identity-bearing experiment keeps
   the full R1 target universe, authenticated pre-holdout target/feature eligibility decisions and a
@@ -51,6 +51,17 @@ remains offline/replay
   chronological split. Representative native integration also remains pending until later R2
   feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
   history supports no model-selection or effectiveness claim.
+- R2.B software now provides the identity-bound `qtrad-r2-features-v1` raw-feature contract.
+  Materialisation authenticates the complete R1 bundle, its availability evidence and every child
+  binding before using exact interval start/end and configured current-cutoff selection. It provides
+  exact local return and causal N-return rolling features, activity-adjusted missingness, fixed
+  leave-one-out model and market-group universes, VIX context, aligned eligibility-gated spreads and
+  locked-holdout exclusion. `research baselines features` writes a bounded immutable chunked-Parquet
+  child with separate semantic dataset and physical manifest identities; `features-verify` validates
+  its strict wide schema, chunk and lineage hashes, then independently replays every row, value and
+  lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
+  semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
+  integration and any model conclusion remain pending.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -82,11 +93,11 @@ remains offline/replay
 ## Next actions
 
 1. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-2. Implement R2.B causal raw features against the R2.A experiment and readiness contracts, then
-   retain the representative native integration evidence required to complete R2.A.
-3. As the confirmatory R2 entry gate, build and independently verify the real 23-market native foundation bundle
-   when the configured evidence interval and product-role qualification support it.
-4. Keep native history and product-economics qualification fail-closed while R2 baselines are prepared.
+2. As the confirmatory R2 entry gate, build and independently verify the real 23-market native
+   foundation bundle when the configured evidence interval and product-role qualification support it.
+3. Run R2.B materialisation and independent persisted verification against that bundle, then retain
+   coverage and failure dispositions without making a model-effectiveness claim.
+4. Keep native history and product-economics qualification fail-closed while R2.C is prepared.
 
 ## Evidence and current authorities
 

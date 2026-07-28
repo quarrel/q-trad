@@ -109,6 +109,7 @@ class VerifiedFoundationBundle:
     targets: TargetDataset
     folds: FoldDataset
     forecasts: ForecastDataset
+    source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
 
 
@@ -801,6 +802,7 @@ async def verify_foundation_bundle(
         targets=targets,
         folds=folds,
         forecasts=forecasts,
+        source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
     )
 
