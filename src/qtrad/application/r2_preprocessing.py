@@ -4,7 +4,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from math import isfinite
-from typing import Any, cast
+from typing import Any, Protocol, cast
 
 import numpy as np
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
@@ -62,6 +62,11 @@ class TrainingRow:
             raise ValueError("features must be finite or null")
 
 
+class FeatureVector(Protocol):
+    @property
+    def features(self) -> tuple[float | None, ...]: ...
+
+
 def build_r2_preprocessing_selection(
     verified: R1FoundationBindings,
     feature_dataset: R2FeatureDataset,
@@ -90,7 +95,7 @@ def build_r2_preprocessing_selection(
         raise ValueError("outer fold membership authentication failed")
 
     scope = _target_scope(experiment, target_instruments)
-    rows = _join_training_rows(
+    rows = join_training_rows(
         verified.targets,
         fold,
         feature_dataset,
@@ -452,7 +457,7 @@ def fit_preprocessing(
     )
 
 
-def transform(rows: Sequence[TrainingRow], fit: PreprocessingFit) -> np.ndarray:
+def transform(rows: Sequence[FeatureVector], fit: PreprocessingFit) -> np.ndarray:
     positions = {name: index for index, name in enumerate(fit.feature_names)}
     active = set(fit.active_feature_names)
     indicators = set(fit.indicator_feature_names)
@@ -575,7 +580,7 @@ def _target_scope(
     return scope
 
 
-def _join_training_rows(
+def join_training_rows(
     targets: TargetDataset,
     fold: Fold,
     features: R2FeatureDataset,
