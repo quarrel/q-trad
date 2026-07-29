@@ -295,9 +295,13 @@ currency is inferred.
 
 #### Current partial implementation and next boundary
 
-The repository implements only the local, non-secret preflight: the canonical candidate catalogue,
-validated Gateway host/port/client ID and deterministic `OPERATOR_AUTHENTICATION_REQUIRED` output.
-It performs no socket connection, account query or provider request and is not Stage 1 exit evidence.
+The repository implements the local, non-secret preflight plus a fixture-tested, market-data-only
+capability-probe boundary. The explicit `--execute-account-probe` path requires an operator-authored,
+non-authoritative query specification, a create-only evidence output and the pinned official API wheel;
+without that wheel it fails before any socket I/O. The preflight retains the canonical candidate
+catalogue, validated Gateway host/port/client ID and deterministic
+`OPERATOR_AUTHENTICATION_REQUIRED` output. No account-qualified evidence exists yet, and neither path
+has mapping-selection authority or is Stage 1 exit evidence.
 
 The approved next boundary uses an **IBC-managed paper IB Gateway** and a **pinned wheel built from an
 official IBKR TWS API distribution**. Before account-gated implementation begins:
@@ -312,8 +316,9 @@ official IBKR TWS API distribution**. Before account-gated implementation begins
   configured port and positive non-zero client ID without enabling an order path;
 - qualify the weekly reauthentication lifecycle separately; until a complete boundary has been
   observed, retain `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED`; and
-- implement and fixture-test the direct API transport, bounded callback/request lifecycle, sanitised
-  errors and exact-contract evidence before an explicitly authorised live capability probe.
+- supply the pinned official wheel and fixture-test it against the direct API transport's bounded
+  callback/request lifecycle, sanitised errors and exact-contract evidence before an explicitly
+  authorised live capability probe.
 
 q-trad receives only the Gateway endpoint and client ID. Operator credentials remain outside the
 application. A reachable or authenticated Gateway alone does not qualify contracts, entitlements,

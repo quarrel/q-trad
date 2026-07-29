@@ -77,12 +77,14 @@ remains offline/replay.
   is deliberately limited to one eligible target, `LOCAL_RIDGE` and the primary horizon; final local
   coefficients and forecasts begin in R2.D, and pooled selection belongs to R2.E.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
-  IBKR paper source and its complete staged path. The local Stage 1 boundary now includes the canonical
+  IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
-  deterministic `instruments review --provider ibkr --environment paper --preflight` artefact. It
-  performs no external I/O and reports `OPERATOR_AUTHENTICATION_REQUIRED`. No IBKR adapter, exact
-  contract or entitlement result, historical dataset, live collector, host or research result has
-  been implemented or qualified.
+  deterministic `instruments review --provider ibkr --environment paper --preflight` artefact. A
+  fixture-tested direct-API capability-probe boundary now requires an explicit
+  `--execute-account-probe`, a non-authoritative operator query specification and a create-only review
+  output. It remains inert until a pinned wheel built from the official TWS API distribution is made
+  available, and it has produced no exact-contract or entitlement evidence. No historical dataset,
+  live collector, host or research result has been implemented or qualified.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
