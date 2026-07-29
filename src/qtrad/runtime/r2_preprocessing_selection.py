@@ -423,7 +423,7 @@ def _exact_object(value: object, keys: set[str], field: str) -> dict[str, object
 def _list(value: object, field: str) -> list[object]:
     if not isinstance(value, list):
         raise TypeError(f"{field} must be a JSON array")
-    return value
+    return cast(list[object], value)
 
 
 def _text(value: object, field: str) -> str:
