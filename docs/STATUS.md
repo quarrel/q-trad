@@ -101,8 +101,9 @@ remains offline/replay.
   target/fold keys, coverage and lineage, then records both own and exact common target support.
   Synthetic shared-signal and cross-asset-signal recovery, missing-member rejection, uneven weighting,
   instrument-order invariance, replay and incomplete-comparator tests pass. This remains
-  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration, R2.F evaluation and any
-  pooled-versus-local effectiveness conclusion remain pending.
+  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration, R2.F1 evaluation and any
+  pooled-versus-local effectiveness conclusion remain pending. R2.F1 persistence must retain the
+  authenticated local-comparator manifest as an independently referenced child.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -146,8 +147,9 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.F1 evaluation and selection machinery while the independent IBKR data track proceeds
-   and native IG history accumulates.
+2. Continue R2.F1 evaluation and selection machinery, including independent local-comparator
+   manifest references in persisted evaluation evidence, while the IBKR data track proceeds and native
+   IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.

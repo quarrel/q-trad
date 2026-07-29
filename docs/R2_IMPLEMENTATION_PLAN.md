@@ -72,8 +72,7 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
 - **Evidence impact:** no decision-grade R2 evidence exists, so none is invalidated. Synthetic R2.A
   readiness evidence produced before this amendment is superseded and cannot support a readiness
   claim under the revised contract.
-- **Approving pull request:** PR #22; this amendment takes effect only if that PR is approved and
-  merged.
+- **Approval:** approved and merged by PR #22.
 - **Amendment date:** 2026-07-26.
 
 ### Amendment 2 — source-specific provider-history experiments
@@ -122,8 +121,7 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
 - **Evidence impact:** no durable pooled-selection or decision-grade R2 evidence exists. Existing local
   selections remain structurally local, but pre-amendment synthetic selection evidence is superseded and
   must be regenerated under the policy-bound semantic identity.
-- **Approving pull request:** PR #29; this amendment takes effect only when that pull request is
-  approved and merged.
+- **Approval:** approved and merged by PR #29.
 - **Amendment date:** 2026-07-29.
 
 ---
@@ -1721,6 +1719,8 @@ Synthetic fixtures and a representative R1 bundle are sufficient.
 - experiment-count register;
 - retained rejected configurations;
 - selection-manifest writer and verifier;
+- independently referenced local-comparator manifest child for every persisted evaluation/selection
+  artefact;
 - synthetic and representative integration reports.
 
 #### Correctness requirements
@@ -1729,6 +1729,8 @@ Synthetic fixtures and a representative R1 bundle are sufficient.
 - use training-derived bucket thresholds;
 - report undefined metrics explicitly;
 - expose coverage differences;
+- reauthenticate the referenced local-comparator manifest, including exact target/fold/feature-set
+  coverage and explicit failed/unavailable coverage, when reconstructing common support;
 - prevent selection from a single aggregate statistic;
 - prove that holdout data cannot affect OOF artefacts;
 - distinguish fixture, integration and confirmatory evidence.
