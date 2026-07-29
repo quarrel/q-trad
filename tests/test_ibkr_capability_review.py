@@ -124,3 +124,38 @@ def test_ibkr_capability_review_rejects_missing_candidate_query_result() -> None
             results=(),
             observed_at=datetime(2026, 7, 29, tzinfo=UTC),
         )
+
+
+def test_ibkr_capability_review_surfaces_actual_ambiguous_contract_count() -> None:
+    result = _result()
+    ambiguous = IbkrCandidateCapability(
+        query=result.query,
+        contracts=(),
+        requests=(
+            IbkrRequestEvidence(
+                kind="CONTRACT_DETAILS",
+                status="AMBIGUOUS",
+                latency_milliseconds=12,
+                returned_contract_count=5,
+            ),
+        ),
+    )
+
+    review = build_ibkr_capability_review(
+        catalogue_name="capture-ibkr-v1-candidates",
+        catalogue_hash="a" * 64,
+        instruments=(_instrument(),),
+        probe_spec_name="operator-probe-v1",
+        probe_spec_hash="b" * 64,
+        api_version="10.33.1",
+        api_package_fingerprint="c" * 64,
+        results=(ambiguous,),
+        observed_at=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+
+    instruments = review.as_json_value()["instruments"]
+    assert isinstance(instruments, list)
+    instrument = instruments[0]
+    assert isinstance(instrument, dict)
+    assert instrument["status"] == "AMBIGUOUS_PROVIDER_MATCH"
+    assert instrument["returned_contract_count"] == 5

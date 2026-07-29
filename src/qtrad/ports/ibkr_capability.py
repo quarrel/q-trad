@@ -39,6 +39,10 @@ class IbkrContractQuery:
         ):
             if value is not None and (not value or len(value) > 80):
                 raise ValueError(f"IBKR contract query {field_name} must be bounded when present")
+        if self.security_type not in {"CASH", "IND", "STK", "FUT"}:
+            raise ValueError("IBKR capability probe does not support broad derivative queries")
+        if self.security_type == "FUT" and self.local_symbol is None:
+            raise ValueError("IBKR futures capability queries require an exact local symbol")
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,6 +96,8 @@ class IbkrRequestEvidence:
     availability: str | None = None
     bid_seen: bool = False
     ask_seen: bool = False
+    bid_usable: bool = False
+    ask_usable: bool = False
     bid_size_seen: bool = False
     ask_size_seen: bool = False
     row_count: int | None = None
@@ -100,6 +106,7 @@ class IbkrRequestEvidence:
     use_rth: bool | None = None
     error_codes: tuple[str, ...] = ()
     error_times: tuple[int, ...] = ()
+    returned_contract_count: int | None = None
 
     def __post_init__(self) -> None:
         if not self.kind or len(self.kind) > 80:
@@ -111,6 +118,7 @@ class IbkrRequestEvidence:
             "LIVE_AVAILABLE",
             "DELAYED_AVAILABLE",
             "FROZEN_OR_DELAYED_FROZEN",
+            "MARKET_DATA_TYPE_UNCONFIRMED",
             "UNAVAILABLE",
         }:
             raise ValueError("IBKR market-data availability classification is invalid")
@@ -120,6 +128,8 @@ class IbkrRequestEvidence:
             raise ValueError("IBKR request contract conId must be positive when present")
         if self.row_count is not None and self.row_count < 0:
             raise ValueError("IBKR request row count cannot be negative")
+        if self.returned_contract_count is not None and self.returned_contract_count < 0:
+            raise ValueError("IBKR returned contract count cannot be negative")
         if self.earliest_timestamp is not None:
             require_utc(self.earliest_timestamp, "IBKR earliest timestamp")
         if len(set(self.error_codes)) != len(self.error_codes):

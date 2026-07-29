@@ -179,13 +179,32 @@ def build_ibkr_capability_review(
         )
         if not candidate_results:
             raise ValueError("IBKR capability review is missing a query result for a candidate")
-        contract_count = sum(len(result.contracts) for result in candidate_results)
+        contract_count = sum(
+            (
+                request.returned_contract_count
+                if request.returned_contract_count is not None
+                else len(result.contracts)
+            )
+            for result in candidate_results
+            for request in result.requests
+            if request.kind == "CONTRACT_DETAILS"
+        )
+        ambiguous = any(
+            request.status == "AMBIGUOUS"
+            for result in candidate_results
+            for request in result.requests
+            if request.kind == "CONTRACT_DETAILS"
+        )
         instrument_payloads.append(
             {
                 "instrument_id": str(instrument.instrument_id),
                 "display_name": instrument.display_name,
                 "status": (
-                    "OPERATOR_SELECTION_REQUIRED" if contract_count else "NO_RETURNED_CONTRACT"
+                    "AMBIGUOUS_PROVIDER_MATCH"
+                    if ambiguous
+                    else "OPERATOR_SELECTION_REQUIRED"
+                    if contract_count
+                    else "NO_RETURNED_CONTRACT"
                 ),
                 "returned_contract_count": contract_count,
                 "queries": [to_json_value(result) for result in candidate_results],

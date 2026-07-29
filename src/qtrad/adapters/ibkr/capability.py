@@ -8,6 +8,7 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
+from math import isfinite
 from queue import Empty, Full, Queue
 from threading import Thread
 from time import monotonic
@@ -72,6 +73,10 @@ class _Callback:
     kind: str
     request_id: int
     values: tuple[object, ...]
+
+
+class IbkrConnectionIntegrityError(RuntimeError):
+    """The Gateway session can no longer support trustworthy request evidence."""
 
 
 class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
@@ -165,22 +170,21 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 ),
             )
         error_codes = _error_codes(callbacks)
-        returned_contracts = tuple(
-            _contract_evidence(callback.values[0])
-            for callback in callbacks
-            if callback.kind == "contract_details"
+        returned_callbacks = tuple(
+            callback for callback in callbacks if callback.kind == "contract_details"
         )
-        contracts = returned_contracts[:_MAX_CONTRACTS_PER_QUERY]
+        returned_count = len(returned_callbacks)
+        exact_match = returned_count == 1
+        contracts = (_contract_evidence(returned_callbacks[0].values[0]),) if exact_match else ()
         contract_request = IbkrRequestEvidence(
             kind="CONTRACT_DETAILS",
             status=(
-                "AMBIGUOUS"
-                if len(returned_contracts) > _MAX_CONTRACTS_PER_QUERY
-                else _status(callbacks, "contract_details_end")
+                "AMBIGUOUS" if returned_count > 1 else _status(callbacks, "contract_details_end")
             ),
             latency_milliseconds=_milliseconds(started),
             error_codes=error_codes,
             error_times=_error_times(callbacks),
+            returned_contract_count=returned_count,
         )
         requests: list[IbkrRequestEvidence] = [contract_request]
         for contract in contracts:
@@ -213,36 +217,34 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         started = monotonic()
         client.reqMarketDataType(requested_type)
         client.reqMktData(market_request_id, api_contract, "", False, False, [])
-        callbacks = await self._collect_for(market_request_id, self._request_timeout_seconds)
-        client.cancelMktData(market_request_id)
-        tick_types = {
-            int(cast(str | int, callback.values[0]))
-            for callback in callbacks
-            if callback.kind in {"tick_price", "tick_size"}
-        }
+        try:
+            callbacks = await self._collect_for(market_request_id, self._request_timeout_seconds)
+        finally:
+            client.cancelMktData(market_request_id)
         data_types = [
             str(callback.values[0]) for callback in callbacks if callback.kind == "market_data_type"
         ]
         data_type = _MARKET_DATA_TYPES.get(data_types[-1]) if data_types else None
-        delayed = requested_type == 3 or data_type in {"DELAYED", "DELAYED_FROZEN"}
-        bid, ask, bid_size, ask_size = (
-            (_DELAYED_BID, _DELAYED_ASK, _DELAYED_BID_SIZE, _DELAYED_ASK_SIZE)
-            if delayed
-            else (_BID, _ASK, _BID_SIZE, _ASK_SIZE)
-        )
+        tick_family = _tick_family(data_type)
+        bid_types, ask_types, bid_size_types, ask_size_types = tick_family
+        tick_types = _tick_types(callbacks)
+        bid_seen = bool(bid_types & tick_types)
+        ask_seen = bool(ask_types & tick_types)
+        bid_usable = _usable_price_seen(callbacks, bid_types)
+        ask_usable = _usable_price_seen(callbacks, ask_types)
         return IbkrRequestEvidence(
             kind=kind,
             status=_window_status(callbacks),
             latency_milliseconds=_milliseconds(started),
             contract_con_id=con_id,
             market_data_type=data_type,
-            availability=_market_availability(
-                callbacks, data_type, bid in tick_types, ask in tick_types
-            ),
-            bid_seen=bid in tick_types,
-            ask_seen=ask in tick_types,
-            bid_size_seen=bid_size in tick_types,
-            ask_size_seen=ask_size in tick_types,
+            availability=_market_availability(callbacks, data_type, bid_usable, ask_usable),
+            bid_seen=bid_seen,
+            ask_seen=ask_seen,
+            bid_usable=bid_usable,
+            ask_usable=ask_usable,
+            bid_size_seen=bool(bid_size_types & tick_types),
+            ask_size_seen=bool(ask_size_types & tick_types),
             error_codes=_error_codes(callbacks),
             error_times=_error_times(callbacks),
         )
@@ -252,8 +254,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     ) -> IbkrRequestEvidence:
         client = self._require_client()
         request_id = self._request_id()
-        started = monotonic()
         await self._pace_historical_request()
+        started = monotonic()
         client.reqHistoricalData(
             request_id, contract, "", "120 S", "1 min", what_to_show, int(use_rth), 2, False, []
         )
@@ -282,8 +284,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     async def _one_second_evidence(self, contract: object, con_id: int) -> IbkrRequestEvidence:
         client = self._require_client()
         request_id = self._request_id()
-        started = monotonic()
         await self._pace_historical_request()
+        started = monotonic()
         client.reqHistoricalData(
             request_id,
             contract,
@@ -321,8 +323,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     async def _earliest_evidence(self, contract: object, con_id: int) -> IbkrRequestEvidence:
         client = self._require_client()
         request_id = self._request_id()
-        started = monotonic()
         await self._pace_historical_request()
+        started = monotonic()
         client.reqHeadTimeStamp(request_id, contract, "MIDPOINT", 0, 2)
         try:
             callbacks = await self._collect_until(request_id, "head_timestamp")
@@ -374,10 +376,16 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         deadline = monotonic() + self._request_timeout_seconds
         while True:
             callback = await self._next_callback(deadline)
+            if _is_global_error(callback):
+                _handle_global_error(callback)
+                callbacks.append(callback)
+                continue
             if callback.request_id != request_id:
                 continue
             callbacks.append(callback)
-            if callback.kind == terminal_kind or callback.kind == "error":
+            if callback.kind == terminal_kind or (
+                callback.kind == "error" and _error_disposition(callback) == "REQUEST_ERROR"
+            ):
                 return callbacks
 
     async def _collect_for(self, request_id: int, seconds: float) -> list[_Callback]:
@@ -388,6 +396,10 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 callback = await self._next_callback(deadline)
             except TimeoutError:
                 return callbacks
+            if _is_global_error(callback):
+                _handle_global_error(callback)
+                callbacks.append(callback)
+                continue
             if callback.request_id == request_id:
                 callbacks.append(callback)
 
@@ -395,11 +407,14 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         deadline = monotonic() + self._request_timeout_seconds
         while True:
             callback = await self._next_callback(deadline)
+            if _is_global_error(callback):
+                _handle_global_error(callback)
+                continue
             if callback.request_id == request_id and callback.kind in kinds:
                 return callback
             if (
                 callback.kind == "error"
-                and callback.request_id in {request_id, -1}
+                and callback.request_id == request_id
                 and _error_disposition(callback)
                 in {"CONNECTION_LOST", "PORT_RESET", "REQUEST_ERROR"}
             ):
@@ -547,13 +562,19 @@ def _contract_evidence(value: object) -> IbkrContractEvidence:
 def _status(callbacks: Sequence[_Callback], terminal_kind: str) -> str:
     if any(callback.kind == terminal_kind for callback in callbacks):
         return "SUCCESS"
-    if any(callback.kind == "error" for callback in callbacks):
+    if any(
+        callback.kind == "error" and _error_disposition(callback) == "REQUEST_ERROR"
+        for callback in callbacks
+    ):
         return "ERROR"
     return "TIMEOUT"
 
 
 def _window_status(callbacks: Sequence[_Callback]) -> str:
-    if any(callback.kind == "error" for callback in callbacks):
+    if any(
+        callback.kind == "error" and _error_disposition(callback) == "REQUEST_ERROR"
+        for callback in callbacks
+    ):
         return "ERROR"
     if callbacks:
         return "SUCCESS"
@@ -602,21 +623,75 @@ def _error_classification(error_code: int) -> str:
     return "REQUEST_ERROR"
 
 
+def _is_global_error(callback: _Callback) -> bool:
+    return callback.kind == "error" and callback.request_id == -1
+
+
+def _handle_global_error(callback: _Callback) -> None:
+    disposition = _error_disposition(callback)
+    if disposition in {
+        "CONNECTION_LOST",
+        "CONNECTION_RESTORED_DATA_LOST",
+        "PORT_RESET",
+        "REQUEST_ERROR",
+    }:
+        raise IbkrConnectionIntegrityError(
+            f"IBKR capability connection integrity failed with IBKR_{_error_code(callback)}"
+        )
+
+
 def _market_availability(
-    callbacks: Sequence[_Callback], data_type: str | None, bid_seen: bool, ask_seen: bool
+    callbacks: Sequence[_Callback], data_type: str | None, bid_usable: bool, ask_usable: bool
 ) -> str:
     if any(
         callback.kind == "error" and _error_disposition(callback) == "REQUEST_ERROR"
         for callback in callbacks
     ):
         return "UNAVAILABLE"
-    if data_type == "LIVE" and bid_seen and ask_seen:
+    if data_type is None:
+        return "MARKET_DATA_TYPE_UNCONFIRMED"
+    if data_type == "LIVE" and bid_usable and ask_usable:
         return "LIVE_AVAILABLE"
-    if data_type == "DELAYED" and bid_seen and ask_seen:
+    if data_type == "DELAYED" and bid_usable and ask_usable:
         return "DELAYED_AVAILABLE"
     if data_type in {"FROZEN", "DELAYED_FROZEN"}:
         return "FROZEN_OR_DELAYED_FROZEN"
     return "UNAVAILABLE"
+
+
+def _tick_family(data_type: str | None) -> tuple[set[int], set[int], set[int], set[int]]:
+    live = ({_BID}, {_ASK}, {_BID_SIZE}, {_ASK_SIZE})
+    delayed = ({_DELAYED_BID}, {_DELAYED_ASK}, {_DELAYED_BID_SIZE}, {_DELAYED_ASK_SIZE})
+    if data_type in {"LIVE", "FROZEN"}:
+        return live
+    if data_type in {"DELAYED", "DELAYED_FROZEN"}:
+        return delayed
+    return (
+        live[0] | delayed[0],
+        live[1] | delayed[1],
+        live[2] | delayed[2],
+        live[3] | delayed[3],
+    )
+
+
+def _tick_types(callbacks: Sequence[_Callback]) -> set[int]:
+    return {
+        int(cast(str | int, callback.values[0]))
+        for callback in callbacks
+        if callback.kind in {"tick_price", "tick_size"}
+    }
+
+
+def _usable_price_seen(callbacks: Sequence[_Callback], tick_types: set[int]) -> bool:
+    return any(
+        callback.kind == "tick_price"
+        and int(cast(str | int, callback.values[0])) in tick_types
+        and isinstance(callback.values[1], (int, float))
+        and not isinstance(callback.values[1], bool)
+        and isfinite(float(callback.values[1]))
+        and float(callback.values[1]) > 0
+        for callback in callbacks
+    )
 
 
 def _verify_official_api_distribution(identity: IbkrApiIdentity) -> None:
