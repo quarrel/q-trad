@@ -9,23 +9,29 @@ from typing import Any, cast
 import numpy as np
 from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
+from qtrad.application.r2_features import feature_schema_for_set
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import ReturnDisposition, TargetDataset
 from qtrad.domain.r2_features import (
     FeatureDefinition,
-    FeatureKind,
     R2FeatureDataset,
     RawFeatureRow,
+    feature_schema_id,
+    feature_set_id,
 )
 from qtrad.domain.r2_models import (
     AlphaCandidateScore,
     AlphaSelection,
     FitDisposition,
+    PreprocessingFeatureDefinition,
+    PreprocessingFeatureKind,
     PreprocessingFit,
+    R2PreprocessingSchema,
     R2PreprocessingSelection,
+    derive_r2_preprocessing_schema,
 )
-from qtrad.domain.r2_readiness import ModelFamily, R2ExperimentConfig
+from qtrad.domain.r2_readiness import FeatureFamily, ModelFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
 _SUPPORTED_PREPROCESSING = "TRAINING_MEDIAN_STANDARDISE_V1"
@@ -71,7 +77,10 @@ def build_r2_preprocessing_selection(
     """Build one replayable preprocessing selection from authenticated R1 and R2.B children."""
     _verify_selection_policies(experiment, model_family, horizon)
     verify_exact_r1_bindings(verified, experiment)
-    _verify_feature_bindings(verified, feature_dataset, experiment)
+    authenticated_raw_schema = _verify_feature_bindings(
+        verified, feature_dataset, experiment, model_family
+    )
+    preprocessing_schema = derive_r2_preprocessing_schema(authenticated_raw_schema)
     fold = _outer_fold(verified, outer_fold_id)
     if not fold.holdout_excluded:
         raise ValueError("R2.C cannot consume a fold containing holdout membership")
@@ -91,7 +100,7 @@ def build_r2_preprocessing_selection(
     )
     selection = select_chronological_alpha(
         rows,
-        feature_schema=feature_dataset.feature_schema,
+        preprocessing_schema=preprocessing_schema,
         alpha_grid=experiment.alpha_grid,
         minimum_training_rows=experiment.minimum_training_rows,
         minimum_inner_validation_rows=experiment.minimum_inner_validation_rows,
@@ -119,6 +128,8 @@ def build_r2_preprocessing_selection(
         purge_boundary=validation_start,
         feature_schema_id=feature_dataset.raw_feature_schema_id,
         feature_set_id=feature_dataset.feature_set_id,
+        preprocessing_schema_id=preprocessing_schema.preprocessing_schema_id,
+        preprocessing_schema=preprocessing_schema,
         evidence_class=feature_dataset.evidence_class,
         application_image_identity=application_image_identity,
         sklearn_library_identity=sklearn_library_identity,
@@ -138,7 +149,7 @@ def build_r2_preprocessing_selection(
 def select_chronological_alpha(
     rows: Sequence[TrainingRow],
     *,
-    feature_schema: Sequence[FeatureDefinition],
+    preprocessing_schema: R2PreprocessingSchema,
     alpha_grid: Sequence[float],
     minimum_training_rows: int,
     minimum_inner_validation_rows: int,
@@ -149,7 +160,7 @@ def select_chronological_alpha(
     pooled_weighting_policy: str,
 ) -> AlphaSelection:
     """Evaluate the exact configured alpha grid on a purged chronological tail."""
-    schema = tuple(feature_schema)
+    schema = preprocessing_schema.features
     grid = tuple(alpha_grid)
     ordered = tuple(
         sorted(rows, key=lambda row: (row.decision_time, row.target_instrument_id, row.target_id))
@@ -199,7 +210,9 @@ def select_chronological_alpha(
         )
 
     inner_weights = equal_instrument_total_weights(inner_fit, pooled_weighting_policy)
-    inner_preprocessing = fit_preprocessing(inner_fit, schema, sample_weights=inner_weights)
+    inner_preprocessing = fit_preprocessing(
+        inner_fit, preprocessing_schema, sample_weights=inner_weights
+    )
     if len(inner_fit) < minimum_training_rows:
         failure_scores = _failure_scores(
             grid,
@@ -325,7 +338,9 @@ def select_chronological_alpha(
         )
     winner = min(ready, key=lambda score: (cast(float, score.loss), -score.alpha))
     outer_weights = equal_instrument_total_weights(ordered, pooled_weighting_policy)
-    outer_preprocessing = fit_preprocessing(ordered, schema, sample_weights=outer_weights)
+    outer_preprocessing = fit_preprocessing(
+        ordered, preprocessing_schema, sample_weights=outer_weights
+    )
     if not outer_preprocessing.active_feature_names:
         return _failed_selection(
             FitDisposition.DEGENERATE_FEATURE_MATRIX,
@@ -351,11 +366,11 @@ def select_chronological_alpha(
 
 def fit_preprocessing(
     rows: Sequence[TrainingRow],
-    feature_schema: Sequence[FeatureDefinition],
+    preprocessing_schema: R2PreprocessingSchema,
     *,
     sample_weights: Sequence[float] | None = None,
 ) -> PreprocessingFit:
-    schema = tuple(feature_schema)
+    schema = preprocessing_schema.features
     if not rows:
         raise ValueError("preprocessing requires training rows")
     if any(len(row.features) != len(schema) for row in rows):
@@ -383,10 +398,12 @@ def fit_preprocessing(
     unscaled: list[str] = []
     all_null: list[str] = []
     zero_variance: list[str] = []
-    indicators = tuple(item.name for item in schema if item.kind is FeatureKind.BINARY_INDICATOR)
+    indicators = tuple(
+        item.name for item in schema if item.kind is PreprocessingFeatureKind.BINARY_INDICATOR
+    )
     for position, definition in enumerate(schema):
         column = matrix[:, position]
-        if definition.kind is FeatureKind.BINARY_INDICATOR:
+        if definition.kind is PreprocessingFeatureKind.BINARY_INDICATOR:
             observed = column[~np.isnan(column)]
             if np.any((observed != 0.0) & (observed != 1.0)):
                 raise ValueError(f"binary indicator is not binary: {definition.name}")
@@ -497,7 +514,8 @@ def _verify_feature_bindings(
     verified: R1FoundationBindings,
     features: R2FeatureDataset,
     experiment: R2ExperimentConfig,
-) -> None:
+    model_family: ModelFamily,
+) -> tuple[FeatureDefinition, ...]:
     expected = {
         "observation_dataset_id": (
             features.observation_dataset_id,
@@ -517,6 +535,28 @@ def _verify_feature_bindings(
         raise ValueError(f"R2 feature binding mismatch: {', '.join(mismatches)}")
     if not features.holdout_excluded:
         raise ValueError("R2.C cannot consume holdout feature rows")
+
+    authenticated_schema = feature_schema_for_set(experiment, features.feature_set_name)
+    declared_set = next(
+        item for item in experiment.feature_sets if item.name == features.feature_set_name
+    )
+    if features.feature_set_name != declared_set.name:
+        raise ValueError("R2 feature binding mismatch: feature_set_name")
+    if model_family is ModelFamily.LOCAL_RIDGE and (
+        FeatureFamily.POOLED_CROSS_ASSET in declared_set.families
+    ):
+        raise ValueError("LOCAL_RIDGE cannot consume a pooled-context feature set")
+    authenticated_set_id = feature_set_id(
+        experiment.configuration_id, declared_set.name, authenticated_schema
+    )
+    if features.feature_set_id != authenticated_set_id:
+        raise ValueError("R2 feature binding mismatch: feature_set_id")
+    authenticated_schema_id = feature_schema_id(authenticated_schema)
+    if features.raw_feature_schema_id != authenticated_schema_id:
+        raise ValueError("R2 feature binding mismatch: raw_feature_schema_id")
+    if features.feature_schema != authenticated_schema:
+        raise ValueError("R2 feature binding mismatch: feature_schema")
+    return authenticated_schema
 
 
 def _outer_fold(verified: R1FoundationBindings, fold_id: str) -> Fold:
@@ -618,7 +658,7 @@ def _inner_validation_bounds(
 
 def _validate_selection_inputs(
     rows: tuple[TrainingRow, ...],
-    schema: tuple[FeatureDefinition, ...],
+    schema: tuple[PreprocessingFeatureDefinition, ...],
     grid: tuple[float, ...],
     minimum_training_rows: int,
     minimum_inner_validation_rows: int,

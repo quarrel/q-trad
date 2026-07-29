@@ -1,6 +1,7 @@
 """Immutable contracts for authenticated R2.C preprocessing selection."""
 
 import json
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
@@ -9,10 +10,113 @@ from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.r2_features import FeatureDefinition
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
+R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v1"
 R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
+
+_BINARY_PREPROCESSING_FEATURE_NAMES = frozenset(
+    {"source_active", "quality_healthy", "gap_known_by_cutoff"}
+)
+
+
+class PreprocessingFeatureKind(StrEnum):
+    CONTINUOUS = "CONTINUOUS"
+    BINARY_INDICATOR = "BINARY_INDICATOR"
+
+
+@dataclass(frozen=True, slots=True)
+class PreprocessingFeatureDefinition:
+    """One immutable preprocessing interpretation of an authenticated raw feature."""
+
+    name: str
+    kind: PreprocessingFeatureKind
+
+    def __post_init__(self) -> None:
+        if not self.name or not self.name.isascii():
+            raise ValueError("preprocessing feature name must be non-empty ASCII")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {"name": self.name, "kind": self.kind.value}
+
+
+@dataclass(frozen=True, slots=True)
+class R2PreprocessingSchema:
+    """Semantic R2.C feature-kind schema derived from an authenticated R2.B schema."""
+
+    features: tuple[PreprocessingFeatureDefinition, ...]
+    preprocessing_schema_id: str
+
+    CONTRACT: ClassVar[str] = R2_PREPROCESSING_SCHEMA_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        if not self.features or len({item.name for item in self.features}) != len(self.features):
+            raise ValueError("preprocessing schema must have non-empty unique feature names")
+        _require_sha256(self.preprocessing_schema_id, "preprocessing schema ID")
+        if self.preprocessing_schema_id != preprocessing_schema_id(self.features):
+            raise ValueError("preprocessing schema ID does not match its semantic content")
+
+    @classmethod
+    def create(cls, features: Sequence[PreprocessingFeatureDefinition]) -> "R2PreprocessingSchema":
+        definitions = tuple(features)
+        return cls(definitions, preprocessing_schema_id(definitions))
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "features": [item.as_json() for item in self.features],
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            **self.semantic_json(),
+            "preprocessing_schema_id": self.preprocessing_schema_id,
+        }
+
+
+def derive_r2_preprocessing_schema(
+    raw_feature_schema: Sequence[FeatureDefinition],
+) -> R2PreprocessingSchema:
+    """Derive the canonical R2.C kinds without changing the authenticated R2.B contract."""
+
+    schema = R2PreprocessingSchema.create(
+        tuple(_preprocessing_definition(item) for item in raw_feature_schema)
+    )
+    validate_preprocessing_schema_correspondence(raw_feature_schema, schema)
+    return schema
+
+
+def validate_preprocessing_schema_correspondence(
+    raw_feature_schema: Sequence[FeatureDefinition],
+    preprocessing_schema: R2PreprocessingSchema,
+) -> None:
+    """Require one preprocessing definition for every raw feature in exact order."""
+
+    expected = tuple(_preprocessing_definition(item) for item in raw_feature_schema)
+    if preprocessing_schema.features != expected:
+        raise ValueError("preprocessing schema differs from the authenticated raw-feature schema")
+
+
+def preprocessing_schema_id(features: Sequence[PreprocessingFeatureDefinition]) -> str:
+    payload = {
+        "contract": R2_PREPROCESSING_SCHEMA_CONTRACT,
+        "schema_version": 1,
+        "features": [item.as_json() for item in features],
+    }
+    return _semantic_id(payload)
+
+
+def _preprocessing_definition(raw: FeatureDefinition) -> PreprocessingFeatureDefinition:
+    kind = (
+        PreprocessingFeatureKind.BINARY_INDICATOR
+        if raw.availability_indicator or raw.name in _BINARY_PREPROCESSING_FEATURE_NAMES
+        else PreprocessingFeatureKind.CONTINUOUS
+    )
+    return PreprocessingFeatureDefinition(raw.name, kind)
 
 
 class FitDisposition(StrEnum):
@@ -245,6 +349,8 @@ class _R2PreprocessingSelectionArguments(TypedDict):
     purge_boundary: datetime
     feature_schema_id: str
     feature_set_id: str
+    preprocessing_schema_id: str
+    preprocessing_schema: R2PreprocessingSchema
     evidence_class: EvidenceClass
     application_image_identity: str
     sklearn_library_identity: str
@@ -278,6 +384,8 @@ class R2PreprocessingSelection:
     purge_boundary: datetime
     feature_schema_id: str
     feature_set_id: str
+    preprocessing_schema_id: str
+    preprocessing_schema: R2PreprocessingSchema
     evidence_class: EvidenceClass
     application_image_identity: str
     sklearn_library_identity: str
@@ -305,9 +413,26 @@ class R2PreprocessingSelection:
             (self.outer_fold_membership_hash, "outer membership hash"),
             (self.feature_schema_id, "feature schema ID"),
             (self.feature_set_id, "feature set ID"),
+            (self.preprocessing_schema_id, "preprocessing schema ID"),
             (self.artifact_id, "preprocessing-selection artifact ID"),
         ):
             _require_sha256(value, field)
+        if self.preprocessing_schema.preprocessing_schema_id != self.preprocessing_schema_id:
+            raise ValueError("preprocessing schema binding is invalid")
+        schema_names = tuple(item.name for item in self.preprocessing_schema.features)
+        indicator_names = tuple(
+            item.name
+            for item in self.preprocessing_schema.features
+            if item.kind is PreprocessingFeatureKind.BINARY_INDICATOR
+        )
+        for fit in (
+            self.selection.inner_preprocessing,
+            self.selection.outer_preprocessing,
+        ):
+            if fit is None:
+                continue
+            if fit.feature_names != schema_names or fit.indicator_feature_names != indicator_names:
+                raise ValueError("preprocessing fit differs from its bound preprocessing schema")
         if self.model_family is not ModelFamily.LOCAL_RIDGE:
             raise ValueError("R2.C preprocessing selection supports only LOCAL_RIDGE")
         if self.horizon != timedelta(minutes=15):
@@ -376,6 +501,8 @@ class R2PreprocessingSelection:
                 "purge_boundary": self.purge_boundary,
                 "feature_schema_id": self.feature_schema_id,
                 "feature_set_id": self.feature_set_id,
+                "preprocessing_schema_id": self.preprocessing_schema_id,
+                "preprocessing_schema": self.preprocessing_schema,
                 "evidence_class": self.evidence_class,
                 "application_image_identity": self.application_image_identity,
                 "sklearn_library_identity": self.sklearn_library_identity,
@@ -400,6 +527,9 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
     selection = values["selection"]
     if not isinstance(selection, AlphaSelection):
         raise TypeError("preprocessing selection must contain an AlphaSelection")
+    preprocessing_schema = values["preprocessing_schema"]
+    if not isinstance(preprocessing_schema, R2PreprocessingSchema):
+        raise TypeError("preprocessing selection must contain an R2PreprocessingSchema")
     return {
         "contract": R2_PREPROCESSING_SELECTION_CONTRACT,
         "schema_version": 1,
@@ -417,6 +547,8 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         "purge_boundary": cast(datetime, values["purge_boundary"]).isoformat(),
         "feature_schema_id": str(values["feature_schema_id"]),
         "feature_set_id": str(values["feature_set_id"]),
+        "preprocessing_schema_id": str(values["preprocessing_schema_id"]),
+        "preprocessing_schema": preprocessing_schema.as_json(),
         "evidence_class": EvidenceClass(cast(EvidenceClass, values["evidence_class"])).value,
         "application_image_identity": str(values["application_image_identity"]),
         "sklearn_library_identity": str(values["sklearn_library_identity"]),
@@ -434,6 +566,10 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
 
 
 def preprocessing_selection_id(payload: dict[str, JsonValue]) -> str:
+    return _semantic_id(payload)
+
+
+def _semantic_id(payload: object) -> str:
     canonical = to_json_value(payload)
     return sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")

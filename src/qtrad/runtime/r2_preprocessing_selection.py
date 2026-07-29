@@ -13,11 +13,15 @@ from qtrad.application.r2_preprocessing import build_r2_preprocessing_selection
 from qtrad.application.r2_readiness import R1FoundationBindings
 from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_models import (
+    R2_PREPROCESSING_SCHEMA_CONTRACT,
     R2_PREPROCESSING_SELECTION_CONTRACT,
     AlphaCandidateScore,
     AlphaSelection,
     FitDisposition,
+    PreprocessingFeatureDefinition,
+    PreprocessingFeatureKind,
     PreprocessingFit,
+    R2PreprocessingSchema,
     R2PreprocessingSelection,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentConfig
@@ -40,6 +44,8 @@ _TOP_LEVEL_KEYS = {
     "purge_boundary",
     "feature_schema_id",
     "feature_set_id",
+    "preprocessing_schema_id",
+    "preprocessing_schema",
     "evidence_class",
     "application_image_identity",
     "sklearn_library_identity",
@@ -55,6 +61,13 @@ _TOP_LEVEL_KEYS = {
     "selection",
     "artifact_id",
 }
+_PREPROCESSING_SCHEMA_KEYS = {
+    "contract",
+    "schema_version",
+    "features",
+    "preprocessing_schema_id",
+}
+_PREPROCESSING_FEATURE_KEYS = {"name", "kind"}
 _PREPROCESSING_KEYS = {
     "feature_names",
     "indicator_feature_names",
@@ -120,6 +133,7 @@ def decode_r2_preprocessing_selection(
     if _integer(obj["schema_version"], "schema_version") != 1:
         raise ValueError("unsupported preprocessing-selection schema version")
     selection = _selection(obj["selection"])
+    preprocessing_schema = _preprocessing_schema(obj["preprocessing_schema"])
     return R2PreprocessingSelection(
         r2_feature_dataset_id=_text(obj["r2_feature_dataset_id"], "r2_feature_dataset_id"),
         target_dataset_id=_text(obj["target_dataset_id"], "target_dataset_id"),
@@ -139,6 +153,8 @@ def decode_r2_preprocessing_selection(
         purge_boundary=_timestamp(obj["purge_boundary"], "purge_boundary"),
         feature_schema_id=_text(obj["feature_schema_id"], "feature_schema_id"),
         feature_set_id=_text(obj["feature_set_id"], "feature_set_id"),
+        preprocessing_schema_id=_text(obj["preprocessing_schema_id"], "preprocessing_schema_id"),
+        preprocessing_schema=preprocessing_schema,
         evidence_class=EvidenceClass(_text(obj["evidence_class"], "evidence_class")),
         application_image_identity=_text(
             obj["application_image_identity"], "application_image_identity"
@@ -315,6 +331,30 @@ def write_r2_preprocessing_selection(path: Path, selection: R2PreprocessingSelec
                 ) from error
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _preprocessing_schema(value: object) -> R2PreprocessingSchema:
+    obj = _exact_object(value, _PREPROCESSING_SCHEMA_KEYS, "preprocessing_schema")
+    if _text(obj["contract"], "preprocessing_schema.contract") != R2_PREPROCESSING_SCHEMA_CONTRACT:
+        raise ValueError("unsupported preprocessing-schema contract")
+    if _integer(obj["schema_version"], "preprocessing_schema.schema_version") != 1:
+        raise ValueError("unsupported preprocessing-schema version")
+    features = tuple(
+        _preprocessing_feature(item)
+        for item in _list(obj["features"], "preprocessing_schema.features")
+    )
+    return R2PreprocessingSchema(
+        features,
+        _text(obj["preprocessing_schema_id"], "preprocessing_schema.preprocessing_schema_id"),
+    )
+
+
+def _preprocessing_feature(value: object) -> PreprocessingFeatureDefinition:
+    obj = _exact_object(value, _PREPROCESSING_FEATURE_KEYS, "preprocessing feature")
+    return PreprocessingFeatureDefinition(
+        _text(obj["name"], "preprocessing feature name"),
+        PreprocessingFeatureKind(_text(obj["kind"], "preprocessing feature kind")),
+    )
 
 
 def _selection(value: object) -> AlphaSelection:

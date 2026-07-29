@@ -4,7 +4,6 @@ import json
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from enum import StrEnum
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
@@ -17,31 +16,22 @@ from qtrad.domain.time import require_utc
 R2_FEATURE_DATASET_CONTRACT = "qtrad-r2-features-v1"
 
 
-class FeatureKind(StrEnum):
-    CONTINUOUS = "CONTINUOUS"
-    BINARY_INDICATOR = "BINARY_INDICATOR"
-
-
 @dataclass(frozen=True, slots=True)
 class FeatureDefinition:
     """One position in the immutable raw-feature vector."""
 
     name: str
     family: FeatureFamily
-    kind: FeatureKind = FeatureKind.CONTINUOUS
     availability_indicator: bool = False
 
     def __post_init__(self) -> None:
         if not self.name or not self.name.isascii():
             raise ValueError("feature name must be non-empty ASCII")
-        if self.availability_indicator and self.kind is not FeatureKind.BINARY_INDICATOR:
-            raise ValueError("availability indicators must be binary features")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
             "name": self.name,
             "family": self.family.value,
-            "kind": self.kind.value,
             "availability_indicator": self.availability_indicator,
         }
 
@@ -267,7 +257,6 @@ def feature_registry(experiment: R2ExperimentConfig) -> tuple[FeatureDefinition,
                     FeatureDefinition(
                         f"return_{suffix}_available",
                         FeatureFamily.LOCAL_RETURNS,
-                        kind=FeatureKind.BINARY_INDICATOR,
                         availability_indicator=True,
                     ),
                 )
@@ -314,17 +303,7 @@ def feature_registry(experiment: R2ExperimentConfig) -> tuple[FeatureDefinition,
             "quality_healthy",
             "gap_known_by_cutoff",
         ):
-            definitions.append(
-                FeatureDefinition(
-                    name,
-                    FeatureFamily.TIME_AVAILABILITY,
-                    kind=(
-                        FeatureKind.BINARY_INDICATOR
-                        if name in {"source_active", "quality_healthy", "gap_known_by_cutoff"}
-                        else FeatureKind.CONTINUOUS
-                    ),
-                )
-            )
+            definitions.append(FeatureDefinition(name, FeatureFamily.TIME_AVAILABILITY))
     if FeatureFamily.SPREAD in families:
         for name in (
             "close_spread",
@@ -342,7 +321,6 @@ def feature_registry(experiment: R2ExperimentConfig) -> tuple[FeatureDefinition,
                 FeatureDefinition(
                     "quote_imbalance_available",
                     FeatureFamily.QUOTE_IMBALANCE,
-                    kind=FeatureKind.BINARY_INDICATOR,
                     availability_indicator=True,
                 ),
             )

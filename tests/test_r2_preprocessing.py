@@ -9,6 +9,7 @@ from uuid import UUID
 import pytest
 from numpy import ndarray, zeros
 
+from qtrad.application.r2_features import feature_schema_for_set
 from qtrad.application.r2_preprocessing import (
     TrainingRow,
     build_r2_preprocessing_selection,
@@ -30,7 +31,6 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.r2_features import (
     FeatureDefinition,
-    FeatureKind,
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
@@ -40,7 +40,11 @@ from qtrad.domain.r2_features import (
 from qtrad.domain.r2_models import (
     AlphaSelection,
     FitDisposition,
+    PreprocessingFeatureKind,
+    R2PreprocessingSchema,
     R2PreprocessingSelection,
+    derive_r2_preprocessing_schema,
+    validate_preprocessing_schema_correspondence,
 )
 from qtrad.domain.r2_readiness import (
     EvidenceClass,
@@ -58,7 +62,7 @@ from tests.test_r2_readiness import experiment as base_experiment
 
 
 class _SelectionKwargs(TypedDict):
-    feature_schema: tuple[FeatureDefinition, ...]
+    preprocessing_schema: R2PreprocessingSchema
     alpha_grid: tuple[float, ...]
     minimum_training_rows: int
     minimum_inner_validation_rows: int
@@ -74,12 +78,12 @@ _SCHEMA = (
     FeatureDefinition(
         "signal_available",
         FeatureFamily.LOCAL_RETURNS,
-        kind=FeatureKind.BINARY_INDICATOR,
         availability_indicator=True,
     ),
     FeatureDefinition("all_null", FeatureFamily.LOCAL_RETURNS),
     FeatureDefinition("constant", FeatureFamily.LOCAL_RETURNS),
 )
+_PREPROCESSING_SCHEMA = derive_r2_preprocessing_schema(_SCHEMA)
 
 _SELECTION_APPLICATION_IMAGE_IDENTITY = "qtrad@sha256:" + "7" * 64
 _SELECTION_SKLEARN_LIBRARY_IDENTITY = "scikit-learn==locked-test"
@@ -108,7 +112,7 @@ def _training_rows() -> tuple[TrainingRow, ...]:
 def _select(rows: tuple[TrainingRow, ...]) -> AlphaSelection:
     return select_chronological_alpha(
         rows,
-        feature_schema=_SCHEMA,
+        preprocessing_schema=_PREPROCESSING_SCHEMA,
         alpha_grid=(0.1, 1.0, 10.0),
         minimum_training_rows=4,
         minimum_inner_validation_rows=2,
@@ -143,7 +147,7 @@ def test_split_purges_target_endpoint_and_delayed_availability() -> None:
 
 def test_preprocessing_drops_all_null_and_zero_variance_but_leaves_binary_unscaled() -> None:
     rows = _training_rows()[:5]
-    fit = fit_preprocessing(rows, _SCHEMA)
+    fit = fit_preprocessing(rows, _PREPROCESSING_SCHEMA)
     assert fit.dropped_all_null_feature_names == ("all_null",)
     assert fit.dropped_zero_variance_feature_names == ("constant",)
     assert fit.unscaled_feature_names == ("signal_available",)
@@ -151,16 +155,31 @@ def test_preprocessing_drops_all_null_and_zero_variance_but_leaves_binary_unscal
     assert tuple(matrix[:, 1]) == (0.0, 1.0, 0.0, 1.0, 0.0)
 
     with pytest.raises(ValueError, match="not binary"):
-        fit_preprocessing((replace(rows[0], features=(0.0, 2.0, None, 7.0)), *rows[1:]), _SCHEMA)
+        fit_preprocessing(
+            (replace(rows[0], features=(0.0, 2.0, None, 7.0)), *rows[1:]),
+            _PREPROCESSING_SCHEMA,
+        )
+
+
+def test_preprocessing_schema_requires_exact_raw_feature_order() -> None:
+    reordered = R2PreprocessingSchema.create(tuple(reversed(_PREPROCESSING_SCHEMA.features)))
+
+    with pytest.raises(ValueError, match="authenticated raw-feature schema"):
+        validate_preprocessing_schema_correspondence(_SCHEMA, reordered)
 
 
 def test_real_feature_registry_kinds_drive_binary_preprocessing() -> None:
-    schema = feature_registry(base_experiment())
-    binary_names = tuple(item.name for item in schema if item.kind is FeatureKind.BINARY_INDICATOR)
+    raw_schema = feature_registry(base_experiment())
+    schema = derive_r2_preprocessing_schema(raw_schema)
+    binary_names = tuple(
+        item.name
+        for item in schema.features
+        if item.kind is PreprocessingFeatureKind.BINARY_INDICATOR
+    )
     assert {"source_active", "quality_healthy", "gap_known_by_cutoff"} <= set(binary_names)
     assert all(
         not item.availability_indicator
-        for item in schema
+        for item in raw_schema
         if item.name in {"source_active", "quality_healthy", "gap_known_by_cutoff"}
     )
     rows = tuple(
@@ -169,9 +188,9 @@ def test_real_feature_registry_kinds_drive_binary_preprocessing() -> None:
             target_id=f"registry-{index}",
             features=tuple(
                 float((position + index) % 2)
-                if definition.kind is FeatureKind.BINARY_INDICATOR
+                if definition.kind is PreprocessingFeatureKind.BINARY_INDICATOR
                 else float(position + index)
-                for position, definition in enumerate(schema)
+                for position, definition in enumerate(schema.features)
             ),
         )
         for index, row in enumerate(_training_rows()[:2])
@@ -244,7 +263,7 @@ def test_exact_candidate_loss_tie_selects_larger_alpha(
 
 def test_configured_solver_and_loss_fail_closed() -> None:
     kwargs: _SelectionKwargs = {
-        "feature_schema": _SCHEMA,
+        "preprocessing_schema": _PREPROCESSING_SCHEMA,
         "alpha_grid": (1.0,),
         "minimum_training_rows": 3,
         "minimum_inner_validation_rows": 2,
@@ -324,7 +343,9 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
         minimum_training_rows=4,
         minimum_inner_validation_rows=2,
     )
-    set_id = feature_set_id(config.configuration_id, "fixture", _SCHEMA)
+    raw_schema = feature_schema_for_set(config, "L0")
+    preprocessing_schema = derive_r2_preprocessing_schema(raw_schema)
+    set_id = feature_set_id(config.configuration_id, "L0", raw_schema)
     feature_rows = tuple(
         RawFeatureRow(
             row.instrument_id,
@@ -332,19 +353,24 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
             row.decision_time,
             row.decision_time,
             set_id,
-            (
-                RawFeatureValue("signal", float(index)),
-                RawFeatureValue("signal_available", float(index % 2)),
-                RawFeatureValue("all_null", None),
-                RawFeatureValue("constant", 7.0),
+            tuple(
+                RawFeatureValue(
+                    definition.name,
+                    float((position + index) % 2)
+                    if preprocessing.kind is PreprocessingFeatureKind.BINARY_INDICATOR
+                    else float(position + index),
+                )
+                for position, (definition, preprocessing) in enumerate(
+                    zip(raw_schema, preprocessing_schema.features, strict=True)
+                )
             ),
         )
         for index, row in enumerate(target_rows)
     )
     features = R2FeatureDataset.create(
         feature_rows,
-        feature_schema=_SCHEMA,
-        feature_set_name="fixture",
+        feature_schema=raw_schema,
+        feature_set_name="L0",
         observation_dataset_id=config.observation_dataset_id,
         panel_dataset_id=config.panel_dataset_id,
         target_dataset_id=targets.dataset_id,
@@ -483,6 +509,8 @@ def _rehashed_selection(
         purge_boundary=artifact.purge_boundary,
         feature_schema_id=artifact.feature_schema_id,
         feature_set_id=artifact.feature_set_id,
+        preprocessing_schema_id=artifact.preprocessing_schema_id,
+        preprocessing_schema=artifact.preprocessing_schema,
         evidence_class=artifact.evidence_class,
         application_image_identity=artifact.application_image_identity,
         sklearn_library_identity=artifact.sklearn_library_identity,
@@ -496,6 +524,45 @@ def _rehashed_selection(
         pooled_weighting_policy=artifact.pooled_weighting_policy,
         holdout_excluded=artifact.holdout_excluded,
         selection=selection,
+    )
+
+
+def _feature_dataset_for_set(
+    source: R2FeatureDataset,
+    config: R2ExperimentConfig,
+    name: str,
+    schema: tuple[FeatureDefinition, ...],
+) -> R2FeatureDataset:
+    preprocessing_schema = derive_r2_preprocessing_schema(schema)
+    set_identity = feature_set_id(config.configuration_id, name, schema)
+    rows = tuple(
+        replace(
+            row,
+            feature_set_id=set_identity,
+            values=tuple(
+                RawFeatureValue(
+                    definition.name,
+                    float((position + row_index) % 2)
+                    if preprocessing.kind is PreprocessingFeatureKind.BINARY_INDICATOR
+                    else float(position + row_index),
+                )
+                for position, (definition, preprocessing) in enumerate(
+                    zip(schema, preprocessing_schema.features, strict=True)
+                )
+            ),
+        )
+        for row_index, row in enumerate(source.rows)
+    )
+    return R2FeatureDataset.create(
+        rows,
+        feature_schema=schema,
+        feature_set_name=name,
+        observation_dataset_id=source.observation_dataset_id,
+        panel_dataset_id=source.panel_dataset_id,
+        target_dataset_id=source.target_dataset_id,
+        fold_dataset_id=source.fold_dataset_id,
+        experiment_configuration_id=source.experiment_configuration_id,
+        evidence_class=source.evidence_class,
     )
 
 
@@ -517,6 +584,8 @@ def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
     assert fit.application_image_identity == _SELECTION_APPLICATION_IMAGE_IDENTITY
     assert fit.sklearn_library_identity == _SELECTION_SKLEARN_LIBRARY_IDENTITY
     assert fit.evidence_class is features.evidence_class
+    assert fit.preprocessing_schema == derive_r2_preprocessing_schema(features.feature_schema)
+    assert fit.preprocessing_schema_id == fit.preprocessing_schema.preprocessing_schema_id
     assert fit.preprocessing_policy == config.preprocessing_policy
     assert fit.inner_validation_policy == config.inner_validation_policy
     assert fit.holdout_excluded is True
@@ -535,6 +604,23 @@ def test_authenticated_build_binds_every_child_and_excludes_holdout() -> None:
     )
     with pytest.raises(ValueError, match="panel_dataset_id"):
         _build_bound_selection(verified, mismatched, config, fold)
+
+
+def test_build_rejects_undeclared_fabricated_feature_dataset() -> None:
+    verified, features, config, fold = _bound_fixture()
+    fabricated = _feature_dataset_for_set(features, config, "fabricated", features.feature_schema)
+
+    with pytest.raises(ValueError, match="unknown R2 feature set"):
+        _build_bound_selection(verified, fabricated, config, fold)
+
+
+def test_build_rejects_declared_pooled_context_feature_dataset() -> None:
+    verified, features, config, fold = _bound_fixture()
+    pooled_schema = feature_schema_for_set(config, "P1")
+    pooled = _feature_dataset_for_set(features, config, "P1", pooled_schema)
+
+    with pytest.raises(ValueError, match="pooled-context feature set"):
+        _build_bound_selection(verified, pooled, config, fold)
 
 
 @pytest.mark.parametrize(
@@ -645,6 +731,11 @@ def test_strict_json_decode_recomputes_identity_and_rejects_unknown_fields() -> 
     payload["unknown"] = True
     with pytest.raises(ValueError, match="unknown or missing"):
         decode_r2_preprocessing_selection(payload)
+    nested_unknown = fit.as_json()
+    nested_schema = cast(dict[str, JsonValue], nested_unknown["preprocessing_schema"])
+    nested_schema["unknown"] = True
+    with pytest.raises(ValueError, match="unknown or missing"):
+        decode_r2_preprocessing_selection(nested_unknown)
     tampered = fit.as_json()
     tampered["ridge_tolerance"] = 0.5
     with pytest.raises(ValueError, match="artifact ID"):

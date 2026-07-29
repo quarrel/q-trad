@@ -19,7 +19,6 @@ from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.r2_features import (
     FeatureDatasetSemanticHasher,
     FeatureDefinition,
-    FeatureKind,
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
@@ -594,12 +593,11 @@ def _chunk_reference(value: object) -> R2FeatureChunkReference:
 
 def _feature_definition(value: object) -> FeatureDefinition:
     raw = _mapping(value)
-    if set(raw) != {"name", "family", "kind", "availability_indicator"}:
+    if set(raw) != {"name", "family", "availability_indicator"}:
         raise ValueError("R2 feature definition has unknown or missing fields")
     return FeatureDefinition(
         name=_text(raw["name"], "feature name"),
         family=FeatureFamily(_text(raw["family"], "feature family")),
-        kind=FeatureKind(_text(raw["kind"], "feature kind")),
         availability_indicator=_bool(raw["availability_indicator"]),
     )
 

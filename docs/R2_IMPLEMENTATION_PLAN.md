@@ -668,7 +668,15 @@ The OOF raw-feature child contains no holdout decision rows. A separate holdout 
 
 ### 9.3 Preprocessing-selection and fold-fit artefacts
 
-R2.C owns the preprocessing-selection contract:
+R2.C owns a separate preprocessing feature-semantics contract, derived in exact raw-feature order without
+changing the R2.B v1 schema:
+
+```text
+qtrad-r2-preprocessing-schema-v1
+```
+
+It classifies each feature as `CONTINUOUS` or `BINARY_INDICATOR`; the preprocessing-selection semantic
+identity binds both its schema ID and full schema. R2.C also owns the selection contract:
 
 ```text
 qtrad-r2-preprocessing-selection-v1

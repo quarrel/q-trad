@@ -42,6 +42,7 @@ from qtrad.domain.r2_features import (
     RawFeatureRow,
     RawFeatureValue,
     feature_registry,
+    feature_schema_id,
     feature_set_id,
 )
 from qtrad.domain.r2_readiness import (
@@ -299,6 +300,37 @@ def test_feature_registry_and_explicit_empty_dataset_identity_are_deterministic(
     assert dataset.rows == ()
     assert dataset.feature_set_id == feature_set_id(config.configuration_id, "L0", schema)
     assert len(dataset.dataset_id) == 64
+
+
+def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
+    schema = (
+        FeatureDefinition("return_60s", FeatureFamily.LOCAL_RETURNS),
+        FeatureDefinition("window_coverage_300s", FeatureFamily.LOCAL_VOLATILITY_RANGE),
+    )
+    assert schema[0].as_json() == {
+        "name": "return_60s",
+        "family": "LOCAL_RETURNS",
+        "availability_indicator": False,
+    }
+    assert "kind" not in schema[0].as_json()
+    assert (
+        feature_schema_id(schema)
+        == "b77d8c36f5f98f79cd605787fede860335f75e7942992d75f32d7d684465e012"
+    )
+    set_identity = feature_set_id("c" * 64, "fixture", schema)
+    assert set_identity == "3f379dd876b3df607eb091df96444316a709bc5d50e2f8faca27278b94977ef4"
+    dataset = R2FeatureDataset.create(
+        (),
+        feature_schema=schema,
+        feature_set_name="fixture",
+        observation_dataset_id="a" * 64,
+        panel_dataset_id="b" * 64,
+        target_dataset_id="d" * 64,
+        fold_dataset_id="e" * 64,
+        experiment_configuration_id="c" * 64,
+        evidence_class=EvidenceClass.IMPLEMENTATION,
+    )
+    assert dataset.dataset_id == "9f6863fb8efd3cf5f0854e4cf26fa5d1f83b5de526a617ba1fcde84f5f911ed7"
 
 
 def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
