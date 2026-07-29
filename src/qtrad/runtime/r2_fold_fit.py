@@ -40,6 +40,7 @@ _FIT_KEYS = {
     "preprocessing_schema_id",
     "evidence_class",
     "application_image_identity",
+    "numpy_library_identity",
     "sklearn_library_identity",
     "training_cutoff",
     "selected_alpha",
@@ -117,6 +118,7 @@ def decode_r2_fold_fit(payload: bytes | str | Mapping[str, object]) -> R2FoldFit
         application_image_identity=_text(
             obj["application_image_identity"], "application_image_identity"
         ),
+        numpy_library_identity=_text(obj["numpy_library_identity"], "numpy_library_identity"),
         sklearn_library_identity=_text(obj["sklearn_library_identity"], "sklearn_library_identity"),
         training_cutoff=_timestamp(obj["training_cutoff"], "training_cutoff"),
         selected_alpha=_optional_number(obj["selected_alpha"], "selected_alpha"),
@@ -145,11 +147,23 @@ def verify_r2_fold_fit(
     experiment: R2ExperimentConfig,
     selection: R2PreprocessingSelection,
     persisted_payload: bytes | str | Mapping[str, object],
+    *,
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
 ) -> R2FoldFit:
     """Rebuild the final fit and compare all structural and numerical evidence."""
 
     persisted = decode_r2_fold_fit(persisted_payload)
-    rebuilt = build_local_ridge_fold(verified, feature_dataset, experiment, selection).fit
+    rebuilt = build_local_ridge_fold(
+        verified,
+        feature_dataset,
+        experiment,
+        selection,
+        application_image_identity=application_image_identity,
+        numpy_library_identity=numpy_library_identity,
+        sklearn_library_identity=sklearn_library_identity,
+    ).fit
     if _structural_json(persisted) != _structural_json(rebuilt):
         raise ValueError("persisted fold fit does not match the authenticated rebuild")
     if not _optional_close(

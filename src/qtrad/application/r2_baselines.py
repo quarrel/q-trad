@@ -90,6 +90,9 @@ class LocalRidgeOofResult:
         }
         if child_forecast_ids != {row.forecast_id for row in self.forecasts.rows}:
             raise ValueError("local OOF forecasts do not reconcile to fold children")
+        verify_coefficient_stability_summary(
+            self.coefficient_stability, tuple(result.fit for result in self.fold_results)
+        )
 
 
 def build_local_ridge_oof(
@@ -97,6 +100,10 @@ def build_local_ridge_oof(
     feature_datasets: Sequence[R2FeatureDataset],
     experiment: R2ExperimentConfig,
     selections: Sequence[R2PreprocessingSelection],
+    *,
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
 ) -> LocalRidgeOofResult:
     """Build the exact local-feature ablation ladder for every eligible target and outer fold."""
 
@@ -139,6 +146,9 @@ def build_local_ridge_oof(
             datasets[key[0]],
             experiment,
             selection_by_key[key],
+            application_image_identity=application_image_identity,
+            numpy_library_identity=numpy_library_identity,
+            sklearn_library_identity=sklearn_library_identity,
         )
         for key in sorted(expected_keys, key=lambda item: (item[0], item[1], item[2], item[3]))
     )
@@ -161,6 +171,10 @@ def build_local_ridge_fold(
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     selection: R2PreprocessingSelection,
+    *,
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
 ) -> LocalRidgeFoldResult:
     """Fit one authenticated final local model and forecast its outer validation membership."""
 
@@ -191,6 +205,9 @@ def build_local_ridge_fold(
         len(fold.training_target_ids) - len(training_rows),
         len(validation_targets),
         training_rows,
+        application_image_identity,
+        numpy_library_identity,
+        sklearn_library_identity,
     )
     forecasts, coverage = _forecast_validation(
         verified,
@@ -201,8 +218,79 @@ def build_local_ridge_fold(
         validation_targets,
     )
     result = LocalRidgeFoldResult(fit, forecasts, coverage)
-    replay_local_ridge_forecasts(result, feature_dataset, experiment)
+    verify_local_ridge_forecast_coverage(verified, feature_dataset, experiment, result)
     return result
+
+
+def verify_local_ridge_forecast_coverage(
+    verified: R1FoundationBindings,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
+    result: LocalRidgeFoldResult,
+) -> None:
+    """Authenticate complete outer membership and every forecast/coverage lineage field."""
+
+    verify_exact_r1_bindings(verified, experiment)
+    fit = result.fit
+    expected_targets = _validation_targets(
+        verified,
+        experiment,
+        outer_fold_id=fit.outer_fold_id,
+        target_instrument_id=fit.target_instrument_id,
+        horizon=fit.horizon,
+    )
+    if len(expected_targets) != fit.outer_validation_opportunity_count:
+        raise ValueError("fold-fit outer validation count differs from authenticated R1 membership")
+    coverage_by_target = {row.target_id: row for row in result.coverage.rows}
+    if len(coverage_by_target) != len(result.coverage.rows) or set(coverage_by_target) != {
+        target.target_id for target in expected_targets
+    }:
+        raise ValueError("forecast coverage does not exactly cover authenticated R1 membership")
+    feature_by_key = _feature_rows_by_key(feature_dataset)
+    forecast_by_id = {row.forecast_id: row for row in result.forecasts.rows}
+    if len(forecast_by_id) != len(result.forecasts.rows):
+        raise ValueError("local forecasts contain duplicate identities")
+    reconciled_forecast_ids: set[str] = set()
+    for target in expected_targets:
+        coverage = coverage_by_target[target.target_id]
+        feature = feature_by_key.get((target.decision_time, target.instrument_id))
+        expected_feature_asof = feature.feature_data_asof if feature is not None else None
+        if (
+            coverage.target_instrument_id != target.instrument_id
+            or coverage.decision_time != target.decision_time
+            or coverage.horizon != target.horizon
+            or coverage.outer_fold_id != fit.outer_fold_id
+            or coverage.fold_fit_id != fit.artifact_id
+            or coverage.feature_data_asof != expected_feature_asof
+        ):
+            raise ValueError("forecast coverage lineage differs from authenticated opportunity")
+        if coverage.disposition is not ForecastCoverageDisposition.FORECASTED:
+            continue
+        if coverage.forecast_id is None or coverage.forecast_id not in forecast_by_id:
+            raise ValueError("forecasted coverage does not bind an emitted forecast")
+        forecast = forecast_by_id[coverage.forecast_id]
+        reconciled_forecast_ids.add(coverage.forecast_id)
+        if (
+            forecast.target_id != target.target_id
+            or forecast.instrument_id != target.instrument_id
+            or forecast.decision_time != target.decision_time
+            or forecast.horizon != target.horizon
+            or forecast.feature_data_asof != expected_feature_asof
+            or forecast.training_cutoff != fit.training_cutoff
+            or forecast.observation_dataset_id != verified.observations.dataset_id
+            or forecast.panel_dataset_id != verified.panel.dataset_id
+            or forecast.target_dataset_id != verified.targets.dataset_id
+            or forecast.fold_dataset_id != verified.folds.dataset_id
+            or forecast.experiment_id != experiment.configuration_id
+            or forecast.fold_id != fit.outer_fold_id
+            or forecast.model_id != fit.artifact_id
+            or forecast.model_contract != fit.CONTRACT
+            or forecast.return_unit is not ReturnUnit.LOG_RETURN
+        ):
+            raise ValueError("local forecast lineage differs from authenticated opportunity")
+    if reconciled_forecast_ids != set(forecast_by_id):
+        raise ValueError("emitted forecasts do not exactly reconcile to authenticated coverage")
+    replay_local_ridge_forecasts(result, feature_dataset, experiment)
 
 
 def replay_local_ridge_forecasts(
@@ -291,6 +379,15 @@ def build_coefficient_stability_summary(
                 )
             )
     return CoefficientStabilitySummary.create(rows, tuple(fit.artifact_id for fit in fits))
+
+
+def verify_coefficient_stability_summary(
+    summary: CoefficientStabilitySummary, fits: Sequence[R2FoldFit]
+) -> None:
+    """Recompute and authenticate every coefficient-stability statistic."""
+
+    if summary != build_coefficient_stability_summary(fits):
+        raise ValueError("coefficient-stability summary differs from authenticated fold-fit replay")
 
 
 def _verify_selection_rebuild(
@@ -436,6 +533,9 @@ def _fit_local_ridge(
     excluded_row_count: int,
     validation_count: int,
     training_rows: tuple[TrainingRow, ...],
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
 ) -> tuple[R2FoldFit, Any | None]:
     chosen = selection.selection
     common = _fold_fit_common(
@@ -446,7 +546,26 @@ def _fit_local_ridge(
         excluded_row_count,
         validation_count,
         training_rows,
+        application_image_identity,
+        numpy_library_identity,
+        sklearn_library_identity,
     )
+    if validation_count < experiment.minimum_outer_validation_rows:
+        return (
+            R2FoldFit.create(
+                **common,
+                selected_alpha=chosen.selected_alpha,
+                preprocessing=chosen.outer_preprocessing,
+                coefficient_feature_names=(),
+                intercept=None,
+                coefficients=(),
+                fit_warnings=(),
+                disposition=FitDisposition.INSUFFICIENT_OUTER_VALIDATION,
+                failure="outer fold has fewer than minimum_outer_validation_rows",
+                diagnostics=None,
+            ),
+            None,
+        )
     if chosen.disposition is not FitDisposition.READY:
         return (
             R2FoldFit.create(
@@ -608,6 +727,9 @@ def _fold_fit_common(
     excluded_row_count: int,
     validation_count: int,
     training_rows: tuple[TrainingRow, ...],
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
 ) -> dict[str, object]:
     return {
         "r2_feature_dataset_id": feature_dataset.dataset_id,
@@ -624,8 +746,9 @@ def _fold_fit_common(
         "feature_schema_id": selection.feature_schema_id,
         "preprocessing_schema_id": selection.preprocessing_schema_id,
         "evidence_class": selection.evidence_class,
-        "application_image_identity": selection.application_image_identity,
-        "sklearn_library_identity": selection.sklearn_library_identity,
+        "application_image_identity": application_image_identity,
+        "numpy_library_identity": numpy_library_identity,
+        "sklearn_library_identity": sklearn_library_identity,
         "training_cutoff": training_cutoff,
         "fit_row_count": len(training_rows),
         "excluded_row_count": excluded_row_count,

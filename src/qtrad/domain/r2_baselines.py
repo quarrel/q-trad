@@ -24,6 +24,7 @@ class ForecastCoverageDisposition(StrEnum):
     FEATURES_UNAVAILABLE = "FEATURES_UNAVAILABLE"
     INSUFFICIENT_TRAINING = "INSUFFICIENT_TRAINING"
     INSUFFICIENT_INNER_VALIDATION = "INSUFFICIENT_INNER_VALIDATION"
+    INSUFFICIENT_OUTER_VALIDATION = "INSUFFICIENT_OUTER_VALIDATION"
     DEGENERATE_TARGET = "DEGENERATE_TARGET"
     DEGENERATE_FEATURE_MATRIX = "DEGENERATE_FEATURE_MATRIX"
     NUMERICAL_FAILURE = "NUMERICAL_FAILURE"
@@ -46,6 +47,7 @@ class _R2FoldFitArguments(TypedDict):
     preprocessing_schema_id: str
     evidence_class: EvidenceClass
     application_image_identity: str
+    numpy_library_identity: str
     sklearn_library_identity: str
     training_cutoff: datetime
     selected_alpha: float | None
@@ -134,6 +136,7 @@ class R2FoldFit:
     preprocessing_schema_id: str
     evidence_class: EvidenceClass
     application_image_identity: str
+    numpy_library_identity: str
     sklearn_library_identity: str
     training_cutoff: datetime
     selected_alpha: float | None
@@ -177,6 +180,7 @@ class R2FoldFit:
                 self.outer_fold_id,
                 self.target_instrument_id,
                 self.application_image_identity,
+                self.numpy_library_identity,
                 self.sklearn_library_identity,
             )
         ):
@@ -259,6 +263,7 @@ class R2FoldFit:
                 preprocessing_schema_id=self.preprocessing_schema_id,
                 evidence_class=self.evidence_class,
                 application_image_identity=self.application_image_identity,
+                numpy_library_identity=self.numpy_library_identity,
                 sklearn_library_identity=self.sklearn_library_identity,
                 training_cutoff=self.training_cutoff,
                 selected_alpha=self.selected_alpha,
@@ -579,6 +584,9 @@ def coverage_disposition_for_fit(disposition: FitDisposition) -> ForecastCoverag
         FitDisposition.INSUFFICIENT_INNER_VALIDATION: (
             ForecastCoverageDisposition.INSUFFICIENT_INNER_VALIDATION
         ),
+        FitDisposition.INSUFFICIENT_OUTER_VALIDATION: (
+            ForecastCoverageDisposition.INSUFFICIENT_OUTER_VALIDATION
+        ),
         FitDisposition.DEGENERATE_TARGET: ForecastCoverageDisposition.DEGENERATE_TARGET,
         FitDisposition.DEGENERATE_FEATURE_MATRIX: (
             ForecastCoverageDisposition.DEGENERATE_FEATURE_MATRIX
@@ -613,6 +621,7 @@ def _fold_fit_json(values: _R2FoldFitArguments) -> dict[str, JsonValue]:
                 "preprocessing_schema_id": values["preprocessing_schema_id"],
                 "evidence_class": values["evidence_class"].value,
                 "application_image_identity": values["application_image_identity"],
+                "numpy_library_identity": values["numpy_library_identity"],
                 "sklearn_library_identity": values["sklearn_library_identity"],
                 "training_cutoff": values["training_cutoff"].isoformat(),
                 "selected_alpha": values["selected_alpha"],
