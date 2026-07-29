@@ -44,9 +44,9 @@ def write_r2_evaluation_bundle(
         ),
     }
     for model in report.evaluated_models:
-        name = f"evaluated_model::{model.model_family.value}"
+        name = f"evaluated_model::{model.manifest_id}"
         child_bytes[name] = (
-            f"evaluated-model-{model.model_family.value.lower()}.json",
+            f"evaluated-model-{model.manifest_id}.json",
             _canonical_bytes(model.as_json()),
         )
     children: dict[str, JsonValue] = {}
@@ -109,8 +109,8 @@ def verify_persisted_r2_evaluation(
         ),
     }
     for model in report.evaluated_models:
-        expected[f"evaluated_model::{model.model_family.value}"] = (
-            f"evaluated-model-{model.model_family.value.lower()}.json",
+        expected[f"evaluated_model::{model.manifest_id}"] = (
+            f"evaluated-model-{model.manifest_id}.json",
             _canonical_bytes(model.as_json()),
         )
     if set(children) != set(expected):
@@ -149,10 +149,22 @@ def verify_persisted_r2_selection(
     report: EvaluationReport,
     local_manifest: LocalComparatorManifest,
     experiment: R2ExperimentConfig,
+    *,
+    expected_secondary_metrics: Sequence[str],
+    expected_final_fitting_procedure: str,
+    expected_application_image_identity: str,
 ) -> None:
     if path.read_bytes() != _canonical_bytes(manifest.as_json()):
         raise ValueError("persisted R2 selection bytes differ from the supplied manifest")
-    verify_selection_manifest(manifest, report, local_manifest, experiment)
+    verify_selection_manifest(
+        manifest,
+        report,
+        local_manifest,
+        experiment,
+        expected_secondary_metrics=expected_secondary_metrics,
+        expected_final_fitting_procedure=expected_final_fitting_procedure,
+        expected_application_image_identity=expected_application_image_identity,
+    )
 
 
 def _canonical_bytes(value: dict[str, JsonValue]) -> bytes:

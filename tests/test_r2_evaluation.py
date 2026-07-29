@@ -15,11 +15,13 @@ from qtrad.application.r2_evaluation import (
     calculate_bucket_metrics,
     calculate_pairwise_comparison,
     calculate_predictive_metrics,
+    verify_selection_manifest,
 )
 from qtrad.application.r2_pooled import build_pooled_ridge_oof
 from qtrad.application.r2_readiness import R1FoundationBindings
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.r2_evaluation import (
+    HOLDOUT_STATE_VERIFICATION_PENDING,
     ComparisonSupport,
     ConfigurationDisposition,
     ConfigurationRecord,
@@ -130,18 +132,21 @@ def _evaluation_fixture() -> tuple[
                 children,
             )
         )
-    local_forecast_id = ForecastDataset.create(
-        tuple(
-            row
-            for child in local.fold_results
-            if child.fit.feature_set_id == comparator_features.feature_set_id
-            for row in child.forecasts.rows
-        ),
-        observation_dataset_id=local.forecasts.observation_dataset_id,
-        panel_dataset_id=local.forecasts.panel_dataset_id,
-        target_dataset_id=local.forecasts.target_dataset_id,
-        fold_dataset_id=local.forecasts.fold_dataset_id,
-    ).dataset_id
+    local_forecast_ids = {
+        dataset.feature_set_id: ForecastDataset.create(
+            tuple(
+                row
+                for child in local.fold_results
+                if child.fit.feature_set_id == dataset.feature_set_id
+                for row in child.forecasts.rows
+            ),
+            observation_dataset_id=local.forecasts.observation_dataset_id,
+            panel_dataset_id=local.forecasts.panel_dataset_id,
+            target_dataset_id=local.forecasts.target_dataset_id,
+            fold_dataset_id=local.forecasts.fold_dataset_id,
+        ).dataset_id
+        for dataset in local_feature_datasets
+    }
     configurations = (
         _configuration(
             ModelFamily.ZERO_RETURN,
@@ -149,11 +154,14 @@ def _evaluation_fixture() -> tuple[
             ConfigurationDisposition.EVALUATED,
             None,
         ),
-        _configuration(
-            ModelFamily.LOCAL_RIDGE,
-            comparator_features.feature_set_id,
-            ConfigurationDisposition.EVALUATED,
-            local_forecast_id,
+        *(
+            _configuration(
+                ModelFamily.LOCAL_RIDGE,
+                dataset.feature_set_id,
+                ConfigurationDisposition.EVALUATED,
+                local_forecast_ids[dataset.feature_set_id],
+            )
+            for dataset in local_feature_datasets
         ),
         _configuration(
             ModelFamily.POOLED_LOCAL_RIDGE,
@@ -274,7 +282,8 @@ def test_evaluation_recomputes_common_support_and_persists_local_child(tmp_path:
     assert all(item.comparator_model_family is not None for item in common_global)
     assert len(report.comparisons) == 3
     assert report.all_model_common_target_ids
-    assert len(report.configurations) == 4
+    assert len(report.configurations) == 5
+    assert sum(item.model_family is ModelFamily.LOCAL_RIDGE for item in report.configurations) == 2
     assert report.bucket_definitions
     assert report.bucket_ordering
     assert report.stability
@@ -293,7 +302,7 @@ def test_evaluation_recomputes_common_support_and_persists_local_child(tmp_path:
         local_feature_datasets=local_feature_datasets,
     )
     assert (bundle.parent / "local-comparator.json").is_file()
-    assert len(tuple(bundle.parent.glob("evaluated-model-*.json"))) == 4
+    assert len(tuple(bundle.parent.glob("evaluated-model-*.json"))) == 5
 
     payload = json.loads((bundle.parent / "evaluation.json").read_text())
     payload["all_model_common_target_ids"] = []
@@ -340,7 +349,16 @@ def test_selection_freeze_retains_rejections_and_contains_no_holdout_data(
     )
     path = tmp_path / "selection.json"
     write_r2_selection_manifest(path, manifest)
-    verify_persisted_r2_selection(path, manifest, report, local_manifest, config)
+    verify_persisted_r2_selection(
+        path,
+        manifest,
+        report,
+        local_manifest,
+        config,
+        expected_secondary_metrics=("MAE", "SPEARMAN", "COVERAGE", "STABILITY"),
+        expected_final_fitting_procedure="REFIT_PRE_HOLDOUT_HISTORY_WITH_FROZEN_PREPROCESSING_V1",
+        expected_application_image_identity=_FINAL_APPLICATION_IMAGE,
+    )
 
     payload = manifest.as_json()
     assert set(manifest.evaluated_configuration_ids) == {
@@ -348,6 +366,9 @@ def test_selection_freeze_retains_rejections_and_contains_no_holdout_data(
     }
     assert "holdout_outcomes" not in payload
     assert "holdout_features" not in payload
+    assert "holdout_feature_dataset_ids" not in payload
+    assert "holdout_consumption_ids" not in payload
+    assert manifest.holdout_state_verification == HOLDOUT_STATE_VERIFICATION_PENDING
 
     with pytest.raises(ValueError, match="does not authenticate"):
         replace(
@@ -390,8 +411,12 @@ def test_pairwise_common_support_is_independent_of_third_model() -> None:
         targets,
     )
 
+    assert pooled_vs_local.common_expected_target_ids == tuple(sorted(target_ids[:2]))
     assert pooled_vs_local.common_target_ids == tuple(sorted(target_ids[:2]))
+    assert pooled_vs_local.common_support_coverage.value == 1.0
+    assert context_vs_pooled.common_expected_target_ids == tuple(sorted(target_ids[:1]))
     assert context_vs_pooled.common_target_ids == tuple(sorted(target_ids[:1]))
+    assert context_vs_pooled.common_support_coverage.value == 1.0
 
 
 def test_fold_bucket_thresholds_apply_only_to_their_validation_fold() -> None:
@@ -445,19 +470,170 @@ def test_fold_bucket_thresholds_apply_only_to_their_validation_fold() -> None:
     assert counts == {"fold-a": 2, "fold-b": 2}
 
 
-def test_selection_rejects_materialised_holdout_state() -> None:
-    _, config, _, _, _, _, _, local_manifest, report = _evaluation_fixture()
+def test_pairwise_common_support_uses_pairwise_expected_denominator() -> None:
+    verified, *_ = _pooled_fixture()
+    targets = {
+        row.target_id: row
+        for row in verified.targets.rows
+        if row.return_disposition.value == "VALID"
+    }
+    target_ids = tuple(targets)[:10]
+    supports = {
+        ModelFamily.LOCAL_RIDGE: target_ids,
+        ModelFamily.POOLED_LOCAL_RIDGE: target_ids,
+    }
+    predictions = {
+        ModelFamily.LOCAL_RIDGE: {target_id: 0.0 for target_id in target_ids[:9]},
+        ModelFamily.POOLED_LOCAL_RIDGE: {target_id: 0.0 for target_id in target_ids[1:]},
+    }
 
-    with pytest.raises(ValueError, match="holdout evidence"):
-        build_selection_manifest(
-            report,
-            local_manifest,
-            config,
-            primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
-            secondary_metrics=("MAE", "COVERAGE", "STABILITY"),
-            final_fitting_procedure="REFIT_PRE_HOLDOUT_HISTORY_WITH_FROZEN_PREPROCESSING_V1",
-            application_image_identity=_FINAL_APPLICATION_IMAGE,
-            frozen_at=config.holdout_range[1] + timedelta(days=1),
-            frozen_by="r2-f1-fixture",
-            holdout_feature_dataset_ids=(semantic_id({"holdout": "feature"}),),
+    comparison = calculate_pairwise_comparison(
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.LOCAL_RIDGE,
+        supports,
+        predictions,
+        targets,
+    )
+
+    assert comparison.common_expected_target_ids == tuple(sorted(target_ids))
+    assert comparison.common_target_ids == tuple(sorted(target_ids[1:9]))
+    assert comparison.common_support_coverage.value == pytest.approx(0.8)
+
+
+def test_bucket_ordering_is_spearman_rank_correlation() -> None:
+    verified, *_ = _pooled_fixture()
+    original_targets = {
+        row.target_id: row
+        for row in verified.targets.rows
+        if row.return_disposition.value == "VALID"
+    }
+    target_ids = tuple(original_targets)[:3]
+    realised = (0.0, 1.0, 100.0)
+    targets = {
+        target_id: replace(original_targets[target_id], log_return=value)
+        for target_id, value in zip(target_ids, realised, strict=True)
+    }
+    family = ModelFamily.LOCAL_RIDGE
+    definition = TrainingBucketDefinition.create(
+        model_family=family,
+        outer_fold_id="fold-a",
+        horizon=targets[target_ids[0]].horizon,
+        training_target_ids=target_ids,
+        thresholds=(0.5, 1.5),
+        training_prediction_evidence_id=semantic_id({"fold": "rank-test"}),
+    )
+
+    _, ordering = calculate_bucket_metrics(
+        (definition,),
+        {family: {target_id: float(index) for index, target_id in enumerate(target_ids)}},
+        targets,
+        {target_id: "fold-a" for target_id in target_ids},
+        {family: target_ids},
+        (),
+    )
+
+    assert len(ordering) == 1
+    assert ordering[0].bucket_order_spearman.value == pytest.approx(1.0)
+    assert ordering[0].monotonicity_failure_count == 0
+
+
+def test_selection_verifier_rejects_rehashed_policy_mutations() -> None:
+    _, config, _, _, _, _, _, local_manifest, report = _evaluation_fixture()
+    secondary = ("MAE", "SPEARMAN", "COVERAGE", "STABILITY")
+    fitting = "REFIT_PRE_HOLDOUT_HISTORY_WITH_FROZEN_PREPROCESSING_V1"
+    manifest = build_selection_manifest(
+        report,
+        local_manifest,
+        config,
+        primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
+        secondary_metrics=secondary,
+        final_fitting_procedure=fitting,
+        application_image_identity=_FINAL_APPLICATION_IMAGE,
+        frozen_at=config.holdout_range[1] + timedelta(days=1),
+        frozen_by="r2-f1-fixture",
+    )
+
+    rehashed_mutations = []
+
+    semantic = manifest.semantic_json()
+    semantic["primary_metric"] = "MSE"
+    rehashed_mutations.append(
+        replace(manifest, primary_metric="MSE", manifest_id=semantic_id(semantic))
+    )
+
+    semantic = manifest.semantic_json()
+    semantic["secondary_metrics"] = ["MAE"]
+    rehashed_mutations.append(
+        replace(manifest, secondary_metrics=("MAE",), manifest_id=semantic_id(semantic))
+    )
+
+    semantic = manifest.semantic_json()
+    semantic["final_fitting_procedure"] = "UNDECLARED_REFIT"
+    rehashed_mutations.append(
+        replace(
+            manifest,
+            final_fitting_procedure="UNDECLARED_REFIT",
+            manifest_id=semantic_id(semantic),
+        )
+    )
+
+    other_image = semantic_id({"image": "other"})
+    semantic = manifest.semantic_json()
+    semantic["application_image_identity"] = other_image
+    rehashed_mutations.append(
+        replace(
+            manifest,
+            application_image_identity=other_image,
+            manifest_id=semantic_id(semantic),
+        )
+    )
+
+    comparators = manifest.predeclared_comparators[:-1]
+    semantic = manifest.semantic_json()
+    semantic["predeclared_comparators"] = [item.value for item in comparators]
+    rehashed_mutations.append(
+        replace(
+            manifest,
+            predeclared_comparators=comparators,
+            manifest_id=semantic_id(semantic),
+        )
+    )
+
+    for tampered in rehashed_mutations:
+        with pytest.raises(ValueError):
+            verify_selection_manifest(
+                tampered,
+                report,
+                local_manifest,
+                config,
+                expected_secondary_metrics=secondary,
+                expected_final_fitting_procedure=fitting,
+                expected_application_image_identity=_FINAL_APPLICATION_IMAGE,
+            )
+
+
+def test_selection_rejects_rehashed_holdout_comparator_mutation() -> None:
+    _, config, _, _, _, _, _, local_manifest, report = _evaluation_fixture()
+    secondary = ("MAE", "SPEARMAN", "COVERAGE", "STABILITY")
+    fitting = "REFIT_PRE_HOLDOUT_HISTORY_WITH_FROZEN_PREPROCESSING_V1"
+    manifest = build_selection_manifest(
+        report,
+        local_manifest,
+        config,
+        primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
+        secondary_metrics=secondary,
+        final_fitting_procedure=fitting,
+        application_image_identity=_FINAL_APPLICATION_IMAGE,
+        frozen_at=config.holdout_range[1] + timedelta(days=1),
+        frozen_by="r2-f1-fixture",
+    )
+    ids = manifest.holdout_comparator_configuration_ids[:-1]
+    semantic = manifest.semantic_json()
+    semantic["holdout_comparator_configuration_ids"] = list(ids)
+
+    with pytest.raises(ValueError, match="holdout comparator"):
+        replace(
+            manifest,
+            holdout_comparator_configuration_ids=ids,
+            manifest_id=semantic_id(semantic),
         )

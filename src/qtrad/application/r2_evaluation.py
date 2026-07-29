@@ -60,6 +60,8 @@ _REQUIRED_SELECTION_THRESHOLDS = (
     "minimum_improving_instrument_proportion",
 )
 
+_PRIMARY_SELECTION_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
+
 
 @dataclass(frozen=True, slots=True)
 class TrainingPredictions:
@@ -431,24 +433,26 @@ def _build_evaluation_core(
         local_feature_dataset,
         feature_set_id=local_feature_set_id,
     )
-    local_fold_results, local_forecasts = _local_scope(local_result, local_feature_set_id)
-    local_model = EvaluationModel(
-        ModelFamily.LOCAL_RIDGE,
-        local_feature_set_id,
-        local_feature_dataset,
-        local_forecasts,
-        local_fold_results,
+    local_models = tuple(
+        _local_evaluation_model(local_result, dataset) for dataset in local_feature_datasets
     )
-    declared = (local_model, *models)
-    by_family = {item.model_family: item for item in declared}
+    selected_local = tuple(
+        model for model in local_models if model.feature_set_id == local_feature_set_id
+    )
+    if len(selected_local) != 1:
+        raise ValueError("evaluation requires one exact selected local comparator")
+    local_model = selected_local[0]
+    hierarchy = (local_model, *models)
+    by_family = {item.model_family: item for item in hierarchy}
     required = {
         ModelFamily.LOCAL_RIDGE,
         ModelFamily.POOLED_LOCAL_RIDGE,
         ModelFamily.POOLED_CROSS_ASSET_RIDGE,
     }
-    if len(by_family) != len(declared) or set(by_family) != required:
+    if len(by_family) != len(hierarchy) or set(by_family) != required:
         raise ValueError("evaluation requires one exact local/P0/P1 comparator hierarchy")
-    for item in declared:
+    all_models = (*local_models, *models)
+    for item in all_models:
         _verify_evaluation_model(verified, experiment, item)
 
     targets = {
@@ -518,9 +522,15 @@ def _build_evaluation_core(
                 )
             )
 
+    training_by_model = {
+        (model.model_family, model.feature_set_id): _derive_training_predictions(
+            verified, experiment, model
+        )
+        for model in all_models
+    }
     training_by_family = {
-        model.model_family: _derive_training_predictions(verified, experiment, model)
-        for model in declared
+        model.model_family: training_by_model[(model.model_family, model.feature_set_id)]
+        for model in hierarchy
     }
     definitions = tuple(
         derive_training_bucket_definition(item, bucket_count=forecast_bucket_count)
@@ -551,12 +561,15 @@ def _build_evaluation_core(
     evaluated_models = (
         _zero_model_manifest(verified, targets),
         *(
-            _evaluated_model_manifest(model, training_by_family[model.model_family])
-            for model in declared
+            _evaluated_model_manifest(
+                model,
+                training_by_model[(model.model_family, model.feature_set_id)],
+            )
+            for model in all_models
         ),
     )
     normalised_configurations = _normalise_configurations(
-        configurations, evaluated_models, by_family
+        configurations, evaluated_models, all_models
     )
     unavailable = [
         (
@@ -623,17 +636,15 @@ def build_selection_manifest(
     application_image_identity: str,
     frozen_at: datetime,
     frozen_by: str,
-    holdout_feature_dataset_ids: Sequence[str] = (),
-    holdout_consumption_ids: Sequence[str] = (),
 ) -> SelectionManifest:
     """Derive every disposition from the frozen report and configured credibility gates."""
 
-    if primary_metric != "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE":
+    if primary_metric != _PRIMARY_SELECTION_METRIC:
         raise ValueError("selection primary metric differs from the implemented frozen criterion")
     if not secondary_metrics:
         raise ValueError("selection requires secondary evidence")
     thresholds = _selection_thresholds(experiment)
-    decisions = _selection_decisions(report, thresholds)
+    decisions = _selection_decisions(report, thresholds, local_manifest.feature_set_id)
     manifest = SelectionManifest.create(
         experiment_configuration_id=experiment.configuration_id,
         evidence_class=experiment.evidence_class,
@@ -661,13 +672,19 @@ def build_selection_manifest(
         ),
         final_fitting_procedure=final_fitting_procedure,
         holdout_range=experiment.holdout_range,
-        holdout_feature_dataset_ids=tuple(holdout_feature_dataset_ids),
-        holdout_consumption_ids=tuple(holdout_consumption_ids),
         application_image_identity=application_image_identity,
         frozen_at=frozen_at,
         frozen_by=frozen_by,
     )
-    verify_selection_manifest(manifest, report, local_manifest, experiment)
+    verify_selection_manifest(
+        manifest,
+        report,
+        local_manifest,
+        experiment,
+        expected_secondary_metrics=secondary_metrics,
+        expected_final_fitting_procedure=final_fitting_procedure,
+        expected_application_image_identity=application_image_identity,
+    )
     return manifest
 
 
@@ -676,6 +693,10 @@ def verify_selection_manifest(
     report: EvaluationReport,
     local_manifest: LocalComparatorManifest,
     experiment: R2ExperimentConfig,
+    *,
+    expected_secondary_metrics: Sequence[str],
+    expected_final_fitting_procedure: str,
+    expected_application_image_identity: str,
 ) -> None:
     if (
         manifest.experiment_configuration_id != experiment.configuration_id
@@ -688,14 +709,34 @@ def verify_selection_manifest(
     if manifest.evaluated_configuration_ids != tuple(
         sorted(item.configuration_id for item in report.configurations)
     ):
-        raise ValueError("selection manifest omits an evaluated configuration")
+        raise ValueError("selection manifest omits a registered configuration")
+    if manifest.predeclared_comparators != experiment.model_families:
+        raise ValueError("selection comparator set differs from the experiment configuration")
+    if manifest.primary_metric != _PRIMARY_SELECTION_METRIC:
+        raise ValueError("selection primary metric differs from the frozen criterion")
+    if manifest.secondary_metrics != tuple(expected_secondary_metrics):
+        raise ValueError("selection secondary metrics differ from the frozen policy")
+    if manifest.final_fitting_procedure != expected_final_fitting_procedure:
+        raise ValueError("selection fitting procedure differs from the frozen policy")
+    if manifest.application_image_identity != expected_application_image_identity:
+        raise ValueError("selection image identity differs from the expected freeze image")
     thresholds = _selection_thresholds(experiment)
     if manifest.acceptance_thresholds != tuple(sorted(thresholds.items())):
         raise ValueError("selection thresholds differ from the experiment configuration")
-    if manifest.decisions != _selection_decisions(report, thresholds):
+    decisions = _selection_decisions(report, thresholds, local_manifest.feature_set_id)
+    if manifest.decisions != decisions:
         raise ValueError("selection decisions differ from independently replayed gates")
-    if manifest.holdout_feature_dataset_ids or manifest.holdout_consumption_ids:
-        raise ValueError("selection was not frozen before holdout materialisation or consumption")
+    expected_holdout_ids = tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition
+        in (
+            ConfigurationDisposition.RETAINED_CONTROL,
+            ConfigurationDisposition.SELECTED_CANDIDATE,
+        )
+    )
+    if manifest.holdout_comparator_configuration_ids != expected_holdout_ids:
+        raise ValueError("selection holdout comparators differ from independently replayed policy")
 
 
 def _selection_thresholds(experiment: R2ExperimentConfig) -> dict[str, float]:
@@ -712,13 +753,49 @@ def _selection_thresholds(experiment: R2ExperimentConfig) -> dict[str, float]:
 def _selection_decisions(
     report: EvaluationReport,
     thresholds: Mapping[str, float],
+    local_feature_set_id: str,
 ) -> tuple[SelectionDecision, ...]:
-    config_by_family = {item.model_family: item for item in report.configurations}
+    hierarchy: dict[ModelFamily, ConfigurationRecord] = {}
+    for family in ModelFamily:
+        matches = tuple(
+            item
+            for item in report.configurations
+            if item.model_family is family
+            and (
+                family is not ModelFamily.LOCAL_RIDGE or item.feature_set_id == local_feature_set_id
+            )
+        )
+        if len(matches) != 1:
+            raise ValueError(
+                "configuration register does not identify one exact comparator hierarchy"
+            )
+        hierarchy[family] = matches[0]
+    hierarchy_ids = {item.configuration_id for item in hierarchy.values()}
     comparison_by_candidate = {item.candidate: item for item in report.comparisons}
     stability_by_candidate = {item.candidate: item for item in report.stability}
     decisions: list[SelectionDecision] = []
-    for family in ModelFamily:
-        configuration = config_by_family[family]
+    for configuration in report.configurations:
+        family = configuration.model_family
+        if configuration.disposition is ConfigurationDisposition.FAILED:
+            decisions.append(
+                SelectionDecision(
+                    configuration.configuration_id,
+                    ConfigurationDisposition.FAILED,
+                    "configuration produced no authenticated forecasts",
+                    (),
+                )
+            )
+            continue
+        if configuration.configuration_id not in hierarchy_ids:
+            decisions.append(
+                SelectionDecision(
+                    configuration.configuration_id,
+                    ConfigurationDisposition.REJECTED,
+                    "diagnostic local-ladder configuration is outside the comparator hierarchy",
+                    (),
+                )
+            )
+            continue
         if family is ModelFamily.ZERO_RETURN:
             decisions.append(
                 SelectionDecision(
@@ -773,15 +850,6 @@ def _credibility_gates(
         comparison.comparator_instrument_balanced_mse,
         comparison.candidate_instrument_balanced_mse,
     )
-    own_global = next(
-        item
-        for item in report.metric_slices
-        if item.model_family is comparison.candidate
-        and item.comparator_model_family is None
-        and item.support is ComparisonSupport.OWN
-        and item.breakdown == "GLOBAL"
-        and item.bucket == "ALL"
-    )
     instrument_count = len(
         {
             item.bucket
@@ -813,8 +881,8 @@ def _credibility_gates(
         ),
         _minimum_gate(
             configuration_id,
-            "MINIMUM_COVERAGE",
-            MetricValue.defined(own_global.metrics.coverage),
+            "MINIMUM_COMMON_SUPPORT",
+            comparison.common_support_coverage,
             thresholds["minimum_common_support"],
         ),
         _minimum_gate(
@@ -894,34 +962,49 @@ def _maximum_gate(
 def _normalise_configurations(
     configurations: Sequence[ConfigurationRecord],
     manifests: Sequence[EvaluatedModelManifest],
-    models: Mapping[ModelFamily, EvaluationModel],
+    models: Sequence[EvaluationModel],
 ) -> tuple[ConfigurationRecord, ...]:
-    by_family = {item.model_family: item for item in configurations}
-    manifest_by_family = {item.model_family: item for item in manifests}
-    if len(by_family) != len(configurations) or set(by_family) != set(ModelFamily):
-        raise ValueError("configuration register must exactly cover the comparator hierarchy")
+    supplied_by_key: dict[tuple[ModelFamily, str | None], ConfigurationRecord] = {
+        (item.model_family, item.feature_set_id): item for item in configurations
+    }
+    model_by_key: dict[tuple[ModelFamily, str | None], EvaluationModel] = {
+        (item.model_family, item.feature_set_id): item for item in models
+    }
+    manifest_by_key: dict[tuple[ModelFamily, str | None], EvaluatedModelManifest] = {
+        (item.model_family, item.feature_set_id): item for item in manifests
+    }
+    expected_keys = {(ModelFamily.ZERO_RETURN, None), *model_by_key}
+    if (
+        len(supplied_by_key) != len(configurations)
+        or set(supplied_by_key) != expected_keys
+        or set(manifest_by_key) != expected_keys
+    ):
+        raise ValueError("configuration register must exactly cover every attempted model")
     rows: list[ConfigurationRecord] = []
-    for family in ModelFamily:
-        supplied = by_family[family]
-        manifest = manifest_by_family[family]
-        expected_feature = (
-            None if family is ModelFamily.ZERO_RETURN else models[family].feature_set_id
-        )
-        expected_forecast = (
-            None if family is ModelFamily.ZERO_RETURN else models[family].forecasts.dataset_id
-        )
-        if (
-            supplied.feature_set_id != expected_feature
-            or supplied.forecast_dataset_id != expected_forecast
-        ):
+    for key in sorted(expected_keys, key=lambda item: (item[0].value, item[1] or "")):
+        family, feature_identity = key
+        supplied = supplied_by_key[key]
+        manifest = manifest_by_key[key]
+        model = model_by_key.get(key)
+        expected_forecast = None if model is None else model.forecasts.dataset_id
+        if supplied.forecast_dataset_id != expected_forecast:
             raise ValueError("configuration register differs from authenticated model evidence")
+        failed = model is not None and not model.forecasts.rows
+        disposition = (
+            ConfigurationDisposition.FAILED if failed else ConfigurationDisposition.EVALUATED
+        )
+        reason = (
+            "no authenticated forecasts were produced by any fold"
+            if failed
+            else "independently authenticated and evaluated"
+        )
         rows.append(
             ConfigurationRecord(
                 supplied.configuration_id,
                 family,
-                expected_feature,
-                ConfigurationDisposition.EVALUATED,
-                "independently authenticated and evaluated",
+                feature_identity,
+                disposition,
+                reason,
                 expected_forecast,
                 manifest.manifest_id,
             )
@@ -1043,13 +1126,25 @@ def calculate_pairwise_comparison(
     predictions: Mapping[ModelFamily, Mapping[str, float]],
     targets: Mapping[str, TargetRow],
 ) -> PairwiseComparison:
-    common = tuple(sorted(set(predictions[candidate]) & set(predictions[comparator])))
+    candidate_support = tuple(sorted(supports[candidate]))
+    comparator_support = tuple(sorted(supports[comparator]))
+    expected_common = tuple(sorted(set(candidate_support) & set(comparator_support)))
+    common = tuple(
+        sorted(set(predictions[candidate]) & set(predictions[comparator]) & set(expected_common))
+    )
+    coverage = (
+        MetricValue.defined(len(common) / len(expected_common))
+        if expected_common
+        else MetricValue.not_defined("pairwise comparison has no common expected opportunities")
+    )
     return PairwiseComparison(
         candidate,
         comparator,
-        tuple(supports[candidate]),
-        tuple(supports[comparator]),
+        candidate_support,
+        comparator_support,
+        expected_common,
         common,
+        coverage,
         _instrument_balanced_mse(common, predictions[candidate], targets),
         _instrument_balanced_mse(common, predictions[comparator], targets),
     )
@@ -1186,8 +1281,8 @@ def calculate_bucket_metrics(
                     )
                 )
             order_metric = _correlation_metric(
-                tuple(float(index) for index, _ in realised_means),
-                tuple(value for _, value in realised_means),
+                _ranks(tuple(float(index) for index, _ in realised_means)),
+                _ranks(tuple(value for _, value in realised_means)),
                 2,
                 "bucket-order Spearman correlation",
             )
@@ -1521,6 +1616,20 @@ def _intersection(values: Sequence[set[str]]) -> set[str]:
     for value in values[1:]:
         result.intersection_update(value)
     return result
+
+
+def _local_evaluation_model(
+    local_result: LocalRidgeOofResult,
+    feature_dataset: R2FeatureDataset,
+) -> EvaluationModel:
+    fold_results, forecasts = _local_scope(local_result, feature_dataset.feature_set_id)
+    return EvaluationModel(
+        ModelFamily.LOCAL_RIDGE,
+        feature_dataset.feature_set_id,
+        feature_dataset,
+        forecasts,
+        fold_results,
+    )
 
 
 def _local_scope(

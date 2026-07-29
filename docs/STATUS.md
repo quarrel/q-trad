@@ -105,21 +105,26 @@ remains offline/replay.
   effectiveness conclusion remain pending.
 - The R2.F1 core now provides `qtrad-r2-evaluation-v1`, `qtrad-r2-local-comparator-v1` and
   `qtrad-r2-selection-v1` contracts. Evaluation independently authenticates the complete declared local
-  ladder and every evaluated local/pooled fold child against exact R1 membership. Separately persisted,
-  identity-bearing evaluated-model manifests bind feature, forecast, coverage, fit, training-prediction
-  and coefficient-stability evidence.
-- Comparator metrics use exact pairwise own/common support; all-model common support is diagnostic only.
-  Training predictions are replayed from authenticated fits, and each fold's training-derived forecast
-  buckets apply only to that fold's validation rows. Reports retain bucket ordering/monotonicity,
-  fold/instrument stability and best-instrument/period concentration. Target-level data-quality slices
-  are explicitly unavailable, with a reason, because the R1 bindings do not expose those classifications.
+  ladder and every evaluated local/pooled fold child against exact R1 membership. The complete attempted
+  configuration register is retained separately from the four-model comparison hierarchy; configurations
+  with no successful forecasts are marked `FAILED` and cannot become retained controls. Separately
+  persisted, identity-bearing evaluated-model manifests bind feature, forecast, coverage, fit,
+  training-prediction and coefficient-stability evidence.
+- Comparator metrics use exact pairwise own/common support. Each comparison persists its expected
+  pairwise denominator and realised common-support ratio, which drives the minimum-support gate;
+  all-model common support remains diagnostic only. Training predictions are replayed from authenticated
+  fits, and each fold's training-derived forecast buckets apply only to that fold's validation rows.
+  Bucket ordering uses Spearman ranks. Reports retain ordering/monotonicity, fold/instrument stability and
+  best-instrument/period concentration. Target-level data-quality slices are explicitly unavailable, with
+  a reason, because the R1 bindings do not expose those classifications.
 - Selection dispositions and retained IDs are derived from persisted acceptance thresholds and report
-  evidence, including comparator, coverage, breadth, stability, concentration and replay gates. Freeze
-  validation rejects materialised holdout feature or consumption evidence; its wall-clock timestamp is
-  not incorrectly compared with the historical market holdout boundary. Independent replay and child
-  mutation tests pass. This is implementation evidence only: representative source-specific integration
-  and the corresponding R2.H bundle remain required before the R2.F1 exit, and no confirmatory model-
-  selection or effectiveness claim is made.
+  evidence, including comparator, coverage, breadth, stability, concentration and replay gates. The
+  verifier independently replays the comparator set, metrics, decisions, holdout comparator IDs, fitting
+  policy and image identity. The manifest contains no holdout features, outcomes or caller-asserted empty
+  external state; trusted absence verification is explicitly `PENDING_R2_H_INTEGRATION`. Rehashed semantic
+  mutation and child mutation tests pass. This is implementation evidence only: representative source-
+  specific integration and the corresponding R2.H bundle remain required before the R2.F1 exit, and no
+  confirmatory model-selection or effectiveness claim is made.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a

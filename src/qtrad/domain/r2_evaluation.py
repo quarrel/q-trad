@@ -16,6 +16,7 @@ from qtrad.domain.time import require_utc
 R2_LOCAL_COMPARATOR_CONTRACT = "qtrad-r2-local-comparator-v1"
 R2_EVALUATION_CONTRACT = "qtrad-r2-evaluation-v1"
 R2_SELECTION_CONTRACT = "qtrad-r2-selection-v1"
+HOLDOUT_STATE_VERIFICATION_PENDING = "PENDING_R2_H_INTEGRATION"
 
 
 class ComparisonSupport(StrEnum):
@@ -476,7 +477,9 @@ class PairwiseComparison:
     comparator: ModelFamily
     candidate_own_target_ids: tuple[str, ...]
     comparator_own_target_ids: tuple[str, ...]
+    common_expected_target_ids: tuple[str, ...]
     common_target_ids: tuple[str, ...]
+    common_support_coverage: MetricValue
     candidate_instrument_balanced_mse: MetricValue
     comparator_instrument_balanced_mse: MetricValue
 
@@ -484,14 +487,27 @@ class PairwiseComparison:
         for values in (
             self.candidate_own_target_ids,
             self.comparator_own_target_ids,
+            self.common_expected_target_ids,
             self.common_target_ids,
         ):
             if tuple(sorted(set(values))) != values:
                 raise ValueError("comparison support must be unique and ordered")
-        if not set(self.common_target_ids) <= (
-            set(self.candidate_own_target_ids) & set(self.comparator_own_target_ids)
-        ):
-            raise ValueError("pairwise common support exceeds own support")
+        expected_common = tuple(
+            sorted(set(self.candidate_own_target_ids) & set(self.comparator_own_target_ids))
+        )
+        if self.common_expected_target_ids != expected_common:
+            raise ValueError(
+                "pairwise common-support denominator differs from expected opportunities"
+            )
+        if not set(self.common_target_ids) <= set(expected_common):
+            raise ValueError("pairwise common forecast support exceeds expected common support")
+        expected_coverage = (
+            MetricValue.defined(len(self.common_target_ids) / len(expected_common))
+            if expected_common
+            else MetricValue.not_defined("pairwise comparison has no common expected opportunities")
+        )
+        if self.common_support_coverage != expected_coverage:
+            raise ValueError("pairwise common-support coverage does not reconcile")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -499,7 +515,9 @@ class PairwiseComparison:
             "comparator": self.comparator.value,
             "candidate_own_target_ids": list(self.candidate_own_target_ids),
             "comparator_own_target_ids": list(self.comparator_own_target_ids),
+            "common_expected_target_ids": list(self.common_expected_target_ids),
             "common_target_ids": list(self.common_target_ids),
+            "common_support_coverage": self.common_support_coverage.as_json(),
             "candidate_instrument_balanced_mse": (self.candidate_instrument_balanced_mse.as_json()),
             "comparator_instrument_balanced_mse": (
                 self.comparator_instrument_balanced_mse.as_json()
@@ -871,8 +889,7 @@ class SelectionManifest:
     holdout_comparator_configuration_ids: tuple[str, ...]
     final_fitting_procedure: str
     holdout_range: tuple[datetime, datetime]
-    holdout_feature_dataset_ids: tuple[str, ...]
-    holdout_consumption_ids: tuple[str, ...]
+    holdout_state_verification: str
     application_image_identity: str
     frozen_at: datetime
     frozen_by: str
@@ -913,8 +930,21 @@ class SelectionManifest:
         )
         if expected_selected != self.selected_configuration_ids:
             raise ValueError("selected IDs differ from verified selection decisions")
-        if self.holdout_feature_dataset_ids or self.holdout_consumption_ids:
-            raise ValueError("selection freeze cannot reference materialised holdout evidence")
+        expected_comparators = tuple(
+            item.configuration_id
+            for item in self.decisions
+            if item.disposition
+            in (
+                ConfigurationDisposition.RETAINED_CONTROL,
+                ConfigurationDisposition.SELECTED_CANDIDATE,
+            )
+        )
+        if expected_comparators != self.holdout_comparator_configuration_ids:
+            raise ValueError("holdout comparator IDs differ from verified selection decisions")
+        if self.holdout_state_verification != HOLDOUT_STATE_VERIFICATION_PENDING:
+            raise ValueError(
+                "R2.F1 holdout-state verification must remain pending R2.H integration"
+            )
         if len(set(self.predeclared_comparators)) != len(self.predeclared_comparators):
             raise ValueError("selection comparator set must be unique")
         if tuple(sorted(set(self.acceptance_thresholds))) != self.acceptance_thresholds or any(
@@ -957,8 +987,6 @@ class SelectionManifest:
         holdout_comparator_configuration_ids: Sequence[str],
         final_fitting_procedure: str,
         holdout_range: tuple[datetime, datetime],
-        holdout_feature_dataset_ids: Sequence[str],
-        holdout_consumption_ids: Sequence[str],
         application_image_identity: str,
         frozen_at: datetime,
         frozen_by: str,
@@ -984,8 +1012,7 @@ class SelectionManifest:
             ("holdout_comparator_configuration_ids", comparator_ids),
             ("final_fitting_procedure", final_fitting_procedure),
             ("holdout_range", holdout_range),
-            ("holdout_feature_dataset_ids", tuple(holdout_feature_dataset_ids)),
-            ("holdout_consumption_ids", tuple(holdout_consumption_ids)),
+            ("holdout_state_verification", HOLDOUT_STATE_VERIFICATION_PENDING),
             ("application_image_identity", application_image_identity),
             ("frozen_at", frozen_at),
             ("frozen_by", frozen_by),
@@ -1007,8 +1034,7 @@ class SelectionManifest:
             holdout_comparator_configuration_ids=comparator_ids,
             final_fitting_procedure=final_fitting_procedure,
             holdout_range=holdout_range,
-            holdout_feature_dataset_ids=tuple(holdout_feature_dataset_ids),
-            holdout_consumption_ids=tuple(holdout_consumption_ids),
+            holdout_state_verification=HOLDOUT_STATE_VERIFICATION_PENDING,
             application_image_identity=application_image_identity,
             frozen_at=frozen_at,
             frozen_by=frozen_by,
@@ -1033,8 +1059,7 @@ class SelectionManifest:
             "holdout_comparator_configuration_ids": list(self.holdout_comparator_configuration_ids),
             "final_fitting_procedure": self.final_fitting_procedure,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
-            "holdout_feature_dataset_ids": list(self.holdout_feature_dataset_ids),
-            "holdout_consumption_ids": list(self.holdout_consumption_ids),
+            "holdout_state_verification": self.holdout_state_verification,
             "application_image_identity": self.application_image_identity,
             "frozen_at": self.frozen_at.isoformat(),
             "frozen_by": self.frozen_by,
