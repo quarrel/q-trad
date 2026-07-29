@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-29
-**Current milestone:** R2 — local and pooled baselines (R2.C software complete; R2.D next)
+**Current milestone:** R2 — local and pooled baselines (R2.D software complete; R2.E next)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -75,7 +75,21 @@ remains offline/replay.
   numerical-library identities; verification independently rebuilds its structural state exactly and
   numerical state within configured tolerances. This remains `IMPLEMENTATION_EVIDENCE_ONLY`: R2.C v1
   is deliberately limited to one eligible target, `LOCAL_RIDGE` and the primary horizon; final local
-  coefficients and forecasts begin in R2.D, and pooled selection belongs to R2.E.
+  coefficients and forecasts are supplied by R2.D, and pooled selection belongs to R2.E.
+- R2.D software now consumes an independently authenticated R2.C selection and fits the final
+  primary-horizon local Ridge only on complete outer-training membership. The immutable
+  `qtrad-r2-fold-fit-v1` contract retains fold, target, feature, preprocessing, selected-alpha,
+  library/image, coefficient, intercept, warning, failure and numerical-diagnostic evidence. Its
+  strict serializer independently rebuilds the fit within declared numerical tolerances. Local
+  outer-validation forecasts bind the exact R1 target and fold plus causal feature/training cut-offs;
+  a separate `qtrad-r2-forecast-coverage-v1` child accounts for every expected opportunity and emits
+  no zero fallback on failed fits or missing features. The local-feature ablation orchestrator
+  requires exact target/fold/feature-set selection coverage, and
+  `qtrad-r2-coefficient-stability-v1` records per-target, horizon and feature-set scale/sign stability.
+  Synthetic signal recovery, validation-label isolation, explicit failed-fit and missing-feature
+  coverage, coefficient replay, round-trip and rehashed-tamper tests pass. This remains
+  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration and any effectiveness conclusion
+  remain pending.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -119,8 +133,8 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.D local Ridge fitting and chronological forecast evidence while the independent IBKR
-   data track proceeds and native IG history accumulates.
+2. Continue R2.E pooled local-feature and pooled cross-asset controls while the independent IBKR data
+   track proceeds and native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.

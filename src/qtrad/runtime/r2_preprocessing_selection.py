@@ -412,6 +412,14 @@ def _optional_preprocessing(value: object, field: str) -> PreprocessingFit | Non
     )
 
 
+def decode_preprocessing_fit(
+    value: object, field: str = "preprocessing"
+) -> PreprocessingFit | None:
+    """Strictly decode reusable fold-local preprocessing state."""
+
+    return _optional_preprocessing(value, field)
+
+
 def _exact_object(value: object, keys: set[str], field: str) -> dict[str, object]:
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise TypeError(f"{field} must be a JSON object")

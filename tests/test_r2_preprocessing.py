@@ -9,6 +9,14 @@ from uuid import UUID
 import pytest
 from numpy import ndarray, zeros
 
+from qtrad.application.r2_baselines import (
+    LocalRidgeFoldResult,
+    build_coefficient_stability_summary,
+    build_local_ridge_fold,
+    replay_local_ridge_forecasts,
+    verify_coefficient_stability_summary,
+    verify_local_ridge_forecast_coverage,
+)
 from qtrad.application.r2_features import feature_schema_for_set
 from qtrad.application.r2_preprocessing import (
     TrainingRow,
@@ -29,6 +37,14 @@ from qtrad.domain.foundation import (
     TargetRow,
 )
 from qtrad.domain.market_data import PriceBasis
+from qtrad.domain.r2_baselines import (
+    CoefficientStabilitySummary,
+    ForecastCoverageDataset,
+    ForecastCoverageDisposition,
+    ForecastCoverageRow,
+    R2FoldFit,
+    fold_fit_id,
+)
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
@@ -51,6 +67,11 @@ from qtrad.domain.r2_readiness import (
     FeatureFamily,
     ModelFamily,
     R2ExperimentConfig,
+)
+from qtrad.runtime.r2_fold_fit import (
+    decode_r2_fold_fit,
+    serialize_r2_fold_fit,
+    verify_r2_fold_fit,
 )
 from qtrad.runtime.r2_preprocessing_selection import (
     decode_r2_preprocessing_selection,
@@ -87,6 +108,9 @@ _PREPROCESSING_SCHEMA = derive_r2_preprocessing_schema(_SCHEMA)
 
 _SELECTION_APPLICATION_IMAGE_IDENTITY = "qtrad@sha256:" + "7" * 64
 _SELECTION_SKLEARN_LIBRARY_IDENTITY = "scikit-learn==locked-test"
+_FINAL_APPLICATION_IMAGE_IDENTITY = "qtrad@sha256:" + "8" * 64
+_FINAL_NUMPY_LIBRARY_IDENTITY = "numpy==locked-test"
+_FINAL_SKLEARN_LIBRARY_IDENTITY = "scikit-learn==final-locked-test"
 
 
 def _training_rows() -> tuple[TrainingRow, ...]:
@@ -303,12 +327,22 @@ def test_configured_solver_and_loss_fail_closed() -> None:
         select_chronological_alpha(_training_rows(), **bad_loss_kwargs)
 
 
-def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2ExperimentConfig, Fold]:
+def _bound_fixture(
+    *, target_values: Sequence[float] | None = None, minimum_outer_validation_rows: int = 2
+) -> tuple[R1FoundationBindings, R2FeatureDataset, R2ExperimentConfig, Fold]:
     base = base_experiment()
     instrument = base.confirmatory_target_instruments[0]
     target_rows: list[TargetRow] = []
-    for index in range(8):
-        decision = START + timedelta(minutes=10 * index)
+    values = (
+        tuple(float(index) / 100 for index in range(10))
+        if target_values is None
+        else tuple(target_values)
+    )
+    if len(values) != 10:
+        raise ValueError("bound fixture requires exactly ten target values")
+    for index in range(10):
+        decision_minutes = 10 * index if index < 8 else 100 + 10 * (index - 8)
+        decision = START + timedelta(minutes=decision_minutes)
         endpoint = decision + timedelta(minutes=15)
         target_rows.append(
             TargetRow(
@@ -323,7 +357,7 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
                 target_available_at=endpoint,
                 label_start_close=Decimal("100"),
                 label_end_close=Decimal("101"),
-                log_return=float(index % 3) / 100,
+                log_return=values[index],
                 return_disposition=ReturnDisposition.VALID,
                 start_event_id=UUID(int=2 * index + 1),
                 end_event_id=UUID(int=2 * index + 2),
@@ -337,7 +371,8 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
         observation_dataset_id=base.observation_dataset_id,
         foundation_configuration_id=base.foundation_configuration_id,
     )
-    training_ids = tuple(row.target_id for row in target_rows)
+    training_ids = tuple(row.target_id for row in target_rows[:8])
+    validation_ids = tuple(row.target_id for row in target_rows[8:])
     fold = Fold(
         fold_id="outer-1",
         training_start=START,
@@ -346,9 +381,9 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
         validation_end=START + timedelta(minutes=120),
         embargo_end=START + timedelta(minutes=91),
         training_target_ids=training_ids,
-        validation_target_ids=(),
+        validation_target_ids=validation_ids,
         holdout_excluded=True,
-        membership_hash=membership_hash(training_ids, ()),
+        membership_hash=membership_hash(training_ids, validation_ids),
     )
     folds = FoldDataset.create(
         (fold,),
@@ -361,6 +396,7 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
         fold_dataset_id=folds.dataset_id,
         minimum_training_rows=4,
         minimum_inner_validation_rows=2,
+        minimum_outer_validation_rows=minimum_outer_validation_rows,
     )
     raw_schema = feature_schema_for_set(config, "L0")
     preprocessing_schema = derive_r2_preprocessing_schema(raw_schema)
@@ -458,6 +494,42 @@ def _bound_fixture() -> tuple[R1FoundationBindings, R2FeatureDataset, R2Experime
         ),
     )
     return verified, features, config, fold
+
+
+def _build_local_fold(
+    verified: R1FoundationBindings,
+    features: R2FeatureDataset,
+    config: R2ExperimentConfig,
+    selection: R2PreprocessingSelection,
+) -> LocalRidgeFoldResult:
+    return build_local_ridge_fold(
+        verified,
+        features,
+        config,
+        selection,
+        application_image_identity=_FINAL_APPLICATION_IMAGE_IDENTITY,
+        numpy_library_identity=_FINAL_NUMPY_LIBRARY_IDENTITY,
+        sklearn_library_identity=_FINAL_SKLEARN_LIBRARY_IDENTITY,
+    )
+
+
+def _verify_local_fit(
+    verified: R1FoundationBindings,
+    features: R2FeatureDataset,
+    config: R2ExperimentConfig,
+    selection: R2PreprocessingSelection,
+    payload: bytes | str | dict[str, JsonValue],
+) -> R2FoldFit:
+    return verify_r2_fold_fit(
+        verified,
+        features,
+        config,
+        selection,
+        payload,
+        application_image_identity=_FINAL_APPLICATION_IMAGE_IDENTITY,
+        numpy_library_identity=_FINAL_NUMPY_LIBRARY_IDENTITY,
+        sklearn_library_identity=_FINAL_SKLEARN_LIBRARY_IDENTITY,
+    )
 
 
 def _build_bound_selection(
@@ -839,6 +911,10 @@ def test_independent_verifier_rebuilds_and_rejects_rehashed_semantic_tampering()
         )
         == within
     )
+    assert (
+        _build_local_fold(verified, features, config, within).fit.disposition
+        is FitDisposition.READY
+    )
 
     outside_delta = 10 * (
         config.numeric_replay_absolute_tolerance
@@ -880,3 +956,283 @@ def test_independent_verifier_rebuilds_and_rejects_rehashed_semantic_tampering()
             target_instruments=target_instruments,
             persisted_payload=serialize_r2_preprocessing_selection(tampered),
         )
+
+
+def test_local_ridge_recovers_signal_and_replays_every_forecast() -> None:
+    verified, features, config, fold = _bound_fixture()
+    selection = _build_bound_selection(verified, features, config, fold)
+
+    result = _build_local_fold(verified, features, config, selection)
+
+    assert result.fit.disposition is FitDisposition.READY
+    assert result.fit.preprocessing == selection.selection.outer_preprocessing
+    assert result.fit.selected_alpha == selection.selection.selected_alpha
+    assert result.fit.application_image_identity == _FINAL_APPLICATION_IMAGE_IDENTITY
+    assert result.fit.numpy_library_identity == _FINAL_NUMPY_LIBRARY_IDENTITY
+    assert result.fit.sklearn_library_identity == _FINAL_SKLEARN_LIBRARY_IDENTITY
+    assert result.fit.application_image_identity != selection.application_image_identity
+    assert result.fit.sklearn_library_identity != selection.sklearn_library_identity
+    preprocessing = result.fit.preprocessing
+    assert preprocessing is not None
+    assert result.fit.coefficient_feature_names == preprocessing.active_feature_names
+    assert result.fit.fit_row_count == 8
+    assert result.fit.outer_validation_opportunity_count == 2
+    assert result.fit.diagnostics is not None
+    assert result.fit.diagnostics.prediction_replay_maximum_absolute_error <= (
+        config.numeric_replay_absolute_tolerance
+    )
+    assert len(result.forecasts.rows) == len(result.coverage.rows) == 2
+    assert all(
+        row.disposition is ForecastCoverageDisposition.FORECASTED for row in result.coverage.rows
+    )
+    assert result.forecasts.rows[1].expected_return > result.forecasts.rows[0].expected_return
+    assert all(row.training_cutoff == fold.training_cutoff for row in result.forecasts.rows)
+    assert all(row.model_id == result.fit.artifact_id for row in result.forecasts.rows)
+    replay_local_ridge_forecasts(result, features, config)
+    encoded = serialize_r2_fold_fit(result.fit)
+    assert decode_r2_fold_fit(encoded) == result.fit
+    assert _verify_local_fit(verified, features, config, selection, encoded) == result.fit
+    with pytest.raises(ValueError, match="authenticated rebuild"):
+        verify_r2_fold_fit(
+            verified,
+            features,
+            config,
+            selection,
+            encoded,
+            application_image_identity=selection.application_image_identity,
+            numpy_library_identity=_FINAL_NUMPY_LIBRARY_IDENTITY,
+            sklearn_library_identity=_FINAL_SKLEARN_LIBRARY_IDENTITY,
+        )
+
+    stability = build_coefficient_stability_summary((result.fit,))
+    assert stability.fold_fit_ids == (result.fit.artifact_id,)
+    assert stability.rows
+    assert all(row.ready_fit_count == row.expected_fit_count == 1 for row in stability.rows)
+
+
+def test_local_ridge_validation_targets_cannot_change_fit_or_forecast_values() -> None:
+    training = tuple(float(index) / 100 for index in range(8))
+    first = _bound_fixture(target_values=(*training, 0.08, 0.09))
+    second = _bound_fixture(target_values=(*training, 500.0, -500.0))
+
+    first_result = _build_local_fold(
+        first[0], first[1], first[2], _build_bound_selection(*first[:3], first[3])
+    )
+    second_result = _build_local_fold(
+        second[0], second[1], second[2], _build_bound_selection(*second[:3], second[3])
+    )
+
+    assert first_result.fit.intercept == second_result.fit.intercept
+    assert first_result.fit.coefficients == second_result.fit.coefficients
+    assert tuple(row.expected_return for row in first_result.forecasts.rows) == tuple(
+        row.expected_return for row in second_result.forecasts.rows
+    )
+
+
+def test_local_ridge_no_signal_control_does_not_create_forecast_gain() -> None:
+    orthogonal_training = (0.01, -0.01, -0.01, 0.01, 0.01, -0.01, -0.01, 0.01)
+    verified, features, config, fold = _bound_fixture(
+        target_values=(*orthogonal_training, 0.25, -0.25)
+    )
+    selection = _build_bound_selection(verified, features, config, fold)
+
+    result = _build_local_fold(verified, features, config, selection)
+
+    assert result.fit.disposition is FitDisposition.READY
+    assert len(result.forecasts.rows) == 2
+    assert max(abs(row.expected_return) for row in result.forecasts.rows) < 1e-12
+
+
+def test_failed_local_fit_emits_explicit_coverage_and_no_forecast() -> None:
+    verified, features, config, fold = _bound_fixture(target_values=(0.0,) * 10)
+    selection = _build_bound_selection(verified, features, config, fold)
+
+    result = _build_local_fold(verified, features, config, selection)
+
+    assert result.fit.disposition is FitDisposition.DEGENERATE_TARGET
+    assert result.fit.failure
+    assert result.forecasts.rows == ()
+    assert len(result.coverage.rows) == 2
+    assert all(
+        row.disposition is ForecastCoverageDisposition.DEGENERATE_TARGET
+        and row.forecast_id is None
+        and row.reason
+        for row in result.coverage.rows
+    )
+
+
+def test_missing_validation_features_reduce_coverage_without_zero_fallback() -> None:
+    verified, features, config, fold = _bound_fixture()
+    reduced = R2FeatureDataset.create(
+        features.rows[:-1],
+        feature_schema=features.feature_schema,
+        feature_set_name=features.feature_set_name,
+        observation_dataset_id=features.observation_dataset_id,
+        panel_dataset_id=features.panel_dataset_id,
+        target_dataset_id=features.target_dataset_id,
+        fold_dataset_id=features.fold_dataset_id,
+        experiment_configuration_id=features.experiment_configuration_id,
+        evidence_class=features.evidence_class,
+    )
+    selection = _build_bound_selection(verified, reduced, config, fold)
+
+    result = _build_local_fold(verified, reduced, config, selection)
+
+    assert len(result.forecasts.rows) == 1
+    assert tuple(row.disposition for row in result.coverage.rows) == (
+        ForecastCoverageDisposition.FORECASTED,
+        ForecastCoverageDisposition.FEATURES_UNAVAILABLE,
+    )
+    assert result.coverage.rows[1].forecast_id is None
+
+
+def test_fold_fit_verifier_rejects_rehashed_coefficient_tampering() -> None:
+    verified, features, config, fold = _bound_fixture()
+    selection = _build_bound_selection(verified, features, config, fold)
+    fit = _build_local_fold(verified, features, config, selection).fit
+    payload = fit.semantic_json()
+    coefficients = cast(list[JsonValue], payload["coefficients"])
+    coefficients[0] = cast(float, coefficients[0]) + 1.0
+    tampered = {**payload, "artifact_id": fold_fit_id(payload)}
+
+    with pytest.raises(ValueError, match="numerically"):
+        _verify_local_fit(verified, features, config, selection, tampered)
+
+
+def test_outer_validation_minimum_does_not_gate_r2d_fit_or_forecasts() -> None:
+    verified, features, config, fold = _bound_fixture(minimum_outer_validation_rows=3)
+    selection = _build_bound_selection(verified, features, config, fold)
+
+    result = _build_local_fold(verified, features, config, selection)
+
+    assert result.fit.outer_validation_opportunity_count < config.minimum_outer_validation_rows
+    assert result.fit.disposition is FitDisposition.READY
+    assert len(result.forecasts.rows) == len(result.coverage.rows) == 2
+    assert all(
+        row.disposition is ForecastCoverageDisposition.FORECASTED for row in result.coverage.rows
+    )
+
+
+def _coverage_with_rows(
+    result: LocalRidgeFoldResult, rows: Sequence[ForecastCoverageRow]
+) -> ForecastCoverageDataset:
+    return ForecastCoverageDataset.create(
+        rows,
+        experiment_configuration_id=result.coverage.experiment_configuration_id,
+        target_dataset_id=result.coverage.target_dataset_id,
+        fold_dataset_id=result.coverage.fold_dataset_id,
+        r2_feature_dataset_id=result.coverage.r2_feature_dataset_id,
+    )
+
+
+def _result_with_unforecasted_opportunity() -> tuple[
+    R1FoundationBindings, R2FeatureDataset, R2ExperimentConfig, LocalRidgeFoldResult
+]:
+    verified, features, config, fold = _bound_fixture()
+    reduced = R2FeatureDataset.create(
+        features.rows[:-1],
+        feature_schema=features.feature_schema,
+        feature_set_name=features.feature_set_name,
+        observation_dataset_id=features.observation_dataset_id,
+        panel_dataset_id=features.panel_dataset_id,
+        target_dataset_id=features.target_dataset_id,
+        fold_dataset_id=features.fold_dataset_id,
+        experiment_configuration_id=features.experiment_configuration_id,
+        evidence_class=features.evidence_class,
+    )
+    selection = _build_bound_selection(verified, reduced, config, fold)
+    return verified, reduced, config, _build_local_fold(verified, reduced, config, selection)
+
+
+def test_coverage_verifier_rejects_dropped_unforecasted_opportunity() -> None:
+    verified, features, config, result = _result_with_unforecasted_opportunity()
+    retained = tuple(
+        row
+        for row in result.coverage.rows
+        if row.disposition is ForecastCoverageDisposition.FORECASTED
+    )
+    tampered = replace(result, coverage=_coverage_with_rows(result, retained))
+
+    with pytest.raises(ValueError, match="authenticated R1 membership"):
+        verify_local_ridge_forecast_coverage(verified, features, config, tampered)
+
+
+def test_coverage_verifier_rejects_substituted_target() -> None:
+    verified, features, config, result = _result_with_unforecasted_opportunity()
+    original = next(
+        row
+        for row in result.coverage.rows
+        if row.disposition is ForecastCoverageDisposition.FEATURES_UNAVAILABLE
+    )
+    substitute = ForecastCoverageRow.create(
+        target_id=verified.targets.rows[0].target_id,
+        target_instrument_id=original.target_instrument_id,
+        decision_time=original.decision_time,
+        horizon=original.horizon,
+        outer_fold_id=original.outer_fold_id,
+        fold_fit_id=original.fold_fit_id,
+        feature_data_asof=original.feature_data_asof,
+        disposition=original.disposition,
+        forecast_id=original.forecast_id,
+        reason=original.reason,
+    )
+    rows = tuple(substitute if row == original else row for row in result.coverage.rows)
+    tampered = replace(result, coverage=_coverage_with_rows(result, rows))
+
+    with pytest.raises(ValueError, match="authenticated R1 membership"):
+        verify_local_ridge_forecast_coverage(verified, features, config, tampered)
+
+
+def test_coverage_verifier_rejects_duplicate_target_rows_with_distinct_hashes() -> None:
+    verified, features, config, result = _result_with_unforecasted_opportunity()
+    original = next(
+        row
+        for row in result.coverage.rows
+        if row.disposition is ForecastCoverageDisposition.FEATURES_UNAVAILABLE
+    )
+    duplicate = ForecastCoverageRow.create(
+        target_id=original.target_id,
+        target_instrument_id=original.target_instrument_id,
+        decision_time=original.decision_time,
+        horizon=original.horizon,
+        outer_fold_id=original.outer_fold_id,
+        fold_fit_id=original.fold_fit_id,
+        feature_data_asof=original.feature_data_asof,
+        disposition=original.disposition,
+        forecast_id=None,
+        reason="distinct rehashed duplicate coverage row",
+    )
+    tampered = replace(
+        result, coverage=_coverage_with_rows(result, (*result.coverage.rows, duplicate))
+    )
+
+    with pytest.raises(ValueError, match="authenticated R1 membership"):
+        verify_local_ridge_forecast_coverage(verified, features, config, tampered)
+
+
+def test_stability_verifier_rejects_rehashed_mean_and_sign_count_tampering() -> None:
+    verified, features, config, fold = _bound_fixture()
+    fit = _build_local_fold(
+        verified, features, config, _build_bound_selection(verified, features, config, fold)
+    ).fit
+    summary = build_coefficient_stability_summary((fit,))
+    mean_row = summary.rows[0]
+    altered_mean = CoefficientStabilitySummary.create(
+        (replace(mean_row, mean=mean_row.mean + 1.0), *summary.rows[1:]), summary.fold_fit_ids
+    )
+    sign_position, sign_row = next(
+        (position, row)
+        for position, row in enumerate(summary.rows)
+        if row.positive_count != row.negative_count
+    )
+    altered_sign_rows = list(summary.rows)
+    altered_sign_rows[sign_position] = replace(
+        sign_row,
+        positive_count=sign_row.negative_count,
+        negative_count=sign_row.positive_count,
+    )
+    altered_sign = CoefficientStabilitySummary.create(altered_sign_rows, summary.fold_fit_ids)
+
+    for tampered in (altered_mean, altered_sign):
+        with pytest.raises(ValueError, match="authenticated fold-fit replay"):
+            verify_coefficient_stability_summary(tampered, (fit,))
