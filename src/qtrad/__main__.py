@@ -1685,6 +1685,7 @@ def _ibkr_capability_adapter(settings: Settings):
     """Compose the isolated market-data-only Stage 1 adapter on explicit account-probe execution."""
 
     from qtrad.adapters.ibkr.capability import (
+        IbkrApiIdentity,
         IbkrGatewayEndpoint,
         OfficialIbkrCapabilityAdapter,
     )
@@ -1694,7 +1695,12 @@ def _ibkr_capability_adapter(settings: Settings):
             host=settings.ibkr_gateway_host,
             port=settings.ibkr_gateway_port,
             client_id=settings.ibkr_client_id,
-        )
+        ),
+        api_identity=(
+            IbkrApiIdentity(package_fingerprint=settings.ibkr_api_package_fingerprint)
+            if settings.ibkr_api_package_fingerprint is not None
+            else None
+        ),
     )
 
 
@@ -1922,6 +1928,8 @@ async def _review_instruments(
                 instruments=candidates.instruments,
                 probe_spec_name=probe_spec.name,
                 probe_spec_hash=probe_spec.configuration_hash,
+                api_version="10.33.1",
+                api_package_fingerprint=settings.ibkr_api_package_fingerprint or "",
                 results=results,
                 observed_at=clock.now(),
             )

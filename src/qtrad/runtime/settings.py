@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     ibkr_gateway_host: str = "127.0.0.1"
     ibkr_gateway_port: int = 4002
     ibkr_client_id: int = 71
+    ibkr_api_package_fingerprint: str | None = None
 
     @field_validator("database_url")
     @classmethod

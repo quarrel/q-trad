@@ -89,6 +89,7 @@ class IbkrRequestEvidence:
     latency_milliseconds: int
     contract_con_id: int | None = None
     market_data_type: str | None = None
+    availability: str | None = None
     bid_seen: bool = False
     ask_seen: bool = False
     bid_size_seen: bool = False
@@ -98,12 +99,21 @@ class IbkrRequestEvidence:
     timezone: str | None = None
     use_rth: bool | None = None
     error_codes: tuple[str, ...] = ()
+    error_times: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if not self.kind or len(self.kind) > 80:
             raise ValueError("IBKR request evidence kind must be bounded")
-        if self.status not in {"SUCCESS", "UNAVAILABLE", "ERROR", "TIMEOUT"}:
+        if self.status not in {"SUCCESS", "UNAVAILABLE", "ERROR", "TIMEOUT", "AMBIGUOUS"}:
             raise ValueError("IBKR request evidence status is invalid")
+        if self.availability not in {
+            None,
+            "LIVE_AVAILABLE",
+            "DELAYED_AVAILABLE",
+            "FROZEN_OR_DELAYED_FROZEN",
+            "UNAVAILABLE",
+        }:
+            raise ValueError("IBKR market-data availability classification is invalid")
         if self.latency_milliseconds < 0:
             raise ValueError("IBKR request latency cannot be negative")
         if self.contract_con_id is not None and self.contract_con_id <= 0:
@@ -116,6 +126,8 @@ class IbkrRequestEvidence:
             raise ValueError("IBKR request error codes must be unique")
         if any(not code or len(code) > 32 for code in self.error_codes):
             raise ValueError("IBKR request error codes must be bounded")
+        if any(error_time < 0 for error_time in self.error_times):
+            raise ValueError("IBKR request error times must be non-negative")
 
 
 @dataclass(frozen=True, slots=True)

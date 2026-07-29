@@ -1,8 +1,10 @@
 """Official TWS API transport used only by the bounded Stage 1 capability probe."""
 
 import asyncio
+import hashlib
 import importlib
-from collections.abc import Callable, Sequence
+import importlib.metadata
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -24,6 +26,16 @@ _BID = 1
 _ASK = 2
 _BID_SIZE = 0
 _ASK_SIZE = 3
+_DELAYED_BID = 66
+_DELAYED_ASK = 67
+_DELAYED_BID_SIZE = 69
+_DELAYED_ASK_SIZE = 70
+_MAX_QUERIES = 24
+_MAX_CONTRACTS_PER_QUERY = 1
+_HISTORICAL_REQUESTS_PER_CONTRACT = 8
+_MAX_HISTORICAL_REQUESTS_PER_RUN = 192
+_HISTORICAL_REQUEST_INTERVAL_SECONDS = 12.5
+_PINNED_API_VERSION = "10.33.1"
 _MARKET_DATA_TYPES = {
     "1": "LIVE",
     "2": "FROZEN",
@@ -37,6 +49,22 @@ class IbkrGatewayEndpoint:
     host: str
     port: int
     client_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrApiIdentity:
+    """Controlled official API distribution identity required before socket construction."""
+
+    package_fingerprint: str
+    version: str = _PINNED_API_VERSION
+
+    def __post_init__(self) -> None:
+        if self.version != _PINNED_API_VERSION:
+            raise ValueError(f"IBKR capability adapter requires TWS API {_PINNED_API_VERSION}")
+        if len(self.package_fingerprint) != 64 or any(
+            character not in "0123456789abcdef" for character in self.package_fingerprint
+        ):
+            raise ValueError("IBKR API package fingerprint must be a lowercase SHA-256 digest")
 
 
 @dataclass(frozen=True, slots=True)
@@ -55,13 +83,21 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         *,
         request_timeout_seconds: float = 10.0,
         client_factory: Callable[[Queue[_Callback]], Any] | None = None,
+        api_identity: IbkrApiIdentity | None = None,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if request_timeout_seconds <= 0:
             raise ValueError("IBKR capability request timeout must be positive")
         self._endpoint = endpoint
         self._request_timeout_seconds = request_timeout_seconds
         self._callbacks: Queue[_Callback] = Queue(maxsize=2_000)
-        self._client_factory = client_factory or _official_client
+        if client_factory is None and api_identity is None:
+            raise ValueError("IBKR capability adapter requires a verified official API identity")
+        self._client_factory = client_factory or (
+            lambda callbacks: _official_client(callbacks, cast(IbkrApiIdentity, api_identity))
+        )
+        self._sleep = sleep
+        self._last_historical_request_at: float | None = None
         self._client: Any | None = None
         self._thread: Thread | None = None
         self._next_request_id = 1
@@ -95,8 +131,15 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     ) -> Sequence[IbkrCandidateCapability]:
         if self._client is None:
             raise RuntimeError("IBKR capability adapter is not connected")
-        if not queries or len(queries) > 100:
-            raise ValueError("IBKR capability probe requires between one and 100 queries")
+        if not queries or len(queries) > _MAX_QUERIES:
+            raise ValueError(
+                f"IBKR capability probe requires between one and {_MAX_QUERIES} queries"
+            )
+        if (
+            len(queries) * _MAX_CONTRACTS_PER_QUERY * _HISTORICAL_REQUESTS_PER_CONTRACT
+            > _MAX_HISTORICAL_REQUESTS_PER_RUN
+        ):
+            raise ValueError("IBKR capability probe exceeds the historical request budget")
         results: list[IbkrCandidateCapability] = []
         for query in queries:
             results.append(await self._probe_query(query))
@@ -107,18 +150,37 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         request_id = self._request_id()
         started = monotonic()
         client.reqContractDetails(request_id, _contract(query))
-        callbacks = await self._collect_until(request_id, "contract_details_end")
+        try:
+            callbacks = await self._collect_until(request_id, "contract_details_end")
+        except TimeoutError:
+            return IbkrCandidateCapability(
+                query=query,
+                contracts=(),
+                requests=(
+                    IbkrRequestEvidence(
+                        kind="CONTRACT_DETAILS",
+                        status="TIMEOUT",
+                        latency_milliseconds=_milliseconds(started),
+                    ),
+                ),
+            )
         error_codes = _error_codes(callbacks)
-        contracts = tuple(
+        returned_contracts = tuple(
             _contract_evidence(callback.values[0])
             for callback in callbacks
             if callback.kind == "contract_details"
         )
+        contracts = returned_contracts[:_MAX_CONTRACTS_PER_QUERY]
         contract_request = IbkrRequestEvidence(
             kind="CONTRACT_DETAILS",
-            status=_status(callbacks, "contract_details_end"),
+            status=(
+                "AMBIGUOUS"
+                if len(returned_contracts) > _MAX_CONTRACTS_PER_QUERY
+                else _status(callbacks, "contract_details_end")
+            ),
             latency_milliseconds=_milliseconds(started),
             error_codes=error_codes,
+            error_times=_error_times(callbacks),
         )
         requests: list[IbkrRequestEvidence] = [contract_request]
         for contract in contracts:
@@ -128,11 +190,28 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     async def _probe_contract(
         self, contract: IbkrContractEvidence
     ) -> tuple[IbkrRequestEvidence, ...]:
-        client = self._require_client()
         api_contract = _contract_from_evidence(contract)
+        market = await self._market_evidence(api_contract, contract.con_id, 1, "LIVE_TOP_OF_BOOK")
+        delayed = await self._market_evidence(
+            api_contract, contract.con_id, 3, "DELAYED_ENABLED_TOP_OF_BOOK"
+        )
+        historical: list[IbkrRequestEvidence] = []
+        for value in ("MIDPOINT", "BID", "ASK"):
+            for use_rth in (False, True):
+                historical.append(
+                    await self._historical_evidence(api_contract, contract.con_id, value, use_rth)
+                )
+        one_second = await self._one_second_evidence(api_contract, contract.con_id)
+        earliest = await self._earliest_evidence(api_contract, contract.con_id)
+        return (market, delayed, *historical, one_second, earliest)
+
+    async def _market_evidence(
+        self, api_contract: object, con_id: int, requested_type: int, kind: str
+    ) -> IbkrRequestEvidence:
+        client = self._require_client()
         market_request_id = self._request_id()
         started = monotonic()
-        client.reqMarketDataType(1)
+        client.reqMarketDataType(requested_type)
         client.reqMktData(market_request_id, api_contract, "", False, False, [])
         callbacks = await self._collect_for(market_request_id, self._request_timeout_seconds)
         client.cancelMktData(market_request_id)
@@ -144,27 +223,29 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         data_types = [
             str(callback.values[0]) for callback in callbacks if callback.kind == "market_data_type"
         ]
-        market = IbkrRequestEvidence(
-            kind="LIVE_TOP_OF_BOOK",
+        data_type = _MARKET_DATA_TYPES.get(data_types[-1]) if data_types else None
+        delayed = requested_type == 3 or data_type in {"DELAYED", "DELAYED_FROZEN"}
+        bid, ask, bid_size, ask_size = (
+            (_DELAYED_BID, _DELAYED_ASK, _DELAYED_BID_SIZE, _DELAYED_ASK_SIZE)
+            if delayed
+            else (_BID, _ASK, _BID_SIZE, _ASK_SIZE)
+        )
+        return IbkrRequestEvidence(
+            kind=kind,
             status=_window_status(callbacks),
             latency_milliseconds=_milliseconds(started),
-            contract_con_id=contract.con_id,
-            market_data_type=_MARKET_DATA_TYPES.get(data_types[-1]) if data_types else None,
-            bid_seen=_BID in tick_types,
-            ask_seen=_ASK in tick_types,
-            bid_size_seen=_BID_SIZE in tick_types,
-            ask_size_seen=_ASK_SIZE in tick_types,
+            contract_con_id=con_id,
+            market_data_type=data_type,
+            availability=_market_availability(
+                callbacks, data_type, bid in tick_types, ask in tick_types
+            ),
+            bid_seen=bid in tick_types,
+            ask_seen=ask in tick_types,
+            bid_size_seen=bid_size in tick_types,
+            ask_size_seen=ask_size in tick_types,
             error_codes=_error_codes(callbacks),
+            error_times=_error_times(callbacks),
         )
-        historical: list[IbkrRequestEvidence] = []
-        for value in ("MIDPOINT", "BID", "ASK"):
-            for use_rth in (False, True):
-                historical.append(
-                    await self._historical_evidence(api_contract, contract.con_id, value, use_rth)
-                )
-        one_second = await self._one_second_evidence(api_contract, contract.con_id)
-        earliest = await self._earliest_evidence(api_contract, contract.con_id)
-        return (market, *historical, one_second, earliest)
 
     async def _historical_evidence(
         self, contract: object, con_id: int, what_to_show: str, use_rth: bool
@@ -172,10 +253,21 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         client = self._require_client()
         request_id = self._request_id()
         started = monotonic()
+        await self._pace_historical_request()
         client.reqHistoricalData(
             request_id, contract, "", "120 S", "1 min", what_to_show, int(use_rth), 2, False, []
         )
-        callbacks = await self._collect_until(request_id, "historical_data_end")
+        try:
+            callbacks = await self._collect_until(request_id, "historical_data_end")
+        except TimeoutError:
+            client.cancelHistoricalData(request_id)
+            return IbkrRequestEvidence(
+                kind=f"ONE_MINUTE_{what_to_show}_{'RTH' if use_rth else 'ALL'}",
+                status="TIMEOUT",
+                latency_milliseconds=_milliseconds(started),
+                contract_con_id=con_id,
+                use_rth=use_rth,
+            )
         return IbkrRequestEvidence(
             kind=f"ONE_MINUTE_{what_to_show}_{'RTH' if use_rth else 'ALL'}",
             status=_status(callbacks, "historical_data_end"),
@@ -184,12 +276,14 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             row_count=sum(callback.kind == "historical_data" for callback in callbacks),
             use_rth=use_rth,
             error_codes=_error_codes(callbacks),
+            error_times=_error_times(callbacks),
         )
 
     async def _one_second_evidence(self, contract: object, con_id: int) -> IbkrRequestEvidence:
         client = self._require_client()
         request_id = self._request_id()
         started = monotonic()
+        await self._pace_historical_request()
         client.reqHistoricalData(
             request_id,
             contract,
@@ -202,7 +296,17 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             False,
             [],
         )
-        callbacks = await self._collect_until(request_id, "historical_data_end")
+        try:
+            callbacks = await self._collect_until(request_id, "historical_data_end")
+        except TimeoutError:
+            client.cancelHistoricalData(request_id)
+            return IbkrRequestEvidence(
+                kind="ONE_SECOND_MIDPOINT_ALL",
+                status="TIMEOUT",
+                latency_milliseconds=_milliseconds(started),
+                contract_con_id=con_id,
+                use_rth=False,
+            )
         return IbkrRequestEvidence(
             kind="ONE_SECOND_MIDPOINT_ALL",
             status=_status(callbacks, "historical_data_end"),
@@ -211,14 +315,25 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             row_count=sum(callback.kind == "historical_data" for callback in callbacks),
             use_rth=False,
             error_codes=_error_codes(callbacks),
+            error_times=_error_times(callbacks),
         )
 
     async def _earliest_evidence(self, contract: object, con_id: int) -> IbkrRequestEvidence:
         client = self._require_client()
         request_id = self._request_id()
         started = monotonic()
+        await self._pace_historical_request()
         client.reqHeadTimeStamp(request_id, contract, "MIDPOINT", 0, 2)
-        callbacks = await self._collect_until(request_id, "head_timestamp")
+        try:
+            callbacks = await self._collect_until(request_id, "head_timestamp")
+        except TimeoutError:
+            client.cancelHeadTimeStamp(request_id)
+            return IbkrRequestEvidence(
+                kind="EARLIEST_MIDPOINT",
+                status="TIMEOUT",
+                latency_milliseconds=_milliseconds(started),
+                contract_con_id=con_id,
+            )
         client.cancelHeadTimeStamp(request_id)
         timestamps = [
             callback.values[0] for callback in callbacks if callback.kind == "head_timestamp"
@@ -231,6 +346,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             contract_con_id=con_id,
             earliest_timestamp=timestamp,
             error_codes=_error_codes(callbacks),
+            error_times=_error_times(callbacks),
         )
 
     def _require_client(self) -> Any:
@@ -242,6 +358,16 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         request_id = self._next_request_id
         self._next_request_id += 1
         return request_id
+
+    async def _pace_historical_request(self) -> None:
+        now = monotonic()
+        if self._last_historical_request_at is not None:
+            remaining = _HISTORICAL_REQUEST_INTERVAL_SECONDS - (
+                now - self._last_historical_request_at
+            )
+            if remaining > 0:
+                await self._sleep(remaining)
+        self._last_historical_request_at = monotonic()
 
     async def _collect_until(self, request_id: int, terminal_kind: str) -> list[_Callback]:
         callbacks: list[_Callback] = []
@@ -271,7 +397,12 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             callback = await self._next_callback(deadline)
             if callback.request_id == request_id and callback.kind in kinds:
                 return callback
-            if callback.kind == "error" and callback.request_id in {request_id, -1}:
+            if (
+                callback.kind == "error"
+                and callback.request_id in {request_id, -1}
+                and _error_disposition(callback)
+                in {"CONNECTION_LOST", "PORT_RESET", "REQUEST_ERROR"}
+            ):
                 code = _error_codes((callback,))[0]
                 raise RuntimeError(f"IBKR capability connection failed with {code}")
 
@@ -285,7 +416,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             raise TimeoutError("IBKR capability request timed out") from error
 
 
-def _official_client(callbacks: Queue[_Callback]) -> Any:
+def _official_client(callbacks: Queue[_Callback], identity: IbkrApiIdentity) -> Any:
+    _verify_official_api_distribution(identity)
     try:
         client_module = importlib.import_module("ibapi.client")
         wrapper_module = importlib.import_module("ibapi.wrapper")
@@ -331,8 +463,18 @@ def _official_client(callbacks: Queue[_Callback]) -> Any:
         def headTimestamp(self, reqId: int, headTimestamp: str) -> None:
             _emit(callbacks, _Callback("head_timestamp", reqId, (headTimestamp,)))
 
-        def error(self, reqId: int, errorCode: int, errorString: str, *args: object) -> None:
-            _emit(callbacks, _Callback("error", reqId, (errorCode,)))
+        def error(
+            self,
+            reqId: int,
+            errorTime: int,
+            errorCode: int,
+            errorString: str,
+            advancedOrderRejectJson: str,
+        ) -> None:
+            _emit(
+                callbacks,
+                _Callback("error", reqId, (errorTime, errorCode, _error_classification(errorCode))),
+            )
 
     return _Client()
 
@@ -421,13 +563,83 @@ def _window_status(callbacks: Sequence[_Callback]) -> str:
 def _error_codes(callbacks: Sequence[_Callback]) -> tuple[str, ...]:
     return tuple(
         sorted(
+            {f"IBKR_{_error_code(callback)}" for callback in callbacks if callback.kind == "error"}
+        )
+    )
+
+
+def _error_times(callbacks: Sequence[_Callback]) -> tuple[int, ...]:
+    return tuple(
+        sorted(
             {
-                f"IBKR_{int(cast(str | int, callback.values[0]))}"
+                int(cast(str | int, callback.values[0]))
                 for callback in callbacks
                 if callback.kind == "error"
             }
         )
     )
+
+
+def _error_code(callback: _Callback) -> int:
+    return int(cast(str | int, callback.values[1]))
+
+
+def _error_disposition(callback: _Callback) -> str:
+    return cast(str, callback.values[2])
+
+
+def _error_classification(error_code: int) -> str:
+    if error_code in {2104, 2106, 2107, 2108, 2158}:
+        return "INFORMATIONAL"
+    if error_code == 1100:
+        return "CONNECTION_LOST"
+    if error_code == 1101:
+        return "CONNECTION_RESTORED_DATA_LOST"
+    if error_code == 1102:
+        return "CONNECTION_RESTORED_DATA_MAINTAINED"
+    if error_code == 1300:
+        return "PORT_RESET"
+    return "REQUEST_ERROR"
+
+
+def _market_availability(
+    callbacks: Sequence[_Callback], data_type: str | None, bid_seen: bool, ask_seen: bool
+) -> str:
+    if any(
+        callback.kind == "error" and _error_disposition(callback) == "REQUEST_ERROR"
+        for callback in callbacks
+    ):
+        return "UNAVAILABLE"
+    if data_type == "LIVE" and bid_seen and ask_seen:
+        return "LIVE_AVAILABLE"
+    if data_type == "DELAYED" and bid_seen and ask_seen:
+        return "DELAYED_AVAILABLE"
+    if data_type in {"FROZEN", "DELAYED_FROZEN"}:
+        return "FROZEN_OR_DELAYED_FROZEN"
+    return "UNAVAILABLE"
+
+
+def _verify_official_api_distribution(identity: IbkrApiIdentity) -> None:
+    try:
+        distribution = importlib.metadata.distribution("ibapi")
+    except importlib.metadata.PackageNotFoundError as error:
+        raise RuntimeError("pinned official IBKR TWS API wheel is unavailable") from error
+    if distribution.version != identity.version:
+        raise RuntimeError("installed IBKR API version does not match the pinned release")
+    files = distribution.files or ()
+    digest = hashlib.sha256()
+    for file in sorted(files, key=str):
+        if file.name == "RECORD":
+            continue
+        digest.update(str(file).encode())
+        try:
+            digest.update(distribution.locate_file(file).read_bytes())
+        except OSError as error:
+            raise RuntimeError("installed IBKR API distribution cannot be fingerprinted") from error
+    if digest.hexdigest() != identity.package_fingerprint:
+        raise RuntimeError(
+            "installed IBKR API distribution does not match the controlled fingerprint"
+        )
 
 
 def _milliseconds(started: float) -> int:

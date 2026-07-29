@@ -769,7 +769,12 @@ async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
         "_ig_review_adapter",
         Mock(side_effect=AssertionError("IG adapter must not be composed")),
     )
-    settings = Settings(ibkr_gateway_host="127.0.0.1", ibkr_gateway_port=4002, ibkr_client_id=71)
+    settings = Settings(
+        ibkr_gateway_host="127.0.0.1",
+        ibkr_gateway_port=4002,
+        ibkr_client_id=71,
+        ibkr_api_package_fingerprint="a" * 64,
+    )
     output = tmp_path / "ibkr-preflight.json"
 
     await cli._review_instruments(
@@ -860,7 +865,7 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
     catalogue = cli.load_capture_candidates(Path("config/capture-ibkr-v1-candidates.toml"))
     probe_spec = tmp_path / "operator-probe.toml"
     probe_spec.write_text(
-        'name = "operator-probe-v1"\n'
+        'schema_version = 1\nname = "operator-probe-v1"\n'
         + "\n".join(
             "[[query]]\n"
             f'instrument_id = "{instrument.instrument_id}"\n'
@@ -875,7 +880,12 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
     output = tmp_path / "ibkr-review.json"
     clock = Mock(spec=Clock)
     clock.now.return_value = datetime(2026, 7, 29, tzinfo=UTC)
-    settings = Settings(ibkr_gateway_host="127.0.0.1", ibkr_gateway_port=4002, ibkr_client_id=71)
+    settings = Settings(
+        ibkr_gateway_host="127.0.0.1",
+        ibkr_gateway_port=4002,
+        ibkr_client_id=71,
+        ibkr_api_package_fingerprint="a" * 64,
+    )
 
     await cli._review_instruments(
         settings,

@@ -78,6 +78,8 @@ def test_ibkr_capability_review_is_complete_non_authoritative_and_deterministic(
         "instruments": (_instrument(),),
         "probe_spec_name": "operator-probe-v1",
         "probe_spec_hash": "b" * 64,
+        "api_version": "10.33.1",
+        "api_package_fingerprint": "c" * 64,
         "results": (_result(),),
         "observed_at": datetime(2026, 7, 29, tzinfo=UTC),
     }
@@ -117,6 +119,8 @@ def test_ibkr_capability_review_rejects_missing_candidate_query_result() -> None
             instruments=(_instrument(),),
             probe_spec_name="operator-probe-v1",
             probe_spec_hash="b" * 64,
+            api_version="10.33.1",
+            api_package_fingerprint="c" * 64,
             results=(),
             observed_at=datetime(2026, 7, 29, tzinfo=UTC),
         )

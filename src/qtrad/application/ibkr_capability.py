@@ -132,6 +132,8 @@ def build_ibkr_capability_review(
     instruments: Sequence[Instrument],
     probe_spec_name: str,
     probe_spec_hash: str,
+    api_version: str,
+    api_package_fingerprint: str,
     results: Sequence[IbkrCandidateCapability],
     observed_at: datetime,
 ) -> IbkrCapabilityReview:
@@ -142,6 +144,10 @@ def build_ibkr_capability_review(
         raise ValueError("IBKR capability review requires a named, hashed catalogue")
     if not probe_spec_name or len(probe_spec_hash) != 64:
         raise ValueError("IBKR capability review requires a named, hashed probe spec")
+    if not api_version or len(api_version) > 32:
+        raise ValueError("IBKR capability review requires a bounded API version")
+    if len(api_package_fingerprint) != 64:
+        raise ValueError("IBKR capability review requires an API package fingerprint")
     expected = {instrument.instrument_id: instrument for instrument in instruments}
     if not expected or len(expected) != len(instruments):
         raise ValueError("IBKR capability review instruments must be non-empty and unique")
@@ -193,6 +199,10 @@ def build_ibkr_capability_review(
         "catalogue_hash": catalogue_hash,
         "probe_spec_name": probe_spec_name,
         "probe_spec_hash": probe_spec_hash,
+        "api": {
+            "version": api_version,
+            "package_fingerprint": api_package_fingerprint,
+        },
         "observed_at": to_json_value(observed_at),
         "selection_authority": False,
         "external_io_performed": True,

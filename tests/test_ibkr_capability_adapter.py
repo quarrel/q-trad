@@ -1,5 +1,6 @@
+import sys
 from queue import Queue
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 
@@ -50,7 +51,8 @@ class _FakeClient:
         self._callbacks.put(capability._Callback("contract_details_end", request_id, ()))
 
     def reqMarketDataType(self, market_data_type: int) -> None:
-        assert market_data_type == 1
+        assert market_data_type in {1, 3}
+        self._market_data_type = market_data_type
 
     def reqMktData(
         self,
@@ -61,8 +63,12 @@ class _FakeClient:
         regulatory_snapshot: bool,
         options: list[object],
     ) -> None:
-        self._callbacks.put(capability._Callback("market_data_type", request_id, (1,)))
-        for tick_type in (0, 1, 2, 3):
+        market_data_type = getattr(self, "_market_data_type", 1)
+        self._callbacks.put(
+            capability._Callback("market_data_type", request_id, (market_data_type,))
+        )
+        tick_types = (0, 1, 2, 3) if market_data_type == 1 else (66, 67, 69, 70)
+        for tick_type in tick_types:
             kind = "tick_size" if tick_type in {0, 3} else "tick_price"
             self._callbacks.put(capability._Callback(kind, request_id, (tick_type, 1)))
 
@@ -77,6 +83,9 @@ class _FakeClient:
         self._callbacks.put(capability._Callback("head_timestamp", request_id, ("1785369600",)))
 
     def cancelHeadTimeStamp(self, request_id: int) -> None:
+        return None
+
+    def cancelHistoricalData(self, request_id: int) -> None:
         return None
 
 
@@ -96,6 +105,7 @@ async def test_direct_capability_adapter_collects_bounded_market_data_evidence(
         capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
         request_timeout_seconds=0.001,
         client_factory=factory,
+        sleep=_immediate_sleep,
     )
     assert not hasattr(adapter, "placeOrder")
     assert not hasattr(adapter, "place_order")
@@ -118,3 +128,58 @@ async def test_direct_capability_adapter_collects_bounded_market_data_evidence(
     assert requests["LIVE_TOP_OF_BOOK"].bid_seen is True
     assert requests["ONE_SECOND_MIDPOINT_ALL"].row_count == 1
     assert requests["EARLIEST_MIDPOINT"].earliest_timestamp is not None
+
+
+async def _immediate_sleep(seconds: float) -> None:
+    return None
+
+
+def test_current_official_error_callback_retains_error_time_and_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client_module = ModuleType("ibapi.client")
+    wrapper_module = ModuleType("ibapi.wrapper")
+
+    class EClient:
+        def __init__(self, wrapper: object) -> None:
+            return None
+
+    class EWrapper:
+        pass
+
+    client_module.__dict__["EClient"] = EClient
+    wrapper_module.__dict__["EWrapper"] = EWrapper
+    monkeypatch.setitem(sys.modules, "ibapi.client", client_module)
+    monkeypatch.setitem(sys.modules, "ibapi.wrapper", wrapper_module)
+    monkeypatch.setattr(capability, "_verify_official_api_distribution", lambda identity: None)
+    callbacks: Queue[capability._Callback] = Queue()
+    client = capability._official_client(
+        callbacks, capability.IbkrApiIdentity(package_fingerprint="a" * 64)
+    )
+
+    client.error(7, 1_785_000_000, 200, "ambiguous contract", "")
+
+    callback = callbacks.get_nowait()
+    assert callback.values == (1_785_000_000, 200, "REQUEST_ERROR")
+    assert capability._error_codes((callback,)) == ("IBKR_200",)
+
+
+@pytest.mark.parametrize(
+    ("error_code", "classification"),
+    (
+        (2104, "INFORMATIONAL"),
+        (2106, "INFORMATIONAL"),
+        (2107, "INFORMATIONAL"),
+        (2108, "INFORMATIONAL"),
+        (2158, "INFORMATIONAL"),
+        (1100, "CONNECTION_LOST"),
+        (1101, "CONNECTION_RESTORED_DATA_LOST"),
+        (1102, "CONNECTION_RESTORED_DATA_MAINTAINED"),
+        (1300, "PORT_RESET"),
+        (200, "REQUEST_ERROR"),
+    ),
+)
+def test_error_classifier_handles_connection_and_request_messages(
+    error_code: int, classification: str
+) -> None:
+    assert capability._error_classification(error_code) == classification
