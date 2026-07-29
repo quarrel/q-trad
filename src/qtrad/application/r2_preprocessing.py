@@ -67,6 +67,11 @@ class FeatureVector(Protocol):
     def features(self) -> tuple[float | None, ...]: ...
 
 
+class InstrumentFeatureVector(FeatureVector, Protocol):
+    @property
+    def target_instrument_id(self) -> str: ...
+
+
 def build_r2_preprocessing_selection(
     verified: R1FoundationBindings,
     feature_dataset: R2FeatureDataset,
@@ -79,7 +84,68 @@ def build_r2_preprocessing_selection(
     application_image_identity: str,
     sklearn_library_identity: str,
 ) -> R2PreprocessingSelection:
-    """Build one replayable preprocessing selection from authenticated R1 and R2.B children."""
+    """Build one R2.C local-model preprocessing selection."""
+
+    if model_family is not ModelFamily.LOCAL_RIDGE:
+        raise ValueError("R2.C selection supports only LOCAL_RIDGE")
+    return _build_preprocessing_selection(
+        verified,
+        feature_dataset,
+        experiment,
+        model_family=model_family,
+        horizon=horizon,
+        outer_fold_id=outer_fold_id,
+        target_instruments=target_instruments,
+        application_image_identity=application_image_identity,
+        sklearn_library_identity=sklearn_library_identity,
+    )
+
+
+def build_pooled_preprocessing_selection(
+    verified: R1FoundationBindings,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
+    *,
+    model_family: ModelFamily,
+    horizon: timedelta,
+    outer_fold_id: str,
+    target_instruments: Sequence[str] | None = None,
+    application_image_identity: str,
+    sklearn_library_identity: str,
+) -> R2PreprocessingSelection:
+    """Build one R2.E pooled preprocessing and alpha-selection artefact."""
+
+    if model_family not in (
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ):
+        raise ValueError("R2.E selection requires a pooled Ridge model family")
+    return _build_preprocessing_selection(
+        verified,
+        feature_dataset,
+        experiment,
+        model_family=model_family,
+        horizon=horizon,
+        outer_fold_id=outer_fold_id,
+        target_instruments=target_instruments,
+        application_image_identity=application_image_identity,
+        sklearn_library_identity=sklearn_library_identity,
+    )
+
+
+def _build_preprocessing_selection(
+    verified: R1FoundationBindings,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
+    *,
+    model_family: ModelFamily,
+    horizon: timedelta,
+    outer_fold_id: str,
+    target_instruments: Sequence[str] | None,
+    application_image_identity: str,
+    sklearn_library_identity: str,
+) -> R2PreprocessingSelection:
+    """Build one replayable selection from authenticated R1 and R2.B children."""
     _verify_selection_policies(experiment, model_family, horizon)
     verify_exact_r1_bindings(verified, experiment)
     authenticated_raw_schema = _verify_feature_bindings(
@@ -94,7 +160,7 @@ def build_r2_preprocessing_selection(
     ):
         raise ValueError("outer fold membership authentication failed")
 
-    scope = _target_scope(experiment, target_instruments)
+    scope = _target_scope(experiment, target_instruments, model_family)
     rows = join_training_rows(
         verified.targets,
         fold,
@@ -114,6 +180,7 @@ def build_r2_preprocessing_selection(
         ridge_max_iterations=experiment.ridge_max_iterations,
         loss_policy=experiment.model_selection_policy,
         pooled_weighting_policy=experiment.pooled_weighting_policy,
+        instrument_identity_order=scope if model_family is not ModelFamily.LOCAL_RIDGE else (),
     )
     validation_start, validation_end = _inner_validation_bounds(
         rows, experiment.minimum_inner_validation_rows
@@ -163,6 +230,7 @@ def select_chronological_alpha(
     ridge_max_iterations: int,
     loss_policy: str,
     pooled_weighting_policy: str,
+    instrument_identity_order: Sequence[str] = (),
 ) -> AlphaSelection:
     """Evaluate the exact configured alpha grid on a purged chronological tail."""
     schema = preprocessing_schema.features
@@ -270,8 +338,14 @@ def select_chronological_alpha(
             candidate_scores=failure_scores,
         )
 
-    x_fit = transform(inner_fit, inner_preprocessing)
-    x_validation = transform(inner_validation, inner_preprocessing)
+    x_fit = add_instrument_identity(
+        transform(inner_fit, inner_preprocessing), inner_fit, instrument_identity_order
+    )
+    x_validation = add_instrument_identity(
+        transform(inner_validation, inner_preprocessing),
+        inner_validation,
+        instrument_identity_order,
+    )
     if not np.isfinite(x_fit).all() or not np.isfinite(x_validation).all():
         failure_scores = _failure_scores(
             grid,
@@ -293,9 +367,12 @@ def select_chronological_alpha(
     y_fit = np.array([row.target for row in inner_fit], dtype=float)
     y_validation = np.array([row.target for row in inner_validation], dtype=float)
     scores: list[AlphaCandidateScore] = []
+    prediction_function = (
+        _pooled_ridge_predictions if instrument_identity_order else _ridge_predictions
+    )
     for alpha in grid:
         try:
-            predictions = _ridge_predictions(
+            predictions = prediction_function(
                 alpha,
                 x_fit,
                 y_fit,
@@ -487,6 +564,30 @@ def transform(rows: Sequence[FeatureVector], fit: PreprocessingFit) -> np.ndarra
     return np.column_stack(columns)
 
 
+def add_instrument_identity(
+    matrix: np.ndarray,
+    rows: Sequence[InstrumentFeatureVector],
+    instrument_order: Sequence[str],
+) -> np.ndarray:
+    """Append a fixed full one-hot instrument effect for a no-intercept pooled model."""
+
+    order = tuple(instrument_order)
+    if not order:
+        return matrix
+    if len(set(order)) != len(order):
+        raise ValueError("instrument identity order must be unique")
+    positions = {instrument: index for index, instrument in enumerate(order)}
+    identity = np.zeros((len(rows), len(order)), dtype=float)
+    for row_index, row in enumerate(rows):
+        try:
+            identity[row_index, positions[row.target_instrument_id]] = 1.0
+        except KeyError as error:
+            raise ValueError("row instrument is absent from the fixed identity schema") from error
+    if matrix.shape[0] != len(rows):
+        raise ValueError("feature matrix rows do not align with instrument identities")
+    return np.column_stack((matrix, identity))
+
+
 def equal_instrument_total_weights(
     rows: Sequence[TrainingRow], policy: str = _SUPPORTED_WEIGHTING
 ) -> tuple[float, ...]:
@@ -505,10 +606,14 @@ def equal_instrument_total_weights(
 def _verify_selection_policies(
     experiment: R2ExperimentConfig, model_family: ModelFamily, horizon: timedelta
 ) -> None:
-    if model_family is not ModelFamily.LOCAL_RIDGE:
-        raise ValueError("R2.C selection supports only LOCAL_RIDGE")
+    if model_family not in (
+        ModelFamily.LOCAL_RIDGE,
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ):
+        raise ValueError("unsupported Ridge selection model family")
     if horizon != experiment.primary_horizon:
-        raise ValueError("R2.C selection supports only the experiment primary horizon")
+        raise ValueError("R2 selection supports only the experiment primary horizon")
     if experiment.preprocessing_policy != _SUPPORTED_PREPROCESSING:
         raise ValueError("unsupported preprocessing policy")
     if experiment.inner_validation_policy != _SUPPORTED_INNER_SPLIT:
@@ -551,6 +656,12 @@ def _verify_feature_bindings(
         FeatureFamily.POOLED_CROSS_ASSET in declared_set.families
     ):
         raise ValueError("LOCAL_RIDGE cannot consume a pooled-context feature set")
+    expected_pooled_set = {
+        ModelFamily.POOLED_LOCAL_RIDGE: "P0",
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE: "P1",
+    }.get(model_family)
+    if expected_pooled_set is not None and features.feature_set_name != expected_pooled_set:
+        raise ValueError(f"{model_family.value} requires the {expected_pooled_set} feature set")
     authenticated_set_id = feature_set_id(
         experiment.configuration_id, declared_set.name, authenticated_schema
     )
@@ -572,11 +683,25 @@ def _outer_fold(verified: R1FoundationBindings, fold_id: str) -> Fold:
 
 
 def _target_scope(
-    experiment: R2ExperimentConfig, requested: Sequence[str] | None
+    experiment: R2ExperimentConfig,
+    requested: Sequence[str] | None,
+    model_family: ModelFamily,
 ) -> tuple[str, ...]:
-    scope = tuple(experiment.confirmatory_target_instruments if requested is None else requested)
-    if len(scope) != 1 or scope[0] not in experiment.target_instruments:
-        raise ValueError("R2.C target scope must contain exactly one eligible target")
+    default = (
+        experiment.target_instruments
+        if model_family is not ModelFamily.LOCAL_RIDGE
+        else experiment.confirmatory_target_instruments
+    )
+    scope = tuple(default if requested is None else requested)
+    if model_family is ModelFamily.LOCAL_RIDGE:
+        if len(scope) != 1 or scope[0] not in experiment.target_instruments:
+            raise ValueError("R2.C target scope must contain exactly one eligible target")
+        return scope
+    if len(scope) < 2 or len(set(scope)) != len(scope) or scope != experiment.target_instruments:
+        raise ValueError(
+            "R2.E pooled target scope must exactly match eligible target order "
+            "with at least two instruments"
+        )
     return scope
 
 
@@ -715,6 +840,30 @@ def _ridge_predictions(
         solver=solver,
         tol=tolerance,
         max_iter=max_iterations,
+    )
+    return np.asarray(
+        model.fit(x_fit, y_fit, sample_weight=np.asarray(sample_weights)).predict(x_validation),
+        dtype=float,
+    )
+
+
+def _pooled_ridge_predictions(
+    alpha: float,
+    x_fit: np.ndarray,
+    y_fit: np.ndarray,
+    x_validation: np.ndarray,
+    sample_weights: Sequence[float],
+    *,
+    solver: str,
+    tolerance: float,
+    max_iterations: int,
+) -> np.ndarray:
+    model: Any = Ridge(
+        alpha=alpha,
+        solver=solver,
+        tol=tolerance,
+        max_iter=max_iterations,
+        fit_intercept=False,
     )
     return np.asarray(
         model.fit(x_fit, y_fit, sample_weight=np.asarray(sample_weights)).predict(x_validation),
