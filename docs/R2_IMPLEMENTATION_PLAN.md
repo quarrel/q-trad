@@ -103,6 +103,29 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
   code and account-capability review.
 - **Amendment date:** 2026-07-28.
 
+### Amendment 3 — discriminated local and pooled preprocessing selections
+
+- **Original requirement:** `qtrad-r2-preprocessing-selection-v1` represented one outer fold and
+  exactly one eligible target, accepted only `LOCAL_RIDGE`, and did not claim pooled-family selection.
+- **Revised requirement:** v1 is a `model_family`-discriminated local/pooled union. Local selections
+  retain exactly one target. Pooled selections retain the complete ordered eligible-target universe
+  and bind `FULL_ONE_HOT_V1`, `NO_GLOBAL_INTERCEPT_V1` and
+  `FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1` as first-class semantic policies. Every pooled
+  instrument must be represented in outer training, purged inner fit and inner validation; configured
+  row minima remain aggregate for the pooled fold. Stronger per-instrument minima require separate
+  explicit configuration fields.
+- **Rationale:** local and pooled Ridge share the same fold-local preprocessing, chronological selection
+  and replay state. The existing `model_family` discriminator preserves the local singleton invariant,
+  older readers fail closed on pooled values, and a second structurally duplicate contract would add no
+  useful boundary. Fixed-universe representation prevents an untrained identity coefficient from being
+  treated as learned without silently multiplying aggregate thresholds by the instrument count.
+- **Evidence impact:** no durable pooled-selection or decision-grade R2 evidence exists. Existing local
+  selections remain structurally local, but pre-amendment synthetic selection evidence is superseded and
+  must be regenerated under the policy-bound semantic identity.
+- **Approving pull request:** PR #29; this amendment takes effect only when that pull request is
+  approved and merged.
+- **Amendment date:** 2026-07-29.
+
 ---
 
 ## 3. Research questions
@@ -682,9 +705,10 @@ identity binds both its schema ID and full schema. R2.C also owns the selection 
 qtrad-r2-preprocessing-selection-v1
 ```
 
-One artefact is stored for each outer fold and exactly one eligible target. Its semantic identity binds
-`model_family` and `horizon`, but this R2.C implementation accepts only `LOCAL_RIDGE` at the experiment
-primary horizon. It does not implement or claim pooled-family selection.
+One artefact is stored for each outer fold and model scope. `model_family` discriminates the union:
+`LOCAL_RIDGE` binds exactly one eligible target, while either pooled family binds the complete ordered
+eligible-target universe. The semantic identity binds the instrument-identity, intercept and membership
+policies in addition to `model_family` and `horizon`.
 
 The R2.C artefact owns:
 

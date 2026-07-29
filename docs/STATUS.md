@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-29
-**Current milestone:** R2 — local and pooled baselines (R2.D software complete; R2.E next)
+**Current milestone:** R2 — local and pooled baselines (R2.E software complete; R2.F1 next)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -71,11 +71,11 @@ remains offline/replay.
   Continuous features use training-only median imputation and standardisation while binary state
   indicators remain unscaled. Candidate evaluation executes the declared Ridge policy, retains
   numerical failures and chooses the larger alpha on equal loss. The strict
-  `qtrad-r2-preprocessing-selection-v1` artefact binds model, horizon, evidence, application and
-  numerical-library identities; verification independently rebuilds its structural state exactly and
-  numerical state within configured tolerances. This remains `IMPLEMENTATION_EVIDENCE_ONLY`: R2.C v1
-  is deliberately limited to one eligible target, `LOCAL_RIDGE` and the primary horizon; final local
-  coefficients and forecasts are supplied by R2.D, and pooled selection belongs to R2.E.
+  `qtrad-r2-preprocessing-selection-v1` artefact binds model, horizon, evidence, application,
+  numerical-library, instrument-identity, intercept and membership-policy identities; verification
+  independently rebuilds its structural state exactly and numerical state within configured
+  tolerances. The v1 contract is an amended discriminated union: its R2.C local branch remains limited
+  to one eligible target and `LOCAL_RIDGE`, while R2.E adds the explicitly identified pooled branch.
 - R2.D software now consumes an independently authenticated R2.C selection and fits the final
   primary-horizon local Ridge only on complete outer-training membership. The immutable
   `qtrad-r2-fold-fit-v1` contract retains fold, target, feature, preprocessing, selected-alpha,
@@ -90,6 +90,19 @@ remains offline/replay.
   coverage, coefficient replay, round-trip and rehashed-tamper tests pass. This remains
   `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration and any effectiveness conclusion
   remain pending.
+- R2.E software now provides pooled local-feature and fixed non-graph cross-asset Ridge controls.
+  Pooled selection requires the exact eligible-instrument order, a fixed full one-hot identity block
+  with no intercept, and at least one observation for every scoped instrument in outer training,
+  purged inner fit and inner validation. The configured row minima remain aggregate safeguards. Final
+  fitting manifests equal total training weight per instrument normalised to mean one and independently
+  supplied application, NumPy and scikit-learn provenance. Pooled fold fits retain OOF forecasts,
+  exact opportunity coverage, coefficient stability and independent replay through the existing strict
+  artefact contracts. The ablation orchestrator authenticates exact P0, P1 and local comparator
+  target/fold keys, coverage and lineage, then records both own and exact common target support.
+  Synthetic shared-signal and cross-asset-signal recovery, missing-member rejection, uneven weighting,
+  instrument-order invariance, replay and incomplete-comparator tests pass. This remains
+  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration, R2.F evaluation and any
+  pooled-versus-local effectiveness conclusion remain pending.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -133,8 +146,8 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.E pooled local-feature and pooled cross-asset controls while the independent IBKR data
-   track proceeds and native IG history accumulates.
+2. Continue R2.F1 evaluation and selection machinery while the independent IBKR data track proceeds
+   and native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.

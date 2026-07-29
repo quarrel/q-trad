@@ -1,4 +1,4 @@
-"""Immutable R2.D local-model, forecast-coverage and stability contracts."""
+"""Immutable R2 Ridge fit, forecast-coverage and stability contracts."""
 
 import json
 from collections.abc import Sequence
@@ -118,7 +118,7 @@ class FoldFitDiagnostics:
 
 @dataclass(frozen=True, slots=True)
 class R2FoldFit:
-    """Canonical final local Ridge state for one target, feature set and outer fold."""
+    """Canonical final Ridge state for one local target or declared target pool."""
 
     r2_feature_dataset_id: str
     target_dataset_id: str
@@ -170,8 +170,12 @@ class R2FoldFit:
         ):
             _require_sha256(value, field)
         require_utc(self.training_cutoff, "fold-fit training cutoff")
-        if self.model_family is not ModelFamily.LOCAL_RIDGE:
-            raise ValueError("R2.D fold fits support only LOCAL_RIDGE")
+        if self.model_family not in (
+            ModelFamily.LOCAL_RIDGE,
+            ModelFamily.POOLED_LOCAL_RIDGE,
+            ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+        ):
+            raise ValueError("unsupported R2 Ridge fold-fit model family")
         if self.horizon <= timedelta(0):
             raise ValueError("fold-fit horizon must be positive")
         if not all(
@@ -218,8 +222,23 @@ class R2FoldFit:
                 or self.fit_row_count == 0
             ):
                 raise ValueError("ready fold fits require complete finite model evidence")
-            if self.coefficient_feature_names != self.preprocessing.active_feature_names:
-                raise ValueError("coefficients must follow the active preprocessing feature order")
+            local_names = self.preprocessing.active_feature_names
+            if self.model_family is ModelFamily.LOCAL_RIDGE:
+                if self.coefficient_feature_names != local_names:
+                    raise ValueError("local coefficients must follow preprocessing feature order")
+            else:
+                identity_names = self.coefficient_feature_names[len(local_names) :]
+                if (
+                    self.target_instrument_id != "__POOLED__"
+                    or self.coefficient_feature_names[: len(local_names)] != local_names
+                    or len(identity_names) < 2
+                    or any(not name.startswith("instrument_identity::") for name in identity_names)
+                    or self.intercept != 0.0
+                ):
+                    raise ValueError(
+                        "pooled coefficients require local features followed by fixed "
+                        "instrument effects"
+                    )
             if self.preprocessing.training_target_ids.__len__() != self.fit_row_count:
                 raise ValueError("fold-fit row count differs from preprocessing membership")
         elif (

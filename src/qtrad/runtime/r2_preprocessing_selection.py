@@ -9,7 +9,10 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import cast
 
-from qtrad.application.r2_preprocessing import build_r2_preprocessing_selection
+from qtrad.application.r2_preprocessing import (
+    build_pooled_preprocessing_selection,
+    build_r2_preprocessing_selection,
+)
 from qtrad.application.r2_readiness import R1FoundationBindings
 from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_models import (
@@ -57,6 +60,9 @@ _TOP_LEVEL_KEYS = {
     "ridge_max_iterations",
     "loss_policy",
     "pooled_weighting_policy",
+    "instrument_identity_policy",
+    "intercept_policy",
+    "instrument_membership_policy",
     "holdout_excluded",
     "selection",
     "artifact_id",
@@ -168,6 +174,13 @@ def decode_r2_preprocessing_selection(
         ridge_max_iterations=_integer(obj["ridge_max_iterations"], "ridge_max_iterations"),
         loss_policy=_text(obj["loss_policy"], "loss_policy"),
         pooled_weighting_policy=_text(obj["pooled_weighting_policy"], "pooled_weighting_policy"),
+        instrument_identity_policy=_text(
+            obj["instrument_identity_policy"], "instrument_identity_policy"
+        ),
+        intercept_policy=_text(obj["intercept_policy"], "intercept_policy"),
+        instrument_membership_policy=_text(
+            obj["instrument_membership_policy"], "instrument_membership_policy"
+        ),
         holdout_excluded=_boolean(obj["holdout_excluded"], "holdout_excluded"),
         selection=selection,
         artifact_id=_text(obj["artifact_id"], "artifact_id"),
@@ -189,7 +202,16 @@ def verify_r2_preprocessing_selection(
 ) -> R2PreprocessingSelection:
     """Decode persisted evidence and compare it with a fresh authenticated rebuild."""
     persisted = decode_r2_preprocessing_selection(persisted_payload)
-    rebuilt = build_r2_preprocessing_selection(
+    if model_family is ModelFamily.LOCAL_RIDGE:
+        builder = build_r2_preprocessing_selection
+    elif model_family in (
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ):
+        builder = build_pooled_preprocessing_selection
+    else:
+        raise ValueError("unsupported preprocessing-selection model family")
+    rebuilt = builder(
         verified,
         feature_dataset,
         experiment,
