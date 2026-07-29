@@ -1,4 +1,4 @@
-"""Strict persistence and authenticated numerical replay for R2.D fold fits."""
+"""Strict persistence and authenticated numerical replay for R2 Ridge fold fits."""
 
 import json
 import os
@@ -10,6 +10,7 @@ from tempfile import NamedTemporaryFile
 from typing import cast
 
 from qtrad.application.r2_baselines import build_local_ridge_fold
+from qtrad.application.r2_pooled import build_pooled_ridge_fold
 from qtrad.application.r2_readiness import R1FoundationBindings
 from qtrad.domain.r2_baselines import (
     R2_FOLD_FIT_CONTRACT,
@@ -149,7 +150,15 @@ def verify_r2_fold_fit(
     """Rebuild the final fit and compare all structural and numerical evidence."""
 
     persisted = decode_r2_fold_fit(persisted_payload)
-    rebuilt = build_local_ridge_fold(verified, feature_dataset, experiment, selection).fit
+    if selection.model_family is ModelFamily.LOCAL_RIDGE:
+        rebuilt = build_local_ridge_fold(verified, feature_dataset, experiment, selection).fit
+    elif selection.model_family in (
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ):
+        rebuilt = build_pooled_ridge_fold(verified, feature_dataset, experiment, selection).fit
+    else:
+        raise ValueError("unsupported fold-fit model family")
     if _structural_json(persisted) != _structural_json(rebuilt):
         raise ValueError("persisted fold fit does not match the authenticated rebuild")
     if not _optional_close(

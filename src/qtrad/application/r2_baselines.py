@@ -1,4 +1,4 @@
-"""Authenticated R2.D local Ridge fitting, forecasting and replay."""
+"""Authenticated R2 Ridge fitting, forecasting and numerical replay."""
 
 import warnings
 from collections import defaultdict
@@ -13,6 +13,7 @@ from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
 from qtrad.application.r2_preprocessing import (
     TrainingRow,
+    add_instrument_identity,
     build_r2_preprocessing_selection,
     join_training_rows,
     transform,
@@ -38,11 +39,12 @@ from qtrad.domain.r2_readiness import FeatureFamily, ModelFamily, R2ExperimentCo
 @dataclass(frozen=True, slots=True)
 class PredictionRow:
     target_id: str
+    target_instrument_id: str
     features: tuple[float | None, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class LocalRidgeFoldResult:
+class RidgeFoldResult:
     fit: R2FoldFit
     forecasts: ForecastDataset
     coverage: ForecastCoverageDataset
@@ -56,7 +58,7 @@ class LocalRidgeFoldResult:
             or self.coverage.r2_feature_dataset_id != self.fit.r2_feature_dataset_id
             or self.coverage.experiment_configuration_id != self.fit.experiment_configuration_id
         ):
-            raise ValueError("local result child lineage differs from its fold fit")
+            raise ValueError("Ridge result child lineage differs from its fold fit")
         forecast_ids = {row.forecast_id for row in self.forecasts.rows}
         covered_ids = {
             row.forecast_id
@@ -64,11 +66,14 @@ class LocalRidgeFoldResult:
             if row.disposition is ForecastCoverageDisposition.FORECASTED
         }
         if forecast_ids != covered_ids or None in covered_ids:
-            raise ValueError("local forecast and coverage identities do not reconcile")
+            raise ValueError("Ridge forecast and coverage identities do not reconcile")
         if any(row.model_id != self.fit.artifact_id for row in self.forecasts.rows):
-            raise ValueError("local forecasts do not bind the fold-fit artifact")
+            raise ValueError("Ridge forecasts do not bind the fold-fit artifact")
         if any(row.fold_fit_id != self.fit.artifact_id for row in self.coverage.rows):
-            raise ValueError("local coverage does not bind the fold-fit artifact")
+            raise ValueError("Ridge coverage does not bind the fold-fit artifact")
+
+
+LocalRidgeFoldResult = RidgeFoldResult
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,7 +111,7 @@ def build_local_ridge_oof(
     declared_local_sets = tuple(
         item
         for item in experiment.feature_sets
-        if FeatureFamily.POOLED_CROSS_ASSET not in item.families
+        if item.name not in {"P0", "P1"} and FeatureFamily.POOLED_CROSS_ASSET not in item.families
     )
     if {dataset.feature_set_name for dataset in feature_datasets} != {
         item.name for item in declared_local_sets
@@ -176,14 +181,14 @@ def build_local_ridge_fold(
         selection.target_instruments,
         selection.horizon,
     )
-    validation_targets = _validation_targets(
+    validation_targets = validation_targets_for_instrument(
         verified,
         experiment,
         outer_fold_id=selection.outer_fold_id,
         target_instrument_id=target_instrument_id,
         horizon=selection.horizon,
     )
-    fit, model = _fit_local_ridge(
+    fit, model = fit_ridge(
         feature_dataset,
         experiment,
         selection,
@@ -192,7 +197,7 @@ def build_local_ridge_fold(
         len(validation_targets),
         training_rows,
     )
-    forecasts, coverage = _forecast_validation(
+    forecasts, coverage = forecast_validation(
         verified,
         feature_dataset,
         experiment,
@@ -200,17 +205,17 @@ def build_local_ridge_fold(
         model,
         validation_targets,
     )
-    result = LocalRidgeFoldResult(fit, forecasts, coverage)
+    result = RidgeFoldResult(fit, forecasts, coverage)
     replay_local_ridge_forecasts(result, feature_dataset, experiment)
     return result
 
 
-def replay_local_ridge_forecasts(
-    result: LocalRidgeFoldResult,
+def replay_ridge_forecasts(
+    result: RidgeFoldResult,
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
 ) -> None:
-    """Independently reproduce persisted forecasts without loading scikit-learn model code."""
+    """Independently reproduce forecasts without loading scikit-learn model code."""
 
     fit = result.fit
     if (
@@ -219,15 +224,15 @@ def replay_local_ridge_forecasts(
         or feature_dataset.fold_dataset_id != fit.fold_dataset_id
         or feature_dataset.experiment_configuration_id != fit.experiment_configuration_id
     ):
-        raise ValueError("local replay feature lineage differs from the fold fit")
+        raise ValueError("Ridge replay feature lineage differs from the fold fit")
     if fit.disposition is not FitDisposition.READY:
         if result.forecasts.rows:
-            raise ValueError("failed local fold fit emitted forecasts")
+            raise ValueError("failed Ridge fold fit emitted forecasts")
         return
     preprocessing = fit.preprocessing
     intercept = fit.intercept
     if preprocessing is None or intercept is None:
-        raise ValueError("ready local fold fit has incomplete replay state")
+        raise ValueError("ready Ridge fold fit has incomplete replay state")
     by_key = _feature_rows_by_key(feature_dataset)
     forecast_by_id = {row.forecast_id: row for row in result.forecasts.rows}
     for coverage in result.coverage.rows:
@@ -237,8 +242,25 @@ def replay_local_ridge_forecasts(
             raise ValueError("forecasted coverage omitted its forecast identity")
         forecast = forecast_by_id[coverage.forecast_id]
         feature = by_key[(forecast.decision_time, forecast.instrument_id)]
-        transformed = transform(
-            (PredictionRow(forecast.target_id, _feature_values(feature)),), preprocessing
+        transformed = add_instrument_identity(
+            transform(
+                (
+                    PredictionRow(
+                        forecast.target_id,
+                        forecast.instrument_id,
+                        _feature_values(feature),
+                    ),
+                ),
+                preprocessing,
+            ),
+            (
+                PredictionRow(
+                    forecast.target_id,
+                    forecast.instrument_id,
+                    _feature_values(feature),
+                ),
+            ),
+            _instrument_identity_order(fit),
         )
         replayed = float(intercept + transformed[0] @ np.asarray(fit.coefficients, dtype=float))
         if not isclose(
@@ -247,7 +269,17 @@ def replay_local_ridge_forecasts(
             rel_tol=experiment.numeric_replay_relative_tolerance,
             abs_tol=experiment.numeric_replay_absolute_tolerance,
         ):
-            raise ValueError("stored local coefficients do not independently reproduce forecast")
+            raise ValueError("stored Ridge coefficients do not independently reproduce forecast")
+
+
+def replay_local_ridge_forecasts(
+    result: LocalRidgeFoldResult,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
+) -> None:
+    if result.fit.model_family is not ModelFamily.LOCAL_RIDGE:
+        raise ValueError("local replay requires a LOCAL_RIDGE fold fit")
+    replay_ridge_forecasts(result, feature_dataset, experiment)
 
 
 def build_coefficient_stability_summary(
@@ -314,7 +346,7 @@ def _verify_selection_rebuild(
         application_image_identity=selection.application_image_identity,
         sklearn_library_identity=selection.sklearn_library_identity,
     )
-    if not _preprocessing_selections_match(
+    if not preprocessing_selections_match(
         selection,
         rebuilt,
         relative_tolerance=experiment.numeric_replay_relative_tolerance,
@@ -323,7 +355,7 @@ def _verify_selection_rebuild(
         raise ValueError("R2.D preprocessing selection differs from authenticated R2.C rebuild")
 
 
-def _preprocessing_selections_match(
+def preprocessing_selections_match(
     actual: R2PreprocessingSelection,
     expected: R2PreprocessingSelection,
     *,
@@ -402,7 +434,7 @@ def _optional_close(
     return isclose(left, right, rel_tol=relative_tolerance, abs_tol=absolute_tolerance)
 
 
-def _validation_targets(
+def validation_targets_for_instrument(
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     *,
@@ -428,7 +460,7 @@ def _validation_targets(
     return tuple(sorted(selected, key=lambda item: (item.decision_time, item.target_id)))
 
 
-def _fit_local_ridge(
+def fit_ridge(
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
     selection: R2PreprocessingSelection,
@@ -458,7 +490,7 @@ def _fit_local_ridge(
                 coefficients=(),
                 fit_warnings=(),
                 disposition=chosen.disposition,
-                failure=f"R2.C selection disposition: {chosen.disposition.value}",
+                failure=f"R2 selection disposition: {chosen.disposition.value}",
                 diagnostics=None,
             ),
             None,
@@ -466,9 +498,9 @@ def _fit_local_ridge(
     preprocessing = chosen.outer_preprocessing
     alpha = chosen.selected_alpha
     if preprocessing is None or alpha is None:
-        raise ValueError("ready R2.C selection omitted final preprocessing or alpha")
+        raise ValueError("ready R2 selection omitted final preprocessing or alpha")
     if preprocessing.training_target_ids != tuple(row.target_id for row in training_rows):
-        raise ValueError("R2.C final preprocessing membership differs from outer training rows")
+        raise ValueError("R2 final preprocessing membership differs from outer training rows")
     if len(training_rows) < experiment.minimum_training_rows:
         return _failed_final_fit(
             common,
@@ -486,8 +518,15 @@ def _fit_local_ridge(
             FitDisposition.DEGENERATE_TARGET,
             "outer training target has zero variance",
         )
-    x = transform(training_rows, preprocessing)
-    if x.shape != (len(training_rows), len(preprocessing.active_feature_names)) or x.shape[1] == 0:
+    local = transform(training_rows, preprocessing)
+    identity_order = (
+        selection.target_instruments
+        if selection.model_family is not ModelFamily.LOCAL_RIDGE
+        else ()
+    )
+    x = add_instrument_identity(local, training_rows, identity_order)
+    expected_columns = len(preprocessing.active_feature_names) + len(identity_order)
+    if x.shape != (len(training_rows), expected_columns) or x.shape[1] == 0:
         return _failed_final_fit(
             common,
             alpha,
@@ -508,6 +547,7 @@ def _fit_local_ridge(
         solver=selection.ridge_solver,
         tol=selection.ridge_tolerance,
         max_iter=selection.ridge_max_iterations,
+        fit_intercept=selection.model_family is ModelFamily.LOCAL_RIDGE,
     )
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
@@ -585,11 +625,15 @@ def _fit_local_ridge(
         maximum_absolute_coefficient=float(np.max(np.abs(coefficients))),
         prediction_replay_maximum_absolute_error=replay_error,
     )
+    coefficient_names = (
+        *preprocessing.active_feature_names,
+        *(f"instrument_identity::{instrument}" for instrument in identity_order),
+    )
     fit = R2FoldFit.create(
         **common,
         selected_alpha=alpha,
         preprocessing=preprocessing,
-        coefficient_feature_names=preprocessing.active_feature_names,
+        coefficient_feature_names=coefficient_names,
         intercept=intercept,
         coefficients=tuple(float(value) for value in coefficients),
         fit_warnings=(),
@@ -615,11 +659,15 @@ def _fold_fit_common(
         "fold_dataset_id": selection.fold_dataset_id,
         "experiment_configuration_id": experiment.configuration_id,
         "preprocessing_selection_id": selection.artifact_id,
-        "model_family": ModelFamily.LOCAL_RIDGE,
+        "model_family": selection.model_family,
         "horizon": selection.horizon,
         "outer_fold_id": selection.outer_fold_id,
         "outer_fold_membership_hash": selection.outer_fold_membership_hash,
-        "target_instrument_id": selection.target_instruments[0],
+        "target_instrument_id": (
+            selection.target_instruments[0]
+            if selection.model_family is ModelFamily.LOCAL_RIDGE
+            else "__POOLED__"
+        ),
         "feature_set_id": selection.feature_set_id,
         "feature_schema_id": selection.feature_schema_id,
         "preprocessing_schema_id": selection.preprocessing_schema_id,
@@ -659,7 +707,7 @@ def _failed_final_fit(
     )
 
 
-def _forecast_validation(
+def forecast_validation(
     verified: R1FoundationBindings,
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
@@ -693,8 +741,13 @@ def _forecast_validation(
             )
             continue
         try:
-            transformed = transform(
-                (PredictionRow(target.target_id, _feature_values(feature)),), fit.preprocessing
+            prediction_row = PredictionRow(
+                target.target_id, target.instrument_id, _feature_values(feature)
+            )
+            transformed = add_instrument_identity(
+                transform((prediction_row,), fit.preprocessing),
+                (prediction_row,),
+                _instrument_identity_order(fit),
             )
             prediction = float(np.asarray(model.predict(transformed), dtype=float).reshape(-1)[0])
             replayed = float(
@@ -836,3 +889,12 @@ def _named_coefficient_or_empty(fit: R2FoldFit, name: str) -> tuple[float, ...]:
         return (fit.intercept,)
     by_name = dict(zip(fit.coefficient_feature_names, fit.coefficients, strict=True))
     return () if name not in by_name else (by_name[name],)
+
+
+def _instrument_identity_order(fit: R2FoldFit) -> tuple[str, ...]:
+    prefix = "instrument_identity::"
+    return tuple(
+        name.removeprefix(prefix)
+        for name in fit.coefficient_feature_names
+        if name.startswith(prefix)
+    )

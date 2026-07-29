@@ -368,7 +368,7 @@ class _R2PreprocessingSelectionArguments(TypedDict):
 
 @dataclass(frozen=True, slots=True)
 class R2PreprocessingSelection:
-    """Identity-bearing replay contract for authenticated fold-local preprocessing selection."""
+    """Identity-bearing replay contract for authenticated fold-local model selection."""
 
     r2_feature_dataset_id: str
     target_dataset_id: str
@@ -433,14 +433,24 @@ class R2PreprocessingSelection:
                 continue
             if fit.feature_names != schema_names or fit.indicator_feature_names != indicator_names:
                 raise ValueError("preprocessing fit differs from its bound preprocessing schema")
-        if self.model_family is not ModelFamily.LOCAL_RIDGE:
-            raise ValueError("R2.C preprocessing selection supports only LOCAL_RIDGE")
+        if self.model_family not in (
+            ModelFamily.LOCAL_RIDGE,
+            ModelFamily.POOLED_LOCAL_RIDGE,
+            ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+        ):
+            raise ValueError("unsupported Ridge preprocessing-selection model family")
         if self.horizon != timedelta(minutes=15):
-            raise ValueError("R2.C preprocessing selection supports only the primary horizon")
+            raise ValueError("R2 preprocessing selection supports only the primary horizon")
         if not self.application_image_identity or not self.sklearn_library_identity:
             raise ValueError("application image and sklearn library identities are required")
-        if not self.outer_fold_id or len(self.target_instruments) != 1:
-            raise ValueError("R2.C fold and target scope must identify exactly one eligible target")
+        if not self.outer_fold_id or not self.target_instruments:
+            raise ValueError("R2 fold and target scope must be non-empty")
+        if len(set(self.target_instruments)) != len(self.target_instruments):
+            raise ValueError("R2 target scope must contain unique instruments")
+        if self.model_family is ModelFamily.LOCAL_RIDGE and len(self.target_instruments) != 1:
+            raise ValueError("local selection must identify exactly one eligible target")
+        if self.model_family is not ModelFamily.LOCAL_RIDGE and len(self.target_instruments) < 2:
+            raise ValueError("pooled selection requires at least two eligible targets")
         for value, field in (
             (self.inner_validation_start, "inner validation start"),
             (self.inner_validation_end, "inner validation end"),

@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-29
-**Current milestone:** R2 — local and pooled baselines (R2.D software complete; R2.E next)
+**Current milestone:** R2 — local and pooled baselines (R2.E software complete; R2.F1 next)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -90,6 +90,15 @@ remains offline/replay.
   coverage, coefficient replay, round-trip and rehashed-tamper tests pass. This remains
   `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration and any effectiveness conclusion
   remain pending.
+- R2.E software now provides pooled local-feature and fixed non-graph cross-asset Ridge controls.
+  Pooled selection requires the exact eligible-instrument order, uses a fixed full one-hot identity
+  block with no intercept, and manifests equal total training weight per instrument normalised to
+  mean one. It retains pooled fold fits, OOF forecasts, exact opportunity coverage, coefficient
+  stability and independent replay through the existing strict artefact contracts. The ablation
+  orchestrator authenticates exact P0, P1 and local comparators and records both own and exact common
+  target support. Synthetic shared-signal and cross-asset-signal recovery, weighting, instrument-order
+  invariance and replay tests pass. This remains `IMPLEMENTATION_EVIDENCE_ONLY`; representative native
+  integration, R2.F evaluation and any pooled-versus-local effectiveness conclusion remain pending.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -133,8 +142,8 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.E pooled local-feature and pooled cross-asset controls while the independent IBKR data
-   track proceeds and native IG history accumulates.
+2. Continue R2.F1 evaluation and selection machinery while the independent IBKR data track proceeds
+   and native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.

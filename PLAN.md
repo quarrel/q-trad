@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R2 — local and pooled baselines (R2.D complete; R2.E next)
+**Current milestone:** R2 — local and pooled baselines (R2.E complete; R2.F1 next)
 **Parallel track:** independent IBKR paper-market-data qualification and historical acquisition
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -38,9 +38,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   make no effectiveness claim. R1 implementation is complete; producing the first real 23-market
   bundle remains a fail-closed R2 entry prerequisite once the configured evidence interval and
   product-role qualification support it.
-- R2.A through R2.D are software-complete implementation evidence. R2.E through R2.F1 may continue
-  with synthetic and representative bundles while qualifying data accumulate; R2.F2 and the locked
-  holdout remain gated on a frozen qualifying foundation.
+- R2.A through R2.E are software-complete implementation evidence. R2.F1 may continue with synthetic
+  and representative bundles while qualifying data accumulate; R2.F2 and the locked holdout remain
+  gated on a frozen qualifying foundation.
 - ADR 0028 approves an independent, market-data-only IBKR paper source. Its contract review,
   historical bootstrap and later live capture proceed as a parallel data track under
   `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`. No IBKR adapter, account capability, dataset or host is
@@ -52,7 +52,7 @@ work and records only the milestone sequence needed to reach the next trustworth
 |---|---|---|
 | R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
 | R1 — causal multi-asset research foundation | COMPLETE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks |
-| R2 — local and pooled baselines | IN PROGRESS | R2.A–R2.D software is complete; R2.E–R2.F1 software and source-specific integration continue before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
+| R2 — local and pooled baselines | IN PROGRESS | R2.A–R2.E software is complete; R2.F1 software and source-specific integration continue before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
 | R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
 | R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
 | R5 — integrated offline MVP | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set |
@@ -104,11 +104,12 @@ chronology ambiguity before those contracts are fixed.
 ## R2 — local and pooled baselines
 
 - R2 implementation plan `docs/R2_IMPLEMENTATION_PLAN.md`.
-- R2.A through R2.D are software-complete; continue R2.E pooled controls, R2.F1 evaluation and the
-  corresponding R2.H software verification. R2.C supplies authenticated, training-only preprocessing
-  and primary-horizon local-Ridge alpha-selection evidence. R2.D consumes that evidence to retain
-  final fold fits, chronological forecasts, explicit expected-opportunity coverage, independent
-  coefficient replay and coefficient-stability summaries.
+- R2.A through R2.E are software-complete; continue R2.F1 evaluation and the corresponding R2.H
+  software verification. R2.C supplies authenticated, training-only preprocessing and
+  primary-horizon Ridge alpha-selection evidence. R2.D retains local final fold fits, chronological
+  forecasts, explicit expected-opportunity coverage, independent coefficient replay and coefficient
+  stability summaries. R2.E adds pooled local-feature and fixed cross-asset controls with explicit
+  instrument identity, manifested equal-instrument weights and exact own/common-support ablations.
 - Keep `R2-IG-NATIVE`, `R2-IBKR-HISTORICAL` and any later `R2-IBKR-NATIVE` experiment source-specific.
   Each consumes one independently verified foundation and makes conclusions only for its evidence
   class. No source-specific experiment silently replaces another.
