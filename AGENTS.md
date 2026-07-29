@@ -51,6 +51,30 @@ When experimental learning and operational hardening compete, prefer the shortes
 experiment unless missing hardening could make a result materially false, irreproducible, unsafe or
 cause loss of required evidence.
 
+## Experimental proportionality
+
+q-trad is an experimental paper-trading research system whose immediate purpose is to obtain
+trustworthy evidence quickly enough to prove or disprove the research idea. It is not being prepared
+for real-capital trading.
+
+Apply rigour where an error could invalidate the current experiment, create false confidence, corrupt
+retained evidence or cross a safety boundary. Do not import downstream evaluation,
+operational-hardening or production requirements into an earlier stage unless their absence makes
+that stage's output dishonest or unusable.
+
+Keep these distinctions explicit:
+
+- artefact validity is not the same as evidential sufficiency;
+- implementation evidence is not a decision-grade result;
+- paper correctness is not production readiness;
+- a later consumer owns requirements that affect only its interpretation; and
+- reversible prototype code remains simple until an observed need justifies generalisation or
+  hardening.
+
+Review objections must identify the concrete failure mode, the stage that owns it and how it could
+mislead the current research decision. If they cannot, treat the objection as a follow-up or reject it
+as premature complexity.
+
 ## Product model
 
 - A **target** defines one asset's realised return over a declared decision time and horizon, its
