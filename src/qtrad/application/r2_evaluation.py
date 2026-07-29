@@ -4,29 +4,61 @@ from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import timedelta
+from datetime import datetime, timedelta
+from itertools import pairwise
 from math import sqrt
-from statistics import fmean, pstdev
+from statistics import fmean, median, pstdev
 
-from qtrad.application.r2_baselines import LocalRidgeOofResult, RidgeFoldResult
+import numpy as np
+
+from qtrad.application.r2_baselines import (
+    LocalRidgeOofResult,
+    RidgeFoldResult,
+    build_coefficient_stability_summary,
+    verify_local_ridge_forecast_coverage,
+    verify_ridge_forecast_coverage,
+)
+from qtrad.application.r2_features import feature_schema_for_set
+from qtrad.application.r2_preprocessing import (
+    add_instrument_identity,
+    join_training_rows,
+    transform,
+)
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import ReturnDisposition, TargetRow
 from qtrad.domain.r2_evaluation import (
     BucketMetrics,
+    BucketOrderingSummary,
     ComparisonSupport,
     ConfigurationDisposition,
     ConfigurationRecord,
+    EvaluatedModelManifest,
     EvaluationReport,
     LocalComparatorManifest,
     MetricSlice,
     MetricValue,
+    PairwiseComparison,
     PredictiveMetrics,
+    SelectionDecision,
+    SelectionGateOutcome,
     SelectionManifest,
     StabilitySummary,
     TrainingBucketDefinition,
+    semantic_id,
 )
-from qtrad.domain.r2_readiness import ModelFamily, R2ExperimentConfig
+from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
+from qtrad.domain.r2_models import FitDisposition
+from qtrad.domain.r2_readiness import FeatureFamily, ModelFamily, R2ExperimentConfig
+
+_REQUIRED_SELECTION_THRESHOLDS = (
+    "maximum_best_instrument_contribution",
+    "maximum_best_period_contribution",
+    "maximum_primary_mse_degradation",
+    "minimum_common_support",
+    "minimum_improving_fold_proportion",
+    "minimum_improving_instrument_proportion",
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -34,7 +66,10 @@ class TrainingPredictions:
     model_family: ModelFamily
     outer_fold_id: str
     horizon: timedelta
+    fold_fit_ids: tuple[str, ...]
+    feature_dataset_id: str
     values: tuple[tuple[str, float], ...]
+    evidence_id: str
 
     def __post_init__(self) -> None:
         if not self.outer_fold_id or self.horizon <= timedelta(0) or not self.values:
@@ -42,21 +77,69 @@ class TrainingPredictions:
         keys = tuple(target_id for target_id, _ in self.values)
         if tuple(sorted(set(keys))) != keys:
             raise ValueError("training predictions must be unique and ordered")
+        if tuple(sorted(set(self.fold_fit_ids))) != self.fold_fit_ids:
+            raise ValueError("training-prediction fold fits must be unique and ordered")
+        expected = semantic_id(self.semantic_json())
+        if self.evidence_id != expected:
+            raise ValueError("training-prediction evidence ID does not authenticate its content")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        model_family: ModelFamily,
+        outer_fold_id: str,
+        horizon: timedelta,
+        fold_fit_ids: Sequence[str],
+        feature_dataset_id: str,
+        values: Sequence[tuple[str, float]],
+    ) -> "TrainingPredictions":
+        ordered_fits = tuple(sorted(fold_fit_ids))
+        ordered_values = tuple(sorted(values))
+        payload = {
+            "model_family": model_family.value,
+            "outer_fold_id": outer_fold_id,
+            "horizon_seconds": horizon.total_seconds(),
+            "fold_fit_ids": list(ordered_fits),
+            "feature_dataset_id": feature_dataset_id,
+            "values": [[target_id, value] for target_id, value in ordered_values],
+        }
+        return cls(
+            model_family,
+            outer_fold_id,
+            horizon,
+            ordered_fits,
+            feature_dataset_id,
+            ordered_values,
+            semantic_id(payload),
+        )
+
+    def semantic_json(self) -> dict[str, object]:
+        return {
+            "model_family": self.model_family.value,
+            "outer_fold_id": self.outer_fold_id,
+            "horizon_seconds": self.horizon.total_seconds(),
+            "fold_fit_ids": list(self.fold_fit_ids),
+            "feature_dataset_id": self.feature_dataset_id,
+            "values": [[target_id, value] for target_id, value in self.values],
+        }
 
 
 @dataclass(frozen=True, slots=True)
 class EvaluationModel:
     model_family: ModelFamily
     feature_set_id: str
+    feature_dataset: R2FeatureDataset
     forecasts: ForecastDataset
     fold_results: tuple[RidgeFoldResult, ...]
-    training_predictions: tuple[TrainingPredictions, ...]
 
     def __post_init__(self) -> None:
         if self.model_family is ModelFamily.ZERO_RETURN:
             raise ValueError("zero return is generated by the evaluator")
         if not self.fold_results:
             raise ValueError("an evaluated model requires fold results")
+        if self.feature_dataset.feature_set_id != self.feature_set_id:
+            raise ValueError("evaluated model feature dataset differs from its feature set")
         if any(result.fit.model_family is not self.model_family for result in self.fold_results):
             raise ValueError("evaluated model family differs from a fold fit")
         children = {
@@ -67,15 +150,24 @@ class EvaluationModel:
 
 
 def build_local_comparator_manifest(
+    verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     local_result: LocalRidgeOofResult,
+    feature_dataset: R2FeatureDataset,
     *,
     feature_set_id: str,
 ) -> LocalComparatorManifest:
-    """Build the independently persisted local child, including every failure disposition."""
+    """Build the separately persisted local child from fully authenticated R1 coverage."""
 
     fold_results, forecasts = _local_scope(local_result, feature_set_id)
-    _verify_model_lineage(experiment, forecasts, fold_results)
+    model = EvaluationModel(
+        ModelFamily.LOCAL_RIDGE,
+        feature_set_id,
+        feature_dataset,
+        forecasts,
+        fold_results,
+    )
+    _verify_evaluation_model(verified, experiment, model)
     rows = tuple(
         (
             row.target_id,
@@ -101,16 +193,18 @@ def build_local_comparator_manifest(
 
 def verify_local_comparator_manifest(
     manifest: LocalComparatorManifest,
+    verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     local_result: LocalRidgeOofResult,
+    feature_dataset: R2FeatureDataset,
     *,
     feature_set_id: str,
 ) -> None:
-    """Reauthenticate target/fold/feature scope and explicit failed coverage."""
-
     rebuilt = build_local_comparator_manifest(
+        verified,
         experiment,
         local_result,
+        feature_dataset,
         feature_set_id=feature_set_id,
     )
     if rebuilt != manifest:
@@ -134,6 +228,7 @@ def derive_training_bucket_definition(
         horizon=predictions.horizon,
         training_target_ids=tuple(target_id for target_id, _ in predictions.values),
         thresholds=thresholds,
+        training_prediction_evidence_id=predictions.evidence_id,
     )
 
 
@@ -144,7 +239,7 @@ def calculate_predictive_metrics(
     *,
     minimum_correlation_rows: int = 3,
 ) -> PredictiveMetrics:
-    """Recompute all predictive metrics from immutable forecasts and frozen targets."""
+    """Recompute predictive metrics from immutable forecasts and frozen targets."""
 
     eligible = tuple(sorted(set(eligible_target_ids)))
     paired = tuple(
@@ -235,7 +330,7 @@ def calculate_predictive_metrics(
     )
 
 
-def _build_evaluation_core(
+def build_r2_evaluation(
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     local_result: LocalRidgeOofResult,
@@ -243,141 +338,31 @@ def _build_evaluation_core(
     configurations: Sequence[ConfigurationRecord],
     *,
     local_feature_set_id: str,
-    local_training_predictions: Sequence[TrainingPredictions] = (),
+    local_feature_datasets: Sequence[R2FeatureDataset],
     minimum_correlation_rows: int = 3,
     forecast_bucket_count: int = 5,
 ) -> tuple[LocalComparatorManifest, EvaluationReport]:
-    """Evaluate own/common support without allowing omitted hard rows to improve a model."""
-
-    verify_exact_r1_bindings(verified, experiment)
-    local_manifest = build_local_comparator_manifest(
-        experiment, local_result, feature_set_id=local_feature_set_id
+    local_manifest, report = _build_evaluation_core(
+        verified,
+        experiment,
+        local_result,
+        models,
+        configurations,
+        local_feature_set_id=local_feature_set_id,
+        local_feature_datasets=local_feature_datasets,
+        minimum_correlation_rows=minimum_correlation_rows,
+        forecast_bucket_count=forecast_bucket_count,
     )
-    local_fold_results, local_forecasts = _local_scope(local_result, local_feature_set_id)
-    local_model = EvaluationModel(
-        ModelFamily.LOCAL_RIDGE,
-        local_feature_set_id,
-        local_forecasts,
-        local_fold_results,
-        tuple(local_training_predictions),
-    )
-    declared = (local_model, *models)
-    by_family = {item.model_family: item for item in declared}
-    if len(by_family) != len(declared):
-        raise ValueError("evaluation model families must be unique")
-    required = {
-        ModelFamily.LOCAL_RIDGE,
-        ModelFamily.POOLED_LOCAL_RIDGE,
-        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
-    }
-    if set(by_family) != required:
-        raise ValueError("evaluation requires the complete local/P0/P1 comparator hierarchy")
-    for item in declared:
-        _verify_model_lineage(experiment, item.forecasts, item.fold_results)
-
-    targets = {
-        row.target_id: row
-        for row in verified.targets.rows
-        if row.return_disposition is ReturnDisposition.VALID
-        and row.target_available_at < experiment.holdout_range[0]
-    }
-    support_by_family = {
-        family: _expected_support(model.fold_results, targets)
-        for family, model in by_family.items()
-    }
-    common = tuple(
-        sorted(
-            _intersection(
-                tuple(set(_forecast_map(model.forecasts)) for model in by_family.values())
-            )
-        )
-    )
-    if not set(common) <= _intersection(tuple(set(value) for value in support_by_family.values())):
-        raise ValueError("common forecasts do not belong to every expected support")
-
-    metric_slices: list[MetricSlice] = []
-    prediction_by_family: dict[ModelFamily, dict[str, float]] = {
-        family: _forecast_map(model.forecasts) for family, model in by_family.items()
-    }
-    all_support = _union(tuple(set(value) for value in support_by_family.values()))
-    prediction_by_family[ModelFamily.ZERO_RETURN] = {target_id: 0.0 for target_id in all_support}
-    zero_support = tuple(sorted(all_support))
-    for family in (ModelFamily.ZERO_RETURN, *by_family):
-        own = zero_support if family is ModelFamily.ZERO_RETURN else support_by_family[family]
-        for support, eligible, allowed_predictions in (
-            (ComparisonSupport.OWN, own, prediction_by_family[family]),
-            (
-                ComparisonSupport.COMMON,
-                common,
-                {target_id: prediction_by_family[family][target_id] for target_id in common},
-            ),
-        ):
-            metric_slices.extend(
-                _metric_breakdowns(
-                    family,
-                    support,
-                    eligible,
-                    allowed_predictions,
-                    targets,
-                    verified,
-                    experiment,
-                    minimum_correlation_rows,
-                )
-            )
-
-    definitions = tuple(
-        derive_training_bucket_definition(predictions, bucket_count=forecast_bucket_count)
-        for model in declared
-        for predictions in model.training_predictions
-    )
-    bucket_metrics = _bucket_metrics(
-        definitions, prediction_by_family, targets, common, support_by_family
-    )
-    stability = tuple(
-        _stability(
-            candidate,
-            comparator,
-            common,
-            prediction_by_family[candidate],
-            prediction_by_family[comparator],
-            targets,
-            verified,
-        )
-        for candidate, comparator in (
-            (ModelFamily.LOCAL_RIDGE, ModelFamily.ZERO_RETURN),
-            (ModelFamily.POOLED_LOCAL_RIDGE, ModelFamily.LOCAL_RIDGE),
-            (ModelFamily.POOLED_CROSS_ASSET_RIDGE, ModelFamily.POOLED_LOCAL_RIDGE),
-        )
-    )
-    report = EvaluationReport.create(
-        experiment_configuration_id=experiment.configuration_id,
-        target_dataset_id=experiment.target_dataset_id,
-        fold_dataset_id=experiment.fold_dataset_id,
-        local_comparator_manifest_id=local_manifest.manifest_id,
-        evidence_class=experiment.evidence_class,
-        metric_policy=experiment.metric_policy,
-        forecast_bucket_policy=experiment.forecast_bucket_policy,
-        common_target_ids=common,
-        metric_slices=metric_slices,
-        bucket_definitions=definitions,
-        bucket_metrics=bucket_metrics,
-        stability=stability,
-        configurations=configurations,
-        unavailable_diagnostics=(
-            (
-                "feature_missingness_band",
-                "R2.B feature rows are not embedded in forecast artefacts",
-            ),
-            (
-                "quote_imbalance_availability",
-                "quote imbalance is ineligible until separately validated",
-            ),
-            (
-                "spread_state",
-                "spread-state evaluation requires an eligible training-derived threshold",
-            ),
-            ("volatility_regime", "state-bucket feature evidence was not supplied"),
-        ),
+    verify_r2_evaluation(
+        report,
+        local_manifest,
+        verified,
+        experiment,
+        local_result,
+        models,
+        configurations,
+        local_feature_set_id=local_feature_set_id,
+        local_feature_datasets=local_feature_datasets,
     )
     return local_manifest, report
 
@@ -392,34 +377,37 @@ def verify_r2_evaluation(
     configurations: Sequence[ConfigurationRecord],
     *,
     local_feature_set_id: str,
-    local_training_predictions: Sequence[TrainingPredictions] = (),
-    minimum_correlation_rows: int = 3,
-    forecast_bucket_count: int = 5,
+    local_feature_datasets: Sequence[R2FeatureDataset],
 ) -> None:
-    """Independently rebuild metrics, buckets, support and configuration count."""
+    """Independently reauthenticate every child and replay all evaluation tables."""
 
+    local_feature_dataset = _selected_local_feature_dataset(
+        local_feature_datasets, local_feature_set_id
+    )
     verify_local_comparator_manifest(
         local_manifest,
+        verified,
         experiment,
         local_result,
+        local_feature_dataset,
         feature_set_id=local_feature_set_id,
     )
-    rebuilt_manifest, rebuilt = build_r2_evaluation_unverified(
+    rebuilt_manifest, rebuilt = _build_evaluation_core(
         verified,
         experiment,
         local_result,
         models,
         configurations,
         local_feature_set_id=local_feature_set_id,
-        local_training_predictions=local_training_predictions,
-        minimum_correlation_rows=minimum_correlation_rows,
-        forecast_bucket_count=forecast_bucket_count,
+        local_feature_datasets=local_feature_datasets,
+        minimum_correlation_rows=report.minimum_correlation_rows,
+        forecast_bucket_count=report.forecast_bucket_count,
     )
     if rebuilt_manifest != local_manifest or rebuilt != report:
         raise ValueError("R2 evaluation does not match independently recomputed evidence")
 
 
-def build_r2_evaluation_unverified(
+def _build_evaluation_core(
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     local_result: LocalRidgeOofResult,
@@ -427,60 +415,199 @@ def build_r2_evaluation_unverified(
     configurations: Sequence[ConfigurationRecord],
     *,
     local_feature_set_id: str,
-    local_training_predictions: Sequence[TrainingPredictions],
+    local_feature_datasets: Sequence[R2FeatureDataset],
     minimum_correlation_rows: int,
     forecast_bucket_count: int,
 ) -> tuple[LocalComparatorManifest, EvaluationReport]:
-    """Rebuild helper used by the verifier without recursive self-verification."""
-
-    return _build_evaluation_core(
-        verified,
-        experiment,
-        local_result,
-        models,
-        configurations,
-        local_feature_set_id=local_feature_set_id,
-        local_training_predictions=local_training_predictions,
-        minimum_correlation_rows=minimum_correlation_rows,
-        forecast_bucket_count=forecast_bucket_count,
+    verify_exact_r1_bindings(verified, experiment)
+    _verify_complete_local_ladder(verified, experiment, local_result, local_feature_datasets)
+    local_feature_dataset = _selected_local_feature_dataset(
+        local_feature_datasets, local_feature_set_id
     )
-
-
-def build_r2_evaluation(
-    verified: R1FoundationBindings,
-    experiment: R2ExperimentConfig,
-    local_result: LocalRidgeOofResult,
-    models: Sequence[EvaluationModel],
-    configurations: Sequence[ConfigurationRecord],
-    *,
-    local_feature_set_id: str,
-    local_training_predictions: Sequence[TrainingPredictions] = (),
-    minimum_correlation_rows: int = 3,
-    forecast_bucket_count: int = 5,
-) -> tuple[LocalComparatorManifest, EvaluationReport]:
-    local_manifest, report = _build_evaluation_core(
+    local_manifest = build_local_comparator_manifest(
         verified,
         experiment,
         local_result,
-        models,
-        configurations,
-        local_feature_set_id=local_feature_set_id,
-        local_training_predictions=local_training_predictions,
-        minimum_correlation_rows=minimum_correlation_rows,
-        forecast_bucket_count=forecast_bucket_count,
+        local_feature_dataset,
+        feature_set_id=local_feature_set_id,
     )
-    verify_r2_evaluation(
-        report,
-        local_manifest,
-        verified,
-        experiment,
-        local_result,
-        models,
-        configurations,
-        local_feature_set_id=local_feature_set_id,
-        local_training_predictions=local_training_predictions,
+    local_fold_results, local_forecasts = _local_scope(local_result, local_feature_set_id)
+    local_model = EvaluationModel(
+        ModelFamily.LOCAL_RIDGE,
+        local_feature_set_id,
+        local_feature_dataset,
+        local_forecasts,
+        local_fold_results,
+    )
+    declared = (local_model, *models)
+    by_family = {item.model_family: item for item in declared}
+    required = {
+        ModelFamily.LOCAL_RIDGE,
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    }
+    if len(by_family) != len(declared) or set(by_family) != required:
+        raise ValueError("evaluation requires one exact local/P0/P1 comparator hierarchy")
+    for item in declared:
+        _verify_evaluation_model(verified, experiment, item)
+
+    targets = {
+        row.target_id: row
+        for row in verified.targets.rows
+        if row.return_disposition is ReturnDisposition.VALID
+        and row.target_available_at < experiment.holdout_range[0]
+    }
+    fold_by_target = _fold_by_validation_target(verified, targets)
+    all_expected = tuple(sorted(fold_by_target))
+    support_by_family = {
+        family: _expected_support(model.fold_results, targets)
+        for family, model in by_family.items()
+    }
+    prediction_by_family = {
+        family: _forecast_map(model.forecasts) for family, model in by_family.items()
+    }
+    prediction_by_family[ModelFamily.ZERO_RETURN] = {target_id: 0.0 for target_id in all_expected}
+    support_by_family[ModelFamily.ZERO_RETURN] = all_expected
+
+    pairs = (
+        (ModelFamily.LOCAL_RIDGE, ModelFamily.ZERO_RETURN),
+        (ModelFamily.POOLED_LOCAL_RIDGE, ModelFamily.LOCAL_RIDGE),
+        (ModelFamily.POOLED_CROSS_ASSET_RIDGE, ModelFamily.POOLED_LOCAL_RIDGE),
+    )
+    comparisons = tuple(
+        calculate_pairwise_comparison(
+            candidate,
+            comparator,
+            support_by_family,
+            prediction_by_family,
+            targets,
+        )
+        for candidate, comparator in pairs
+    )
+    metric_slices: list[MetricSlice] = []
+    for family in ModelFamily:
+        metric_slices.extend(
+            _metric_breakdowns(
+                family,
+                None,
+                ComparisonSupport.OWN,
+                support_by_family[family],
+                prediction_by_family[family],
+                targets,
+                verified,
+                experiment,
+                minimum_correlation_rows,
+            )
+        )
+    for comparison in comparisons:
+        for family, comparator in (
+            (comparison.candidate, comparison.comparator),
+            (comparison.comparator, comparison.candidate),
+        ):
+            metric_slices.extend(
+                _metric_breakdowns(
+                    family,
+                    comparator,
+                    ComparisonSupport.COMMON,
+                    comparison.common_target_ids,
+                    prediction_by_family[family],
+                    targets,
+                    verified,
+                    experiment,
+                    minimum_correlation_rows,
+                )
+            )
+
+    training_by_family = {
+        model.model_family: _derive_training_predictions(verified, experiment, model)
+        for model in declared
+    }
+    definitions = tuple(
+        derive_training_bucket_definition(item, bucket_count=forecast_bucket_count)
+        for family in sorted(training_by_family, key=lambda item: item.value)
+        for item in training_by_family[family]
+    )
+    bucket_metrics, bucket_ordering = calculate_bucket_metrics(
+        definitions,
+        prediction_by_family,
+        targets,
+        fold_by_target,
+        support_by_family,
+        comparisons,
+    )
+    stability = tuple(
+        _stability(
+            comparison,
+            prediction_by_family[comparison.candidate],
+            prediction_by_family[comparison.comparator],
+            targets,
+            verified,
+        )
+        for comparison in comparisons
+    )
+    all_common = tuple(
+        sorted(_intersection(tuple(set(prediction_by_family[family]) for family in ModelFamily)))
+    )
+    evaluated_models = (
+        _zero_model_manifest(verified, targets),
+        *(
+            _evaluated_model_manifest(model, training_by_family[model.model_family])
+            for model in declared
+        ),
+    )
+    normalised_configurations = _normalise_configurations(
+        configurations, evaluated_models, by_family
+    )
+    unavailable = [
+        (
+            "data_quality_or_gap_disposition",
+            "the verified R1 binding exposes no target-level quality classification; "
+            "VALID return disposition is not a quality or gap proxy",
+        ),
+        (
+            "feature_missingness_band",
+            "R2.B feature missingness classifications are not present in forecast evidence",
+        ),
+        (
+            "quote_imbalance_availability",
+            "quote imbalance is ineligible until separately validated",
+        ),
+        (
+            "spread_state",
+            "spread-state evaluation requires eligible training-derived thresholds",
+        ),
+        ("volatility_regime", "state-bucket feature evidence was not supplied"),
+    ]
+    for family, items in training_by_family.items():
+        ready_folds = {item.outer_fold_id for item in items}
+        for fold in verified.folds.folds:
+            if fold.fold_id not in ready_folds:
+                unavailable.append(
+                    (
+                        f"forecast_bucket:{family.value}:{fold.fold_id}",
+                        "no READY authenticated fold fit exists for training-prediction replay",
+                    )
+                )
+    report = EvaluationReport.create(
+        experiment_configuration_id=experiment.configuration_id,
+        target_dataset_id=experiment.target_dataset_id,
+        fold_dataset_id=experiment.fold_dataset_id,
+        local_comparator_manifest_id=local_manifest.manifest_id,
+        evidence_class=experiment.evidence_class,
+        metric_policy=experiment.metric_policy,
+        forecast_bucket_policy=experiment.forecast_bucket_policy,
         minimum_correlation_rows=minimum_correlation_rows,
         forecast_bucket_count=forecast_bucket_count,
+        all_model_common_target_ids=all_common,
+        evaluated_models=evaluated_models,
+        comparisons=comparisons,
+        metric_slices=tuple(metric_slices),
+        bucket_definitions=definitions,
+        bucket_metrics=bucket_metrics,
+        bucket_ordering=bucket_ordering,
+        stability=stability,
+        configurations=normalised_configurations,
+        unavailable_diagnostics=tuple(unavailable),
     )
     return local_manifest, report
 
@@ -490,46 +617,52 @@ def build_selection_manifest(
     local_manifest: LocalComparatorManifest,
     experiment: R2ExperimentConfig,
     *,
-    selected_configuration_ids: Sequence[str],
-    holdout_comparator_configuration_ids: Sequence[str],
     primary_metric: str,
     secondary_metrics: Sequence[str],
     final_fitting_procedure: str,
     application_image_identity: str,
-    frozen_at: object,
+    frozen_at: datetime,
     frozen_by: str,
+    holdout_feature_dataset_ids: Sequence[str] = (),
+    holdout_consumption_ids: Sequence[str] = (),
 ) -> SelectionManifest:
-    """Freeze explicit multi-metric decisions; never infer selection from one aggregate."""
+    """Derive every disposition from the frozen report and configured credibility gates."""
 
-    if report.local_comparator_manifest_id != local_manifest.manifest_id:
-        raise ValueError("selection evaluation does not reference the supplied local comparator")
-    if report.evidence_class is not experiment.evidence_class:
-        raise ValueError("selection evidence class differs from the experiment")
-    if primary_metric == "" or not secondary_metrics:
-        raise ValueError("selection requires primary and secondary evidence")
-    records = {item.configuration_id: item for item in report.configurations}
-    for configuration_id in selected_configuration_ids:
-        if records[configuration_id].disposition is not ConfigurationDisposition.SELECTED_CANDIDATE:
-            raise ValueError(
-                "selected configuration lacks an explicit selected-candidate disposition"
-            )
-    from datetime import datetime
-
-    if not isinstance(frozen_at, datetime):
-        raise TypeError("selection frozen_at must be a datetime")
+    if primary_metric != "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE":
+        raise ValueError("selection primary metric differs from the implemented frozen criterion")
+    if not secondary_metrics:
+        raise ValueError("selection requires secondary evidence")
+    thresholds = _selection_thresholds(experiment)
+    decisions = _selection_decisions(report, thresholds)
     manifest = SelectionManifest.create(
         experiment_configuration_id=experiment.configuration_id,
         evidence_class=experiment.evidence_class,
         evaluation_report_id=report.report_id,
         local_comparator_manifest_id=local_manifest.manifest_id,
-        evaluated_configuration_ids=tuple(records),
+        evaluated_configuration_ids=tuple(item.configuration_id for item in report.configurations),
         predeclared_comparators=experiment.model_families,
         primary_metric=primary_metric,
-        secondary_metrics=secondary_metrics,
-        selected_configuration_ids=selected_configuration_ids,
-        holdout_comparator_configuration_ids=holdout_comparator_configuration_ids,
+        secondary_metrics=tuple(secondary_metrics),
+        acceptance_thresholds=tuple(sorted(thresholds.items())),
+        decisions=decisions,
+        selected_configuration_ids=tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+        ),
+        holdout_comparator_configuration_ids=tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition
+            in (
+                ConfigurationDisposition.RETAINED_CONTROL,
+                ConfigurationDisposition.SELECTED_CANDIDATE,
+            )
+        ),
         final_fitting_procedure=final_fitting_procedure,
         holdout_range=experiment.holdout_range,
+        holdout_feature_dataset_ids=tuple(holdout_feature_dataset_ids),
+        holdout_consumption_ids=tuple(holdout_consumption_ids),
         application_image_identity=application_image_identity,
         frozen_at=frozen_at,
         frozen_by=frozen_by,
@@ -555,13 +688,389 @@ def verify_selection_manifest(
     if manifest.evaluated_configuration_ids != tuple(
         sorted(item.configuration_id for item in report.configurations)
     ):
-        raise ValueError("selection manifest omits an evaluated or rejected configuration")
-    if manifest.frozen_at >= manifest.holdout_range[0]:
-        raise ValueError("selection must be frozen before the holdout begins")
+        raise ValueError("selection manifest omits an evaluated configuration")
+    thresholds = _selection_thresholds(experiment)
+    if manifest.acceptance_thresholds != tuple(sorted(thresholds.items())):
+        raise ValueError("selection thresholds differ from the experiment configuration")
+    if manifest.decisions != _selection_decisions(report, thresholds):
+        raise ValueError("selection decisions differ from independently replayed gates")
+    if manifest.holdout_feature_dataset_ids or manifest.holdout_consumption_ids:
+        raise ValueError("selection was not frozen before holdout materialisation or consumption")
+
+
+def _selection_thresholds(experiment: R2ExperimentConfig) -> dict[str, float]:
+    missing = tuple(
+        name
+        for name in _REQUIRED_SELECTION_THRESHOLDS
+        if name not in experiment.acceptance_thresholds
+    )
+    if missing:
+        raise ValueError(f"selection acceptance thresholds are incomplete: {missing}")
+    return {name: experiment.acceptance_thresholds[name] for name in _REQUIRED_SELECTION_THRESHOLDS}
+
+
+def _selection_decisions(
+    report: EvaluationReport,
+    thresholds: Mapping[str, float],
+) -> tuple[SelectionDecision, ...]:
+    config_by_family = {item.model_family: item for item in report.configurations}
+    comparison_by_candidate = {item.candidate: item for item in report.comparisons}
+    stability_by_candidate = {item.candidate: item for item in report.stability}
+    decisions: list[SelectionDecision] = []
+    for family in ModelFamily:
+        configuration = config_by_family[family]
+        if family is ModelFamily.ZERO_RETURN:
+            decisions.append(
+                SelectionDecision(
+                    configuration.configuration_id,
+                    ConfigurationDisposition.RETAINED_CONTROL,
+                    "predeclared zero-return control",
+                    (),
+                )
+            )
+            continue
+        comparison = comparison_by_candidate[family]
+        stability = stability_by_candidate[family]
+        gates = _credibility_gates(
+            configuration.configuration_id,
+            comparison,
+            stability,
+            report,
+            thresholds,
+        )
+        primary_delta = _metric_difference(
+            comparison.comparator_instrument_balanced_mse,
+            comparison.candidate_instrument_balanced_mse,
+        )
+        selected = (
+            primary_delta.availability.value == "DEFINED"
+            and _metric_number(primary_delta) > 0.0
+            and all(gate.passed for gate in gates)
+        )
+        if selected:
+            disposition = ConfigurationDisposition.SELECTED_CANDIDATE
+            reason = "improves its immediate comparator and passes every frozen gate"
+        elif family is ModelFamily.LOCAL_RIDGE:
+            disposition = ConfigurationDisposition.RETAINED_CONTROL
+            reason = "required local baseline retained as a control"
+        else:
+            disposition = ConfigurationDisposition.REJECTED
+            reason = "does not satisfy the frozen immediate-comparator selection gates"
+        decisions.append(
+            SelectionDecision(configuration.configuration_id, disposition, reason, gates)
+        )
+    return tuple(sorted(decisions, key=lambda item: item.configuration_id))
+
+
+def _credibility_gates(
+    configuration_id: str,
+    comparison: PairwiseComparison,
+    stability: StabilitySummary,
+    report: EvaluationReport,
+    thresholds: Mapping[str, float],
+) -> tuple[SelectionGateOutcome, ...]:
+    primary_delta = _metric_difference(
+        comparison.comparator_instrument_balanced_mse,
+        comparison.candidate_instrument_balanced_mse,
+    )
+    own_global = next(
+        item
+        for item in report.metric_slices
+        if item.model_family is comparison.candidate
+        and item.comparator_model_family is None
+        and item.support is ComparisonSupport.OWN
+        and item.breakdown == "GLOBAL"
+        and item.bucket == "ALL"
+    )
+    instrument_count = len(
+        {
+            item.bucket
+            for item in report.metric_slices
+            if item.model_family is comparison.candidate
+            and item.comparator_model_family is comparison.comparator
+            and item.support is ComparisonSupport.COMMON
+            and item.breakdown == "INSTRUMENT"
+            and item.target_ids
+        }
+    )
+    period_count = len(
+        {
+            item.bucket
+            for item in report.metric_slices
+            if item.model_family is comparison.candidate
+            and item.comparator_model_family is comparison.comparator
+            and item.support is ComparisonSupport.COMMON
+            and item.breakdown == "PERIOD"
+            and item.target_ids
+        }
+    )
+    checks = (
+        _minimum_gate(
+            configuration_id,
+            "PRIMARY_NOT_MATERIALLY_WORSE",
+            primary_delta,
+            -thresholds["maximum_primary_mse_degradation"],
+        ),
+        _minimum_gate(
+            configuration_id,
+            "MINIMUM_COVERAGE",
+            MetricValue.defined(own_global.metrics.coverage),
+            thresholds["minimum_common_support"],
+        ),
+        _minimum_gate(
+            configuration_id,
+            "CHRONOLOGICAL_OR_ASSET_BREADTH",
+            MetricValue.defined(float(max(instrument_count, period_count))),
+            2.0,
+        ),
+        _minimum_gate(
+            configuration_id,
+            "IMPROVING_FOLD_PROPORTION",
+            stability.improving_fold_proportion,
+            thresholds["minimum_improving_fold_proportion"],
+        ),
+        _minimum_gate(
+            configuration_id,
+            "IMPROVING_INSTRUMENT_PROPORTION",
+            stability.improving_instrument_proportion,
+            thresholds["minimum_improving_instrument_proportion"],
+        ),
+        _maximum_gate(
+            configuration_id,
+            "BEST_INSTRUMENT_CONTRIBUTION",
+            stability.best_instrument_contribution,
+            thresholds["maximum_best_instrument_contribution"],
+        ),
+        _maximum_gate(
+            configuration_id,
+            "BEST_PERIOD_CONTRIBUTION",
+            stability.best_period_contribution,
+            thresholds["maximum_best_period_contribution"],
+        ),
+        SelectionGateOutcome(
+            configuration_id,
+            "NUMERICAL_AND_COEFFICIENT_REPLAY",
+            True,
+            MetricValue.defined(1.0),
+            MetricValue.defined(1.0),
+            "evaluated-model children and coefficient summaries were independently replayed",
+        ),
+    )
+    return checks
+
+
+def _minimum_gate(
+    configuration_id: str, name: str, observed: MetricValue, threshold: float
+) -> SelectionGateOutcome:
+    passed = observed.value is not None and observed.value >= threshold
+    return SelectionGateOutcome(
+        configuration_id,
+        name,
+        passed,
+        observed,
+        MetricValue.defined(threshold),
+        "observed value meets the configured minimum"
+        if passed
+        else "observed value is undefined or below the configured minimum",
+    )
+
+
+def _maximum_gate(
+    configuration_id: str, name: str, observed: MetricValue, threshold: float
+) -> SelectionGateOutcome:
+    passed = observed.value is not None and observed.value <= threshold
+    return SelectionGateOutcome(
+        configuration_id,
+        name,
+        passed,
+        observed,
+        MetricValue.defined(threshold),
+        "observed value meets the configured maximum"
+        if passed
+        else "observed value is undefined or above the configured maximum",
+    )
+
+
+def _normalise_configurations(
+    configurations: Sequence[ConfigurationRecord],
+    manifests: Sequence[EvaluatedModelManifest],
+    models: Mapping[ModelFamily, EvaluationModel],
+) -> tuple[ConfigurationRecord, ...]:
+    by_family = {item.model_family: item for item in configurations}
+    manifest_by_family = {item.model_family: item for item in manifests}
+    if len(by_family) != len(configurations) or set(by_family) != set(ModelFamily):
+        raise ValueError("configuration register must exactly cover the comparator hierarchy")
+    rows: list[ConfigurationRecord] = []
+    for family in ModelFamily:
+        supplied = by_family[family]
+        manifest = manifest_by_family[family]
+        expected_feature = (
+            None if family is ModelFamily.ZERO_RETURN else models[family].feature_set_id
+        )
+        expected_forecast = (
+            None if family is ModelFamily.ZERO_RETURN else models[family].forecasts.dataset_id
+        )
+        if (
+            supplied.feature_set_id != expected_feature
+            or supplied.forecast_dataset_id != expected_forecast
+        ):
+            raise ValueError("configuration register differs from authenticated model evidence")
+        rows.append(
+            ConfigurationRecord(
+                supplied.configuration_id,
+                family,
+                expected_feature,
+                ConfigurationDisposition.EVALUATED,
+                "independently authenticated and evaluated",
+                expected_forecast,
+                manifest.manifest_id,
+            )
+        )
+    return tuple(sorted(rows, key=lambda item: item.configuration_id))
+
+
+def _evaluated_model_manifest(
+    model: EvaluationModel,
+    training_predictions: Sequence[TrainingPredictions],
+) -> EvaluatedModelManifest:
+    stability = build_coefficient_stability_summary(
+        tuple(result.fit for result in model.fold_results)
+    )
+    return EvaluatedModelManifest.create(
+        model_family=model.model_family,
+        feature_set_id=model.feature_set_id,
+        forecast_dataset_id=model.forecasts.dataset_id,
+        feature_dataset_id=model.feature_dataset.dataset_id,
+        coverage_dataset_ids=tuple(
+            sorted(result.coverage.dataset_id for result in model.fold_results)
+        ),
+        fold_fit_ids=tuple(sorted(result.fit.artifact_id for result in model.fold_results)),
+        expected_fold_target_keys=tuple(
+            sorted(
+                (row.outer_fold_id, row.target_id)
+                for result in model.fold_results
+                for row in result.coverage.rows
+            )
+        ),
+        training_prediction_evidence_ids=tuple(
+            sorted(item.evidence_id for item in training_predictions)
+        ),
+        coefficient_stability_summary_id=stability.summary_id,
+    )
+
+
+def _zero_model_manifest(
+    verified: R1FoundationBindings,
+    targets: Mapping[str, TargetRow],
+) -> EvaluatedModelManifest:
+    return EvaluatedModelManifest.create(
+        model_family=ModelFamily.ZERO_RETURN,
+        feature_set_id=None,
+        forecast_dataset_id=None,
+        feature_dataset_id=None,
+        coverage_dataset_ids=(),
+        fold_fit_ids=(),
+        expected_fold_target_keys=tuple(
+            sorted(
+                (fold.fold_id, target_id)
+                for fold in verified.folds.folds
+                for target_id in fold.validation_target_ids
+                if target_id in targets
+            )
+        ),
+        training_prediction_evidence_ids=(),
+        coefficient_stability_summary_id=None,
+    )
+
+
+def _derive_training_predictions(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    model: EvaluationModel,
+) -> tuple[TrainingPredictions, ...]:
+    fold_by_id = {fold.fold_id: fold for fold in verified.folds.folds}
+    grouped_values: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    grouped_fit_ids: dict[str, list[str]] = defaultdict(list)
+    for result in model.fold_results:
+        fit = result.fit
+        if fit.disposition is not FitDisposition.READY:
+            continue
+        if fit.preprocessing is None or fit.intercept is None:
+            raise ValueError("READY fold fit lacks replay state")
+        scope = (
+            (fit.target_instrument_id,)
+            if model.model_family is ModelFamily.LOCAL_RIDGE
+            else experiment.target_instruments
+        )
+        rows = join_training_rows(
+            verified.targets,
+            fold_by_id[fit.outer_fold_id],
+            model.feature_dataset,
+            experiment,
+            scope,
+            fit.horizon,
+        )
+        if tuple(row.target_id for row in rows) != fit.preprocessing.training_target_ids:
+            raise ValueError("training-prediction membership differs from the fold fit")
+        matrix = transform(rows, fit.preprocessing)
+        if model.model_family is not ModelFamily.LOCAL_RIDGE:
+            matrix = add_instrument_identity(matrix, rows, experiment.target_instruments)
+        coefficients = np.asarray(fit.coefficients, dtype=float)
+        if matrix.shape[1] != coefficients.shape[0]:
+            raise ValueError("training-prediction matrix differs from fitted coefficients")
+        values = matrix @ coefficients + fit.intercept
+        grouped_values[fit.outer_fold_id].extend(
+            (row.target_id, float(value)) for row, value in zip(rows, values, strict=True)
+        )
+        grouped_fit_ids[fit.outer_fold_id].append(fit.artifact_id)
+    return tuple(
+        TrainingPredictions.create(
+            model_family=model.model_family,
+            outer_fold_id=fold_id,
+            horizon=experiment.primary_horizon,
+            fold_fit_ids=grouped_fit_ids[fold_id],
+            feature_dataset_id=model.feature_dataset.dataset_id,
+            values=values,
+        )
+        for fold_id, values in sorted(grouped_values.items())
+    )
+
+
+def calculate_pairwise_comparison(
+    candidate: ModelFamily,
+    comparator: ModelFamily,
+    supports: Mapping[ModelFamily, Sequence[str]],
+    predictions: Mapping[ModelFamily, Mapping[str, float]],
+    targets: Mapping[str, TargetRow],
+) -> PairwiseComparison:
+    common = tuple(sorted(set(predictions[candidate]) & set(predictions[comparator])))
+    return PairwiseComparison(
+        candidate,
+        comparator,
+        tuple(supports[candidate]),
+        tuple(supports[comparator]),
+        common,
+        _instrument_balanced_mse(common, predictions[candidate], targets),
+        _instrument_balanced_mse(common, predictions[comparator], targets),
+    )
+
+
+def _instrument_balanced_mse(
+    target_ids: Sequence[str],
+    predictions: Mapping[str, float],
+    targets: Mapping[str, TargetRow],
+) -> MetricValue:
+    grouped: dict[str, list[str]] = defaultdict(list)
+    for target_id in target_ids:
+        grouped[targets[target_id].instrument_id].append(target_id)
+    if not grouped:
+        return MetricValue.not_defined("no pairwise common-support instruments")
+    return MetricValue.defined(fmean(_mse(ids, predictions, targets) for ids in grouped.values()))
 
 
 def _metric_breakdowns(
     family: ModelFamily,
+    comparator: ModelFamily | None,
     support: ComparisonSupport,
     eligible: Sequence[str],
     predictions: Mapping[str, float],
@@ -571,11 +1080,7 @@ def _metric_breakdowns(
     minimum_rows: int,
 ) -> tuple[MetricSlice, ...]:
     groups: dict[tuple[str, str, timedelta], list[str]] = defaultdict(list)
-    fold_by_target = {
-        target_id: fold.fold_id
-        for fold in verified.folds.folds
-        for target_id in fold.validation_target_ids
-    }
+    fold_by_target = _fold_by_validation_target(verified, targets)
     for target_id in eligible:
         target = _required_target(targets, target_id)
         groups[("GLOBAL", "ALL", target.horizon)].append(target_id)
@@ -588,10 +1093,10 @@ def _metric_breakdowns(
         groups[("UTC_TIME_BUCKET", str(target.decision_time.hour), target.horizon)].append(
             target_id
         )
-        groups[("DATA_QUALITY", target.return_disposition.value, target.horizon)].append(target_id)
     return tuple(
         MetricSlice(
             family,
+            comparator,
             support,
             breakdown,
             bucket,
@@ -610,40 +1115,62 @@ def _metric_breakdowns(
     )
 
 
-def _bucket_metrics(
+def calculate_bucket_metrics(
     definitions: Sequence[TrainingBucketDefinition],
     predictions: Mapping[ModelFamily, Mapping[str, float]],
     targets: Mapping[str, TargetRow],
-    common: Sequence[str],
+    fold_by_target: Mapping[str, str],
     supports: Mapping[ModelFamily, Sequence[str]],
-) -> tuple[BucketMetrics, ...]:
+    comparisons: Sequence[PairwiseComparison],
+) -> tuple[tuple[BucketMetrics, ...], tuple[BucketOrderingSummary, ...]]:
     rows: list[BucketMetrics] = []
+    summaries: list[BucketOrderingSummary] = []
+    comparison_scopes: dict[ModelFamily, list[tuple[ModelFamily, Sequence[str]]]] = defaultdict(
+        list
+    )
+    for comparison in comparisons:
+        comparison_scopes[comparison.candidate].append(
+            (comparison.comparator, comparison.common_target_ids)
+        )
+        comparison_scopes[comparison.comparator].append(
+            (comparison.candidate, comparison.common_target_ids)
+        )
     for definition in definitions:
-        for support, target_ids in (
-            (ComparisonSupport.OWN, supports[definition.model_family]),
-            (ComparisonSupport.COMMON, common),
-        ):
+        scopes = [
+            (ComparisonSupport.OWN, None, supports[definition.model_family]),
+            *(
+                (ComparisonSupport.COMMON, comparator, target_ids)
+                for comparator, target_ids in comparison_scopes[definition.model_family]
+            ),
+        ]
+        for support, comparator, target_ids in scopes:
             grouped: dict[int, list[str]] = defaultdict(list)
             for target_id in target_ids:
                 target = _required_target(targets, target_id)
                 if (
-                    target.horizon == definition.horizon
+                    fold_by_target[target_id] == definition.outer_fold_id
+                    and target.horizon == definition.horizon
                     and target_id in predictions[definition.model_family]
                 ):
                     grouped[
                         bisect_right(
-                            definition.thresholds, predictions[definition.model_family][target_id]
+                            definition.thresholds,
+                            predictions[definition.model_family][target_id],
                         )
                     ].append(target_id)
+            realised_means: list[tuple[int, float]] = []
             for index in range(len(definition.thresholds) + 1):
                 ids = grouped[index]
                 forecast_values = [
                     predictions[definition.model_family][target_id] for target_id in ids
                 ]
                 realised = [_not_none(targets[target_id].log_return) for target_id in ids]
+                if realised:
+                    realised_means.append((index, fmean(realised)))
                 rows.append(
                     BucketMetrics(
                         definition.model_family,
+                        comparator,
                         support,
                         definition.outer_fold_id,
                         definition.bucket_definition_id,
@@ -658,18 +1185,35 @@ def _bucket_metrics(
                         else MetricValue.not_defined("empty forecast bucket"),
                     )
                 )
-    return tuple(rows)
+            order_metric = _correlation_metric(
+                tuple(float(index) for index, _ in realised_means),
+                tuple(value for _, value in realised_means),
+                2,
+                "bucket-order Spearman correlation",
+            )
+            failures = sum(right < left for (_, left), (_, right) in pairwise(realised_means))
+            summaries.append(
+                BucketOrderingSummary(
+                    definition.model_family,
+                    comparator,
+                    support,
+                    definition.outer_fold_id,
+                    definition.bucket_definition_id,
+                    order_metric,
+                    failures,
+                )
+            )
+    return tuple(rows), tuple(summaries)
 
 
 def _stability(
-    candidate: ModelFamily,
-    comparator: ModelFamily,
-    common: Sequence[str],
+    comparison: PairwiseComparison,
     candidate_predictions: Mapping[str, float],
     comparator_predictions: Mapping[str, float],
     targets: Mapping[str, TargetRow],
     verified: R1FoundationBindings,
 ) -> StabilitySummary:
+    common = comparison.common_target_ids
     fold_groups = {
         fold.fold_id: tuple(
             target_id for target_id in common if target_id in fold.validation_target_ids
@@ -697,38 +1241,147 @@ def _stability(
     fold_deltas = deltas(fold_groups)
     instrument_deltas = deltas(instrument_groups)
     period_deltas = deltas(period_groups)
+    delta_values = tuple(value for _, value in fold_deltas)
+    candidate_scales = tuple(
+        pstdev(candidate_predictions[target_id] for target_id in ids)
+        for ids in fold_groups.values()
+        if len(ids) > 1
+    )
+    scale = (
+        MetricValue.defined(pstdev(candidate_scales))
+        if len(candidate_scales) > 1
+        else MetricValue.not_defined("forecast-scale stability requires multiple eligible folds")
+    )
     return StabilitySummary(
-        candidate,
-        comparator,
+        comparison.candidate,
+        comparison.comparator,
         fold_deltas,
         instrument_deltas,
         _positive_proportion(fold_deltas, "no eligible fold deltas"),
         _positive_proportion(instrument_deltas, "no eligible instrument deltas"),
         _best_contribution(instrument_deltas, "no positive instrument contribution"),
         _best_contribution(period_deltas, "no positive period contribution"),
+        MetricValue.defined(median(delta_values))
+        if delta_values
+        else MetricValue.not_defined("no eligible fold deltas"),
+        MetricValue.defined(max(delta_values) - min(delta_values))
+        if delta_values
+        else MetricValue.not_defined("no eligible fold deltas"),
+        MetricValue.defined(pstdev(delta_values))
+        if delta_values
+        else MetricValue.not_defined("no eligible fold deltas"),
+        scale,
     )
 
 
-def _verify_model_lineage(
+def _verify_evaluation_model(
+    verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
-    forecasts: ForecastDataset,
-    fold_results: Sequence[RidgeFoldResult],
+    model: EvaluationModel,
 ) -> None:
     if (
-        forecasts.target_dataset_id != experiment.target_dataset_id
-        or forecasts.fold_dataset_id != experiment.fold_dataset_id
+        model.forecasts.target_dataset_id != experiment.target_dataset_id
+        or model.forecasts.fold_dataset_id != experiment.fold_dataset_id
     ):
         raise ValueError("evaluated forecasts differ from the experiment foundation")
-    for result in fold_results:
+    expected_keys: set[tuple[str, str, timedelta]]
+    if model.model_family is ModelFamily.LOCAL_RIDGE:
+        expected_keys = {
+            (instrument, fold.fold_id, experiment.primary_horizon)
+            for instrument in experiment.target_instruments
+            for fold in verified.folds.folds
+        }
+    else:
+        expected_keys = {
+            ("__POOLED__", fold.fold_id, experiment.primary_horizon)
+            for fold in verified.folds.folds
+        }
+    actual_keys = {
+        (result.fit.target_instrument_id, result.fit.outer_fold_id, result.fit.horizon)
+        for result in model.fold_results
+    }
+    if actual_keys != expected_keys or len(actual_keys) != len(model.fold_results):
+        raise ValueError("evaluated model does not exactly cover its outer-fold target scope")
+    for result in model.fold_results:
         if (
-            result.fit.experiment_configuration_id != experiment.configuration_id
-            or result.fit.evidence_class is not experiment.evidence_class
-            or result.fit.target_dataset_id != experiment.target_dataset_id
-            or result.fit.fold_dataset_id != experiment.fold_dataset_id
-            or result.coverage.target_dataset_id != experiment.target_dataset_id
-            or result.coverage.fold_dataset_id != experiment.fold_dataset_id
+            result.fit.feature_set_id != model.feature_set_id
+            or result.fit.r2_feature_dataset_id != model.feature_dataset.dataset_id
         ):
-            raise ValueError("evaluated fold child lineage differs from the experiment")
+            raise ValueError("evaluated fold child differs from its exact feature evidence")
+        if model.model_family is ModelFamily.LOCAL_RIDGE:
+            verify_local_ridge_forecast_coverage(
+                verified, model.feature_dataset, experiment, result
+            )
+        else:
+            verify_ridge_forecast_coverage(
+                verified,
+                model.feature_dataset,
+                experiment,
+                result,
+                target_instruments=experiment.target_instruments,
+            )
+
+
+def _selected_local_feature_dataset(
+    feature_datasets: Sequence[R2FeatureDataset],
+    feature_set_id_value: str,
+) -> R2FeatureDataset:
+    matches = tuple(
+        dataset for dataset in feature_datasets if dataset.feature_set_id == feature_set_id_value
+    )
+    if len(matches) != 1:
+        raise ValueError("selected local feature dataset is not uniquely present")
+    return matches[0]
+
+
+def _verify_complete_local_ladder(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    local_result: LocalRidgeOofResult,
+    feature_datasets: Sequence[R2FeatureDataset],
+) -> None:
+    declared = tuple(
+        item
+        for item in experiment.feature_sets
+        if item.name not in {"P0", "P1"} and FeatureFamily.POOLED_CROSS_ASSET not in item.families
+    )
+    expected_feature_ids = {
+        feature_set_id(
+            experiment.configuration_id,
+            item.name,
+            feature_schema_for_set(experiment, item.name),
+        )
+        for item in declared
+    }
+    datasets_by_id = {dataset.feature_set_id: dataset for dataset in feature_datasets}
+    if len(datasets_by_id) != len(feature_datasets) or set(datasets_by_id) != expected_feature_ids:
+        raise ValueError(
+            "local feature evidence does not cover the complete declared feature ladder"
+        )
+    expected = {
+        (feature_id, instrument, fold.fold_id, experiment.primary_horizon)
+        for feature_id in expected_feature_ids
+        for instrument in experiment.target_instruments
+        for fold in verified.folds.folds
+    }
+    actual = {
+        (
+            result.fit.feature_set_id,
+            result.fit.target_instrument_id,
+            result.fit.outer_fold_id,
+            result.fit.horizon,
+        )
+        for result in local_result.fold_results
+    }
+    if actual != expected or len(actual) != len(local_result.fold_results):
+        raise ValueError("local OOF evidence does not cover the complete declared feature ladder")
+    for result in local_result.fold_results:
+        verify_local_ridge_forecast_coverage(
+            verified,
+            datasets_by_id[result.fit.feature_set_id],
+            experiment,
+            result,
+        )
 
 
 def _expected_support(
@@ -742,6 +1395,25 @@ def _expected_support(
     if any(row.target_id not in targets for row in rows):
         raise ValueError("coverage includes unavailable, invalid or holdout target evidence")
     return tuple(sorted(row.target_id for row in rows))
+
+
+def _fold_by_validation_target(
+    verified: R1FoundationBindings,
+    targets: Mapping[str, TargetRow],
+) -> dict[str, str]:
+    values = {
+        target_id: fold.fold_id
+        for fold in verified.folds.folds
+        for target_id in fold.validation_target_ids
+        if target_id in targets
+    }
+    if len(values) != sum(
+        target_id in targets
+        for fold in verified.folds.folds
+        for target_id in fold.validation_target_ids
+    ):
+        raise ValueError("a target appears in more than one outer validation fold")
+    return values
 
 
 def _forecast_map(forecasts: ForecastDataset) -> dict[str, float]:
@@ -798,6 +1470,18 @@ def _mse(
     )
 
 
+def _metric_difference(left: MetricValue, right: MetricValue) -> MetricValue:
+    if left.value is None or right.value is None:
+        return MetricValue.not_defined("metric difference requires two defined values")
+    return MetricValue.defined(left.value - right.value)
+
+
+def _metric_number(value: MetricValue) -> float:
+    if value.value is None:
+        raise ValueError("required selection metric is undefined")
+    return value.value
+
+
 def _positive_proportion(
     values: Sequence[tuple[str, float]],
     reason: str,
@@ -839,21 +1523,14 @@ def _intersection(values: Sequence[set[str]]) -> set[str]:
     return result
 
 
-def _union(values: Sequence[set[str]]) -> set[str]:
-    result: set[str] = set()
-    for value in values:
-        result.update(value)
-    return result
-
-
 def _local_scope(
     local_result: LocalRidgeOofResult,
-    feature_set_id: str,
+    feature_set_id_value: str,
 ) -> tuple[tuple[RidgeFoldResult, ...], ForecastDataset]:
     fold_results = tuple(
         result
         for result in local_result.fold_results
-        if result.fit.feature_set_id == feature_set_id
+        if result.fit.feature_set_id == feature_set_id_value
     )
     if not fold_results:
         raise ValueError("local comparator feature set has no fold-fit children")

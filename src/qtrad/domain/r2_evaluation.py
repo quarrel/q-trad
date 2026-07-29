@@ -29,6 +29,7 @@ class MetricAvailability(StrEnum):
 
 
 class ConfigurationDisposition(StrEnum):
+    EVALUATED = "EVALUATED"
     RETAINED_CONTROL = "RETAINED_CONTROL"
     SELECTED_CANDIDATE = "SELECTED_CANDIDATE"
     REJECTED = "REJECTED"
@@ -121,6 +122,7 @@ class PredictiveMetrics:
 @dataclass(frozen=True, slots=True)
 class MetricSlice:
     model_family: ModelFamily
+    comparator_model_family: ModelFamily | None
     support: ComparisonSupport
     breakdown: str
     bucket: str
@@ -135,10 +137,19 @@ class MetricSlice:
             raise ValueError("metric slice target IDs must be unique and ordered")
         if len(self.target_ids) != self.metrics.eligible_target_count:
             raise ValueError("metric slice target IDs differ from eligible count")
+        if self.support is ComparisonSupport.OWN and self.comparator_model_family is not None:
+            raise ValueError("own-support metrics cannot name a comparator")
+        if self.support is ComparisonSupport.COMMON and self.comparator_model_family is None:
+            raise ValueError("common-support metrics require the pairwise comparator")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
             "model_family": self.model_family.value,
+            "comparator_model_family": (
+                self.comparator_model_family.value
+                if self.comparator_model_family is not None
+                else None
+            ),
             "support": self.support.value,
             "breakdown": self.breakdown,
             "bucket": self.bucket,
@@ -155,6 +166,7 @@ class TrainingBucketDefinition:
     horizon: timedelta
     training_target_ids: tuple[str, ...]
     thresholds: tuple[float, ...]
+    training_prediction_evidence_id: str
     bucket_definition_id: str
 
     def __post_init__(self) -> None:
@@ -166,6 +178,7 @@ class TrainingBucketDefinition:
             raise ValueError("bucket thresholds must be unique and ordered")
         if any(not isfinite(value) for value in self.thresholds):
             raise ValueError("bucket thresholds must be finite")
+        _require_sha256(self.training_prediction_evidence_id, "training-prediction evidence ID")
         if self.bucket_definition_id != semantic_id(self.semantic_json()):
             raise ValueError("bucket definition ID does not match its content")
 
@@ -178,11 +191,27 @@ class TrainingBucketDefinition:
         horizon: timedelta,
         training_target_ids: Sequence[str],
         thresholds: Sequence[float],
+        training_prediction_evidence_id: str,
     ) -> "TrainingBucketDefinition":
         ids = tuple(sorted(training_target_ids))
         limits = tuple(sorted(set(thresholds)))
-        payload = _bucket_json(model_family, outer_fold_id, horizon, ids, limits)
-        return cls(model_family, outer_fold_id, horizon, ids, limits, semantic_id(payload))
+        payload = _bucket_json(
+            model_family,
+            outer_fold_id,
+            horizon,
+            ids,
+            limits,
+            training_prediction_evidence_id,
+        )
+        return cls(
+            model_family,
+            outer_fold_id,
+            horizon,
+            ids,
+            limits,
+            training_prediction_evidence_id,
+            semantic_id(payload),
+        )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return _bucket_json(
@@ -191,6 +220,7 @@ class TrainingBucketDefinition:
             self.horizon,
             self.training_target_ids,
             self.thresholds,
+            self.training_prediction_evidence_id,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -200,6 +230,7 @@ class TrainingBucketDefinition:
 @dataclass(frozen=True, slots=True)
 class BucketMetrics:
     model_family: ModelFamily
+    comparator_model_family: ModelFamily | None
     support: ComparisonSupport
     outer_fold_id: str
     bucket_definition_id: str
@@ -215,10 +246,19 @@ class BucketMetrics:
             raise ValueError("forecast bucket scope is invalid")
         if not 0 <= self.instrument_count <= self.row_count:
             raise ValueError("forecast bucket instrument count is invalid")
+        if self.support is ComparisonSupport.OWN and self.comparator_model_family is not None:
+            raise ValueError("own-support buckets cannot name a comparator")
+        if self.support is ComparisonSupport.COMMON and self.comparator_model_family is None:
+            raise ValueError("common-support buckets require the pairwise comparator")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
             "model_family": self.model_family.value,
+            "comparator_model_family": (
+                self.comparator_model_family.value
+                if self.comparator_model_family is not None
+                else None
+            ),
             "support": self.support.value,
             "outer_fold_id": self.outer_fold_id,
             "bucket_definition_id": self.bucket_definition_id,
@@ -227,6 +267,37 @@ class BucketMetrics:
             "instrument_count": self.instrument_count,
             "forecast_mean": self.forecast_mean.as_json(),
             "realised_mean": self.realised_mean.as_json(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BucketOrderingSummary:
+    model_family: ModelFamily
+    comparator_model_family: ModelFamily | None
+    support: ComparisonSupport
+    outer_fold_id: str
+    bucket_definition_id: str
+    bucket_order_spearman: MetricValue
+    monotonicity_failure_count: int
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.bucket_definition_id, "bucket definition ID")
+        if not self.outer_fold_id or self.monotonicity_failure_count < 0:
+            raise ValueError("bucket-ordering scope is invalid")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "model_family": self.model_family.value,
+            "comparator_model_family": (
+                self.comparator_model_family.value
+                if self.comparator_model_family is not None
+                else None
+            ),
+            "support": self.support.value,
+            "outer_fold_id": self.outer_fold_id,
+            "bucket_definition_id": self.bucket_definition_id,
+            "bucket_order_spearman": self.bucket_order_spearman.as_json(),
+            "monotonicity_failure_count": self.monotonicity_failure_count,
         }
 
 
@@ -240,6 +311,10 @@ class StabilitySummary:
     improving_instrument_proportion: MetricValue
     best_instrument_contribution: MetricValue
     best_period_contribution: MetricValue
+    fold_delta_median: MetricValue
+    fold_delta_range: MetricValue
+    fold_delta_dispersion: MetricValue
+    forecast_scale_stability: MetricValue
 
     def __post_init__(self) -> None:
         for values in (self.fold_mse_deltas, self.instrument_mse_deltas):
@@ -259,6 +334,176 @@ class StabilitySummary:
             "improving_instrument_proportion": self.improving_instrument_proportion.as_json(),
             "best_instrument_contribution": self.best_instrument_contribution.as_json(),
             "best_period_contribution": self.best_period_contribution.as_json(),
+            "fold_delta_median": self.fold_delta_median.as_json(),
+            "fold_delta_range": self.fold_delta_range.as_json(),
+            "fold_delta_dispersion": self.fold_delta_dispersion.as_json(),
+            "forecast_scale_stability": self.forecast_scale_stability.as_json(),
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class EvaluatedModelManifest:
+    model_family: ModelFamily
+    feature_set_id: str | None
+    forecast_dataset_id: str | None
+    feature_dataset_id: str | None
+    coverage_dataset_ids: tuple[str, ...]
+    fold_fit_ids: tuple[str, ...]
+    expected_fold_target_keys: tuple[tuple[str, str], ...]
+    training_prediction_evidence_ids: tuple[str, ...]
+    coefficient_stability_summary_id: str | None
+    manifest_id: str
+
+    def __post_init__(self) -> None:
+        optional_ids = (
+            self.feature_set_id,
+            self.forecast_dataset_id,
+            self.feature_dataset_id,
+            self.coefficient_stability_summary_id,
+        )
+        for value in optional_ids:
+            if value is not None:
+                _require_sha256(value, "evaluated-model child ID")
+        for group in (
+            self.coverage_dataset_ids,
+            self.fold_fit_ids,
+            self.training_prediction_evidence_ids,
+        ):
+            if tuple(sorted(set(group))) != group:
+                raise ValueError("evaluated-model child IDs must be unique and ordered")
+            for value in group:
+                _require_sha256(value, "evaluated-model child ID")
+        if tuple(sorted(set(self.expected_fold_target_keys))) != self.expected_fold_target_keys:
+            raise ValueError("evaluated-model expected keys must be unique and ordered")
+        if self.model_family is ModelFamily.ZERO_RETURN:
+            if any(
+                (
+                    self.feature_set_id,
+                    self.forecast_dataset_id,
+                    self.feature_dataset_id,
+                    self.coverage_dataset_ids,
+                    self.fold_fit_ids,
+                    self.training_prediction_evidence_ids,
+                    self.coefficient_stability_summary_id,
+                )
+            ):
+                raise ValueError("zero comparator cannot reference fitted-model evidence")
+        elif not all(
+            (
+                self.feature_set_id,
+                self.forecast_dataset_id,
+                self.feature_dataset_id,
+                self.coverage_dataset_ids,
+                self.fold_fit_ids,
+                self.expected_fold_target_keys,
+                self.coefficient_stability_summary_id,
+            )
+        ):
+            raise ValueError("fitted evaluated models require complete child evidence")
+        _require_sha256(self.manifest_id, "evaluated-model manifest ID")
+        if self.manifest_id != semantic_id(self.semantic_json()):
+            raise ValueError("evaluated-model manifest ID does not authenticate its content")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        model_family: ModelFamily,
+        feature_set_id: str | None,
+        forecast_dataset_id: str | None,
+        feature_dataset_id: str | None,
+        coverage_dataset_ids: Sequence[str],
+        fold_fit_ids: Sequence[str],
+        expected_fold_target_keys: Sequence[tuple[str, str]],
+        training_prediction_evidence_ids: Sequence[str],
+        coefficient_stability_summary_id: str | None,
+    ) -> "EvaluatedModelManifest":
+        coverage_ids = tuple(coverage_dataset_ids)
+        fit_ids = tuple(fold_fit_ids)
+        expected_keys = tuple(expected_fold_target_keys)
+        training_ids = tuple(training_prediction_evidence_ids)
+        provisional = object.__new__(cls)
+        for field, value in (
+            ("model_family", model_family),
+            ("feature_set_id", feature_set_id),
+            ("forecast_dataset_id", forecast_dataset_id),
+            ("feature_dataset_id", feature_dataset_id),
+            ("coverage_dataset_ids", coverage_ids),
+            ("fold_fit_ids", fit_ids),
+            ("expected_fold_target_keys", expected_keys),
+            ("training_prediction_evidence_ids", training_ids),
+            ("coefficient_stability_summary_id", coefficient_stability_summary_id),
+        ):
+            object.__setattr__(provisional, field, value)
+        identity = semantic_id(provisional.semantic_json())
+        return cls(
+            model_family=model_family,
+            feature_set_id=feature_set_id,
+            forecast_dataset_id=forecast_dataset_id,
+            feature_dataset_id=feature_dataset_id,
+            coverage_dataset_ids=coverage_ids,
+            fold_fit_ids=fit_ids,
+            expected_fold_target_keys=expected_keys,
+            training_prediction_evidence_ids=training_ids,
+            coefficient_stability_summary_id=coefficient_stability_summary_id,
+            manifest_id=identity,
+        )
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": R2_EVALUATION_CONTRACT,
+            "schema_version": 1,
+            "model_family": self.model_family.value,
+            "feature_set_id": self.feature_set_id,
+            "forecast_dataset_id": self.forecast_dataset_id,
+            "feature_dataset_id": self.feature_dataset_id,
+            "coverage_dataset_ids": list(self.coverage_dataset_ids),
+            "fold_fit_ids": list(self.fold_fit_ids),
+            "expected_fold_target_keys": [
+                [fold_id, target_id] for fold_id, target_id in self.expected_fold_target_keys
+            ],
+            "training_prediction_evidence_ids": list(self.training_prediction_evidence_ids),
+            "coefficient_stability_summary_id": self.coefficient_stability_summary_id,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "manifest_id": self.manifest_id}
+
+
+@dataclass(frozen=True, slots=True)
+class PairwiseComparison:
+    candidate: ModelFamily
+    comparator: ModelFamily
+    candidate_own_target_ids: tuple[str, ...]
+    comparator_own_target_ids: tuple[str, ...]
+    common_target_ids: tuple[str, ...]
+    candidate_instrument_balanced_mse: MetricValue
+    comparator_instrument_balanced_mse: MetricValue
+
+    def __post_init__(self) -> None:
+        for values in (
+            self.candidate_own_target_ids,
+            self.comparator_own_target_ids,
+            self.common_target_ids,
+        ):
+            if tuple(sorted(set(values))) != values:
+                raise ValueError("comparison support must be unique and ordered")
+        if not set(self.common_target_ids) <= (
+            set(self.candidate_own_target_ids) & set(self.comparator_own_target_ids)
+        ):
+            raise ValueError("pairwise common support exceeds own support")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "candidate": self.candidate.value,
+            "comparator": self.comparator.value,
+            "candidate_own_target_ids": list(self.candidate_own_target_ids),
+            "comparator_own_target_ids": list(self.comparator_own_target_ids),
+            "common_target_ids": list(self.common_target_ids),
+            "candidate_instrument_balanced_mse": (self.candidate_instrument_balanced_mse.as_json()),
+            "comparator_instrument_balanced_mse": (
+                self.comparator_instrument_balanced_mse.as_json()
+            ),
         }
 
 
@@ -270,15 +515,23 @@ class ConfigurationRecord:
     disposition: ConfigurationDisposition
     reason: str
     forecast_dataset_id: str | None
+    evaluated_model_manifest_id: str | None
 
     def __post_init__(self) -> None:
         _require_sha256(self.configuration_id, "evaluated configuration ID")
+        if self.evaluated_model_manifest_id is not None:
+            _require_sha256(self.evaluated_model_manifest_id, "evaluated-model manifest ID")
         if self.feature_set_id is not None:
             _require_sha256(self.feature_set_id, "evaluated feature-set ID")
         if self.forecast_dataset_id is not None:
             _require_sha256(self.forecast_dataset_id, "evaluated forecast dataset ID")
         if not self.reason:
             raise ValueError("configuration disposition requires a reason")
+        if self.disposition not in (
+            ConfigurationDisposition.EVALUATED,
+            ConfigurationDisposition.FAILED,
+        ):
+            raise ValueError("evaluation records cannot assert selection dispositions")
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
@@ -288,6 +541,7 @@ class ConfigurationRecord:
             "disposition": self.disposition.value,
             "reason": self.reason,
             "forecast_dataset_id": self.forecast_dataset_id,
+            "evaluated_model_manifest_id": self.evaluated_model_manifest_id,
         }
 
 
@@ -393,10 +647,15 @@ class EvaluationReport:
     evidence_class: EvidenceClass
     metric_policy: str
     forecast_bucket_policy: str
-    common_target_ids: tuple[str, ...]
+    minimum_correlation_rows: int
+    forecast_bucket_count: int
+    all_model_common_target_ids: tuple[str, ...]
+    evaluated_models: tuple[EvaluatedModelManifest, ...]
+    comparisons: tuple[PairwiseComparison, ...]
     metric_slices: tuple[MetricSlice, ...]
     bucket_definitions: tuple[TrainingBucketDefinition, ...]
     bucket_metrics: tuple[BucketMetrics, ...]
+    bucket_ordering: tuple[BucketOrderingSummary, ...]
     stability: tuple[StabilitySummary, ...]
     configurations: tuple[ConfigurationRecord, ...]
     unavailable_diagnostics: tuple[tuple[str, str], ...]
@@ -413,15 +672,25 @@ class EvaluationReport:
             (self.report_id, "evaluation report ID"),
         ):
             _require_sha256(value, field)
-        if not self.metric_policy or not self.forecast_bucket_policy:
-            raise ValueError("evaluation policies must be non-empty")
-        if tuple(sorted(set(self.common_target_ids))) != self.common_target_ids:
-            raise ValueError("common support must be unique and ordered")
-        if not self.metric_slices or not self.configurations:
-            raise ValueError("evaluation requires metrics and a configuration register")
+        if (
+            not self.metric_policy
+            or not self.forecast_bucket_policy
+            or self.minimum_correlation_rows < 2
+            or self.forecast_bucket_count < 2
+        ):
+            raise ValueError("evaluation policies must be complete and valid")
+        if tuple(sorted(set(self.all_model_common_target_ids))) != self.all_model_common_target_ids:
+            raise ValueError("all-model common support must be unique and ordered")
+        if not self.metric_slices or not self.configurations or not self.comparisons:
+            raise ValueError("evaluation requires metrics, comparisons and configurations")
+        model_ids = tuple(item.manifest_id for item in self.evaluated_models)
+        if tuple(sorted(set(model_ids))) != model_ids:
+            raise ValueError("evaluated-model manifests must be unique and ordered")
         config_ids = tuple(item.configuration_id for item in self.configurations)
         if tuple(sorted(set(config_ids))) != config_ids:
             raise ValueError("configuration register must be unique and ordered")
+        if {item.evaluated_model_manifest_id for item in self.configurations} != set(model_ids):
+            raise ValueError("configuration register differs from evaluated-model evidence")
         if tuple(sorted(set(self.unavailable_diagnostics))) != self.unavailable_diagnostics:
             raise ValueError("unavailable diagnostics must be unique and ordered")
         if any(not name or not reason for name, reason in self.unavailable_diagnostics):
@@ -440,35 +709,71 @@ class EvaluationReport:
         evidence_class: EvidenceClass,
         metric_policy: str,
         forecast_bucket_policy: str,
-        common_target_ids: Sequence[str],
+        minimum_correlation_rows: int,
+        forecast_bucket_count: int,
+        all_model_common_target_ids: Sequence[str],
+        evaluated_models: Sequence[EvaluatedModelManifest],
+        comparisons: Sequence[PairwiseComparison],
         metric_slices: Sequence[MetricSlice],
         bucket_definitions: Sequence[TrainingBucketDefinition],
         bucket_metrics: Sequence[BucketMetrics],
+        bucket_ordering: Sequence[BucketOrderingSummary],
         stability: Sequence[StabilitySummary],
         configurations: Sequence[ConfigurationRecord],
         unavailable_diagnostics: Sequence[tuple[str, str]],
     ) -> "EvaluationReport":
-        values: dict[str, object] = {
-            "experiment_configuration_id": experiment_configuration_id,
-            "target_dataset_id": target_dataset_id,
-            "fold_dataset_id": fold_dataset_id,
-            "local_comparator_manifest_id": local_comparator_manifest_id,
-            "evidence_class": evidence_class,
-            "metric_policy": metric_policy,
-            "forecast_bucket_policy": forecast_bucket_policy,
-            "common_target_ids": tuple(sorted(common_target_ids)),
-            "metric_slices": tuple(metric_slices),
-            "bucket_definitions": tuple(bucket_definitions),
-            "bucket_metrics": tuple(bucket_metrics),
-            "stability": tuple(stability),
-            "configurations": tuple(sorted(configurations, key=lambda item: item.configuration_id)),
-            "unavailable_diagnostics": tuple(sorted(unavailable_diagnostics)),
-        }
+        common_ids = tuple(sorted(all_model_common_target_ids))
+        ordered_models = tuple(sorted(evaluated_models, key=lambda item: item.manifest_id))
+        ordered_configurations = tuple(
+            sorted(configurations, key=lambda item: item.configuration_id)
+        )
+        diagnostics = tuple(sorted(unavailable_diagnostics))
         provisional = object.__new__(cls)
-        for field, value in values.items():
+        for field, value in (
+            ("experiment_configuration_id", experiment_configuration_id),
+            ("target_dataset_id", target_dataset_id),
+            ("fold_dataset_id", fold_dataset_id),
+            ("local_comparator_manifest_id", local_comparator_manifest_id),
+            ("evidence_class", evidence_class),
+            ("metric_policy", metric_policy),
+            ("forecast_bucket_policy", forecast_bucket_policy),
+            ("minimum_correlation_rows", minimum_correlation_rows),
+            ("forecast_bucket_count", forecast_bucket_count),
+            ("all_model_common_target_ids", common_ids),
+            ("evaluated_models", ordered_models),
+            ("comparisons", tuple(comparisons)),
+            ("metric_slices", tuple(metric_slices)),
+            ("bucket_definitions", tuple(bucket_definitions)),
+            ("bucket_metrics", tuple(bucket_metrics)),
+            ("bucket_ordering", tuple(bucket_ordering)),
+            ("stability", tuple(stability)),
+            ("configurations", ordered_configurations),
+            ("unavailable_diagnostics", diagnostics),
+        ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
-        return cls(**values, report_id=identity)  # type: ignore[arg-type]
+        return cls(
+            experiment_configuration_id=experiment_configuration_id,
+            target_dataset_id=target_dataset_id,
+            fold_dataset_id=fold_dataset_id,
+            local_comparator_manifest_id=local_comparator_manifest_id,
+            evidence_class=evidence_class,
+            metric_policy=metric_policy,
+            forecast_bucket_policy=forecast_bucket_policy,
+            minimum_correlation_rows=minimum_correlation_rows,
+            forecast_bucket_count=forecast_bucket_count,
+            all_model_common_target_ids=common_ids,
+            evaluated_models=ordered_models,
+            comparisons=tuple(comparisons),
+            metric_slices=tuple(metric_slices),
+            bucket_definitions=tuple(bucket_definitions),
+            bucket_metrics=tuple(bucket_metrics),
+            bucket_ordering=tuple(bucket_ordering),
+            stability=tuple(stability),
+            configurations=ordered_configurations,
+            unavailable_diagnostics=diagnostics,
+            report_id=identity,
+        )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return {
@@ -481,10 +786,15 @@ class EvaluationReport:
             "evidence_class": self.evidence_class.value,
             "metric_policy": self.metric_policy,
             "forecast_bucket_policy": self.forecast_bucket_policy,
-            "common_target_ids": list(self.common_target_ids),
+            "minimum_correlation_rows": self.minimum_correlation_rows,
+            "forecast_bucket_count": self.forecast_bucket_count,
+            "all_model_common_target_ids": list(self.all_model_common_target_ids),
+            "evaluated_models": [item.as_json() for item in self.evaluated_models],
+            "comparisons": [item.as_json() for item in self.comparisons],
             "metric_slices": [item.as_json() for item in self.metric_slices],
             "bucket_definitions": [item.as_json() for item in self.bucket_definitions],
             "bucket_metrics": [item.as_json() for item in self.bucket_metrics],
+            "bucket_ordering": [item.as_json() for item in self.bucket_ordering],
             "stability": [item.as_json() for item in self.stability],
             "configurations": [item.as_json() for item in self.configurations],
             "configuration_count": len(self.configurations),
@@ -498,6 +808,54 @@ class EvaluationReport:
 
 
 @dataclass(frozen=True, slots=True)
+class SelectionGateOutcome:
+    configuration_id: str
+    name: str
+    passed: bool
+    observed: MetricValue
+    threshold: MetricValue
+    reason: str
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.configuration_id, "selection-gate configuration ID")
+        if not self.name or not self.reason:
+            raise ValueError("selection gate requires a name and reason")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "configuration_id": self.configuration_id,
+            "name": self.name,
+            "passed": self.passed,
+            "observed": self.observed.as_json(),
+            "threshold": self.threshold.as_json(),
+            "reason": self.reason,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionDecision:
+    configuration_id: str
+    disposition: ConfigurationDisposition
+    reason: str
+    gates: tuple[SelectionGateOutcome, ...]
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.configuration_id, "selection-decision configuration ID")
+        if not self.reason:
+            raise ValueError("selection decision requires a reason")
+        if any(gate.configuration_id != self.configuration_id for gate in self.gates):
+            raise ValueError("selection gates differ from their configuration")
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "configuration_id": self.configuration_id,
+            "disposition": self.disposition.value,
+            "reason": self.reason,
+            "gates": [gate.as_json() for gate in self.gates],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class SelectionManifest:
     experiment_configuration_id: str
     evidence_class: EvidenceClass
@@ -507,10 +865,14 @@ class SelectionManifest:
     predeclared_comparators: tuple[ModelFamily, ...]
     primary_metric: str
     secondary_metrics: tuple[str, ...]
+    acceptance_thresholds: tuple[tuple[str, float], ...]
+    decisions: tuple[SelectionDecision, ...]
     selected_configuration_ids: tuple[str, ...]
     holdout_comparator_configuration_ids: tuple[str, ...]
     final_fitting_procedure: str
     holdout_range: tuple[datetime, datetime]
+    holdout_feature_dataset_ids: tuple[str, ...]
+    holdout_consumption_ids: tuple[str, ...]
     application_image_identity: str
     frozen_at: datetime
     frozen_by: str
@@ -542,8 +904,23 @@ class SelectionManifest:
             raise ValueError("selected configurations were not evaluated")
         if not set(self.holdout_comparator_configuration_ids) <= evaluated:
             raise ValueError("holdout comparators were not evaluated")
+        if tuple(item.configuration_id for item in self.decisions) != tuple(sorted(evaluated)):
+            raise ValueError("selection decisions must exactly cover evaluated configurations")
+        expected_selected = tuple(
+            item.configuration_id
+            for item in self.decisions
+            if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+        )
+        if expected_selected != self.selected_configuration_ids:
+            raise ValueError("selected IDs differ from verified selection decisions")
+        if self.holdout_feature_dataset_ids or self.holdout_consumption_ids:
+            raise ValueError("selection freeze cannot reference materialised holdout evidence")
         if len(set(self.predeclared_comparators)) != len(self.predeclared_comparators):
             raise ValueError("selection comparator set must be unique")
+        if tuple(sorted(set(self.acceptance_thresholds))) != self.acceptance_thresholds or any(
+            not name or not isfinite(value) for name, value in self.acceptance_thresholds
+        ):
+            raise ValueError("selection thresholds must be unique, ordered and finite")
         if not all(
             (
                 self.primary_metric,
@@ -574,38 +951,69 @@ class SelectionManifest:
         predeclared_comparators: Sequence[ModelFamily],
         primary_metric: str,
         secondary_metrics: Sequence[str],
+        acceptance_thresholds: Sequence[tuple[str, float]],
+        decisions: Sequence[SelectionDecision],
         selected_configuration_ids: Sequence[str],
         holdout_comparator_configuration_ids: Sequence[str],
         final_fitting_procedure: str,
         holdout_range: tuple[datetime, datetime],
+        holdout_feature_dataset_ids: Sequence[str],
+        holdout_consumption_ids: Sequence[str],
         application_image_identity: str,
         frozen_at: datetime,
         frozen_by: str,
     ) -> "SelectionManifest":
-        values: dict[str, object] = {
-            "experiment_configuration_id": experiment_configuration_id,
-            "evidence_class": evidence_class,
-            "evaluation_report_id": evaluation_report_id,
-            "local_comparator_manifest_id": local_comparator_manifest_id,
-            "evaluated_configuration_ids": tuple(sorted(evaluated_configuration_ids)),
-            "predeclared_comparators": tuple(predeclared_comparators),
-            "primary_metric": primary_metric,
-            "secondary_metrics": tuple(secondary_metrics),
-            "selected_configuration_ids": tuple(sorted(selected_configuration_ids)),
-            "holdout_comparator_configuration_ids": tuple(
-                sorted(holdout_comparator_configuration_ids)
-            ),
-            "final_fitting_procedure": final_fitting_procedure,
-            "holdout_range": holdout_range,
-            "application_image_identity": application_image_identity,
-            "frozen_at": frozen_at,
-            "frozen_by": frozen_by,
-        }
+        evaluated_ids = tuple(sorted(evaluated_configuration_ids))
+        selected_ids = tuple(sorted(selected_configuration_ids))
+        comparator_ids = tuple(sorted(holdout_comparator_configuration_ids))
+        thresholds = tuple(sorted(acceptance_thresholds))
+        ordered_decisions = tuple(sorted(decisions, key=lambda item: item.configuration_id))
         provisional = object.__new__(cls)
-        for field, value in values.items():
+        for field, value in (
+            ("experiment_configuration_id", experiment_configuration_id),
+            ("evidence_class", evidence_class),
+            ("evaluation_report_id", evaluation_report_id),
+            ("local_comparator_manifest_id", local_comparator_manifest_id),
+            ("evaluated_configuration_ids", evaluated_ids),
+            ("predeclared_comparators", tuple(predeclared_comparators)),
+            ("primary_metric", primary_metric),
+            ("secondary_metrics", tuple(secondary_metrics)),
+            ("acceptance_thresholds", thresholds),
+            ("decisions", ordered_decisions),
+            ("selected_configuration_ids", selected_ids),
+            ("holdout_comparator_configuration_ids", comparator_ids),
+            ("final_fitting_procedure", final_fitting_procedure),
+            ("holdout_range", holdout_range),
+            ("holdout_feature_dataset_ids", tuple(holdout_feature_dataset_ids)),
+            ("holdout_consumption_ids", tuple(holdout_consumption_ids)),
+            ("application_image_identity", application_image_identity),
+            ("frozen_at", frozen_at),
+            ("frozen_by", frozen_by),
+        ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
-        return cls(**values, manifest_id=identity)  # type: ignore[arg-type]
+        return cls(
+            experiment_configuration_id=experiment_configuration_id,
+            evidence_class=evidence_class,
+            evaluation_report_id=evaluation_report_id,
+            local_comparator_manifest_id=local_comparator_manifest_id,
+            evaluated_configuration_ids=evaluated_ids,
+            predeclared_comparators=tuple(predeclared_comparators),
+            primary_metric=primary_metric,
+            secondary_metrics=tuple(secondary_metrics),
+            acceptance_thresholds=thresholds,
+            decisions=ordered_decisions,
+            selected_configuration_ids=selected_ids,
+            holdout_comparator_configuration_ids=comparator_ids,
+            final_fitting_procedure=final_fitting_procedure,
+            holdout_range=holdout_range,
+            holdout_feature_dataset_ids=tuple(holdout_feature_dataset_ids),
+            holdout_consumption_ids=tuple(holdout_consumption_ids),
+            application_image_identity=application_image_identity,
+            frozen_at=frozen_at,
+            frozen_by=frozen_by,
+            manifest_id=identity,
+        )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return {
@@ -619,10 +1027,14 @@ class SelectionManifest:
             "predeclared_comparators": [item.value for item in self.predeclared_comparators],
             "primary_metric": self.primary_metric,
             "secondary_metrics": list(self.secondary_metrics),
+            "acceptance_thresholds": {name: value for name, value in self.acceptance_thresholds},
+            "decisions": [item.as_json() for item in self.decisions],
             "selected_configuration_ids": list(self.selected_configuration_ids),
             "holdout_comparator_configuration_ids": list(self.holdout_comparator_configuration_ids),
             "final_fitting_procedure": self.final_fitting_procedure,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
+            "holdout_feature_dataset_ids": list(self.holdout_feature_dataset_ids),
+            "holdout_consumption_ids": list(self.holdout_consumption_ids),
             "application_image_identity": self.application_image_identity,
             "frozen_at": self.frozen_at.isoformat(),
             "frozen_by": self.frozen_by,
@@ -638,6 +1050,7 @@ def _bucket_json(
     horizon: timedelta,
     training_target_ids: Sequence[str],
     thresholds: Sequence[float],
+    training_prediction_evidence_id: str,
 ) -> dict[str, JsonValue]:
     return {
         "contract": R2_EVALUATION_CONTRACT,
@@ -647,6 +1060,7 @@ def _bucket_json(
         "horizon_seconds": horizon.total_seconds(),
         "training_target_ids": list(training_target_ids),
         "thresholds": list(thresholds),
+        "training_prediction_evidence_id": training_prediction_evidence_id,
     }
 
 

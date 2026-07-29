@@ -2,6 +2,7 @@
 
 import json
 import os
+from collections.abc import Sequence
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -10,8 +11,6 @@ from typing import cast
 from qtrad.application.r2_baselines import LocalRidgeOofResult
 from qtrad.application.r2_evaluation import (
     EvaluationModel,
-    TrainingPredictions,
-    verify_local_comparator_manifest,
     verify_r2_evaluation,
     verify_selection_manifest,
 )
@@ -23,6 +22,7 @@ from qtrad.domain.r2_evaluation import (
     LocalComparatorManifest,
     SelectionManifest,
 )
+from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_readiness import R2ExperimentConfig
 
 R2_EVALUATION_BUNDLE_CONTRACT = "qtrad-r2-evaluation-bundle-v1"
@@ -33,30 +33,33 @@ def write_r2_evaluation_bundle(
     local_manifest: LocalComparatorManifest,
     report: EvaluationReport,
 ) -> Path:
-    """Persist a thin report whose local comparator remains an independent child."""
+    """Persist the report and every independently authenticated model child."""
 
     output.mkdir(parents=True, exist_ok=True)
-    local_path = output / "local-comparator.json"
-    report_path = output / "evaluation.json"
-    local_bytes = _canonical_bytes(local_manifest.as_json())
-    report_bytes = _canonical_bytes(report.as_json())
-    _immutable_write(local_path, local_bytes)
-    _immutable_write(report_path, report_bytes)
+    child_bytes: dict[str, tuple[str, bytes]] = {
+        "evaluation": ("evaluation.json", _canonical_bytes(report.as_json())),
+        "local_comparator": (
+            "local-comparator.json",
+            _canonical_bytes(local_manifest.as_json()),
+        ),
+    }
+    for model in report.evaluated_models:
+        name = f"evaluated_model::{model.model_family.value}"
+        child_bytes[name] = (
+            f"evaluated-model-{model.model_family.value.lower()}.json",
+            _canonical_bytes(model.as_json()),
+        )
+    children: dict[str, JsonValue] = {}
+    for name, (filename, content) in sorted(child_bytes.items()):
+        _immutable_write(output / filename, content)
+        children[name] = {"path": filename, "sha256": sha256(content).hexdigest()}
     bundle: dict[str, JsonValue] = {
         "contract": R2_EVALUATION_BUNDLE_CONTRACT,
         "schema_version": 1,
         "evaluation_report_id": report.report_id,
         "local_comparator_manifest_id": local_manifest.manifest_id,
-        "children": {
-            "evaluation": {
-                "path": report_path.name,
-                "sha256": sha256(report_bytes).hexdigest(),
-            },
-            "local_comparator": {
-                "path": local_path.name,
-                "sha256": sha256(local_bytes).hexdigest(),
-            },
-        },
+        "evaluated_model_manifest_ids": [item.manifest_id for item in report.evaluated_models],
+        "children": children,
     }
     bundle_path = output / "manifest.json"
     _immutable_write(bundle_path, _canonical_bytes(bundle))
@@ -74,11 +77,9 @@ def verify_persisted_r2_evaluation(
     configurations: tuple[ConfigurationRecord, ...],
     *,
     local_feature_set_id: str,
-    local_training_predictions: tuple[TrainingPredictions, ...] = (),
-    minimum_correlation_rows: int = 3,
-    forecast_bucket_count: int = 5,
+    local_feature_datasets: Sequence[R2FeatureDataset],
 ) -> None:
-    """Verify bytes, independent child references and a complete metric replay."""
+    """Verify bytes, every independent child and a complete evaluation replay."""
 
     payload = _object(json.loads(bundle_path.read_bytes()))
     if set(payload) != {
@@ -86,6 +87,7 @@ def verify_persisted_r2_evaluation(
         "schema_version",
         "evaluation_report_id",
         "local_comparator_manifest_id",
+        "evaluated_model_manifest_ids",
         "children",
     }:
         raise ValueError("R2 evaluation bundle has unexpected fields")
@@ -94,16 +96,23 @@ def verify_persisted_r2_evaluation(
     if (
         payload["evaluation_report_id"] != report.report_id
         or payload["local_comparator_manifest_id"] != local_manifest.manifest_id
+        or payload["evaluated_model_manifest_ids"]
+        != [item.manifest_id for item in report.evaluated_models]
     ):
         raise ValueError("R2 evaluation bundle child identities differ")
     children = _object(payload["children"])
-    expected = {
+    expected: dict[str, tuple[str, bytes]] = {
         "evaluation": ("evaluation.json", _canonical_bytes(report.as_json())),
         "local_comparator": (
             "local-comparator.json",
             _canonical_bytes(local_manifest.as_json()),
         ),
     }
+    for model in report.evaluated_models:
+        expected[f"evaluated_model::{model.model_family.value}"] = (
+            f"evaluated-model-{model.model_family.value.lower()}.json",
+            _canonical_bytes(model.as_json()),
+        )
     if set(children) != set(expected):
         raise ValueError("R2 evaluation bundle child set is incomplete")
     for name, (expected_path, expected_bytes) in expected.items():
@@ -111,12 +120,12 @@ def verify_persisted_r2_evaluation(
         if set(reference) != {"path", "sha256"} or reference["path"] != expected_path:
             raise ValueError(f"R2 evaluation {name} reference is invalid")
         child_path = _safe_child(bundle_path.parent, expected_path)
-        child_bytes = child_path.read_bytes()
-        if child_bytes != expected_bytes or reference["sha256"] != sha256(child_bytes).hexdigest():
+        child_content = child_path.read_bytes()
+        if (
+            child_content != expected_bytes
+            or reference["sha256"] != sha256(child_content).hexdigest()
+        ):
             raise ValueError(f"R2 evaluation {name} child failed authentication")
-    verify_local_comparator_manifest(
-        local_manifest, experiment, local_result, feature_set_id=local_feature_set_id
-    )
     verify_r2_evaluation(
         report,
         local_manifest,
@@ -126,9 +135,7 @@ def verify_persisted_r2_evaluation(
         models,
         configurations,
         local_feature_set_id=local_feature_set_id,
-        local_training_predictions=local_training_predictions,
-        minimum_correlation_rows=minimum_correlation_rows,
-        forecast_bucket_count=forecast_bucket_count,
+        local_feature_datasets=local_feature_datasets,
     )
 
 
