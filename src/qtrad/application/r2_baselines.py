@@ -227,22 +227,39 @@ def build_local_ridge_fold(
     return result
 
 
-def verify_local_ridge_forecast_coverage(
+def verify_ridge_forecast_coverage(
     verified: R1FoundationBindings,
     feature_dataset: R2FeatureDataset,
     experiment: R2ExperimentConfig,
-    result: LocalRidgeFoldResult,
+    result: RidgeFoldResult,
+    *,
+    target_instruments: Sequence[str],
 ) -> None:
     """Authenticate complete outer membership and every forecast/coverage lineage field."""
 
     verify_exact_r1_bindings(verified, experiment)
     fit = result.fit
-    expected_targets = _validation_targets(
-        verified,
-        experiment,
-        outer_fold_id=fit.outer_fold_id,
-        target_instrument_id=fit.target_instrument_id,
-        horizon=fit.horizon,
+    scope = tuple(target_instruments)
+    if fit.model_family is ModelFamily.LOCAL_RIDGE:
+        if scope != (fit.target_instrument_id,):
+            raise ValueError("local coverage scope differs from its fold fit")
+    elif fit.target_instrument_id != "__POOLED__" or scope != experiment.target_instruments:
+        raise ValueError("pooled coverage scope differs from the fixed eligible universe")
+    expected_targets = tuple(
+        sorted(
+            (
+                target
+                for instrument in scope
+                for target in validation_targets_for_instrument(
+                    verified,
+                    experiment,
+                    outer_fold_id=fit.outer_fold_id,
+                    target_instrument_id=instrument,
+                    horizon=fit.horizon,
+                )
+            ),
+            key=lambda target: (target.decision_time, target.instrument_id, target.target_id),
+        )
     )
     if len(expected_targets) != fit.outer_validation_opportunity_count:
         raise ValueError("fold-fit outer validation count differs from authenticated R1 membership")
@@ -254,7 +271,7 @@ def verify_local_ridge_forecast_coverage(
     feature_by_key = _feature_rows_by_key(feature_dataset)
     forecast_by_id = {row.forecast_id: row for row in result.forecasts.rows}
     if len(forecast_by_id) != len(result.forecasts.rows):
-        raise ValueError("local forecasts contain duplicate identities")
+        raise ValueError("Ridge forecasts contain duplicate identities")
     reconciled_forecast_ids: set[str] = set()
     for target in expected_targets:
         coverage = coverage_by_target[target.target_id]
@@ -292,10 +309,27 @@ def verify_local_ridge_forecast_coverage(
             or forecast.model_contract != fit.CONTRACT
             or forecast.return_unit is not ReturnUnit.LOG_RETURN
         ):
-            raise ValueError("local forecast lineage differs from authenticated opportunity")
+            raise ValueError("Ridge forecast lineage differs from authenticated opportunity")
     if reconciled_forecast_ids != set(forecast_by_id):
         raise ValueError("emitted forecasts do not exactly reconcile to authenticated coverage")
-    replay_local_ridge_forecasts(result, feature_dataset, experiment)
+    replay_ridge_forecasts(result, feature_dataset, experiment)
+
+
+def verify_local_ridge_forecast_coverage(
+    verified: R1FoundationBindings,
+    feature_dataset: R2FeatureDataset,
+    experiment: R2ExperimentConfig,
+    result: LocalRidgeFoldResult,
+) -> None:
+    """Authenticate one local result against its exact R1 outer opportunities."""
+
+    verify_ridge_forecast_coverage(
+        verified,
+        feature_dataset,
+        experiment,
+        result,
+        target_instruments=(result.fit.target_instrument_id,),
+    )
 
 
 def replay_ridge_forecasts(
@@ -604,6 +638,22 @@ def fit_ridge(
         raise ValueError("ready R2 selection omitted final preprocessing or alpha")
     if preprocessing.training_target_ids != tuple(row.target_id for row in training_rows):
         raise ValueError("R2 final preprocessing membership differs from outer training rows")
+    identity_order = (
+        selection.target_instruments
+        if selection.model_family is not ModelFamily.LOCAL_RIDGE
+        else ()
+    )
+    observed_instruments = {row.target_instrument_id for row in training_rows}
+    if identity_order and any(
+        instrument not in observed_instruments for instrument in identity_order
+    ):
+        return _failed_final_fit(
+            common,
+            alpha,
+            preprocessing,
+            FitDisposition.INSUFFICIENT_TRAINING,
+            "outer fit omits a declared pooled instrument",
+        )
     if len(training_rows) < experiment.minimum_training_rows:
         return _failed_final_fit(
             common,
@@ -622,11 +672,6 @@ def fit_ridge(
             "outer training target has zero variance",
         )
     local = transform(training_rows, preprocessing)
-    identity_order = (
-        selection.target_instruments
-        if selection.model_family is not ModelFamily.LOCAL_RIDGE
-        else ()
-    )
     x = add_instrument_identity(local, training_rows, identity_order)
     expected_columns = len(preprocessing.active_feature_names) + len(identity_order)
     if x.shape != (len(training_rows), expected_columns) or x.shape[1] == 0:

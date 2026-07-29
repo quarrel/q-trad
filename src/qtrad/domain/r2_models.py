@@ -17,6 +17,13 @@ from qtrad.domain.time import require_utc
 R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v1"
 R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
 
+LOCAL_INSTRUMENT_IDENTITY_POLICY = "NO_INSTRUMENT_IDENTITY_V1"
+POOLED_INSTRUMENT_IDENTITY_POLICY = "FULL_ONE_HOT_V1"
+LOCAL_INTERCEPT_POLICY = "FIT_GLOBAL_INTERCEPT_V1"
+POOLED_INTERCEPT_POLICY = "NO_GLOBAL_INTERCEPT_V1"
+LOCAL_INSTRUMENT_MEMBERSHIP_POLICY = "SINGLE_INSTRUMENT_MEMBERSHIP_V1"
+POOLED_INSTRUMENT_MEMBERSHIP_POLICY = "FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1"
+
 _BINARY_PREPROCESSING_FEATURE_NAMES = frozenset(
     {"source_active", "quality_healthy", "gap_known_by_cutoff"}
 )
@@ -362,6 +369,9 @@ class _R2PreprocessingSelectionArguments(TypedDict):
     ridge_max_iterations: int
     loss_policy: str
     pooled_weighting_policy: str
+    instrument_identity_policy: str
+    intercept_policy: str
+    instrument_membership_policy: str
     holdout_excluded: bool
     selection: AlphaSelection
 
@@ -397,6 +407,9 @@ class R2PreprocessingSelection:
     ridge_max_iterations: int
     loss_policy: str
     pooled_weighting_policy: str
+    instrument_identity_policy: str
+    intercept_policy: str
+    instrument_membership_policy: str
     holdout_excluded: bool
     selection: AlphaSelection
     artifact_id: str
@@ -451,6 +464,25 @@ class R2PreprocessingSelection:
             raise ValueError("local selection must identify exactly one eligible target")
         if self.model_family is not ModelFamily.LOCAL_RIDGE and len(self.target_instruments) < 2:
             raise ValueError("pooled selection requires at least two eligible targets")
+        expected_policies = (
+            (
+                LOCAL_INSTRUMENT_IDENTITY_POLICY,
+                LOCAL_INTERCEPT_POLICY,
+                LOCAL_INSTRUMENT_MEMBERSHIP_POLICY,
+            )
+            if self.model_family is ModelFamily.LOCAL_RIDGE
+            else (
+                POOLED_INSTRUMENT_IDENTITY_POLICY,
+                POOLED_INTERCEPT_POLICY,
+                POOLED_INSTRUMENT_MEMBERSHIP_POLICY,
+            )
+        )
+        if (
+            self.instrument_identity_policy,
+            self.intercept_policy,
+            self.instrument_membership_policy,
+        ) != expected_policies:
+            raise ValueError("selection model policies differ from the declared model family")
         for value, field in (
             (self.inner_validation_start, "inner validation start"),
             (self.inner_validation_end, "inner validation end"),
@@ -524,6 +556,9 @@ class R2PreprocessingSelection:
                 "ridge_max_iterations": self.ridge_max_iterations,
                 "loss_policy": self.loss_policy,
                 "pooled_weighting_policy": self.pooled_weighting_policy,
+                "instrument_identity_policy": self.instrument_identity_policy,
+                "intercept_policy": self.intercept_policy,
+                "instrument_membership_policy": self.instrument_membership_policy,
                 "holdout_excluded": self.holdout_excluded,
                 "selection": self.selection,
             }
@@ -570,6 +605,9 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         "ridge_max_iterations": int(cast(int, values["ridge_max_iterations"])),
         "loss_policy": str(values["loss_policy"]),
         "pooled_weighting_policy": str(values["pooled_weighting_policy"]),
+        "instrument_identity_policy": str(values["instrument_identity_policy"]),
+        "intercept_policy": str(values["intercept_policy"]),
+        "instrument_membership_policy": str(values["instrument_membership_policy"]),
         "holdout_excluded": bool(values["holdout_excluded"]),
         "selection": selection.as_json(),
     }

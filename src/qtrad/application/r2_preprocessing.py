@@ -21,6 +21,12 @@ from qtrad.domain.r2_features import (
     feature_set_id,
 )
 from qtrad.domain.r2_models import (
+    LOCAL_INSTRUMENT_IDENTITY_POLICY,
+    LOCAL_INSTRUMENT_MEMBERSHIP_POLICY,
+    LOCAL_INTERCEPT_POLICY,
+    POOLED_INSTRUMENT_IDENTITY_POLICY,
+    POOLED_INSTRUMENT_MEMBERSHIP_POLICY,
+    POOLED_INTERCEPT_POLICY,
     AlphaCandidateScore,
     AlphaSelection,
     FitDisposition,
@@ -213,6 +219,21 @@ def _build_preprocessing_selection(
         ridge_max_iterations=experiment.ridge_max_iterations,
         loss_policy=experiment.model_selection_policy,
         pooled_weighting_policy=experiment.pooled_weighting_policy,
+        instrument_identity_policy=(
+            LOCAL_INSTRUMENT_IDENTITY_POLICY
+            if model_family is ModelFamily.LOCAL_RIDGE
+            else POOLED_INSTRUMENT_IDENTITY_POLICY
+        ),
+        intercept_policy=(
+            LOCAL_INTERCEPT_POLICY
+            if model_family is ModelFamily.LOCAL_RIDGE
+            else POOLED_INTERCEPT_POLICY
+        ),
+        instrument_membership_policy=(
+            LOCAL_INSTRUMENT_MEMBERSHIP_POLICY
+            if model_family is ModelFamily.LOCAL_RIDGE
+            else POOLED_INSTRUMENT_MEMBERSHIP_POLICY
+        ),
         holdout_excluded=True,
         selection=selection,
     )
@@ -265,6 +286,15 @@ def select_chronological_alpha(
         if row.target_end_time > validation_start or row.target_available_at > validation_start
     )
 
+    identity_order = tuple(instrument_identity_order)
+    if identity_order and _missing_instruments(ordered, identity_order):
+        return _failed_selection(
+            FitDisposition.INSUFFICIENT_TRAINING,
+            outer_ids,
+            inner_fit,
+            inner_validation,
+            purged,
+        )
     if len(inner_validation) < minimum_inner_validation_rows:
         return _failed_selection(
             FitDisposition.INSUFFICIENT_INNER_VALIDATION,
@@ -273,7 +303,23 @@ def select_chronological_alpha(
             inner_validation,
             purged,
         )
+    if identity_order and _missing_instruments(inner_validation, identity_order):
+        return _failed_selection(
+            FitDisposition.INSUFFICIENT_INNER_VALIDATION,
+            outer_ids,
+            inner_fit,
+            inner_validation,
+            purged,
+        )
     if not inner_fit:
+        return _failed_selection(
+            FitDisposition.INSUFFICIENT_TRAINING,
+            outer_ids,
+            inner_fit,
+            inner_validation,
+            purged,
+        )
+    if identity_order and _missing_instruments(inner_fit, identity_order):
         return _failed_selection(
             FitDisposition.INSUFFICIENT_TRAINING,
             outer_ids,
@@ -586,6 +632,13 @@ def add_instrument_identity(
     if matrix.shape[0] != len(rows):
         raise ValueError("feature matrix rows do not align with instrument identities")
     return np.column_stack((matrix, identity))
+
+
+def _missing_instruments(
+    rows: Sequence[InstrumentFeatureVector], instrument_order: Sequence[str]
+) -> tuple[str, ...]:
+    observed = {row.target_instrument_id for row in rows}
+    return tuple(instrument for instrument in instrument_order if instrument not in observed)
 
 
 def equal_instrument_total_weights(

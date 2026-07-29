@@ -613,6 +613,9 @@ def _rehashed_selection(
         ridge_max_iterations=artifact.ridge_max_iterations,
         loss_policy=artifact.loss_policy,
         pooled_weighting_policy=artifact.pooled_weighting_policy,
+        instrument_identity_policy=artifact.instrument_identity_policy,
+        intercept_policy=artifact.intercept_policy,
+        instrument_membership_policy=artifact.instrument_membership_policy,
         holdout_excluded=artifact.holdout_excluded,
         selection=selection,
     )
