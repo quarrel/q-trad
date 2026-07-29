@@ -249,9 +249,9 @@ Stage 2 live adapter -> Stage 6 capture host/qualification -> Stage 7 R2-IBKR-NA
                                             Stage 8 optional transfer experiment
 ```
 
-R2.C through R2.F1 and corresponding R2.H software verification may continue using synthetic and
-representative bundles. R2-IG-NATIVE remains pending until a qualifying frozen IG-native bundle
-passes its unchanged gates.
+R2.C is software-complete. R2.D through R2.F1 and corresponding R2.H software verification may
+continue using synthetic and representative bundles. R2-IG-NATIVE remains pending until a qualifying
+frozen IG-native bundle passes its unchanged gates.
 
 ## 8. Staged implementation
 
@@ -371,9 +371,10 @@ coverage gates.
 
 ### Stage 4 — R2 software continuation and historical integration
 
-Continue R2.C fold-local preprocessing and alpha selection, R2.D local Ridge, R2.E pooled controls,
-R2.F1 evaluation/selection machinery and the corresponding R2.H software verification. Exercise the
-historical foundation as a provenance-distinct integration input once it verifies.
+Use the completed R2.C fold-local preprocessing and alpha-selection contract, then continue R2.D local
+Ridge, R2.E pooled controls, R2.F1 evaluation/selection machinery and the corresponding R2.H software
+verification. Exercise the historical foundation as a provenance-distinct integration input once it
+verifies.
 
 Exit gate: synthetic and representative integration evidence independently replays features, fits,
 forecasts, metrics, selection and disposable holdout mechanics. Until Stage 5, outputs remain

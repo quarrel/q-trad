@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-07-28
-**Current milestone:** R2 — local and pooled baselines (R2.B software complete; R2.C next)
+**Updated:** 2026-07-29
+**Current milestone:** R2 — local and pooled baselines (R2.C software complete; R2.D next)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -48,10 +48,11 @@ remains offline/replay.
   R1 identities and reports source-active coverage for each qualifying instrument and research block,
   active-source duration, and usable common weeks rather than a first/last timestamp span. It enforces
   the documented 6+2+2+2+4-week gates and configured training, outer-validation and holdout row
-  minima. Inner-validation row readiness remains explicitly partial until R2.C produces its verified
-  chronological split. Representative native integration also remains pending until later R2
-  feature, fit, persistence, replay and evaluation evidence actually exercises it; current native
-  history supports no model-selection or effectiveness claim.
+  minima. Inner-validation row readiness remains explicitly partial until a verified R2.C selection
+  from a qualifying source-specific foundation is supplied to readiness reporting. Representative
+  native integration also remains pending until later R2 feature, fit, persistence, replay and
+  evaluation evidence actually exercises it; current native history supports no model-selection or
+  effectiveness claim.
 - R2.B software now provides the identity-bound `qtrad-r2-features-v1` raw-feature contract.
   Materialisation authenticates the complete R1 bundle, its availability evidence and every child
   binding before using exact interval start/end and configured current-cutoff selection. It provides
@@ -63,6 +64,18 @@ remains offline/replay.
   lineage from the verified R1 bundle. Eligible quote imbalance fails closed until quote-size
   semantics are separately validated. This is `IMPLEMENTATION_EVIDENCE_ONLY`; representative
   integration and any model conclusion remain pending.
+- R2.C software now provides authenticated fold-local preprocessing and primary-horizon local-Ridge
+  alpha-selection evidence. It derives exact inner-fit, inner-validation and purged membership from the
+  verified R1 fold and mature target availability; authenticates the declared local R2.B feature set;
+  and binds a separate `qtrad-r2-preprocessing-schema-v1` without changing any R2.B v1 identity.
+  Continuous features use training-only median imputation and standardisation while binary state
+  indicators remain unscaled. Candidate evaluation executes the declared Ridge policy, retains
+  numerical failures and chooses the larger alpha on equal loss. The strict
+  `qtrad-r2-preprocessing-selection-v1` artefact binds model, horizon, evidence, application and
+  numerical-library identities; verification independently rebuilds its structural state exactly and
+  numerical state within configured tolerances. This remains `IMPLEMENTATION_EVIDENCE_ONLY`: R2.C v1
+  is deliberately limited to one eligible target, `LOCAL_RIDGE` and the primary horizon; final local
+  coefficients and forecasts begin in R2.D, and pooled selection belongs to R2.E.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary now includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -104,13 +117,13 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.C fold-local preprocessing and alpha selection while the independent IBKR data track
-   proceeds and native IG history accumulates.
+2. Continue R2.D local Ridge fitting and chronological forecast evidence while the independent IBKR
+   data track proceeds and native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.
-5. Run R2.B and later R2 integration/verification against representative and qualifying bundles with
-   explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
+5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
+   with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities
 
