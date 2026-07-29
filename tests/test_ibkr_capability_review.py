@@ -159,3 +159,47 @@ def test_ibkr_capability_review_surfaces_actual_ambiguous_contract_count() -> No
     assert isinstance(instrument, dict)
     assert instrument["status"] == "AMBIGUOUS_PROVIDER_MATCH"
     assert instrument["returned_contract_count"] == 5
+
+
+@pytest.mark.parametrize(
+    ("request_status", "returned_count", "expected_status"),
+    (
+        ("TIMEOUT", 0, "CONTRACT_QUERY_TIMEOUT"),
+        ("ERROR", 1, "CONTRACT_QUERY_ERROR"),
+        ("SUCCESS", 0, "NO_RETURNED_CONTRACT"),
+    ),
+)
+def test_ibkr_capability_review_distinguishes_contract_query_outcomes(
+    request_status: str, returned_count: int, expected_status: str
+) -> None:
+    result = _result()
+    outcome = IbkrCandidateCapability(
+        query=result.query,
+        contracts=(),
+        requests=(
+            IbkrRequestEvidence(
+                kind="CONTRACT_DETAILS",
+                status=request_status,
+                latency_milliseconds=12,
+                returned_contract_count=returned_count,
+            ),
+        ),
+    )
+    review = build_ibkr_capability_review(
+        catalogue_name="capture-ibkr-v1-candidates",
+        catalogue_hash="a" * 64,
+        instruments=(_instrument(),),
+        probe_spec_name="operator-probe-v1",
+        probe_spec_hash="b" * 64,
+        api_version="10.33.1",
+        api_package_fingerprint="c" * 64,
+        results=(outcome,),
+        observed_at=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+
+    instruments = review.as_json_value()["instruments"]
+    assert isinstance(instruments, list)
+    instrument = instruments[0]
+    assert isinstance(instrument, dict)
+    assert instrument["status"] == expected_status
+    assert instrument["returned_contract_count"] == returned_count

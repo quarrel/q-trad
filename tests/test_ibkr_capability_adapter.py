@@ -119,6 +119,43 @@ class _AmbiguousClient(_FakeClient):
         )
 
 
+class _ContractFailureClient(_FakeClient):
+    def __init__(self, callbacks: Queue[capability._Callback], mode: str) -> None:
+        super().__init__(callbacks)
+        self._mode = mode
+        self.market_request_count = 0
+
+    def reqContractDetails(self, request_id: int, contract: object) -> None:
+        if self._mode == "partial_error":
+            super().reqContractDetails(request_id, contract)
+            details = self._callbacks.get_nowait()
+            self._callbacks.get_nowait()
+            self._callbacks.put(details)
+        if self._mode != "timeout":
+            self._callbacks.put(
+                capability._Callback("error", request_id, (1_785_000_000, 200, "REQUEST_ERROR"))
+            )
+
+    def reqMktData(
+        self,
+        request_id: int,
+        contract: object,
+        generic_tick_list: str,
+        snapshot: bool,
+        regulatory_snapshot: bool,
+        options: list[object],
+    ) -> None:
+        self.market_request_count += 1
+        super().reqMktData(
+            request_id,
+            contract,
+            generic_tick_list,
+            snapshot,
+            regulatory_snapshot,
+            options,
+        )
+
+
 @pytest.mark.asyncio
 async def test_direct_capability_adapter_collects_bounded_market_data_evidence(
     monkeypatch: pytest.MonkeyPatch,
@@ -197,6 +234,49 @@ async def test_ambiguous_contract_results_retain_count_without_downstream_probe(
     assert result.contracts == ()
     assert result.requests[0].status == "AMBIGUOUS"
     assert result.requests[0].returned_contract_count == returned_count
+    assert created[0].market_request_count == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("mode", "expected_status", "expected_count"),
+    (("partial_error", "ERROR", 1), ("error", "ERROR", 0), ("timeout", "TIMEOUT", 0)),
+)
+async def test_contract_query_failure_never_probes_partial_or_missing_results(
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+    expected_status: str,
+    expected_count: int,
+) -> None:
+    created: list[_ContractFailureClient] = []
+
+    def factory(callbacks: Queue[capability._Callback]) -> _ContractFailureClient:
+        client = _ContractFailureClient(callbacks, mode)
+        created.append(client)
+        return client
+
+    monkeypatch.setattr(capability, "_contract", lambda query: SimpleNamespace())
+    adapter = capability.OfficialIbkrCapabilityAdapter(
+        capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
+        request_timeout_seconds=0.001,
+        client_factory=factory,
+        sleep=_immediate_sleep,
+    )
+    query = IbkrContractQuery(
+        instrument_id=InstrumentId("fx:eur-usd"),
+        symbol="EUR",
+        security_type="CASH",
+        exchange="IDEALPRO",
+        currency="USD",
+    )
+
+    await adapter.connect()
+    result = (await adapter.probe((query,)))[0]
+    await adapter.disconnect()
+
+    assert result.contracts == ()
+    assert result.requests[0].status == expected_status
+    assert result.requests[0].returned_contract_count == expected_count
     assert created[0].market_request_count == 0
 
 
@@ -289,6 +369,27 @@ def test_missing_market_data_type_inspects_both_tick_families_but_is_uncertain()
     )
 
 
+def test_global_notice_without_market_callback_does_not_make_request_successful() -> None:
+    callbacks = (
+        capability._Callback(
+            "error", -1, (1_785_000_000, 1102, "CONNECTION_RESTORED_DATA_MAINTAINED")
+        ),
+    )
+
+    assert capability._window_status(callbacks) == "TIMEOUT"
+
+
+def test_finite_negative_futures_quote_is_usable_except_exact_sentinel() -> None:
+    callbacks = (
+        capability._Callback("tick_price", 1, (1, -2.5)),
+        capability._Callback("tick_price", 1, (2, 0.0)),
+    )
+
+    assert capability._usable_price_seen(callbacks, {1}) is True
+    assert capability._usable_price_seen(callbacks, {2}) is True
+    assert capability._market_availability(callbacks, "LIVE", True, True) == "LIVE_AVAILABLE"
+
+
 def _collector_adapter() -> capability.OfficialIbkrCapabilityAdapter:
     return capability.OfficialIbkrCapabilityAdapter(
         capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
@@ -338,3 +439,27 @@ async def test_restored_connection_with_data_maintained_remains_request_evidence
 
     assert capability._error_codes(callbacks) == ("IBKR_1102",)
     assert capability._status(callbacks, "historical_data_end") == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_historical_timeout_retains_prior_connection_notice() -> None:
+    adapter = _collector_adapter()
+
+    class Client:
+        def reqHistoricalData(self, request_id: int, *args: object) -> None:
+            adapter._callbacks.put(
+                capability._Callback(
+                    "error", -1, (1_785_000_000, 1102, "CONNECTION_RESTORED_DATA_MAINTAINED")
+                )
+            )
+
+        def cancelHistoricalData(self, request_id: int) -> None:
+            return None
+
+    adapter._client = Client()
+
+    evidence = await adapter._historical_evidence(object(), 1, "MIDPOINT", False)
+
+    assert evidence.status == "TIMEOUT"
+    assert evidence.error_codes == ("IBKR_1102",)
+    assert evidence.error_times == (1_785_000_000,)

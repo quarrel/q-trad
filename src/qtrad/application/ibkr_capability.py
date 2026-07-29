@@ -189,23 +189,27 @@ def build_ibkr_capability_review(
             for request in result.requests
             if request.kind == "CONTRACT_DETAILS"
         )
-        ambiguous = any(
-            request.status == "AMBIGUOUS"
+        contract_statuses = {
+            request.status
             for result in candidate_results
             for request in result.requests
             if request.kind == "CONTRACT_DETAILS"
-        )
+        }
+        if "TIMEOUT" in contract_statuses:
+            instrument_status = "CONTRACT_QUERY_TIMEOUT"
+        elif "ERROR" in contract_statuses:
+            instrument_status = "CONTRACT_QUERY_ERROR"
+        elif "AMBIGUOUS" in contract_statuses:
+            instrument_status = "AMBIGUOUS_PROVIDER_MATCH"
+        elif contract_count:
+            instrument_status = "OPERATOR_SELECTION_REQUIRED"
+        else:
+            instrument_status = "NO_RETURNED_CONTRACT"
         instrument_payloads.append(
             {
                 "instrument_id": str(instrument.instrument_id),
                 "display_name": instrument.display_name,
-                "status": (
-                    "AMBIGUOUS_PROVIDER_MATCH"
-                    if ambiguous
-                    else "OPERATOR_SELECTION_REQUIRED"
-                    if contract_count
-                    else "NO_RETURNED_CONTRACT"
-                ),
+                "status": instrument_status,
                 "returned_contract_count": contract_count,
                 "queries": [to_json_value(result) for result in candidate_results],
             }

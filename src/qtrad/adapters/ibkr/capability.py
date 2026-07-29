@@ -79,6 +79,14 @@ class IbkrConnectionIntegrityError(RuntimeError):
     """The Gateway session can no longer support trustworthy request evidence."""
 
 
+class IbkrRequestTimeout(TimeoutError):
+    """A bounded request timed out after retaining callbacks already observed for it."""
+
+    def __init__(self, callbacks: Sequence[_Callback]) -> None:
+        super().__init__("IBKR capability request timed out")
+        self.callbacks = tuple(callbacks)
+
+
 class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     """Direct API client with bounded requests and no account or order surface."""
 
@@ -157,7 +165,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         client.reqContractDetails(request_id, _contract(query))
         try:
             callbacks = await self._collect_until(request_id, "contract_details_end")
-        except TimeoutError:
+        except IbkrRequestTimeout as error:
             return IbkrCandidateCapability(
                 query=query,
                 contracts=(),
@@ -166,6 +174,11 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                         kind="CONTRACT_DETAILS",
                         status="TIMEOUT",
                         latency_milliseconds=_milliseconds(started),
+                        error_codes=_error_codes(error.callbacks),
+                        error_times=_error_times(error.callbacks),
+                        returned_contract_count=sum(
+                            callback.kind == "contract_details" for callback in error.callbacks
+                        ),
                     ),
                 ),
             )
@@ -174,12 +187,17 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             callback for callback in callbacks if callback.kind == "contract_details"
         )
         returned_count = len(returned_callbacks)
-        exact_match = returned_count == 1
+        contract_status = _status(callbacks, "contract_details_end")
+        exact_match = contract_status == "SUCCESS" and returned_count == 1
         contracts = (_contract_evidence(returned_callbacks[0].values[0]),) if exact_match else ()
         contract_request = IbkrRequestEvidence(
             kind="CONTRACT_DETAILS",
             status=(
-                "AMBIGUOUS" if returned_count > 1 else _status(callbacks, "contract_details_end")
+                contract_status
+                if contract_status != "SUCCESS"
+                else "AMBIGUOUS"
+                if returned_count > 1
+                else "SUCCESS"
             ),
             latency_milliseconds=_milliseconds(started),
             error_codes=error_codes,
@@ -261,7 +279,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         )
         try:
             callbacks = await self._collect_until(request_id, "historical_data_end")
-        except TimeoutError:
+        except IbkrRequestTimeout as error:
             client.cancelHistoricalData(request_id)
             return IbkrRequestEvidence(
                 kind=f"ONE_MINUTE_{what_to_show}_{'RTH' if use_rth else 'ALL'}",
@@ -269,6 +287,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 latency_milliseconds=_milliseconds(started),
                 contract_con_id=con_id,
                 use_rth=use_rth,
+                error_codes=_error_codes(error.callbacks),
+                error_times=_error_times(error.callbacks),
             )
         return IbkrRequestEvidence(
             kind=f"ONE_MINUTE_{what_to_show}_{'RTH' if use_rth else 'ALL'}",
@@ -300,7 +320,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         )
         try:
             callbacks = await self._collect_until(request_id, "historical_data_end")
-        except TimeoutError:
+        except IbkrRequestTimeout as error:
             client.cancelHistoricalData(request_id)
             return IbkrRequestEvidence(
                 kind="ONE_SECOND_MIDPOINT_ALL",
@@ -308,6 +328,8 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 latency_milliseconds=_milliseconds(started),
                 contract_con_id=con_id,
                 use_rth=False,
+                error_codes=_error_codes(error.callbacks),
+                error_times=_error_times(error.callbacks),
             )
         return IbkrRequestEvidence(
             kind="ONE_SECOND_MIDPOINT_ALL",
@@ -328,13 +350,15 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         client.reqHeadTimeStamp(request_id, contract, "MIDPOINT", 0, 2)
         try:
             callbacks = await self._collect_until(request_id, "head_timestamp")
-        except TimeoutError:
+        except IbkrRequestTimeout as error:
             client.cancelHeadTimeStamp(request_id)
             return IbkrRequestEvidence(
                 kind="EARLIEST_MIDPOINT",
                 status="TIMEOUT",
                 latency_milliseconds=_milliseconds(started),
                 contract_con_id=con_id,
+                error_codes=_error_codes(error.callbacks),
+                error_times=_error_times(error.callbacks),
             )
         client.cancelHeadTimeStamp(request_id)
         timestamps = [
@@ -375,7 +399,10 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         callbacks: list[_Callback] = []
         deadline = monotonic() + self._request_timeout_seconds
         while True:
-            callback = await self._next_callback(deadline)
+            try:
+                callback = await self._next_callback(deadline)
+            except TimeoutError as error:
+                raise IbkrRequestTimeout(callbacks) from error
             if _is_global_error(callback):
                 _handle_global_error(callback)
                 callbacks.append(callback)
@@ -576,7 +603,9 @@ def _window_status(callbacks: Sequence[_Callback]) -> str:
         for callback in callbacks
     ):
         return "ERROR"
-    if callbacks:
+    if any(
+        callback.kind in {"market_data_type", "tick_price", "tick_size"} for callback in callbacks
+    ):
         return "SUCCESS"
     return "TIMEOUT"
 
@@ -689,7 +718,7 @@ def _usable_price_seen(callbacks: Sequence[_Callback], tick_types: set[int]) -> 
         and isinstance(callback.values[1], (int, float))
         and not isinstance(callback.values[1], bool)
         and isfinite(float(callback.values[1]))
-        and float(callback.values[1]) > 0
+        and float(callback.values[1]) != -1.0
         for callback in callbacks
     )
 
