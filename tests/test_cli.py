@@ -149,6 +149,8 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
                 ("provider", "ig"),
                 ("environment", None),
                 ("preflight", False),
+                ("probe_spec_path", None),
+                ("execute_account_probe", False),
             ),
         ),
         (
@@ -767,7 +769,12 @@ async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
         "_ig_review_adapter",
         Mock(side_effect=AssertionError("IG adapter must not be composed")),
     )
-    settings = Settings(ibkr_gateway_host="127.0.0.1", ibkr_gateway_port=4002, ibkr_client_id=71)
+    settings = Settings(
+        ibkr_gateway_host="127.0.0.1",
+        ibkr_gateway_port=4002,
+        ibkr_client_id=71,
+        ibkr_api_package_fingerprint="a" * 64,
+    )
     output = tmp_path / "ibkr-preflight.json"
 
     await cli._review_instruments(
@@ -794,6 +801,109 @@ async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
             provider="ibkr",
             environment="paper",
         )
+
+
+@pytest.mark.asyncio
+async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from qtrad.ports.ibkr_capability import (
+        IbkrCandidateCapability,
+        IbkrContractEvidence,
+        IbkrContractQuery,
+        IbkrRequestEvidence,
+    )
+
+    class FakeAdapter:
+        def __init__(self) -> None:
+            self.connected = False
+            self.disconnected = False
+
+        async def connect(self) -> None:
+            self.connected = True
+
+        async def disconnect(self) -> None:
+            self.disconnected = True
+
+        async def probe(
+            self, queries: Sequence[IbkrContractQuery]
+        ) -> tuple[IbkrCandidateCapability, ...]:
+            return tuple(
+                IbkrCandidateCapability(
+                    query=query,
+                    contracts=(
+                        IbkrContractEvidence(
+                            con_id=index + 1,
+                            symbol=query.symbol,
+                            local_symbol=query.symbol,
+                            security_type=query.security_type,
+                            exchange=query.exchange,
+                            currency=query.currency,
+                            trading_class=None,
+                            multiplier=None,
+                            minimum_tick=Decimal("0.01"),
+                            market_rule_ids=(),
+                            valid_exchanges=(query.exchange,),
+                            long_name=None,
+                            underlier_con_id=None,
+                            timezone=None,
+                            trading_hours=None,
+                            liquid_hours=None,
+                        ),
+                    ),
+                    requests=(
+                        IbkrRequestEvidence(
+                            kind="CONTRACT_DETAILS", status="SUCCESS", latency_milliseconds=1
+                        ),
+                    ),
+                )
+                for index, query in enumerate(queries)
+            )
+
+    adapter = FakeAdapter()
+    monkeypatch.setattr(cli, "_ibkr_capability_adapter", lambda settings: adapter)
+    catalogue = cli.load_capture_candidates(Path("config/capture-ibkr-v1-candidates.toml"))
+    probe_spec = tmp_path / "operator-probe.toml"
+    probe_spec.write_text(
+        'schema_version = 1\nname = "operator-probe-v1"\n'
+        + "\n".join(
+            "[[query]]\n"
+            f'instrument_id = "{instrument.instrument_id}"\n'
+            'symbol = "TEST"\n'
+            'security_type = "IND"\n'
+            'exchange = "SMART"\n'
+            'currency = "USD"\n'
+            for instrument in catalogue.instruments
+        ),
+        encoding="utf-8",
+    )
+    output = tmp_path / "ibkr-review.json"
+    clock = Mock(spec=Clock)
+    clock.now.return_value = datetime(2026, 7, 29, tzinfo=UTC)
+    settings = Settings(
+        ibkr_gateway_host="127.0.0.1",
+        ibkr_gateway_port=4002,
+        ibkr_client_id=71,
+        ibkr_api_package_fingerprint="a" * 64,
+    )
+
+    await cli._review_instruments(
+        settings,
+        clock,
+        catalogue_path=Path("config/capture-ibkr-v1-candidates.toml"),
+        output_path=output,
+        provider="ibkr",
+        environment="paper",
+        probe_spec_path=probe_spec,
+        execute_account_probe=True,
+    )
+
+    payload = json.loads(output.read_text())
+    assert adapter.connected is True
+    assert adapter.disconnected is True
+    assert payload["external_io_performed"] is True
+    assert payload["selection_authority"] is False
+    assert len(payload["instruments"]) == 20
 
 
 @pytest.mark.asyncio

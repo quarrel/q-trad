@@ -2,9 +2,15 @@
 
 import hashlib
 import json
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 
-from qtrad.domain.events import JsonValue
+from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import Instrument
+from qtrad.domain.time import require_utc
+from qtrad.ports.ibkr_capability import IbkrCandidateCapability, IbkrContractQuery
 
 
 @dataclass(frozen=True, slots=True)
@@ -106,3 +112,124 @@ def _validate_gateway(host: str, port: int, client_id: int) -> None:
         raise ValueError("IBKR Gateway port must be between 1 and 65535")
     if client_id <= 0:
         raise ValueError("IBKR client ID must be positive; client ID zero is not permitted")
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrCapabilityReview:
+    """Immutable, non-authoritative output from a bounded paper-Gateway probe."""
+
+    review_hash: str
+    payload: Mapping[str, JsonValue]
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {**self.payload, "review_hash": self.review_hash}
+
+
+def build_ibkr_capability_review(
+    *,
+    catalogue_name: str,
+    catalogue_hash: str,
+    instruments: Sequence[Instrument],
+    probe_spec_name: str,
+    probe_spec_hash: str,
+    api_version: str,
+    api_package_fingerprint: str,
+    results: Sequence[IbkrCandidateCapability],
+    observed_at: datetime,
+) -> IbkrCapabilityReview:
+    """Build complete review evidence without selecting a provider contract."""
+
+    require_utc(observed_at, "IBKR capability review observed_at")
+    if not catalogue_name or len(catalogue_hash) != 64:
+        raise ValueError("IBKR capability review requires a named, hashed catalogue")
+    if not probe_spec_name or len(probe_spec_hash) != 64:
+        raise ValueError("IBKR capability review requires a named, hashed probe spec")
+    if not api_version or len(api_version) > 32:
+        raise ValueError("IBKR capability review requires a bounded API version")
+    if len(api_package_fingerprint) != 64:
+        raise ValueError("IBKR capability review requires an API package fingerprint")
+    expected = {instrument.instrument_id: instrument for instrument in instruments}
+    if not expected or len(expected) != len(instruments):
+        raise ValueError("IBKR capability review instruments must be non-empty and unique")
+    by_instrument: dict[InstrumentId, list[IbkrCandidateCapability]] = {
+        instrument_id: [] for instrument_id in expected
+    }
+    queries: set[IbkrContractQuery] = set()
+    for result in results:
+        if result.query.instrument_id not in expected:
+            raise ValueError("IBKR capability review contains an extraneous instrument")
+        if result.query in queries:
+            raise ValueError("IBKR capability review contains a duplicate query result")
+        queries.add(result.query)
+        by_instrument[result.query.instrument_id].append(result)
+    missing = set(expected) - set(by_instrument)
+    if missing:
+        raise ValueError("IBKR capability review is missing candidate instruments")
+
+    instrument_payloads: list[JsonValue] = []
+    for instrument in instruments:
+        candidate_results = sorted(
+            by_instrument[instrument.instrument_id],
+            key=lambda result: (
+                result.query.symbol,
+                result.query.security_type,
+                result.query.exchange,
+                result.query.currency,
+            ),
+        )
+        if not candidate_results:
+            raise ValueError("IBKR capability review is missing a query result for a candidate")
+        contract_count = sum(
+            (
+                request.returned_contract_count
+                if request.returned_contract_count is not None
+                else len(result.contracts)
+            )
+            for result in candidate_results
+            for request in result.requests
+            if request.kind == "CONTRACT_DETAILS"
+        )
+        contract_statuses = {
+            request.status
+            for result in candidate_results
+            for request in result.requests
+            if request.kind == "CONTRACT_DETAILS"
+        }
+        if "TIMEOUT" in contract_statuses:
+            instrument_status = "CONTRACT_QUERY_TIMEOUT"
+        elif "ERROR" in contract_statuses:
+            instrument_status = "CONTRACT_QUERY_ERROR"
+        elif "AMBIGUOUS" in contract_statuses:
+            instrument_status = "AMBIGUOUS_PROVIDER_MATCH"
+        elif contract_count:
+            instrument_status = "OPERATOR_SELECTION_REQUIRED"
+        else:
+            instrument_status = "NO_RETURNED_CONTRACT"
+        instrument_payloads.append(
+            {
+                "instrument_id": str(instrument.instrument_id),
+                "display_name": instrument.display_name,
+                "status": instrument_status,
+                "returned_contract_count": contract_count,
+                "queries": [to_json_value(result) for result in candidate_results],
+            }
+        )
+    payload: dict[str, JsonValue] = {
+        "schema_version": 1,
+        "provider": "ibkr",
+        "environment": "paper",
+        "catalogue_name": catalogue_name,
+        "catalogue_hash": catalogue_hash,
+        "probe_spec_name": probe_spec_name,
+        "probe_spec_hash": probe_spec_hash,
+        "api": {
+            "version": api_version,
+            "package_fingerprint": api_package_fingerprint,
+        },
+        "observed_at": to_json_value(observed_at),
+        "selection_authority": False,
+        "external_io_performed": True,
+        "instruments": instrument_payloads,
+    }
+    encoded = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    return IbkrCapabilityReview(review_hash=hashlib.sha256(encoded).hexdigest(), payload=payload)

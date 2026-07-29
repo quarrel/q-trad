@@ -37,7 +37,10 @@ from qtrad.application.backfill_planning import (
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
-from qtrad.application.ibkr_capability import build_ibkr_capability_preflight
+from qtrad.application.ibkr_capability import (
+    build_ibkr_capability_preflight,
+    build_ibkr_capability_review,
+)
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
@@ -87,6 +90,7 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
 )
+from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -222,6 +226,8 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--environment", choices=("demo", "paper"))
     review.add_argument("--catalogue", type=Path)
     review.add_argument("--preflight", action="store_true")
+    review.add_argument("--probe-spec", type=Path)
+    review.add_argument("--execute-account-probe", action="store_true")
     review.add_argument("--output", type=Path)
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -477,6 +483,8 @@ def main(argv: Sequence[str] | None = None) -> None:
                 provider=args.provider,
                 environment=args.environment,
                 preflight=args.preflight,
+                probe_spec_path=args.probe_spec,
+                execute_account_probe=args.execute_account_probe,
             )
         )
     elif args.command == "instruments" and args.instrument_command == "promote":
@@ -1673,6 +1681,29 @@ def _ig_review_adapter(
     )
 
 
+def _ibkr_capability_adapter(settings: Settings):
+    """Compose the isolated market-data-only Stage 1 adapter on explicit account-probe execution."""
+
+    from qtrad.adapters.ibkr.capability import (
+        IbkrApiIdentity,
+        IbkrGatewayEndpoint,
+        OfficialIbkrCapabilityAdapter,
+    )
+
+    return OfficialIbkrCapabilityAdapter(
+        IbkrGatewayEndpoint(
+            host=settings.ibkr_gateway_host,
+            port=settings.ibkr_gateway_port,
+            client_id=settings.ibkr_client_id,
+        ),
+        api_identity=(
+            IbkrApiIdentity(package_fingerprint=settings.ibkr_api_package_fingerprint)
+            if settings.ibkr_api_package_fingerprint is not None
+            else None
+        ),
+    )
+
+
 def _ig_backfill_adapter(settings: Settings, clock: Clock) -> IgDemoMarketDataAdapter:
     username, password, api_key, account_id = settings.require_ig_credentials()
     return IgDemoMarketDataAdapter(
@@ -1841,6 +1872,8 @@ async def _review_instruments(
     provider: str = "ig",
     environment: str | None = None,
     preflight: bool = False,
+    probe_spec_path: Path | None = None,
+    execute_account_probe: bool = False,
 ) -> None:
     if output_path is not None:
         if output_path.exists():
@@ -1852,23 +1885,57 @@ async def _review_instruments(
     if provider == "ibkr":
         if environment not in (None, "paper"):
             raise ValueError("IBKR listing review supports only the paper environment")
-        if not preflight:
-            raise RuntimeError(
-                "IBKR capability review is account-gated; run with --preflight before "
-                "operator-authenticated Gateway access is authorised"
+        if preflight:
+            if probe_spec_path is not None or execute_account_probe:
+                raise ValueError("IBKR preflight cannot accept a probe spec or execute account I/O")
+            candidates = load_capture_candidates(
+                catalogue_path or Path("config/capture-ibkr-v1-candidates.toml")
             )
+            result = build_ibkr_capability_preflight(
+                catalogue_name=candidates.name,
+                catalogue_hash=candidates.configuration_hash,
+                candidate_count=len(candidates.instruments),
+                gateway_host=settings.ibkr_gateway_host,
+                gateway_port=settings.ibkr_gateway_port,
+                client_id=settings.ibkr_client_id,
+            )
+            _emit_json_artifact(result.as_json_value(), output_path)
+            return
+        if not execute_account_probe:
+            raise RuntimeError(
+                "IBKR capability review is account-gated; run --preflight first, then explicitly "
+                "pass --execute-account-probe after Gateway access is authorised"
+            )
+        if output_path is None:
+            raise ValueError("IBKR account probe requires --output")
+        if probe_spec_path is None:
+            raise ValueError("IBKR account probe requires --probe-spec")
         candidates = load_capture_candidates(
             catalogue_path or Path("config/capture-ibkr-v1-candidates.toml")
         )
-        result = build_ibkr_capability_preflight(
-            catalogue_name=candidates.name,
-            catalogue_hash=candidates.configuration_hash,
-            candidate_count=len(candidates.instruments),
-            gateway_host=settings.ibkr_gateway_host,
-            gateway_port=settings.ibkr_gateway_port,
-            client_id=settings.ibkr_client_id,
-        )
-        _emit_json_artifact(result.as_json_value(), output_path)
+        probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
+        candidate_ids = {instrument.instrument_id for instrument in candidates.instruments}
+        query_ids = {query.instrument_id for query in probe_spec.queries}
+        if candidate_ids != query_ids:
+            raise ValueError("IBKR capability probe spec must cover each candidate exactly")
+        adapter = _ibkr_capability_adapter(settings)
+        try:
+            await adapter.connect()
+            results = await adapter.probe(probe_spec.queries)
+            review = build_ibkr_capability_review(
+                catalogue_name=candidates.name,
+                catalogue_hash=candidates.configuration_hash,
+                instruments=candidates.instruments,
+                probe_spec_name=probe_spec.name,
+                probe_spec_hash=probe_spec.configuration_hash,
+                api_version="10.33.1",
+                api_package_fingerprint=settings.ibkr_api_package_fingerprint or "",
+                results=results,
+                observed_at=clock.now(),
+            )
+            _emit_json_artifact(review.as_json_value(), output_path, review.review_hash)
+        finally:
+            await adapter.disconnect()
         return
     if provider != "ig":
         raise ValueError(f"unsupported listing-review provider: {provider}")
@@ -1876,6 +1943,8 @@ async def _review_instruments(
         raise ValueError("IG listing review supports only the demo environment")
     if preflight:
         raise ValueError("--preflight is only valid for the IBKR provider")
+    if probe_spec_path is not None or execute_account_probe:
+        raise ValueError("IBKR account-probe options are only valid for the IBKR provider")
 
     candidates = load_capture_candidates(
         catalogue_path or Path("config/capture-v2-candidates.toml")

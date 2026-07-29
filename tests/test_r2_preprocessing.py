@@ -1,4 +1,4 @@
-from collections.abc import Callable
+from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -222,12 +222,31 @@ def test_complete_grid_retains_numerical_candidate_failures(
 ) -> None:
     from qtrad.application import r2_preprocessing
 
-    real: Callable[..., ndarray] = r2_preprocessing._ridge_predictions
+    real = r2_preprocessing._ridge_predictions
 
-    def fail_one(alpha: float, *args: object, **kwargs: object) -> ndarray:
+    def fail_one(
+        alpha: float,
+        x_fit: ndarray,
+        y_fit: ndarray,
+        x_validation: ndarray,
+        sample_weights: Sequence[float],
+        *,
+        solver: str,
+        tolerance: float,
+        max_iterations: int,
+    ) -> ndarray:
         if alpha == 1.0:
             raise ValueError("synthetic solver failure")
-        return real(alpha, *args, **kwargs)
+        return real(
+            alpha,
+            x_fit,
+            y_fit,
+            x_validation,
+            sample_weights,
+            solver=solver,
+            tolerance=tolerance,
+            max_iterations=max_iterations,
+        )
 
     monkeypatch.setattr(r2_preprocessing, "_ridge_predictions", fail_one)
     result = _select(_training_rows())
