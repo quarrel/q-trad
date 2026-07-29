@@ -146,6 +146,9 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             (
                 ("catalogue_path", Path("config/capture-v2-candidates.toml")),
                 ("output_path", Path("review.json")),
+                ("provider", "ig"),
+                ("environment", None),
+                ("preflight", False),
             ),
         ),
         (

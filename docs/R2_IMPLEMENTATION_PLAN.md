@@ -666,42 +666,47 @@ Raw features are not imputed or standardised.
 
 The OOF raw-feature child contains no holdout decision rows. A separate holdout feature child is created only after selection freeze.
 
-### 9.3 Fold fit artefact
+### 9.3 Preprocessing-selection and fold-fit artefacts
 
-Suggested contract:
+R2.C owns a separate preprocessing feature-semantics contract, derived in exact raw-feature order without
+changing the R2.B v1 schema:
+
+```text
+qtrad-r2-preprocessing-schema-v1
+```
+
+It classifies each feature as `CONTINUOUS` or `BINARY_INDICATOR`; the preprocessing-selection semantic
+identity binds both its schema ID and full schema. R2.C also owns the selection contract:
+
+```text
+qtrad-r2-preprocessing-selection-v1
+```
+
+One artefact is stored for each outer fold and exactly one eligible target. Its semantic identity binds
+`model_family` and `horizon`, but this R2.C implementation accepts only `LOCAL_RIDGE` at the experiment
+primary horizon. It does not implement or claim pooled-family selection.
+
+The R2.C artefact owns:
+
+- exact outer, inner-fit, inner-validation and purged target membership;
+- fold-local preprocessing state, including active and explicitly dropped features;
+- imputation medians, scaling means and scales, and sample weights;
+- the complete alpha candidate grid and candidate losses;
+- the exactly selected alpha and deterministic larger-alpha tie-break;
+- the split, preprocessing, loss, weighting and Ridge solver policies; and
+- application image and scikit-learn library replay identities for the selection computation.
+
+R2.D and R2.E own the final fold-fit contract:
 
 ```text
 qtrad-r2-fold-fit-v1
 ```
 
-One artefact is stored for each:
-
-```text
-model_family
-horizon
-outer_fold
-target_instrument_or_pool
-```
-
-It records:
-
-- exact training and validation target membership hashes;
-- feature schema and active feature list;
-- dropped zero-variance features;
-- imputation values;
-- scaling means and scales;
-- inner fit and inner validation membership;
-- alpha candidate scores;
-- selected alpha;
-- deterministic tie-break outcome;
-- Ridge solver parameters;
-- sample-weight policy;
-- intercept;
-- ordered coefficients;
-- fit row counts and exclusion counts;
-- fit warnings or failure status;
-- library and image identities; and
-- numerical diagnostics.
+That artefact is stored for each model family, horizon, outer fold and target instrument or pool. It owns
+the authoritative model-family and horizon fit identity, final intercept and ordered coefficients, fit row
+and exclusion counts, fit warnings or failure status, final-fit library and image identities, and numerical
+diagnostics. R2.D supplies local fits; R2.E supplies pooled fits. No R2.C preprocessing-selection artefact
+is evidence that a pooled model was selected or fitted.
 
 ### 9.4 Forecast and coverage artefacts
 
@@ -1577,7 +1582,7 @@ A stage may be software-complete while its confirmatory research execution remai
 - bounded alpha evaluator;
 - deterministic selection rule;
 - model-fit failure dispositions;
-- fold-fit manifest support.
+- preprocessing-selection manifest support.
 
 #### Correctness requirements
 
