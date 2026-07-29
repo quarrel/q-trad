@@ -550,22 +550,6 @@ def _fit_local_ridge(
         numpy_library_identity,
         sklearn_library_identity,
     )
-    if validation_count < experiment.minimum_outer_validation_rows:
-        return (
-            R2FoldFit.create(
-                **common,
-                selected_alpha=chosen.selected_alpha,
-                preprocessing=chosen.outer_preprocessing,
-                coefficient_feature_names=(),
-                intercept=None,
-                coefficients=(),
-                fit_warnings=(),
-                disposition=FitDisposition.INSUFFICIENT_OUTER_VALIDATION,
-                failure="outer fold has fewer than minimum_outer_validation_rows",
-                diagnostics=None,
-            ),
-            None,
-        )
     if chosen.disposition is not FitDisposition.READY:
         return (
             R2FoldFit.create(

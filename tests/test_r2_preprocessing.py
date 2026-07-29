@@ -328,19 +328,19 @@ def test_configured_solver_and_loss_fail_closed() -> None:
 
 
 def _bound_fixture(
-    *, target_values: Sequence[float] | None = None, outer_validation_rows: int = 2
+    *, target_values: Sequence[float] | None = None, minimum_outer_validation_rows: int = 2
 ) -> tuple[R1FoundationBindings, R2FeatureDataset, R2ExperimentConfig, Fold]:
     base = base_experiment()
     instrument = base.confirmatory_target_instruments[0]
     target_rows: list[TargetRow] = []
     values = (
-        tuple(float(index) / 100 for index in range(8 + outer_validation_rows))
+        tuple(float(index) / 100 for index in range(10))
         if target_values is None
         else tuple(target_values)
     )
-    if len(values) != 8 + outer_validation_rows:
-        raise ValueError("bound fixture target values do not match its requested validation rows")
-    for index in range(8 + outer_validation_rows):
+    if len(values) != 10:
+        raise ValueError("bound fixture requires exactly ten target values")
+    for index in range(10):
         decision_minutes = 10 * index if index < 8 else 100 + 10 * (index - 8)
         decision = START + timedelta(minutes=decision_minutes)
         endpoint = decision + timedelta(minutes=15)
@@ -378,7 +378,7 @@ def _bound_fixture(
         training_start=START,
         training_cutoff=START + timedelta(minutes=90),
         validation_start=START + timedelta(minutes=91),
-        validation_end=START + timedelta(minutes=100 + 10 * outer_validation_rows),
+        validation_end=START + timedelta(minutes=120),
         embargo_end=START + timedelta(minutes=91),
         training_target_ids=training_ids,
         validation_target_ids=validation_ids,
@@ -396,7 +396,7 @@ def _bound_fixture(
         fold_dataset_id=folds.dataset_id,
         minimum_training_rows=4,
         minimum_inner_validation_rows=2,
-        minimum_outer_validation_rows=2,
+        minimum_outer_validation_rows=minimum_outer_validation_rows,
     )
     raw_schema = feature_schema_for_set(config, "L0")
     preprocessing_schema = derive_r2_preprocessing_schema(raw_schema)
@@ -1099,33 +1099,18 @@ def test_fold_fit_verifier_rejects_rehashed_coefficient_tampering() -> None:
         _verify_local_fit(verified, features, config, selection, tampered)
 
 
-@pytest.mark.parametrize(
-    ("outer_validation_rows", "expected_disposition", "expected_forecasts"),
-    [
-        (1, FitDisposition.INSUFFICIENT_OUTER_VALIDATION, 0),
-        (2, FitDisposition.READY, 2),
-        (3, FitDisposition.READY, 3),
-    ],
-)
-def test_outer_validation_minimum_is_enforced_below_at_and_above_threshold(
-    outer_validation_rows: int,
-    expected_disposition: FitDisposition,
-    expected_forecasts: int,
-) -> None:
-    verified, features, config, fold = _bound_fixture(outer_validation_rows=outer_validation_rows)
+def test_outer_validation_minimum_does_not_gate_r2d_fit_or_forecasts() -> None:
+    verified, features, config, fold = _bound_fixture(minimum_outer_validation_rows=3)
     selection = _build_bound_selection(verified, features, config, fold)
 
     result = _build_local_fold(verified, features, config, selection)
 
-    assert config.minimum_outer_validation_rows == 2
-    assert result.fit.disposition is expected_disposition
-    assert len(result.coverage.rows) == outer_validation_rows
-    assert len(result.forecasts.rows) == expected_forecasts
-    if expected_disposition is FitDisposition.INSUFFICIENT_OUTER_VALIDATION:
-        assert all(
-            row.disposition is ForecastCoverageDisposition.INSUFFICIENT_OUTER_VALIDATION
-            for row in result.coverage.rows
-        )
+    assert result.fit.outer_validation_opportunity_count < config.minimum_outer_validation_rows
+    assert result.fit.disposition is FitDisposition.READY
+    assert len(result.forecasts.rows) == len(result.coverage.rows) == 2
+    assert all(
+        row.disposition is ForecastCoverageDisposition.FORECASTED for row in result.coverage.rows
+    )
 
 
 def _coverage_with_rows(
