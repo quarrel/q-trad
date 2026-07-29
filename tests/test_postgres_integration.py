@@ -41,7 +41,11 @@ from qtrad.runtime.settings import Settings
 
 DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
 pytestmark = pytest.mark.skipif(
-    not DATABASE_URL, reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration"
+    not DATABASE_URL,
+    reason=(
+        "QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration; "
+        "run ops/dev/verify.sh for the complete local gate"
+    ),
 )
 
 
