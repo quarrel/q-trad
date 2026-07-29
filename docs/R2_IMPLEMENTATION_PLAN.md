@@ -122,8 +122,8 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
 - **Evidence impact:** no durable pooled-selection or decision-grade R2 evidence exists. Existing local
   selections remain structurally local, but pre-amendment synthetic selection evidence is superseded and
   must be regenerated under the policy-bound semantic identity.
-- **Approving pull request:** replacement R2.E pull request; this amendment takes effect only if that
-  pull request is approved and merged.
+- **Approving pull request:** PR #29; this amendment takes effect only when that pull request is
+  approved and merged.
 - **Amendment date:** 2026-07-29.
 
 ---
