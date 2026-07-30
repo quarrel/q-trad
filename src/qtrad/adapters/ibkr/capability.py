@@ -639,7 +639,7 @@ def _error_disposition(callback: _Callback) -> str:
 
 
 def _error_classification(error_code: int) -> str:
-    if error_code in {2104, 2106, 2107, 2108, 2158}:
+    if error_code in {2104, 2106, 2107, 2108, 2119, 2158}:
         return "INFORMATIONAL"
     if error_code == 1100:
         return "CONNECTION_LOST"
