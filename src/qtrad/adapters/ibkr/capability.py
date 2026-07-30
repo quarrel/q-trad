@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib
 import importlib.metadata
+from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -36,6 +37,8 @@ _MAX_CONTRACTS_PER_QUERY = 1
 _HISTORICAL_REQUESTS_PER_CONTRACT = 8
 _MAX_HISTORICAL_REQUESTS_PER_RUN = 192
 _HISTORICAL_REQUEST_INTERVAL_SECONDS = 12.5
+_SECURITY_DEFINITION_FARM_DISCONNECTED = 2157
+_SECURITY_DEFINITION_FARM_RECOVERED = 2158
 _PINNED_API_VERSION = "10.33.1"
 _MARKET_DATA_TYPES = {
     "1": "LIVE",
@@ -104,6 +107,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         self._endpoint = endpoint
         self._request_timeout_seconds = request_timeout_seconds
         self._callbacks: Queue[_Callback] = Queue(maxsize=2_000)
+        self._deferred_callbacks: deque[_Callback] = deque()
         if client_factory is None and api_identity is None:
             raise ValueError("IBKR capability adapter requires a verified official API identity")
         self._client_factory = client_factory or (
@@ -404,7 +408,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             except TimeoutError as error:
                 raise IbkrRequestTimeout(callbacks) from error
             if _is_global_error(callback):
-                _handle_global_error(callback)
+                await self._handle_global_error(callback)
                 callbacks.append(callback)
                 continue
             if callback.request_id != request_id:
@@ -424,7 +428,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             except TimeoutError:
                 return callbacks
             if _is_global_error(callback):
-                _handle_global_error(callback)
+                await self._handle_global_error(callback)
                 callbacks.append(callback)
                 continue
             if callback.request_id == request_id:
@@ -435,7 +439,7 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         while True:
             callback = await self._next_callback(deadline)
             if _is_global_error(callback):
-                _handle_global_error(callback)
+                await self._handle_global_error(callback)
                 continue
             if callback.request_id == request_id and callback.kind in kinds:
                 return callback
@@ -449,6 +453,11 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 raise RuntimeError(f"IBKR capability connection failed with {code}")
 
     async def _next_callback(self, deadline: float) -> _Callback:
+        if self._deferred_callbacks:
+            return self._deferred_callbacks.popleft()
+        return await self._next_queued_callback(deadline)
+
+    async def _next_queued_callback(self, deadline: float) -> _Callback:
         remaining = deadline - monotonic()
         if remaining <= 0:
             raise TimeoutError("IBKR capability request timed out")
@@ -456,6 +465,41 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             return await asyncio.to_thread(self._callbacks.get, True, remaining)
         except Empty as error:
             raise TimeoutError("IBKR capability request timed out") from error
+
+    async def _handle_global_error(self, callback: _Callback) -> None:
+        error_code = _error_code(callback)
+        if error_code == _SECURITY_DEFINITION_FARM_DISCONNECTED:
+            await self._await_security_definition_farm_recovery()
+            return
+        disposition = _error_disposition(callback)
+        if disposition in {
+            "CONNECTION_LOST",
+            "CONNECTION_RESTORED_DATA_LOST",
+            "PORT_RESET",
+            "REQUEST_ERROR",
+        }:
+            raise IbkrConnectionIntegrityError(
+                f"IBKR capability connection integrity failed with IBKR_{error_code}"
+            )
+
+    async def _await_security_definition_farm_recovery(self) -> None:
+        deadline = monotonic() + self._request_timeout_seconds
+        while True:
+            try:
+                callback = await self._next_queued_callback(deadline)
+            except TimeoutError as error:
+                raise IbkrConnectionIntegrityError(
+                    "IBKR security-definition farm did not recover after IBKR_2157"
+                ) from error
+            if not _is_global_error(callback):
+                self._deferred_callbacks.append(callback)
+                continue
+            error_code = _error_code(callback)
+            if error_code == _SECURITY_DEFINITION_FARM_RECOVERED:
+                return
+            if error_code == _SECURITY_DEFINITION_FARM_DISCONNECTED:
+                continue
+            await self._handle_global_error(callback)
 
 
 def _official_client(callbacks: Queue[_Callback], identity: IbkrApiIdentity) -> Any:
@@ -639,8 +683,10 @@ def _error_disposition(callback: _Callback) -> str:
 
 
 def _error_classification(error_code: int) -> str:
-    if error_code in {2104, 2106, 2107, 2108, 2119, 2158}:
+    if error_code in {2104, 2106, 2107, 2108, 2119, _SECURITY_DEFINITION_FARM_RECOVERED}:
         return "INFORMATIONAL"
+    if error_code == _SECURITY_DEFINITION_FARM_DISCONNECTED:
+        return "SECURITY_DEFINITION_FARM_DISCONNECTED"
     if error_code == 1100:
         return "CONNECTION_LOST"
     if error_code == 1101:
@@ -654,19 +700,6 @@ def _error_classification(error_code: int) -> str:
 
 def _is_global_error(callback: _Callback) -> bool:
     return callback.kind == "error" and callback.request_id == -1
-
-
-def _handle_global_error(callback: _Callback) -> None:
-    disposition = _error_disposition(callback)
-    if disposition in {
-        "CONNECTION_LOST",
-        "CONNECTION_RESTORED_DATA_LOST",
-        "PORT_RESET",
-        "REQUEST_ERROR",
-    }:
-        raise IbkrConnectionIntegrityError(
-            f"IBKR capability connection integrity failed with IBKR_{_error_code(callback)}"
-        )
 
 
 def _market_availability(
