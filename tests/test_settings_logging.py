@@ -42,3 +42,13 @@ def test_trading_ig_info_logs_are_suppressed() -> None:
         assert logger.level == logging.WARNING
     finally:
         logger.setLevel(original_level)
+
+
+def test_ibapi_info_logs_are_suppressed() -> None:
+    logger = logging.getLogger("ibapi")
+    original_level = logger.level
+    try:
+        configure_logging("INFO")
+        assert logger.level == logging.WARNING
+    finally:
+        logger.setLevel(original_level)

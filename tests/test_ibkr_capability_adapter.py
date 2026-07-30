@@ -321,6 +321,7 @@ def test_current_official_error_callback_retains_error_time_and_code(
         (2106, "INFORMATIONAL"),
         (2107, "INFORMATIONAL"),
         (2108, "INFORMATIONAL"),
+        (2157, "SECURITY_DEFINITION_FARM_DISCONNECTED"),
         (2158, "INFORMATIONAL"),
         (1100, "CONNECTION_LOST"),
         (1101, "CONNECTION_RESTORED_DATA_LOST"),
@@ -443,6 +444,42 @@ async def test_restored_connection_with_data_maintained_remains_request_evidence
 
     assert capability._error_codes(callbacks) == ("IBKR_1102",)
     assert capability._status(callbacks, "historical_data_end") == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_security_definition_farm_recovery_preserves_interrupted_request_callbacks() -> None:
+    adapter = _collector_adapter()
+    adapter._callbacks.put(
+        capability._Callback(
+            "error",
+            -1,
+            (1_785_000_000, 2157, "SECURITY_DEFINITION_FARM_DISCONNECTED"),
+        )
+    )
+    adapter._callbacks.put(capability._Callback("historical_data_end", 1, ("", "")))
+    adapter._callbacks.put(
+        capability._Callback("error", -1, (1_785_000_001, 2158, "INFORMATIONAL"))
+    )
+
+    callbacks = await adapter._collect_until(1, "historical_data_end")
+
+    assert capability._error_codes(callbacks) == ("IBKR_2157",)
+    assert capability._status(callbacks, "historical_data_end") == "SUCCESS"
+
+
+@pytest.mark.asyncio
+async def test_security_definition_farm_recovery_timeout_fails_closed() -> None:
+    adapter = _collector_adapter()
+    adapter._callbacks.put(
+        capability._Callback(
+            "error",
+            -1,
+            (1_785_000_000, 2157, "SECURITY_DEFINITION_FARM_DISCONNECTED"),
+        )
+    )
+
+    with pytest.raises(capability.IbkrConnectionIntegrityError, match="IBKR_2157"):
+        await adapter._collect_until(1, "historical_data_end")
 
 
 @pytest.mark.asyncio

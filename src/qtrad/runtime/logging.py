@@ -38,3 +38,4 @@ def configure_logging(level: str) -> None:
     root.addHandler(handler)
     root.setLevel(level.upper())
     logging.getLogger("trading_ig").setLevel(logging.WARNING)
+    logging.getLogger("ibapi").setLevel(logging.WARNING)
