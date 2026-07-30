@@ -47,5 +47,25 @@ def test_probe_spec_rejects_broad_derivative_queries_before_socket_io(
         f"{query_fields}\n"
     )
 
-    with pytest.raises(ValueError, match=r"futures.*local symbol|broad derivative"):
+    with pytest.raises(ValueError, match=r"futures.*local symbol|security type"):
         load_ibkr_capability_probe_spec(path)
+
+
+def test_probe_spec_accepts_exact_cfd_query_before_socket_io(tmp_path: Path) -> None:
+    path = tmp_path / "cfd.toml"
+    path.write_text(
+        """schema_version = 1
+name = "test"
+
+[[query]]
+instrument_id = "index:us-500"
+symbol = "IBUS500"
+security_type = "CFD"
+exchange = "SMART"
+currency = "USD"
+"""
+    )
+
+    spec = load_ibkr_capability_probe_spec(path)
+
+    assert spec.queries[0].security_type == "CFD"

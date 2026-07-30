@@ -379,6 +379,10 @@ def test_global_notice_without_market_callback_does_not_make_request_successful(
     assert capability._window_status(callbacks) == "TIMEOUT"
 
 
+def test_market_data_farm_connecting_notice_is_informational() -> None:
+    assert capability._error_classification(2119) == "INFORMATIONAL"
+
+
 def test_finite_negative_futures_quote_is_usable_except_exact_sentinel() -> None:
     callbacks = (
         capability._Callback("tick_price", 1, (1, -2.5)),

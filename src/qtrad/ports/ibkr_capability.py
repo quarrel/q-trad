@@ -39,8 +39,8 @@ class IbkrContractQuery:
         ):
             if value is not None and (not value or len(value) > 80):
                 raise ValueError(f"IBKR contract query {field_name} must be bounded when present")
-        if self.security_type not in {"CASH", "IND", "STK", "FUT"}:
-            raise ValueError("IBKR capability probe does not support broad derivative queries")
+        if self.security_type not in {"CASH", "CFD", "IND", "STK", "FUT"}:
+            raise ValueError("IBKR capability probe does not support this security type")
         if self.security_type == "FUT" and self.local_symbol is None:
             raise ValueError("IBKR futures capability queries require an exact local symbol")
 
