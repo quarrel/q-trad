@@ -22,14 +22,15 @@ affects current work. Keep active documents concise and archive completed chrono
 
 ## Current phase
 
-The current milestone is **R2 — local and pooled baselines (R2.E complete; R2.F1 next)**:
+The current milestone is **R2 — local and pooled baselines (R2.F1 core implemented; integration and R2.H verification pending)**:
 
 > current native capture → reviewed APAC coverage and historical inputs → aligned causal datasets →
 > multi-horizon forecasts → explicit cost/risk states → constrained offline paper portfolio → later
 > continuous shadow paper.
 
 R0 and the R1 causal multi-asset research foundation are complete. R2.A–R2.E software is complete,
-and R2.F1 evaluation and selection machinery is next. Confirmatory R2 execution remains gated on a real 23-market
+and the R2.F1 core machinery is implemented; its representative integration and corresponding R2.H
+software-verification bundle remain pending. Confirmatory R2 execution remains gated on a real 23-market
 foundation bundle that independently verifies against sufficient mature native evidence and completed
 product-role qualification. The reviewed 23-market `capture-v4` collector is
 running on OCI. Its 22 non-VIX markets remain potentially tradable subject to experiment role and

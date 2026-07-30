@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-07-29
-**Current milestone:** R2 — local and pooled baselines (R2.E software complete; R2.F1 next)
+**Current milestone:** R2 — local and pooled baselines (R2.F1 core implemented; integration and R2.H verification pending)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -101,9 +101,30 @@ remains offline/replay.
   target/fold keys, coverage and lineage, then records both own and exact common target support.
   Synthetic shared-signal and cross-asset-signal recovery, missing-member rejection, uneven weighting,
   instrument-order invariance, replay and incomplete-comparator tests pass. This remains
-  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration, R2.F1 evaluation and any
-  pooled-versus-local effectiveness conclusion remain pending. R2.F1 persistence must retain the
-  authenticated local-comparator manifest as an independently referenced child.
+  `IMPLEMENTATION_EVIDENCE_ONLY`; representative native integration and any pooled-versus-local
+  effectiveness conclusion remain pending.
+- The R2.F1 core now provides `qtrad-r2-evaluation-v1`, `qtrad-r2-local-comparator-v1` and
+  `qtrad-r2-selection-v1` contracts. Evaluation independently authenticates the complete declared local
+  ladder and every evaluated local/pooled fold child against exact R1 membership. The complete attempted
+  configuration register is retained separately from the four-model comparison hierarchy; configurations
+  with no successful forecasts are marked `FAILED` and cannot become retained controls. Separately
+  persisted, identity-bearing evaluated-model manifests bind feature, forecast, coverage, fit,
+  training-prediction and coefficient-stability evidence.
+- Comparator metrics use exact pairwise own/common support. Each comparison persists its expected
+  pairwise denominator and realised common-support ratio, which drives the minimum-support gate;
+  all-model common support remains diagnostic only. Training predictions are replayed from authenticated
+  fits, and each fold's training-derived forecast buckets apply only to that fold's validation rows.
+  Bucket ordering uses Spearman ranks. Reports retain ordering/monotonicity, fold/instrument stability and
+  best-instrument/period concentration. Target-level data-quality slices are explicitly unavailable, with
+  a reason, because the R1 bindings do not expose those classifications.
+- Selection dispositions and retained IDs are derived from persisted acceptance thresholds and report
+  evidence, including comparator, coverage, breadth, stability, concentration and replay gates. The
+  verifier independently replays the comparator set, metrics, decisions, holdout comparator IDs, fitting
+  policy and image identity. The manifest contains no holdout features, outcomes or caller-asserted empty
+  external state; trusted absence verification is explicitly `PENDING_R2_H_INTEGRATION`. Rehashed semantic
+  mutation and child mutation tests pass. This is implementation evidence only: representative source-
+  specific integration and the corresponding R2.H bundle remain required before the R2.F1 exit, and no
+  confirmatory model-selection or effectiveness claim is made.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
@@ -147,9 +168,9 @@ remains offline/replay.
 1. Complete the bounded IBKR exact-contract, entitlement and capability probe after selecting the
    official direct-API installation and operator-authenticated Gateway approach; do not ingest or infer
    mappings.
-2. Continue R2.F1 evaluation and selection machinery, including independent local-comparator
-   manifest references in persisted evaluation evidence, while the IBKR data track proceeds and native
-   IG history accumulates.
+2. Complete representative source-specific integration and the corresponding R2.H software-verification
+   bundle for the implemented R2.F1 evaluation/selection core while the IBKR data track proceeds and
+   native IG history accumulates.
 3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 4. Build and independently verify each source-specific foundation only when its configured evidence,
    availability and product-role gates pass; do not weaken durations or combine sources.
