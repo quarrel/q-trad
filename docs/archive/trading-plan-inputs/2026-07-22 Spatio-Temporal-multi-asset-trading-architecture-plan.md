@@ -103,7 +103,7 @@ For asset $i$ and horizon $h$:
 
 $$
 \hat{\mu}\_{i,t,h}
-\=
+=
 E[R\_{i,t,h}\mid X\_t]
 $$
 
@@ -202,7 +202,7 @@ For a mid-price $P_t$, define cumulative log return:
 
 $$
 R_{t,h}
-\=
+=
 \log\left(\frac{P_{t+h}}{P_t}\right)
 $$
 
@@ -282,7 +282,7 @@ For asset $i$:
 
 $$
 w_{i,t}
-\=
+=
 \sum_h z_{i,t,h}
 $$
 
@@ -292,9 +292,9 @@ A proposed increase from one sleeve may be offset by a reduction from another. T
 
 $$
 \Delta w_{i,t}
-\=
+=
 w_{i,t}^{\text{target}}
-\-
+-
 w_{i,t}^{\text{current}}
 $$
 
@@ -363,9 +363,9 @@ The cross-asset model predicts the out-of-fold residual of the local baseline:
 
 $$
 \varepsilon_{i,t,h}
-\=
+=
 R_{i,t,h}
-\-
+-
 \hat{R}^{\text{local}}_{i,t,h}
 $$
 
@@ -373,9 +373,9 @@ The final forecast is:
 
 $$
 \hat{R}^{\text{combined}}\_{i,t,h}
-\=
+=
 \hat{R}^{\text{local}}\_{i,t,h}
-\+
++
 \hat{\varepsilon}^{\text{graph}}\_{i,t,h}
 $$
 
@@ -396,7 +396,7 @@ A baseline learned adjacency may be:
 
 $$
 A_{\text{struct}}
-\=
+=
 \operatorname{softmax}
 \left(
 \operatorname{ReLU}(E_1E_2^\top)
@@ -547,7 +547,7 @@ For a physical position change $\Delta w_i$:
 
 $$
 C_i(\Delta w_i)
-\=
+=
 c^{\text{spread}}_i|\Delta w_i|
 +
 c^{\text{slippage}}_i|\Delta w_i|
@@ -673,11 +673,11 @@ $$
 \max_w
 \quad
 a_t^\top w
-\-
+-
 \frac{\lambda}{2}w^\top\Sigma_t w
-\-
+-
 c_1^\top|w-w_{t-1}|
-\-
+-
 (w-w_{t-1})^\top C_2(w-w_{t-1})
 $$
 
@@ -1511,9 +1511,9 @@ Potential normalised score:
 
 $$
 s\_{i,t,h}
-\=
-\frac{|R_{i,t,h}\-\hat{\mu}\_{i,t,h}|}
-{\hat{\sigma}\_{i,t,h}\+\epsilon}
+=
+\frac{|R_{i,t,h}-\hat{\mu}\_{i,t,h}|}
+{\hat{\sigma}\_{i,t,h}+\epsilon}
 $$
 
 Outputs:
@@ -1597,7 +1597,7 @@ and conditional payoff:
 
 $$
 a
-\=
+=
 P_pE[R\mid p]
 +
 P_sE[R\mid s]
@@ -1648,7 +1648,7 @@ $$
 
 $$
 S_t
-\=
+=
 \frac{E_1E_2^\top}{\sqrt{d_e}}
 +
 \gamma_t
@@ -1657,7 +1657,7 @@ $$
 
 $$
 A_t
-\=
+=
 \operatorname{softmax}
 \left(
 \operatorname{mask}(S_t)
@@ -1946,13 +1946,14 @@ That question should remain the stable centre of the framework even as later res
 
 # 24. Further discussions A
 
-Yes, they do. You have hit on the exact architectural friction point of Spatio-Temporal architectures: GNNs and LSTMs operate on fundamentally different horizons and mix two entirely different types of information. [1] 
+You have hit on the exact architectural friction point of Spatio-Temporal architectures: GNNs and LSTMs operate on fundamentally different horizons and mix two entirely different types of information. [1] 
 When you combine them into a Spatio-Temporal Graph Neural Network (ST-GNN) for finance, they process two distinct axes of data:
 
 * LSTMs operate on the Temporal Horizon (Vertical/Deep): They track sequential dependencies, momentum, and historical context over time.
 * GNNs operate on the Spatial/Topological Horizon (Horizontal/Wide): They track systemic correlation, risk propagation, and structural linkages across assets or nodes. [2, 3] 
 
 Understanding how these horizons conflict—and how to align them—is key to building a robust financial forecasting pipeline.
+
 ------------------------------
 ## 24.1 The Horizon Mismatch: Time vs. Space
 
@@ -1980,11 +1981,28 @@ The GNN uses the derivative to gauge contagion and systemic vulnerability. It lo
 ## 24.3 How to Structure the Network to Solve This Mismatch
 In financial series, spatial relationships (GNN) change at a different speed than temporal dynamics (LSTM). To handle this, practitioners generally choose between two core integration architectures: [11, 12] 
 
-Approach A (Time-then-Space):
-Raw Data ---> [ LSTM (Extracts Time Patterns) ] ---> [ GNN (Spreads Patterns Across Graph) ] ---> Prediction
+```mermaid
+flowchart LR
+    subgraph A["Approach A: Time-then-Space"]
+        direction LR
+        A0["Raw Data"]
+        A1["LSTM<br/>Extracts Time Patterns"]
+        A2["GNN<br/>Spreads Patterns Across Graph"]
+        A3["Prediction"]
 
-Approach B (Space-then-Time):
-Raw Data ---> [ GNN (Extracts Market Context) ]  ---> [ LSTM (Tracks Context Over Time) ]   ---> Prediction
+        A0 --> A1 --> A2 --> A3
+    end
+
+    subgraph B["Approach B: Space-then-Time"]
+        direction LR
+        B0["Raw Data"]
+        B1["GNN<br/>Extracts Market Context"]
+        B2["LSTM<br/>Tracks Context Over Time"]
+        B3["Prediction"]
+
+        B0 --> B1 --> B2 --> B3
+    end
+```
 
 ### Approach A: Time-then-Space (Temporal-First)
 You pass each asset's feature history (including your precalculated derivatives) through an LSTM first. The LSTM condenses the time-series history into a single vector embedding for each node. Then, the GNN processes these node embeddings across the graph layout. [13, 14] 
@@ -2016,16 +2034,25 @@ When you blend them, they act as mutual regularizers, canceling out each other's
 ## 25.1 Why an Ensemble Works: The Architectural Blind Spots
 In deep learning, an ensemble is most effective when the underlying models are decorrelated—meaning they view the same data through entirely different lenses. Approach A and Approach B create completely distinct representations of the market: [1, 2] 
 
-[ Approach A: Temporal-First ] ──> Focuses on raw historical inertia, trends, and momentum.
-                                    Deaf to intra-step structural shifts.
-                                                        └──> [ ENSEMBLE BLENDER ] ──> Meta-Prediction
-[ Approach B: Spatial-First ]  ──> Focuses on instant cross-sectional contagion and risk.
-                                    Blurs individual long-term asset memories.
+```mermaid
+flowchart LR
+    A["Approach A: Temporal-First<br/><br/>Focuses on raw historical inertia,<br/>trends, and momentum.<br/><br/><i>Limitation: Deaf to intra-step<br/>structural shifts.</i>"]
+
+    B["Approach B: Spatial-First<br/><br/>Focuses on instant cross-sectional<br/>contagion and risk.<br/><br/><i>Limitation: Blurs individual<br/>long-term asset memories.</i>"]
+
+    E["Ensemble Blender"]
+    M["Meta-Prediction"]
+
+    A --> E
+    B --> E
+    E --> M
+```
 
 ### Approach A's Blind Spot: The Structural Lag
 Because Approach A runs the LSTM first, it compresses each asset's time series in isolation. The GNN only steps in at the very end to pass messages. If a sudden, systemic structural event occurs across assets at time t (e.g., a sudden regulatory change or market-wide margin call), Approach A's LSTM cannot see it because it doesn't look sideways at neighboring nodes. It experiences a structural lag in processing systemic shocks.
 ### Approach B's Blind Spot: The Over-Smoothing Trap
 Because Approach B runs the GNN first at every single time step, it constantly mixes neighbor information before the LSTM can evaluate the timeline. If an asset has a highly unique, idiosyncratic historical trend, that crisp signal gets mixed with its neighbors' states at t-2, t-1, and t. By the time the LSTM receives the sequence of graph snapshots, the individual asset's precise momentum has been chemically altered (over-smoothed) by the graph.
+
 ------------------------------
 ## 25.2 Three Ways to Structure Your Ensemble
 You should not just average their raw outputs. In financial machine learning, there are three primary ways to implement this ensemble, ranging from simple to highly advanced: [3, 4] 
@@ -2037,16 +2064,21 @@ You train Approach A and Approach B independently. Instead of a simple average, 
 ### 2. Parallel Feature Fusion (The Hybrid Layer)
 Instead of ensembling at the output layer, you ensemble them at the latent feature layer. You run both blocks in parallel and concatenate their hidden embeddings before feeding them to a final dense prediction network.
 
-$$\text{Combined Node Embedding} = [\mathbf{H}_{\text{Approach A}} \parallel \mathbf{H}_{\text{Approach B}}]$$ 
+$$
+\text{Combined Node Embedding} = [\mathbf{H}_{\text{Approach A}} \parallel \mathbf{H}_{\text{Approach B}}]
+$$ 
 
 * Why it works: The final prediction layer gets the best of both worlds simultaneously: a pure representation of the asset's individual historical momentum $\mathbf{H}_{\text{Approach A}}$ alongside a pure representation of its immediate systemic risk context $\mathbf{H}_{\text{Approach B}}$.
 
 ### 3. The Alternating ST-Block (The State-of-the-Art Approach)
 If you look at state-of-the-art architectures like Spatio-Temporal Graph Convolutional Networks (STGCN), they actually build a deep ensemble by sandwiching these operations sequentially inside a single backbone:
 
-$$\text{Input} \longrightarrow \text{Temporal Layer} \longrightarrow \text{Spatial Layer} \longrightarrow \text{Temporal Layer} \longrightarrow \text{Output}$$
+$$
+\text{Input} \longrightarrow \text{Temporal Layer} \longrightarrow \text{Spatial Layer} \longrightarrow \text{Temporal Layer} \longrightarrow \text{Output}
+$$
 
 By stacking them like a sandwich rather than choosing one over the other, the network continuously refines the features across both horizons at multiple depths of the network.
+
 ------------------------------
 ## 25.3 Implementation Blueprint for Financial Series
 If you build this parallel ensemble, your pipeline should process data using this exact structure to maximize the value of your precalculated derivatives:
