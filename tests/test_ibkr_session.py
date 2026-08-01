@@ -101,6 +101,33 @@ def test_farm_disconnect_recovers_and_inactive_is_not_failure() -> None:
     assert session.snapshot().state == IbkrSessionState.CONNECTED
 
 
+def test_upstream_loss_is_not_masked_by_farm_connected_notice() -> None:
+    session = _connected_session()
+
+    session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=100.0)
+    session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_CONNECTED)
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+
+def test_farm_disconnect_is_not_masked_by_server_time() -> None:
+    session = _connected_session()
+
+    session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED)
+    session.mark_server_time()
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+
+def test_unknown_global_degradation_survives_server_time() -> None:
+    session = _connected_session()
+
+    session.on_system_message(9999)
+    session.mark_server_time()
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+
 def test_gateway_escalation_is_bounded() -> None:
     session = IbkrSession()
     session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=0.0)

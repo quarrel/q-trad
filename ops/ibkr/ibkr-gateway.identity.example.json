@@ -1,0 +1,6 @@
+{
+  "schema_version": 1,
+  "gateway_version": "10.49",
+  "gateway_archive_sha256": "REPLACE_WITH_64_HEX_DIGEST",
+  "launcher": "/opt/ibc/IBCIbcStart.sh"
+}

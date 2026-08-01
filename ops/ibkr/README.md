@@ -13,16 +13,22 @@ Before running the bounded probe:
 1. Attach and mount the OCI block device at `/srv/qtrad/postgres`; `verify-host.sh` fails closed if
    the mount is absent.
 2. Install the official matched 10.49 Gateway/API pair (retain 10.45 archives for rollback) and IBC
-   3.24.1 outside the repository. Record SHA-256 values in the private host deployment configuration.
-3. Build the application from the exact API ZIP; `build-image.sh` verifies its SHA-256, extracts
-   `IBJts/source/pythonclient`, and installs that official subtree. Set OCI image labels for API
-   version, Gateway version, source digest, application commit and build time; use only an immutable
-   image digest; `build-image.sh` requires `QTRAD_IBKR_PUSH=1`, tags the matched build, and prints the pushed manifest digest.
-4. Set `QTRAD_IBKR_CHECKPOINT_ROOT` to a writable absolute path on the PostgreSQL volume and set
-   `QTRAD_IBKR_API_PACKAGE_FINGERPRINT` to the archive/source fingerprint. The wrapper mounts the
+   3.24.1 outside the repository. Record the Gateway archive SHA-256 in the private host deployment
+   manifest ("ibkr-gateway.identity.example.json" documents the non-secret shape); the manifest must be
+   installed privately at `/etc/qtrad/ibkr-gateway-manifest.json`.
+3. Build the application from the exact API ZIP; build-image.sh verifies its SHA-256, computes the
+   runtime source-manifest fingerprint, extracts IBJts/source/pythonclient, and installs that official
+   subtree. Set OCI labels for API/Gateway versions and archive identities, source digest, application
+   commit and build time; use only an immutable image digest; build-image.sh requires
+   QTRAD_IBKR_PUSH=1, tags the matched build, and prints both the source fingerprint and pushed digest.
+4. Set QTRAD_IBKR_CHECKPOINT_ROOT to a writable absolute path on the PostgreSQL volume,
+   QTRAD_IBKR_API_PACKAGE_FINGERPRINT to the source fingerprint printed by the build, and
+   QTRAD_IBKR_GATEWAY_MANIFEST/QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256 to the private installation
+   identity. Host verification requires these values to match the image labels. The wrapper mounts the
    checkpoint directory and runs the image as UID 10001, so a container restart preserves evidence.
-5. Run `deploy.sh` only as the invariant check. It does not enable services while continuous ingest is
-   absent. Run the explicit bounded command:
+5. Run deploy.sh only as the invariant check; it pulls the immutable image digest before local
+   inspection. It does not enable services while continuous ingest is absent. Run the explicit bounded
+   command:
    `qtrad instruments review --provider ibkr --environment paper --execute-account-probe`.
 6. Use the example `qtrad-ibkr-postgres.service` as the required readiness dependency when the
    future continuous adapter is introduced. It must provide the host's PostgreSQL start, readiness,

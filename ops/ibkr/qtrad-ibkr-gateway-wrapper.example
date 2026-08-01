@@ -1,8 +1,18 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
+manifest="${QTRAD_IBKR_GATEWAY_MANIFEST:?set QTRAD_IBKR_GATEWAY_MANIFEST}"
+gateway_version="${QTRAD_IBKR_GATEWAY_VERSION:?set QTRAD_IBKR_GATEWAY_VERSION}"
+gateway_archive_sha="${QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256:?set QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256}"
+launcher="${QTRAD_IBC_LAUNCHER:?set QTRAD_IBC_LAUNCHER to the verified IBC launcher}"
+command -v jq >/dev/null
+[[ "$gateway_version" =~ ^10[.](49|45)$ ]] || exit 69
+[[ "$gateway_archive_sha" =~ ^[0-9a-f]{64}$ ]] || exit 69
+[[ -f "$manifest" && "$launcher" == /* && -x "$launcher" ]] || exit 69
+jq -e --arg version "$gateway_version" --arg archive_sha "$gateway_archive_sha" --arg launcher "$launcher" '
+    .gateway_version == $version
+    and .gateway_archive_sha256 == $archive_sha
+    and .launcher == $launcher
+' "$manifest" >/dev/null || exit 69
 # TEMPLATE: point this at the verified IBC 3.24.1 launcher installed on the host.
 # The protected IBC config must retain paper, read-only, operator-assisted auth and AutoRestartTime.
-launcher="${QTRAD_IBC_LAUNCHER:?set QTRAD_IBC_LAUNCHER to the verified IBC launcher}"
-[[ "$launcher" == /* && -x "$launcher" ]] || exit 69
 exec "$launcher"
