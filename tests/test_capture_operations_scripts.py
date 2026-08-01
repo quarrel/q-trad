@@ -71,6 +71,18 @@ def test_capture_deployment_orchestrator_preserves_release_gates() -> None:
     assert "0,/^\\[rollback\\]/" in activation
 
 
+def test_oci_collector_deployments_reject_active_pcp() -> None:
+    scripts = (
+        SCRIPTS / "activate-release.sh",
+        REPOSITORY_ROOT / "ops" / "ibkr" / "verify-host.sh",
+    )
+
+    for script_path in scripts:
+        script = script_path.read_text()
+        assert "pmcd.service pmlogger.service pmie.service" in script
+        assert 'systemctl is-active --quiet "$unit"' in script
+        assert 'systemctl is-enabled --quiet "$unit"' in script
+
 def test_operator_console_displays_live_heartbeat_evidence() -> None:
     overview = (REPOSITORY_ROOT / "src/qtrad/api/templates/_overview.html").read_text()
 

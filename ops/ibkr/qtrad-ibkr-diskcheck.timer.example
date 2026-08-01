@@ -1,0 +1,10 @@
+[Unit]
+Description=Run q-trad IBKR disk-space check
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=15min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -861,7 +861,7 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
             )
 
     adapter = FakeAdapter()
-    monkeypatch.setattr(cli, "_ibkr_capability_adapter", lambda settings: adapter)
+    monkeypatch.setattr(cli, "_ibkr_capability_adapter", lambda settings, **kwargs: adapter)
     catalogue = cli.load_capture_candidates(Path("config/capture-ibkr-v1-candidates.toml"))
     probe_spec = tmp_path / "operator-probe.toml"
     probe_spec.write_text(

@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -1681,7 +1682,7 @@ def _ig_review_adapter(
     )
 
 
-def _ibkr_capability_adapter(settings: Settings):
+def _ibkr_capability_adapter(settings: Settings, *, checkpoint=None, pacing_reserver=None):
     """Compose the isolated market-data-only Stage 1 adapter on explicit account-probe execution."""
 
     from qtrad.adapters.ibkr.capability import (
@@ -1696,8 +1697,20 @@ def _ibkr_capability_adapter(settings: Settings):
             port=settings.ibkr_gateway_port,
             client_id=settings.ibkr_client_id,
         ),
+        request_timeout_seconds=settings.ibkr_historical_timeout_seconds,
+        upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
+        connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
+        handshake_timeout_seconds=settings.ibkr_handshake_timeout_seconds,
+        server_time_timeout_seconds=settings.ibkr_server_time_timeout_seconds,
+        contract_timeout_seconds=settings.ibkr_contract_timeout_seconds,
+        historical_timeout_seconds=settings.ibkr_historical_timeout_seconds,
+        checkpoint=checkpoint,
+        pacing_reserver=pacing_reserver,
         api_identity=(
-            IbkrApiIdentity(package_fingerprint=settings.ibkr_api_package_fingerprint)
+            IbkrApiIdentity(
+                package_fingerprint=settings.ibkr_api_package_fingerprint,
+                version=settings.ibkr_api_version,
+            )
             if settings.ibkr_api_package_fingerprint is not None
             else None
         ),
@@ -1918,8 +1931,44 @@ async def _review_instruments(
         query_ids = {query.instrument_id for query in probe_spec.queries}
         if candidate_ids != query_ids:
             raise ValueError("IBKR capability probe spec must cover each candidate exactly")
-        adapter = _ibkr_capability_adapter(settings)
+        from qtrad.adapters.ibkr.checkpoint import (
+            IbkrCapabilityCheckpointIdentity,
+            JsonIbkrCapabilityCheckpoint,
+        )
+
+        checkpoint_configuration = hashlib.sha256(
+            json.dumps(
+                {
+                    "gateway_host": settings.ibkr_gateway_host,
+                    "gateway_port": settings.ibkr_gateway_port,
+                    "client_id": settings.ibkr_client_id,
+                    "api_fingerprint": settings.ibkr_api_package_fingerprint,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        checkpoint = JsonIbkrCapabilityCheckpoint(
+            settings.ibkr_checkpoint_root / f"{probe_spec.configuration_hash}.json",
+            IbkrCapabilityCheckpointIdentity(
+                catalogue_hash=candidates.configuration_hash,
+                probe_spec_hash=probe_spec.configuration_hash,
+                api_version=settings.ibkr_api_version,
+                gateway_version=settings.ibkr_gateway_version,
+                configuration_hash=checkpoint_configuration,
+            ),
+        )
+        from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
+
+        engine = _engine(settings)
+        adapter = None
         try:
+            pacing = IbkrPostgresPacing(PostgresAuditStore(engine))
+            adapter = _ibkr_capability_adapter(
+                settings,
+                checkpoint=checkpoint,
+                pacing_reserver=pacing.reserve,
+            )
             await adapter.connect()
             results = await adapter.probe(probe_spec.queries)
             review = build_ibkr_capability_review(
@@ -1928,14 +1977,16 @@ async def _review_instruments(
                 instruments=candidates.instruments,
                 probe_spec_name=probe_spec.name,
                 probe_spec_hash=probe_spec.configuration_hash,
-                api_version="10.33.1",
+                api_version=settings.ibkr_api_version,
                 api_package_fingerprint=settings.ibkr_api_package_fingerprint or "",
                 results=results,
                 observed_at=clock.now(),
             )
             _emit_json_artifact(review.as_json_value(), output_path, review.review_hash)
         finally:
-            await adapter.disconnect()
+            if adapter is not None:
+                await adapter.disconnect()
+            await engine.dispose()
         return
     if provider != "ig":
         raise ValueError(f"unsupported listing-review provider: {provider}")

@@ -1,0 +1,8 @@
+[Unit]
+Description=q-trad IBKR disk-space check
+After=local-fs.target
+RequiresMountsFor=/srv/qtrad/postgres
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/qtrad-ibkr-diskcheck

@@ -21,6 +21,13 @@ class HealthStatus(StrEnum):
     STOPPED = "STOPPED"
 
 
+class RecoveryAction(StrEnum):
+    NONE = "NONE"
+    RESTART_ADAPTER = "RESTART_ADAPTER"
+    RESTART_GATEWAY = "RESTART_GATEWAY"
+    OPERATOR = "OPERATOR"
+
+
 @dataclass(frozen=True, slots=True)
 class AdapterHealth:
     adapter_name: str
@@ -29,11 +36,25 @@ class AdapterHealth:
     observed_at: datetime
     last_message_at: datetime | None
     detail: str | None = None
+    reason_codes: tuple[str, ...] = ()
+    recovery_action: RecoveryAction = RecoveryAction.NONE
+    attributes: tuple[tuple[str, str], ...] = ()
 
     def __post_init__(self) -> None:
         require_utc(self.observed_at, "observed_at")
         if self.last_message_at is not None:
             require_utc(self.last_message_at, "last_message_at")
+        if len(set(self.reason_codes)) != len(self.reason_codes):
+            raise ValueError("adapter health reason codes must be unique")
+        if any(not code or len(code) > 80 for code in self.reason_codes):
+            raise ValueError("adapter health reason codes must be bounded")
+        if any(
+            not key or len(key) > 80 or not value or len(value) > 200
+            for key, value in self.attributes
+        ):
+            raise ValueError("adapter health attributes must be bounded")
+        if len({key for key, _ in self.attributes}) != len(self.attributes):
+            raise ValueError("adapter health attributes must have unique keys")
 
 
 @dataclass(frozen=True, slots=True)

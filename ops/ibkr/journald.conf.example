@@ -1,0 +1,8 @@
+# Install as /etc/systemd/journald.conf.d/qtrad-ibkr.conf.
+[Journal]
+Storage=persistent
+Compress=yes
+SystemMaxUse=2G
+SystemKeepFree=4G
+RuntimeMaxUse=256M
+MaxRetentionSec=30day

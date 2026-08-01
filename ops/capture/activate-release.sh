@@ -38,6 +38,12 @@ stage=bootstrap
 [[ -f "$capture_env" && ! -L "$capture_env" ]]
 [[ -f "$active_universe" && ! -L "$active_universe" ]]
 
+for unit in pmcd.service pmlogger.service pmie.service; do
+  if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit"; then
+    printf 'PCP unit must be inactive and disabled: %s\n' "$unit" >&2
+    exit 1
+  fi
+done
 mapfile -t bootstrap_images < <(
   sed -n '0,/^\[rollback\]/{ s/^application_image = "\([^"]*\)"$/\1/p; }' "$descriptor"
 )

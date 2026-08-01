@@ -396,11 +396,23 @@ def test_finite_negative_futures_quote_is_usable_except_exact_sentinel() -> None
 
 
 def _collector_adapter() -> capability.OfficialIbkrCapabilityAdapter:
-    return capability.OfficialIbkrCapabilityAdapter(
+    adapter = capability.OfficialIbkrCapabilityAdapter(
         capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
         request_timeout_seconds=0.001,
+        upstream_recovery_timeout_seconds=0.001,
         client_factory=lambda callbacks: object(),
     )
+    adapter._session.begin_connection()
+    adapter._session.mark_socket_connected()
+    adapter._session.mark_handshake()
+    adapter._session.mark_server_time()
+
+    class Client:
+        def reqCurrentTime(self) -> None:
+            adapter._callbacks.put(capability._Callback("current_time", -1, (0,)))
+
+    adapter._client = Client()
+    return adapter
 
 
 @pytest.mark.asyncio
@@ -487,6 +499,9 @@ async def test_historical_timeout_retains_prior_connection_notice() -> None:
     adapter = _collector_adapter()
 
     class Client:
+        def reqCurrentTime(self) -> None:
+            adapter._callbacks.put(capability._Callback("current_time", -1, (0,)))
+
         def reqHistoricalData(self, request_id: int, *args: object) -> None:
             adapter._callbacks.put(
                 capability._Callback(

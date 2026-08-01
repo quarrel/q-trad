@@ -1,0 +1,11 @@
+[Unit]
+Description=Poll q-trad IBKR recovery health
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=qtrad-ibkr-health.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

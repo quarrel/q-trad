@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
+evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
+mkdir -p "$evidence_root"
+
+[[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
+[[ -d /srv/qtrad/postgres && -w /srv/qtrad/postgres ]] || exit 69
+[[ -d "$evidence_root" && -w "$evidence_root" ]] || exit 69
+if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' \
+    | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' > /dev/null; then
+    echo 'Gateway API is not localhost-only' >&2
+    exit 69
+fi
+command -v firewall-cmd >/dev/null
+[[ "$(firewall-cmd --state)" == "running" ]] || {
+    echo 'firewalld is not running' >&2
+    exit 69
+}
+if firewall-cmd --query-port=4002/tcp; then
+    echo 'Gateway API is exposed by firewalld' >&2
+    exit 69
+fi
+
+exec docker run --rm --name qtrad-ibkr-ingest --network host \
+    --env-file /etc/qtrad/ibkr-ingest.env \
+    --volume /srv/qtrad/postgres:/srv/qtrad/postgres \
+    --volume "$evidence_root:$evidence_root" \
+    "$image"

@@ -7,9 +7,10 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
-from sqlalchemy import text
+from sqlalchemy import String, bindparam, text
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.engine import RowMapping
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
@@ -258,24 +259,33 @@ class PostgresAuditStore(AuditStore):
 
     async def record_adapter_health(self, health: AdapterHealth) -> None:
         async with self._engine.begin() as connection:
+            statement = text(
+                """
+                INSERT INTO ops.adapter_health (
+                    adapter_name, environment, status, observed_at,
+                    last_message_at, detail, reason_codes, recovery_action,
+                    attributes
+                ) VALUES (
+                    :adapter_name, :environment, :status, :observed_at,
+                    :last_message_at, :detail, :reason_codes, :recovery_action,
+                    :attributes
+                )
+                ON CONFLICT (adapter_name) DO UPDATE SET
+                    environment = EXCLUDED.environment,
+                    status = EXCLUDED.status,
+                    observed_at = EXCLUDED.observed_at,
+                    last_message_at = EXCLUDED.last_message_at,
+                    detail = EXCLUDED.detail,
+                    reason_codes = EXCLUDED.reason_codes,
+                    recovery_action = EXCLUDED.recovery_action,
+                    attributes = EXCLUDED.attributes
+                """
+            ).bindparams(
+                bindparam("reason_codes", type_=ARRAY(String)),
+                bindparam("attributes", type_=JSONB),
+            )
             await connection.execute(
-                text(
-                    """
-                    INSERT INTO ops.adapter_health (
-                        adapter_name, environment, status, observed_at,
-                        last_message_at, detail
-                    ) VALUES (
-                        :adapter_name, :environment, :status, :observed_at,
-                        :last_message_at, :detail
-                    )
-                    ON CONFLICT (adapter_name) DO UPDATE SET
-                        environment = EXCLUDED.environment,
-                        status = EXCLUDED.status,
-                        observed_at = EXCLUDED.observed_at,
-                        last_message_at = EXCLUDED.last_message_at,
-                        detail = EXCLUDED.detail
-                    """
-                ),
+                statement,
                 {
                     "adapter_name": health.adapter_name,
                     "environment": health.environment.value,
@@ -283,8 +293,130 @@ class PostgresAuditStore(AuditStore):
                     "observed_at": health.observed_at,
                     "last_message_at": health.last_message_at,
                     "detail": health.detail,
+                    "reason_codes": list(health.reason_codes),
+                    "recovery_action": health.recovery_action.value,
+                    "attributes": dict(health.attributes),
                 },
             )
+
+    async def reserve_ibkr_request(
+        self,
+        *,
+        requested_at: datetime,
+        request_kind: str,
+        contract_key: str,
+        request_fingerprint: str,
+        weight: int,
+    ) -> bool:
+        """Reserve an IBKR request atomically, or report that it must wait."""
+        require_utc(requested_at, "IBKR pacing requested_at")
+        if not request_kind or not contract_key or not request_fingerprint:
+            raise ValueError("IBKR pacing identity fields must be non-empty")
+        if weight <= 0:
+            raise ValueError("IBKR pacing weight must be positive")
+
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_xact_lock(hashtext('qtrad.ibkr.request_pacing'))")
+            )
+            await connection.execute(
+                text(
+                    """
+                    DELETE FROM ops.ibkr_request_pacing
+                    WHERE requested_at < :requested_at - INTERVAL '10 minutes'
+                    """
+                ),
+                {"requested_at": requested_at},
+            )
+            duplicate = await connection.execute(
+                text(
+                    """
+                    SELECT EXISTS (
+                        SELECT 1 FROM ops.ibkr_request_pacing
+                        WHERE request_kind = :request_kind
+                          AND contract_key = :contract_key
+                          AND request_fingerprint = :request_fingerprint
+                          AND requested_at >= :requested_at - INTERVAL '15 seconds'
+                    )
+                    """
+                ),
+                {
+                    "request_kind": request_kind,
+                    "contract_key": contract_key,
+                    "request_fingerprint": request_fingerprint,
+                    "requested_at": requested_at,
+                },
+            )
+            if bool(duplicate.scalar_one()):
+                return False
+            global_weight = await connection.execute(
+                text(
+                    """
+                    SELECT COALESCE(SUM(weight), 0)
+                    FROM ops.ibkr_request_pacing
+                    WHERE requested_at >= :requested_at - INTERVAL '1 second'
+                    """
+                ),
+                {"requested_at": requested_at},
+            )
+            if int(global_weight.scalar_one()) + weight > 45:
+                return False
+            if request_kind in {"historical", "BID_ASK"}:
+                window_seconds = "2 seconds"
+                max_weight = 6
+                scoped_kind = request_kind
+                contract_weight = await connection.execute(
+                    text(
+                        f"""
+                        SELECT COALESCE(SUM(weight), 0)
+                        FROM ops.ibkr_request_pacing
+                        WHERE request_kind = :request_kind
+                          AND contract_key = :contract_key
+                          AND requested_at >= :requested_at - INTERVAL '{window_seconds}'
+                        """
+                    ),
+                    {
+                        "request_kind": scoped_kind,
+                        "contract_key": contract_key,
+                        "requested_at": requested_at,
+                    },
+                )
+                if int(contract_weight.scalar_one()) + weight > max_weight:
+                    return False
+            if request_kind == "historical":
+                historical_weight = await connection.execute(
+                    text(
+                        """
+                        SELECT COALESCE(SUM(weight), 0)
+                        FROM ops.ibkr_request_pacing
+                        WHERE request_kind = 'historical'
+                          AND requested_at >= :requested_at - INTERVAL '10 minutes'
+                        """
+                    ),
+                    {"requested_at": requested_at},
+                )
+                if int(historical_weight.scalar_one()) + weight > 60:
+                    return False
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.ibkr_request_pacing (
+                        reservation_id, requested_at, request_kind, contract_key,
+                        request_fingerprint, weight
+                    ) VALUES (:reservation_id, :requested_at, :request_kind,
+                              :contract_key, :request_fingerprint, :weight)
+                    """
+                ),
+                {
+                    "reservation_id": uuid4(),
+                    "requested_at": requested_at,
+                    "request_kind": request_kind,
+                    "contract_key": contract_key,
+                    "request_fingerprint": request_fingerprint,
+                    "weight": weight,
+                },
+            )
+        return True
 
     async def start_run(
         self,
