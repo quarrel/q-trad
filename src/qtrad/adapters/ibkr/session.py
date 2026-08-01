@@ -202,7 +202,6 @@ class IbkrSession:
         if self._state not in {
             IbkrSessionState.WAITING_HANDSHAKE,
             IbkrSessionState.WAITING_SERVER_TIME,
-            IbkrSessionState.DEGRADED,
         }:
             raise RuntimeError("IBKR handshake arrived in an invalid state")
         self._handshake_seen = True
@@ -217,6 +216,13 @@ class IbkrSession:
         self._reason_codes.discard("CONNECTING")
         self._reason_codes.discard("IBKR_UPSTREAM_DISCONNECTED")
         self._refresh_state()
+
+    def _mark_degraded(self) -> None:
+        if self._state not in {
+            IbkrSessionState.CONNECTING,
+            IbkrSessionState.WAITING_HANDSHAKE,
+        }:
+            self._state = IbkrSessionState.DEGRADED
 
     def _refresh_state(self) -> None:
         if self._state in {
@@ -305,13 +311,13 @@ class IbkrSession:
         try:
             system_code = IbkrSystemCode(code)
         except ValueError:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             reason = f"UNKNOWN_GLOBAL_CODE_{code}"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)
 
         if system_code == IbkrSystemCode.UPSTREAM_DISCONNECTED:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             self._resubscribe_pending = False
             if self._upstream_lost_at is None:
                 self._upstream_lost_at = observed_at
@@ -371,7 +377,7 @@ class IbkrSession:
         if system_code in _FARM_DOWN:
             farm = _FARM_DOWN[system_code]
             self._farms[farm] = "DISCONNECTED"
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             reason = f"{farm.upper()}_FARM_DISCONNECTED"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)
@@ -405,7 +411,7 @@ class IbkrSession:
                 code=code,
             )
         if system_code == IbkrSystemCode.TWS_SERVER_DISCONNECTED:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             self._reason_codes.add("IBKR_TWS_SERVER_DISCONNECTED")
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,

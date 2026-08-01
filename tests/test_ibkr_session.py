@@ -96,6 +96,7 @@ def test_handshake_accepts_farm_loss_during_connection_establishment() -> None:
 
     session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED)
     session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=100.0)
+    assert session.state == IbkrSessionState.WAITING_HANDSHAKE
     session.mark_handshake()
     session.mark_server_time()
 
