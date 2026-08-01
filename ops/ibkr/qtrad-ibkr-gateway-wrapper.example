@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# TEMPLATE: point this at the verified IBC 3.24.1 launcher installed on the host.
+# The protected IBC config must retain paper, read-only, operator-assisted auth and AutoRestartTime.
+launcher="${QTRAD_IBC_LAUNCHER:?set QTRAD_IBC_LAUNCHER to the verified IBC launcher}"
+[[ "$launcher" == /* && -x "$launcher" ]] || exit 69
+exec "$launcher"

@@ -1,0 +1,10 @@
+[Unit]
+Description=Back up q-trad IBKR PostgreSQL
+RequiresMountsFor=/srv/qtrad/postgres
+After=docker.service qtrad-ibkr-ingest.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/qtrad/ibkr-backup.env
+ExecStart=/usr/local/sbin/qtrad-ibkr-postgres-backup

@@ -1,0 +1,10 @@
+[Unit]
+Description=Verify the latest q-trad IBKR PostgreSQL backup
+RequiresMountsFor=/srv/qtrad/postgres
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/qtrad/ibkr-backup.env
+ExecStart=/usr/local/sbin/qtrad-ibkr-postgres-restore-verify

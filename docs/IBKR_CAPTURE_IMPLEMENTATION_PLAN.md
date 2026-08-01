@@ -528,3 +528,19 @@ Defer automated Gateway credential/2FA injection, production or live-account con
 submission, public GUI exposure, full-universe one-second backfill, source-mixed foundations,
 continuous contract synthesis, inferred product mappings and automatic experiment promotion. Revisit
 only through explicit evidence and, for durable boundary changes, a superseding ADR.
+
+## 14. Robustness implementation status (2026-08-01)
+
+The shared IBKR session layer is now the required boundary for capability and future continuous
+capture. It models socket generation, handshake, server time, farm capability, desired
+subscriptions and bounded gateway escalation. Documented system codes are centralised, unknown
+request errors are isolated, and unknown global codes become visible degraded state. `1101`
+requests one exact resubscription epoch; repeated notifications do not duplicate it. Pacing and
+capability evidence can use the PostgreSQL ledger and identity-bound atomic checkpoints.
+
+Runtime settings default to matched API/Gateway 10.49, retain 10.45 as rollback, expose the
+documented timeouts and reject mismatched versions. The API health model persists reason codes,
+recovery action and sanitised attributes; `/api/v1/system` exposes them for the host health timer.
+The `ops/ibkr` templates describe q-trad-2 mount, localhost socket, immutable-image, systemd and
+operator-intervention assertions. Licensed archives, host wrappers and credentials remain a
+separate deployment operation.

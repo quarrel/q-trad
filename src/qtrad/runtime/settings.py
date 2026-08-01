@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Literal
 
-from pydantic import SecretStr, field_validator
+from pydantic import SecretStr, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -27,7 +27,39 @@ class Settings(BaseSettings):
     ibkr_gateway_host: str = "127.0.0.1"
     ibkr_gateway_port: int = 4002
     ibkr_client_id: int = 71
+    ibkr_api_version: Literal["10.49", "10.45"] = "10.49"
+    ibkr_gateway_version: Literal["10.49", "10.45"] = "10.49"
     ibkr_api_package_fingerprint: str | None = None
+    ibkr_connect_timeout_seconds: float = 5.0
+    ibkr_handshake_timeout_seconds: float = 15.0
+    ibkr_server_time_timeout_seconds: float = 10.0
+    ibkr_contract_timeout_seconds: float = 30.0
+    ibkr_historical_timeout_seconds: float = 60.0
+    ibkr_upstream_recovery_timeout_seconds: float = 180.0
+    ibkr_gateway_restart_after_seconds: float = 300.0
+    ibkr_gateway_restart_cooldown_seconds: float = 900.0
+    ibkr_gateway_restart_limit_per_hour: int = 3
+    ibkr_checkpoint_root: Path = Path("data/ibkr/checkpoints")
+
+    @model_validator(mode="after")
+    def validate_ibkr_stack(self) -> "Settings":
+        if self.ibkr_api_version != self.ibkr_gateway_version:
+            raise ValueError("IBKR Gateway and API versions must match")
+        timeouts = (
+            self.ibkr_connect_timeout_seconds,
+            self.ibkr_handshake_timeout_seconds,
+            self.ibkr_server_time_timeout_seconds,
+            self.ibkr_contract_timeout_seconds,
+            self.ibkr_historical_timeout_seconds,
+            self.ibkr_upstream_recovery_timeout_seconds,
+            self.ibkr_gateway_restart_after_seconds,
+            self.ibkr_gateway_restart_cooldown_seconds,
+        )
+        if any(timeout <= 0 for timeout in timeouts) or (
+            self.ibkr_gateway_restart_limit_per_hour <= 0
+        ):
+            raise ValueError("IBKR session timeouts and restart limit must be positive")
+        return self
 
     @field_validator("database_url")
     @classmethod

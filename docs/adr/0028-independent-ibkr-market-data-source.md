@@ -88,3 +88,21 @@ Operational duplication is accepted only where source identity, Gateway lifecycl
 isolation require it. PostgreSQL remains the canonical operational store and immutable Parquet plus
 manifests remains the research artefact boundary. Any later source mixing, order capability,
 credential automation or production/live-account connection requires a superseding decision.
+
+## Robustness amendment (2026-08-01)
+
+The adapter boundary retains the official direct TWS API. The production pair is the matched
+10.49 Latest Gateway/API release, with 10.45 retained as an explicitly selected rollback pair.
+The official API distribution is verified from a source manifest that excludes installer metadata,
+bytecode and caches; credentials and licensed archives remain outside Git.
+
+A shared generation-authenticated IBKR session reducer owns handshake/server-time readiness,
+subscription identity, documented system-code policy and bounded recovery. It handles normal
+1100/1101/1102/1300 and farm transitions without treating quiet farms or closed markets as
+infrastructure failure. Durable PostgreSQL pacing reservations and identity-bound capability
+checkpoints prevent duplicate requests and loss of completed evidence across process restarts.
+
+`ib_async` is not adopted. It independently reimplements the wire protocol, couples its watchdog to
+IBC/Gateway lifecycle and probes with historical requests; the current upstream behaviour also has
+known CFD rerouting and disconnect-delivery defects. The direct official API keeps protocol and
+lifecycle ownership at this adapter boundary.
