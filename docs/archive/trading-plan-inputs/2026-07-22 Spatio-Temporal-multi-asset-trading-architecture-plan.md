@@ -2095,3 +2095,70 @@ If you build this parallel ensemble, your pipeline should process data using thi
 If you run an ensemble of A and B, you must enforce a strict Walk-Forward Validation protocol across both models simultaneously.
 Because Approach B aggregates spatial data first, it is highly sensitive to any data leakage across nodes. If Asset A's data window accidentally includes information from t+1 due to a timezone or settlement lag alignment error, the GNN in Approach B will instantly leak that future information to all neighboring assets in the graph, completely ruining your ensemble's validation validity.
 Are you planning to build this ensemble using PyTorch Geometric (PyG), or are you looking to implement it via a Keras/TensorFlow pipeline? I can provide the structural code layout for the parallel feature fusion block if you are ready to start scripting.
+
+# 26. Feature contruction for the GNN-LSTM
+
+Here are reading recommendations and standard feature engineering practices for mapping multi-scale features, stationary inputs, and graph topology anchors into ST-GNN models.
+
+---
+
+## 26.1 Recommended Literature
+
+For concrete implementations of stationary inputs, multi-scale temporal derivatives, and spatial feature maps in spatio-temporal asset modeling:
+
+* **Feng, F., He, X., Wang, X., Luo, C., Liu, Y., & Tat-Seng, C. (2019).** *Temporal Relational Ranking for Stock Prediction.* ACM Transactions on Information Systems (TOIS).
+* **Focus:** Groundbreaking framework for combining temporal sequential inputs (LSTM) with cross-sectional relation graphs (GNN). Details log returns, volatility transformations, and node feature construction explicitly.
+
+
+* **Kim, R., So, C. H., Uhm, M., Lee, S., Zou, J., & Kang, J. (2022).** *Relational Graph Neural Network with Hierarchical Attention for Stock Movement Prediction.* Proceedings of the 29th International Conference on Computational Linguistics (COLING).
+* **Focus:** Details raw feature transformations, normalization layers, and feature matrix assembly for nodes across different industry sectors.
+
+
+* **Sawhney, R., Agarwal, S., Wadhwa, A., & Shah, R. R. (2021).** *Exploring the Scale-Free Nature of Stock Markets: Hyperbolic Graph Neural Networks for Stock Price Prediction.* WWW '21: Proceedings of the Web Conference 2021.
+* **Focus:** Illustrates multi-scale rolling inputs (short- vs long-horizon rolling windows) and graph topology metrics as explicit features.
+
+
+
+---
+
+## 26.2 Standard Feature Vector Structure ($\mathbf{X}_{i,t}$)
+
+Feeding raw price series directly into GNN/LSTM pipelines fails due to non-stationarity. Inputs are transformed into stationary log differences, rolling statistical moments, and explicit graph-topological anchors.
+
+A standard feature vector for asset $i$ at time $t$ ($\mathbf{X}_{i,t} \in \mathbb{R}^d$) is grouped into four tiers:
+
+### 26.2.1 Base Stationary Transforms (1-Step Horizon)
+
+* **Log Return:** $r_{i,t} = \ln(P_{i,t} / P_{i,t-1})$
+* **Log Volume Change:** $\Delta v_{i,t} = \ln(V_{i,t} / V_{i,t-1})$
+* **Garman-Klass Volatility Proxy:** Uses Open ($O$), High ($H$), Low ($L$), and Close ($C$) to yield a low-variance 1-step volatility estimate:
+
+$$\sigma_{GK,t}^2 = 0.5 \left( \ln \frac{H_t}{L_t} \right)^2 - (2\ln 2 - 1) \left( \ln \frac{C_t}{O_t} \right)^2$$
+
+### 26.2.2 Multi-Scale Temporal Derivatives (Micro to Macro)
+
+To capture momentum and evolving baselines without relying entirely on the LSTM state, features are constructed over varied lookback horizons $k \in \{5, 21, 63\}$ (1 week, 1 month, 1 quarter):
+
+* **Rolling Realized Volatility:** $\sigma_{i,t}^{(k)} = \sqrt{\frac{1}{k} \sum_{m=0}^{k-1} r_{i,t-m}^2}$
+* **Volatility Acceleration (Derivative Delta):** $\Delta \sigma_{i,t}^{(k)} = \sigma_{i,t}^{(k)} - \sigma_{i,t-1}^{(k)}$
+* **Normalized Rolling Volatility Z-Score:**
+
+$$Z_{\sigma,t}^{(k)} = \frac{\sigma_{i,t}^{(1)} - \mu\left(\sigma_{i,t-k..t}^{(1)}\right)}{\text{Std}\left(\sigma_{i,t-k..t}^{(1)}\right)}$$
+
+* **Log Return Moving Average Ratios (MACD-style):** $\frac{\text{EMA}_{5}(P_{i,t})}{\text{EMA}_{21}(P_{i,t})} - 1$
+
+### 26.2.3 Spatial & Cross-Sectional Features (GNN Anchors)
+
+Spatial attributes give the GNN structural context before message passing:
+
+* **Cross-Sectional Relative Volatility:** $\sigma_{i,t}^{(21)} - \frac{1}{N} \sum_{j=1}^N \sigma_{j,t}^{(21)}$ (Asset volatility relative to the broader market graph at time $t$).
+* **Sector-Relative Performance:** $r_{i,t} - r_{\text{Sector}, t}$
+* **Node Degree / Centrality Metrics:** Weighted or binary node degree $d_i$ derived from the dynamic correlation or supply-chain matrix $A_{i,j}$, telling the GNN if the asset is a market hub or an isolated node.
+
+### 26.2.4. Graph Construction Inputs (Adjacency Matrix $A_{t}$)
+
+While features above sit on individual nodes, spatial connectivity is defined in the $N \times N$ adjacency matrix $A$:
+
+* **Rolling Empirical Correlation:** $A_{ij, t} = \text{Corr}\left(r_{i, t-k..t}, r_{j, t-k..t}\right)$
+* **Granger Causality / Partial Correlation:** Directed edges showing lead-lag relationship.
+* **Knowledge Graphs:** Static domain edges (e.g., shared supply chain, sector classifications, cross-holding).
