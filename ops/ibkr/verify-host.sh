@@ -14,6 +14,12 @@ command -v firewall-cmd >/dev/null
     exit 1
 }
 
+for unit in pmcd.service pmlogger.service pmie.service; do
+    if systemctl is-active --quiet "$unit" || systemctl is-enabled --quiet "$unit"; then
+        echo "PCP unit must be inactive and disabled: $unit" >&2
+        exit 1
+    fi
+done
 if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' >/dev/null; then
     echo "IB Gateway API is not restricted to localhost" >&2
     exit 1
