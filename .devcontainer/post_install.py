@@ -12,8 +12,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-MCP_SERVER_NAMES = ("context7", "tilth", "token-optimizer")
-RETIRED_MCP_SERVER_NAMES = ("github",)
+MCP_SERVER_NAMES = ("context7", "tilth")
+RETIRED_MCP_SERVER_NAMES = ("github", "token-optimizer")
 
 
 def ensure_owned_directories() -> None:
@@ -23,7 +23,6 @@ def ensure_owned_directories() -> None:
         Path("/commandhistory"),
         Path.home() / ".cache",
         Path.home() / ".codex",
-        Path.home() / ".omp",
         Path("/workspace/.venv"),
     )
     for path in paths:
@@ -34,23 +33,6 @@ def ensure_owned_directories() -> None:
             ["sudo", "chown", "-R", f"{uid}:{gid}", str(path)],
             check=True,
         )
-
-
-def restore_omp_home() -> None:
-    """Seed a new persistent OMP home once, then remove the ignored migration copy."""
-    seed = Path("/workspace/.devcontainer/local/omp-home-seed")
-    destination = Path.home() / ".omp"
-    if not seed.is_dir():
-        return
-    if any(destination.iterdir()):
-        print(
-            "[post_install] preserving populated OMP home; migration seed was not applied",
-            file=sys.stderr,
-        )
-        return
-    shutil.copytree(seed, destination, dirs_exist_ok=True, symlinks=True)
-    shutil.rmtree(seed)
-    print("[post_install] restored OMP home into its persistent volume", file=sys.stderr)
 
 
 def configure_history() -> None:
@@ -194,15 +176,6 @@ def configure_mcp_servers() -> None:
         "--edit",
     )
 
-    run_codex_mcp(
-        "add",
-        "token-optimizer",
-        "--",
-        "npx",
-        "-y",
-        "@ooples/token-optimizer-mcp@latest",
-    )
-
     verified = json.loads(
         subprocess.run(
             ["codex", "mcp", "list", "--json"],
@@ -234,18 +207,10 @@ def configure_mcp_servers() -> None:
     ]:
         raise RuntimeError("Tilth MCP registration does not match the reviewed command")
 
-    token_optimizer = by_name["token-optimizer"]["transport"]
-    if token_optimizer["command"] != "npx" or token_optimizer["args"] != [
-        "-y",
-        "@ooples/token-optimizer-mcp@latest",
-    ]:
-        raise RuntimeError("token-optimizer MCP registration does not match the reviewed command")
-
 
 def main() -> None:
     print("[post_install] configuring q-trad Dev Container", file=sys.stderr)
     ensure_owned_directories()
-    restore_omp_home()
     configure_history()
     configure_codex()
     configure_mcp_servers()

@@ -21,5 +21,4 @@ data/
 tmp/
 .devcontainer/local/
 oci/
-.omp/
 .dirac-cache/
