@@ -202,6 +202,7 @@ class IbkrSession:
         if self._state not in {
             IbkrSessionState.WAITING_HANDSHAKE,
             IbkrSessionState.WAITING_SERVER_TIME,
+            IbkrSessionState.DEGRADED,
         }:
             raise RuntimeError("IBKR handshake arrived in an invalid state")
         self._handshake_seen = True
@@ -212,7 +213,9 @@ class IbkrSession:
             raise RuntimeError("IBKR server time cannot precede the handshake")
         self._server_time_seen = True
         self._failed_reconnect_cycles = 0
+        self._upstream_lost_at = None
         self._reason_codes.discard("CONNECTING")
+        self._reason_codes.discard("IBKR_UPSTREAM_DISCONNECTED")
         self._refresh_state()
 
     def _refresh_state(self) -> None:
