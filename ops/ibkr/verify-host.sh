@@ -43,8 +43,22 @@ jq -e     --arg api "${QTRAD_IBKR_API_VERSION:-10.49}"     --arg gateway "${QTRA
      and (.["org.opencontainers.image.created"] | length > 0)' <<<"$labels" >/dev/null
 
 evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
+checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT to a persistent host path}"
+api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
+[[ "$checkpoint_root" == /* ]] || {
+    echo "QTRAD_IBKR_CHECKPOINT_ROOT must be an absolute persistent path" >&2
+    exit 1
+}
+[[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ ]] || {
+    echo "QTRAD_IBKR_API_PACKAGE_FINGERPRINT must be a 64-character lowercase SHA-256 digest" >&2
+    exit 1
+}
 [[ -d "$evidence_root" && -w "$evidence_root" ]] || {
     echo "IBKR evidence path is not writable: $evidence_root" >&2
+    exit 1
+}
+[[ -d "$checkpoint_root" && -w "$checkpoint_root" ]] || {
+    echo "IBKR checkpoint path is not writable: $checkpoint_root" >&2
     exit 1
 }
 test -w /srv/qtrad/postgres

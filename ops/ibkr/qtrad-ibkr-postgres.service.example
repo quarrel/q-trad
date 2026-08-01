@@ -1,0 +1,18 @@
+[Unit]
+Description=q-trad IBKR PostgreSQL readiness dependency
+Requires=docker.service
+After=docker.service
+RequiresMountsFor=/srv/qtrad/postgres
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+EnvironmentFile=/etc/qtrad/ibkr-postgres.env
+ExecStart=/usr/local/sbin/qtrad-ibkr-postgres-start
+ExecStartPost=/usr/local/sbin/qtrad-ibkr-postgres-ready
+ExecStop=/usr/local/sbin/qtrad-ibkr-postgres-stop
+TimeoutStartSec=120
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

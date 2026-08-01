@@ -63,26 +63,12 @@ _FARM_UP: Final[Mapping[IbkrSystemCode, str]] = {
     IbkrSystemCode.HISTORICAL_FARM_CONNECTED: "historical",
     IbkrSystemCode.SECURITY_DEFINITION_FARM_CONNECTED: "security_definition",
 }
-_FARM_RECOVERY: Final[Mapping[IbkrSystemCode, IbkrSystemCode]] = {
-    IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED: IbkrSystemCode.MARKET_DATA_FARM_CONNECTED,
-    IbkrSystemCode.HISTORICAL_FARM_DISCONNECTED: IbkrSystemCode.HISTORICAL_FARM_CONNECTED,
-    IbkrSystemCode.SECURITY_DEFINITION_FARM_DISCONNECTED: (
-        IbkrSystemCode.SECURITY_DEFINITION_FARM_CONNECTED
-    ),
-}
 _FARM_INACTIVE: Final[frozenset[IbkrSystemCode]] = frozenset(
     {
         IbkrSystemCode.MARKET_DATA_FARM_INACTIVE,
         IbkrSystemCode.HISTORICAL_FARM_INACTIVE,
     }
 )
-
-
-def farm_recovery_code(code: int) -> int | None:
-    try:
-        return int(_FARM_RECOVERY[IbkrSystemCode(code)])
-    except (KeyError, ValueError):
-        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,7 +209,13 @@ class IbkrSession:
         if not self._handshake_seen:
             raise RuntimeError("IBKR server time cannot precede the handshake")
         self._server_time_seen = True
-        self._state = IbkrSessionState.SUBSCRIBING if self._desired else IbkrSessionState.CONNECTED
+        self._state = (
+            IbkrSessionState.CONNECTED
+            if self._active == set(self._desired)
+            else IbkrSessionState.SUBSCRIBING
+            if self._desired
+            else IbkrSessionState.CONNECTED
+        )
         self._upstream_lost_at = None
         self._failed_reconnect_cycles = 0
         self._reason_codes.clear()
@@ -272,9 +264,17 @@ class IbkrSession:
         code: int,
         *,
         request_id: int = -1,
+        generation: int | None = None,
         now: float | None = None,
     ) -> IbkrRecoveryDecision:
         observed_at = self._clock() if now is None else now
+        if generation is not None and generation != self._generation:
+            self._reason_codes.add("SUPERSEDED_GENERATION")
+            return IbkrRecoveryDecision(
+                IbkrRecoveryAction.NONE,
+                "SUPERSEDED_GENERATION",
+                code=code,
+            )
         if request_id >= 0:
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
@@ -357,7 +357,11 @@ class IbkrSession:
             self._reason_codes.discard(f"{farm.upper()}_FARM_DISCONNECTED")
             if not any(value == "DISCONNECTED" for value in self._farms.values()):
                 self._state = (
-                    IbkrSessionState.SUBSCRIBING if self._desired else IbkrSessionState.CONNECTED
+                    IbkrSessionState.CONNECTED
+                    if self._active == set(self._desired)
+                    else IbkrSessionState.SUBSCRIBING
+                    if self._desired
+                    else IbkrSessionState.CONNECTED
                 )
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,

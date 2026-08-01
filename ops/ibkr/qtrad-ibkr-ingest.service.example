@@ -1,8 +1,10 @@
 [Unit]
-Description=q-trad IBKR market-data ingest
-Requires=docker.service qtrad-ibgateway.service
-After=docker.service qtrad-ibgateway.service
+Description=q-trad IBKR market-data ingest (future continuous adapter)
+Requires=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service
+After=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service
 RequiresMountsFor=/srv/qtrad/postgres
+StartLimitIntervalSec=1h
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -11,11 +13,9 @@ ExecStart=/usr/local/sbin/qtrad-ibkr-ingest
 ExecStop=/usr/bin/docker stop --time 90 qtrad-ibkr-ingest
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=1h
-StartLimitBurst=3
 KillMode=control-group
 TimeoutStopSec=120
-# The wrapper must run host networking, localhost Gateway access and an immutable image digest.
+# This unit remains an example until the continuous IBKR adapter and API service exist.
 
 [Install]
 WantedBy=multi-user.target

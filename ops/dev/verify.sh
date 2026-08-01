@@ -53,7 +53,7 @@ uv run ruff format --check .
 uv run ruff check .
 uv run pyright
 uv run ty check
-shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh
+shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh ops/ibkr/*.sh
 
 uv run alembic upgrade 0003
 uv run pytest -q \

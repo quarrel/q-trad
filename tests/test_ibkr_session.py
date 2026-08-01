@@ -73,7 +73,7 @@ def test_data_maintained_does_not_request_resubscription() -> None:
     assert decision.revalidate_server_time is True
     assert decision.action == IbkrRecoveryAction.NONE
     session.mark_server_time()
-    assert session.snapshot().state == IbkrSessionState.SUBSCRIBING
+    assert session.snapshot().state == IbkrSessionState.CONNECTED
 
 
 def test_unknown_global_and_request_errors_are_isolated() -> None:
@@ -147,3 +147,18 @@ def test_historical_pacing_covers_duplicate_and_weighted_windows() -> None:
 
     assert policy.wait_seconds(duplicate, recent) == pytest.approx(570.0)
     assert policy.reserve(duplicate, recent) == pytest.approx(570.0)
+
+
+def test_system_message_from_superseded_generation_is_ignored() -> None:
+    session = _connected_session()
+
+    decision = session.on_system_message(
+        IbkrSystemCode.UPSTREAM_DISCONNECTED,
+        generation=session.generation - 1,
+        now=100.0,
+    )
+
+    assert decision.action == IbkrRecoveryAction.NONE
+    assert decision.reason_code == "SUPERSEDED_GENERATION"
+    assert session.state == IbkrSessionState.CONNECTED
+    assert session.snapshot().reason_codes == ("SUPERSEDED_GENERATION",)

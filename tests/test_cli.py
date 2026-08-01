@@ -885,6 +885,7 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
         ibkr_gateway_port=4002,
         ibkr_client_id=71,
         ibkr_api_package_fingerprint="a" * 64,
+        ibkr_checkpoint_root=tmp_path / "checkpoints",
     )
 
     await cli._review_instruments(

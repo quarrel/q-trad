@@ -26,7 +26,6 @@ from qtrad.adapters.ibkr.session import (
     IbkrSession,
     IbkrSessionTimeouts,
     IbkrSystemCode,
-    farm_recovery_code,
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.ports.ibkr_capability import (
@@ -735,11 +734,10 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
 
     async def _handle_global_error(self, callback: _Callback) -> None:
         error_code = _error_code(callback)
-        decision = self._session.on_system_message(error_code)
-        recovery_code = farm_recovery_code(error_code)
-        if recovery_code is not None:
-            await self._await_farm_recovery(error_code, recovery_code)
-            return
+        decision = self._session.on_system_message(
+            error_code,
+            generation=callback.generation,
+        )
         if error_code == int(IbkrSystemCode.UPSTREAM_DISCONNECTED):
             await self._await_upstream_recovery(error_code)
             return
@@ -798,7 +796,10 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 self._deferred_callbacks.append(callback)
                 continue
             error_code = _error_code(callback)
-            decision = self._session.on_system_message(error_code)
+            decision = self._session.on_system_message(
+                error_code,
+                generation=callback.generation,
+            )
             if error_code == int(IbkrSystemCode.UPSTREAM_RESTORED_DATA_MAINTAINED):
                 if decision.revalidate_server_time:
                     await self._revalidate_server_time()
@@ -814,30 +815,6 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 raise IbkrConnectionIntegrityError(
                     f"IBKR upstream recovery failed with IBKR_{error_code}"
                 )
-
-    async def _await_farm_recovery(self, disconnected_code: int, recovery_code: int) -> None:
-        deadline = monotonic() + self._request_timeout_seconds
-        while True:
-            try:
-                callback = await self._next_queued_callback(deadline)
-            except TimeoutError as error:
-                raise IbkrConnectionIntegrityError(
-                    f"IBKR_{disconnected_code} farm did not recover after IBKR_{recovery_code}"
-                ) from error
-            if not self._session.accept_callback(callback.generation):
-                continue
-            if not _is_global_error(callback):
-                self._deferred_callbacks.append(callback)
-                continue
-            error_code = _error_code(callback)
-            self._session.on_system_message(error_code)
-            if error_code == recovery_code:
-                return
-            if error_code in {
-                int(IbkrSystemCode.UPSTREAM_DISCONNECTED),
-                int(IbkrSystemCode.PORT_RESET),
-            }:
-                await self._handle_global_error(callback)
 
 
 def _official_client(

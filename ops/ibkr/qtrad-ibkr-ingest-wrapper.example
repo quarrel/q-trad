@@ -1,13 +1,22 @@
 #!/usr/bin/env bash
 set -euo pipefail
+# Deliberate guard: the continuous adapter/API does not exist in this milestone.
+echo "qtrad-ibkr-ingest is scaffolding only; no continuous IBKR adapter is implemented" >&2
+exit 78
 
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
 evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
-mkdir -p "$evidence_root"
+checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT to a persistent host path}"
+api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
+[[ "$checkpoint_root" == /* ]] || exit 64
+mkdir -p "$evidence_root" "$checkpoint_root"
+chown 10001:10001 "$evidence_root" "$checkpoint_root"
 
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
+[[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ ]] || exit 64
 [[ -d /srv/qtrad/postgres && -w /srv/qtrad/postgres ]] || exit 69
 [[ -d "$evidence_root" && -w "$evidence_root" ]] || exit 69
+[[ -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
 if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' \
     | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' > /dev/null; then
     echo 'Gateway API is not localhost-only' >&2
@@ -27,4 +36,5 @@ exec docker run --rm --name qtrad-ibkr-ingest --network host \
     --env-file /etc/qtrad/ibkr-ingest.env \
     --volume /srv/qtrad/postgres:/srv/qtrad/postgres \
     --volume "$evidence_root:$evidence_root" \
+    --volume "$checkpoint_root:$checkpoint_root" \
     "$image"

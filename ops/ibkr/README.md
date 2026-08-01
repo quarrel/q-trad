@@ -4,7 +4,11 @@ These files are deployment templates for the separate paper, read-only IBKR runt
 licensed Gateway/API archives, IBC configuration, passwords, 2FA material or rendered environment
 files into Git.
 
-Before enabling either service:
+The continuous IBKR adapter and its operator API are not implemented in this milestone. The host
+entry point is therefore verification-only: it checks the invariants and never starts a Gateway,
+ingest or health service. The bounded capability probe remains the only executable IBKR operation.
+
+Before running the bounded probe:
 
 1. Attach and mount the OCI block device at `/srv/qtrad/postgres`; `verify-host.sh` fails closed if
    the mount is absent.
@@ -13,29 +17,27 @@ Before enabling either service:
 3. Build the application from the exact API ZIP; `build-image.sh` verifies its SHA-256, extracts
    `IBJts/source/pythonclient`, and installs that official subtree. Set OCI image labels for API
    version, Gateway version, source digest, application commit and build time; use only an immutable
-   image digest.
-4. Install the example units after providing `/usr/local/sbin/qtrad-ibgateway` and
-   `/usr/local/sbin/qtrad-ibkr-ingest` wrappers. The ingest wrapper must assert host networking,
-   `/srv/qtrad/postgres`, localhost-only Gateway binding and the firewalld denial before starting.
-5. Install `healthcheck.sh` as `/usr/local/sbin/qtrad-ibkr-healthcheck`, then enable the health timer.
-   Only explicit persisted `RESTART_ADAPTER` or `RESTART_GATEWAY` actions cause restarts. Missing
-   weekend ticks and missing entitlements do not. `OPERATOR` is logged once per cooldown and is not
-   crash-looped.
-6. Run `verify-host.sh` after every image or Gateway change. It must pass before a connection-only
-   acceptance test.
+   image digest; `build-image.sh` requires `QTRAD_IBKR_PUSH=1`, tags the matched build, and prints the pushed manifest digest.
+4. Set `QTRAD_IBKR_CHECKPOINT_ROOT` to a writable absolute path on the PostgreSQL volume and set
+   `QTRAD_IBKR_API_PACKAGE_FINGERPRINT` to the archive/source fingerprint. The wrapper mounts the
+   checkpoint directory and runs the image as UID 10001, so a container restart preserves evidence.
+5. Run `deploy.sh` only as the invariant check. It does not enable services while continuous ingest is
+   absent. Run the explicit bounded command:
+   `qtrad instruments review --provider ibkr --environment paper --execute-account-probe`.
+6. Use the example `qtrad-ibkr-postgres.service` as the required readiness dependency when the
+   future continuous adapter is introduced. It must provide the host's PostgreSQL start, readiness,
+   and stop wrappers.
 
 The API port remains inaccessible from outside the host. Tailscale/approved IPv6 access reaches the
-operator API, not the Gateway socket. Weekly authentication/2FA expiry remains an operator action.
-`/health/ready` is reserved for capture validity; the health timer uses `/api/v1/system` recovery
-actions so closed markets cannot restart infrastructure.
+operator API only after a future API service is installed; the Gateway socket remains localhost-only.
+Weekly authentication/2FA expiry remains an operator action.
 
 ## Host maintenance
 
-Install the example units and scripts with the matching names under `/usr/local/sbin` and
-`/etc/systemd/system`. `deploy.sh` is the single idempotent host entry point: it checks the
-immutable image, mounted and writable evidence/PostgreSQL paths, localhost-only Gateway API,
-firewall denial, matched image labels, then starts Gateway before ingest and enables the health,
-disk, backup and restore-verification timers.
+The health script is retained as a future control-plane hook. Its restart history must live under
+`QTRAD_IBKR_RESTART_HISTORY_PATH` on persistent host storage, not `/run`, so a service restart cannot
+reset the three-per-hour Gateway budget. It must only be enabled alongside a real continuous adapter
+and API service. `OPERATOR` is logged once per cooldown and is not crash-looped.
 
 Install `journald.conf.example` as a drop-in and run `systemctl restart systemd-journald`. The disk
 timer checks both `/` and `/srv/qtrad/postgres`; backup files and checksums remain on the 100G

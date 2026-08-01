@@ -480,7 +480,7 @@ async def test_security_definition_farm_recovery_preserves_interrupted_request_c
 
 
 @pytest.mark.asyncio
-async def test_security_definition_farm_recovery_timeout_fails_closed() -> None:
+async def test_security_definition_farm_failure_does_not_block_request_error() -> None:
     adapter = _collector_adapter()
     adapter._callbacks.put(
         capability._Callback(
@@ -489,9 +489,12 @@ async def test_security_definition_farm_recovery_timeout_fails_closed() -> None:
             (1_785_000_000, 2157, "SECURITY_DEFINITION_FARM_DISCONNECTED"),
         )
     )
+    adapter._callbacks.put(capability._Callback("error", 1, (1_785_000_001, 200, "REQUEST_ERROR")))
 
-    with pytest.raises(capability.IbkrConnectionIntegrityError, match="IBKR_2157"):
-        await adapter._collect_until(1, "historical_data_end")
+    callbacks = await adapter._collect_until(1, "historical_data_end")
+
+    assert capability._error_codes(callbacks) == ("IBKR_200", "IBKR_2157")
+    assert capability._status(callbacks, "historical_data_end") == "ERROR"
 
 
 @pytest.mark.asyncio

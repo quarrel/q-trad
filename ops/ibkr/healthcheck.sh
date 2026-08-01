@@ -2,7 +2,13 @@
 set -euo pipefail
 
 system_url="${QTRAD_IBKR_SYSTEM_URL:-http://127.0.0.1:8000/api/v1/system}"
-state_dir="${QTRAD_IBKR_HEALTH_STATE_DIR:-/run/qtrad}"
+state_dir="${QTRAD_IBKR_HEALTH_STATE_DIR:-/var/lib/qtrad/ibkr}"
+restart_history_path="${QTRAD_IBKR_RESTART_HISTORY_PATH:-${state_dir}/gateway-restarts}"
+max_gateway_restarts="${QTRAD_IBKR_MAX_GATEWAY_RESTARTS_PER_HOUR:-3}"
+[[ "$max_gateway_restarts" =~ ^[1-9][0-9]*$ ]] || {
+    logger -p alert -t qtrad-ibkr-health "invalid Gateway restart budget"
+    exit 2
+}
 lock_path="${state_dir}/ibkr-healthcheck.lock"
 state_path="${state_dir}/ibkr-healthcheck.state"
 mkdir -p "$state_dir"
@@ -34,7 +40,30 @@ if [[ -f "$state_path" ]]; then
         logger -t qtrad-ibkr-health "recovery action $action remains pending; cooldown suppresses a loop"
         exit 1
     fi
+    if [[ "$previous" == "OPERATOR" && $((now - previous_at)) -lt 900 ]]; then
+        exit 2
+    fi
 fi
+
+if [[ "$action" == "RESTART_GATEWAY" ]]; then
+    history_dir="$(dirname -- "$restart_history_path")"
+    install -d -m 0750 "$history_dir"
+    history_tmp="${restart_history_path}.tmp.$$"
+    if [[ -f "$restart_history_path" ]]; then
+        awk -v cutoff="$((now - 3600))" '$1 >= cutoff { print $1 }' \
+            "$restart_history_path" >"$history_tmp"
+    else
+        : >"$history_tmp"
+    fi
+    mv -f "$history_tmp" "$restart_history_path"
+    restart_count="$(wc -l <"$restart_history_path")"
+    if ((restart_count >= max_gateway_restarts)); then
+        logger -p alert -t qtrad-ibkr-health "IBKR Gateway restart budget exhausted; operator intervention required"
+        printf 'OPERATOR %s\n' "$now" >"$state_path"
+        exit 2
+    fi
+fi
+
 printf '%s %s\n' "$action" "$now" >"$state_path"
 
 case "$action" in
@@ -42,6 +71,7 @@ case "$action" in
         systemctl restart qtrad-ibkr-ingest.service
         ;;
     RESTART_GATEWAY)
+        printf '%s\n' "$now" >>"$restart_history_path"
         systemctl restart qtrad-ibgateway.service
         systemctl restart qtrad-ibkr-ingest.service
         ;;
