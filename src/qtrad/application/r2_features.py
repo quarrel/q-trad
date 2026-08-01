@@ -27,7 +27,7 @@ from qtrad.domain.foundation import (
     TargetDataset,
 )
 from qtrad.domain.foundation_bundle import FoundationBundle
-from qtrad.domain.market_data import PriceBasis
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
@@ -1040,6 +1040,9 @@ class R2FeatureManifestBindings(Protocol):
     def evidence_class(self) -> EvidenceClass: ...
 
     @property
+    def market_data_source_class(self) -> MarketDataSourceClass: ...
+
+    @property
     def holdout_excluded(self) -> bool: ...
 
 
@@ -1071,6 +1074,8 @@ def verify_raw_feature_manifest_bindings(
         raise ValueError("feature manifest schema differs from declared feature set")
     if manifest.evidence_class != experiment.evidence_class:
         raise ValueError("feature manifest evidence class differs from experiment")
+    if manifest.market_data_source_class != experiment.market_data_source_class:
+        raise ValueError("feature manifest source class differs from experiment")
     if not manifest.holdout_excluded:
         raise ValueError("feature manifest does not exclude the locked holdout")
 
@@ -1107,6 +1112,7 @@ def verify_raw_feature_dataset(
         fold_dataset_id=foundation.folds.dataset_id,
         experiment_configuration_id=experiment.configuration_id,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
     if dataset != expected:
         raise ValueError("feature dataset semantic identity differs from deterministic replay")

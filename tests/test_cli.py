@@ -935,6 +935,97 @@ def test_parser_rejects_non_demo_ingestion_environment() -> None:
         cli.build_parser().parse_args(["ingest", "--environment", "live"])
 
 
+def test_parser_accepts_r2_replay_and_software_operations() -> None:
+    parser = cli.build_parser()
+
+    oof = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "oof-build",
+            "--foundation-bundle",
+            "foundation.json",
+            "--experiment",
+            "experiment.json",
+            "--feature-manifest",
+            "L0=l0.json",
+            "--feature-manifest",
+            "L1=l1.json",
+            "--feature-manifest",
+            "P0=p0.json",
+            "--feature-manifest",
+            "P1=p1.json",
+            "--output",
+            "run",
+        ]
+    )
+    software = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "software-verify",
+            "--bundle",
+            "software/manifest.json",
+        ]
+    )
+
+    assert oof.baselines_command == "oof-build"
+    assert oof.feature_manifest == ["L0=l0.json", "L1=l1.json", "P0=p0.json", "P1=p1.json"]
+    assert software.baselines_command == "software-verify"
+
+
+def test_cli_builds_and_verifies_software_bundle_in_separate_phases(
+    tmp_path: Path,
+    cli_environment: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del cli_environment
+    from qtrad.runtime.r2_bundles import write_r2_oof_bundle
+    from qtrad.runtime.r2_verification import selection_freeze
+    from tests.test_r2_bundles import _bundle_and_children
+
+    representative_root = tmp_path / "representative"
+    representative_root.mkdir()
+    representative_bundle, children = _bundle_and_children()
+    representative_manifest = write_r2_oof_bundle(
+        representative_root, representative_bundle, children
+    )
+    representative_selection = representative_root / "selection.json"
+    selection_freeze(
+        oof_bundle_path=representative_manifest,
+        frozen_by="cli-test",
+        output=representative_selection,
+    )
+
+    output = tmp_path / "software"
+    cli.main(
+        [
+            "research",
+            "baselines",
+            "software-build",
+            "--representative-oof-bundle",
+            str(representative_manifest),
+            "--representative-selection",
+            str(representative_selection),
+            "--output",
+            str(output),
+        ]
+    )
+    assert json.loads(capsys.readouterr().out)["software_bundle"].endswith("manifest.json")
+
+    cli.main(
+        [
+            "research",
+            "baselines",
+            "software-verify",
+            "--bundle",
+            str(output / "manifest.json"),
+        ]
+    )
+    verified = json.loads(capsys.readouterr().out)
+    assert verified["representative_integration_ready"] == "READY"
+
+
 @pytest.mark.asyncio
 async def test_ingestion_synchronises_missing_approved_listing_before_subscribe() -> None:
     universe = load_capture_universe(Path("config/capture-v1.toml"))

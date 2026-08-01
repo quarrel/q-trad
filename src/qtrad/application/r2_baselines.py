@@ -823,6 +823,7 @@ def _fold_fit_common(
         "feature_schema_id": selection.feature_schema_id,
         "preprocessing_schema_id": selection.preprocessing_schema_id,
         "evidence_class": selection.evidence_class,
+        "market_data_source_class": experiment.market_data_source_class,
         "application_image_identity": application_image_identity,
         "numpy_library_identity": numpy_library_identity,
         "sklearn_library_identity": sklearn_library_identity,

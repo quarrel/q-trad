@@ -108,7 +108,15 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
+from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
 from qtrad.runtime.r2_readiness import load_r2_experiment, write_r2_readiness
+from qtrad.runtime.r2_verification import (
+    build_oof_bundle,
+    build_software_bundle,
+    load_experiment_and_feature_paths,
+    selection_freeze,
+    verify_software_bundle,
+)
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
     ResearchSnapshotImport,
@@ -359,6 +367,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
+    baselines_readiness.add_argument("--software-bundle", type=Path)
     baselines_readiness.add_argument("--output", type=Path, required=True)
     baselines_features = baselines_sub.add_parser(
         "features", help="materialise and verify an OOF R2 raw-feature child"
@@ -375,6 +384,35 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_features.add_argument("--feature-set", required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
 
+    baselines_oof_build = baselines_sub.add_parser(
+        "oof-build", help="authenticate R2 feature children and build an OOF bundle"
+    )
+    baselines_oof_build.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_oof_build.add_argument("--experiment", type=Path, required=True)
+    baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
+    baselines_oof_build.add_argument("--output", type=Path, required=True)
+    baselines_oof_verify = baselines_sub.add_parser(
+        "oof-verify", help="independently verify an R2 OOF bundle"
+    )
+    baselines_oof_verify.add_argument("--bundle", type=Path, required=True)
+
+    baselines_selection_freeze = baselines_sub.add_parser(
+        "selection-freeze", help="freeze disposable implementation selection mechanics"
+    )
+    baselines_selection_freeze.add_argument("--oof-bundle", type=Path, required=True)
+    baselines_selection_freeze.add_argument("--frozen-by", required=True)
+    baselines_selection_freeze.add_argument("--output", type=Path, required=True)
+
+    baselines_software_build = baselines_sub.add_parser(
+        "software-build", help="build the R2 synthetic and representative verification bundle"
+    )
+    baselines_software_build.add_argument("--representative-oof-bundle", type=Path, required=True)
+    baselines_software_build.add_argument("--representative-selection", type=Path, required=True)
+    baselines_software_build.add_argument("--output", type=Path, required=True)
+    baselines_software_verify = baselines_sub.add_parser(
+        "software-verify", help="independently replay the R2 software bundle"
+    )
+    baselines_software_verify.add_argument("--bundle", type=Path, required=True)
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
 
@@ -652,9 +690,61 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 experiment_path=args.experiment,
+                software_bundle_path=args.software_bundle,
                 output_path=args.output,
             )
         )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "oof-build"
+    ):
+        asyncio.run(
+            _build_r2_oof(
+                settings,
+                clock,
+                foundation_bundle_path=args.foundation_bundle,
+                experiment_path=args.experiment,
+                feature_arguments=args.feature_manifest,
+                output_path=args.output,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "oof-verify"
+    ):
+        bundle = verify_r2_oof_bundle(args.bundle)
+        print(json.dumps(bundle.as_json(), sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "selection-freeze"
+    ):
+        selection_freeze(
+            oof_bundle_path=args.oof_bundle,
+            frozen_by=args.frozen_by,
+            output=args.output,
+        )
+        print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "software-build"
+    ):
+        build_software_bundle(
+            representative_oof_bundle_path=args.representative_oof_bundle,
+            representative_selection_path=args.representative_selection,
+            output=args.output,
+        )
+        print(json.dumps({"software_bundle": str(args.output / "manifest.json")}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "software-verify"
+    ):
+        bundle = verify_software_bundle(args.bundle)
+        print(json.dumps(bundle.as_json(), sort_keys=True))
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -741,6 +831,7 @@ async def _report_r2_readiness(
     *,
     foundation_bundle_path: Path,
     experiment_path: Path,
+    software_bundle_path: Path | None,
     output_path: Path,
 ) -> None:
     verified = await verify_foundation_bundle(
@@ -749,9 +840,52 @@ async def _report_r2_readiness(
         clock=clock,
     )
     experiment = load_r2_experiment(experiment_path)
-    report = evaluate_r2_readiness(verified, experiment)
+    software_verified = False
+    if software_bundle_path is not None:
+        software = verify_software_bundle(software_bundle_path)
+        representative = verify_r2_oof_bundle(
+            software_bundle_path.parent / software.representative_oof_bundle.path
+        )
+        software_verified = (
+            representative.foundation_bundle_id == verified.bundle.bundle_id
+            and representative.experiment_configuration_id == experiment.configuration_id
+            and representative.source_class is experiment.market_data_source_class
+            and representative.evidence_class is experiment.evidence_class
+        )
+        if not software_verified:
+            raise ValueError("software bundle does not bind the exact foundation and experiment")
+    report = evaluate_r2_readiness(verified, experiment, software_verified=software_verified)
     write_r2_readiness(output_path, report)
     print(json.dumps(report.as_json(), sort_keys=True))
+
+
+async def _build_r2_oof(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    experiment_path: Path,
+    feature_arguments: list[str],
+    output_path: Path,
+) -> None:
+    verified = await verify_foundation_bundle(
+        root=settings.research_root,
+        bundle_path=foundation_bundle_path,
+        clock=clock,
+    )
+    experiment, feature_paths = load_experiment_and_feature_paths(
+        experiment_path=experiment_path,
+        feature_arguments=feature_arguments,
+    )
+    manifest = build_oof_bundle(
+        verified=verified,
+        experiment=experiment,
+        feature_manifest_paths=feature_paths,
+        research_root=settings.research_root,
+        clock=clock,
+        output=output_path,
+    )
+    print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))
 
 
 async def _materialise_r2_features(

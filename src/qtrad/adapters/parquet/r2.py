@@ -16,6 +16,7 @@ from typing import cast
 import polars as pl
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_features import (
     FeatureDatasetSemanticHasher,
     FeatureDefinition,
@@ -100,6 +101,7 @@ class R2FeatureManifest:
     chunks: tuple[R2FeatureChunkReference, ...]
     application_version: str
     image_identity: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT = R2_PARQUET_MANIFEST_CONTRACT
     SCHEMA_VERSION = R2_PARQUET_MANIFEST_SCHEMA_VERSION
@@ -143,6 +145,7 @@ class ParquetR2FeatureStore:
         holdout_excluded: bool,
         application_version: str,
         image_identity: str,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> R2FeatureManifest:
         """Publish a new immutable manifest and its bounded chunks."""
         path = self._resolve_manifest_path(manifest_path)
@@ -182,6 +185,7 @@ class ParquetR2FeatureStore:
             experiment_configuration_id=experiment_configuration_id,
             evidence_class=evidence_class,
             holdout_excluded=holdout_excluded,
+            market_data_source_class=market_data_source_class,
         )
         chunk_refs: list[R2FeatureChunkReference] = []
         buffer: list[RawFeatureRow] = []
@@ -228,6 +232,7 @@ class ParquetR2FeatureStore:
                 chunks=tuple(chunk_refs),
                 application_version=application_version,
                 image_identity=image_identity,
+                market_data_source_class=market_data_source_class,
             )
             self._publish_manifest(path, manifest)
             return manifest
@@ -306,6 +311,7 @@ class ParquetR2FeatureStore:
             fold_dataset_id=manifest.fold_dataset_id,
             experiment_configuration_id=manifest.experiment_configuration_id,
             evidence_class=manifest.evidence_class,
+            market_data_source_class=manifest.market_data_source_class,
         )
         if dataset.dataset_id != manifest.semantic_dataset_id:
             raise ValueError("loaded R2 feature dataset identity differs from its manifest")
@@ -395,6 +401,7 @@ def _build_manifest(
     chunks: tuple[R2FeatureChunkReference, ...],
     application_version: str,
     image_identity: str,
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> R2FeatureManifest:
     unbound = R2FeatureManifest(
         manifest_id="0" * 24,
@@ -418,6 +425,7 @@ def _build_manifest(
         chunks=chunks,
         application_version=application_version,
         image_identity=image_identity,
+        market_data_source_class=market_data_source_class,
     )
     identity = _manifest_identity_payload(unbound)
     digest = _sha256_json(identity)
@@ -443,6 +451,7 @@ def _build_manifest(
         chunks=chunks,
         application_version=application_version,
         image_identity=image_identity,
+        market_data_source_class=market_data_source_class,
     )
 
 
@@ -469,6 +478,7 @@ def _manifest_identity_payload(manifest: R2FeatureManifest) -> dict[str, JsonVal
         "chunks": [item.as_json() for item in manifest.chunks],
         "application_version": manifest.application_version,
         "image_identity": manifest.image_identity,
+        "market_data_source_class": manifest.market_data_source_class.value,
     }
 
 
@@ -503,8 +513,13 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
         "chunks",
         "application_version",
         "image_identity",
+        "market_data_source_class",
     }
-    if set(raw) != expected:
+    legacy_expected = expected - {"market_data_source_class"}
+    legacy = False
+    if set(raw) == legacy_expected:
+        legacy = True
+    elif set(raw) != expected:
         raise ValueError("R2 feature manifest has unknown or missing fields")
     manifest = R2FeatureManifest(
         manifest_id=_hex(raw["manifest_id"], 24, "manifest ID"),
@@ -532,12 +547,21 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
         chunks=tuple(_chunk_reference(item) for item in _sequence(raw["chunks"])),
         application_version=_text(raw["application_version"], "application version"),
         image_identity=_text(raw["image_identity"], "image identity"),
+        market_data_source_class=MarketDataSourceClass(
+            _text(
+                raw.get("market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE.value),
+                "market data source class",
+            )
+        ),
     )
     if manifest.manifest_filename != path.name:
         raise ValueError("R2 feature manifest filename does not match its path")
     if manifest.manifest_id != manifest.manifest_sha256[:24]:
         raise ValueError("R2 feature manifest ID does not match its hash")
-    if _sha256_json(_manifest_identity_payload(manifest)) != manifest.manifest_sha256:
+    identity = _manifest_identity_payload(manifest)
+    if legacy:
+        identity.pop("market_data_source_class", None)
+    if _sha256_json(identity) != manifest.manifest_sha256:
         raise ValueError("R2 feature manifest hash does not match its canonical content")
     if manifest.raw_feature_schema_id != feature_schema_id(manifest.feature_schema):
         raise ValueError("R2 feature manifest schema identity is invalid")
@@ -739,6 +763,7 @@ def _semantic_hasher(manifest: R2FeatureManifest) -> FeatureDatasetSemanticHashe
         experiment_configuration_id=manifest.experiment_configuration_id,
         evidence_class=manifest.evidence_class,
         holdout_excluded=manifest.holdout_excluded,
+        market_data_source_class=manifest.market_data_source_class,
     )
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import cast
 
 from qtrad.domain.foundation import InstrumentRole
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
     EvidenceClass,
@@ -63,6 +64,7 @@ _KEYS = frozenset(
         "numeric_replay_relative_tolerance",
         "numeric_replay_absolute_tolerance",
         "evidence_class",
+        "market_data_source_class",
         "model_families",
     }
 )
@@ -153,6 +155,7 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
         numeric_replay_relative_tolerance=_float(payload["numeric_replay_relative_tolerance"]),
         numeric_replay_absolute_tolerance=_float(payload["numeric_replay_absolute_tolerance"]),
         evidence_class=EvidenceClass(_text(payload["evidence_class"])),
+        market_data_source_class=MarketDataSourceClass(_text(payload["market_data_source_class"])),
         model_families=tuple(
             ModelFamily(_text(item)) for item in _sequence(payload["model_families"])
         ),

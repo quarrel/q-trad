@@ -10,6 +10,7 @@ from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_models import FitDisposition, PreprocessingFit
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
@@ -45,6 +46,7 @@ class _R2FoldFitArguments(TypedDict):
     feature_schema_id: str
     preprocessing_schema_id: str
     evidence_class: EvidenceClass
+    market_data_source_class: MarketDataSourceClass
     application_image_identity: str
     numpy_library_identity: str
     sklearn_library_identity: str
@@ -151,6 +153,7 @@ class R2FoldFit:
     failure: str | None
     diagnostics: FoldFitDiagnostics | None
     artifact_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_FOLD_FIT_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -280,6 +283,7 @@ class R2FoldFit:
                 feature_schema_id=self.feature_schema_id,
                 preprocessing_schema_id=self.preprocessing_schema_id,
                 evidence_class=self.evidence_class,
+                market_data_source_class=self.market_data_source_class,
                 application_image_identity=self.application_image_identity,
                 numpy_library_identity=self.numpy_library_identity,
                 sklearn_library_identity=self.sklearn_library_identity,
@@ -554,6 +558,10 @@ class CoefficientStabilitySummary:
 
 
 def fold_fit_id(payload: dict[str, JsonValue]) -> str:
+    source = payload.get("market_data_source_class")
+    if source == MarketDataSourceClass.IG_NATIVE_CAPTURE.value:
+        payload = dict(payload)
+        payload.pop("market_data_source_class")
     return _semantic_id(payload)
 
 
@@ -635,6 +643,9 @@ def _fold_fit_json(values: _R2FoldFitArguments) -> dict[str, JsonValue]:
                 "feature_schema_id": values["feature_schema_id"],
                 "preprocessing_schema_id": values["preprocessing_schema_id"],
                 "evidence_class": values["evidence_class"].value,
+                "market_data_source_class": values.get(
+                    "market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE
+                ).value,
                 "application_image_identity": values["application_image_identity"],
                 "numpy_library_identity": values["numpy_library_identity"],
                 "sklearn_library_identity": values["sklearn_library_identity"],

@@ -14,6 +14,7 @@ from qtrad.application.r2_preprocessing import (
     build_r2_preprocessing_selection,
 )
 from qtrad.application.r2_readiness import R1FoundationBindings
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_models import (
     R2_PREPROCESSING_SCHEMA_CONTRACT,
@@ -50,6 +51,7 @@ _TOP_LEVEL_KEYS = {
     "preprocessing_schema_id",
     "preprocessing_schema",
     "evidence_class",
+    "market_data_source_class",
     "application_image_identity",
     "sklearn_library_identity",
     "preprocessing_policy",
@@ -162,6 +164,12 @@ def decode_r2_preprocessing_selection(
         preprocessing_schema_id=_text(obj["preprocessing_schema_id"], "preprocessing_schema_id"),
         preprocessing_schema=preprocessing_schema,
         evidence_class=EvidenceClass(_text(obj["evidence_class"], "evidence_class")),
+        market_data_source_class=MarketDataSourceClass(
+            _text(
+                obj.get("market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE.value),
+                "market_data_source_class",
+            )
+        ),
         application_image_identity=_text(
             obj["application_image_identity"], "application_image_identity"
         ),
@@ -202,6 +210,10 @@ def verify_r2_preprocessing_selection(
 ) -> R2PreprocessingSelection:
     """Decode persisted evidence and compare it with a fresh authenticated rebuild."""
     persisted = decode_r2_preprocessing_selection(persisted_payload)
+    if persisted.market_data_source_class is not experiment.market_data_source_class:
+        raise ValueError("preprocessing selection source class differs from experiment")
+    if feature_dataset.market_data_source_class is not persisted.market_data_source_class:
+        raise ValueError("preprocessing selection source class differs from feature dataset")
     if model_family is ModelFamily.LOCAL_RIDGE:
         builder = build_r2_preprocessing_selection
     elif model_family in (

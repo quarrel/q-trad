@@ -10,6 +10,7 @@ from math import isfinite
 from typing import ClassVar
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
@@ -121,6 +122,7 @@ class R2FeatureDataset:
     evidence_class: EvidenceClass
     holdout_excluded: bool
     dataset_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_FEATURE_DATASET_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -161,6 +163,7 @@ class R2FeatureDataset:
             fold_dataset_id=self.fold_dataset_id,
             experiment_configuration_id=self.experiment_configuration_id,
             evidence_class=self.evidence_class,
+            market_data_source_class=self.market_data_source_class,
             holdout_excluded=self.holdout_excluded,
         )
         if self.dataset_id != expected:
@@ -180,6 +183,7 @@ class R2FeatureDataset:
         fold_dataset_id: str,
         experiment_configuration_id: str,
         evidence_class: EvidenceClass,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "R2FeatureDataset":
         ordered_rows = tuple(sorted(rows, key=RawFeatureRow.semantic_key))
         schema = tuple(feature_schema)
@@ -202,6 +206,7 @@ class R2FeatureDataset:
             fold_dataset_id=fold_dataset_id,
             experiment_configuration_id=experiment_configuration_id,
             evidence_class=evidence_class,
+            market_data_source_class=market_data_source_class,
             holdout_excluded=True,
         )
         return cls(
@@ -216,6 +221,7 @@ class R2FeatureDataset:
             fold_dataset_id=fold_dataset_id,
             experiment_configuration_id=experiment_configuration_id,
             evidence_class=evidence_class,
+            market_data_source_class=market_data_source_class,
             holdout_excluded=True,
             dataset_id=dataset_id,
         )
@@ -235,6 +241,7 @@ class R2FeatureDataset:
             "fold_dataset_id": self.fold_dataset_id,
             "experiment_configuration_id": self.experiment_configuration_id,
             "evidence_class": self.evidence_class.value,
+            "market_data_source_class": self.market_data_source_class.value,
             "holdout_excluded": self.holdout_excluded,
             "row_count": len(self.rows),
         }
@@ -393,6 +400,7 @@ class FeatureDatasetSemanticHasher:
         experiment_configuration_id: str,
         evidence_class: EvidenceClass,
         holdout_excluded: bool,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> None:
         self._hash = sha256()
         identity = {
@@ -409,6 +417,8 @@ class FeatureDatasetSemanticHasher:
             "evidence_class": evidence_class.value,
             "holdout_excluded": holdout_excluded,
         }
+        if market_data_source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
+            identity["market_data_source_class"] = market_data_source_class.value
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self._hash.update(encoded[:-1])
         self._hash.update(b',"rows":[')
@@ -441,6 +451,7 @@ def feature_dataset_id(
     experiment_configuration_id: str,
     evidence_class: EvidenceClass,
     holdout_excluded: bool,
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> str:
     hasher = FeatureDatasetSemanticHasher(
         feature_schema=feature_schema,
@@ -452,6 +463,7 @@ def feature_dataset_id(
         fold_dataset_id=fold_dataset_id,
         experiment_configuration_id=experiment_configuration_id,
         evidence_class=evidence_class,
+        market_data_source_class=market_data_source_class,
         holdout_excluded=holdout_excluded,
     )
     for row in rows:

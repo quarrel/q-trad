@@ -64,7 +64,10 @@ class VerifiedFoundation(R1FoundationBindings, Protocol):
 
 
 def evaluate_r2_readiness(
-    verified: VerifiedFoundation, experiment: R2ExperimentConfig
+    verified: VerifiedFoundation,
+    experiment: R2ExperimentConfig,
+    *,
+    software_verified: bool = False,
 ) -> R2ReadinessReport:
     """Fail closed while keeping software and scientific readiness independent."""
 
@@ -73,11 +76,12 @@ def evaluate_r2_readiness(
     feature_states = {
         family: _feature_state(experiment.feature_eligibility[family]) for family in FeatureFamily
     }
-    representative = ReadinessState.NOT_READY
-    unmet.append(
-        "representative integration requires retained R2 feature, fit, persistence, replay and "
-        "evaluation evidence; an R1 bundle alone is insufficient"
-    )
+    representative = ReadinessState.READY if software_verified else ReadinessState.NOT_READY
+    if not software_verified:
+        unmet.append(
+            "representative integration requires retained R2 feature, fit, persistence, replay and "
+            "evaluation evidence; an R1 bundle alone is insufficient"
+        )
 
     group_counts = Counter(experiment.market_groups.values())
     folds = verified.folds.folds
@@ -216,6 +220,7 @@ def evaluate_r2_readiness(
         active_source_duration_seconds=active_source_durations,
         unmet_conditions=tuple(unmet),
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
 
 
