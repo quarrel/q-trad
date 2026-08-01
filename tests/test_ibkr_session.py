@@ -73,7 +73,36 @@ def test_data_maintained_does_not_request_resubscription() -> None:
     assert decision.revalidate_server_time is True
     assert decision.action == IbkrRecoveryAction.NONE
     session.mark_server_time()
-    assert session.snapshot().state == IbkrSessionState.SUBSCRIBING
+    assert session.snapshot().state == IbkrSessionState.CONNECTED
+
+
+def test_fresh_reconnect_clears_completed_upstream_loss() -> None:
+    session = _connected_session()
+
+    session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=100.0)
+    session.begin_connection()
+    session.mark_socket_connected()
+    session.mark_handshake()
+    session.mark_server_time()
+
+    assert session.state == IbkrSessionState.CONNECTED
+    assert session.poll(now=1_000.0).reason_code == "NO_RECOVERY_REQUIRED"
+
+
+def test_handshake_accepts_farm_loss_during_connection_establishment() -> None:
+    session = IbkrSession()
+    session.begin_connection()
+    session.mark_socket_connected()
+
+    session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED)
+    session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=100.0)
+    assert session.state == IbkrSessionState.WAITING_HANDSHAKE
+    session.mark_handshake()
+    session.mark_server_time()
+
+    assert session.state == IbkrSessionState.DEGRADED
+    assert "MARKET_DATA_FARM_DISCONNECTED" in session.snapshot().reason_codes
+    assert "IBKR_UPSTREAM_DISCONNECTED" not in session.snapshot().reason_codes
 
 
 def test_unknown_global_and_request_errors_are_isolated() -> None:
@@ -99,6 +128,33 @@ def test_farm_disconnect_recovers_and_inactive_is_not_failure() -> None:
     assert inactive.action == IbkrRecoveryAction.NONE
     assert recovered.reason_code == "SECURITY_DEFINITION_FARM_CONNECTED"
     assert session.snapshot().state == IbkrSessionState.CONNECTED
+
+
+def test_upstream_loss_is_not_masked_by_farm_connected_notice() -> None:
+    session = _connected_session()
+
+    session.on_system_message(IbkrSystemCode.UPSTREAM_DISCONNECTED, now=100.0)
+    session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_CONNECTED)
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+
+def test_farm_disconnect_is_not_masked_by_server_time() -> None:
+    session = _connected_session()
+
+    session.on_system_message(IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED)
+    session.mark_server_time()
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+
+def test_unknown_global_degradation_survives_server_time() -> None:
+    session = _connected_session()
+
+    session.on_system_message(9999)
+    session.mark_server_time()
+
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
 
 
 def test_gateway_escalation_is_bounded() -> None:
@@ -147,3 +203,18 @@ def test_historical_pacing_covers_duplicate_and_weighted_windows() -> None:
 
     assert policy.wait_seconds(duplicate, recent) == pytest.approx(570.0)
     assert policy.reserve(duplicate, recent) == pytest.approx(570.0)
+
+
+def test_system_message_from_superseded_generation_is_ignored() -> None:
+    session = _connected_session()
+
+    decision = session.on_system_message(
+        IbkrSystemCode.UPSTREAM_DISCONNECTED,
+        generation=session.generation - 1,
+        now=100.0,
+    )
+
+    assert decision.action == IbkrRecoveryAction.NONE
+    assert decision.reason_code == "SUPERSEDED_GENERATION"
+    assert session.state == IbkrSessionState.CONNECTED
+    assert session.snapshot().reason_codes == ("SUPERSEDED_GENERATION",)

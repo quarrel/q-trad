@@ -83,6 +83,103 @@ def test_oci_collector_deployments_reject_active_pcp() -> None:
         assert 'systemctl is-active --quiet "$unit"' in script
         assert 'systemctl is-enabled --quiet "$unit"' in script
 
+
+def test_ibkr_operations_are_explicit_about_the_unimplemented_continuous_adapter() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    deploy = (ibkr / "deploy.sh").read_text()
+    wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
+    readme = (ibkr / "README.md").read_text()
+
+    assert "no Gateway, ingest or operator-API service was started" in deploy
+    assert 'docker pull "$image"' in deploy
+    assert "QTRAD_IBKR_CHECKPOINT_ROOT" in wrapper
+    assert '--volume "$checkpoint_root:$checkpoint_root"' in wrapper
+    assert "continuous IBKR adapter and its operator API are not implemented" in readme
+
+
+def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    host = (ibkr / "verify-host.sh").read_text()
+    ingest = (ibkr / "qtrad-ibkr-ingest.service.example").read_text()
+    gateway = (ibkr / "qtrad-ibgateway.service.example").read_text()
+    postgres = (ibkr / "qtrad-ibkr-postgres.service.example").read_text()
+
+    assert "QTRAD_IBKR_API_PACKAGE_FINGERPRINT" in host
+    assert "QTRAD_IBKR_GATEWAY_MANIFEST" in host
+    assert "org.qtrad.ibkr.api.source-manifest.sha256" in host
+    assert "org.qtrad.ibkr.gateway.archive.sha256" in host
+    assert "checkpoint_root" in host
+    assert "StartLimitIntervalSec=1h" in ingest
+    assert "StartLimitBurst=3" in ingest
+    assert "Requires=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service" in ingest
+    assert "RequiresMountsFor=/srv/qtrad/postgres" in postgres
+    assert "After=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service" in ingest
+    assert "StartLimitIntervalSec=1h" in gateway
+
+
+def test_ibkr_build_and_health_controls_are_durable() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    build = (ibkr / "build-image.sh").read_text()
+    health = (ibkr / "healthcheck.sh").read_text()
+
+    assert "QTRAD_IBKR_PUSH=1" in build
+    assert "IBKR_API_SOURCE_MANIFEST_SHA256" in build
+    assert "QTRAD_IBKR_API_PACKAGE_FINGERPRINT" in build
+    assert "docker buildx imagetools inspect" in build
+    assert '--tag "$repository:$build_tag"' in build
+    assert "QTRAD_IBKR_RESTART_HISTORY_PATH" in health
+    assert "restart_count" in health
+    assert "if ((restart_count >= max_gateway_restarts)); then" in health
+    assert "SOURCE_DATE_EPOCH" in build
+    dockerfile = (REPOSITORY_ROOT / "Dockerfile.ibkr").read_text()
+    assert "_verify_official_api_distribution" in dockerfile
+    assert "org.qtrad.ibkr.api.source-manifest.sha256" in dockerfile
+
+
+def test_ibkr_gateway_identity_is_required_by_runtime_templates() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    gateway_env = (ibkr / "ibkr-gateway.env.example").read_text()
+    gateway_wrapper = (ibkr / "qtrad-ibkr-gateway-wrapper.example").read_text()
+    manifest = (ibkr / "ibkr-gateway.identity.example.json").read_text()
+    ci = (REPOSITORY_ROOT / ".github/workflows/ci.yml").read_text()
+
+    assert "QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256" in gateway_env
+    assert "QTRAD_IBKR_GATEWAY_MANIFEST" in gateway_env
+    assert "gateway_archive_sha256" in manifest
+    assert "jq -e" in gateway_wrapper
+    assert "ops/ibkr/*.sh" in ci
+
+
+def test_ibkr_source_manifest_fingerprint_matches_runtime_contract(tmp_path: Path) -> None:
+    source_root = tmp_path / "pythonclient"
+    package_root = source_root / "ibapi"
+    package_root.mkdir(parents=True)
+    (package_root / "__init__.py").write_bytes(b"init")
+    (package_root / "client.py").write_bytes(b"client")
+    (package_root / "ignored.pyc").write_bytes(b"generated")
+    (package_root / "__pycache__").mkdir()
+    (package_root / "__pycache__" / "client.cpython-313.pyc").write_bytes(b"cache")
+    (source_root / "ibapi-10.49.dist-info").mkdir()
+    (source_root / "ibapi-10.49.dist-info" / "RECORD").write_bytes(b"record")
+
+    result = subprocess.run(
+        [
+            "bash",
+            str(REPOSITORY_ROOT / "ops/ibkr/source-manifest-fingerprint.sh"),
+            str(source_root),
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    expected = hashlib.sha256()
+    for relative, content in (("ibapi/__init__.py", b"init"), ("ibapi/client.py", b"client")):
+        expected.update(relative.encode())
+        expected.update(content)
+    assert result.stdout.strip() == expected.hexdigest()
+
+
 def test_operator_console_displays_live_heartbeat_evidence() -> None:
     overview = (REPOSITORY_ROOT / "src/qtrad/api/templates/_overview.html").read_text()
 

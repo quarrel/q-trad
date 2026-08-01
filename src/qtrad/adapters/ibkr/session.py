@@ -63,26 +63,12 @@ _FARM_UP: Final[Mapping[IbkrSystemCode, str]] = {
     IbkrSystemCode.HISTORICAL_FARM_CONNECTED: "historical",
     IbkrSystemCode.SECURITY_DEFINITION_FARM_CONNECTED: "security_definition",
 }
-_FARM_RECOVERY: Final[Mapping[IbkrSystemCode, IbkrSystemCode]] = {
-    IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED: IbkrSystemCode.MARKET_DATA_FARM_CONNECTED,
-    IbkrSystemCode.HISTORICAL_FARM_DISCONNECTED: IbkrSystemCode.HISTORICAL_FARM_CONNECTED,
-    IbkrSystemCode.SECURITY_DEFINITION_FARM_DISCONNECTED: (
-        IbkrSystemCode.SECURITY_DEFINITION_FARM_CONNECTED
-    ),
-}
 _FARM_INACTIVE: Final[frozenset[IbkrSystemCode]] = frozenset(
     {
         IbkrSystemCode.MARKET_DATA_FARM_INACTIVE,
         IbkrSystemCode.HISTORICAL_FARM_INACTIVE,
     }
 )
-
-
-def farm_recovery_code(code: int) -> int | None:
-    try:
-        return int(_FARM_RECOVERY[IbkrSystemCode(code)])
-    except (KeyError, ValueError):
-        return None
 
 
 @dataclass(frozen=True, slots=True)
@@ -196,6 +182,8 @@ class IbkrSession:
         self._server_time_seen = False
         self._resubscribe_pending = False
         self._active.clear()
+        for farm in self._farms:
+            self._farms[farm] = "UNKNOWN"
         self._reason_codes = {"CONNECTING"}
         return self._generation
 
@@ -223,18 +211,50 @@ class IbkrSession:
         if not self._handshake_seen:
             raise RuntimeError("IBKR server time cannot precede the handshake")
         self._server_time_seen = True
-        self._state = IbkrSessionState.SUBSCRIBING if self._desired else IbkrSessionState.CONNECTED
-        self._upstream_lost_at = None
         self._failed_reconnect_cycles = 0
-        self._reason_codes.clear()
+        self._upstream_lost_at = None
+        self._reason_codes.discard("CONNECTING")
+        self._reason_codes.discard("IBKR_UPSTREAM_DISCONNECTED")
+        self._refresh_state()
+
+    def _mark_degraded(self) -> None:
+        if self._state not in {
+            IbkrSessionState.CONNECTING,
+            IbkrSessionState.WAITING_HANDSHAKE,
+        }:
+            self._state = IbkrSessionState.DEGRADED
+
+    def _refresh_state(self) -> None:
+        if self._state in {
+            IbkrSessionState.STOPPED,
+            IbkrSessionState.CONNECTING,
+            IbkrSessionState.WAITING_HANDSHAKE,
+            IbkrSessionState.BACKOFF,
+            IbkrSessionState.FAILED_OPERATOR,
+        }:
+            return
+        if not self._handshake_seen or not self._server_time_seen:
+            return
+        if (
+            self._upstream_lost_at is not None
+            or any(value == "DISCONNECTED" for value in self._farms.values())
+            or "IBKR_TWS_SERVER_DISCONNECTED" in self._reason_codes
+            or any(reason.startswith("UNKNOWN_GLOBAL_CODE_") for reason in self._reason_codes)
+        ):
+            self._state = IbkrSessionState.DEGRADED
+        elif self._active == set(self._desired):
+            self._state = IbkrSessionState.CONNECTED
+        elif self._desired:
+            self._state = IbkrSessionState.SUBSCRIBING
+        else:
+            self._state = IbkrSessionState.CONNECTED
 
     def register_subscriptions(self, subscriptions: tuple[IbkrSubscription, ...]) -> None:
         if len({item.listing_id for item in subscriptions}) != len(subscriptions):
             raise ValueError("IBKR subscription listing IDs must be unique")
         self._desired = {item.listing_id: item for item in subscriptions}
         self._active.intersection_update(self._desired)
-        if self._state == IbkrSessionState.CONNECTED and self._desired:
-            self._state = IbkrSessionState.SUBSCRIBING
+        self._refresh_state()
 
     def mark_subscription_active(self, listing_id: str, *, generation: int) -> None:
         if not self.accept_callback(generation):
@@ -242,8 +262,7 @@ class IbkrSession:
         if listing_id not in self._desired:
             raise KeyError(f"unknown IBKR subscription {listing_id}")
         self._active.add(listing_id)
-        if self._active == set(self._desired) and self._state == IbkrSessionState.SUBSCRIBING:
-            self._state = IbkrSessionState.CONNECTED
+        self._refresh_state()
 
     def accept_callback(self, generation: int) -> bool:
         """Accept only callbacks from the current socket generation."""
@@ -272,9 +291,17 @@ class IbkrSession:
         code: int,
         *,
         request_id: int = -1,
+        generation: int | None = None,
         now: float | None = None,
     ) -> IbkrRecoveryDecision:
         observed_at = self._clock() if now is None else now
+        if generation is not None and generation != self._generation:
+            self._reason_codes.add("SUPERSEDED_GENERATION")
+            return IbkrRecoveryDecision(
+                IbkrRecoveryAction.NONE,
+                "SUPERSEDED_GENERATION",
+                code=code,
+            )
         if request_id >= 0:
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
@@ -284,13 +311,13 @@ class IbkrSession:
         try:
             system_code = IbkrSystemCode(code)
         except ValueError:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             reason = f"UNKNOWN_GLOBAL_CODE_{code}"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)
 
         if system_code == IbkrSystemCode.UPSTREAM_DISCONNECTED:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             self._resubscribe_pending = False
             if self._upstream_lost_at is None:
                 self._upstream_lost_at = observed_at
@@ -308,12 +335,15 @@ class IbkrSession:
                     code=code,
                 )
             self._recovery_epoch += 1
+            self._upstream_lost_at = None
+            self._reason_codes.discard("IBKR_UPSTREAM_DISCONNECTED")
             self._state = (
                 IbkrSessionState.SUBSCRIBING if self._desired else IbkrSessionState.CONNECTED
             )
             self._active.clear()
             self._resubscribe_pending = True
             self._reason_codes.add("IBKR_UPSTREAM_RESTORED_DATA_LOST")
+            self._refresh_state()
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
                 "IBKR_UPSTREAM_RESTORED_DATA_LOST",
@@ -347,7 +377,7 @@ class IbkrSession:
         if system_code in _FARM_DOWN:
             farm = _FARM_DOWN[system_code]
             self._farms[farm] = "DISCONNECTED"
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             reason = f"{farm.upper()}_FARM_DISCONNECTED"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)
@@ -355,10 +385,7 @@ class IbkrSession:
             farm = _FARM_UP[system_code]
             self._farms[farm] = "CONNECTED"
             self._reason_codes.discard(f"{farm.upper()}_FARM_DISCONNECTED")
-            if not any(value == "DISCONNECTED" for value in self._farms.values()):
-                self._state = (
-                    IbkrSessionState.SUBSCRIBING if self._desired else IbkrSessionState.CONNECTED
-                )
+            self._refresh_state()
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
                 f"{farm.upper()}_FARM_CONNECTED",
@@ -384,7 +411,7 @@ class IbkrSession:
                 code=code,
             )
         if system_code == IbkrSystemCode.TWS_SERVER_DISCONNECTED:
-            self._state = IbkrSessionState.DEGRADED
+            self._mark_degraded()
             self._reason_codes.add("IBKR_TWS_SERVER_DISCONNECTED")
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,

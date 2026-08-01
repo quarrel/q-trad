@@ -1948,8 +1948,12 @@ async def _review_instruments(
                 separators=(",", ":"),
             ).encode("utf-8")
         ).hexdigest()
+        if not settings.ibkr_checkpoint_root.is_absolute():
+            raise ValueError("IBKR capability checkpoints require an absolute persistent path")
+        settings.ibkr_checkpoint_root.mkdir(parents=True, exist_ok=True)
+        checkpoint_path = settings.ibkr_checkpoint_root / f"{probe_spec.configuration_hash}.json"
         checkpoint = JsonIbkrCapabilityCheckpoint(
-            settings.ibkr_checkpoint_root / f"{probe_spec.configuration_hash}.json",
+            checkpoint_path,
             IbkrCapabilityCheckpointIdentity(
                 catalogue_hash=candidates.configuration_hash,
                 probe_spec_hash=probe_spec.configuration_hash,

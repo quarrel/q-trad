@@ -57,7 +57,7 @@ jobs:
         run: uv run pyright
 
       - name: Check shell scripts
-        run: shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh
+        run: shellcheck ops/capture/*.sh ops/dev/*.sh ops/research/*.sh ops/ibkr/*.sh
 
       - name: Verify backup restore in real PostgreSQL containers
         run: ops/dev/restore-verification-integration.sh

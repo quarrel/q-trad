@@ -39,7 +39,7 @@ class Settings(BaseSettings):
     ibkr_gateway_restart_after_seconds: float = 300.0
     ibkr_gateway_restart_cooldown_seconds: float = 900.0
     ibkr_gateway_restart_limit_per_hour: int = 3
-    ibkr_checkpoint_root: Path = Path("data/ibkr/checkpoints")
+    ibkr_checkpoint_root: Path = Path("/srv/qtrad/ibkr/checkpoints")
 
     @model_validator(mode="after")
     def validate_ibkr_stack(self) -> "Settings":
@@ -59,6 +59,8 @@ class Settings(BaseSettings):
             self.ibkr_gateway_restart_limit_per_hour <= 0
         ):
             raise ValueError("IBKR session timeouts and restart limit must be positive")
+        if not self.ibkr_checkpoint_root.is_absolute():
+            raise ValueError("IBKR checkpoint root must be an absolute persistent path")
         return self
 
     @field_validator("database_url")

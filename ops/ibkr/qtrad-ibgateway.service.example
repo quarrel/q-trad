@@ -2,6 +2,8 @@
 Description=q-trad IB Gateway and IBC
 After=network-online.target
 Wants=network-online.target
+StartLimitIntervalSec=1h
+StartLimitBurst=3
 
 [Service]
 Type=simple
@@ -11,8 +13,6 @@ EnvironmentFile=/etc/qtrad/ibkr-gateway.env
 ExecStart=/usr/local/sbin/qtrad-ibgateway
 Restart=always
 RestartSec=15
-StartLimitIntervalSec=1h
-StartLimitBurst=3
 KillMode=control-group
 TimeoutStopSec=90
 # The wrapper owns the licensed Gateway/IBC archives and daily AutoRestartTime.
