@@ -125,7 +125,7 @@ class R2FeatureDataset:
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_FEATURE_DATASET_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not self.feature_set_name or not self.feature_set_id:
@@ -380,7 +380,7 @@ def feature_set_id(
 ) -> str:
     return _hash_json(
         {
-            "contract": "qtrad-r2-feature-set-v1",
+            "contract": "qtrad-r2-feature-set-v2",
             "experiment_configuration_id": experiment_id,
             "name": name,
             "raw_feature_schema_id": feature_schema_id(schema),
@@ -413,7 +413,7 @@ class FeatureDatasetSemanticHasher:
         self._hash = sha256()
         identity = {
             "contract": R2_FEATURE_DATASET_CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "feature_schema": [item.as_json() for item in feature_schema],
             "feature_set_name": feature_set_name,
             "feature_set_id": feature_set_identity,

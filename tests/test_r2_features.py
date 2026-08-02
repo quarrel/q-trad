@@ -318,7 +318,7 @@ def test_r2b_feature_json_and_source_bound_ids_are_deterministic() -> None:
         == "b77d8c36f5f98f79cd605787fede860335f75e7942992d75f32d7d684465e012"
     )
     set_identity = feature_set_id("c" * 64, "fixture", schema)
-    assert set_identity == "52809991461907f48f35ec9722924a1c11f58674a04f084e5553ccb9fd62f3ee"
+    assert set_identity == "e77eb0a85bb37ce0a3ed44afc642e8c9b48ae4f6919ce7be7d056bab214cecfb"
     dataset = R2FeatureDataset.create(
         (),
         feature_schema=schema,

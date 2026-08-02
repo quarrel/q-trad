@@ -15,8 +15,8 @@ from qtrad.domain.r2_features import FeatureDefinition
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v1"
-R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
+R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v2"
+R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v2"
 
 LOCAL_INSTRUMENT_IDENTITY_POLICY = "NO_INSTRUMENT_IDENTITY_V1"
 POOLED_INSTRUMENT_IDENTITY_POLICY = "FULL_ONE_HOT_V1"
@@ -58,7 +58,7 @@ class R2PreprocessingSchema:
     preprocessing_schema_id: str
 
     CONTRACT: ClassVar[str] = R2_PREPROCESSING_SCHEMA_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not self.features or len({item.name for item in self.features}) != len(self.features):
@@ -112,7 +112,7 @@ def validate_preprocessing_schema_correspondence(
 def preprocessing_schema_id(features: Sequence[PreprocessingFeatureDefinition]) -> str:
     payload = {
         "contract": R2_PREPROCESSING_SCHEMA_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "features": [item.as_json() for item in features],
     }
     return _semantic_id(payload)
@@ -418,7 +418,7 @@ class R2PreprocessingSelection:
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_PREPROCESSING_SELECTION_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         for value, field in (
@@ -581,7 +581,7 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         raise TypeError("preprocessing selection must contain an R2PreprocessingSchema")
     return {
         "contract": R2_PREPROCESSING_SELECTION_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "r2_feature_dataset_id": str(values["r2_feature_dataset_id"]),
         "target_dataset_id": str(values["target_dataset_id"]),
         "fold_dataset_id": str(values["fold_dataset_id"]),

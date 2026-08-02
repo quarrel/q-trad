@@ -13,8 +13,8 @@ from qtrad.domain.foundation import InstrumentRole
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.time import require_utc
 
-R2_EXPERIMENT_CONTRACT = "qtrad-r2-experiment-config-v1"
-R2_READINESS_CONTRACT = "qtrad-r2-readiness-v1"
+R2_EXPERIMENT_CONTRACT = "qtrad-r2-experiment-config-v2"
+R2_READINESS_CONTRACT = "qtrad-r2-readiness-v2"
 _ALLOWED_HORIZONS = frozenset(timedelta(minutes=value) for value in (5, 15, 30, 60))
 
 
@@ -170,7 +170,7 @@ class R2ExperimentConfig:
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_EXPERIMENT_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not self.name or self.schema_version != self.SCHEMA_VERSION:
@@ -418,7 +418,7 @@ class R2ReadinessReport:
     def as_json(self) -> dict[str, JsonValue]:
         return {
             "contract": self.CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "experiment_configuration_id": self.experiment_configuration_id,
             "r1_bundle_id": self.r1_bundle_id,
             "software_contract_ready": self.software_contract_ready.value,

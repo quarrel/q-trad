@@ -138,7 +138,7 @@ def decode_r2_preprocessing_selection(
     obj = _exact_object(raw, _TOP_LEVEL_KEYS, "preprocessing selection")
     if _text(obj["contract"], "contract") != R2_PREPROCESSING_SELECTION_CONTRACT:
         raise ValueError("unsupported preprocessing-selection contract")
-    if _integer(obj["schema_version"], "schema_version") != 1:
+    if _integer(obj["schema_version"], "schema_version") != 2:
         raise ValueError("unsupported preprocessing-selection schema version")
     selection = _selection(obj["selection"])
     preprocessing_schema = _preprocessing_schema(obj["preprocessing_schema"])
@@ -371,7 +371,7 @@ def _preprocessing_schema(value: object) -> R2PreprocessingSchema:
     obj = _exact_object(value, _PREPROCESSING_SCHEMA_KEYS, "preprocessing_schema")
     if _text(obj["contract"], "preprocessing_schema.contract") != R2_PREPROCESSING_SCHEMA_CONTRACT:
         raise ValueError("unsupported preprocessing-schema contract")
-    if _integer(obj["schema_version"], "preprocessing_schema.schema_version") != 1:
+    if _integer(obj["schema_version"], "preprocessing_schema.schema_version") != 2:
         raise ValueError("unsupported preprocessing-schema version")
     features = tuple(
         _preprocessing_feature(item)

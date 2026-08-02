@@ -64,7 +64,7 @@ def experiment() -> R2ExperimentConfig:
     )
     return R2ExperimentConfig(
         name="r2-a-fixture",
-        schema_version=1,
+        schema_version=2,
         r1_bundle_id=SHA,
         observation_dataset_id="b" * 64,
         foundation_configuration_id="c" * 64,

@@ -17,6 +17,7 @@ from qtrad.domain.r2_bundles import (
     R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import R2_SELECTION_CONTRACT
+from qtrad.domain.r2_models import R2_PREPROCESSING_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
 R2_EVALUATION_REGISTER_CONTRACT = "qtrad-r2-evaluation-register-v2"
@@ -108,6 +109,51 @@ def write_r2_oof_bundle(
     return path
 
 
+def _verify_replay_inputs(
+    root: Path, descriptor: Mapping[str, object], allowed_paths: set[str]
+) -> None:
+    raw = descriptor.get("replay_inputs")
+    if not isinstance(raw, dict) or raw.get("root") != ".":
+        raise ValueError("representative replay inputs are missing or malformed")
+    children = raw.get("children")
+    expected = {"foundation", "experiment", "L0", "L1", "P0", "P1"}
+    if not isinstance(children, dict) or set(children) != expected:
+        raise ValueError("representative replay inputs have incomplete children")
+    root_resolved = root.resolve()
+    for name, value in children.items():
+        if not isinstance(name, str) or not isinstance(value, dict):
+            raise ValueError("representative replay input child is malformed")
+        raw_path = value.get("path")
+        raw_root = value.get("root")
+        expected_digest = value.get("sha256")
+        if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
+            raise ValueError("representative replay input identity is incomplete")
+        replay_path = Path(raw_path)
+        replay_root = Path(raw_root)
+        if (
+            replay_path.is_absolute()
+            or replay_root.is_absolute()
+            or ".." in replay_path.parts
+            or ".." in replay_root.parts
+        ):
+            raise ValueError("representative replay input path is unsafe")
+        candidate = (root / replay_path).resolve()
+        child_root = (root / replay_root).resolve()
+        if not candidate.is_relative_to(root_resolved) or not child_root.is_relative_to(
+            root_resolved
+        ):
+            raise ValueError("representative replay input escapes the bundle root")
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"representative replay input is unavailable: {name}")
+        if sha256(candidate.read_bytes()).hexdigest() != expected_digest:
+            raise ValueError(f"representative replay input changed: {name}")
+        for nested in child_root.rglob("*"):
+            if nested.is_symlink():
+                raise ValueError("representative replay input root contains a symlink")
+            if nested.is_file():
+                allowed_paths.add(nested.relative_to(root).as_posix())
+
+
 def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     payload = _load_object(path)
     if set(payload) != {
@@ -183,6 +229,12 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 or child.get("holdout_excluded") is not True
             ):
                 raise ValueError("R2 OOF descriptor lineage differs from its bundle")
+            _verify_replay_inputs(path.parent, child, allowed_paths)
+        if ref.path.startswith("preprocessing/") and (
+            child.get("contract") != R2_PREPROCESSING_SELECTION_CONTRACT
+            or child.get("schema_version") != 2
+        ):
+            raise ValueError("R2 preprocessing-selection child is not v2")
         if child.get("contract") == R2ForecastManifest.CONTRACT:
             forecast_manifest = R2ForecastManifest.from_json(child)
             _verify_reference(path.parent, forecast_manifest.forecast_child)

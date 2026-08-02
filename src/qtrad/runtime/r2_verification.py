@@ -16,7 +16,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
 from typing import Any, cast
@@ -105,11 +105,80 @@ from qtrad.runtime.r2_bundles import (
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
+_IMAGE_IDENTITY_CONTRACT = "qtrad-runtime-image-identity-v1"
 _REQUIRED_FEATURE_SETS = frozenset({"L0", "L1", "P0", "P1"})
+_CAPTURE_V4_UNIVERSE = (
+    "fx:aud-usd",
+    "fx:eur-usd",
+    "fx:usd-jpy",
+    "fx:gbp-usd",
+    "fx:usd-chf",
+    "fx:usd-cad",
+    "fx:nzd-usd",
+    "fx:eur-jpy",
+    "index:australia-200",
+    "index:us-500",
+    "index:ftse-100",
+    "index:us-tech-100",
+    "index:wall-street",
+    "index:germany-40",
+    "index:japan-225",
+    "index:eu-stocks-50",
+    "commodity:spot-gold",
+    "commodity:spot-silver",
+    "commodity:us-crude",
+    "index:hong-kong-hs50",
+    "index:china-a50",
+    "index:taiwan",
+    "index:volatility",
+)
+_CAPTURE_V4_TARGETS = (
+    "fx:aud-usd",
+    "fx:eur-usd",
+    "index:australia-200",
+    "index:us-500",
+    "commodity:spot-gold",
+    "commodity:us-crude",
+)
+
+
+def _image_identity_manifest() -> Mapping[str, object]:
+    test_mode = os.environ.get("QTRAD_TEST_MODE") == "1"
+    path = (
+        Path(os.environ["QTRAD_IMAGE_IDENTITY_PATH"])
+        if test_mode and os.environ.get("QTRAD_IMAGE_IDENTITY_PATH")
+        else Path("/run/qtrad/image-identity.json")
+    )
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeError("the deployment image identity manifest is unavailable")
+    if not test_mode and (path.stat().st_uid != 0 or path.stat().st_mode & 0o022):
+        raise RuntimeError("the deployment image identity manifest is not trusted")
+    try:
+        payload = json.loads(path.read_bytes())
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("the deployment image identity manifest is invalid") from exc
+    if not isinstance(payload, dict) or set(payload) != {
+        "contract",
+        "schema_version",
+        "application_commit",
+        "image_digest",
+        "manifest_sha256",
+    }:
+        raise RuntimeError("the deployment image identity manifest has unexpected fields")
+    if payload["contract"] != _IMAGE_IDENTITY_CONTRACT or payload["schema_version"] != 1:
+        raise RuntimeError("the deployment image identity manifest contract is unsupported")
+    manifest_hash = payload["manifest_sha256"]
+    unsigned = {key: value for key, value in payload.items() if key != "manifest_sha256"}
+    if (
+        not isinstance(manifest_hash, str)
+        or sha256(canonical_bytes(unsigned)).hexdigest() != manifest_hash
+    ):
+        raise RuntimeError("the deployment image identity manifest digest is invalid")
+    return cast(Mapping[str, object], payload)
 
 
 def runtime_identities() -> dict[str, str]:
-    """Derive identities from the running source tree and installed libraries."""
+    """Derive identities from the running source tree and authenticated deployment manifest."""
     repository = Path(__file__).resolve().parents[2]
     try:
         result = subprocess.run(
@@ -131,18 +200,17 @@ def runtime_identities() -> dict[str, str]:
     commit = result.stdout.strip()
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         raise RuntimeError("git did not return a verified commit identity")
-    declared_commit = os.environ.get("QTRAD_APPLICATION_COMMIT")
-    if declared_commit is not None and declared_commit != commit:
-        raise RuntimeError("declared application commit differs from the running source")
-    image_digest = os.environ.get("QTRAD_IMAGE_DIGEST")
-    if image_digest is None:
-        raise RuntimeError("QTRAD_IMAGE_DIGEST must identify the immutable application image")
+    manifest = _image_identity_manifest()
+    if manifest["application_commit"] != commit:
+        raise RuntimeError("image identity manifest commit differs from the running source")
+    image_digest = manifest["image_digest"]
     if (
-        not image_digest.startswith("sha256:")
+        not isinstance(image_digest, str)
+        or not image_digest.startswith("sha256:")
         or len(image_digest) != len("sha256:") + 64
         or any(character not in "0123456789abcdef" for character in image_digest[7:])
     ):
-        raise RuntimeError("QTRAD_IMAGE_DIGEST must be a verified sha256 digest")
+        raise RuntimeError("image identity manifest does not contain a verified sha256 digest")
     application = f"qtrad-{__version__}+git:{commit}+image:{image_digest}"
     return {
         "application_identity": application,
@@ -244,25 +312,179 @@ def _descriptor_payload(
     return {**semantic, "descriptor_id": descriptor_id}
 
 
-def _replay_input_payload(
-    *,
-    research_root: Path,
-    paths: Mapping[str, Path],
+def _validate_representative_capture_v4(
+    verified: R1FoundationBindings, experiment: R2ExperimentConfig
+) -> None:
+    """Admit only the fixed, non-qualifying capture-v4 integration specification."""
+    if experiment.market_data_source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
+        raise ValueError("representative run must use IG_NATIVE_CAPTURE")
+    if tuple(verified.bundle.ordered_instruments) != _CAPTURE_V4_UNIVERSE:
+        raise ValueError("representative foundation is not the ordered capture-v4 universe")
+    if experiment.ordered_instruments != _CAPTURE_V4_UNIVERSE:
+        raise ValueError("representative experiment is not the ordered capture-v4 universe")
+    expected_roles = {
+        instrument: InstrumentRole.CONTEXT
+        if instrument == "index:volatility"
+        else InstrumentRole.TARGET
+        for instrument in _CAPTURE_V4_UNIVERSE
+    }
+    if dict(experiment.instrument_roles) != expected_roles:
+        raise ValueError("representative experiment has the wrong capture-v4 instrument roles")
+    expected_eligibility = set(_CAPTURE_V4_UNIVERSE) - {"index:volatility"}
+    if set(experiment.target_instrument_eligibility) != expected_eligibility:
+        raise ValueError("representative experiment eligibility does not cover capture-v4 targets")
+    for instrument, decision in experiment.target_instrument_eligibility.items():
+        expected = (
+            FeatureEligibility.ELIGIBLE
+            if instrument in _CAPTURE_V4_TARGETS
+            else FeatureEligibility.NOT_ELIGIBLE
+        )
+        if decision.state is not expected:
+            raise ValueError(
+                "representative target eligibility differs from the fixed specification"
+            )
+    if (
+        experiment.target_instruments != _CAPTURE_V4_TARGETS
+        or experiment.confirmatory_target_instruments != _CAPTURE_V4_TARGETS
+    ):
+        raise ValueError("representative experiment has the wrong six eligible targets")
+    expected_groups = {
+        frozenset({"fx:aud-usd", "fx:eur-usd"}),
+        frozenset({"index:australia-200", "index:us-500"}),
+        frozenset({"commodity:spot-gold", "commodity:us-crude"}),
+    }
+    actual_groups = {
+        frozenset(
+            instrument
+            for instrument in _CAPTURE_V4_TARGETS
+            if experiment.market_groups[instrument] == group
+        )
+        for group in set(experiment.market_groups.values())
+    }
+    if actual_groups != expected_groups:
+        raise ValueError("representative market groups do not match the fixed pairs")
+    if experiment.horizons != (timedelta(minutes=15),):
+        raise ValueError("representative experiment must use only the 15-minute horizon")
+    expected_features = {
+        "L0": (FeatureFamily.LOCAL_RETURNS, FeatureFamily.TIME_AVAILABILITY),
+        "L1": (
+            FeatureFamily.LOCAL_RETURNS,
+            FeatureFamily.TIME_AVAILABILITY,
+            FeatureFamily.LOCAL_VOLATILITY_RANGE,
+        ),
+        "P0": (
+            FeatureFamily.LOCAL_RETURNS,
+            FeatureFamily.TIME_AVAILABILITY,
+            FeatureFamily.LOCAL_VOLATILITY_RANGE,
+        ),
+        "P1": (
+            FeatureFamily.LOCAL_RETURNS,
+            FeatureFamily.TIME_AVAILABILITY,
+            FeatureFamily.LOCAL_VOLATILITY_RANGE,
+            FeatureFamily.POOLED_CROSS_ASSET,
+        ),
+    }
+    if {item.name: item.families for item in experiment.feature_sets} != expected_features:
+        raise ValueError("representative feature ladder differs from the fixed specification")
+    for family in (FeatureFamily.SPREAD, FeatureFamily.QUOTE_IMBALANCE):
+        if experiment.feature_eligibility[family].state is not FeatureEligibility.NOT_ELIGIBLE:
+            raise ValueError("spread and quote imbalance must remain ineligible")
+    if experiment.alpha_grid != (0.01, 0.1, 1.0, 10.0):
+        raise ValueError("representative alpha grid differs from the fixed specification")
+    if (
+        experiment.ridge_solver != "lsqr"
+        or experiment.ridge_tolerance != 1e-8
+        or experiment.ridge_max_iterations != 10_000
+        or experiment.pooled_weighting_policy != "EQUAL_INSTRUMENT_TOTAL_WEIGHT_MEAN_ONE"
+        or experiment.minimum_training_rows != 100
+        or experiment.minimum_inner_validation_rows != 20
+        or experiment.minimum_outer_validation_rows != 20
+    ):
+        raise ValueError("representative numerical policy differs from the fixed specification")
+    start = verified.bundle.range_start
+    end = verified.bundle.range_end
+    total_minutes = int((end - start).total_seconds() // 60)
+    if start.second or start.microsecond or end.second or end.microsecond or total_minutes % 10:
+        raise ValueError("representative capture interval must align to completed UTC minutes")
+
+    def boundary(tenths: int) -> datetime:
+        return start + timedelta(minutes=total_minutes * tenths // 10)
+
+    if experiment.holdout_range != (boundary(8), end):
+        raise ValueError("representative integration holdout does not use the final 20 percent")
+    folds = verified.folds.folds
+    if len(folds) != 3:
+        raise ValueError("representative integration requires exactly three expanding folds")
+    for index, fold in enumerate(folds):
+        expected_start = boundary(5 + index)
+        expected_end = boundary(6 + index)
+        if (
+            fold.training_start != start
+            or fold.training_cutoff != expected_start
+            or fold.validation_start != expected_start
+            or fold.validation_end != expected_end
+            or not fold.holdout_excluded
+        ):
+            raise ValueError("representative fold boundaries differ from the fixed 50/30/20 rule")
+
+
+def _copy_replay_tree(source: Path, destination: Path) -> None:
+    if source.is_symlink() or not source.is_dir():
+        raise ValueError("replay research root must be a regular non-symlink directory")
+    destination.mkdir(parents=True, exist_ok=False)
+    for candidate in sorted(source.rglob("*")):
+        relative = candidate.relative_to(source)
+        target = destination / relative
+        if candidate.is_symlink():
+            raise ValueError(f"replay research input contains a symlink: {relative}")
+        if candidate.is_dir():
+            target.mkdir(parents=True, exist_ok=False)
+            continue
+        if not candidate.is_file():
+            raise ValueError(f"replay research input is not a regular file: {relative}")
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(candidate.read_bytes())
+
+
+def _stage_replay_inputs(
+    *, output: Path, research_root: Path, paths: Mapping[str, Path]
 ) -> dict[str, object]:
     expected = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
     if set(paths) != expected:
         raise ValueError(
             "representative replay inputs must include foundation, experiment and L0/L1/P0/P1"
         )
+    source_root = research_root.resolve()
+    output_root = output.resolve()
+    if output_root.is_relative_to(source_root):
+        raise ValueError("replay output must not be inside its source root")
+    replay_root = output / "replay-inputs"
+    replay_root.mkdir(parents=True, exist_ok=False)
+    staged_research = replay_root / "research"
+    _copy_replay_tree(source_root, staged_research)
     children: dict[str, object] = {}
     for name, path in sorted(paths.items()):
         if path.is_symlink() or not path.is_file():
             raise ValueError(f"replay input must be a regular non-symlink file: {name}")
+        resolved = path.resolve()
+        try:
+            relative = resolved.relative_to(source_root)
+        except ValueError as exc:
+            if name != "experiment":
+                raise ValueError(f"replay input {name} is outside the research root") from exc
+            destination = replay_root / "experiment.json"
+            destination.write_bytes(resolved.read_bytes())
+            root_relative = PurePosixPath("replay-inputs")
+            path_relative = PurePosixPath("replay-inputs") / destination.name
+        else:
+            root_relative = PurePosixPath("replay-inputs/research")
+            path_relative = root_relative / PurePosixPath(relative.as_posix())
         children[name] = {
-            "path": str(path.resolve()),
-            "sha256": sha256(path.read_bytes()).hexdigest(),
+            "path": path_relative.as_posix(),
+            "root": root_relative.as_posix(),
+            "sha256": sha256(resolved.read_bytes()).hexdigest(),
         }
-    return {"research_root": str(research_root.resolve()), "children": children}
+    return {"root": ".", "children": children}
 
 
 def _descriptor_reference(
@@ -482,7 +704,7 @@ def _synthetic_pipeline_inputs() -> tuple[
     )
     experiment = R2ExperimentConfig(
         name="r2-software-verification-synthetic",
-        schema_version=1,
+        schema_version=2,
         r1_bundle_id=r1_id,
         observation_dataset_id=observation_id,
         foundation_configuration_id=foundation_id,
@@ -1069,7 +1291,7 @@ def build_oof_bundle(
     if replay_inputs is not None:
         descriptor["replay_inputs"] = cast(
             dict[str, JsonValue],
-            _replay_input_payload(research_root=research_root, paths=replay_inputs),
+            _stage_replay_inputs(output=output, research_root=research_root, paths=replay_inputs),
         )
     descriptor["descriptor_id"] = sha256(
         canonical_bytes({key: value for key, value in descriptor.items() if key != "descriptor_id"})
@@ -1189,7 +1411,7 @@ def selection_freeze(
     """Create a typed, holdout-free SelectionManifest from the OOF register."""
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
-    bundle = verify_r2_oof_bundle(oof_bundle_path)
+    bundle = verify_oof_bundle(oof_bundle_path)
     register = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
     descriptor = _oof_child_payload(oof_bundle_path, bundle, OOF_DESCRIPTOR_CONTRACT)
     raw_configurations = register.get("configurations")
@@ -1449,33 +1671,52 @@ async def _replay_representative_oof_async(path: Path) -> None:
     raw_inputs = descriptor.get("replay_inputs")
     if not isinstance(raw_inputs, dict):
         raise ValueError("representative OOF descriptor has no authenticated replay inputs")
-    raw_root = raw_inputs.get("research_root")
-    raw_children = raw_inputs.get("children")
-    if not isinstance(raw_root, str) or not isinstance(raw_children, dict):
+    if raw_inputs.get("root") != "." or not isinstance(raw_inputs.get("children"), dict):
         raise ValueError("representative replay inputs are malformed")
+    raw_children = cast(dict[object, object], raw_inputs["children"])
+    expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
+    if set(raw_children) != expected_names:
+        raise ValueError("representative replay inputs have incomplete children")
     paths: dict[str, Path] = {}
+    roots: dict[str, Path] = {}
+    bundle_root = path.parent.resolve()
     for name, value in raw_children.items():
         if not isinstance(name, str) or not isinstance(value, dict):
             raise ValueError("representative replay input child is malformed")
         raw_path = value.get("path")
+        raw_root = value.get("root")
         expected_digest = value.get("sha256")
-        if not isinstance(raw_path, str) or not isinstance(expected_digest, str):
+        if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
             raise ValueError("representative replay input identity is incomplete")
-        candidate = Path(raw_path)
+        relative_path = PurePosixPath(cast(str, raw_path))
+        relative_root = PurePosixPath(cast(str, raw_root))
+        if (
+            relative_path.is_absolute()
+            or relative_root.is_absolute()
+            or ".." in relative_path.parts
+            or ".." in relative_root.parts
+        ):
+            raise ValueError("representative replay input path is unsafe")
+        candidate = (bundle_root / relative_path).resolve()
+        root = (bundle_root / relative_root).resolve()
+        if not candidate.is_relative_to(bundle_root) or not root.is_relative_to(bundle_root):
+            raise ValueError("representative replay input escapes the bundle root")
         if candidate.is_symlink() or not candidate.is_file():
             raise ValueError(f"representative replay input is unavailable: {name}")
-        if sha256(candidate.read_bytes()).hexdigest() != expected_digest:
+        if sha256(candidate.read_bytes()).hexdigest() != cast(str, expected_digest):
             raise ValueError(f"representative replay input changed: {name}")
         paths[name] = candidate
-    replay = _replay_input_payload(research_root=Path(raw_root), paths=paths)
-    if replay != raw_inputs:
-        raise ValueError("representative replay input identity does not authenticate")
+        roots[name] = root
+    research_root = roots["foundation"]
+    if any(roots[name] != research_root for name in _REQUIRED_FEATURE_SETS):
+        raise ValueError("representative feature inputs do not share the foundation root")
     verified = await verify_foundation_bundle(
-        root=Path(raw_root),
+        root=research_root,
         bundle_path=paths["foundation"],
         clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
     )
     experiment = load_r2_experiment(paths["experiment"])
+    _validate_representative_capture_v4(verified, experiment)
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
@@ -1483,7 +1724,7 @@ async def _replay_representative_oof_async(path: Path) -> None:
             verified=verified,
             experiment=experiment,
             feature_manifest_paths=feature_paths,
-            research_root=Path(raw_root),
+            research_root=research_root,
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
             output=expected_root,
             run_kind="REPRESENTATIVE",
@@ -1523,9 +1764,16 @@ def _replay_synthetic_oof(path: Path) -> None:
 
 
 def verify_oof_bundle(path: Path) -> R2OofBundle:
-    """Verify an OOF envelope and replay the deterministic synthetic scenario."""
+    """Verify an OOF envelope and replay the run's authenticated computation."""
     bundle = verify_r2_oof_bundle(path)
-    _replay_synthetic_oof(path)
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    run_kind = descriptor.get("run_kind")
+    if run_kind == "SYNTHETIC":
+        _replay_synthetic_oof(path)
+    elif run_kind == "REPRESENTATIVE":
+        _replay_representative_oof(path)
+    else:
+        raise ValueError("OOF descriptor has an unsupported run kind")
     return bundle
 
 
