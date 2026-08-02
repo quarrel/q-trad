@@ -1,0 +1,962 @@
+# IBKR Historical Acquisition — Staged Implementation Plan
+
+## 1. Objective
+
+Produce the first independently verified IBKR provider-history foundation without registering or running the `R2-IBKR-HISTORICAL` experiment and without consuming its holdout.
+
+The work will:
+
+* freeze the accepted canonical-to-IBKR contract mappings;
+* prove the runtime identity used for acquisition;
+* generate an immutable historical request plan;
+* execute that plan through a restart-safe and pacing-aware state machine;
+* publish independently authenticated request and aggregate results;
+* convert verified results into provider-history observations using an explicit declared-availability policy;
+* build and replay an IBKR-specific foundation;
+* report whether the fixed six-target, three-group R2 entry gate is satisfied.
+
+The initial acquisition range remains:
+
+```text
+[2026-02-01T00:00:00Z, 2026-08-02T00:00:00Z)
+```
+
+The initial data request remains:
+
+```text
+bar size:       1 minute
+data type:      MIDPOINT
+use RTH:        false
+format date:    epoch
+keep up to date:false
+session data:   SCHEDULE
+```
+
+Historical availability is explicitly **declared rather than measured**:
+
+```text
+available_at = interval_end + PT5M
+policy       = BAR_END_PLUS_DECLARED_PROVIDER_DELAY
+```
+
+IBKR’s current API documentation confirms epoch-formatted historical bars, `SCHEDULE` delivery through `historicalSchedule`, historical-data subscription requirements and historical pacing constraints.
+
+## 2. Development principles
+
+### 2.1 One trust boundary per pull request
+
+No pull request should simultaneously introduce:
+
+* a new immutable artifact contract;
+* a new database execution state machine;
+* a new provider transport;
+* and a new downstream research interpretation.
+
+Each stage below must be independently reviewable and releasable.
+
+### 2.2 Builders and verifiers are separate paths
+
+Every immutable artifact must have:
+
+* a typed domain model;
+* deterministic semantic identity;
+* canonical serialization;
+* create-only publication;
+* an independent loader and verifier;
+* mutation tests proving that important fields and child files are authenticated.
+
+A verifier must not rely on in-memory objects supplied by the builder.
+
+### 2.3 Operational state is not research evidence
+
+PostgreSQL tables for plans, attempts, callbacks, pacing and recovery are operational state.
+
+Immutable plan, request-result and aggregate-result manifests are the research evidence generated from that state.
+
+The database may be resumed and repaired operationally. Published evidence may not be overwritten.
+
+### 2.4 No plan mutation during execution
+
+Once a historical plan is registered:
+
+* request boundaries cannot be split or extended;
+* contracts cannot be substituted;
+* request parameters cannot be changed;
+* successful request results cannot be replaced;
+* failed requests remain part of the result.
+
+A materially different acquisition strategy requires a new plan identity.
+
+Retries of the same planned request are permitted only under the plan’s fixed retry policy.
+
+### 2.5 No model-driven acquisition decisions
+
+Contracts, acquisition ranges, chunk profiles and the six confirmatory candidates must be frozen without reference to model performance.
+
+Operational canaries may determine safe request sizing. They must not inspect or optimise for predictive results.
+
+---
+
+# 3. Evidence model
+
+## 3.1 Contract selection
+
+Add create-only:
+
+```text
+qtrad-ibkr-contract-selection-v1
+```
+
+It binds:
+
+* the completed capability review and its SHA-256;
+* the source catalogue and probe specification;
+* the API identity used for the capability review;
+* the operator and freeze time;
+* exactly one decision for each canonical instrument;
+* the selected IBKR contract fingerprint;
+* mapping acceptance separately from acquisition eligibility.
+
+Decisions are:
+
+```text
+ACCEPTED_EXACT_CONTRACT
+QUARANTINED
+REJECTED
+```
+
+The initial selection contains the previously reviewed 20 unique mappings:
+
+```text
+FX
+AUD/USD              14433401
+EUR/USD              12087792
+USD/JPY              15016059
+GBP/USD              12087797
+USD/CHF              12087820
+USD/CAD               15016062
+NZD/USD              39453441
+EUR/JPY               14321016
+
+Indices
+Australia 200        111987484
+US 500               111767871
+Wall Street          111767879
+US Tech 100          111767885
+FTSE 100             111987412
+Germany 40           111987422
+Japan 225            111987469
+EU Stocks 50         111987407
+Hong Kong HS50       111987478
+
+Commodities
+Spot gold            457068913
+Spot silver          457068916
+US crude              738357708
+```
+
+### Canonical contract fingerprint
+
+Do not freeze every descriptive field returned by IBKR as an identity field.
+
+Define a typed, product-aware `IbkrContractFingerprint` containing identity-relevant fields such as:
+
+* `conId`;
+* security type;
+* currency;
+* exchange or routing destination;
+* primary exchange where applicable;
+* local symbol;
+* trading class;
+* multiplier where applicable;
+* underlying `conId` where applicable;
+* expiry or contract month where applicable.
+
+Optional fields must be represented explicitly as absent rather than omitted unpredictably.
+
+The complete original capability response remains authenticated through the capability-review digest. Reauthentication compares the canonical fingerprint.
+
+A changed descriptive field that is not part of the fingerprint may be recorded as metadata drift without invalidating the mapping. A changed identity field produces immutable:
+
+```text
+CONTRACT_IDENTITY_CHANGED
+```
+
+and blocks acquisition for that contract.
+
+## 3.2 Runtime lock
+
+Add:
+
+```text
+qtrad-ibkr-acquisition-runtime-v1
+```
+
+This records the exact acquisition environment:
+
+* official IB Gateway version and archive SHA-256;
+* official Python API version and archive SHA-256;
+* IBC version and archive SHA-256;
+* q-trad commit;
+* q-trad image digest;
+* Python and relevant library versions;
+* Gateway configuration identity;
+* paper-account environment;
+* API host, port and client-ID policy without secrets.
+
+The proposed 10.49/10.49/3.24.1 stack may be used if its archives and compatibility are independently verified. It should be frozen by this artifact rather than embedded as an unchangeable assumption in application logic.
+
+IBKR currently recommends using compatible current Stable or Latest Gateway/TWS and API releases.
+
+## 3.3 Historical plan
+
+Add:
+
+```text
+qtrad-ibkr-historical-plan-v1
+```
+
+The plan is a thin immutable collection of exact request identities.
+
+It binds:
+
+* contract-selection identity;
+* runtime-lock identity;
+* provider and paper environment;
+* acquisition range;
+* request-profile identity;
+* planner application identity;
+* all exact request definitions.
+
+Each planned request contains:
+
+* canonical instrument;
+* complete contract fingerprint;
+* request kind: `MIDPOINT_BARS` or `SCHEDULE`;
+* exact UTC half-open interval;
+* IBKR `endDateTime`;
+* duration string;
+* bar size;
+* `whatToShow`;
+* `useRTH`;
+* `formatDate`;
+* `keepUpToDate`;
+* deterministic request identity.
+
+The verifier reconstructs every request and proves:
+
+* the expected contracts are present exactly once;
+* bar intervals cover the range contiguously;
+* accepted intervals neither overlap nor leave planner-created gaps;
+* schedule coverage spans the required range;
+* all parameters match the frozen request profile.
+
+## 3.4 Request results
+
+Add:
+
+```text
+qtrad-ibkr-historical-request-result-v1
+```
+
+One result represents one planned request and its terminal disposition.
+
+It authenticates:
+
+* plan and planned-request identities;
+* all attempt identities;
+* the selected terminal attempt;
+* generation and callback sequence;
+* raw callback closure;
+* accepted normalized rows or sessions;
+* completion marker;
+* error classification;
+* retry history;
+* acquisition timing;
+* request disposition.
+
+Possible terminal dispositions include:
+
+```text
+SUCCEEDED
+CONTRACT_IDENTITY_CHANGED
+ENTITLEMENT_UNAVAILABLE
+NO_DATA_RETURNED
+INVALID_REQUEST
+RETRY_LIMIT_EXHAUSTED
+PROVIDER_REJECTED
+SESSION_EVIDENCE_UNAVAILABLE
+```
+
+A successful result is the first attempt that independently satisfies the complete request-result contract. Earlier incomplete attempts remain authenticated evidence but do not contribute rows.
+
+## 3.5 Aggregate result
+
+Add:
+
+```text
+qtrad-ibkr-historical-result-v1
+```
+
+It references:
+
+* one historical plan;
+* exactly one terminal result per planned request;
+* the runtime lock;
+* aggregate coverage and entitlement summaries;
+* no unreferenced request-result children.
+
+The aggregate verifier independently recomputes:
+
+* plan completeness;
+* request-result identity;
+* returned interval coverage;
+* active-session coverage;
+* missing and conflicting rows;
+* entitlement and failure dispositions;
+* the set of contracts eligible for provider-history construction.
+
+## 3.6 Provider-history observations
+
+Add:
+
+```text
+qtrad-provider-historical-observations-v1
+qtrad-provider-history-availability-selector-v1
+```
+
+Each observation contains:
+
+* source class `IBKR_HISTORICAL_RESEARCH`;
+* provider `ibkr`;
+* environment `paper`;
+* canonical instrument;
+* exact contract-selection identity;
+* interval start and end;
+* MIDPOINT OHLC;
+* request and result lineage;
+* acquisition attempt and completion times;
+* declared `available_at`;
+* declared availability policy;
+* correction policy;
+* provider-schedule evidence;
+* gap disposition.
+
+It must not contain fabricated:
+
+```text
+received_at
+persisted_at
+```
+
+The correction policy is:
+
+```text
+FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE
+```
+
+---
+
+# 4. Staged development
+
+## Stage 0 — Threat model and invariant matrix
+
+**Form:** documentation-only pull request.
+
+Write a short ADR defining:
+
+* trusted and untrusted inputs;
+* what each digest proves;
+* what is mutable operational state;
+* what becomes immutable evidence;
+* which failures are retryable;
+* what constitutes request success;
+* what “independent replay” means at each layer;
+* which absence claims are measured, provider-declared or unknown.
+
+Create an invariant matrix covering:
+
+```text
+contract identity
+runtime identity
+plan identity
+attempt identity
+callback ownership
+terminal result selection
+file closure
+availability semantics
+session semantics
+foundation lineage
+```
+
+### Exit criteria
+
+* Every later artifact has a named trust boundary.
+* The distinction between operational recovery and evidence immutability is explicit.
+* No production code is added.
+
+---
+
+## Stage 1 — Contract selection and runtime-lock contracts
+
+**Form:** domain and artifact-contract pull request.
+
+Implement:
+
+* typed contract fingerprints;
+* contract-selection builder and verifier;
+* runtime-lock builder and verifier;
+* exact duplicate, substitution and missing-instrument rejection;
+* create-only persistence;
+* symlink, path-escape, unknown-field and overwrite rejection.
+
+Add the contract-selection CLI:
+
+```text
+qtrad instruments select --provider ibkr \
+  --capability-review <path> \
+  --selection <operator-authored-path> \
+  --frozen-by <operator> \
+  --output <path>
+```
+
+Add a runtime-lock inspection command:
+
+```text
+qtrad historical ibkr runtime-lock \
+  --gateway-archive <path> \
+  --api-archive <path> \
+  --ibc-archive <path> \
+  --output <path>
+```
+
+This stage performs no socket connections and no acquisition.
+
+### Exit criteria
+
+* The 20 decisions reconstruct exactly from the capability review.
+* Identity-relevant contract mutations fail verification.
+* Non-identity descriptive drift can be represented separately.
+* Runtime archives and application identity are authenticated.
+* All tests run without IB Gateway.
+
+---
+
+## Stage 2 — Deterministic historical planner
+
+**Form:** pure planning pull request.
+
+Implement the typed request profile and deterministic planner.
+
+The request profile includes:
+
+* permitted bar and schedule duration strings;
+* maximum in-flight requests;
+* request timeout;
+* retry count;
+* pacing policy;
+* duplicate-request protection;
+* product-specific request duration where justified.
+
+Do **not** initially fix the production plan to four-week bar requests. The planner accepts a frozen request profile as input.
+
+Add:
+
+```text
+qtrad historical ibkr plan \
+  --contract-selection <path> \
+  --runtime-lock <path> \
+  --request-profile <path> \
+  --start 2026-02-01T00:00:00Z \
+  --end 2026-08-02T00:00:00Z \
+  --output <path>
+
+qtrad historical ibkr plan-verify \
+  --plan <path>
+```
+
+The planner is entirely independent of PostgreSQL and IB Gateway.
+
+### Exit criteria
+
+* Property tests prove exact half-open coverage.
+* DST and calendar boundaries do not change UTC request ownership.
+* Request identities are deterministic.
+* Reordering source mappings does not change plan identity.
+* Invalid profiles and unsafe request durations fail before execution.
+
+---
+
+## Stage 3 — Durable execution state machine
+
+**Form:** database and application-state pull request.
+
+Implement transport-independent execution using a fake historical-data port.
+
+PostgreSQL stores:
+
+* registered immutable plan bytes and identity;
+* registered planned requests;
+* pacing reservations;
+* attempt starts;
+* attempt terminal states;
+* generation-bearing callback records;
+* completion markers;
+* publication status.
+
+Required properties:
+
+* registration is idempotent only for byte-identical plan content;
+* an attempt is persisted before provider I/O;
+* callbacks are append-only;
+* every callback carries connection generation and monotonic sequence;
+* stale-generation callbacks cannot enter a successful closure;
+* a disconnect invalidates unfinished attempts;
+* a completed successful planned request is never rerun;
+* terminal failures do not block unrelated requests;
+* crash recovery derives work from durable state rather than process memory.
+
+The executor uses a conservative internal rate below provider limits and the existing authoritative pacing ledger. IBKR documents identical-request, per-contract burst and 60-request-per-ten-minute historical pacing constraints.
+
+### Exit criteria
+
+* State-machine tests cover every transition.
+* Crash injection is tested before request send, during callbacks, after completion and before publication.
+* Restart resumes only unfinished or retryable requests.
+* The stage has no dependency on the real IBKR client.
+
+---
+
+## Stage 4 — Result publication and independent verification
+
+**Form:** immutable evidence pull request.
+
+Implement request-result and aggregate-result builders from database state.
+
+Normalize historical bars as follows:
+
+* provider timestamp is treated as bar start;
+* one-minute end is derived deterministically;
+* epoch values are normalized to UTC;
+* accepted rows are clipped to the planned half-open interval;
+* callback values are preserved;
+* OHLC is serialized canonically;
+* provider volume, WAP and count fields are retained without assigning unsupported meaning;
+* rows are strictly ordered and uniquely keyed;
+* invalid OHLC and conflicting duplicates fail the request;
+* callbacks from incomplete or superseded generations remain evidence but cannot become accepted rows.
+
+For boundary callbacks returned by adjacent requests, the planned half-open interval determines ownership. Identical duplicates outside the owning interval remain raw evidence and are not merged into accepted observations.
+
+Treat `SCHEDULE` as **provider-declared session evidence**, not proof that quotes must exist throughout every session.
+
+If schedule acquisition fails:
+
+```text
+session state = UNKNOWN
+```
+
+The interval must not be classified as inactive.
+
+Add:
+
+```text
+qtrad historical ibkr result-build \
+  --plan <path> \
+  --output <directory>
+
+qtrad historical ibkr verify \
+  --result <manifest>
+```
+
+### Exit criteria
+
+* The verifier starts from files and independently reconstructs accepted closures.
+* Every planned request has exactly one terminal result.
+* Missing, altered, additional and orphaned children fail.
+* Reordered callback input produces the same result.
+* Conflicting callbacks fail.
+* Published results are create-only and bounded.
+
+---
+
+## Stage 5 — IBKR adapter, runtime deployment and request-profile canary
+
+**Form:** provider-adapter pull request followed by an operational deployment.
+
+Extend the shared IBKR session engine with:
+
+* contract-detail reauthentication;
+* historical bar requests;
+* historical schedule requests;
+* callback correlation;
+* completion handling;
+* error-code classification;
+* generation invalidation;
+* bounded cancellation and timeout handling.
+
+Raw provider messages are not exported. Persist:
+
+* numeric provider error code;
+* normalized internal classification;
+* a strictly sanitized diagnostic where safe;
+* digest of the original provider message if required for identity.
+
+### Host deployment
+
+On `q-trad-2`:
+
+1. Back up the existing Gateway installation, probe image and capability evidence.
+2. Install the exact archives named in the runtime lock.
+3. Build the matching q-trad image.
+4. Verify localhost-only API access and paper-account identity.
+5. Prove server time and current-generation handshake.
+6. Reauthenticate all 20 contract fingerprints.
+7. Run PostgreSQL migrations.
+8. Verify writable evidence storage.
+
+### Request-profile canary
+
+Before freezing the full plan, run canaries on one representative contract from each product group:
+
+```text
+FX
+index
+commodity
+```
+
+Test increasingly large request durations, for example:
+
+```text
+1 D
+1 W
+2 W
+4 W
+```
+
+Stop increasing a product’s duration when requests:
+
+* exceed the fixed timeout;
+* trigger throttling or disconnect;
+* return an operationally excessive closure;
+* fail deterministic result verification;
+* show inconsistent schedule behaviour.
+
+Use several adjacent, non-identical intervals rather than immediately repeating an identical request.
+
+Freeze the largest conservatively reliable duration per product class into:
+
+```text
+qtrad-ibkr-historical-request-profile-v1
+```
+
+Four-week chunks may be selected if demonstrated reliable. They are not assumed in advance.
+
+### Exit criteria
+
+* Contract reauthentication succeeds or produces immutable mismatch evidence.
+* One-day MIDPOINT and `SCHEDULE` results independently verify.
+* The request profile is based on recorded canary evidence.
+* No full 20-contract plan has yet been registered.
+
+---
+
+## Stage 6 — Register and execute the full acquisition
+
+**Form:** operational run, not a new feature pull request.
+
+Generate the final immutable plan using:
+
+* the frozen contract selection;
+* the frozen runtime lock;
+* the frozen request profile;
+* the exact 26-week range.
+
+The total request count is derived from that profile. It is not hardcoded as 160 unless the verified profile actually produces 140 bar requests and 20 schedule requests.
+
+Commands:
+
+```text
+qtrad historical ibkr plan ...
+qtrad historical ibkr plan-verify --plan <path>
+qtrad historical ibkr register --plan <path>
+qtrad historical ibkr execute --plan-id <id>
+qtrad historical ibkr result-build --plan <path> --output <directory>
+qtrad historical ibkr verify --result <manifest>
+```
+
+Execution policy:
+
+* reserve pacing before socket I/O;
+* persist attempt before send;
+* default to small bounded concurrency;
+* use a 60-second request timeout unless the frozen profile specifies otherwise;
+* permit at most five transient attempts;
+* use full-jitter reconnect delay;
+* never retry terminal contract or entitlement failures automatically;
+* continue unrelated requests after individual failures.
+
+A partial or entitlement-limited run is still valid immutable evidence.
+
+After later permission changes, create a new plan referencing the original contract selection and prior result. Do not amend the original run.
+
+### Exit criteria
+
+* Every planned request has a verified terminal result.
+* PostgreSQL state and immutable result manifests reconcile exactly.
+* All failures are explicit and attributable.
+* The aggregate result verifies independently.
+
+---
+
+## Stage 7 — Provider-history observation construction
+
+**Form:** research-input pull request.
+
+Implement:
+
+```text
+qtrad research observations build-provider-history \
+  --historical-result <manifest> \
+  --availability-delay PT5M \
+  --output <directory>
+
+qtrad research observations verify-provider-history \
+  --manifest <path>
+```
+
+The builder consumes only independently verified aggregate results.
+
+The availability selector union becomes:
+
+```text
+NATIVE_MEASURED_AVAILABILITY
+PROVIDER_HISTORY_DECLARED_DELAY
+```
+
+Native observations continue using measured receipt or persistence timestamps.
+
+Provider-history observations use:
+
+```text
+available_at = interval_end + declared_delay
+```
+
+The selector must authenticate:
+
+* source class;
+* result identity;
+* declared delay;
+* policy identity;
+* recomputed availability;
+* absence of native timestamps.
+
+Unknown selectors and mixed native/provider inputs fail closed.
+
+### Exit criteria
+
+* Changing `PT5M` changes all dependent identities.
+* Provider-history data cannot masquerade as measured native availability.
+* Observation rows replay from request-result children.
+* No model or foundation logic is introduced in this stage.
+
+---
+
+## Stage 8 — Source-specific foundation and readiness
+
+**Form:** foundation integration pull request.
+
+Extend foundation build and verification with mutually exclusive inputs:
+
+```text
+native observations
+provider-history observations
+```
+
+Build the IBKR foundation over every successfully acquired accepted contract.
+
+Predeclare the six confirmatory candidates:
+
+```text
+FX
+AUD/USD
+EUR/USD
+
+Indices
+Australia 200
+US 500
+
+Commodities
+Spot gold
+US crude
+```
+
+Predeclare the three groups:
+
+```text
+FX
+indices
+commodities
+```
+
+No candidate may be added or removed based on model outcomes.
+
+The foundation verifier must replay:
+
+* observations;
+* provider-declared sessions;
+* gaps;
+* panels;
+* targets;
+* folds;
+* common-support calculations;
+* source and availability lineage.
+
+Readiness may report:
+
+```text
+QUALIFYING_HISTORY_READY
+INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+```
+
+The latter must include exact causes such as:
+
+```text
+ENTITLEMENT_UNAVAILABLE
+CONTRACT_IDENTITY_CHANGED
+SESSION_EVIDENCE_UNAVAILABLE
+INSUFFICIENT_COMMON_SUPPORT
+INSUFFICIENT_DURATION
+INSUFFICIENT_ROWS
+MISSING_CONFIRMATORY_TARGET
+```
+
+Stop before:
+
+* R2 experiment registration;
+* OOF construction;
+* model selection;
+* holdout access;
+* effectiveness claims.
+
+### Exit criteria
+
+* The foundation independently replays from provider-history children.
+* Readiness truthfully reports the six-target, three-group gate.
+* No downstream R2 artifact has been created.
+
+---
+
+# 5. Test strategy
+
+## Contract and planner tests
+
+* Exact reconstruction of the 20 decisions.
+* Duplicate `conId`, substitution and missing-instrument rejection.
+* Product-aware fingerprint mutations.
+* Deterministic request identity.
+* Contiguous exact range coverage.
+* DST, leap-day, weekend and session-boundary cases.
+* Request-profile mutation and unknown-field rejection.
+
+## Execution state-machine tests
+
+* Registration races.
+* Duplicate process execution.
+* Crash before send.
+* Crash after partial callback persistence.
+* Disconnect before completion.
+* Completion callback before final database transaction.
+* Superseded generation callbacks.
+* Retry-limit exhaustion.
+* Permanent failure isolation.
+* Pacing across restart.
+
+## Provider protocol fixtures
+
+Use genuine recorded callback shapes for:
+
+* contract details;
+* historical bars;
+* historical schedule;
+* historical completion;
+* no-data response;
+* entitlement failure;
+* pacing rejection;
+* connectivity loss;
+* farm-status events;
+* stale request IDs.
+
+Fixtures must be sanitized and contain no account secrets.
+
+## Evidence mutation tests
+
+Mutate and rehash, where applicable:
+
+* plan request parameters;
+* contract fingerprint;
+* runtime identity;
+* callback values;
+* callback sequence;
+* accepted rows;
+* session intervals;
+* request disposition;
+* availability delay;
+* child references;
+* closure files.
+
+The verifier must reject semantic republishing, not merely stale hashes.
+
+## End-to-end tests
+
+* Fake transport through registration, execution, result publication and verification.
+* Real Parquet or canonical persisted observation paths.
+* Provider-history observation replay.
+* Foundation replay.
+* CLI round trips.
+* `ops/dev/verify.sh` before every host deployment.
+
+---
+
+# 6. Operational completion
+
+After the first full run:
+
+1. Verify every request result and aggregate result.
+2. Build and verify provider-history observations.
+3. Build and verify the source-specific foundation.
+4. Record readiness disposition.
+5. Back up PostgreSQL and immutable artifacts.
+6. Store raw market data outside Git.
+7. Commit only sanitized identities, dispositions and documentation.
+8. Update `PLAN.md`, `docs/STATUS.md`, architecture records and the IBKR runbook.
+
+The milestone is complete when the system produces one of two honest outcomes:
+
+```text
+QUALIFYING_HISTORY_READY
+```
+
+or:
+
+```text
+INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+```
+
+Both are successful executions of the acquisition and verification system. Only the first permits later registration of `R2-IBKR-HISTORICAL`.
+
+# 7. Explicitly deferred work
+
+The following remain outside this plan:
+
+* historical BID or ASK acquisition;
+* BID_ASK acquisition;
+* one-second history;
+* live IBKR capture;
+* refetch merging or historical corrections;
+* automatic contract substitution;
+* adaptive mutation of a registered plan;
+* R2 experiment registration;
+* OOF model selection;
+* confirmatory holdout execution;
+* any effectiveness claim.
