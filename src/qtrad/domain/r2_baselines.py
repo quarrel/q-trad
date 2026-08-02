@@ -558,10 +558,7 @@ class CoefficientStabilitySummary:
 
 
 def fold_fit_id(payload: dict[str, JsonValue]) -> str:
-    source = payload.get("market_data_source_class")
-    if source == MarketDataSourceClass.IG_NATIVE_CAPTURE.value:
-        payload = dict(payload)
-        payload.pop("market_data_source_class")
+    """Hash the complete fit lineage, including its market-data source."""
     return _semantic_id(payload)
 
 

@@ -10,9 +10,10 @@ from typing import ClassVar, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import HorizonCoverageSummary
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.time import require_utc
 
-FOUNDATION_BUNDLE_CONTRACT = "qtrad-research-foundation-bundle-v1"
+FOUNDATION_BUNDLE_CONTRACT = "qtrad-research-foundation-bundle-v2"
 AVAILABILITY_EVIDENCE_CONTRACT = "qtrad-research-availability-evidence-v1"
 
 
@@ -81,9 +82,10 @@ class FoundationBundle:
     coverage: tuple[HorizonCoverageSummary, ...]
     build_summary: Mapping[str, JsonValue]
     bundle_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = FOUNDATION_BUNDLE_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         require_utc(self.range_start, "foundation bundle range_start")
@@ -116,6 +118,7 @@ class FoundationBundle:
         range_end: datetime,
         coverage: Sequence[HorizonCoverageSummary],
         build_summary: Mapping[str, JsonValue],
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "FoundationBundle":
         unbound = _UnboundBundle(
             configuration=configuration,
@@ -130,6 +133,7 @@ class FoundationBundle:
             range_end=range_end,
             coverage=tuple(sorted(coverage, key=lambda item: item.horizon)),
             build_summary=dict(build_summary),
+            market_data_source_class=market_data_source_class,
         )
         return cls(
             configuration=unbound.configuration,
@@ -144,6 +148,7 @@ class FoundationBundle:
             range_end=unbound.range_end,
             coverage=unbound.coverage,
             build_summary=unbound.build_summary,
+            market_data_source_class=unbound.market_data_source_class,
             bundle_id=_bundle_hash(unbound),
         )
 
@@ -179,6 +184,7 @@ class _UnboundBundle:
     range_end: datetime
     coverage: tuple[HorizonCoverageSummary, ...]
     build_summary: Mapping[str, JsonValue]
+    market_data_source_class: MarketDataSourceClass
 
 
 def _verify_reference_contracts(bundle: FoundationBundle) -> None:
@@ -201,7 +207,7 @@ def _verify_reference_contracts(bundle: FoundationBundle) -> None:
 def _bundle_payload(bundle: FoundationBundle | _UnboundBundle) -> dict[str, object]:
     return {
         "contract": FOUNDATION_BUNDLE_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "children": {
             child.name: child.as_json()
             for child in (
@@ -219,6 +225,7 @@ def _bundle_payload(bundle: FoundationBundle | _UnboundBundle) -> dict[str, obje
         "range_end": bundle.range_end.isoformat(),
         "coverage": [summary.as_json() for summary in bundle.coverage],
         "build_summary": dict(bundle.build_summary),
+        "source_class": bundle.market_data_source_class.value,
     }
 
 

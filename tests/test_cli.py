@@ -974,12 +974,12 @@ def test_parser_accepts_r2_replay_and_software_operations() -> None:
     assert software.baselines_command == "software-verify"
 
 
-def test_cli_builds_and_verifies_software_bundle_in_separate_phases(
+def test_cli_rejects_manufactured_software_input(
     tmp_path: Path,
     cli_environment: Settings,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    del cli_environment
+    del cli_environment, capsys
     from qtrad.runtime.r2_bundles import write_r2_oof_bundle
     from qtrad.runtime.r2_verification import selection_freeze
     from tests.test_r2_bundles import _bundle_and_children
@@ -990,40 +990,12 @@ def test_cli_builds_and_verifies_software_bundle_in_separate_phases(
     representative_manifest = write_r2_oof_bundle(
         representative_root, representative_bundle, children
     )
-    representative_selection = representative_root / "selection.json"
-    selection_freeze(
-        oof_bundle_path=representative_manifest,
-        frozen_by="cli-test",
-        output=representative_selection,
-    )
-
-    output = tmp_path / "software"
-    cli.main(
-        [
-            "research",
-            "baselines",
-            "software-build",
-            "--representative-oof-bundle",
-            str(representative_manifest),
-            "--representative-selection",
-            str(representative_selection),
-            "--output",
-            str(output),
-        ]
-    )
-    assert json.loads(capsys.readouterr().out)["software_bundle"].endswith("manifest.json")
-
-    cli.main(
-        [
-            "research",
-            "baselines",
-            "software-verify",
-            "--bundle",
-            str(output / "manifest.json"),
-        ]
-    )
-    verified = json.loads(capsys.readouterr().out)
-    assert verified["representative_integration_ready"] == "READY"
+    with pytest.raises(ValueError, match="evaluation-register"):
+        selection_freeze(
+            oof_bundle_path=representative_manifest,
+            frozen_by="cli-test",
+            output=representative_root / "selection.json",
+        )
 
 
 @pytest.mark.asyncio

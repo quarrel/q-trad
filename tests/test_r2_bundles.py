@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
@@ -14,16 +17,18 @@ from qtrad.domain.r2_bundles import (
     R2OofBundle,
 )
 from qtrad.domain.r2_readiness import EvidenceClass
+from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import (
+    atomic_create,
     canonical_bytes,
     verify_r2_oof_bundle,
-    verify_r2_software_bundle,
     write_r2_oof_bundle,
 )
 from qtrad.runtime.r2_verification import (
-    build_software_bundle,
+    _synthetic_pipeline_inputs,
+    build_oof_bundle,
     selection_freeze,
-    verify_software_bundle,
+    verify_oof_bundle,
 )
 
 
@@ -126,26 +131,51 @@ def test_bundle_rejects_unsafe_paths_and_duplicate_cross_category_children() -> 
         )
 
 
-def test_software_bundle_replays_synthetic_and_representative_children(tmp_path: Path) -> None:
+def test_software_bundle_rejects_manufactured_representative_input(tmp_path: Path) -> None:
     representative_root = tmp_path / "representative-input"
     representative_root.mkdir()
     bundle, children = _bundle_and_children()
     representative_manifest = write_r2_oof_bundle(representative_root, bundle, children)
-    selection_path = representative_root / "selection.json"
+    with pytest.raises(ValueError, match="evaluation-register"):
+        selection_freeze(
+            oof_bundle_path=representative_manifest,
+            frozen_by="test-operator",
+            output=representative_root / "selection.json",
+        )
+
+
+def test_create_only_output_rejects_ancestor_symlink_and_oversize_payload(tmp_path: Path) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        atomic_create(link / "child.json", b"{}")
+    assert not (outside / "child.json").exists()
+
+    with pytest.raises(ValueError, match="64 MiB"):
+        atomic_create(tmp_path / "large.json", b"x" * (64 * 1024 * 1024 + 1))
+
+
+def test_synthetic_oof_build_is_replayed_from_typed_pipeline(tmp_path: Path) -> None:
+    verified, experiment, datasets, manifests = _synthetic_pipeline_inputs()
+    manifest_path = build_oof_bundle(
+        verified=verified,
+        experiment=experiment,
+        feature_manifest_paths={},
+        research_root=tmp_path,
+        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+        output=tmp_path / "oof",
+        run_kind="SYNTHETIC",
+        dataset_overrides=datasets,
+        manifest_overrides=manifests,
+    )
     selection_freeze(
-        oof_bundle_path=representative_manifest,
-        frozen_by="test-operator",
-        output=selection_path,
+        oof_bundle_path=manifest_path,
+        frozen_by="synthetic-test",
+        output=tmp_path / "selection.json",
     )
-
-    software_manifest = build_software_bundle(
-        representative_oof_bundle_path=representative_manifest,
-        representative_selection_path=selection_path,
-        output=tmp_path / "software",
+    assert (
+        verify_oof_bundle(manifest_path).source_class
+        is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
     )
-
-    software = verify_r2_software_bundle(software_manifest)
-    verify_software_bundle(software_manifest)
-    assert software.representative_integration_ready == "READY"
-    assert software.evidence_disposition == "IMPLEMENTATION_EVIDENCE_ONLY"
-    assert software.research_disposition == "RESEARCH_EVIDENCE_PENDING"

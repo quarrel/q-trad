@@ -24,11 +24,27 @@ def canonical_bytes(value: Mapping[str, object]) -> bytes:
     return (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
 
 
+def _reject_symlink_ancestors(path: Path) -> None:
+    """Reject every existing ancestor before creating a temporary file."""
+    current = path.parent
+    ancestors: list[Path] = []
+    while current != current.parent:
+        ancestors.append(current)
+        current = current.parent
+    for ancestor in ancestors:
+        if ancestor.is_symlink():
+            raise ValueError(f"R2 output path traverses a symlink: {ancestor}")
+
+
 def atomic_create(path: Path, content: bytes) -> None:
     """Write one regular file atomically and fail on every existing path."""
+    if len(content) > _MAX_BYTES:
+        raise ValueError("R2 output exceeds the 64 MiB child limit")
+    _reject_symlink_ancestors(path)
     if path.is_symlink() or path.exists():
         raise FileExistsError(f"create-only R2 output already exists: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
+    _reject_symlink_ancestors(path)
     temporary_name: str | None = None
     try:
         with NamedTemporaryFile(
@@ -80,7 +96,10 @@ def write_r2_oof_bundle(
     if set(children) != {ref.path for ref in refs}:
         raise ValueError("OOF child payloads must exactly match declared references")
     for ref in refs:
-        atomic_create(output / ref.path, canonical_bytes(children[ref.path]))
+        encoded = canonical_bytes(children[ref.path])
+        if len(encoded) > _MAX_BYTES:
+            raise ValueError(f"OOF child exceeds the 64 MiB limit: {ref.path}")
+        atomic_create(output / ref.path, encoded)
         _verify_reference(output, ref)
     path = output / "manifest.json"
     atomic_create(path, canonical_bytes(bundle.as_json()))
@@ -126,11 +145,42 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         **refs,
         bundle_id=_text(payload["bundle_id"]),
     )
-    allowed_paths = {"manifest.json"} | {ref.path for ref in _all_oof_references(bundle)}
-    for ref in _all_oof_references(bundle):
+    all_refs = _all_oof_references(bundle)
+    canonical = any(reference.contract.startswith("qtrad-r2-") for reference in all_refs)
+    register_refs = [
+        reference
+        for reference in bundle.evaluation_children
+        if reference.contract == "qtrad-r2-evaluation-register-v1"
+    ]
+    descriptor_refs = [
+        reference
+        for reference in bundle.evaluation_children
+        if reference.contract == "qtrad-r2-oof-run-descriptor-v1"
+    ]
+    if canonical and (len(register_refs) != 1 or len(descriptor_refs) != 1):
+        raise ValueError("canonical R2 OOF bundle must have exactly one register and descriptor")
+    allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
+    for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
         _verify_lineage_payload(child, bundle)
+        if child.get("contract") == "qtrad-r2-oof-run-descriptor-v1":
+            descriptor_id = child.get("descriptor_id")
+            if not isinstance(descriptor_id, str):
+                raise ValueError("R2 OOF descriptor must expose a descriptor ID")
+            descriptor_payload = {
+                key: value for key, value in child.items() if key != "descriptor_id"
+            }
+            if sha256(canonical_bytes(descriptor_payload)).hexdigest() != descriptor_id:
+                raise ValueError("R2 OOF descriptor ID does not authenticate its content")
+            if (
+                child.get("foundation_bundle_id") != bundle.foundation_bundle_id
+                or child.get("experiment_configuration_id") != bundle.experiment_configuration_id
+                or child.get("source_class") != bundle.source_class.value
+                or child.get("evidence_class") != bundle.evidence_class.value
+                or child.get("holdout_excluded") is not True
+            ):
+                raise ValueError("R2 OOF descriptor lineage differs from its bundle")
         if child.get("contract") == R2ForecastManifest.CONTRACT:
             forecast_manifest = R2ForecastManifest.from_json(child)
             _verify_reference(path.parent, forecast_manifest.forecast_child)
@@ -236,7 +286,7 @@ def _allow_bound_selection(root: Path, bundle: R2OofBundle) -> None:
     if not selection_path.exists():
         return
     selection = _load_object(selection_path)
-    if selection.get("contract") != "qtrad-r2-selection-mechanics-v1":
+    if selection.get("contract") != "qtrad-r2-selection-v1":
         raise ValueError("R2 bundle contains an unexpected selection child")
     if (
         selection.get("oof_bundle_id") != bundle.bundle_id
@@ -244,16 +294,18 @@ def _allow_bound_selection(root: Path, bundle: R2OofBundle) -> None:
         or selection.get("experiment_configuration_id") != bundle.experiment_configuration_id
         or selection.get("source_class") != bundle.source_class.value
         or selection.get("evidence_class") != bundle.evidence_class.value
-        or selection.get("holdout_excluded") is not True
+        or selection.get("holdout_state_verification") != "PENDING_R2_H_INTEGRATION"
     ):
         raise ValueError("R2 selection child does not bind its OOF bundle")
-    # The selection is an explicitly bound sibling, not an OOF child.
+    manifest_id = selection.get("manifest_id")
+    if not isinstance(manifest_id, str):
+        raise ValueError("R2 selection child has no manifest ID")
     _verify_reference(
         root,
         reference_for_json(
             path="selection.json",
             contract=str(selection["contract"]),
-            semantic_id=str(selection["selection_id"]),
+            semantic_id=manifest_id,
             content=selection,
         ),
     )
@@ -323,6 +375,7 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
                 "report_id",
                 "descriptor_id",
                 "scenario_id",
+                "ablation_id",
             )
             if key in payload
         ),
@@ -359,38 +412,69 @@ def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> 
 def _verify_evaluation_register(
     payload: dict[str, object], bundle: R2OofBundle, root: Path
 ) -> None:
-    """Authenticate register references against the OOF child set."""
-    reference_keys = (
+    """Authenticate every evaluation child and reconcile it with the OOF envelope."""
+    required = {
         "local_comparator",
         "evaluation",
         "evaluated_models",
         "forecast_manifests",
         "coverage",
-    )
-    if not any(key in payload for key in reference_keys):
-        return
+        "pooled_ablation",
+    }
+    missing = required - set(payload)
+    if missing:
+        raise ValueError(
+            "R2 evaluation register is missing required references: " + ", ".join(sorted(missing))
+        )
+    if payload.get("source_class") != bundle.source_class.value:
+        raise ValueError("R2 evaluation register source class differs from its OOF bundle")
+    if payload.get("evidence_class") != bundle.evidence_class.value:
+        raise ValueError("R2 evaluation register evidence class differs from its OOF bundle")
     declared = {
         (reference.contract, reference.semantic_id, reference.path): reference
         for reference in _all_oof_references(bundle)
     }
 
-    def bind(value: object) -> None:
+    def bind(value: object) -> ArtifactReference:
         reference = ArtifactReference.from_json(value)
         key = (reference.contract, reference.semantic_id, reference.path)
         if key not in declared:
             raise ValueError("R2 evaluation register references an undeclared child")
         _verify_reference(root, reference)
+        return reference
 
-    for key in ("local_comparator", "evaluation"):
-        if key not in payload:
-            raise ValueError(f"R2 evaluation register is missing {key} reference")
-        bind(payload[key])
-    for key in ("evaluated_models", "forecast_manifests", "coverage"):
-        values = payload.get(key)
+    def bind_one(key: str, expected_path: str) -> ArtifactReference:
+        reference = bind(payload[key])
+        if reference.path != expected_path:
+            raise ValueError(f"R2 evaluation register {key} path is inconsistent")
+        return reference
+
+    bind_one("local_comparator", "evaluation/local-comparator.json")
+    bind_one("evaluation", "evaluation/report.json")
+    bind_one("pooled_ablation", "evaluation/pooled-ablation.json")
+
+    def bind_array(key: str, expected: tuple[ArtifactReference, ...]) -> None:
+        values = payload[key]
         if not isinstance(values, list):
             raise ValueError(f"R2 evaluation register {key} references must be an array")
-        for value in values:
-            bind(value)
+        actual = tuple(bind(value) for value in values)
+        actual_keys = tuple(
+            (item.contract, item.semantic_id, item.path, item.sha256) for item in actual
+        )
+        expected_keys = tuple(
+            (item.contract, item.semantic_id, item.path, item.sha256) for item in expected
+        )
+        if len(actual_keys) != len(set(actual_keys)) or set(actual_keys) != set(expected_keys):
+            raise ValueError(f"R2 evaluation register {key} is not an exact child reconciliation")
+
+    bind_array("forecast_manifests", bundle.forecast_manifests)
+    bind_array("coverage", bundle.coverage_children)
+    evaluated = tuple(
+        reference
+        for reference in _all_oof_references(bundle)
+        if reference.path.startswith("evaluation/models/")
+    )
+    bind_array("evaluated_models", evaluated)
 
 
 def _references(value: object) -> tuple[ArtifactReference, ...]:

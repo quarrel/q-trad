@@ -8,11 +8,18 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
 import sys
 from collections.abc import Mapping
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
+from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from typing import Any, cast
+from uuid import UUID
 
 import numpy
 import sklearn
@@ -23,6 +30,7 @@ from qtrad.application.r2_baselines import build_local_ridge_oof
 from qtrad.application.r2_evaluation import EvaluationModel, build_r2_evaluation
 from qtrad.application.r2_features import (
     R2FoundationInputs,
+    feature_schema_for_set,
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
@@ -31,10 +39,19 @@ from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
     build_r2_preprocessing_selection,
 )
-from qtrad.application.r2_readiness import R1FoundationBindings
+from qtrad.application.r2_readiness import R1FoundationBindings, _availability_dataset_id
 from qtrad.domain.events import JsonValue
+from qtrad.domain.folds import Fold, FoldDataset, membership_hash
 from qtrad.domain.forecasts import ForecastDataset
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.foundation import (
+    AvailabilityBasis,
+    ExcursionDisposition,
+    InstrumentRole,
+    ReturnDisposition,
+    TargetDataset,
+    TargetRow,
+)
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
     R2ForecastManifest,
@@ -42,11 +59,28 @@ from qtrad.domain.r2_bundles import (
     R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import (
+    R2_SELECTION_CONTRACT,
     ConfigurationDisposition,
     ConfigurationRecord,
+    SelectionDecision,
+    SelectionManifest,
 )
-from qtrad.domain.r2_features import R2FeatureDataset
-from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentConfig
+from qtrad.domain.r2_features import (
+    R2FeatureDataset,
+    RawFeatureRow,
+    RawFeatureValue,
+    feature_set_id,
+)
+from qtrad.domain.r2_models import PreprocessingFeatureKind, derive_r2_preprocessing_schema
+from qtrad.domain.r2_readiness import (
+    EligibilityDecision,
+    EvidenceClass,
+    FeatureEligibility,
+    FeatureFamily,
+    FeatureSet,
+    ModelFamily,
+    R2ExperimentConfig,
+)
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import (
     atomic_create,
@@ -60,17 +94,35 @@ from qtrad.runtime.r2_bundles import (
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
-SELECTION_MECHANICS_CONTRACT = "qtrad-r2-selection-mechanics-v1"
-SYNTHETIC_SCENARIO_CONTRACT = "qtrad-r2-synthetic-scenario-v1"
 _REQUIRED_FEATURE_SETS = frozenset({"L0", "L1", "P0", "P1"})
 
 
 def runtime_identities() -> dict[str, str]:
-    """Derive identities from the running interpreter and installed libraries."""
-    application = f"qtrad-{__version__}"
-    commit = os.environ.get("QTRAD_APPLICATION_COMMIT")
-    if commit:
-        application = f"{application}+{commit}"
+    """Derive identities from the running source tree and installed libraries."""
+    repository = Path(__file__).resolve().parents[2]
+    try:
+        result = subprocess.run(
+            ("git", "-C", str(repository), "rev-parse", "HEAD"),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as exc:
+        raise RuntimeError("cannot derive the application commit identity") from exc
+    commit = result.stdout.strip()
+    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+        raise RuntimeError("git did not return a verified commit identity")
+    declared_commit = os.environ.get("QTRAD_APPLICATION_COMMIT")
+    if declared_commit is not None and declared_commit != commit:
+        raise RuntimeError("declared application commit differs from the running source")
+    image_digest = os.environ.get("QTRAD_IMAGE_DIGEST", "source-tree")
+    if image_digest != "source-tree" and (
+        not image_digest.startswith("sha256:")
+        or len(image_digest) != len("sha256:") + 64
+        or any(character not in "0123456789abcdef" for character in image_digest[7:])
+    ):
+        raise RuntimeError("QTRAD_IMAGE_DIGEST must be a verified sha256 digest")
+    application = f"qtrad-{__version__}+git:{commit}+image:{image_digest}"
     return {
         "application_identity": application,
         "python_identity": sys.version.split()[0],
@@ -161,6 +213,10 @@ def _descriptor_payload(
         "python_identity": identities["python_identity"],
         "numpy_identity": identities["numpy_identity"],
         "sklearn_identity": identities["sklearn_identity"],
+        "holdout_range": [item.isoformat() for item in experiment.holdout_range],
+        "acceptance_thresholds": dict(experiment.acceptance_thresholds),
+        "target_instruments": list(experiment.target_instruments),
+        "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
     }
     descriptor_id = sha256(canonical_bytes(semantic)).hexdigest()
@@ -222,12 +278,17 @@ def _load_feature_datasets(
     return datasets, manifests
 
 
-def _dataset_payload(dataset: R2FeatureDataset, manifest: R2FeatureManifest) -> dict[str, object]:
+def _dataset_payload(
+    dataset: R2FeatureDataset, manifest: R2FeatureManifest | Mapping[str, object]
+) -> dict[str, object]:
+    manifest_payload = (
+        manifest.as_json() if isinstance(manifest, R2FeatureManifest) else dict(manifest)
+    )
     return {
         "contract": dataset.CONTRACT,
         "schema_version": dataset.SCHEMA_VERSION,
         "dataset_id": dataset.dataset_id,
-        "manifest": manifest.as_json(),
+        "manifest": manifest_payload,
         **{
             key: value
             for key, value in dataset.manifest_json().items()
@@ -269,6 +330,7 @@ def _payload_identity(payload: Mapping[str, object]) -> str:
         "report_id",
         "descriptor_id",
         "scenario_id",
+        "ablation_id",
     ):
         value = payload.get(key)
         if isinstance(value, str):
@@ -330,6 +392,287 @@ def _model_forecasts(
     )
 
 
+def _synthetic_pipeline_inputs() -> tuple[
+    R1FoundationBindings,
+    R2ExperimentConfig,
+    dict[str, R2FeatureDataset],
+    dict[str, Mapping[str, object]],
+]:
+    """Create deterministic typed inputs for the same R2 build path used in production."""
+    start = datetime(2026, 1, 1, tzinfo=UTC)
+    horizon = timedelta(minutes=15)
+    holdout = (start + timedelta(hours=6), start + timedelta(hours=24))
+    target_names = ("index:synthetic-a", "index:synthetic-b")
+    context_name = "index:volatility"
+    ordered = (*target_names, context_name)
+    r1_id = sha256(b"r2-synthetic-r1").hexdigest()
+    observation_id = sha256(b"r2-synthetic-observations").hexdigest()
+    foundation_id = sha256(b"r2-synthetic-foundation-config").hexdigest()
+    panel_id = sha256(b"r2-synthetic-panel").hexdigest()
+
+    def eligibility(subject: str, state: FeatureEligibility) -> EligibilityDecision:
+        return EligibilityDecision.create(
+            subject=subject,
+            state=state,
+            evidence_start=start - timedelta(days=1),
+            evidence_end=start + timedelta(hours=1),
+            reason="deterministic software-verification fixture",
+        )
+
+    roles = {name: InstrumentRole.TARGET for name in target_names}
+    roles[context_name] = InstrumentRole.CONTEXT
+    feature_eligibility = {
+        family: eligibility(
+            family.value,
+            FeatureEligibility.NOT_ELIGIBLE
+            if family in {FeatureFamily.SPREAD, FeatureFamily.QUOTE_IMBALANCE}
+            else FeatureEligibility.ELIGIBLE,
+        )
+        for family in FeatureFamily
+    }
+    local_families = (
+        FeatureFamily.LOCAL_RETURNS,
+        FeatureFamily.TIME_AVAILABILITY,
+        FeatureFamily.LOCAL_VOLATILITY_RANGE,
+    )
+    experiment = R2ExperimentConfig(
+        name="r2-software-verification-synthetic",
+        schema_version=1,
+        r1_bundle_id=r1_id,
+        observation_dataset_id=observation_id,
+        foundation_configuration_id=foundation_id,
+        panel_dataset_id=panel_id,
+        target_dataset_id="a" * 64,
+        fold_dataset_id="b" * 64,
+        r1_application_version="synthetic",
+        r1_image_identity="qtrad@sha256:" + "1" * 64,
+        ordered_instruments=ordered,
+        instrument_roles=roles,
+        target_instrument_eligibility={
+            name: eligibility(name, FeatureEligibility.ELIGIBLE) for name in target_names
+        },
+        target_instruments=target_names,
+        confirmatory_target_instruments=target_names,
+        market_groups={target_names[0]: "synthetic-0", target_names[1]: "synthetic-1"},
+        horizons=(horizon,),
+        primary_horizon=horizon,
+        feature_sets=(
+            FeatureSet("L0", local_families[:2]),
+            FeatureSet("L1", local_families),
+            FeatureSet("P0", local_families),
+            FeatureSet("P1", (*local_families, FeatureFamily.POOLED_CROSS_ASSET)),
+        ),
+        feature_windows=(timedelta(minutes=1), timedelta(minutes=5)),
+        feature_coverage_thresholds={family: 0.0 for family in FeatureFamily},
+        feature_eligibility=feature_eligibility,
+        preprocessing_policy="TRAINING_MEDIAN_STANDARDISE_V1",
+        alpha_grid=(0.01, 0.1, 1.0, 10.0),
+        inner_validation_policy="CHRONOLOGICAL_TAIL_PURGED_V1",
+        ridge_solver="lsqr",
+        ridge_tolerance=1e-8,
+        ridge_max_iterations=10_000,
+        pooled_weighting_policy="EQUAL_INSTRUMENT_TOTAL_WEIGHT_MEAN_ONE",
+        minimum_training_rows=2,
+        minimum_inner_validation_rows=1,
+        minimum_outer_validation_rows=1,
+        metric_policy="R2_METRICS_V1",
+        forecast_bucket_policy="TRAINING_QUANTILES_V1",
+        state_bucket_policy="TRAINING_THRESHOLDS_V1",
+        model_selection_policy="OOF_PRIMARY_MSE_V1",
+        acceptance_thresholds={
+            "maximum_best_instrument_contribution": 1.0,
+            "maximum_best_period_contribution": 1.0,
+            "maximum_primary_mse_degradation": 0.0,
+            "minimum_common_support": 0.0,
+            "minimum_improving_fold_proportion": 0.0,
+            "minimum_improving_instrument_proportion": 0.0,
+        },
+        holdout_range=holdout,
+        numeric_replay_relative_tolerance=1e-10,
+        numeric_replay_absolute_tolerance=1e-12,
+        evidence_class=EvidenceClass.IMPLEMENTATION,
+        market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        model_families=tuple(ModelFamily),
+    )
+    targets_rows: list[TargetRow] = []
+    for index in range(8):
+        decision = start + timedelta(minutes=15 * index)
+        for instrument_index, instrument in enumerate(target_names):
+            targets_rows.append(
+                TargetRow(
+                    instrument_id=instrument,
+                    decision_time=decision,
+                    horizon=horizon,
+                    target_basis=PriceBasis.MID,
+                    target_revision_policy="LATEST_AVAILABLE_BEFORE_FREEZE",
+                    target_start_time=decision,
+                    target_end_time=decision + horizon,
+                    target_freeze_at=decision + horizon,
+                    target_available_at=decision + horizon,
+                    label_start_close=Decimal("100"),
+                    label_end_close=Decimal("101"),
+                    log_return=0.01 * (index + instrument_index),
+                    return_disposition=ReturnDisposition.VALID,
+                    start_event_id=UUID(int=index * 2 + instrument_index + 1),
+                    end_event_id=UUID(int=index * 2 + instrument_index + 2),
+                    upper_log_excursion=0.02,
+                    lower_log_excursion=-0.01,
+                    excursion_disposition=ExcursionDisposition.VALID,
+                )
+            )
+    targets = TargetDataset.create(
+        targets_rows,
+        observation_dataset_id=observation_id,
+        foundation_configuration_id=foundation_id,
+    )
+    training_ids = tuple(
+        row.target_id
+        for row in targets.rows
+        if row.target_end_time <= start + timedelta(minutes=75)
+    )
+    validation_ids = tuple(
+        row.target_id
+        for row in targets.rows
+        if row.target_start_time >= start + timedelta(minutes=90)
+    )
+    fold = Fold(
+        fold_id="synthetic-outer-0",
+        training_start=start,
+        training_cutoff=start + timedelta(minutes=75),
+        validation_start=start + timedelta(minutes=90),
+        validation_end=start + timedelta(minutes=120),
+        embargo_end=start + timedelta(minutes=90),
+        training_target_ids=training_ids,
+        validation_target_ids=validation_ids,
+        holdout_excluded=True,
+        membership_hash=membership_hash(training_ids, validation_ids),
+    )
+    folds = FoldDataset.create(
+        (fold,),
+        target_dataset_id=targets.dataset_id,
+        foundation_configuration_id=foundation_id,
+    )
+    experiment = replace(
+        experiment,
+        target_dataset_id=targets.dataset_id,
+        fold_dataset_id=folds.dataset_id,
+    )
+    datasets: dict[str, R2FeatureDataset] = {}
+    manifests: dict[str, Mapping[str, object]] = {}
+    for feature_set in experiment.feature_sets:
+        schema = feature_schema_for_set(experiment, feature_set.name)
+        preprocessing_schema = derive_r2_preprocessing_schema(schema)
+        set_id = feature_set_id(experiment.configuration_id, feature_set.name, schema)
+        set_rows = []
+        for target in targets.rows:
+            values = []
+            for definition, transformed in zip(schema, preprocessing_schema.features, strict=True):
+                if transformed.kind is PreprocessingFeatureKind.BINARY_INDICATOR:
+                    value = 1.0
+                elif definition.family is FeatureFamily.LOCAL_RETURNS:
+                    value = float(target.decision_time.minute) / 15.0
+                elif definition.family is FeatureFamily.POOLED_CROSS_ASSET:
+                    value = float(target.instrument_id == target_names[1])
+                elif definition.family is FeatureFamily.TIME_AVAILABILITY:
+                    value = 1.0
+                else:
+                    value = 0.0
+                values.append(RawFeatureValue(definition.name, value))
+            set_rows.append(
+                RawFeatureRow(
+                    target.instrument_id,
+                    target.decision_time,
+                    target.decision_time,
+                    target.decision_time,
+                    set_id,
+                    tuple(values),
+                )
+            )
+        dataset = R2FeatureDataset.create(
+            set_rows,
+            feature_schema=schema,
+            feature_set_name=feature_set.name,
+            feature_set_id=set_id,
+            observation_dataset_id=observation_id,
+            panel_dataset_id=panel_id,
+            target_dataset_id=targets.dataset_id,
+            fold_dataset_id=folds.dataset_id,
+            experiment_configuration_id=experiment.configuration_id,
+            evidence_class=experiment.evidence_class,
+            market_data_source_class=experiment.market_data_source_class,
+        )
+        datasets[feature_set.name] = dataset
+        manifests[feature_set.name] = {
+            "contract": "qtrad-r2-parquet-feature-manifest-v1",
+            "schema_version": 1,
+            "semantic_dataset_id": dataset.dataset_id,
+            "feature_set_name": feature_set.name,
+            "feature_set_id": dataset.feature_set_id,
+            "source_class": experiment.market_data_source_class.value,
+            "evidence_class": experiment.evidence_class.value,
+            "holdout_excluded": True,
+        }
+    evidence: dict[str, JsonValue] = {
+        "availability_delay_report": {},
+        "revision_delay_report": {},
+        "data_gaps": [],
+        "source_active_intervals": {name: [] for name in ordered},
+        "lineage_summary": {},
+        "observation_bounds": {
+            "interval_start": start.isoformat(),
+            "interval_end": holdout[1].isoformat(),
+        },
+    }
+    availability_id = _availability_dataset_id(observation_id, evidence)
+    verified = cast(
+        R1FoundationBindings,
+        SimpleNamespace(
+            bundle=SimpleNamespace(
+                bundle_id=r1_id,
+                market_data_source_class=experiment.market_data_source_class,
+                ordered_instruments=ordered,
+                range_start=start,
+                range_end=holdout[1],
+                configuration=SimpleNamespace(dataset_id=foundation_id),
+                observations=SimpleNamespace(dataset_id=observation_id),
+                availability=SimpleNamespace(dataset_id=availability_id),
+                panel=SimpleNamespace(dataset_id=panel_id),
+                targets=SimpleNamespace(dataset_id=targets.dataset_id),
+                folds=SimpleNamespace(dataset_id=folds.dataset_id),
+                build_summary={
+                    "application_version": "synthetic",
+                    "image_identity": "qtrad@sha256:" + "1" * 64,
+                },
+            ),
+            configuration=SimpleNamespace(
+                configuration_id=foundation_id,
+                observation_dataset_id=observation_id,
+                ordered_instruments=ordered,
+                instrument_roles=roles,
+                target_horizons=(horizon,),
+                holdout_range=holdout,
+                range_start=start,
+                range_end=holdout[1],
+                availability_basis=AvailabilityBasis.PERSISTED_AT,
+            ),
+            observations=SimpleNamespace(
+                dataset_id=observation_id,
+                selection_policies={"availability_basis": "persisted_at"},
+            ),
+            panel=SimpleNamespace(
+                dataset_id=panel_id,
+                observation_dataset_id=observation_id,
+                foundation_configuration_id=foundation_id,
+            ),
+            targets=targets,
+            folds=folds,
+            forecasts=SimpleNamespace(),
+            availability_evidence=evidence,
+        ),
+    )
+    return verified, experiment, datasets, manifests
+
+
 def build_oof_bundle(
     *,
     verified: R1FoundationBindings,
@@ -339,15 +682,24 @@ def build_oof_bundle(
     clock: Clock,
     output: Path,
     run_kind: str = "REPRESENTATIVE",
+    dataset_overrides: Mapping[str, R2FeatureDataset] | None = None,
+    manifest_overrides: Mapping[str, Mapping[str, object]] | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
-    datasets, manifests = _load_feature_datasets(
-        verified=verified,
-        experiment=experiment,
-        feature_manifest_paths=feature_manifest_paths,
-        root=research_root,
-        clock=clock,
-    )
+    foundation_source = getattr(verified.bundle, "market_data_source_class", None)
+    if foundation_source is not experiment.market_data_source_class:
+        raise ValueError("R2 experiment source class differs from the R1 foundation")
+    if dataset_overrides is None:
+        datasets, manifests = _load_feature_datasets(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_manifest_paths,
+            root=research_root,
+            clock=clock,
+        )
+    else:
+        datasets = dict(dataset_overrides)
+        manifests = dict(manifest_overrides or {})
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     identities = runtime_identities()
@@ -585,6 +937,30 @@ def build_oof_bundle(
     evaluation_ref = _child_reference(evaluation_path, evaluation_payload)
     evaluation_refs.append(evaluation_ref)
 
+    ablation = pooled_result.ablation
+    ablation_payload: dict[str, object] = {
+        "contract": "qtrad-r2-pooled-ablation-v1",
+        "schema_version": 1,
+        "source_class": experiment.market_data_source_class.value,
+        "evidence_class": experiment.evidence_class.value,
+        "local_fold_fit_ids": list(ablation.local_fold_fit_ids),
+        "pooled_local_fold_fit_ids": list(ablation.pooled_local_fold_fit_ids),
+        "pooled_context_fold_fit_ids": list(ablation.pooled_context_fold_fit_ids),
+        "local_target_ids": list(ablation.local_target_ids),
+        "pooled_local_target_ids": list(ablation.pooled_local_target_ids),
+        "pooled_context_target_ids": list(ablation.pooled_context_target_ids),
+        "common_target_ids": list(ablation.common_target_ids),
+        "holdout_excluded": True,
+    }
+    ablation_payload["ablation_id"] = sha256(
+        canonical_bytes(
+            {key: value for key, value in ablation_payload.items() if key != "ablation_id"}
+        )
+    ).hexdigest()
+    ablation_path = "evaluation/pooled-ablation.json"
+    children[ablation_path] = ablation_payload
+    ablation_ref = _child_reference(ablation_path, ablation_payload)
+    evaluation_refs.append(ablation_ref)
     register: dict[str, object] = {
         "contract": "qtrad-r2-evaluation-register-v1",
         "schema_version": 1,
@@ -595,6 +971,7 @@ def build_oof_bundle(
         "evaluation": evaluation_ref.as_json(),
         "forecast_manifests": [item.as_json() for item in forecast_manifest_refs],
         "coverage": [item.as_json() for item in coverage_refs],
+        "pooled_ablation": ablation_ref.as_json(),
         "configurations": [item.as_json() for item in configurations],
         "holdout_excluded": True,
     }
@@ -650,31 +1027,103 @@ def _load_selection(path: Path) -> dict[str, object]:
     return value
 
 
+def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) -> dict[str, object]:
+    for reference in (*bundle.evaluation_children, *bundle.forecast_manifests):
+        if reference.contract == contract:
+            return _load_selection(bundle_path.parent / reference.path)
+    raise ValueError(f"OOF bundle is missing required {contract} child")
+
+
 def selection_freeze(
     *,
     oof_bundle_path: Path,
     frozen_by: str,
     output: Path,
 ) -> Path:
-    """Create a disposable, holdout-free selection-mechanics manifest."""
+    """Create a typed, holdout-free SelectionManifest from the OOF register."""
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
     bundle = verify_r2_oof_bundle(oof_bundle_path)
-    semantic: dict[str, JsonValue] = {
-        "contract": SELECTION_MECHANICS_CONTRACT,
-        "schema_version": 1,
-        "oof_bundle_id": bundle.bundle_id,
-        "foundation_bundle_id": bundle.foundation_bundle_id,
-        "experiment_configuration_id": bundle.experiment_configuration_id,
-        "source_class": bundle.source_class.value,
-        "evidence_class": bundle.evidence_class.value,
-        "frozen_by": frozen_by,
-        "disposition": "PENDING_R2_H_INTEGRATION",
-        "holdout_excluded": True,
-        "selected_configuration_ids": [],
-    }
-    selection_id = sha256(canonical_bytes(semantic)).hexdigest()
-    atomic_create(output, canonical_bytes({**semantic, "selection_id": selection_id}))
+    register = _oof_child_payload(oof_bundle_path, bundle, "qtrad-r2-evaluation-register-v1")
+    descriptor = _oof_child_payload(oof_bundle_path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    raw_configurations = register.get("configurations")
+    if not isinstance(raw_configurations, list) or not raw_configurations:
+        raise ValueError("OOF evaluation register has no complete configuration set")
+    configurations: list[dict[str, object]] = []
+    for item in raw_configurations:
+        if not isinstance(item, dict):
+            raise ValueError("OOF evaluation register contains an invalid configuration")
+        configurations.append(cast(dict[str, object], item))
+    evaluated_ids = tuple(sorted(str(item["configuration_id"]) for item in configurations))
+    decisions: list[SelectionDecision] = []
+    retained_controls: list[str] = []
+    for item in configurations:
+        configuration_id = str(item["configuration_id"])
+        model_family = str(item.get("model_family", ""))
+        disposition = (
+            ConfigurationDisposition.RETAINED_CONTROL
+            if model_family == ModelFamily.ZERO_RETURN.value
+            else ConfigurationDisposition.REJECTED
+        )
+        if disposition is ConfigurationDisposition.RETAINED_CONTROL:
+            retained_controls.append(configuration_id)
+        decisions.append(
+            SelectionDecision(
+                configuration_id=configuration_id,
+                disposition=disposition,
+                reason="implementation evidence; confirmatory selection remains pending",
+                gates=(),
+            )
+        )
+    holdout_range_value = descriptor.get("holdout_range")
+    if (
+        not isinstance(holdout_range_value, list)
+        or len(holdout_range_value) != 2
+        or not all(isinstance(value, str) for value in holdout_range_value)
+    ):
+        raise ValueError("OOF descriptor has no authenticated holdout range")
+    thresholds = descriptor.get("acceptance_thresholds")
+    if not isinstance(thresholds, dict):
+        raise ValueError("OOF descriptor has no authenticated selection thresholds")
+    report_id = register.get("report_id")
+    local_ref = register.get("local_comparator")
+    if not isinstance(report_id, str) or not isinstance(local_ref, dict):
+        raise ValueError("OOF register has incomplete evaluation lineage")
+    local_ref_payload = cast(dict[str, object], local_ref)
+    local_comparator_id = local_ref_payload.get("semantic_id")
+    if not isinstance(local_comparator_id, str):
+        raise ValueError("OOF register local comparator has no semantic ID")
+    threshold_values: list[tuple[str, float]] = []
+    for name, value in thresholds.items():
+        if not isinstance(name, str) or not isinstance(value, (int, float)):
+            raise ValueError("OOF descriptor has invalid selection thresholds")
+        threshold_values.append((name, float(value)))
+    manifest = SelectionManifest.create(
+        experiment_configuration_id=bundle.experiment_configuration_id,
+        evidence_class=bundle.evidence_class,
+        evaluation_report_id=report_id,
+        local_comparator_manifest_id=local_comparator_id,
+        evaluated_configuration_ids=evaluated_ids,
+        predeclared_comparators=tuple(ModelFamily),
+        primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
+        secondary_metrics=("RMSE",),
+        acceptance_thresholds=tuple(threshold_values),
+        decisions=tuple(decisions),
+        selected_configuration_ids=(),
+        holdout_comparator_configuration_ids=tuple(sorted(retained_controls)),
+        final_fitting_procedure="PENDING_R2_H_INTEGRATION",
+        holdout_range=(
+            datetime.fromisoformat(str(holdout_range_value[0])),
+            datetime.fromisoformat(str(holdout_range_value[1])),
+        ),
+        application_image_identity=str(descriptor["application_identity"]),
+        frozen_at=datetime.now(UTC),
+        frozen_by=frozen_by,
+        market_data_source_class=bundle.source_class,
+        foundation_bundle_id=bundle.foundation_bundle_id,
+        oof_bundle_id=bundle.bundle_id,
+    )
+    atomic_create(output, canonical_bytes(cast(dict[str, object], manifest.as_json())))
     return output
 
 
@@ -727,33 +1176,6 @@ def _selection_reference(path: str, payload: dict[str, object]) -> ArtifactRefer
     )
 
 
-def _synthetic_child(
-    *,
-    path: str,
-    contract: str,
-    identity_field: str,
-    label: str,
-    source_class: MarketDataSourceClass,
-    evidence_class: EvidenceClass,
-    values: Mapping[str, object] | None = None,
-) -> tuple[ArtifactReference, dict[str, object]]:
-    payload: dict[str, object] = {
-        "contract": contract,
-        "schema_version": 1,
-        "source_class": source_class.value,
-        "evidence_class": evidence_class.value,
-        "holdout_excluded": True,
-        "label": label,
-    }
-    if values is not None:
-        payload.update(values)
-    identity = sha256(
-        canonical_bytes({"contract": contract, "label": label, "path": path})
-    ).hexdigest()
-    payload[identity_field] = identity
-    return _child_reference(path, payload), payload
-
-
 def build_software_bundle(
     *,
     representative_oof_bundle_path: Path,
@@ -766,11 +1188,32 @@ def build_software_bundle(
         raise ValueError("representative software integration must use IG_NATIVE_CAPTURE")
     if representative_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
         raise ValueError("representative software integration must use implementation evidence")
+    descriptor = _oof_child_payload(
+        representative_oof_bundle_path, representative_oof, OOF_DESCRIPTOR_CONTRACT
+    )
+    if descriptor.get("run_kind") != "REPRESENTATIVE":
+        raise ValueError("representative software integration requires a representative run")
+    if descriptor.get("feature_sets") != sorted(_REQUIRED_FEATURE_SETS):
+        raise ValueError("representative run must cover exactly L0/L1/P0/P1")
+    expected_targets = {
+        "fx:aud-usd",
+        "fx:eur-usd",
+        "index:australia-200",
+        "index:us-500",
+        "commodity:spot-gold",
+        "commodity:us-crude",
+    }
+    target_instruments = descriptor.get("target_instruments")
+    if not isinstance(target_instruments, list) or set(target_instruments) != expected_targets:
+        raise ValueError("representative run is not the fixed capture-v4 integration")
     selection = _load_selection(representative_selection_path)
-    if selection.get("contract") != SELECTION_MECHANICS_CONTRACT:
-        raise ValueError("representative selection must be a selection-mechanics manifest")
-    if selection.get("oof_bundle_id") != representative_oof.bundle_id:
-        raise ValueError("representative selection does not bind the supplied OOF bundle")
+    if selection.get("contract") != R2_SELECTION_CONTRACT:
+        raise ValueError("representative selection must be a typed SelectionManifest")
+    register = _oof_child_payload(
+        representative_oof_bundle_path, representative_oof, "qtrad-r2-evaluation-register-v1"
+    )
+    if selection.get("evaluation_report_id") != register.get("report_id"):
+        raise ValueError("representative selection does not bind the supplied OOF report")
     output.mkdir(parents=True, exist_ok=False)
     _copy_tree(representative_oof_bundle_path.parent, output / "representative" / "oof")
     representative_selection_target = output / "representative" / "selection.json"
@@ -781,218 +1224,28 @@ def build_software_bundle(
     identities = runtime_identities()
 
     synthetic_root = output / "synthetic" / "oof"
-    synthetic_source = MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
-    synthetic_evidence = EvidenceClass.IMPLEMENTATION
-    synthetic_foundation_id = sha256(b"synthetic-foundation").hexdigest()
-    synthetic_experiment_id = sha256(b"synthetic-experiment").hexdigest()
-    synthetic_payload: dict[str, object] = {
-        "contract": SYNTHETIC_SCENARIO_CONTRACT,
-        "schema_version": 1,
-        "scenario": "canonical-r2-synthetic-replay-v1",
-        "foundation_bundle_id": synthetic_foundation_id,
-        "experiment_configuration_id": synthetic_experiment_id,
-        "feature_sets": sorted(_REQUIRED_FEATURE_SETS),
-        "observations": [
-            {"instrument": "synthetic-a", "decision_index": index, "return": index / 1000}
-            for index in range(12)
-        ],
-        "folds": [
-            {"fold": "synthetic-0", "train_end": 5, "validation_start": 6, "validation_end": 8},
-            {"fold": "synthetic-1", "train_end": 8, "validation_start": 9, "validation_end": 11},
-        ],
-        "holdout_excluded": True,
-        "source_class": synthetic_source.value,
-        "evidence_class": synthetic_evidence.value,
-    }
-    synthetic_payload["scenario_id"] = sha256(canonical_bytes(synthetic_payload)).hexdigest()
-    synthetic_children: dict[str, dict[str, object]] = {}
-    feature_refs: list[ArtifactReference] = []
-    preprocessing_refs: list[ArtifactReference] = []
-    fit_refs: list[ArtifactReference] = []
-    coverage_refs: list[ArtifactReference] = []
-    forecast_manifest_refs: list[ArtifactReference] = []
-    forecast_data_refs: list[ArtifactReference] = []
-    stability_refs: list[ArtifactReference] = []
-    for name in sorted(_REQUIRED_FEATURE_SETS):
-        feature_ref, feature_payload = _synthetic_child(
-            path=f"features/{name}.json",
-            contract="qtrad-r2-features-v1",
-            identity_field="dataset_id",
-            label=name,
-            source_class=synthetic_source,
-            evidence_class=synthetic_evidence,
-            values={"feature_set_name": name, "rows": [0.0, 0.001, 0.002]},
-        )
-        synthetic_children[feature_ref.path] = feature_payload
-        feature_refs.append(feature_ref)
-        selection_ref, selection_payload = _synthetic_child(
-            path=f"preprocessing/{name}.json",
-            contract="qtrad-r2-preprocessing-selection-v1",
-            identity_field="selection_id",
-            label=name,
-            source_class=synthetic_source,
-            evidence_class=synthetic_evidence,
-            values={"feature_set_name": name, "selected_alpha": 1.0},
-        )
-        synthetic_children[selection_ref.path] = selection_payload
-        preprocessing_refs.append(selection_ref)
-        fit_ref, fit_payload = _synthetic_child(
-            path=f"fits/{name}.json",
-            contract="qtrad-r2-fold-fit-v1",
-            identity_field="artifact_id",
-            label=name,
-            source_class=synthetic_source,
-            evidence_class=synthetic_evidence,
-            values={"feature_set_name": name, "disposition": "FITTED", "fit_rows": 8},
-        )
-        synthetic_children[fit_ref.path] = fit_payload
-        fit_refs.append(fit_ref)
-        coverage_ref, coverage_payload = _synthetic_child(
-            path=f"coverage/{name}.json",
-            contract="qtrad-r2-forecast-coverage-v1",
-            identity_field="dataset_id",
-            label=name,
-            source_class=synthetic_source,
-            evidence_class=synthetic_evidence,
-            values={
-                "feature_set_name": name,
-                "expected_opportunities": 3,
-                "covered_opportunities": 3,
-            },
-        )
-        synthetic_children[coverage_ref.path] = coverage_payload
-        coverage_refs.append(coverage_ref)
-        stability_ref, stability_payload = _synthetic_child(
-            path=f"evaluation/{name}-stability.json",
-            contract="qtrad-r2-coefficient-stability-v1",
-            identity_field="summary_id",
-            label=name,
-            source_class=synthetic_source,
-            evidence_class=synthetic_evidence,
-            values={"feature_set_name": name, "ready_fit_count": 2, "expected_fit_count": 2},
-        )
-        synthetic_children[stability_ref.path] = stability_payload
-        stability_refs.append(stability_ref)
-    forecast_data_ref, forecast_data_payload = _synthetic_child(
-        path="forecasts/P1.data.json",
-        contract="qtrad-research-forecasts-v1",
-        identity_field="dataset_id",
-        label="P1",
-        source_class=synthetic_source,
-        evidence_class=synthetic_evidence,
-        values={"rows": [0.001, 0.002, 0.003], "target_dataset_id": synthetic_foundation_id},
+    synthetic_verified, synthetic_experiment, synthetic_datasets, synthetic_manifests = (
+        _synthetic_pipeline_inputs()
     )
-    synthetic_children[forecast_data_ref.path] = forecast_data_payload
-    forecast_data_refs.append(forecast_data_ref)
-    forecast_manifest = R2ForecastManifest.create(
-        forecast_dataset_id=str(forecast_data_payload["dataset_id"]),
-        experiment_configuration_id=synthetic_experiment_id,
-        source_class=synthetic_source,
-        evidence_class=synthetic_evidence,
-        forecast_child=forecast_data_ref,
-    )
-    forecast_manifest_payload = cast(dict[str, object], forecast_manifest.as_json())
-    forecast_manifest_ref = _child_reference(
-        "forecasts/P1.manifest.json", forecast_manifest_payload
-    )
-    synthetic_children[forecast_manifest_ref.path] = forecast_manifest_payload
-    forecast_manifest_refs.append(forecast_manifest_ref)
-    evaluation_register: dict[str, object] = {
-        "contract": "qtrad-r2-evaluation-register-v1",
-        "schema_version": 1,
-        "source_class": synthetic_source.value,
-        "evidence_class": synthetic_evidence.value,
-        "configurations": [
-            {
-                "configuration_id": sha256(name.encode()).hexdigest(),
-                "feature_set_name": name,
-                "disposition": "EVALUATED",
-            }
-            for name in sorted(_REQUIRED_FEATURE_SETS)
-        ],
-        "stability_summary_ids": [ref.semantic_id for ref in stability_refs],
-        "holdout_excluded": True,
-    }
-    evaluation_register["report_id"] = sha256(canonical_bytes(evaluation_register)).hexdigest()
-    register_path = "evaluation/register.json"
-    synthetic_children[register_path] = evaluation_register
-    evaluation_ref = _child_reference(register_path, evaluation_register)
-    scenario_path = "evaluation/synthetic-scenario.json"
-    synthetic_scenario_ref = _child_reference(scenario_path, synthetic_payload)
-    synthetic_children[scenario_path] = synthetic_payload
-    synthetic_descriptor: dict[str, object] = {
-        "contract": OOF_DESCRIPTOR_CONTRACT,
-        "schema_version": 1,
-        "foundation_bundle_id": synthetic_foundation_id,
-        "experiment_configuration_id": synthetic_experiment_id,
-        "source_class": synthetic_source.value,
-        "evidence_class": synthetic_evidence.value,
-        "feature_sets": sorted(_REQUIRED_FEATURE_SETS),
-        "run_kind": "SYNTHETIC",
-        "fit_count": len(fit_refs),
-        "forecast_manifest_count": len(forecast_manifest_refs),
-        "coverage_count": len(coverage_refs),
-        "evaluation_report_id": str(evaluation_register["report_id"]),
-        **{
-            key: identities[key]
-            for key in (
-                "application_identity",
-                "python_identity",
-                "numpy_identity",
-                "sklearn_identity",
-            )
-        },
-        "holdout_excluded": True,
-    }
-    synthetic_descriptor["descriptor_id"] = sha256(
-        canonical_bytes(synthetic_descriptor)
-    ).hexdigest()
-    descriptor_path = "evaluation/run-descriptor.json"
-    synthetic_children[descriptor_path] = synthetic_descriptor
-    synthetic_descriptor_ref = _descriptor_reference(
+    synthetic_manifest = build_oof_bundle(
+        verified=synthetic_verified,
+        experiment=synthetic_experiment,
+        feature_manifest_paths={},
+        research_root=output,
+        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
         output=synthetic_root,
-        relative_path=descriptor_path,
-        payload=synthetic_descriptor,
+        run_kind="SYNTHETIC",
+        dataset_overrides=synthetic_datasets,
+        manifest_overrides=synthetic_manifests,
     )
-    synthetic_bundle = R2OofBundle.create(
-        foundation_bundle_id=synthetic_foundation_id,
-        experiment_configuration_id=synthetic_experiment_id,
-        source_class=synthetic_source,
-        evidence_class=synthetic_evidence,
-        feature_children=tuple(feature_refs),
-        preprocessing_children=tuple(preprocessing_refs),
-        fit_children=tuple(fit_refs),
-        forecast_manifests=tuple(forecast_manifest_refs),
-        coverage_children=tuple(coverage_refs),
-        evaluation_children=(
-            *stability_refs,
-            evaluation_ref,
-            synthetic_scenario_ref,
-            synthetic_descriptor_ref,
-            *forecast_data_refs,
-        ),
-    )
-    write_r2_oof_bundle(synthetic_root, synthetic_bundle, synthetic_children)
-    verify_r2_oof_bundle(synthetic_root / "manifest.json")
-
-    synthetic_selection_payload: dict[str, object] = {
-        "contract": SELECTION_MECHANICS_CONTRACT,
-        "schema_version": 1,
-        "oof_bundle_id": synthetic_bundle.bundle_id,
-        "foundation_bundle_id": synthetic_bundle.foundation_bundle_id,
-        "experiment_configuration_id": synthetic_bundle.experiment_configuration_id,
-        "source_class": synthetic_bundle.source_class.value,
-        "evidence_class": synthetic_bundle.evidence_class.value,
-        "frozen_by": "software-verification",
-        "disposition": "PENDING_R2_H_INTEGRATION",
-        "holdout_excluded": True,
-        "selected_configuration_ids": [],
-    }
-    synthetic_selection_payload["selection_id"] = sha256(
-        canonical_bytes(synthetic_selection_payload)
-    ).hexdigest()
     synthetic_selection_path = output / "synthetic" / "selection.json"
-    atomic_create(synthetic_selection_path, canonical_bytes(synthetic_selection_payload))
+    selection_freeze(
+        oof_bundle_path=synthetic_manifest,
+        frozen_by="software-verification",
+        output=synthetic_selection_path,
+    )
+    synthetic_bundle = verify_r2_oof_bundle(synthetic_manifest)
+    synthetic_selection_payload = _load_selection(synthetic_selection_path)
     synthetic_ref = _selection_reference("synthetic/selection.json", synthetic_selection_payload)
     representative_oof_ref = reference_for_json(
         path="representative/oof/manifest.json",
@@ -1023,6 +1276,44 @@ def build_software_bundle(
     return write_r2_software_bundle(output, software)
 
 
+def _tree_bytes(root: Path) -> dict[str, bytes]:
+    return {
+        candidate.relative_to(root).as_posix(): candidate.read_bytes()
+        for candidate in root.rglob("*")
+        if candidate.is_file()
+    }
+
+
+def _replay_synthetic_oof(path: Path) -> None:
+    bundle = verify_r2_oof_bundle(path)
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    if descriptor.get("run_kind") != "SYNTHETIC":
+        return
+    verified, experiment, datasets, manifests = _synthetic_pipeline_inputs()
+    with TemporaryDirectory() as temporary:
+        expected_root = Path(temporary) / "oof"
+        build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths={},
+            research_root=Path(temporary),
+            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            output=expected_root,
+            run_kind="SYNTHETIC",
+            dataset_overrides=datasets,
+            manifest_overrides=manifests,
+        )
+        if _tree_bytes(path.parent) != _tree_bytes(expected_root):
+            raise ValueError("synthetic OOF bundle does not replay to the authenticated pipeline")
+
+
+def verify_oof_bundle(path: Path) -> R2OofBundle:
+    """Verify an OOF envelope and replay the deterministic synthetic scenario."""
+    bundle = verify_r2_oof_bundle(path)
+    _replay_synthetic_oof(path)
+    return bundle
+
+
 def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
     """Verify both nested OOF integrations and their holdout-free selections."""
     software = verify_r2_software_bundle(path)
@@ -1030,30 +1321,65 @@ def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
     for key, expected in identities.items():
         if getattr(software, key) != expected:
             raise ValueError(f"software bundle {key} differs from the running environment")
+    if software.representative_integration_ready != "READY":
+        raise ValueError("software bundle representative integration is not READY")
+    if software.evidence_disposition != "IMPLEMENTATION_EVIDENCE_ONLY":
+        raise ValueError("software bundle evidence disposition is not implementation-only")
+    if software.research_disposition != "RESEARCH_EVIDENCE_PENDING":
+        raise ValueError("software bundle research disposition is not pending")
     root = path.parent
     synthetic = root / software.synthetic_oof_bundle.path
     representative = root / software.representative_oof_bundle.path
-    synthetic_oof = verify_r2_oof_bundle(synthetic)
+    synthetic_oof = verify_oof_bundle(synthetic)
     representative_oof = verify_r2_oof_bundle(representative)
     if synthetic_oof.source_class is not MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
         raise ValueError("synthetic software integration must use IBKR_HISTORICAL_RESEARCH")
+    if representative_oof.source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
+        raise ValueError("representative software integration must use IG_NATIVE_CAPTURE")
     if synthetic_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
         raise ValueError("synthetic software integration must use implementation evidence")
-    for reference, oof in (
-        (software.synthetic_selection, synthetic_oof),
-        (software.representative_selection, representative_oof),
+    if representative_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
+        raise ValueError("representative software integration must use implementation evidence")
+    expected_targets = {
+        "fx:aud-usd",
+        "fx:eur-usd",
+        "index:australia-200",
+        "index:us-500",
+        "commodity:spot-gold",
+        "commodity:us-crude",
+    }
+    for oof, oof_path, selection_reference in (
+        (synthetic_oof, synthetic, software.synthetic_selection),
+        (representative_oof, representative, software.representative_selection),
     ):
-        payload = _load_selection(root / reference.path)
-        if payload.get("contract") != reference.contract:
-            raise ValueError("software selection child contract mismatch")
+        descriptor = _oof_child_payload(oof_path, oof, OOF_DESCRIPTOR_CONTRACT)
+        if descriptor.get("feature_sets") != sorted(_REQUIRED_FEATURE_SETS):
+            raise ValueError("software OOF child does not cover exactly L0/L1/P0/P1")
+        target_instruments = descriptor.get("target_instruments")
+        if oof is representative_oof and (
+            not isinstance(target_instruments, list) or set(target_instruments) != expected_targets
+        ):
+            raise ValueError("representative software OOF child has the wrong target universe")
+        register = _oof_child_payload(oof_path, oof, "qtrad-r2-evaluation-register-v1")
+        payload = _load_selection(root / selection_reference.path)
+        if payload.get("contract") != "qtrad-r2-selection-v1":
+            raise ValueError("software selection child is not a typed SelectionManifest")
+        if payload.get("manifest_id") != selection_reference.semantic_id:
+            raise ValueError("software selection manifest ID does not match its reference")
         if payload.get("oof_bundle_id") != oof.bundle_id:
             raise ValueError("software selection does not bind its OOF bundle")
+        if payload.get("foundation_bundle_id") != oof.foundation_bundle_id:
+            raise ValueError("software selection does not bind its foundation")
         if payload.get("source_class") != oof.source_class.value:
             raise ValueError("software selection source class differs from its OOF bundle")
         if payload.get("evidence_class") != oof.evidence_class.value:
             raise ValueError("software selection evidence class differs from its OOF bundle")
-        if payload.get("holdout_excluded") is not True:
-            raise ValueError("software selection must exclude the locked holdout")
+        if payload.get("holdout_state_verification") != "PENDING_R2_H_INTEGRATION":
+            raise ValueError("software selection must leave holdout verification pending")
+        if payload.get("evaluation_report_id") != register.get("report_id"):
+            raise ValueError("software selection does not bind the OOF evaluation report")
+        if payload.get("application_image_identity") != identities["application_identity"]:
+            raise ValueError("software selection identity differs from the running application")
     return software
 
 

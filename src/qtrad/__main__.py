@@ -115,6 +115,7 @@ from qtrad.runtime.r2_verification import (
     build_software_bundle,
     load_experiment_and_feature_paths,
     selection_freeze,
+    verify_oof_bundle,
     verify_software_bundle,
 )
 from qtrad.runtime.research_export import research_export_metadata
@@ -714,7 +715,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "oof-verify"
     ):
-        bundle = verify_r2_oof_bundle(args.bundle)
+        bundle = verify_oof_bundle(args.bundle)
         print(json.dumps(bundle.as_json(), sort_keys=True))
     elif (
         args.command == "research"

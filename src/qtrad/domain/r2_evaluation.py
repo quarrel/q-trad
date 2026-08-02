@@ -10,6 +10,7 @@ from math import isfinite
 from typing import ClassVar
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
@@ -894,16 +895,27 @@ class SelectionManifest:
     frozen_at: datetime
     frozen_by: str
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass | None = None
+    foundation_bundle_id: str | None = None
+    oof_bundle_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_SELECTION_CONTRACT
 
     def __post_init__(self) -> None:
-        for value, field in (
+        identity_values = [
             (self.experiment_configuration_id, "selection experiment ID"),
             (self.evaluation_report_id, "selection evaluation ID"),
             (self.local_comparator_manifest_id, "selection local-comparator ID"),
             (self.manifest_id, "selection manifest ID"),
-        ):
+        ]
+        if self.foundation_bundle_id is not None and self.oof_bundle_id is not None:
+            identity_values.extend(
+                (
+                    (self.foundation_bundle_id, "selection foundation ID"),
+                    (self.oof_bundle_id, "selection OOF ID"),
+                )
+            )
+        for value, field in identity_values:
             _require_sha256(value, field)
         for values in (
             self.evaluated_configuration_ids,
@@ -990,6 +1002,9 @@ class SelectionManifest:
         application_image_identity: str,
         frozen_at: datetime,
         frozen_by: str,
+        market_data_source_class: MarketDataSourceClass | None = None,
+        foundation_bundle_id: str | None = None,
+        oof_bundle_id: str | None = None,
     ) -> "SelectionManifest":
         evaluated_ids = tuple(sorted(evaluated_configuration_ids))
         selected_ids = tuple(sorted(selected_configuration_ids))
@@ -1016,6 +1031,9 @@ class SelectionManifest:
             ("application_image_identity", application_image_identity),
             ("frozen_at", frozen_at),
             ("frozen_by", frozen_by),
+            ("market_data_source_class", market_data_source_class),
+            ("foundation_bundle_id", foundation_bundle_id),
+            ("oof_bundle_id", oof_bundle_id),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -1038,11 +1056,14 @@ class SelectionManifest:
             application_image_identity=application_image_identity,
             frozen_at=frozen_at,
             frozen_by=frozen_by,
+            market_data_source_class=market_data_source_class,
+            foundation_bundle_id=foundation_bundle_id,
+            oof_bundle_id=oof_bundle_id,
             manifest_id=identity,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
-        return {
+        payload: dict[str, JsonValue] = {
             "contract": self.CONTRACT,
             "schema_version": 1,
             "experiment_configuration_id": self.experiment_configuration_id,
@@ -1064,6 +1085,19 @@ class SelectionManifest:
             "frozen_at": self.frozen_at.isoformat(),
             "frozen_by": self.frozen_by,
         }
+        if self.market_data_source_class is not None:
+            if self.foundation_bundle_id is None or self.oof_bundle_id is None:
+                raise ValueError("source-bound selections require foundation and OOF IDs")
+            payload.update(
+                {
+                    "source_class": self.market_data_source_class.value,
+                    "foundation_bundle_id": self.foundation_bundle_id,
+                    "oof_bundle_id": self.oof_bundle_id,
+                }
+            )
+        elif self.foundation_bundle_id is not None or self.oof_bundle_id is not None:
+            raise ValueError("selection lineage IDs require a source class")
+        return payload
 
     def as_json(self) -> dict[str, JsonValue]:
         return {**self.semantic_json(), "manifest_id": self.manifest_id}

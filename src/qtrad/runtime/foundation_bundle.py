@@ -48,7 +48,7 @@ from qtrad.domain.foundation_bundle import (
     FoundationBundle,
 )
 from qtrad.domain.identifiers import InstrumentId
-from qtrad.domain.market_data import DataGap, DataQuality, PriceBasis
+from qtrad.domain.market_data import DataGap, DataQuality, MarketDataSourceClass, PriceBasis
 from qtrad.domain.research import (
     AvailabilityDelayReport,
     ObservationDataset,
@@ -148,11 +148,12 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         "range_end",
         "coverage",
         "build_summary",
+        "source_class",
         "bundle_id",
     }
     if set(payload) != expected:
         raise ValueError("foundation bundle has an unexpected schema")
-    if payload["contract"] != FoundationBundle.CONTRACT or payload["schema_version"] != 1:
+    if payload["contract"] != FoundationBundle.CONTRACT or payload["schema_version"] != 2:
         raise ValueError("foundation bundle contract is unsupported")
     children = _mapping(payload["children"])
     child_names = {
@@ -181,6 +182,7 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         range_end=_datetime(payload["range_end"]),
         coverage=tuple(_coverage(_mapping(item)) for item in _sequence(payload["coverage"])),
         build_summary=cast(Mapping[str, JsonValue], _mapping(payload["build_summary"])),
+        market_data_source_class=MarketDataSourceClass(_text(payload["source_class"])),
         bundle_id=_text(payload["bundle_id"]),
     )
 
