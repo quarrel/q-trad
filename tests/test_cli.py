@@ -990,7 +990,7 @@ def test_cli_rejects_manufactured_software_input(
     representative_manifest = write_r2_oof_bundle(
         representative_root, representative_bundle, children
     )
-    with pytest.raises(ValueError, match="evaluation-register"):
+    with pytest.raises(ValueError, match="descriptor"):
         selection_freeze(
             oof_bundle_path=representative_manifest,
             frozen_by="cli-test",
