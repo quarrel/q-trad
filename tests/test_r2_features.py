@@ -302,7 +302,7 @@ def test_feature_registry_and_explicit_empty_dataset_identity_are_deterministic(
     assert len(dataset.dataset_id) == 64
 
 
-def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
+def test_r2b_feature_json_and_source_bound_ids_are_deterministic() -> None:
     schema = (
         FeatureDefinition("return_60s", FeatureFamily.LOCAL_RETURNS),
         FeatureDefinition("window_coverage_300s", FeatureFamily.LOCAL_VOLATILITY_RANGE),
@@ -330,7 +330,7 @@ def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
         experiment_configuration_id="c" * 64,
         evidence_class=EvidenceClass.IMPLEMENTATION,
     )
-    assert dataset.dataset_id == "d2b7b8491ca2df40e34d59c6f29637db436ae81f85bf81ac80990c62e0eabea6"
+    assert dataset.dataset_id == "197986307e00de14de511ad41ac61d6e04cbc0be7476369490da05d43702c380"
 
 
 def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
