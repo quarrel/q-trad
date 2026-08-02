@@ -1576,7 +1576,7 @@ def _verify_software_bundle_envelope(path: Path) -> R2SoftwareVerificationBundle
         ):
             raise ValueError("representative software OOF child has the wrong target universe")
         payload = _load_selection(root / selection_reference.path)
-        if payload.get("contract") != "qtrad-r2-selection-v1":
+        if payload.get("contract") != R2_SELECTION_CONTRACT:
             raise ValueError("software selection child is not a typed SelectionManifest")
         if payload.get("manifest_id") != selection_reference.semantic_id:
             raise ValueError("software selection manifest ID does not match its reference")

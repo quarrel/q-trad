@@ -16,6 +16,7 @@ from qtrad.domain.r2_bundles import (
     R2OofBundle,
     R2SoftwareVerificationBundle,
 )
+from qtrad.domain.r2_evaluation import R2_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
 R2_EVALUATION_REGISTER_CONTRACT = "qtrad-r2-evaluation-register-v2"
@@ -287,7 +288,7 @@ def _allow_bound_selection(root: Path, bundle: R2OofBundle) -> None:
     if not selection_path.exists():
         return
     selection = _load_object(selection_path)
-    if selection.get("contract") != "qtrad-r2-selection-v1":
+    if selection.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("R2 bundle contains an unexpected selection child")
     if (
         selection.get("oof_bundle_id") != bundle.bundle_id
