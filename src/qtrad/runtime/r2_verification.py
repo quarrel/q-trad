@@ -62,7 +62,6 @@ from qtrad.domain.r2_bundles import (
     R2ForecastManifest,
     R2OofBundle,
     R2SoftwareVerificationBundle,
-    R2_EVALUATION_REGISTER_CONTRACT,
 )
 from qtrad.domain.r2_evaluation import (
     R2_EVALUATION_CONTRACT,
@@ -75,6 +74,7 @@ from qtrad.domain.r2_evaluation import (
     SelectionGateOutcome,
     SelectionManifest,
 )
+from qtrad.runtime.r2_bundles import R2_EVALUATION_REGISTER_CONTRACT
 from qtrad.domain.r2_features import (
     R2FeatureDataset,
     RawFeatureRow,
