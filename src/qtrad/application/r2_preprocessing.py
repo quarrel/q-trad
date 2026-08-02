@@ -721,7 +721,10 @@ def _verify_feature_bindings(
     if expected_pooled_set is not None and features.feature_set_name != expected_pooled_set:
         raise ValueError(f"{model_family.value} requires the {expected_pooled_set} feature set")
     authenticated_set_id = feature_set_id(
-        experiment.configuration_id, declared_set.name, authenticated_schema
+        experiment.configuration_id,
+        declared_set.name,
+        authenticated_schema,
+        experiment.market_data_source_class,
     )
     if features.feature_set_id != authenticated_set_id:
         raise ValueError("R2 feature binding mismatch: feature_set_id")

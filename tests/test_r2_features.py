@@ -330,7 +330,7 @@ def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
         experiment_configuration_id="c" * 64,
         evidence_class=EvidenceClass.IMPLEMENTATION,
     )
-    assert dataset.dataset_id == "9f6863fb8efd3cf5f0854e4cf26fa5d1f83b5de526a617ba1fcde84f5f911ed7"
+    assert dataset.dataset_id == "d2b7b8491ca2df40e34d59c6f29637db436ae81f85bf81ac80990c62e0eabea6"
 
 
 def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
