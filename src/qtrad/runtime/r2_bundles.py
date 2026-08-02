@@ -126,37 +126,56 @@ def _verify_replay_inputs(
         raw_path = value.get("path")
         raw_root = value.get("root")
         expected_digest = value.get("sha256")
+        files = value.get("files")
         if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
             raise ValueError("representative replay input identity is incomplete")
-        replay_path = Path(cast(str, raw_path))
+        if not isinstance(files, list) or not files:
+            raise ValueError("representative replay input file closure is missing")
+        initial_path = Path(cast(str, raw_path))
         replay_root = Path(cast(str, raw_root))
         if (
-            replay_path.is_absolute()
+            initial_path.is_absolute()
             or replay_root.is_absolute()
-            or ".." in replay_path.parts
+            or ".." in initial_path.parts
             or ".." in replay_root.parts
         ):
             raise ValueError("representative replay input path is unsafe")
-        candidate = (root / replay_path).resolve()
-        child_root = (root / replay_root).resolve()
-        if not candidate.is_relative_to(root_resolved) or not child_root.is_relative_to(
-            root_resolved
-        ):
+        candidate_root = (root / replay_root).resolve()
+        if not candidate_root.is_relative_to(root_resolved):
             raise ValueError("representative replay input escapes the bundle root")
-        if (
-            child_root.is_symlink()
-            or not child_root.is_dir()
-            or candidate.is_symlink()
-            or not candidate.is_file()
-        ):
-            raise ValueError(f"representative replay input is unavailable: {name}")
-        if sha256(candidate.read_bytes()).hexdigest() != expected_digest:
-            raise ValueError(f"representative replay input changed: {name}")
-        for nested in child_root.rglob("*"):
-            if nested.is_symlink():
-                raise ValueError("representative replay input root contains a symlink")
-            if nested.is_file():
-                allowed_paths.add(nested.relative_to(root).as_posix())
+        if candidate_root.is_symlink() or not candidate_root.is_dir():
+            raise ValueError(f"representative replay input root is unavailable: {name}")
+        declared: dict[str, str] = {}
+        for raw_file in files:
+            if not isinstance(raw_file, dict) or set(raw_file) != {"path", "sha256"}:
+                raise ValueError("representative replay input file reference is malformed")
+            file_path = raw_file.get("path")
+            file_digest = raw_file.get("sha256")
+            if not isinstance(file_path, str) or not isinstance(file_digest, str):
+                raise ValueError("representative replay input file identity is incomplete")
+            relative_file = Path(file_path)
+            if relative_file.is_absolute() or ".." in relative_file.parts:
+                raise ValueError("representative replay input file path is unsafe")
+            candidate = (root / relative_file).resolve()
+            if (
+                not candidate.is_relative_to(root_resolved)
+                or not candidate.is_relative_to(candidate_root)
+                or candidate.is_symlink()
+                or not candidate.is_file()
+            ):
+                raise ValueError(f"representative replay input file is unavailable: {name}")
+            normalized = relative_file.as_posix()
+            if normalized in declared:
+                raise ValueError("representative replay input file closure contains duplicates")
+            if sha256(candidate.read_bytes()).hexdigest() != file_digest:
+                raise ValueError(f"representative replay input file changed: {name}")
+            declared[normalized] = file_digest
+            allowed_paths.add(normalized)
+        if cast(str, raw_path) not in declared:
+            raise ValueError(f"representative replay input path is not in its closure: {name}")
+            raise ValueError(
+                f"representative replay input identity differs from its closure: {name}"
+            )
 
 
 def verify_r2_oof_bundle(path: Path) -> R2OofBundle:

@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import subprocess
 import sys
 from collections.abc import Mapping
@@ -78,6 +77,7 @@ from qtrad.domain.r2_features import (
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
+    feature_schema_id,
     feature_set_id,
 )
 from qtrad.domain.r2_models import PreprocessingFeatureKind, derive_r2_preprocessing_schema
@@ -142,19 +142,21 @@ _CAPTURE_V4_TARGETS = (
 )
 
 
-def _image_identity_manifest() -> Mapping[str, object]:
-    test_mode = os.environ.get("QTRAD_TEST_MODE") == "1"
-    path = (
-        Path(os.environ["QTRAD_IMAGE_IDENTITY_PATH"])
-        if test_mode and os.environ.get("QTRAD_IMAGE_IDENTITY_PATH")
-        else Path("/run/qtrad/image-identity.json")
-    )
-    if path.is_symlink() or not path.is_file():
+_DEPLOYMENT_IMAGE_IDENTITY_PATH = Path("/run/qtrad/image-identity.json")
+
+
+def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
+    manifest_path = _DEPLOYMENT_IMAGE_IDENTITY_PATH if path is None else path
+    if manifest_path.is_symlink() or not manifest_path.is_file():
         raise RuntimeError("the deployment image identity manifest is unavailable")
-    if not test_mode and (path.stat().st_uid != 0 or path.stat().st_mode & 0o022):
+    try:
+        stat = manifest_path.stat()
+    except OSError as exc:
+        raise RuntimeError("the deployment image identity manifest is unavailable") from exc
+    if path is None and (stat.st_uid != 0 or stat.st_mode & 0o022):
         raise RuntimeError("the deployment image identity manifest is not trusted")
     try:
-        payload = json.loads(path.read_bytes())
+        payload = json.loads(manifest_path.read_bytes())
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise RuntimeError("the deployment image identity manifest is invalid") from exc
     if not isinstance(payload, dict) or set(payload) != {
@@ -413,19 +415,41 @@ def _validate_representative_capture_v4(
     if experiment.holdout_range != (boundary(8), end):
         raise ValueError("representative integration holdout does not use the final 20 percent")
     folds = verified.folds.folds
+    _validate_representative_fold_layout(folds, start, end, experiment.holdout_range)
+
+
+def _validate_representative_fold_layout(
+    folds: tuple[Fold, ...],
+    start: datetime,
+    end: datetime,
+    holdout_range: tuple[datetime, datetime],
+) -> None:
+    total_minutes = int((end - start).total_seconds() // 60)
+
+    def boundary(tenths: int) -> datetime:
+        return start + timedelta(minutes=total_minutes * tenths // 10)
+
     if len(folds) != 3:
         raise ValueError("representative integration requires exactly three expanding folds")
+    previous_validation_end: datetime | None = None
     for index, fold in enumerate(folds):
         expected_start = boundary(5 + index)
         expected_end = boundary(6 + index)
+        expected_duration = expected_end - expected_start
         if (
             fold.training_start != start
             or fold.training_cutoff != expected_start
-            or fold.validation_start != expected_start
-            or fold.validation_end != expected_end
+            or fold.validation_start < fold.training_cutoff
+            or fold.validation_end - fold.validation_start != expected_duration
+            or (
+                previous_validation_end is not None
+                and fold.validation_start < previous_validation_end
+            )
             or not fold.holdout_excluded
+            or fold.validation_end > holdout_range[1]
         ):
             raise ValueError("representative fold boundaries differ from the fixed 50/30/20 rule")
+        previous_validation_end = fold.validation_end
 
 
 def _reject_replay_symlink_ancestors(path: Path) -> None:
@@ -436,22 +460,113 @@ def _reject_replay_symlink_ancestors(path: Path) -> None:
         current = current.parent
 
 
-def _copy_replay_tree(source: Path, destination: Path) -> None:
-    if source.is_symlink() or not source.is_dir():
-        raise ValueError("replay research root must be a regular non-symlink directory")
-    destination.mkdir(parents=True, exist_ok=False)
-    for candidate in sorted(source.rglob("*")):
-        relative = candidate.relative_to(source)
-        target = destination / relative
-        if candidate.is_symlink():
-            raise ValueError(f"replay research input contains a symlink: {relative}")
-        if candidate.is_dir():
-            target.mkdir(parents=True, exist_ok=False)
+def _validated_replay_file(path: Path, source_root: Path | None = None) -> Path:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("replay input must be a regular non-symlink file")
+    _reject_replay_symlink_ancestors(path)
+    resolved = path.resolve()
+    if source_root is not None and not resolved.is_relative_to(source_root):
+        raise ValueError("replay input escapes the research root")
+    return resolved
+
+
+def _declared_replay_path(raw: object, *, base: Path, source_root: Path, field: str) -> Path:
+    if not isinstance(raw, str):
+        raise ValueError(f"replay manifest {field} is malformed")
+    relative = PurePosixPath(raw)
+    if relative.is_absolute() or ".." in relative.parts:
+        raise ValueError(f"replay manifest {field} is unsafe")
+    return _validated_replay_file(base / relative, source_root)
+
+
+def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Path, ...]:
+    initial = _validated_replay_file(path, source_root)
+    pending: list[tuple[Path, str]] = [(initial, name)]
+    seen: set[Path] = set()
+    while pending:
+        current, role = pending.pop()
+        if current in seen:
             continue
-        if not candidate.is_file():
-            raise ValueError(f"replay research input is not a regular file: {relative}")
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(candidate.read_bytes())
+        seen.add(current)
+        if current.suffix != ".json":
+            continue
+        try:
+            payload = json.loads(current.read_bytes())
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise ValueError(f"replay manifest is not valid JSON: {current.name}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError(f"replay manifest must be a JSON object: {current.name}")
+        if role == "foundation":
+            children = payload.get("children")
+            if isinstance(children, dict):
+                for child_name, child in children.items():
+                    if not isinstance(child, dict):
+                        raise ValueError("foundation replay child is malformed")
+                    child_path = _declared_replay_path(
+                        child.get("manifest_path"),
+                        base=source_root,
+                        source_root=source_root,
+                        field="manifest_path",
+                    )
+                    pending.append(
+                        (
+                            child_path,
+                            "observation-manifest"
+                            if child_name == "observations"
+                            else "foundation-child",
+                        )
+                    )
+        elif role in {"foundation-child", "observation-manifest"}:
+            if role == "foundation-child":
+                pending.append(
+                    (
+                        _declared_replay_path(
+                            payload.get("file"),
+                            base=source_root,
+                            source_root=source_root,
+                            field="file",
+                        ),
+                        "binary",
+                    )
+                )
+            else:
+                files = payload.get("files")
+                if not isinstance(files, list):
+                    raise ValueError("observation replay manifest files are malformed")
+                for raw_file in files:
+                    pending.append(
+                        (
+                            _declared_replay_path(
+                                raw_file,
+                                base=source_root,
+                                source_root=source_root,
+                                field="files",
+                            ),
+                            "binary",
+                        )
+                    )
+        elif role in _REQUIRED_FEATURE_SETS:
+            chunks = payload.get("chunks")
+            if chunks is None and not payload:
+                continue
+            if not isinstance(chunks, list):
+                raise ValueError("feature replay manifest chunks are malformed")
+            for chunk in chunks:
+                if not isinstance(chunk, dict):
+                    raise ValueError("feature replay chunk is malformed")
+                for field in ("data_file", "lineage_file"):
+                    pending.append(
+                        (
+                            _declared_replay_path(
+                                chunk.get(field),
+                                base=current.parent,
+                                source_root=source_root,
+                                field=field,
+                            ),
+                            "binary",
+                        )
+                    )
+    return tuple(sorted(seen))
 
 
 def _stage_replay_inputs(
@@ -464,35 +579,59 @@ def _stage_replay_inputs(
         )
     _reject_replay_symlink_ancestors(output / "replay-inputs")
     source_root = research_root.resolve()
+    if source_root.is_symlink() or not source_root.is_dir():
+        raise ValueError("replay research root must be a regular non-symlink directory")
     output_root = output.resolve()
     if output_root.is_relative_to(source_root):
         raise ValueError("replay output must not be inside its source root")
     replay_root = output / "replay-inputs"
     replay_root.mkdir(parents=True, exist_ok=False)
     _reject_replay_symlink_ancestors(replay_root)
-    staged_research = replay_root / "research"
-    _copy_replay_tree(source_root, staged_research)
-    children: dict[str, object] = {}
-    for name, path in sorted(paths.items()):
-        if path.is_symlink() or not path.is_file():
-            raise ValueError(f"replay input must be a regular non-symlink file: {name}")
-        resolved = path.resolve()
-        try:
-            relative = resolved.relative_to(source_root)
-        except ValueError as exc:
-            if name != "experiment":
-                raise ValueError(f"replay input {name} is outside the research root") from exc
-            destination = replay_root / "experiment.json"
-            destination.write_bytes(resolved.read_bytes())
-            root_relative = PurePosixPath("replay-inputs")
-            path_relative = PurePosixPath("replay-inputs") / destination.name
+
+    collected: dict[str, tuple[Path, ...]] = {
+        name: (
+            (_validated_replay_file(path),)
+            if name == "experiment"
+            else _declared_replay_files(name, path, source_root)
+        )
+        for name, path in sorted(paths.items())
+    }
+    staged: dict[Path, PurePosixPath] = {}
+    for name, files in collected.items():
+        if name == "experiment":
+            staged[files[0]] = PurePosixPath("replay-inputs/experiment.json")
         else:
-            root_relative = PurePosixPath("replay-inputs/research")
-            path_relative = root_relative / PurePosixPath(relative.as_posix())
+            for file in files:
+                staged.setdefault(
+                    file,
+                    PurePosixPath("replay-inputs/research")
+                    / PurePosixPath(file.relative_to(source_root).as_posix()),
+                )
+    for source, relative in sorted(staged.items(), key=lambda item: item[1].as_posix()):
+        destination = output / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(source.read_bytes())
+
+    children: dict[str, object] = {}
+    for name, files in sorted(collected.items()):
+        root_relative = (
+            PurePosixPath("replay-inputs")
+            if name == "experiment"
+            else PurePosixPath("replay-inputs/research")
+        )
+        references = [
+            {
+                "path": staged[file].as_posix(),
+                "sha256": sha256(file.read_bytes()).hexdigest(),
+            }
+            for file in sorted(files, key=lambda item: staged[item].as_posix())
+        ]
+        initial = _validated_replay_file(paths[name], None if name == "experiment" else source_root)
         children[name] = {
-            "path": path_relative.as_posix(),
+            "path": staged[initial].as_posix(),
             "root": root_relative.as_posix(),
-            "sha256": sha256(resolved.read_bytes()).hexdigest(),
+            "sha256": sha256(initial.read_bytes()).hexdigest(),
+            "files": references,
         }
     return {"root": ".", "children": children}
 
@@ -884,15 +1023,47 @@ def _synthetic_pipeline_inputs() -> tuple[
             market_data_source_class=experiment.market_data_source_class,
         )
         datasets[feature_set.name] = dataset
-        manifests[feature_set.name] = {
-            "contract": "qtrad-r2-parquet-feature-manifest-v1",
-            "schema_version": 1,
+        manifest_identity: dict[str, object] = {
+            "contract": R2FeatureManifest.CONTRACT,
+            "schema_version": R2FeatureManifest.SCHEMA_VERSION,
+            "manifest_filename": f"{feature_set.name}.json",
+            "created_at": start.isoformat(),
             "semantic_dataset_id": dataset.dataset_id,
             "feature_set_name": feature_set.name,
             "feature_set_id": dataset.feature_set_id,
-            "source_class": experiment.market_data_source_class.value,
+            "raw_feature_schema_id": feature_schema_id(schema),
+            "feature_schema": [item.as_json() for item in schema],
+            "observation_dataset_id": dataset.observation_dataset_id,
+            "panel_dataset_id": dataset.panel_dataset_id,
+            "target_dataset_id": dataset.target_dataset_id,
+            "fold_dataset_id": dataset.fold_dataset_id,
+            "experiment_configuration_id": dataset.experiment_configuration_id,
             "evidence_class": experiment.evidence_class.value,
             "holdout_excluded": True,
+            "row_count": len(dataset.rows),
+            "chunk_row_limit": 8192,
+            "chunks": [
+                {
+                    "index": 0,
+                    "data_file": f"chunks/synthetic-{feature_set.name}.parquet",
+                    "data_sha256": "0" * 64,
+                    "lineage_file": f"lineage/synthetic-{feature_set.name}.parquet",
+                    "lineage_sha256": "0" * 64,
+                    "row_count": len(dataset.rows),
+                    "first_row_key": f"synthetic-{feature_set.name}-first",
+                    "last_row_key": f"synthetic-{feature_set.name}-last",
+                    "semantic_hash": "0" * 64,
+                }
+            ],
+            "application_version": "synthetic",
+            "image_identity": "qtrad@sha256:" + "1" * 64,
+            "market_data_source_class": experiment.market_data_source_class.value,
+        }
+        manifest_hash = sha256(canonical_bytes(manifest_identity)).hexdigest()
+        manifests[feature_set.name] = {
+            **manifest_identity,
+            "manifest_id": manifest_hash[:24],
+            "manifest_sha256": manifest_hash,
         }
     evidence: dict[str, JsonValue] = {
         "availability_delay_report": {},

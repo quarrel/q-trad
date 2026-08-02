@@ -9,6 +9,10 @@ import tempfile
 from hashlib import sha256
 from pathlib import Path
 
+import pytest
+
+import qtrad.runtime.r2_verification as _verification
+
 _commit = subprocess.check_output(("git", "rev-parse", "HEAD"), text=True).strip()
 _unsigned = {
     "contract": "qtrad-runtime-image-identity-v1",
@@ -30,5 +34,13 @@ _manifest_path.write_text(
     encoding="utf-8",
 )
 _manifest_path.chmod(0o444)
-os.environ.setdefault("QTRAD_TEST_MODE", "1")
-os.environ.setdefault("QTRAD_IMAGE_IDENTITY_PATH", str(_manifest_path))
+_production_loader = _verification._image_identity_manifest
+
+
+@pytest.fixture(autouse=True)
+def _test_image_identity_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        _verification,
+        "_image_identity_manifest",
+        lambda: _production_loader(_manifest_path),
+    )
