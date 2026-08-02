@@ -27,6 +27,7 @@ from qtrad.application.r2_preprocessing import (
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import ReturnDisposition, TargetRow
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_evaluation import (
     BucketMetrics,
     BucketOrderingSummary,
@@ -560,7 +561,7 @@ def _build_evaluation_core(
         sorted(_intersection(tuple(set(prediction_by_family[family]) for family in ModelFamily)))
     )
     evaluated_models = (
-        _zero_model_manifest(verified, targets),
+        _zero_model_manifest(verified, targets, experiment.market_data_source_class),
         *(
             _evaluated_model_manifest(
                 model,
@@ -1049,7 +1050,13 @@ def _evaluated_model_manifest(
 def _zero_model_manifest(
     verified: R1FoundationBindings,
     targets: Mapping[str, TargetRow],
+    market_data_source_class: MarketDataSourceClass | None = None,
 ) -> EvaluatedModelManifest:
+    source = market_data_source_class or getattr(
+        verified.bundle,
+        "market_data_source_class",
+        MarketDataSourceClass.IG_NATIVE_CAPTURE,
+    )
     return EvaluatedModelManifest.create(
         model_family=ModelFamily.ZERO_RETURN,
         feature_set_id=None,
@@ -1067,7 +1074,7 @@ def _zero_model_manifest(
         ),
         training_prediction_evidence_ids=(),
         coefficient_stability_summary_id=None,
-        market_data_source_class=verified.bundle.market_data_source_class,
+        market_data_source_class=source,
     )
 
 

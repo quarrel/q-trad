@@ -1078,10 +1078,17 @@ def _load_selection(path: Path) -> dict[str, object]:
 
 
 def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) -> dict[str, object]:
+    matches: list[dict[str, object]] = []
     for reference in (*bundle.evaluation_children, *bundle.forecast_manifests):
-        if reference.contract == contract:
-            return _load_selection(bundle_path.parent / reference.path)
-    raise ValueError(f"OOF bundle is missing required {contract} child")
+        if reference.contract != contract:
+            continue
+        payload = _load_selection(bundle_path.parent / reference.path)
+        if contract == "qtrad-r2-evaluation-v1" and "report_id" not in payload:
+            continue
+        matches.append(payload)
+    if len(matches) != 1:
+        raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
+    return matches[0]
 
 
 def selection_freeze(
