@@ -136,7 +136,7 @@ def test_software_bundle_rejects_manufactured_representative_input(tmp_path: Pat
     representative_root.mkdir()
     bundle, children = _bundle_and_children()
     representative_manifest = write_r2_oof_bundle(representative_root, bundle, children)
-    with pytest.raises(ValueError, match="evaluation-register"):
+    with pytest.raises(ValueError, match="descriptor"):
         selection_freeze(
             oof_bundle_path=representative_manifest,
             frozen_by="test-operator",
