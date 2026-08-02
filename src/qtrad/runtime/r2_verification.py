@@ -595,7 +595,12 @@ def _synthetic_pipeline_inputs() -> tuple[
     for feature_set in experiment.feature_sets:
         schema = feature_schema_for_set(experiment, feature_set.name)
         preprocessing_schema = derive_r2_preprocessing_schema(schema)
-        set_id = feature_set_id(experiment.configuration_id, feature_set.name, schema)
+        set_id = feature_set_id(
+            experiment.configuration_id,
+            feature_set.name,
+            schema,
+            experiment.market_data_source_class,
+        )
         set_rows = []
         for target in targets.rows:
             values = []
