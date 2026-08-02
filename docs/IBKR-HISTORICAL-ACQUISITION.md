@@ -418,6 +418,8 @@ Add the contract-selection CLI:
 ```text
 qtrad instruments select --provider ibkr \
   --capability-review <path> \
+  --catalogue <canonical-catalogue-path> \
+  --probe-spec <canonical-probe-spec-path> \
   --selection <operator-authored-path> \
   --frozen-by <operator> \
   --output <path>

@@ -11,7 +11,6 @@ from pathlib import Path
 from typing import cast
 
 from qtrad.application.ibkr_historical import (
-    _gateway_configuration_identity,
     build_ibkr_contract_selection,
     build_ibkr_runtime_lock,
 )
@@ -25,8 +24,8 @@ from qtrad.domain.ibkr_historical import (
     IbkrContractSelectionDecision,
 )
 from qtrad.domain.identifiers import InstrumentId
-from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
-from qtrad.runtime.universe import load_capture_candidates
+from qtrad.runtime.ibkr_capability import ibkr_capability_probe_spec_from_document
+from qtrad.runtime.universe import capture_candidates_from_document
 
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _SELECTION_KEYS = {
@@ -94,8 +93,9 @@ def load_ibkr_capability_review(
     """Load a review and prove it covers the independently reloaded canonical closure."""
     from qtrad.application.ibkr_historical import _verify_capability_review
 
-    candidates = load_capture_candidates(catalogue_path)
-    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
+    candidates, probe_spec = _load_canonical_inputs(
+        catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
     document = _read_json_object(path, "IBKR capability review")
     _verify_capability_review(
         document,
@@ -142,8 +142,9 @@ def build_ibkr_contract_selection_from_files(
     frozen_by: str,
     frozen_at: datetime,
 ) -> IbkrContractSelection:
-    candidates = load_capture_candidates(catalogue_path)
-    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
+    candidates, probe_spec = _load_canonical_inputs(
+        catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
     return build_ibkr_contract_selection(
         capability_review=load_ibkr_capability_review(
             capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
@@ -197,8 +198,9 @@ def verify_ibkr_contract_selection(
     review = load_ibkr_capability_review(
         capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
-    candidates = load_capture_candidates(catalogue_path)
-    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
+    candidates, probe_spec = _load_canonical_inputs(
+        catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
     rebuilt = build_ibkr_contract_selection(
         capability_review=review,
         operator_selection={
@@ -291,6 +293,12 @@ def verify_ibkr_runtime_lock(
     expected_api_sha256: str,
     expected_ibc_sha256: str,
     expected_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
 ) -> IbkrAcquisitionRuntime:
     """Replay runtime identity against explicit authoritative archive/image attestations."""
     runtime = load_ibkr_runtime_lock(path)
@@ -313,24 +321,28 @@ def verify_ibkr_runtime_lock(
         gateway_archive=gateway_archive,
         api_archive=api_archive,
         ibc_archive=ibc_archive,
-        gateway_version=runtime.gateway_version,
-        api_version=runtime.api_version,
-        ibc_version=runtime.ibc_version,
+        gateway_version=expected_gateway_version,
+        api_version=expected_api_version,
+        ibc_version=expected_ibc_version,
         qtrad_image_digest=expected_image_digest,
         frozen_at=runtime.frozen_at,
-        api_host=runtime.api_host,
-        api_port=runtime.api_port,
-        client_id_policy=runtime.client_id_policy,
+        api_host=expected_api_host,
+        api_port=expected_api_port,
+        client_id_policy=expected_client_id_policy,
     )
     if rebuilt.as_json_value() != runtime.as_json_value():
         raise ValueError("IBKR runtime lock does not replay from the actual runtime identity")
-    if runtime.gateway_configuration_identity != _gateway_configuration_identity(
-        api_host=runtime.api_host,
-        api_port=runtime.api_port,
-        client_id_policy=runtime.client_id_policy,
-    ):
-        raise ValueError("IBKR runtime lock configuration identity is not reconstructed")
     return runtime
+
+
+def _load_canonical_inputs(*, catalogue_path: Path, probe_spec_path: Path):
+    candidates = capture_candidates_from_document(
+        _read_toml_object(catalogue_path, "IBKR canonical catalogue")
+    )
+    probe_spec = ibkr_capability_probe_spec_from_document(
+        _read_toml_object(probe_spec_path, "IBKR capability probe specification")
+    )
+    return candidates, probe_spec
 
 
 def _read_json_document(path: Path, label: str) -> dict[str, object]:

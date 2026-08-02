@@ -2,6 +2,7 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -232,6 +233,12 @@ def test_runtime_lock_replays_actual_environment_and_authoritative_archives(
             expected_api_sha256=hashes[1],
             expected_ibc_sha256=hashes[2],
             expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         )
         == runtime
     )
@@ -252,6 +259,12 @@ def test_runtime_lock_replays_actual_environment_and_authoritative_archives(
             expected_api_sha256=hashes[1],
             expected_ibc_sha256=hashes[2],
             expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         )
         == runtime
     )
@@ -265,6 +278,12 @@ def test_runtime_lock_replays_actual_environment_and_authoritative_archives(
             expected_api_sha256=hashes[1],
             expected_ibc_sha256=hashes[2],
             expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         )
 
 
@@ -284,4 +303,251 @@ def test_runtime_lock_rejects_duplicate_archive_roles(
             ibc_version="3.24.1",
             qtrad_image_digest="sha256:" + "b" * 64,
             frozen_at=_NOW,
+        )
+
+
+def _rehash_runtime_payload(payload: dict[str, object]) -> None:
+    unsigned = {key: value for key, value in payload.items() if key != "runtime_sha256"}
+    payload["runtime_sha256"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_runtime_lock_rejects_rehashed_untrusted_runtime_labels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
+    archives = []
+    for name in ("gateway.zip", "api.zip", "ibc.zip"):
+        archive = tmp_path / name
+        archive.write_bytes(name.encode())
+        archives.append(archive)
+    image = "sha256:" + "b" * 64
+    runtime = build_ibkr_runtime_lock(
+        gateway_archive=archives[0],
+        api_archive=archives[1],
+        ibc_archive=archives[2],
+        gateway_version="10.49",
+        api_version="10.50",
+        ibc_version="3.24.1",
+        qtrad_image_digest=image,
+        frozen_at=_NOW,
+    )
+    path = tmp_path / "runtime-lock.json"
+    write_ibkr_runtime_lock(path, runtime)
+    hashes = [hashlib.sha256(item.read_bytes()).hexdigest() for item in archives]
+    payload = json.loads(path.read_text())
+    payload["gateway_version"] = "99.99"
+    _rehash_runtime_payload(payload)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="does not replay"):
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        )
+
+
+def test_runtime_lock_rejects_rehashed_untrusted_gateway_configuration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
+    archives = []
+    for name in ("gateway.zip", "api.zip", "ibc.zip"):
+        archive = tmp_path / name
+        archive.write_bytes(name.encode())
+        archives.append(archive)
+    image = "sha256:" + "b" * 64
+    runtime = build_ibkr_runtime_lock(
+        gateway_archive=archives[0],
+        api_archive=archives[1],
+        ibc_archive=archives[2],
+        gateway_version="10.49",
+        api_version="10.50",
+        ibc_version="3.24.1",
+        qtrad_image_digest=image,
+        frozen_at=_NOW,
+    )
+    path = tmp_path / "runtime-lock.json"
+    write_ibkr_runtime_lock(path, runtime)
+    hashes = [hashlib.sha256(item.read_bytes()).hexdigest() for item in archives]
+    payload = json.loads(path.read_text())
+    payload["api_host"] = "untrusted.example.invalid"
+    payload["gateway_configuration_identity"] = historical._gateway_configuration_identity(
+        api_host="untrusted.example.invalid",
+        api_port=4002,
+        client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+    )
+    _rehash_runtime_payload(payload)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="does not replay"):
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        )
+
+
+def test_contract_selection_restores_create_only_field_and_symlink_mutations(
+    tmp_path: Path,
+) -> None:
+    review = _review()
+    selection = _selection(review)
+    path = tmp_path / "selection.json"
+    write_ibkr_contract_selection(path, selection)
+    with pytest.raises(FileExistsError):
+        write_ibkr_contract_selection(path, selection)
+    payload = json.loads(path.read_text())
+    payload["unexpected"] = True
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        load_ibkr_contract_selection(path)
+    path.unlink()
+    target = tmp_path / "selection-target.json"
+    target.write_text("{}")
+    path.symlink_to(target)
+    with pytest.raises(ValueError, match="symlink"):
+        load_ibkr_contract_selection(path)
+
+
+def test_contract_selection_restores_duplicate_and_substitution_rejection() -> None:
+    review = _review()
+    operator = _operator(review)
+    decisions = operator["decisions"]
+    assert isinstance(decisions, list)
+    decision = cast(dict[str, object], decisions[0])
+    duplicate = {**operator, "decisions": [decision, decision]}
+    with pytest.raises(ValueError, match="repeats instrument"):
+        build_ibkr_contract_selection(
+            capability_review=review,
+            operator_selection=duplicate,
+            canonical_instrument_ids=frozenset({_QUERY.instrument_id}),
+            canonical_queries=frozenset({_QUERY}),
+            frozen_by="operator",
+            frozen_at=_NOW,
+        )
+    fingerprint_value = decision["fingerprint"]
+    assert isinstance(fingerprint_value, dict)
+    fingerprint = dict(fingerprint_value)
+    fingerprint["con_id"] = 999
+    substituted = {**operator, "decisions": [{**decision, "fingerprint": fingerprint}]}
+    with pytest.raises(ValueError, match="exact capability-review match"):
+        build_ibkr_contract_selection(
+            capability_review=review,
+            operator_selection=substituted,
+            canonical_instrument_ids=frozenset({_QUERY.instrument_id}),
+            canonical_queries=frozenset({_QUERY}),
+            frozen_by="operator",
+            frozen_at=_NOW,
+        )
+
+
+def test_contract_selection_rejects_symlinked_and_oversized_canonical_inputs(
+    tmp_path: Path,
+) -> None:
+    catalogue, probe = _sources(tmp_path)
+    from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
+    from qtrad.runtime.universe import load_capture_candidates
+
+    review = _review()
+    review["catalogue_hash"] = load_capture_candidates(catalogue).configuration_hash
+    review["probe_spec_hash"] = load_ibkr_capability_probe_spec(probe).configuration_hash
+    unsigned = {key: value for key, value in review.items() if key != "review_hash"}
+    review["review_hash"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    selection = _selection(review)
+    selection_path = tmp_path / "selection.json"
+    review_path = tmp_path / "review.json"
+    write_ibkr_contract_selection(selection_path, selection)
+    review_path.write_text(json.dumps(review))
+    linked_catalogue = tmp_path / "linked-catalogue.toml"
+    linked_catalogue.symlink_to(catalogue)
+    with pytest.raises(ValueError, match="symlink"):
+        verify_ibkr_contract_selection(
+            selection_path,
+            capability_review_path=review_path,
+            catalogue_path=linked_catalogue,
+            probe_spec_path=probe,
+        )
+    with pytest.raises(ValueError, match="escapes"):
+        verify_ibkr_contract_selection(
+            selection_path,
+            capability_review_path=review_path,
+            catalogue_path=tmp_path / "nested" / ".." / catalogue.name,
+            probe_spec_path=probe,
+        )
+    oversized_probe = tmp_path / "oversized-probe.toml"
+    oversized_probe.write_bytes(b"#" * (8 * 1024 * 1024 + 1))
+    with pytest.raises(ValueError, match="bounded size"):
+        verify_ibkr_contract_selection(
+            selection_path,
+            capability_review_path=review_path,
+            catalogue_path=catalogue,
+            probe_spec_path=oversized_probe,
+        )
+
+
+def test_runtime_lock_rejects_archive_mutation_after_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
+    archives = []
+    for name in ("gateway.zip", "api.zip", "ibc.zip"):
+        archive = tmp_path / name
+        archive.write_bytes(name.encode())
+        archives.append(archive)
+    image = "sha256:" + "b" * 64
+    runtime = build_ibkr_runtime_lock(
+        gateway_archive=archives[0],
+        api_archive=archives[1],
+        ibc_archive=archives[2],
+        gateway_version="10.49",
+        api_version="10.50",
+        ibc_version="3.24.1",
+        qtrad_image_digest=image,
+        frozen_at=_NOW,
+    )
+    path = tmp_path / "runtime-lock.json"
+    write_ibkr_runtime_lock(path, runtime)
+    hashes = [hashlib.sha256(item.read_bytes()).hexdigest() for item in archives]
+    archives[1].write_bytes(b"mutated")
+    with pytest.raises(ValueError, match="authoritative role attestation"):
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         )
