@@ -48,7 +48,7 @@ admin_psql --command "CREATE DATABASE \"$test_database\""
 export QTRAD_DATABASE_URL="postgresql+asyncpg://${test_user}:${test_password}@${test_host}:${test_port}/${test_database}"
 export QTRAD_TEST_DATABASE_URL="$QTRAD_DATABASE_URL"
 export QTRAD_MIGRATION_DATABASE_URL="postgresql+psycopg://${test_user}:${test_password}@${test_host}:${test_port}/${test_database}"
-
+# Runtime image identity is supplied by the authenticated test fixture or deployment manifest.
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright

@@ -302,7 +302,7 @@ def test_feature_registry_and_explicit_empty_dataset_identity_are_deterministic(
     assert len(dataset.dataset_id) == 64
 
 
-def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
+def test_r2b_feature_json_and_source_bound_ids_are_deterministic() -> None:
     schema = (
         FeatureDefinition("return_60s", FeatureFamily.LOCAL_RETURNS),
         FeatureDefinition("window_coverage_300s", FeatureFamily.LOCAL_VOLATILITY_RANGE),
@@ -318,7 +318,7 @@ def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
         == "b77d8c36f5f98f79cd605787fede860335f75e7942992d75f32d7d684465e012"
     )
     set_identity = feature_set_id("c" * 64, "fixture", schema)
-    assert set_identity == "3f379dd876b3df607eb091df96444316a709bc5d50e2f8faca27278b94977ef4"
+    assert set_identity == "e77eb0a85bb37ce0a3ed44afc642e8c9b48ae4f6919ce7be7d056bab214cecfb"
     dataset = R2FeatureDataset.create(
         (),
         feature_schema=schema,
@@ -330,7 +330,7 @@ def test_r2b_feature_json_and_canonical_ids_remain_v1_compatible() -> None:
         experiment_configuration_id="c" * 64,
         evidence_class=EvidenceClass.IMPLEMENTATION,
     )
-    assert dataset.dataset_id == "9f6863fb8efd3cf5f0854e4cf26fa5d1f83b5de526a617ba1fcde84f5f911ed7"
+    assert dataset.dataset_id == "57feeaa2f139fefd227c3ccf4a52c2ae04e415e268956bc108e7f7adfc8b4a5f"
 
 
 def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
@@ -1292,7 +1292,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
         output_path=Path("features.json"),
     )
     built = json.loads(capsys.readouterr().out)
-    assert built["contract"] == "qtrad-r2-feature-parquet-v1"
+    assert built["contract"] == "qtrad-r2-feature-parquet-v2"
     assert built["rows"] == 1
     await cli._verify_persisted_r2_features(
         settings,

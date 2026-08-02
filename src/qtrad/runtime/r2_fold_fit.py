@@ -12,6 +12,7 @@ from typing import cast
 from qtrad.application.r2_baselines import build_local_ridge_fold
 from qtrad.application.r2_pooled import build_pooled_ridge_fold
 from qtrad.application.r2_readiness import R1FoundationBindings
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_baselines import (
     R2_FOLD_FIT_CONTRACT,
     FoldFitDiagnostics,
@@ -40,6 +41,7 @@ _FIT_KEYS = {
     "feature_schema_id",
     "preprocessing_schema_id",
     "evidence_class",
+    "market_data_source_class",
     "application_image_identity",
     "numpy_library_identity",
     "sklearn_library_identity",
@@ -116,6 +118,12 @@ def decode_r2_fold_fit(payload: bytes | str | Mapping[str, object]) -> R2FoldFit
         feature_schema_id=_text(obj["feature_schema_id"], "feature_schema_id"),
         preprocessing_schema_id=_text(obj["preprocessing_schema_id"], "preprocessing_schema_id"),
         evidence_class=EvidenceClass(_text(obj["evidence_class"], "evidence_class")),
+        market_data_source_class=MarketDataSourceClass(
+            _text(
+                obj.get("market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE.value),
+                "market_data_source_class",
+            )
+        ),
         application_image_identity=_text(
             obj["application_image_identity"], "application_image_identity"
         ),
@@ -156,6 +164,12 @@ def verify_r2_fold_fit(
     """Rebuild the final fit and compare all structural and numerical evidence."""
 
     persisted = decode_r2_fold_fit(persisted_payload)
+    if persisted.market_data_source_class is not experiment.market_data_source_class:
+        raise ValueError("fold fit source class differs from experiment")
+    if persisted.market_data_source_class is not selection.market_data_source_class:
+        raise ValueError("fold fit source class differs from preprocessing selection")
+    if persisted.market_data_source_class is not feature_dataset.market_data_source_class:
+        raise ValueError("fold fit source class differs from feature dataset")
     if selection.model_family is ModelFamily.LOCAL_RIDGE:
         rebuilt = build_local_ridge_fold(
             verified,

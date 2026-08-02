@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R2 — local and pooled baselines (R2.F1 core implemented; integration and R2.H verification pending)
+**Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
 **Parallel track:** independent IBKR paper-market-data qualification and historical acquisition
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -38,10 +38,11 @@ work and records only the milestone sequence needed to reach the next trustworth
   make no effectiveness claim. R1 implementation is complete; producing the first real 23-market
   bundle remains a fail-closed R2 entry prerequisite once the configured evidence interval and
   product-role qualification support it.
-- R2.A through R2.E are software-complete implementation evidence. The R2.F1 core machinery is
-  implemented, but its representative source-specific integration and corresponding R2.H
-  software-verification bundle remain before the R2.F1 exit is complete; R2.F2 and the locked holdout
-  remain gated on a frozen qualifying foundation.
+- R2.A through R2.E are software-complete implementation evidence. The R2.F1 core and its source/evidence-bound
+  replay machinery are implemented, including create-only forecast, OOF, selection and software-verification
+  contracts plus CLI operations and mutation-tested independent authentication. A fresh representative
+  source-specific integration and its R2.H software bundle remain before the R2.F1 exit is complete; R2.F2
+  and the locked holdout remain gated on a frozen qualifying foundation.
 - ADR 0028 approves an independent, market-data-only IBKR paper source. Its contract review,
   historical bootstrap and later live capture proceed as a parallel data track under
   `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`. No IBKR adapter, account capability, dataset or host is
@@ -105,9 +106,9 @@ chronology ambiguity before those contracts are fixed.
 ## R2 — local and pooled baselines
 
 - R2 implementation plan `docs/R2_IMPLEMENTATION_PLAN.md`.
-- R2.A through R2.E are software-complete; the R2.F1 core is implemented and awaits representative
-  integration plus its corresponding R2.H software-verification bundle. R2.C supplies authenticated,
-  training-only preprocessing and primary-horizon Ridge alpha-selection evidence. R2.D retains local
+- R2.A through R2.E are software-complete; R2.F1 now has source-bound, independently replayable
+  OOF/selection/software bundle contracts and CLI operations, but still requires a fresh representative
+  capture-v4 integration to exercise them. R2.C supplies authenticated,
   final fold fits, chronological forecasts, explicit expected-opportunity coverage, independent
   coefficient replay and coefficient stability summaries. R2.E adds pooled local-feature and fixed
   cross-asset controls with explicit instrument identity, manifested equal-instrument weights and exact

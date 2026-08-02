@@ -1,7 +1,7 @@
 # Current status
 
-**Updated:** 2026-07-29
-**Current milestone:** R2 — local and pooled baselines (R2.F1 core implemented; integration and R2.H verification pending)
+**Updated:** 2026-08-01
+**Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
 **Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -121,10 +121,13 @@ remains offline/replay.
   evidence, including comparator, coverage, breadth, stability, concentration and replay gates. The
   verifier independently replays the comparator set, metrics, decisions, holdout comparator IDs, fitting
   policy and image identity. The manifest contains no holdout features, outcomes or caller-asserted empty
-  external state; trusted absence verification is explicitly `PENDING_R2_H_INTEGRATION`. Rehashed semantic
-  mutation and child mutation tests pass. This is implementation evidence only: representative source-
-  specific integration and the corresponding R2.H bundle remain required before the R2.F1 exit, and no
-  confirmatory model-selection or effectiveness claim is made.
+  external state; trusted absence verification is explicitly PENDING_R2_H_INTEGRATION. Rehashed semantic
+  mutation and child mutation tests pass. The source/evidence-bound forecast-manifest, OOF-bundle and
+  software-verification contracts now have create-only persistence, orphan/symlink/path-escape rejection,
+  independent child authentication and CLI round-trip coverage. The synthetic software path is verified
+  locally, but no fresh representative capture-v4 snapshot is available in this workspace; therefore
+  representative integration readiness is not asserted and R2.F1/R2.H remain pending. No confirmatory
+  model-selection or effectiveness claim is made.
 - ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
   IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
   20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a

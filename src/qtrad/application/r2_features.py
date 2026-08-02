@@ -27,7 +27,7 @@ from qtrad.domain.foundation import (
     TargetDataset,
 )
 from qtrad.domain.foundation_bundle import FoundationBundle
-from qtrad.domain.market_data import PriceBasis
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
@@ -231,7 +231,12 @@ def iter_raw_feature_rows(
     """Yield canonical feature rows without retaining the output row collection."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    set_identity = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    set_identity = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     yield from _iter_raw_feature_rows(
         foundation,
         experiment,
@@ -1040,6 +1045,9 @@ class R2FeatureManifestBindings(Protocol):
     def evidence_class(self) -> EvidenceClass: ...
 
     @property
+    def market_data_source_class(self) -> MarketDataSourceClass: ...
+
+    @property
     def holdout_excluded(self) -> bool: ...
 
 
@@ -1053,7 +1061,12 @@ def verify_raw_feature_manifest_bindings(
     """Authenticate persisted feature metadata before reading feature rows."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    expected_set_id = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    expected_set_id = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     expected_ids = (
         ("observation", manifest.observation_dataset_id, foundation.observations.dataset_id),
         ("panel", manifest.panel_dataset_id, foundation.panel.dataset_id),
@@ -1071,6 +1084,8 @@ def verify_raw_feature_manifest_bindings(
         raise ValueError("feature manifest schema differs from declared feature set")
     if manifest.evidence_class != experiment.evidence_class:
         raise ValueError("feature manifest evidence class differs from experiment")
+    if manifest.market_data_source_class != experiment.market_data_source_class:
+        raise ValueError("feature manifest source class differs from experiment")
     if not manifest.holdout_excluded:
         raise ValueError("feature manifest does not exclude the locked holdout")
 
@@ -1107,6 +1122,7 @@ def verify_raw_feature_dataset(
         fold_dataset_id=foundation.folds.dataset_id,
         experiment_configuration_id=experiment.configuration_id,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
     if dataset != expected:
         raise ValueError("feature dataset semantic identity differs from deterministic replay")
@@ -1122,7 +1138,12 @@ def verify_raw_feature_rows(
     """Replay persisted rows in lockstep without materialising the expected dataset."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    expected_set_id = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    expected_set_id = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     expected = iter_raw_feature_rows(
         foundation,
         experiment,

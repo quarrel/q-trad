@@ -10,10 +10,11 @@ from typing import ClassVar
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import InstrumentRole
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.time import require_utc
 
-R2_EXPERIMENT_CONTRACT = "qtrad-r2-experiment-config-v1"
-R2_READINESS_CONTRACT = "qtrad-r2-readiness-v1"
+R2_EXPERIMENT_CONTRACT = "qtrad-r2-experiment-config-v2"
+R2_READINESS_CONTRACT = "qtrad-r2-readiness-v2"
 _ALLOWED_HORIZONS = frozenset(timedelta(minutes=value) for value in (5, 15, 30, 60))
 
 
@@ -166,9 +167,10 @@ class R2ExperimentConfig:
     numeric_replay_absolute_tolerance: float
     evidence_class: EvidenceClass
     model_families: tuple[ModelFamily, ...]
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_EXPERIMENT_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not self.name or self.schema_version != self.SCHEMA_VERSION:
@@ -388,6 +390,7 @@ class R2ExperimentConfig:
             "numeric_replay_relative_tolerance": self.numeric_replay_relative_tolerance,
             "numeric_replay_absolute_tolerance": self.numeric_replay_absolute_tolerance,
             "evidence_class": self.evidence_class.value,
+            "market_data_source_class": self.market_data_source_class.value,
             "model_families": [item.value for item in self.model_families],
         }
 
@@ -408,13 +411,14 @@ class R2ReadinessReport:
     active_source_duration_seconds: Mapping[str, float]
     unmet_conditions: tuple[str, ...]
     evidence_class: EvidenceClass
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_READINESS_CONTRACT
 
     def as_json(self) -> dict[str, JsonValue]:
         return {
             "contract": self.CONTRACT,
-            "schema_version": 1,
+            "schema_version": 2,
             "experiment_configuration_id": self.experiment_configuration_id,
             "r1_bundle_id": self.r1_bundle_id,
             "software_contract_ready": self.software_contract_ready.value,
@@ -437,6 +441,7 @@ class R2ReadinessReport:
             },
             "unmet_conditions": list(self.unmet_conditions),
             "evidence_class": self.evidence_class.value,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
 

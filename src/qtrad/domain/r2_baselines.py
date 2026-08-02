@@ -10,13 +10,14 @@ from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_models import FitDisposition, PreprocessingFit
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v1"
-R2_FORECAST_COVERAGE_CONTRACT = "qtrad-r2-forecast-coverage-v1"
-R2_COEFFICIENT_STABILITY_CONTRACT = "qtrad-r2-coefficient-stability-v1"
+R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v2"
+R2_FORECAST_COVERAGE_CONTRACT = "qtrad-r2-forecast-coverage-v2"
+R2_COEFFICIENT_STABILITY_CONTRACT = "qtrad-r2-coefficient-stability-v2"
 
 
 class ForecastCoverageDisposition(StrEnum):
@@ -45,6 +46,7 @@ class _R2FoldFitArguments(TypedDict):
     feature_schema_id: str
     preprocessing_schema_id: str
     evidence_class: EvidenceClass
+    market_data_source_class: MarketDataSourceClass
     application_image_identity: str
     numpy_library_identity: str
     sklearn_library_identity: str
@@ -74,6 +76,7 @@ class _ForecastCoverageArguments(TypedDict):
     disposition: ForecastCoverageDisposition
     forecast_id: str | None
     reason: str | None
+    market_data_source_class: MarketDataSourceClass
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +154,7 @@ class R2FoldFit:
     failure: str | None
     diagnostics: FoldFitDiagnostics | None
     artifact_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_FOLD_FIT_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -280,6 +284,7 @@ class R2FoldFit:
                 feature_schema_id=self.feature_schema_id,
                 preprocessing_schema_id=self.preprocessing_schema_id,
                 evidence_class=self.evidence_class,
+                market_data_source_class=self.market_data_source_class,
                 application_image_identity=self.application_image_identity,
                 numpy_library_identity=self.numpy_library_identity,
                 sklearn_library_identity=self.sklearn_library_identity,
@@ -316,6 +321,7 @@ class ForecastCoverageRow:
     forecast_id: str | None
     reason: str | None
     coverage_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     def __post_init__(self) -> None:
         require_utc(self.decision_time, "forecast-coverage decision time")
@@ -361,6 +367,7 @@ class ForecastCoverageRow:
                 disposition=self.disposition,
                 forecast_id=self.forecast_id,
                 reason=self.reason,
+                market_data_source_class=self.market_data_source_class,
             )
         )
 
@@ -376,6 +383,7 @@ class ForecastCoverageDataset:
     fold_dataset_id: str
     r2_feature_dataset_id: str
     dataset_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_FORECAST_COVERAGE_CONTRACT
 
@@ -397,6 +405,7 @@ class ForecastCoverageDataset:
             target_dataset_id=self.target_dataset_id,
             fold_dataset_id=self.fold_dataset_id,
             r2_feature_dataset_id=self.r2_feature_dataset_id,
+            market_data_source_class=self.market_data_source_class,
         ):
             raise ValueError("forecast-coverage dataset ID does not match its semantic content")
 
@@ -409,6 +418,7 @@ class ForecastCoverageDataset:
         target_dataset_id: str,
         fold_dataset_id: str,
         r2_feature_dataset_id: str,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "ForecastCoverageDataset":
         ordered = tuple(sorted(rows, key=_coverage_key))
         return cls(
@@ -423,7 +433,9 @@ class ForecastCoverageDataset:
                 target_dataset_id=target_dataset_id,
                 fold_dataset_id=fold_dataset_id,
                 r2_feature_dataset_id=r2_feature_dataset_id,
+                market_data_source_class=market_data_source_class,
             ),
+            market_data_source_class,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -436,6 +448,7 @@ class ForecastCoverageDataset:
             "r2_feature_dataset_id": self.r2_feature_dataset_id,
             "rows": [row.as_json() for row in self.rows],
             "dataset_id": self.dataset_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
 
@@ -497,6 +510,7 @@ class CoefficientStabilitySummary:
     rows: tuple[CoefficientStabilityRow, ...]
     fold_fit_ids: tuple[str, ...]
     summary_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_COEFFICIENT_STABILITY_CONTRACT
 
@@ -518,12 +532,17 @@ class CoefficientStabilitySummary:
         )
         if expected != self.rows:
             raise ValueError("coefficient-stability rows must use deterministic ordering")
-        if self.summary_id != coefficient_stability_id(self.rows, self.fold_fit_ids):
+        if self.summary_id != coefficient_stability_id(
+            self.rows, self.fold_fit_ids, self.market_data_source_class
+        ):
             raise ValueError("coefficient-stability ID does not match its semantic content")
 
     @classmethod
     def create(
-        cls, rows: Sequence[CoefficientStabilityRow], fold_fit_ids: Sequence[str]
+        cls,
+        rows: Sequence[CoefficientStabilityRow],
+        fold_fit_ids: Sequence[str],
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "CoefficientStabilitySummary":
         ordered_rows = tuple(
             sorted(
@@ -540,7 +559,8 @@ class CoefficientStabilitySummary:
         return cls(
             ordered_rows,
             ordered_fit_ids,
-            coefficient_stability_id(ordered_rows, ordered_fit_ids),
+            coefficient_stability_id(ordered_rows, ordered_fit_ids, market_data_source_class),
+            market_data_source_class,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -550,10 +570,12 @@ class CoefficientStabilitySummary:
             "fold_fit_ids": list(self.fold_fit_ids),
             "rows": [row.as_json() for row in self.rows],
             "summary_id": self.summary_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
 
 def fold_fit_id(payload: dict[str, JsonValue]) -> str:
+    """Hash the complete fit lineage, including its market-data source."""
     return _semantic_id(payload)
 
 
@@ -568,6 +590,7 @@ def forecast_coverage_dataset_id(
     target_dataset_id: str,
     fold_dataset_id: str,
     r2_feature_dataset_id: str,
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> str:
     return _semantic_id(
         {
@@ -577,19 +600,23 @@ def forecast_coverage_dataset_id(
             "target_dataset_id": target_dataset_id,
             "fold_dataset_id": fold_dataset_id,
             "r2_feature_dataset_id": r2_feature_dataset_id,
+            "market_data_source_class": market_data_source_class.value,
             "rows": [row.as_json() for row in rows],
         }
     )
 
 
 def coefficient_stability_id(
-    rows: Sequence[CoefficientStabilityRow], fold_fit_ids: Sequence[str]
+    rows: Sequence[CoefficientStabilityRow],
+    fold_fit_ids: Sequence[str],
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> str:
     return _semantic_id(
         {
             "contract": R2_COEFFICIENT_STABILITY_CONTRACT,
             "schema_version": 1,
             "fold_fit_ids": list(fold_fit_ids),
+            "market_data_source_class": market_data_source_class.value,
             "rows": [row.as_json() for row in rows],
         }
     )
@@ -635,6 +662,9 @@ def _fold_fit_json(values: _R2FoldFitArguments) -> dict[str, JsonValue]:
                 "feature_schema_id": values["feature_schema_id"],
                 "preprocessing_schema_id": values["preprocessing_schema_id"],
                 "evidence_class": values["evidence_class"].value,
+                "market_data_source_class": values.get(
+                    "market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE
+                ).value,
                 "application_image_identity": values["application_image_identity"],
                 "numpy_library_identity": values["numpy_library_identity"],
                 "sklearn_library_identity": values["sklearn_library_identity"],
@@ -678,6 +708,9 @@ def _coverage_row_json(values: _ForecastCoverageArguments) -> dict[str, JsonValu
                 "disposition": values["disposition"].value,
                 "forecast_id": values["forecast_id"],
                 "reason": values["reason"],
+                "market_data_source_class": values.get(
+                    "market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE
+                ).value,
             }
         ),
     )

@@ -27,6 +27,7 @@ from qtrad.application.r2_preprocessing import (
 from qtrad.application.r2_readiness import R1FoundationBindings, verify_exact_r1_bindings
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import ReturnDisposition, TargetRow
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_evaluation import (
     BucketMetrics,
     BucketOrderingSummary,
@@ -190,6 +191,7 @@ def build_local_comparator_manifest(
         fold_fit_ids=tuple(result.fit.artifact_id for result in fold_results),
         coverage_rows=rows,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
 
 
@@ -559,7 +561,7 @@ def _build_evaluation_core(
         sorted(_intersection(tuple(set(prediction_by_family[family]) for family in ModelFamily)))
     )
     evaluated_models = (
-        _zero_model_manifest(verified, targets),
+        _zero_model_manifest(verified, targets, experiment.market_data_source_class),
         *(
             _evaluated_model_manifest(
                 model,
@@ -607,6 +609,7 @@ def _build_evaluation_core(
         fold_dataset_id=experiment.fold_dataset_id,
         local_comparator_manifest_id=local_manifest.manifest_id,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
         metric_policy=experiment.metric_policy,
         forecast_bucket_policy=experiment.forecast_bucket_policy,
         minimum_correlation_rows=minimum_correlation_rows,
@@ -1007,6 +1010,7 @@ def _normalise_configurations(
                 reason,
                 expected_forecast,
                 manifest.manifest_id,
+                manifest.market_data_source_class,
             )
         )
     return tuple(sorted(rows, key=lambda item: item.configuration_id))
@@ -1039,13 +1043,20 @@ def _evaluated_model_manifest(
             sorted(item.evidence_id for item in training_predictions)
         ),
         coefficient_stability_summary_id=stability.summary_id,
+        market_data_source_class=model.feature_dataset.market_data_source_class,
     )
 
 
 def _zero_model_manifest(
     verified: R1FoundationBindings,
     targets: Mapping[str, TargetRow],
+    market_data_source_class: MarketDataSourceClass | None = None,
 ) -> EvaluatedModelManifest:
+    source = market_data_source_class or getattr(
+        verified.bundle,
+        "market_data_source_class",
+        MarketDataSourceClass.IG_NATIVE_CAPTURE,
+    )
     return EvaluatedModelManifest.create(
         model_family=ModelFamily.ZERO_RETURN,
         feature_set_id=None,
@@ -1063,6 +1074,7 @@ def _zero_model_manifest(
         ),
         training_prediction_evidence_ids=(),
         coefficient_stability_summary_id=None,
+        market_data_source_class=source,
     )
 
 
@@ -1445,6 +1457,7 @@ def _verify_complete_local_ladder(
             experiment.configuration_id,
             item.name,
             feature_schema_for_set(experiment, item.name),
+            experiment.market_data_source_class,
         )
         for item in declared
     }

@@ -10,12 +10,13 @@ from math import isfinite
 from typing import ClassVar
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_LOCAL_COMPARATOR_CONTRACT = "qtrad-r2-local-comparator-v1"
-R2_EVALUATION_CONTRACT = "qtrad-r2-evaluation-v1"
-R2_SELECTION_CONTRACT = "qtrad-r2-selection-v1"
+R2_LOCAL_COMPARATOR_CONTRACT = "qtrad-r2-local-comparator-v2"
+R2_EVALUATION_CONTRACT = "qtrad-r2-evaluation-v2"
+R2_SELECTION_CONTRACT = "qtrad-r2-selection-v2"
 HOLDOUT_STATE_VERIFICATION_PENDING = "PENDING_R2_H_INTEGRATION"
 
 
@@ -354,6 +355,7 @@ class EvaluatedModelManifest:
     training_prediction_evidence_ids: tuple[str, ...]
     coefficient_stability_summary_id: str | None
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     def __post_init__(self) -> None:
         optional_ids = (
@@ -418,6 +420,7 @@ class EvaluatedModelManifest:
         expected_fold_target_keys: Sequence[tuple[str, str]],
         training_prediction_evidence_ids: Sequence[str],
         coefficient_stability_summary_id: str | None,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "EvaluatedModelManifest":
         coverage_ids = tuple(coverage_dataset_ids)
         fit_ids = tuple(fold_fit_ids)
@@ -434,6 +437,7 @@ class EvaluatedModelManifest:
             ("expected_fold_target_keys", expected_keys),
             ("training_prediction_evidence_ids", training_ids),
             ("coefficient_stability_summary_id", coefficient_stability_summary_id),
+            ("market_data_source_class", market_data_source_class),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -448,6 +452,7 @@ class EvaluatedModelManifest:
             training_prediction_evidence_ids=training_ids,
             coefficient_stability_summary_id=coefficient_stability_summary_id,
             manifest_id=identity,
+            market_data_source_class=market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -465,6 +470,7 @@ class EvaluatedModelManifest:
             ],
             "training_prediction_evidence_ids": list(self.training_prediction_evidence_ids),
             "coefficient_stability_summary_id": self.coefficient_stability_summary_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -534,6 +540,7 @@ class ConfigurationRecord:
     reason: str
     forecast_dataset_id: str | None
     evaluated_model_manifest_id: str | None
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     def __post_init__(self) -> None:
         _require_sha256(self.configuration_id, "evaluated configuration ID")
@@ -560,6 +567,7 @@ class ConfigurationRecord:
             "reason": self.reason,
             "forecast_dataset_id": self.forecast_dataset_id,
             "evaluated_model_manifest_id": self.evaluated_model_manifest_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
 
@@ -575,6 +583,7 @@ class LocalComparatorManifest:
     coverage_rows: tuple[tuple[str, str, str, str | None], ...]
     evidence_class: EvidenceClass
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_LOCAL_COMPARATOR_CONTRACT
 
@@ -611,6 +620,7 @@ class LocalComparatorManifest:
         fold_fit_ids: Sequence[str],
         coverage_rows: Sequence[tuple[str, str, str, str | None]],
         evidence_class: EvidenceClass,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "LocalComparatorManifest":
         coverage_ids = tuple(sorted(coverage_dataset_ids))
         fit_ids = tuple(sorted(fold_fit_ids))
@@ -625,6 +635,7 @@ class LocalComparatorManifest:
             fit_ids,
             rows,
             evidence_class,
+            market_data_source_class,
         )
         return cls(
             experiment_configuration_id,
@@ -637,6 +648,7 @@ class LocalComparatorManifest:
             rows,
             evidence_class,
             semantic_id(payload),
+            market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -650,6 +662,7 @@ class LocalComparatorManifest:
             self.fold_fit_ids,
             self.coverage_rows,
             self.evidence_class,
+            self.market_data_source_class,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -678,6 +691,7 @@ class EvaluationReport:
     configurations: tuple[ConfigurationRecord, ...]
     unavailable_diagnostics: tuple[tuple[str, str], ...]
     report_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_EVALUATION_CONTRACT
 
@@ -739,6 +753,7 @@ class EvaluationReport:
         stability: Sequence[StabilitySummary],
         configurations: Sequence[ConfigurationRecord],
         unavailable_diagnostics: Sequence[tuple[str, str]],
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "EvaluationReport":
         common_ids = tuple(sorted(all_model_common_target_ids))
         ordered_models = tuple(sorted(evaluated_models, key=lambda item: item.manifest_id))
@@ -767,6 +782,7 @@ class EvaluationReport:
             ("stability", tuple(stability)),
             ("configurations", ordered_configurations),
             ("unavailable_diagnostics", diagnostics),
+            ("market_data_source_class", market_data_source_class),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -791,6 +807,7 @@ class EvaluationReport:
             configurations=ordered_configurations,
             unavailable_diagnostics=diagnostics,
             report_id=identity,
+            market_data_source_class=market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -819,6 +836,7 @@ class EvaluationReport:
             "unavailable_diagnostics": [
                 {"name": name, "reason": reason} for name, reason in self.unavailable_diagnostics
             ],
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -894,16 +912,27 @@ class SelectionManifest:
     frozen_at: datetime
     frozen_by: str
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass | None = None
+    foundation_bundle_id: str | None = None
+    oof_bundle_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_SELECTION_CONTRACT
 
     def __post_init__(self) -> None:
-        for value, field in (
+        identity_values = [
             (self.experiment_configuration_id, "selection experiment ID"),
             (self.evaluation_report_id, "selection evaluation ID"),
             (self.local_comparator_manifest_id, "selection local-comparator ID"),
             (self.manifest_id, "selection manifest ID"),
-        ):
+        ]
+        if self.foundation_bundle_id is not None and self.oof_bundle_id is not None:
+            identity_values.extend(
+                (
+                    (self.foundation_bundle_id, "selection foundation ID"),
+                    (self.oof_bundle_id, "selection OOF ID"),
+                )
+            )
+        for value, field in identity_values:
             _require_sha256(value, field)
         for values in (
             self.evaluated_configuration_ids,
@@ -990,6 +1019,9 @@ class SelectionManifest:
         application_image_identity: str,
         frozen_at: datetime,
         frozen_by: str,
+        market_data_source_class: MarketDataSourceClass | None = None,
+        foundation_bundle_id: str | None = None,
+        oof_bundle_id: str | None = None,
     ) -> "SelectionManifest":
         evaluated_ids = tuple(sorted(evaluated_configuration_ids))
         selected_ids = tuple(sorted(selected_configuration_ids))
@@ -1016,6 +1048,9 @@ class SelectionManifest:
             ("application_image_identity", application_image_identity),
             ("frozen_at", frozen_at),
             ("frozen_by", frozen_by),
+            ("market_data_source_class", market_data_source_class),
+            ("foundation_bundle_id", foundation_bundle_id),
+            ("oof_bundle_id", oof_bundle_id),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -1038,11 +1073,14 @@ class SelectionManifest:
             application_image_identity=application_image_identity,
             frozen_at=frozen_at,
             frozen_by=frozen_by,
+            market_data_source_class=market_data_source_class,
+            foundation_bundle_id=foundation_bundle_id,
+            oof_bundle_id=oof_bundle_id,
             manifest_id=identity,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
-        return {
+        payload: dict[str, JsonValue] = {
             "contract": self.CONTRACT,
             "schema_version": 1,
             "experiment_configuration_id": self.experiment_configuration_id,
@@ -1064,6 +1102,19 @@ class SelectionManifest:
             "frozen_at": self.frozen_at.isoformat(),
             "frozen_by": self.frozen_by,
         }
+        if self.market_data_source_class is not None:
+            if self.foundation_bundle_id is None or self.oof_bundle_id is None:
+                raise ValueError("source-bound selections require foundation and OOF IDs")
+            payload.update(
+                {
+                    "source_class": self.market_data_source_class.value,
+                    "foundation_bundle_id": self.foundation_bundle_id,
+                    "oof_bundle_id": self.oof_bundle_id,
+                }
+            )
+        elif self.foundation_bundle_id is not None or self.oof_bundle_id is not None:
+            raise ValueError("selection lineage IDs require a source class")
+        return payload
 
     def as_json(self) -> dict[str, JsonValue]:
         return {**self.semantic_json(), "manifest_id": self.manifest_id}
@@ -1099,6 +1150,7 @@ def _local_comparator_json(
     fold_fit_ids: Sequence[str],
     coverage_rows: Sequence[tuple[str, str, str, str | None]],
     evidence_class: EvidenceClass,
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> dict[str, JsonValue]:
     return {
         "contract": R2_LOCAL_COMPARATOR_CONTRACT,
@@ -1120,6 +1172,7 @@ def _local_comparator_json(
             for target_id, fold_id, disposition, forecast_id in coverage_rows
         ],
         "evidence_class": evidence_class.value,
+        "market_data_source_class": market_data_source_class.value,
     }
 
 

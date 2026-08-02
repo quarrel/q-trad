@@ -10,12 +10,13 @@ from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_features import FeatureDefinition
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v1"
-R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v1"
+R2_PREPROCESSING_SCHEMA_CONTRACT = "qtrad-r2-preprocessing-schema-v2"
+R2_PREPROCESSING_SELECTION_CONTRACT = "qtrad-r2-preprocessing-selection-v2"
 
 LOCAL_INSTRUMENT_IDENTITY_POLICY = "NO_INSTRUMENT_IDENTITY_V1"
 POOLED_INSTRUMENT_IDENTITY_POLICY = "FULL_ONE_HOT_V1"
@@ -57,7 +58,7 @@ class R2PreprocessingSchema:
     preprocessing_schema_id: str
 
     CONTRACT: ClassVar[str] = R2_PREPROCESSING_SCHEMA_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         if not self.features or len({item.name for item in self.features}) != len(self.features):
@@ -111,7 +112,7 @@ def validate_preprocessing_schema_correspondence(
 def preprocessing_schema_id(features: Sequence[PreprocessingFeatureDefinition]) -> str:
     payload = {
         "contract": R2_PREPROCESSING_SCHEMA_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "features": [item.as_json() for item in features],
     }
     return _semantic_id(payload)
@@ -359,6 +360,7 @@ class _R2PreprocessingSelectionArguments(TypedDict):
     preprocessing_schema_id: str
     preprocessing_schema: R2PreprocessingSchema
     evidence_class: EvidenceClass
+    market_data_source_class: MarketDataSourceClass
     application_image_identity: str
     sklearn_library_identity: str
     preprocessing_policy: str
@@ -413,9 +415,10 @@ class R2PreprocessingSelection:
     holdout_excluded: bool
     selection: AlphaSelection
     artifact_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_PREPROCESSING_SELECTION_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         for value, field in (
@@ -546,6 +549,7 @@ class R2PreprocessingSelection:
                 "preprocessing_schema_id": self.preprocessing_schema_id,
                 "preprocessing_schema": self.preprocessing_schema,
                 "evidence_class": self.evidence_class,
+                "market_data_source_class": self.market_data_source_class,
                 "application_image_identity": self.application_image_identity,
                 "sklearn_library_identity": self.sklearn_library_identity,
                 "preprocessing_policy": self.preprocessing_policy,
@@ -577,7 +581,7 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         raise TypeError("preprocessing selection must contain an R2PreprocessingSchema")
     return {
         "contract": R2_PREPROCESSING_SELECTION_CONTRACT,
-        "schema_version": 1,
+        "schema_version": 2,
         "r2_feature_dataset_id": str(values["r2_feature_dataset_id"]),
         "target_dataset_id": str(values["target_dataset_id"]),
         "fold_dataset_id": str(values["fold_dataset_id"]),
@@ -595,6 +599,12 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
         "preprocessing_schema_id": str(values["preprocessing_schema_id"]),
         "preprocessing_schema": preprocessing_schema.as_json(),
         "evidence_class": EvidenceClass(cast(EvidenceClass, values["evidence_class"])).value,
+        "market_data_source_class": MarketDataSourceClass(
+            cast(
+                MarketDataSourceClass,
+                values.get("market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE),
+            )
+        ).value,
         "application_image_identity": str(values["application_image_identity"]),
         "sklearn_library_identity": str(values["sklearn_library_identity"]),
         "preprocessing_policy": str(values["preprocessing_policy"]),

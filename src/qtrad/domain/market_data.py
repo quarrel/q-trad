@@ -123,3 +123,11 @@ class DataGap:
             require_utc(self.repaired_at, "repaired_at")
         if self.interval_end <= self.interval_start:
             raise ValueError("gap interval must be positive")
+
+
+class MarketDataSourceClass(StrEnum):
+    """Provider/data path that produced a research artefact."""
+
+    IG_NATIVE_CAPTURE = "IG_NATIVE_CAPTURE"
+    IBKR_HISTORICAL_RESEARCH = "IBKR_HISTORICAL_RESEARCH"
+    IBKR_NATIVE_CAPTURE = "IBKR_NATIVE_CAPTURE"

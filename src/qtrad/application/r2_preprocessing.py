@@ -209,6 +209,7 @@ def _build_preprocessing_selection(
         preprocessing_schema_id=preprocessing_schema.preprocessing_schema_id,
         preprocessing_schema=preprocessing_schema,
         evidence_class=feature_dataset.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
         application_image_identity=application_image_identity,
         sklearn_library_identity=sklearn_library_identity,
         preprocessing_policy=experiment.preprocessing_policy,
@@ -692,6 +693,10 @@ def _verify_feature_bindings(
             experiment.configuration_id,
         ),
         "evidence_class": (features.evidence_class, experiment.evidence_class),
+        "market_data_source_class": (
+            features.market_data_source_class,
+            experiment.market_data_source_class,
+        ),
     }
     mismatches = [name for name, (actual, wanted) in expected.items() if actual != wanted]
     if mismatches:
@@ -716,7 +721,10 @@ def _verify_feature_bindings(
     if expected_pooled_set is not None and features.feature_set_name != expected_pooled_set:
         raise ValueError(f"{model_family.value} requires the {expected_pooled_set} feature set")
     authenticated_set_id = feature_set_id(
-        experiment.configuration_id, declared_set.name, authenticated_schema
+        experiment.configuration_id,
+        declared_set.name,
+        authenticated_schema,
+        experiment.market_data_source_class,
     )
     if features.feature_set_id != authenticated_set_id:
         raise ValueError("R2 feature binding mismatch: feature_set_id")

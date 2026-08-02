@@ -444,7 +444,11 @@ def build_coefficient_stability_summary(
                     zero_count=sum(value == 0 for value in values),
                 )
             )
-    return CoefficientStabilitySummary.create(rows, tuple(fit.artifact_id for fit in fits))
+    return CoefficientStabilitySummary.create(
+        rows,
+        tuple(fit.artifact_id for fit in fits),
+        fits[0].market_data_source_class,
+    )
 
 
 def verify_coefficient_stability_summary(
@@ -823,6 +827,7 @@ def _fold_fit_common(
         "feature_schema_id": selection.feature_schema_id,
         "preprocessing_schema_id": selection.preprocessing_schema_id,
         "evidence_class": selection.evidence_class,
+        "market_data_source_class": experiment.market_data_source_class,
         "application_image_identity": application_image_identity,
         "numpy_library_identity": numpy_library_identity,
         "sklearn_library_identity": sklearn_library_identity,
@@ -977,6 +982,7 @@ def forecast_validation(
             target_dataset_id=verified.targets.dataset_id,
             fold_dataset_id=verified.folds.dataset_id,
             r2_feature_dataset_id=feature_dataset.dataset_id,
+            market_data_source_class=fit.market_data_source_class,
         ),
     )
 
@@ -1000,6 +1006,7 @@ def _coverage_row(
         disposition=disposition,
         forecast_id=forecast_id,
         reason=reason,
+        market_data_source_class=fit.market_data_source_class,
     )
 
 
