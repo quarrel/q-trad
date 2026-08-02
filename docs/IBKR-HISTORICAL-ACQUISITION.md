@@ -363,6 +363,9 @@ FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE
 
 **Form:** documentation-only pull request.
 
+**Status:** Complete — the accepted threat model and invariant matrix are recorded in
+[ADR 0029](adr/0029-ibkr-historical-acquisition-evidence-boundaries.md).
+
 Write a short ADR defining:
 
 * trusted and untrusted inputs;
