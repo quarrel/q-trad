@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 
 import pytest
 
 import qtrad.runtime.r2_verification as verification
-from qtrad.adapters.parquet.r2 import R2FeatureManifest
+from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
+from qtrad.ports.clock import Clock
+from qtrad.runtime.r2_bundles import _verify_replay_inputs
 from qtrad.runtime.r2_verification import (
     _image_identity_manifest as _production_image_identity_manifest,
 )
 from qtrad.runtime.r2_verification import (
+    _materialise_synthetic_feature_manifests,
     _stage_replay_inputs,
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
@@ -80,7 +85,8 @@ def test_replay_input_paths_are_relative_and_portable(tmp_path: Path) -> None:
     assert payload["root"] == "."
     children = payload["children"]
     assert isinstance(children, dict)
-    for child in children.values():
+    typed_children = cast(dict[str, object], children)
+    for child in typed_children.values():
         if not isinstance(child, dict):
             raise AssertionError("staged child is not an object")
         child_payload = cast(dict[str, object], child)
@@ -93,6 +99,11 @@ def test_replay_input_paths_are_relative_and_portable(tmp_path: Path) -> None:
         assert not Path(child_root).is_absolute()
     assert not (tmp_path / "bundle" / "replay-inputs" / "research" / "unrelated.txt").exists()
 
+    first = cast(dict[str, object], typed_children["foundation"])
+    first["sha256"] = "f" * 64
+    with pytest.raises(ValueError, match="identity differs from its closure"):
+        _verify_replay_inputs(tmp_path / "bundle", {"replay_inputs": payload}, set())
+
 
 def test_representative_fold_layout_preserves_dependency_embargo() -> None:
     start = datetime(2026, 1, 1, tzinfo=UTC)
@@ -104,8 +115,8 @@ def test_representative_fold_layout_preserves_dependency_embargo() -> None:
             training_start=start,
             training_cutoff=start + timedelta(minutes=500 + index * 100),
             validation_start=start + timedelta(minutes=505 + index * 100),
-            validation_end=start + timedelta(minutes=605 + index * 100),
-            embargo_end=start + timedelta(minutes=510 + index * 100),
+            validation_end=start + timedelta(minutes=600 + index * 100),
+            embargo_end=start + timedelta(minutes=505 + index * 100),
             training_target_ids=(),
             validation_target_ids=(),
             holdout_excluded=True,
@@ -113,18 +124,34 @@ def test_representative_fold_layout_preserves_dependency_embargo() -> None:
         )
         for index in range(3)
     )
-    _validate_representative_fold_layout(folds, start, end, holdout)
+    _validate_representative_fold_layout(folds, start, end, holdout, embargo=timedelta(minutes=5))
+    leaking = (*folds[:-1], replace(folds[-1], validation_end=holdout[0] + timedelta(minutes=5)))
+    with pytest.raises(ValueError, match="50/30/20"):
+        _validate_representative_fold_layout(
+            leaking, start, end, holdout, embargo=timedelta(minutes=5)
+        )
 
 
-def test_synthetic_manifests_use_strict_v2_parquet_contract() -> None:
-    _, _, _, manifests = _synthetic_pipeline_inputs()
-    for payload in manifests.values():
+def test_synthetic_manifests_are_real_independently_verified_parquet(
+    tmp_path: Path,
+) -> None:
+    _, experiment, datasets = _synthetic_pipeline_inputs()
+    paths = _materialise_synthetic_feature_manifests(tmp_path, experiment, datasets)
+    store = ParquetR2FeatureStore(
+        tmp_path,
+        cast(Clock, SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=UTC))),
+    )
+    for name, path in paths.items():
+        manifest = store.verify(path)
+        payload = json.loads((tmp_path / path).read_text())
         assert payload["contract"] == R2FeatureManifest.CONTRACT
         assert payload["schema_version"] == R2FeatureManifest.SCHEMA_VERSION
+        assert manifest.manifest_sha256 != "0" * 64
+        assert store.load(path) == datasets[name]
 
 
 def test_representative_admission_rejects_non_capture_v4_inputs() -> None:
-    verified, experiment, _, _ = _synthetic_pipeline_inputs()
+    verified, experiment, _ = _synthetic_pipeline_inputs()
     with pytest.raises(ValueError, match="IG_NATIVE_CAPTURE"):
         _validate_representative_capture_v4(verified, experiment)
 

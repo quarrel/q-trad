@@ -171,8 +171,10 @@ def _verify_replay_inputs(
                 raise ValueError(f"representative replay input file changed: {name}")
             declared[normalized] = file_digest
             allowed_paths.add(normalized)
-        if cast(str, raw_path) not in declared:
+        normalized_initial = initial_path.as_posix()
+        if normalized_initial not in declared:
             raise ValueError(f"representative replay input path is not in its closure: {name}")
+        if declared[normalized_initial] != expected_digest:
             raise ValueError(
                 f"representative replay input identity differs from its closure: {name}"
             )

@@ -4,10 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
-from typing import cast
 
 import pytest
 
@@ -17,7 +14,6 @@ from qtrad.domain.r2_bundles import (
     R2OofBundle,
 )
 from qtrad.domain.r2_readiness import EvidenceClass
-from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import (
     atomic_create,
     canonical_bytes,
@@ -25,8 +21,7 @@ from qtrad.runtime.r2_bundles import (
     write_r2_oof_bundle,
 )
 from qtrad.runtime.r2_verification import (
-    _synthetic_pipeline_inputs,
-    build_oof_bundle,
+    _build_synthetic_oof,
     selection_freeze,
     verify_oof_bundle,
 )
@@ -158,18 +153,7 @@ def test_create_only_output_rejects_ancestor_symlink_and_oversize_payload(tmp_pa
 
 
 def test_synthetic_oof_build_is_replayed_from_typed_pipeline(tmp_path: Path) -> None:
-    verified, experiment, datasets, manifests = _synthetic_pipeline_inputs()
-    manifest_path = build_oof_bundle(
-        verified=verified,
-        experiment=experiment,
-        feature_manifest_paths={},
-        research_root=tmp_path,
-        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
-        output=tmp_path / "oof",
-        run_kind="SYNTHETIC",
-        dataset_overrides=datasets,
-        manifest_overrides=manifests,
-    )
+    manifest_path = _build_synthetic_oof(tmp_path / "oof")
     selection_freeze(
         oof_bundle_path=manifest_path,
         frozen_by="synthetic-test",

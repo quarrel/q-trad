@@ -44,6 +44,7 @@ from qtrad.application.r2_preprocessing import (
     build_r2_preprocessing_selection,
 )
 from qtrad.application.r2_readiness import R1FoundationBindings, _availability_dataset_id
+from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, FoldDataset, membership_hash
 from qtrad.domain.forecasts import ForecastDataset
@@ -77,7 +78,6 @@ from qtrad.domain.r2_features import (
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
-    feature_schema_id,
     feature_set_id,
 )
 from qtrad.domain.r2_models import PreprocessingFeatureKind, derive_r2_preprocessing_schema
@@ -415,7 +415,35 @@ def _validate_representative_capture_v4(
     if experiment.holdout_range != (boundary(8), end):
         raise ValueError("representative integration holdout does not use the final 20 percent")
     folds = verified.folds.folds
-    _validate_representative_fold_layout(folds, start, end, experiment.holdout_range)
+    _validate_representative_fold_layout(
+        folds,
+        start,
+        end,
+        experiment.holdout_range,
+        embargo=verified.configuration.embargo,
+    )
+    expected_folds = build_expanding_folds(
+        verified.targets,
+        verified.configuration,
+        horizon=experiment.primary_horizon,
+        validation_duration=folds[0].validation_end - folds[0].validation_start,
+    )
+    if expected_folds.folds != folds:
+        raise ValueError(
+            "representative folds do not replay from the authenticated foundation configuration"
+        )
+    targets_by_id = {row.target_id: row for row in verified.targets.rows}
+    for fold in folds:
+        for target_id in fold.validation_target_ids:
+            target = targets_by_id[target_id]
+            if (
+                target.target_end_time > experiment.holdout_range[0]
+                or target.target_freeze_at > experiment.holdout_range[0]
+                or target.target_available_at > experiment.holdout_range[0]
+            ):
+                raise ValueError(
+                    "representative validation dependency reaches the disposable holdout"
+                )
 
 
 def _validate_representative_fold_layout(
@@ -423,33 +451,44 @@ def _validate_representative_fold_layout(
     start: datetime,
     end: datetime,
     holdout_range: tuple[datetime, datetime],
+    *,
+    embargo: timedelta,
 ) -> None:
     total_minutes = int((end - start).total_seconds() // 60)
 
     def boundary(tenths: int) -> datetime:
         return start + timedelta(minutes=total_minutes * tenths // 10)
 
-    if len(folds) != 3:
-        raise ValueError("representative integration requires exactly three expanding folds")
-    previous_validation_end: datetime | None = None
-    for index, fold in enumerate(folds):
-        expected_start = boundary(5 + index)
-        expected_end = boundary(6 + index)
-        expected_duration = expected_end - expected_start
+    initial_training_cutoff = boundary(5)
+    holdout_start = boundary(8)
+    available_validation = holdout_start - initial_training_cutoff - 3 * embargo
+    available_seconds = int(available_validation.total_seconds())
+    if (
+        len(folds) != 3
+        or holdout_range != (holdout_start, end)
+        or embargo < timedelta(0)
+        or available_seconds <= 0
+        or available_seconds % (3 * 60)
+    ):
+        raise ValueError("representative fold boundaries cannot satisfy the fixed 50/30/20 rule")
+    validation_duration = timedelta(seconds=available_seconds // 3)
+    expected_training_cutoff = initial_training_cutoff
+    for fold in folds:
+        expected_validation_start = expected_training_cutoff + embargo
+        expected_validation_end = expected_validation_start + validation_duration
         if (
             fold.training_start != start
-            or fold.training_cutoff != expected_start
-            or fold.validation_start < fold.training_cutoff
-            or fold.validation_end - fold.validation_start != expected_duration
-            or (
-                previous_validation_end is not None
-                and fold.validation_start < previous_validation_end
-            )
+            or fold.training_cutoff != expected_training_cutoff
+            or fold.validation_start != expected_validation_start
+            or fold.validation_end != expected_validation_end
+            or fold.embargo_end != expected_validation_start
             or not fold.holdout_excluded
-            or fold.validation_end > holdout_range[1]
+            or fold.validation_end > holdout_start
         ):
             raise ValueError("representative fold boundaries differ from the fixed 50/30/20 rule")
-        previous_validation_end = fold.validation_end
+        expected_training_cutoff = expected_validation_end
+    if folds[-1].validation_end != holdout_start:
+        raise ValueError("representative validation interval does not end at the holdout boundary")
 
 
 def _reject_replay_symlink_ancestors(path: Path) -> None:
@@ -657,6 +696,7 @@ def _load_feature_datasets(
     feature_manifest_paths: dict[str, Path],
     root: Path,
     clock: Clock,
+    recompute_rows: bool = True,
 ) -> tuple[dict[str, R2FeatureDataset], dict[str, R2FeatureManifest]]:
     foundation = _foundation_inputs(verified)
     store = ParquetR2FeatureStore(root, clock)
@@ -668,7 +708,8 @@ def _load_feature_datasets(
             manifest, foundation, experiment, feature_set_name=name
         )
         rows = tuple(store.iter_rows(feature_manifest_paths[name]))
-        verify_raw_feature_rows(iter(rows), foundation, experiment, feature_set_name=name)
+        if recompute_rows:
+            verify_raw_feature_rows(iter(rows), foundation, experiment, feature_set_name=name)
         dataset = R2FeatureDataset.create(
             rows,
             feature_schema=manifest.feature_schema,
@@ -812,7 +853,6 @@ def _synthetic_pipeline_inputs() -> tuple[
     R1FoundationBindings,
     R2ExperimentConfig,
     dict[str, R2FeatureDataset],
-    dict[str, Mapping[str, object]],
 ]:
     """Create deterministic typed inputs for the same R2 build path used in production."""
     start = datetime(2026, 1, 1, tzinfo=UTC)
@@ -974,7 +1014,6 @@ def _synthetic_pipeline_inputs() -> tuple[
         fold_dataset_id=folds.dataset_id,
     )
     datasets: dict[str, R2FeatureDataset] = {}
-    manifests: dict[str, Mapping[str, object]] = {}
     for feature_set in experiment.feature_sets:
         schema = feature_schema_for_set(experiment, feature_set.name)
         preprocessing_schema = derive_r2_preprocessing_schema(schema)
@@ -1023,48 +1062,6 @@ def _synthetic_pipeline_inputs() -> tuple[
             market_data_source_class=experiment.market_data_source_class,
         )
         datasets[feature_set.name] = dataset
-        manifest_identity: dict[str, object] = {
-            "contract": R2FeatureManifest.CONTRACT,
-            "schema_version": R2FeatureManifest.SCHEMA_VERSION,
-            "manifest_filename": f"{feature_set.name}.json",
-            "created_at": start.isoformat(),
-            "semantic_dataset_id": dataset.dataset_id,
-            "feature_set_name": feature_set.name,
-            "feature_set_id": dataset.feature_set_id,
-            "raw_feature_schema_id": feature_schema_id(schema),
-            "feature_schema": [item.as_json() for item in schema],
-            "observation_dataset_id": dataset.observation_dataset_id,
-            "panel_dataset_id": dataset.panel_dataset_id,
-            "target_dataset_id": dataset.target_dataset_id,
-            "fold_dataset_id": dataset.fold_dataset_id,
-            "experiment_configuration_id": dataset.experiment_configuration_id,
-            "evidence_class": experiment.evidence_class.value,
-            "holdout_excluded": True,
-            "row_count": len(dataset.rows),
-            "chunk_row_limit": 8192,
-            "chunks": [
-                {
-                    "index": 0,
-                    "data_file": f"chunks/synthetic-{feature_set.name}.parquet",
-                    "data_sha256": "0" * 64,
-                    "lineage_file": f"lineage/synthetic-{feature_set.name}.parquet",
-                    "lineage_sha256": "0" * 64,
-                    "row_count": len(dataset.rows),
-                    "first_row_key": f"synthetic-{feature_set.name}-first",
-                    "last_row_key": f"synthetic-{feature_set.name}-last",
-                    "semantic_hash": "0" * 64,
-                }
-            ],
-            "application_version": "synthetic",
-            "image_identity": "qtrad@sha256:" + "1" * 64,
-            "market_data_source_class": experiment.market_data_source_class.value,
-        }
-        manifest_hash = sha256(canonical_bytes(manifest_identity)).hexdigest()
-        manifests[feature_set.name] = {
-            **manifest_identity,
-            "manifest_id": manifest_hash[:24],
-            "manifest_sha256": manifest_hash,
-        }
     evidence: dict[str, JsonValue] = {
         "availability_delay_report": {},
         "revision_delay_report": {},
@@ -1123,7 +1120,65 @@ def _synthetic_pipeline_inputs() -> tuple[
             availability_evidence=evidence,
         ),
     )
-    return verified, experiment, datasets, manifests
+    return verified, experiment, datasets
+
+
+def _materialise_synthetic_feature_manifests(
+    root: Path,
+    experiment: R2ExperimentConfig,
+    datasets: Mapping[str, R2FeatureDataset],
+) -> dict[str, Path]:
+    """Publish and independently verify canonical synthetic features through Parquet."""
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    clock = cast(Clock, SimpleNamespace(now=lambda: created_at))
+    store = ParquetR2FeatureStore(root, clock)
+    paths: dict[str, Path] = {}
+    for feature_set in experiment.feature_sets:
+        dataset = datasets[feature_set.name]
+        relative_path = Path("features") / f"{feature_set.name}.json"
+        written = store.write(
+            relative_path,
+            dataset.rows,
+            feature_set_name=dataset.feature_set_name,
+            feature_set_id=dataset.feature_set_id,
+            feature_schema=dataset.feature_schema,
+            observation_dataset_id=dataset.observation_dataset_id,
+            panel_dataset_id=dataset.panel_dataset_id,
+            target_dataset_id=dataset.target_dataset_id,
+            fold_dataset_id=dataset.fold_dataset_id,
+            experiment_configuration_id=dataset.experiment_configuration_id,
+            evidence_class=dataset.evidence_class,
+            holdout_excluded=True,
+            application_version="synthetic-software-verification-v1",
+            image_identity="qtrad-synthetic@sha256:" + "1" * 64,
+            market_data_source_class=dataset.market_data_source_class,
+        )
+        verified = store.verify(relative_path)
+        loaded = store.load(relative_path)
+        if verified != written or loaded != dataset:
+            raise ValueError("synthetic Parquet feature publication did not independently replay")
+        paths[feature_set.name] = relative_path
+    return paths
+
+
+def _build_synthetic_oof(output: Path) -> Path:
+    verified, experiment, datasets = _synthetic_pipeline_inputs()
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    clock = cast(Clock, SimpleNamespace(now=lambda: created_at))
+    with TemporaryDirectory() as temporary:
+        research_root = Path(temporary)
+        feature_paths = _materialise_synthetic_feature_manifests(
+            research_root, experiment, datasets
+        )
+        return build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_paths,
+            research_root=research_root,
+            clock=clock,
+            output=output,
+            run_kind="SYNTHETIC",
+        )
 
 
 def build_oof_bundle(
@@ -1135,25 +1190,20 @@ def build_oof_bundle(
     clock: Clock,
     output: Path,
     run_kind: str = "REPRESENTATIVE",
-    dataset_overrides: Mapping[str, R2FeatureDataset] | None = None,
-    manifest_overrides: Mapping[str, Mapping[str, object]] | None = None,
     replay_inputs: Mapping[str, Path] | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     foundation_source = getattr(verified.bundle, "market_data_source_class", None)
     if foundation_source is not experiment.market_data_source_class:
         raise ValueError("R2 experiment source class differs from the R1 foundation")
-    if dataset_overrides is None:
-        datasets, manifests = _load_feature_datasets(
-            verified=verified,
-            experiment=experiment,
-            feature_manifest_paths=feature_manifest_paths,
-            root=research_root,
-            clock=clock,
-        )
-    else:
-        datasets = dict(dataset_overrides)
-        manifests = dict(manifest_overrides or {})
+    datasets, manifests = _load_feature_datasets(
+        verified=verified,
+        experiment=experiment,
+        feature_manifest_paths=feature_manifest_paths,
+        root=research_root,
+        clock=clock,
+        recompute_rows=run_kind != "SYNTHETIC",
+    )
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     identities = runtime_identities()
@@ -1784,20 +1834,7 @@ def build_software_bundle(
     identities = runtime_identities()
 
     synthetic_root = output / "synthetic" / "oof"
-    synthetic_verified, synthetic_experiment, synthetic_datasets, synthetic_manifests = (
-        _synthetic_pipeline_inputs()
-    )
-    synthetic_manifest = build_oof_bundle(
-        verified=synthetic_verified,
-        experiment=synthetic_experiment,
-        feature_manifest_paths={},
-        research_root=output,
-        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
-        output=synthetic_root,
-        run_kind="SYNTHETIC",
-        dataset_overrides=synthetic_datasets,
-        manifest_overrides=synthetic_manifests,
-    )
+    synthetic_manifest = _build_synthetic_oof(synthetic_root)
     synthetic_selection_path = output / "synthetic" / "selection.json"
     selection_freeze(
         oof_bundle_path=synthetic_manifest,
@@ -1927,20 +1964,9 @@ def _replay_synthetic_oof(path: Path) -> None:
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
     if descriptor.get("run_kind") != "SYNTHETIC":
         return
-    verified, experiment, datasets, manifests = _synthetic_pipeline_inputs()
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
-        build_oof_bundle(
-            verified=verified,
-            experiment=experiment,
-            feature_manifest_paths={},
-            research_root=Path(temporary),
-            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
-            output=expected_root,
-            run_kind="SYNTHETIC",
-            dataset_overrides=datasets,
-            manifest_overrides=manifests,
-        )
+        _build_synthetic_oof(expected_root)
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError("synthetic OOF bundle does not replay to the authenticated pipeline")
 
