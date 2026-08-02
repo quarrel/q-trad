@@ -1671,9 +1671,10 @@ async def _replay_representative_oof_async(path: Path) -> None:
     raw_inputs = descriptor.get("replay_inputs")
     if not isinstance(raw_inputs, dict):
         raise ValueError("representative OOF descriptor has no authenticated replay inputs")
-    if raw_inputs.get("root") != "." or not isinstance(raw_inputs.get("children"), dict):
+    raw_children_value = raw_inputs.get("children")
+    if raw_inputs.get("root") != "." or not isinstance(raw_children_value, dict):
         raise ValueError("representative replay inputs are malformed")
-    raw_children = cast(dict[object, object], raw_inputs["children"])
+    raw_children = cast(dict[object, object], raw_children_value)
     expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
     if set(raw_children) != expected_names:
         raise ValueError("representative replay inputs have incomplete children")

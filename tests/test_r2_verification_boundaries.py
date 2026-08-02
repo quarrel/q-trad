@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import cast
 
 import pytest
 
@@ -69,10 +70,16 @@ def test_replay_input_paths_are_relative_and_portable(tmp_path: Path) -> None:
     children = payload["children"]
     assert isinstance(children, dict)
     for child in children.values():
-        assert isinstance(child, dict)
-        assert not Path(child["path"]).is_absolute()
-        assert ".." not in Path(child["path"]).parts
-        assert not Path(child["root"]).is_absolute()
+        if not isinstance(child, dict):
+            raise AssertionError("staged child is not an object")
+        child_payload = cast(dict[str, object], child)
+        child_path = child_payload["path"]
+        child_root = child_payload["root"]
+        assert isinstance(child_path, str)
+        assert isinstance(child_root, str)
+        assert not Path(child_path).is_absolute()
+        assert ".." not in Path(child_path).parts
+        assert not Path(child_root).is_absolute()
 
 
 def test_representative_admission_rejects_non_capture_v4_inputs() -> None:
