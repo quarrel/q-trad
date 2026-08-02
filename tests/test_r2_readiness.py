@@ -532,3 +532,10 @@ def test_exact_r1_binding_rejects_reclassified_r1_target() -> None:
 
     with pytest.raises(ValueError, match="instrument_roles"):
         verify_exact_r1_bindings(_verified(config), contradictory)
+
+
+def test_v1_experiment_contract_is_rejected() -> None:
+    payload = experiment().as_json()
+    payload["contract"] = "qtrad-r2-experiment-config-v1"
+    with pytest.raises(ValueError, match="contract"):
+        decode_r2_experiment(payload)
