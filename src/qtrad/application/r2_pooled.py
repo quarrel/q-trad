@@ -132,6 +132,7 @@ def build_pooled_ridge_oof(
         experiment.configuration_id,
         local_comparator_name,
         feature_schema_for_set(experiment, local_comparator_name),
+        experiment.market_data_source_class,
     )
     local_children = _verify_local_comparator(
         verified,

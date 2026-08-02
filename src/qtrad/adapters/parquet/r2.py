@@ -168,6 +168,7 @@ class ParquetR2FeatureStore:
             experiment_configuration_id,
             feature_set_name,
             schema,
+            market_data_source_class,
         )
         if feature_set_id != expected_feature_set_id:
             raise ValueError("R2 feature-set ID does not match its declared name and schema")
@@ -579,6 +580,7 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
         manifest.experiment_configuration_id,
         manifest.feature_set_name,
         manifest.feature_schema,
+        manifest.market_data_source_class,
     ):
         raise ValueError("R2 feature manifest feature-set identity is invalid")
     for chunk in manifest.chunks:

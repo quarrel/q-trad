@@ -389,12 +389,14 @@ def _configuration_record(
     feature_set_id: str | None,
     forecast_dataset_id: str | None,
     reason: str,
+    market_data_source_class: MarketDataSourceClass,
 ) -> ConfigurationRecord:
     semantic = {
         "model_family": family.value,
         "feature_set_id": feature_set_id,
         "forecast_dataset_id": forecast_dataset_id,
         "reason": reason,
+        "market_data_source_class": market_data_source_class.value,
     }
     return ConfigurationRecord(
         configuration_id=sha256(canonical_bytes(semantic)).hexdigest(),
@@ -404,6 +406,7 @@ def _configuration_record(
         reason=reason,
         forecast_dataset_id=forecast_dataset_id,
         evaluated_model_manifest_id=None,
+        market_data_source_class=market_data_source_class,
     )
 
 
@@ -828,6 +831,7 @@ def build_oof_bundle(
             feature_set_id=None,
             forecast_dataset_id=None,
             reason="zero-return control",
+            market_data_source_class=experiment.market_data_source_class,
         ),
         *(
             _configuration_record(
@@ -845,6 +849,7 @@ def build_oof_bundle(
                     fold_dataset_id=verified.folds.dataset_id,
                 ).dataset_id,
                 reason=f"local {dataset.feature_set_name} Ridge",
+                market_data_source_class=experiment.market_data_source_class,
             )
             for dataset in local_datasets
         ),
@@ -854,6 +859,7 @@ def build_oof_bundle(
                 feature_set_id=model.feature_set_id,
                 forecast_dataset_id=model.forecasts.dataset_id,
                 reason=f"pooled {model.feature_set_id} Ridge",
+                market_data_source_class=experiment.market_data_source_class,
             )
             for model in models
         ),
@@ -1241,6 +1247,7 @@ def build_software_bundle(
 ) -> Path:
     """Build the top-level software bundle after independently verifying the representative run."""
     representative_oof = verify_r2_oof_bundle(representative_oof_bundle_path)
+    _replay_representative_oof(representative_oof_bundle_path)
     if representative_oof.source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
         raise ValueError("representative software integration must use IG_NATIVE_CAPTURE")
     if representative_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:

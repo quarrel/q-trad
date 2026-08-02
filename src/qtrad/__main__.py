@@ -924,6 +924,7 @@ async def _materialise_r2_features(
         experiment.configuration_id,
         feature_set_name,
         schema,
+        experiment.market_data_source_class,
     )
     store = ParquetR2FeatureStore(settings.research_root, clock)
     manifest = store.write(

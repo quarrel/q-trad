@@ -190,6 +190,7 @@ def build_local_comparator_manifest(
         fold_fit_ids=tuple(result.fit.artifact_id for result in fold_results),
         coverage_rows=rows,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
 
 
@@ -1008,6 +1009,7 @@ def _normalise_configurations(
                 reason,
                 expected_forecast,
                 manifest.manifest_id,
+                manifest.market_data_source_class,
             )
         )
     return tuple(sorted(rows, key=lambda item: item.configuration_id))
@@ -1040,6 +1042,7 @@ def _evaluated_model_manifest(
             sorted(item.evidence_id for item in training_predictions)
         ),
         coefficient_stability_summary_id=stability.summary_id,
+        market_data_source_class=model.feature_dataset.market_data_source_class,
     )
 
 
@@ -1064,6 +1067,7 @@ def _zero_model_manifest(
         ),
         training_prediction_evidence_ids=(),
         coefficient_stability_summary_id=None,
+        market_data_source_class=verified.bundle.market_data_source_class,
     )
 
 
@@ -1446,6 +1450,7 @@ def _verify_complete_local_ladder(
             experiment.configuration_id,
             item.name,
             feature_schema_for_set(experiment, item.name),
+            experiment.market_data_source_class,
         )
         for item in declared
     }

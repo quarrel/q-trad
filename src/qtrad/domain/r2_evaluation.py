@@ -355,6 +355,7 @@ class EvaluatedModelManifest:
     training_prediction_evidence_ids: tuple[str, ...]
     coefficient_stability_summary_id: str | None
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     def __post_init__(self) -> None:
         optional_ids = (
@@ -419,6 +420,7 @@ class EvaluatedModelManifest:
         expected_fold_target_keys: Sequence[tuple[str, str]],
         training_prediction_evidence_ids: Sequence[str],
         coefficient_stability_summary_id: str | None,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "EvaluatedModelManifest":
         coverage_ids = tuple(coverage_dataset_ids)
         fit_ids = tuple(fold_fit_ids)
@@ -435,6 +437,7 @@ class EvaluatedModelManifest:
             ("expected_fold_target_keys", expected_keys),
             ("training_prediction_evidence_ids", training_ids),
             ("coefficient_stability_summary_id", coefficient_stability_summary_id),
+            ("market_data_source_class", market_data_source_class),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -449,6 +452,7 @@ class EvaluatedModelManifest:
             training_prediction_evidence_ids=training_ids,
             coefficient_stability_summary_id=coefficient_stability_summary_id,
             manifest_id=identity,
+            market_data_source_class=market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -466,6 +470,7 @@ class EvaluatedModelManifest:
             ],
             "training_prediction_evidence_ids": list(self.training_prediction_evidence_ids),
             "coefficient_stability_summary_id": self.coefficient_stability_summary_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -535,6 +540,7 @@ class ConfigurationRecord:
     reason: str
     forecast_dataset_id: str | None
     evaluated_model_manifest_id: str | None
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     def __post_init__(self) -> None:
         _require_sha256(self.configuration_id, "evaluated configuration ID")
@@ -561,6 +567,7 @@ class ConfigurationRecord:
             "reason": self.reason,
             "forecast_dataset_id": self.forecast_dataset_id,
             "evaluated_model_manifest_id": self.evaluated_model_manifest_id,
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
 
@@ -576,6 +583,7 @@ class LocalComparatorManifest:
     coverage_rows: tuple[tuple[str, str, str, str | None], ...]
     evidence_class: EvidenceClass
     manifest_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_LOCAL_COMPARATOR_CONTRACT
 
@@ -612,6 +620,7 @@ class LocalComparatorManifest:
         fold_fit_ids: Sequence[str],
         coverage_rows: Sequence[tuple[str, str, str, str | None]],
         evidence_class: EvidenceClass,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "LocalComparatorManifest":
         coverage_ids = tuple(sorted(coverage_dataset_ids))
         fit_ids = tuple(sorted(fold_fit_ids))
@@ -626,6 +635,7 @@ class LocalComparatorManifest:
             fit_ids,
             rows,
             evidence_class,
+            market_data_source_class,
         )
         return cls(
             experiment_configuration_id,
@@ -638,6 +648,7 @@ class LocalComparatorManifest:
             rows,
             evidence_class,
             semantic_id(payload),
+            market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -651,6 +662,7 @@ class LocalComparatorManifest:
             self.fold_fit_ids,
             self.coverage_rows,
             self.evidence_class,
+            self.market_data_source_class,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -1138,6 +1150,7 @@ def _local_comparator_json(
     fold_fit_ids: Sequence[str],
     coverage_rows: Sequence[tuple[str, str, str, str | None]],
     evidence_class: EvidenceClass,
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> dict[str, JsonValue]:
     return {
         "contract": R2_LOCAL_COMPARATOR_CONTRACT,
@@ -1159,6 +1172,7 @@ def _local_comparator_json(
             for target_id, fold_id, disposition, forecast_id in coverage_rows
         ],
         "evidence_class": evidence_class.value,
+        "market_data_source_class": market_data_source_class.value,
     }
 
 
