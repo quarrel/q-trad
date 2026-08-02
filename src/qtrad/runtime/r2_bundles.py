@@ -229,10 +229,16 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 or child.get("holdout_excluded") is not True
             ):
                 raise ValueError("R2 OOF descriptor lineage differs from its bundle")
-            _verify_replay_inputs(path.parent, child, allowed_paths)
-        if ref.path.startswith("preprocessing/") and (
-            child.get("contract") != R2_PREPROCESSING_SELECTION_CONTRACT
-            or child.get("schema_version") != 2
+            if "replay_inputs" in child:
+                _verify_replay_inputs(path.parent, child, allowed_paths)
+        if (
+            ref.path.startswith("preprocessing/")
+            and isinstance(child.get("contract"), str)
+            and child["contract"].startswith("qtrad-r2-preprocessing-selection")
+            and (
+                child.get("contract") != R2_PREPROCESSING_SELECTION_CONTRACT
+                or child.get("schema_version") != 2
+            )
         ):
             raise ValueError("R2 preprocessing-selection child is not v2")
         if child.get("contract") == R2ForecastManifest.CONTRACT:

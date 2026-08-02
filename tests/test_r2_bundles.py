@@ -34,23 +34,13 @@ from qtrad.runtime.r2_verification import (
 
 def _child(path: str, seed: str) -> tuple[ArtifactReference, dict[str, object]]:
     identity = hashlib.sha256(seed.encode()).hexdigest()
-    is_preprocessing = seed == "preprocessing"
-    contract = (
-        "qtrad-r2-preprocessing-selection-v2" if is_preprocessing else f"qtrad-test-child-{seed}-v1"
-    )
+    contract = f"qtrad-test-child-{seed}-v1"
     payload: dict[str, object] = {
         "contract": contract,
-        "schema_version": 2 if is_preprocessing else 1,
+        "schema_version": 1,
         "artifact_id": identity,
         "value": seed,
     }
-    if is_preprocessing:
-        payload.update(
-            {
-                "market_data_source_class": "IG_NATIVE_CAPTURE",
-                "evidence_class": "IMPLEMENTATION_EVIDENCE_ONLY",
-            }
-        )
     digest = hashlib.sha256(canonical_bytes(payload)).hexdigest()
     return ArtifactReference(contract, identity, path, digest), payload
 

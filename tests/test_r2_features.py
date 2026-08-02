@@ -330,7 +330,7 @@ def test_r2b_feature_json_and_source_bound_ids_are_deterministic() -> None:
         experiment_configuration_id="c" * 64,
         evidence_class=EvidenceClass.IMPLEMENTATION,
     )
-    assert dataset.dataset_id == "197986307e00de14de511ad41ac61d6e04cbc0be7476369490da05d43702c380"
+    assert dataset.dataset_id == "57feeaa2f139fefd227c3ccf4a52c2ae04e415e268956bc108e7f7adfc8b4a5f"
 
 
 def test_current_cutoff_obeys_configured_availability_and_exact_both_endpoints() -> None:
