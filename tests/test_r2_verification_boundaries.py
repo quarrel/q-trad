@@ -106,3 +106,27 @@ def test_oof_verification_dispatches_representative_replay(
     monkeypatch.setattr(verification, "_replay_representative_oof", replay)
     assert verify_oof_bundle(Path("manifest.json")) is not None
     assert replayed
+
+
+def test_replay_staging_rejects_ancestor_symlinks(tmp_path: Path) -> None:
+    research = tmp_path / "research"
+    research.mkdir()
+    foundation = research / "foundation.json"
+    foundation.write_text("{}")
+    paths: dict[str, Path] = {"foundation": foundation}
+    for name in ("L0", "L1", "P0", "P1"):
+        feature = research / f"{name}.json"
+        feature.write_text("{}")
+        paths[name] = feature
+    experiment = tmp_path / "experiment.json"
+    experiment.write_text("{}")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    link = tmp_path / "link"
+    link.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        _stage_replay_inputs(
+            output=link / "bundle",
+            research_root=research,
+            paths={"experiment": experiment, **paths},
+        )
