@@ -74,7 +74,6 @@ from qtrad.domain.r2_evaluation import (
     SelectionGateOutcome,
     SelectionManifest,
 )
-from qtrad.runtime.r2_bundles import R2_EVALUATION_REGISTER_CONTRACT
 from qtrad.domain.r2_features import (
     R2FeatureDataset,
     RawFeatureRow,
@@ -94,6 +93,7 @@ from qtrad.domain.r2_readiness import (
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import verify_foundation_bundle
 from qtrad.runtime.r2_bundles import (
+    R2_EVALUATION_REGISTER_CONTRACT,
     atomic_create,
     canonical_bytes,
     reference_for_json,

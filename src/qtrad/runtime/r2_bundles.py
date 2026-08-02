@@ -414,7 +414,10 @@ def _verify_evaluation_register(
     payload: dict[str, object], bundle: R2OofBundle, root: Path
 ) -> None:
     """Authenticate every evaluation child and reconcile it with the OOF envelope."""
-    if payload.get("contract") != R2_EVALUATION_REGISTER_CONTRACT or payload.get("schema_version") != 2:
+    if (
+        payload.get("contract") != R2_EVALUATION_REGISTER_CONTRACT
+        or payload.get("schema_version") != 2
+    ):
         raise ValueError("R2 evaluation register contract is unsupported")
     required = {
         "local_comparator",
@@ -461,7 +464,9 @@ def _verify_evaluation_register(
     bind_one("pooled_ablation", "evaluation/pooled-ablation.json")
     evaluation_payload = _load_object(root / evaluation_reference.path)
     if payload.get("selection_evaluation_report_id") != evaluation_payload.get("report_id"):
-        raise ValueError("R2 evaluation register selection report ID differs from evaluation report")
+        raise ValueError(
+            "R2 evaluation register selection report ID differs from evaluation report"
+        )
     if not isinstance(payload["selection_decisions"], list):
         raise ValueError("R2 evaluation register selection decisions must be an array")
     for key in (
