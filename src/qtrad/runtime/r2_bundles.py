@@ -128,8 +128,8 @@ def _verify_replay_inputs(
         expected_digest = value.get("sha256")
         if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
             raise ValueError("representative replay input identity is incomplete")
-        replay_path = Path(raw_path)
-        replay_root = Path(raw_root)
+        replay_path = Path(cast(str, raw_path))
+        replay_root = Path(cast(str, raw_root))
         if (
             replay_path.is_absolute()
             or replay_root.is_absolute()
@@ -231,13 +231,13 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 raise ValueError("R2 OOF descriptor lineage differs from its bundle")
             if "replay_inputs" in child:
                 _verify_replay_inputs(path.parent, child, allowed_paths)
+        contract = child.get("contract")
         if (
             ref.path.startswith("preprocessing/")
-            and isinstance(child.get("contract"), str)
-            and child["contract"].startswith("qtrad-r2-preprocessing-selection")
+            and isinstance(contract, str)
+            and contract.startswith("qtrad-r2-preprocessing-selection")
             and (
-                child.get("contract") != R2_PREPROCESSING_SELECTION_CONTRACT
-                or child.get("schema_version") != 2
+                contract != R2_PREPROCESSING_SELECTION_CONTRACT or child.get("schema_version") != 2
             )
         ):
             raise ValueError("R2 preprocessing-selection child is not v2")
