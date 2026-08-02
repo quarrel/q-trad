@@ -165,7 +165,12 @@ def render_capture_universe_promotion(
 def load_capture_candidates(path: Path) -> CaptureCandidates:
     """Load an offline candidate catalogue that cannot authorise ingestion."""
 
-    document = _document(path)
+    return capture_candidates_from_document(_document(path))
+
+
+def capture_candidates_from_document(document: Mapping[str, object]) -> CaptureCandidates:
+    """Parse an already file-authenticated candidate catalogue."""
+
     entries = _entries(document)
     for entry in entries:
         if "preferred_epic" in entry:

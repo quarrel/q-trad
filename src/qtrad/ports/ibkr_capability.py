@@ -65,6 +65,8 @@ class IbkrContractEvidence:
     timezone: str | None
     trading_hours: str | None
     liquid_hours: str | None
+    primary_exchange: str | None = None
+    contract_month: str | None = None
 
     def __post_init__(self) -> None:
         if self.con_id <= 0:

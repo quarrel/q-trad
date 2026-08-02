@@ -42,6 +42,14 @@ def load_ibkr_capability_probe_spec(path: Path) -> IbkrCapabilityProbeSpec:
 
     with path.open("rb") as source:
         document = cast(Mapping[str, object], tomllib.load(source))
+    return ibkr_capability_probe_spec_from_document(document)
+
+
+def ibkr_capability_probe_spec_from_document(
+    document: Mapping[str, object],
+) -> IbkrCapabilityProbeSpec:
+    """Parse an already file-authenticated IBKR capability probe specification."""
+
     _require_exact_keys(document, _TOP_LEVEL_KEYS, "IBKR capability probe spec")
     if document.get("schema_version") != 1:
         raise ValueError("IBKR capability probe spec requires schema_version = 1")

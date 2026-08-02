@@ -969,6 +969,10 @@ def _contract_from_evidence(evidence: IbkrContractEvidence) -> object:
     )
     contract = cast(Any, _contract(query))
     contract.conId = evidence.con_id
+    if evidence.primary_exchange is not None:
+        contract.primaryExchange = evidence.primary_exchange
+    if evidence.contract_month is not None:
+        contract.lastTradeDateOrContractMonth = evidence.contract_month
     return contract
 
 
@@ -992,6 +996,8 @@ def _contract_evidence(value: object) -> IbkrContractEvidence:
         timezone=_optional_text(details.timeZoneId),
         trading_hours=_optional_text(details.tradingHours),
         liquid_hours=_optional_text(details.liquidHours),
+        primary_exchange=_optional_text(getattr(contract, "primaryExchange", None)),
+        contract_month=_optional_text(getattr(contract, "lastTradeDateOrContractMonth", None)),
     )
 
 
