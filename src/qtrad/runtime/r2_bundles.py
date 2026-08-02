@@ -143,7 +143,12 @@ def _verify_replay_inputs(
             root_resolved
         ):
             raise ValueError("representative replay input escapes the bundle root")
-        if candidate.is_symlink() or not candidate.is_file():
+        if (
+            child_root.is_symlink()
+            or not child_root.is_dir()
+            or candidate.is_symlink()
+            or not candidate.is_file()
+        ):
             raise ValueError(f"representative replay input is unavailable: {name}")
         if sha256(candidate.read_bytes()).hexdigest() != expected_digest:
             raise ValueError(f"representative replay input changed: {name}")

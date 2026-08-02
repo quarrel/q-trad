@@ -428,6 +428,14 @@ def _validate_representative_capture_v4(
             raise ValueError("representative fold boundaries differ from the fixed 50/30/20 rule")
 
 
+def _reject_replay_symlink_ancestors(path: Path) -> None:
+    current = path
+    while current != current.parent:
+        if current.is_symlink():
+            raise ValueError(f"replay output path traverses a symlink: {current}")
+        current = current.parent
+
+
 def _copy_replay_tree(source: Path, destination: Path) -> None:
     if source.is_symlink() or not source.is_dir():
         raise ValueError("replay research root must be a regular non-symlink directory")
@@ -454,12 +462,14 @@ def _stage_replay_inputs(
         raise ValueError(
             "representative replay inputs must include foundation, experiment and L0/L1/P0/P1"
         )
+    _reject_replay_symlink_ancestors(output / "replay-inputs")
     source_root = research_root.resolve()
     output_root = output.resolve()
     if output_root.is_relative_to(source_root):
         raise ValueError("replay output must not be inside its source root")
     replay_root = output / "replay-inputs"
     replay_root.mkdir(parents=True, exist_ok=False)
+    _reject_replay_symlink_ancestors(replay_root)
     staged_research = replay_root / "research"
     _copy_replay_tree(source_root, staged_research)
     children: dict[str, object] = {}
