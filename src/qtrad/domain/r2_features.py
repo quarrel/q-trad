@@ -14,7 +14,7 @@ from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
-R2_FEATURE_DATASET_CONTRACT = "qtrad-r2-features-v1"
+R2_FEATURE_DATASET_CONTRACT = "qtrad-r2-features-v2"
 
 
 @dataclass(frozen=True, slots=True)

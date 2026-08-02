@@ -14,9 +14,9 @@ from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_LOCAL_COMPARATOR_CONTRACT = "qtrad-r2-local-comparator-v1"
-R2_EVALUATION_CONTRACT = "qtrad-r2-evaluation-v1"
-R2_SELECTION_CONTRACT = "qtrad-r2-selection-v1"
+R2_LOCAL_COMPARATOR_CONTRACT = "qtrad-r2-local-comparator-v2"
+R2_EVALUATION_CONTRACT = "qtrad-r2-evaluation-v2"
+R2_SELECTION_CONTRACT = "qtrad-r2-selection-v2"
 HOLDOUT_STATE_VERIFICATION_PENDING = "PENDING_R2_H_INTEGRATION"
 
 

@@ -62,8 +62,10 @@ from qtrad.domain.r2_bundles import (
     R2ForecastManifest,
     R2OofBundle,
     R2SoftwareVerificationBundle,
+    R2_EVALUATION_REGISTER_CONTRACT,
 )
 from qtrad.domain.r2_evaluation import (
+    R2_EVALUATION_CONTRACT,
     R2_SELECTION_CONTRACT,
     ConfigurationDisposition,
     ConfigurationRecord,
@@ -1025,8 +1027,8 @@ def build_oof_bundle(
     ablation_ref = _child_reference(ablation_path, ablation_payload)
     evaluation_refs.append(ablation_ref)
     register: dict[str, object] = {
-        "contract": "qtrad-r2-evaluation-register-v1",
-        "schema_version": 1,
+        "contract": R2_EVALUATION_REGISTER_CONTRACT,
+        "schema_version": 2,
         "source_class": experiment.market_data_source_class.value,
         "evidence_class": experiment.evidence_class.value,
         "local_comparator": local_comparator_ref.as_json(),
@@ -1107,7 +1109,7 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
         if reference.contract != contract:
             continue
         payload = _load_selection(bundle_path.parent / reference.path)
-        if contract == "qtrad-r2-evaluation-v1" and "report_id" not in payload:
+        if contract == R2_EVALUATION_CONTRACT and "report_id" not in payload:
             continue
         matches.append(payload)
     if len(matches) != 1:
@@ -1188,7 +1190,7 @@ def selection_freeze(
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
     bundle = verify_r2_oof_bundle(oof_bundle_path)
-    register = _oof_child_payload(oof_bundle_path, bundle, "qtrad-r2-evaluation-register-v1")
+    register = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
     descriptor = _oof_child_payload(oof_bundle_path, bundle, OOF_DESCRIPTOR_CONTRACT)
     raw_configurations = register.get("configurations")
     if not isinstance(raw_configurations, list) or not raw_configurations:
@@ -1213,7 +1215,7 @@ def selection_freeze(
     thresholds = descriptor.get("acceptance_thresholds")
     if not isinstance(thresholds, dict):
         raise ValueError("OOF descriptor has no authenticated selection thresholds")
-    evaluation_payload = _oof_child_payload(oof_bundle_path, bundle, "qtrad-r2-evaluation-v1")
+    evaluation_payload = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
     evaluation_report_id = evaluation_payload.get("report_id")
     report_ref = register.get("evaluation")
     local_ref = register.get("local_comparator")
@@ -1365,7 +1367,7 @@ def build_software_bundle(
     if selection.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("representative selection must be a typed SelectionManifest")
     evaluation_payload = _oof_child_payload(
-        representative_oof_bundle_path, representative_oof, "qtrad-r2-evaluation-v1"
+        representative_oof_bundle_path, representative_oof, R2_EVALUATION_CONTRACT
     )
     if selection.get("evaluation_report_id") != evaluation_payload.get("report_id"):
         raise ValueError("representative selection does not bind the supplied OOF report")
@@ -1588,7 +1590,7 @@ def _verify_software_bundle_envelope(path: Path) -> R2SoftwareVerificationBundle
             raise ValueError("software selection evidence class differs from its OOF bundle")
         if payload.get("holdout_state_verification") != "PENDING_R2_H_INTEGRATION":
             raise ValueError("software selection must leave holdout verification pending")
-        evaluation_payload = _oof_child_payload(oof_path, oof, "qtrad-r2-evaluation-v1")
+        evaluation_payload = _oof_child_payload(oof_path, oof, R2_EVALUATION_CONTRACT)
         if payload.get("evaluation_report_id") != evaluation_payload.get("report_id"):
             raise ValueError("software selection does not bind the OOF evaluation report")
         if payload.get("application_image_identity") != identities["application_identity"]:

@@ -1292,7 +1292,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
         output_path=Path("features.json"),
     )
     built = json.loads(capsys.readouterr().out)
-    assert built["contract"] == "qtrad-r2-feature-parquet-v1"
+    assert built["contract"] == "qtrad-r2-feature-parquet-v2"
     assert built["rows"] == 1
     await cli._verify_persisted_r2_features(
         settings,

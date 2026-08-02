@@ -32,7 +32,7 @@ from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily
 from qtrad.domain.time import require_utc
 from qtrad.ports.clock import Clock
 
-R2_PARQUET_MANIFEST_CONTRACT = "qtrad-r2-feature-parquet-v1"
+R2_PARQUET_MANIFEST_CONTRACT = "qtrad-r2-feature-parquet-v2"
 R2_PARQUET_MANIFEST_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _DEFAULT_CHUNK_ROWS = 8192
@@ -516,11 +516,7 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
         "image_identity",
         "market_data_source_class",
     }
-    legacy_expected = expected - {"market_data_source_class"}
-    legacy = False
-    if set(raw) == legacy_expected:
-        legacy = True
-    elif set(raw) != expected:
+    if set(raw) != expected:
         raise ValueError("R2 feature manifest has unknown or missing fields")
     manifest = R2FeatureManifest(
         manifest_id=_hex(raw["manifest_id"], 24, "manifest ID"),
@@ -549,10 +545,7 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
         application_version=_text(raw["application_version"], "application version"),
         image_identity=_text(raw["image_identity"], "image identity"),
         market_data_source_class=MarketDataSourceClass(
-            _text(
-                raw.get("market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE.value),
-                "market data source class",
-            )
+            _text(raw["market_data_source_class"], "market data source class")
         ),
     )
     if manifest.manifest_filename != path.name:
@@ -560,8 +553,6 @@ def _read_manifest(path: Path) -> R2FeatureManifest:
     if manifest.manifest_id != manifest.manifest_sha256[:24]:
         raise ValueError("R2 feature manifest ID does not match its hash")
     identity = _manifest_identity_payload(manifest)
-    if legacy:
-        identity.pop("market_data_source_class", None)
     if _sha256_json(identity) != manifest.manifest_sha256:
         raise ValueError("R2 feature manifest hash does not match its canonical content")
     if manifest.raw_feature_schema_id != feature_schema_id(manifest.feature_schema):

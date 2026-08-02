@@ -18,6 +18,7 @@ from qtrad.domain.r2_bundles import (
 )
 
 _MAX_BYTES = 64 * 1024 * 1024
+R2_EVALUATION_REGISTER_CONTRACT = "qtrad-r2-evaluation-register-v2"
 
 
 def canonical_bytes(value: Mapping[str, object]) -> bytes:
@@ -150,7 +151,7 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     register_refs = [
         reference
         for reference in bundle.evaluation_children
-        if reference.contract == "qtrad-r2-evaluation-register-v1"
+        if reference.contract == R2_EVALUATION_REGISTER_CONTRACT
     ]
     descriptor_refs = [
         reference
@@ -185,7 +186,7 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
             forecast_manifest = R2ForecastManifest.from_json(child)
             _verify_reference(path.parent, forecast_manifest.forecast_child)
             allowed_paths.add(forecast_manifest.forecast_child.path)
-        if child.get("contract") == "qtrad-r2-evaluation-register-v1":
+        if child.get("contract") == R2_EVALUATION_REGISTER_CONTRACT:
             report_id = child.get("report_id")
             if not isinstance(report_id, str):
                 raise ValueError("R2 evaluation register must expose a report ID")
@@ -413,6 +414,8 @@ def _verify_evaluation_register(
     payload: dict[str, object], bundle: R2OofBundle, root: Path
 ) -> None:
     """Authenticate every evaluation child and reconcile it with the OOF envelope."""
+    if payload.get("contract") != R2_EVALUATION_REGISTER_CONTRACT or payload.get("schema_version") != 2:
+        raise ValueError("R2 evaluation register contract is unsupported")
     required = {
         "local_comparator",
         "evaluation",
@@ -420,6 +423,10 @@ def _verify_evaluation_register(
         "forecast_manifests",
         "coverage",
         "pooled_ablation",
+        "selection_evaluation_report_id",
+        "selection_decisions",
+        "selection_selected_configuration_ids",
+        "selection_holdout_comparator_configuration_ids",
     }
     missing = required - set(payload)
     if missing:
@@ -450,8 +457,20 @@ def _verify_evaluation_register(
         return reference
 
     bind_one("local_comparator", "evaluation/local-comparator.json")
-    bind_one("evaluation", "evaluation/report.json")
+    evaluation_reference = bind_one("evaluation", "evaluation/report.json")
     bind_one("pooled_ablation", "evaluation/pooled-ablation.json")
+    evaluation_payload = _load_object(root / evaluation_reference.path)
+    if payload.get("selection_evaluation_report_id") != evaluation_payload.get("report_id"):
+        raise ValueError("R2 evaluation register selection report ID differs from evaluation report")
+    if not isinstance(payload["selection_decisions"], list):
+        raise ValueError("R2 evaluation register selection decisions must be an array")
+    for key in (
+        "selection_selected_configuration_ids",
+        "selection_holdout_comparator_configuration_ids",
+    ):
+        values = payload[key]
+        if not isinstance(values, list) or not all(isinstance(value, str) for value in values):
+            raise ValueError(f"R2 evaluation register {key} must be a string array")
 
     def bind_array(key: str, expected: tuple[ArtifactReference, ...]) -> None:
         values = payload[key]

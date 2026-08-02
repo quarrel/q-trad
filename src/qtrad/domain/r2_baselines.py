@@ -15,9 +15,9 @@ from qtrad.domain.r2_models import FitDisposition, PreprocessingFit
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
-R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v1"
-R2_FORECAST_COVERAGE_CONTRACT = "qtrad-r2-forecast-coverage-v1"
-R2_COEFFICIENT_STABILITY_CONTRACT = "qtrad-r2-coefficient-stability-v1"
+R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v2"
+R2_FORECAST_COVERAGE_CONTRACT = "qtrad-r2-forecast-coverage-v2"
+R2_COEFFICIENT_STABILITY_CONTRACT = "qtrad-r2-coefficient-stability-v2"
 
 
 class ForecastCoverageDisposition(StrEnum):
