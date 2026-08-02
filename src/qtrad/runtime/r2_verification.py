@@ -28,7 +28,11 @@ import sklearn
 from qtrad import __version__
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.application.r2_baselines import build_local_ridge_oof
-from qtrad.application.r2_evaluation import EvaluationModel, build_r2_evaluation
+from qtrad.application.r2_evaluation import (
+    EvaluationModel,
+    build_r2_evaluation,
+    build_selection_manifest,
+)
 from qtrad.application.r2_features import (
     R2FoundationInputs,
     feature_schema_for_set,
@@ -63,7 +67,10 @@ from qtrad.domain.r2_evaluation import (
     R2_SELECTION_CONTRACT,
     ConfigurationDisposition,
     ConfigurationRecord,
+    MetricAvailability,
+    MetricValue,
     SelectionDecision,
+    SelectionGateOutcome,
     SelectionManifest,
 )
 from qtrad.domain.r2_features import (
@@ -873,6 +880,17 @@ def build_oof_bundle(
         local_feature_set_id=datasets["L1"].feature_set_id,
         local_feature_datasets=local_datasets,
     )
+    selection_preview = build_selection_manifest(
+        evaluation,
+        local_comparator,
+        experiment,
+        primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
+        secondary_metrics=("RMSE",),
+        final_fitting_procedure="PENDING_R2_H_INTEGRATION",
+        application_image_identity=identities["application_identity"],
+        frozen_at=clock.now(),
+        frozen_by="oof-build-replay",
+    )
 
     children: dict[str, dict[str, object]] = {}
     feature_refs: list[ArtifactReference] = []
@@ -1018,6 +1036,12 @@ def build_oof_bundle(
         "coverage": [item.as_json() for item in coverage_refs],
         "pooled_ablation": ablation_ref.as_json(),
         "configurations": [item.as_json() for item in configurations],
+        "selection_evaluation_report_id": evaluation.report_id,
+        "selection_decisions": [item.as_json() for item in selection_preview.decisions],
+        "selection_selected_configuration_ids": list(selection_preview.selected_configuration_ids),
+        "selection_holdout_comparator_configuration_ids": list(
+            selection_preview.holdout_comparator_configuration_ids
+        ),
         "holdout_excluded": True,
     }
     register["report_id"] = sha256(canonical_bytes(register)).hexdigest()
@@ -1091,6 +1115,69 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
     return matches[0]
 
 
+def _selection_decisions_from_payload(value: object) -> tuple[SelectionDecision, ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError("OOF register has no persisted selection-gate decisions")
+
+    def metric(raw: object) -> MetricValue:
+        if not isinstance(raw, dict):
+            raise ValueError("selection gate metric is not an object")
+        raw = cast(dict[str, object], raw)
+        availability = MetricAvailability(str(raw["availability"]))
+        if availability is MetricAvailability.DEFINED:
+            number = raw["value"]
+            if isinstance(number, bool) or not isinstance(number, (int, float)):
+                raise ValueError("defined selection metric has no numeric value")
+            if raw.get("reason") is not None:
+                raise ValueError("defined selection metric has an unexpected reason")
+            return MetricValue.defined(float(number))
+        reason = raw["reason"]
+        if not isinstance(reason, str) or not reason:
+            raise ValueError("undefined selection metric has no reason")
+        if raw.get("value") is not None:
+            raise ValueError("undefined selection metric has an unexpected value")
+        return MetricValue.not_defined(reason)
+
+    decisions: list[SelectionDecision] = []
+    for raw_decision in value:
+        if not isinstance(raw_decision, dict):
+            raise ValueError("selection decision is not an object")
+        raw_decision = cast(dict[str, object], raw_decision)
+        configuration_id = str(raw_decision["configuration_id"])
+        gates_raw = raw_decision["gates"]
+        if not isinstance(gates_raw, list):
+            raise ValueError("selection decision gates are not a list")
+        gates: list[SelectionGateOutcome] = []
+        for raw_gate in gates_raw:
+            if not isinstance(raw_gate, dict):
+                raise ValueError("selection gate is not an object")
+            raw_gate = cast(dict[str, object], raw_gate)
+            gates.append(
+                SelectionGateOutcome(
+                    configuration_id=configuration_id,
+                    name=str(raw_gate["name"]),
+                    passed=bool(raw_gate["passed"]),
+                    observed=metric(raw_gate["observed"]),
+                    threshold=metric(raw_gate["threshold"]),
+                    reason=str(raw_gate["reason"]),
+                )
+            )
+        decisions.append(
+            SelectionDecision(
+                configuration_id=configuration_id,
+                disposition=ConfigurationDisposition(str(raw_decision["disposition"])),
+                reason=str(raw_decision["reason"]),
+                gates=tuple(gates),
+            )
+        )
+    ordered = tuple(sorted(decisions, key=lambda item: item.configuration_id))
+    if ordered != tuple(decisions) or len({item.configuration_id for item in decisions}) != len(
+        decisions
+    ):
+        raise ValueError("selection decisions are not unique and ordered")
+    return ordered
+
+
 def selection_freeze(
     *,
     oof_bundle_path: Path,
@@ -1112,32 +1199,10 @@ def selection_freeze(
             raise ValueError("OOF evaluation register contains an invalid configuration")
         configurations.append(cast(dict[str, object], item))
     evaluated_ids = tuple(sorted(str(item["configuration_id"]) for item in configurations))
-    decisions: list[SelectionDecision] = []
-    retained_controls: list[str] = []
-    for item in configurations:
-        configuration_id = str(item["configuration_id"])
-        raw_disposition = item.get("disposition")
-        raw_reason = item.get("reason")
-        if (
-            not isinstance(raw_disposition, str)
-            or not isinstance(raw_reason, str)
-            or not raw_reason
-        ):
-            raise ValueError("OOF configuration lacks persisted disposition or reason")
-        try:
-            disposition = ConfigurationDisposition(raw_disposition)
-        except ValueError as exc:
-            raise ValueError("OOF configuration has an unknown disposition") from exc
-        if disposition is ConfigurationDisposition.RETAINED_CONTROL:
-            retained_controls.append(configuration_id)
-        decisions.append(
-            SelectionDecision(
-                configuration_id=configuration_id,
-                disposition=disposition,
-                reason=raw_reason,
-                gates=(),
-            )
-        )
+    raw_selection_decisions = register.get("selection_decisions")
+    decisions = _selection_decisions_from_payload(raw_selection_decisions)
+    if tuple(item.configuration_id for item in decisions) != evaluated_ids:
+        raise ValueError("persisted selection decisions do not cover the evaluation register")
     holdout_range_value = descriptor.get("holdout_range")
     if (
         not isinstance(holdout_range_value, list)
@@ -1152,13 +1217,32 @@ def selection_freeze(
     evaluation_report_id = evaluation_payload.get("report_id")
     report_ref = register.get("evaluation")
     local_ref = register.get("local_comparator")
+    selected_values = register.get("selection_selected_configuration_ids")
+    holdout_values = register.get("selection_holdout_comparator_configuration_ids")
     if (
         not isinstance(evaluation_report_id, str)
+        or register.get("selection_evaluation_report_id") != evaluation_report_id
         or not isinstance(report_ref, dict)
         or report_ref.get("semantic_id") != evaluation_report_id
         or not isinstance(local_ref, dict)
+        or not isinstance(selected_values, list)
+        or not isinstance(holdout_values, list)
+        or not all(isinstance(item, str) for item in (*selected_values, *holdout_values))
     ):
-        raise ValueError("OOF register has incomplete evaluation lineage")
+        raise ValueError("OOF register has incomplete evaluation lineage or selection replay")
+    selected_ids = tuple(sorted(cast(list[str], selected_values)))
+    holdout_ids = tuple(sorted(cast(list[str], holdout_values)))
+    if selected_ids != tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+    ) or holdout_ids != tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition
+        in (ConfigurationDisposition.RETAINED_CONTROL, ConfigurationDisposition.SELECTED_CANDIDATE)
+    ):
+        raise ValueError("persisted selection IDs differ from replayed decisions")
     local_ref_payload = cast(dict[str, object], local_ref)
     local_comparator_id = local_ref_payload.get("semantic_id")
     if not isinstance(local_comparator_id, str):
@@ -1179,8 +1263,8 @@ def selection_freeze(
         secondary_metrics=("RMSE",),
         acceptance_thresholds=tuple(threshold_values),
         decisions=tuple(decisions),
-        selected_configuration_ids=(),
-        holdout_comparator_configuration_ids=tuple(sorted(retained_controls)),
+        selected_configuration_ids=selected_ids,
+        holdout_comparator_configuration_ids=holdout_ids,
         final_fitting_procedure="PENDING_R2_H_INTEGRATION",
         holdout_range=(
             datetime.fromisoformat(str(holdout_range_value[0])),
