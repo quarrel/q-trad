@@ -42,6 +42,10 @@ from qtrad.application.ibkr_capability import (
     build_ibkr_capability_preflight,
     build_ibkr_capability_review,
 )
+from qtrad.application.ibkr_historical import (
+    configured_image_digest,
+    derive_qtrad_commit,
+)
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
@@ -92,6 +96,12 @@ from qtrad.runtime.foundation_bundle import (
     verify_observation_build_evidence,
 )
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
+from qtrad.runtime.ibkr_historical import (
+    build_ibkr_contract_selection_from_files,
+    build_ibkr_runtime_lock_from_files,
+    write_ibkr_contract_selection,
+    write_ibkr_runtime_lock,
+)
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
@@ -240,6 +250,34 @@ def build_parser() -> argparse.ArgumentParser:
     review.add_argument("--probe-spec", type=Path)
     review.add_argument("--execute-account-probe", action="store_true")
     review.add_argument("--output", type=Path)
+    select = instrument_sub.add_parser(
+        "select", help="freeze exact IBKR contract decisions from a verified capability review"
+    )
+    select.add_argument("--provider", choices=("ibkr",), required=True)
+    select.add_argument("--capability-review", type=Path, required=True)
+    select.add_argument("--selection", type=Path, required=True)
+    select.add_argument("--frozen-by", required=True)
+    select.add_argument("--output", type=Path, required=True)
+
+    historical = subparsers.add_parser("historical", help="historical provider-data operations")
+    historical_sub = historical.add_subparsers(dest="historical_provider", required=True)
+    historical_ibkr = historical_sub.add_parser("ibkr", help="IBKR historical operations")
+    historical_ibkr_sub = historical_ibkr.add_subparsers(
+        dest="historical_ibkr_command", required=True
+    )
+    runtime_lock = historical_ibkr_sub.add_parser(
+        "runtime-lock", help="hash IBKR runtime archives and inspect the acquisition environment"
+    )
+    runtime_lock.add_argument("--gateway-archive", type=Path, required=True)
+    runtime_lock.add_argument("--api-archive", type=Path, required=True)
+    runtime_lock.add_argument("--ibc-archive", type=Path, required=True)
+    runtime_lock.add_argument("--gateway-version")
+    runtime_lock.add_argument("--api-version")
+    runtime_lock.add_argument("--ibc-version", default="3.24.1")
+    runtime_lock.add_argument("--qtrad-commit")
+    runtime_lock.add_argument("--image-digest")
+    runtime_lock.add_argument("--output", type=Path, required=True)
+
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
     )
@@ -527,6 +565,32 @@ def main(argv: Sequence[str] | None = None) -> None:
                 probe_spec_path=args.probe_spec,
                 execute_account_probe=args.execute_account_probe,
             )
+        )
+    elif args.command == "instruments" and args.instrument_command == "select":
+        _select_ibkr_instruments(
+            clock,
+            capability_review_path=args.capability_review,
+            selection_path=args.selection,
+            frozen_by=args.frozen_by,
+            output_path=args.output,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "runtime-lock"
+    ):
+        _inspect_ibkr_runtime_lock(
+            settings,
+            clock,
+            gateway_archive=args.gateway_archive,
+            api_archive=args.api_archive,
+            ibc_archive=args.ibc_archive,
+            gateway_version=args.gateway_version,
+            api_version=args.api_version,
+            ibc_version=args.ibc_version,
+            qtrad_commit=args.qtrad_commit,
+            image_digest=args.image_digest,
+            output_path=args.output,
         )
     elif args.command == "instruments" and args.instrument_command == "promote":
         _promote_universe(
@@ -2016,6 +2080,78 @@ async def _sync_instruments(
     finally:
         await adapter.disconnect()
         await engine.dispose()
+
+
+def _select_ibkr_instruments(
+    clock: Clock,
+    *,
+    capability_review_path: Path,
+    selection_path: Path,
+    frozen_by: str,
+    output_path: Path,
+) -> None:
+    selection = build_ibkr_contract_selection_from_files(
+        capability_review_path=capability_review_path,
+        selection_path=selection_path,
+        frozen_by=frozen_by,
+        frozen_at=clock.now(),
+    )
+    write_ibkr_contract_selection(output_path, selection)
+    print(
+        json.dumps(
+            {
+                "output": str(output_path),
+                "selection_sha256": selection.selection_sha256,
+                "decision_count": len(selection.decisions),
+                "acquisition_eligible_count": sum(
+                    decision.acquisition_eligible for decision in selection.decisions
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _inspect_ibkr_runtime_lock(
+    settings: Settings,
+    clock: Clock,
+    *,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    gateway_version: str | None,
+    api_version: str | None,
+    ibc_version: str,
+    qtrad_commit: str | None,
+    image_digest: str | None,
+    output_path: Path,
+) -> None:
+    runtime = build_ibkr_runtime_lock_from_files(
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        gateway_version=gateway_version or settings.ibkr_gateway_version,
+        api_version=api_version or settings.ibkr_api_version,
+        ibc_version=ibc_version,
+        qtrad_commit=qtrad_commit or derive_qtrad_commit(require_clean=qtrad_commit is None),
+        qtrad_image_digest=configured_image_digest(image_digest),
+        frozen_at=clock.now(),
+        api_host=settings.ibkr_gateway_host,
+        api_port=settings.ibkr_gateway_port,
+    )
+    write_ibkr_runtime_lock(output_path, runtime)
+    print(
+        json.dumps(
+            {
+                "output": str(output_path),
+                "runtime_sha256": runtime.runtime_sha256,
+                "gateway_version": runtime.gateway_version,
+                "api_version": runtime.api_version,
+                "ibc_version": runtime.ibc_version,
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _review_instruments(

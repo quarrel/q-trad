@@ -43,22 +43,23 @@ work and records only the milestone sequence needed to reach the next trustworth
   contracts plus CLI operations and mutation-tested independent authentication. A fresh representative
   source-specific integration and its R2.H software bundle remain before the R2.F1 exit is complete; R2.F2
   and the locked holdout remain gated on a frozen qualifying foundation.
-- ADR 0028 approves an independent, market-data-only IBKR paper source. Its contract review,
-  historical bootstrap and later live capture proceed as a parallel data track under
-  `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`. No IBKR adapter, account capability, dataset or host is
-  implemented or qualified yet, and IBKR evidence cannot substantiate an IG-native conclusion.
+- ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
+  historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
+  Stage 1 contract/runtime artefacts and offline verifiers are implemented; no IBKR adapter, account
+  capability, historical dataset or host is implemented or qualified yet, and IBKR evidence cannot
+  substantiate an IG-native conclusion.
 
 ## Milestones
 
-| Milestone | Status | Exit evidence |
-|---|---|---|
-| R0 — alignment, coverage and data readiness | COMPLETE | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded |
-| R1 — causal multi-asset research foundation | COMPLETE | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks |
-| R2 — local and pooled baselines | IN PROGRESS | R2.A–R2.E software is complete and the R2.F1 core is implemented; representative integration and the R2.H software-verification bundle remain before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
-| R3 — cost and portfolio baseline | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically |
-| R4 — residual structural graph experiment | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value |
-| R5 — integrated offline MVP | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set |
-| R6 — continuous shadow paper | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L |
+| Milestone                                   | Status      | Exit evidence                                                                                                                                                                                                                           |
+| ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| R0 — alignment, coverage and data readiness | COMPLETE    | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
+| R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
+| R2 — local and pooled baselines             | IN PROGRESS | R2.A–R2.E software is complete and the R2.F1 core is implemented; representative integration and the R2.H software-verification bundle remain before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
+| R3 — cost and portfolio baseline            | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically                                                                                                                            |
+| R4 — residual structural graph experiment   | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value                                                                                                                                               |
+| R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
+| R6 — continuous shadow paper                | NOT STARTED | the validated stack runs continuously with causal executable fills, horizon attribution and reconciling paper P&L                                                                                                                       |
 
 ## R0 — alignment, coverage and data readiness
 
@@ -130,8 +131,9 @@ chronology ambiguity before those contracts are fixed.
 
 ## Parallel IBKR market-data track
 
-- Normative implementation plan: `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`; durable boundary:
-  `docs/adr/0028-independent-ibkr-market-data-source.md`.
+- Normative historical-acquisition plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`; durable boundaries:
+  `docs/adr/0028-independent-ibkr-market-data-source.md` and
+  `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`.
 - First qualify account-visible exact contracts, entitlements, timestamps, sessions and historical
   capabilities without ingesting or inferring provider mappings.
 - Then implement immutable one-minute historical acquisition and a separate provider-history

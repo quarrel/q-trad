@@ -181,6 +181,8 @@ def _contract_from_json(payload: Mapping[str, object]) -> IbkrContractEvidence:
         timezone=_optional_string(payload["timezone"]),
         trading_hours=_optional_string(payload["trading_hours"]),
         liquid_hours=_optional_string(payload["liquid_hours"]),
+        primary_exchange=_optional_string(payload.get("primary_exchange")),
+        contract_month=_optional_string(payload.get("contract_month")),
     )
 
 

@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-08-01
+**Updated:** 2026-08-02
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
-**Parallel track:** IBKR Stage 1 local preflight complete; account-gated capability probe pending
+**Parallel track:** IBKR Stage 1 contract/runtime artefacts implemented and offline-verified; account-gated capability probe pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -128,15 +128,13 @@ remains offline/replay.
   locally, but no fresh representative capture-v4 snapshot is available in this workspace; therefore
   representative integration readiness is not asserted and R2.F1/R2.H remain pending. No confirmatory
   model-selection or effectiveness claim is made.
-- ADR 0028 and `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md` define an independent, market-data-only
-  IBKR paper source and its complete staged path. The local Stage 1 boundary includes the canonical
-  20-concept candidate catalogue, validated non-secret Gateway endpoint/client configuration and a
-  deterministic `instruments review --provider ibkr --environment paper --preflight` artefact. A
-  fixture-tested direct-API capability-probe boundary now requires an explicit
-  `--execute-account-probe`, a non-authoritative operator query specification and a create-only review
-  output. It remains inert until a pinned wheel built from the official TWS API distribution is made
-  available, and it has produced no exact-contract or entitlement evidence. No historical dataset,
-  live collector, host or research result has been implemented or qualified.
+- ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
+  market-data-only IBKR paper source and historical evidence boundaries. Stage 1 now provides typed
+  `qtrad-ibkr-contract-selection-v1` and `qtrad-ibkr-acquisition-runtime-v1` artefacts, strict
+  independent loaders/verifiers, create-only persistence, archive rehashing and offline CLI paths.
+  It remains inert until an account-gated capability review and exact operator selection are available;
+  no historical dataset, entitlement evidence or research result has been created. IBKR history stays
+  provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -160,7 +158,7 @@ remains offline/replay.
 - China A50 and Taiwan session/data-quality qualification remains part of the native coverage audit.
   Korea 200 remains unavailable without a future eligible listing. VIX is capture-only and must not
   become paper-tradable without a separate economics/role decision. Bitcoin needs a future review
-  while its exact listing is available before it can be promoted as potentially tradable.
+  while its exact listing is available before it can be promoted.
 - R0's 2026-07-22 bounded historical-data decision remains retained evidence. ADR 0028 subsequently
   approved an independently governed IBKR paper-market-data track, but its exact contracts, account
   entitlements, timestamp/session semantics and historical availability remain unqualified. Any future
@@ -187,7 +185,7 @@ remains offline/replay.
 - Implemented and intended system shape: `docs/ARCHITECTURE.md`
 - Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
 - R0 native coverage and retained historical-source decision: `docs/R0_DATA_READINESS.md`
-- IBKR normative implementation plan: `docs/IBKR_CAPTURE_IMPLEMENTATION_PLAN.md`
+- IBKR normative implementation plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`
 - Independent IBKR source decision: `docs/adr/0028-independent-ibkr-market-data-source.md`
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`
 - Verified snapshot import: `docs/RESEARCH_SNAPSHOT_RUNBOOK.md`
