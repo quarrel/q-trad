@@ -2,7 +2,7 @@
 
 **Updated:** 2026-08-02
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
-**Parallel track:** IBKR Stage 1 contract/runtime artefacts implemented and offline-verified; account-gated capability probe pending
+**Parallel track:** IBKR Stages 1–2 immutable contract/planner artefacts implemented and offline-verified; account-gated capability probe and Stage 5 request-profile canary pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -129,10 +129,15 @@ remains offline/replay.
   representative integration readiness is not asserted and R2.F1/R2.H remain pending. No confirmatory
   model-selection or effectiveness claim is made.
 - ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
-  market-data-only IBKR paper source and historical evidence boundaries. Stage 1 now provides typed
+  market-data-only IBKR paper source and historical evidence boundaries. Stage 1 provides typed
   `qtrad-ibkr-contract-selection-v1` and `qtrad-ibkr-acquisition-runtime-v1` artefacts, strict
   independent loaders/verifiers, create-only persistence, archive rehashing and offline CLI paths.
-  It remains inert until an account-gated capability review and exact operator selection are available;
+  Stage 2 adds strict `qtrad-ibkr-historical-request-profile-v1` and
+  `qtrad-ibkr-historical-plan-v1` contracts plus a PostgreSQL- and Gateway-independent deterministic
+  planner and file-only plan verifier. It freezes UTC half-open MIDPOINT and SCHEDULE ownership,
+  request parameters, bounded safe durations and conservative pacing policy without assuming a
+  four-week production duration. It remains inert until an account-gated capability review, exact
+  operator selection and later Stage 5 canary evidence are available;
   no historical dataset, entitlement evidence or research result has been created. IBKR history stays
   provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product

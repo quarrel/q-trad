@@ -97,8 +97,11 @@ from qtrad.runtime.foundation_bundle import (
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_historical import (
     build_ibkr_contract_selection_from_files,
+    build_ibkr_historical_plan_from_files,
     build_ibkr_runtime_lock_from_files,
+    verify_ibkr_historical_plan,
     write_ibkr_contract_selection,
+    write_ibkr_historical_plan,
     write_ibkr_runtime_lock,
 )
 from qtrad.runtime.logging import configure_logging
@@ -277,6 +280,19 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_lock.add_argument("--ibc-version", default="3.24.1")
     runtime_lock.add_argument("--image-digest")
     runtime_lock.add_argument("--output", type=Path, required=True)
+    historical_plan = historical_ibkr_sub.add_parser(
+        "plan", help="build a deterministic IBKR historical request plan without provider I/O"
+    )
+    historical_plan.add_argument("--contract-selection", type=Path, required=True)
+    historical_plan.add_argument("--runtime-lock", type=Path, required=True)
+    historical_plan.add_argument("--request-profile", type=Path, required=True)
+    historical_plan.add_argument("--start", type=_utc_minute_argument, required=True)
+    historical_plan.add_argument("--end", type=_utc_minute_argument, required=True)
+    historical_plan.add_argument("--output", type=Path, required=True)
+    historical_plan_verify = historical_ibkr_sub.add_parser(
+        "plan-verify", help="independently verify a file-only IBKR historical request plan"
+    )
+    historical_plan_verify.add_argument("--plan", type=Path, required=True)
 
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -593,6 +609,25 @@ def main(argv: Sequence[str] | None = None) -> None:
             image_digest=args.image_digest,
             output_path=args.output,
         )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "plan"
+    ):
+        _plan_ibkr_historical(
+            contract_selection_path=args.contract_selection,
+            runtime_lock_path=args.runtime_lock,
+            request_profile_path=args.request_profile,
+            start=args.start,
+            end=args.end,
+            output_path=args.output,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "plan-verify"
+    ):
+        _verify_ibkr_historical_plan(args.plan)
     elif args.command == "instruments" and args.instrument_command == "promote":
         _promote_universe(
             clock,
@@ -2111,6 +2146,58 @@ def _select_ibkr_instruments(
                 "acquisition_eligible_count": sum(
                     decision.acquisition_eligible for decision in selection.decisions
                 ),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _plan_ibkr_historical(
+    *,
+    contract_selection_path: Path,
+    runtime_lock_path: Path,
+    request_profile_path: Path,
+    start: datetime,
+    end: datetime,
+    output_path: Path,
+) -> None:
+    plan = build_ibkr_historical_plan_from_files(
+        contract_selection_path=contract_selection_path,
+        runtime_lock_path=runtime_lock_path,
+        request_profile_path=request_profile_path,
+        start=start,
+        end=end,
+    )
+    write_ibkr_historical_plan(output_path, plan)
+    print(
+        json.dumps(
+            {
+                "output": str(output_path),
+                "plan_sha256": plan.plan_sha256,
+                "eligible_contract_count": len(plan.eligible_contracts),
+                "request_count": len(plan.requests),
+                "midpoint_bar_request_count": sum(
+                    request.kind.value == "MIDPOINT_BARS" for request in plan.requests
+                ),
+                "schedule_request_count": sum(
+                    request.kind.value == "SCHEDULE" for request in plan.requests
+                ),
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_ibkr_historical_plan(plan_path: Path) -> None:
+    plan = verify_ibkr_historical_plan(plan_path)
+    print(
+        json.dumps(
+            {
+                "plan": str(plan_path),
+                "plan_sha256": plan.plan_sha256,
+                "eligible_contract_count": len(plan.eligible_contracts),
+                "request_count": len(plan.requests),
+                "verified": True,
             },
             sort_keys=True,
         )

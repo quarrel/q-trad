@@ -1,22 +1,43 @@
 import hashlib
 import json
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 from qtrad.application import ibkr_historical as historical
-from qtrad.application.ibkr_historical import build_ibkr_contract_selection, build_ibkr_runtime_lock
-from qtrad.domain.ibkr_historical import IbkrContractDecision
+from qtrad.application.ibkr_historical import (
+    build_ibkr_contract_selection,
+    build_ibkr_historical_plan,
+    build_ibkr_historical_request_profile,
+    build_ibkr_runtime_lock,
+)
+from qtrad.domain.ibkr_historical import (
+    IbkrAcquisitionRuntime,
+    IbkrArchiveIdentity,
+    IbkrContractDecision,
+    IbkrHistoricalPacingPolicy,
+    IbkrHistoricalRequestKind,
+    sha256_json,
+)
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import AssetClass
 from qtrad.ports.ibkr_capability import IbkrContractQuery
 from qtrad.runtime.ibkr_historical import (
+    build_ibkr_historical_plan_from_files,
     load_ibkr_contract_selection,
+    load_ibkr_historical_plan,
+    load_ibkr_historical_request_profile,
     load_ibkr_runtime_lock,
     verify_ibkr_contract_selection,
+    verify_ibkr_historical_plan,
     verify_ibkr_runtime_lock,
     write_ibkr_contract_selection,
+    write_ibkr_historical_plan,
+    write_ibkr_historical_request_profile,
     write_ibkr_runtime_lock,
 )
 
@@ -551,3 +572,213 @@ def test_runtime_lock_rejects_archive_mutation_after_publication(
             expected_api_port=4002,
             expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         )
+
+
+def _profile(*, reverse_product_mapping: bool = False):
+    entries = [
+        (AssetClass.FX, "1 W"),
+        (AssetClass.INDEX, "1 W"),
+        (AssetClass.COMMODITY, "1 W"),
+    ]
+    if reverse_product_mapping:
+        entries.reverse()
+    return build_ibkr_historical_request_profile(
+        canary_evidence_sha256="d" * 64,
+        permitted_bar_durations=("1 D", "1 W", "2 W", "4 W"),
+        permitted_schedule_durations=("1 D", "1 W", "2 W", "4 W"),
+        bar_duration_by_asset_class=dict(entries),
+        schedule_duration="1 W",
+        maximum_in_flight_requests=2,
+        request_timeout_seconds=60,
+        retry_count=5,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds=15,
+            per_contract_window_seconds=2,
+            max_requests_per_contract_window=5,
+            rolling_window_seconds=600,
+            max_requests_per_rolling_window=55,
+        ),
+    )
+
+
+def _planning_runtime() -> IbkrAcquisitionRuntime:
+    gateway_archive = IbkrArchiveIdentity("gateway.zip", "a" * 64)
+    api_archive = IbkrArchiveIdentity("api.zip", "b" * 64)
+    ibc_archive = IbkrArchiveIdentity("ibc.zip", "c" * 64)
+    identity = {
+        "contract": IbkrAcquisitionRuntime.CONTRACT,
+        "schema_version": IbkrAcquisitionRuntime.SCHEMA_VERSION,
+        "gateway_version": "10.49",
+        "gateway_archive": gateway_archive.as_json_value(),
+        "api_version": "10.49",
+        "api_archive": api_archive.as_json_value(),
+        "ibc_version": "3.24.1",
+        "ibc_archive": ibc_archive.as_json_value(),
+        "qtrad_commit": "a" * 40,
+        "qtrad_image_digest": "sha256:" + "d" * 64,
+        "python_version": "3.13.0",
+        "library_versions": {"pydantic": "2.11.0"},
+        "gateway_configuration_identity": "e" * 64,
+        "paper_account_environment": "paper",
+        "api_host": "127.0.0.1",
+        "api_port": 4002,
+        "client_id_policy": "DEDICATED_NONZERO_CLIENT_ID",
+        "frozen_at": "2026-08-02T12:00:00Z",
+    }
+    return IbkrAcquisitionRuntime(
+        gateway_version="10.49",
+        gateway_archive=gateway_archive,
+        api_version="10.49",
+        api_archive=api_archive,
+        ibc_version="3.24.1",
+        ibc_archive=ibc_archive,
+        qtrad_commit="a" * 40,
+        qtrad_image_digest="sha256:" + "d" * 64,
+        python_version="3.13.0",
+        library_versions={"pydantic": "2.11.0"},
+        gateway_configuration_identity="e" * 64,
+        paper_account_environment="paper",
+        api_host="127.0.0.1",
+        api_port=4002,
+        client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        frozen_at=_NOW,
+        runtime_sha256=sha256_json(identity),
+    )
+
+
+def _assert_exact_coverage(plan) -> None:
+    for kind in IbkrHistoricalRequestKind:
+        requests = sorted(
+            (request for request in plan.requests if request.kind is kind),
+            key=lambda request: request.interval_start,
+        )
+        cursor = plan.start
+        for request in requests:
+            assert request.interval_start == cursor
+            cursor = request.interval_end
+        assert cursor == plan.end
+
+
+def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoint_parameters(
+    tmp_path: Path,
+) -> None:
+    selection = _selection(_review())
+    runtime = _planning_runtime()
+    profile = _profile()
+    start = datetime(2026, 2, 1, tzinfo=UTC)
+    end = datetime(2026, 2, 15, tzinfo=UTC)
+    plan = build_ibkr_historical_plan(
+        selection=selection,
+        runtime=runtime,
+        request_profile=profile,
+        start=start,
+        end=end,
+    )
+    assert plan == build_ibkr_historical_plan(
+        selection=selection,
+        runtime=runtime,
+        request_profile=_profile(reverse_product_mapping=True),
+        start=start,
+        end=end,
+    )
+    assert {request.kind for request in plan.requests} == set(IbkrHistoricalRequestKind)
+    assert len(plan.requests) == 4
+    _assert_exact_coverage(plan)
+    for request in plan.requests:
+        assert request.end_date_time.endswith(" UTC")
+        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+            assert request.bar_size == "1 min"
+            assert request.what_to_show == "MIDPOINT"
+            assert request.use_rth is False
+            assert request.format_date == 2
+            assert request.keep_up_to_date is False
+
+    selection_path = tmp_path / "selection.json"
+    runtime_path = tmp_path / "runtime.json"
+    profile_path = tmp_path / "profile.json"
+    plan_path = tmp_path / "plan.json"
+    write_ibkr_contract_selection(selection_path, selection)
+    write_ibkr_runtime_lock(runtime_path, runtime)
+    write_ibkr_historical_request_profile(profile_path, profile)
+    assert load_ibkr_historical_request_profile(profile_path) == profile
+    rebuilt = build_ibkr_historical_plan_from_files(
+        contract_selection_path=selection_path,
+        runtime_lock_path=runtime_path,
+        request_profile_path=profile_path,
+        start=start,
+        end=end,
+    )
+    assert rebuilt == plan
+    write_ibkr_historical_plan(plan_path, plan)
+    assert load_ibkr_historical_plan(plan_path) == plan
+    assert verify_ibkr_historical_plan(plan_path) == plan
+
+
+@given(
+    start_offset=st.integers(min_value=0, max_value=800),
+    days=st.integers(min_value=1, max_value=80),
+)
+def test_historical_plan_property_preserves_exact_utc_half_open_coverage(
+    start_offset: int, days: int
+) -> None:
+    start = datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=start_offset)
+    plan = build_ibkr_historical_plan(
+        selection=_selection(_review()),
+        runtime=_planning_runtime(),
+        request_profile=_profile(),
+        start=start,
+        end=start + timedelta(days=days),
+    )
+    _assert_exact_coverage(plan)
+
+
+def test_historical_plan_uses_utc_ownership_across_dst_and_rejects_unsafe_profile() -> None:
+    plan = build_ibkr_historical_plan(
+        selection=_selection(_review()),
+        runtime=_planning_runtime(),
+        request_profile=_profile(),
+        start=datetime(2026, 3, 8, 6, tzinfo=UTC),
+        end=datetime(2026, 3, 10, 6, tzinfo=UTC),
+    )
+    _assert_exact_coverage(plan)
+    with pytest.raises(ValueError, match="duration"):
+        build_ibkr_historical_request_profile(
+            canary_evidence_sha256="d" * 64,
+            permitted_bar_durations=("1 M",),
+            permitted_schedule_durations=("1 D",),
+            bar_duration_by_asset_class={
+                AssetClass.FX: "1 M",
+                AssetClass.INDEX: "1 M",
+                AssetClass.COMMODITY: "1 M",
+            },
+            schedule_duration="1 D",
+            maximum_in_flight_requests=1,
+            request_timeout_seconds=60,
+            retry_count=0,
+            pacing_policy=IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55),
+        )
+
+
+def test_historical_plan_verifier_rejects_rehashed_request_interval_mutation(
+    tmp_path: Path,
+) -> None:
+    plan = build_ibkr_historical_plan(
+        selection=_selection(_review()),
+        runtime=_planning_runtime(),
+        request_profile=_profile(),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 15, tzinfo=UTC),
+    )
+    path = tmp_path / "plan.json"
+    write_ibkr_historical_plan(path, plan)
+    payload = json.loads(path.read_text())
+    requests = cast(list[dict[str, object]], payload["requests"])
+    requests[0]["interval_end"] = "2026-02-07T00:00:00Z"
+    requests[0]["end_date_time"] = "20260207-00:00:00 UTC"
+    request_unsigned = {key: value for key, value in requests[0].items() if key != "request_sha256"}
+    requests[0]["request_sha256"] = sha256_json(request_unsigned)
+    plan_unsigned = {key: value for key, value in payload.items() if key != "plan_sha256"}
+    payload["plan_sha256"] = sha256_json(plan_unsigned)
+    path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="contiguously"):
+        verify_ibkr_historical_plan(path)

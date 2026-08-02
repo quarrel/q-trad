@@ -20,11 +20,20 @@ from qtrad.domain.ibkr_historical import (
     IbkrContractFingerprint,
     IbkrContractSelection,
     IbkrContractSelectionDecision,
+    IbkrHistoricalPacingPolicy,
+    IbkrHistoricalPlan,
+    IbkrHistoricalRequest,
+    IbkrHistoricalRequestKind,
+    IbkrHistoricalRequestProfile,
+    IbkrPlannedContract,
+    duration_timedelta,
+    ibkr_end_date_time,
     ordered_decisions,
     sha256_json,
     utc_text,
 )
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import AssetClass
 from qtrad.domain.time import require_utc
 from qtrad.ports.ibkr_capability import IbkrContractQuery
 
@@ -265,6 +274,202 @@ def build_ibkr_runtime_lock(
         frozen_at=frozen_at,
         runtime_sha256=sha256_json(identity),
     )
+
+
+def build_ibkr_historical_request_profile(
+    *,
+    canary_evidence_sha256: str,
+    permitted_bar_durations: tuple[str, ...],
+    permitted_schedule_durations: tuple[str, ...],
+    bar_duration_by_asset_class: Mapping[AssetClass, str],
+    schedule_duration: str,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    pacing_policy: IbkrHistoricalPacingPolicy,
+) -> IbkrHistoricalRequestProfile:
+    """Create the canonical Stage 2 request profile from explicit, offline policy inputs."""
+
+    identity = {
+        "contract": IbkrHistoricalRequestProfile.CONTRACT,
+        "schema_version": IbkrHistoricalRequestProfile.SCHEMA_VERSION,
+        "canary_evidence_sha256": canary_evidence_sha256,
+        "permitted_bar_durations": list(permitted_bar_durations),
+        "permitted_schedule_durations": list(permitted_schedule_durations),
+        "bar_duration_by_asset_class": {
+            item.value: bar_duration_by_asset_class[item]
+            for item in sorted(bar_duration_by_asset_class, key=lambda value: value.value)
+        },
+        "schedule_duration": schedule_duration,
+        "maximum_in_flight_requests": maximum_in_flight_requests,
+        "request_timeout_seconds": request_timeout_seconds,
+        "retry_count": retry_count,
+        "pacing_policy": pacing_policy.as_json_value(),
+    }
+    return IbkrHistoricalRequestProfile(
+        canary_evidence_sha256=canary_evidence_sha256,
+        permitted_bar_durations=permitted_bar_durations,
+        permitted_schedule_durations=permitted_schedule_durations,
+        bar_duration_by_asset_class=dict(bar_duration_by_asset_class),
+        schedule_duration=schedule_duration,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        pacing_policy=pacing_policy,
+        profile_sha256=sha256_json(identity),
+    )
+
+
+def build_ibkr_historical_plan(
+    *,
+    selection: IbkrContractSelection,
+    runtime: IbkrAcquisitionRuntime,
+    request_profile: IbkrHistoricalRequestProfile,
+    start: datetime,
+    end: datetime,
+) -> IbkrHistoricalPlan:
+    """Generate all exact IBKR requests without a database, clock or provider dependency."""
+
+    require_utc(start, "IBKR historical plan start")
+    require_utc(end, "IBKR historical plan end")
+    if end <= start:
+        raise ValueError("IBKR historical plan end must follow start")
+    if any(value.second or value.microsecond for value in (start, end)):
+        raise ValueError("IBKR historical plan range must align to UTC minutes")
+    accepted = tuple(
+        sorted(
+            (
+                IbkrPlannedContract(decision.instrument_id, decision.fingerprint)
+                for decision in selection.decisions
+                if decision.decision is IbkrContractDecision.ACCEPTED_EXACT_CONTRACT
+                and decision.acquisition_eligible
+                and decision.fingerprint is not None
+            ),
+            key=lambda value: str(value.instrument_id),
+        )
+    )
+    if not accepted:
+        raise ValueError("IBKR historical plan has no acquisition-eligible exact contracts")
+    requests: list[IbkrHistoricalRequest] = []
+    for contract in accepted:
+        asset_class = _asset_class(contract.instrument_id)
+        bar_duration = request_profile.bar_duration_by_asset_class[asset_class]
+        requests.extend(
+            _planned_requests(
+                contract=contract,
+                kind=IbkrHistoricalRequestKind.MIDPOINT_BARS,
+                start=start,
+                end=end,
+                duration=bar_duration,
+            )
+        )
+        requests.extend(
+            _planned_requests(
+                contract=contract,
+                kind=IbkrHistoricalRequestKind.SCHEDULE,
+                start=start,
+                end=end,
+                duration=request_profile.schedule_duration,
+            )
+        )
+    ordered_requests = tuple(sorted(requests, key=_request_sort_key))
+    identity = {
+        "contract": IbkrHistoricalPlan.CONTRACT,
+        "schema_version": IbkrHistoricalPlan.SCHEMA_VERSION,
+        "contract_selection_sha256": selection.selection_sha256,
+        "runtime_sha256": runtime.runtime_sha256,
+        "request_profile_sha256": request_profile.profile_sha256,
+        "provider": "ibkr",
+        "environment": "paper",
+        "planner_qtrad_commit": runtime.qtrad_commit,
+        "planner_qtrad_image_digest": runtime.qtrad_image_digest,
+        "start": utc_text(start),
+        "end": utc_text(end),
+        "eligible_contracts": [item.as_json_value() for item in accepted],
+        "requests": [item.as_json_value() for item in ordered_requests],
+    }
+    return IbkrHistoricalPlan(
+        contract_selection_sha256=selection.selection_sha256,
+        runtime_sha256=runtime.runtime_sha256,
+        request_profile_sha256=request_profile.profile_sha256,
+        provider="ibkr",
+        environment="paper",
+        planner_qtrad_commit=runtime.qtrad_commit,
+        planner_qtrad_image_digest=runtime.qtrad_image_digest,
+        start=start,
+        end=end,
+        eligible_contracts=accepted,
+        requests=ordered_requests,
+        plan_sha256=sha256_json(identity),
+    )
+
+
+def _planned_requests(
+    *,
+    contract: IbkrPlannedContract,
+    kind: IbkrHistoricalRequestKind,
+    start: datetime,
+    end: datetime,
+    duration: str,
+) -> tuple[IbkrHistoricalRequest, ...]:
+    interval_start = start
+    step = duration_timedelta(duration)
+    requests: list[IbkrHistoricalRequest] = []
+    while interval_start < end:
+        interval_end = min(interval_start + step, end)
+        identity: dict[str, JsonValue] = {
+            "instrument_id": str(contract.instrument_id),
+            "fingerprint": contract.fingerprint.as_json_value(),
+            "kind": kind.value,
+            "interval_start": utc_text(interval_start),
+            "interval_end": utc_text(interval_end),
+            "end_date_time": ibkr_end_date_time(interval_end),
+            "duration": duration,
+            "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+            "what_to_show": "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+            "use_rth": False,
+            "format_date": 2 if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+            "keep_up_to_date": False,
+        }
+        requests.append(
+            IbkrHistoricalRequest(
+                instrument_id=contract.instrument_id,
+                fingerprint=contract.fingerprint,
+                kind=kind,
+                interval_start=interval_start,
+                interval_end=interval_end,
+                end_date_time=ibkr_end_date_time(interval_end),
+                duration=duration,
+                bar_size=cast(str | None, identity["bar_size"]),
+                what_to_show=cast(str | None, identity["what_to_show"]),
+                use_rth=False,
+                format_date=cast(int | None, identity["format_date"]),
+                keep_up_to_date=False,
+                request_sha256=sha256_json(identity),
+            )
+        )
+        interval_start = interval_end
+    return tuple(requests)
+
+
+def _asset_class(instrument_id: InstrumentId) -> AssetClass:
+    prefix, separator, _ = str(instrument_id).partition(":")
+    if not separator:
+        raise ValueError(f"IBKR historical plan cannot determine asset class for {instrument_id}")
+    try:
+        return {
+            "fx": AssetClass.FX,
+            "index": AssetClass.INDEX,
+            "commodity": AssetClass.COMMODITY,
+        }[prefix]
+    except KeyError as error:
+        raise ValueError(
+            f"IBKR historical plan has no request-profile product class for {instrument_id}"
+        ) from error
+
+
+def _request_sort_key(value: IbkrHistoricalRequest) -> tuple[str, str, datetime, str]:
+    return (str(value.instrument_id), value.kind.value, value.interval_start, value.request_sha256)
 
 
 def _verify_capability_review(

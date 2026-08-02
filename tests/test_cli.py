@@ -1242,3 +1242,58 @@ def test_main_does_not_leave_an_event_loop_running(
 
     with pytest.raises(RuntimeError, match="no running event loop"):
         asyncio.get_running_loop()
+
+
+def test_ibkr_historical_plan_dispatches_without_provider_or_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_plan_ibkr_historical", operation)
+
+    cli.main(
+        [
+            "historical",
+            "ibkr",
+            "plan",
+            "--contract-selection",
+            "selection.json",
+            "--runtime-lock",
+            "runtime.json",
+            "--request-profile",
+            "profile.json",
+            "--start",
+            "2026-02-01T00:00:00Z",
+            "--end",
+            "2026-08-02T00:00:00Z",
+            "--output",
+            "plan.json",
+        ]
+    )
+
+    operation.assert_called_once_with(
+        contract_selection_path=Path("selection.json"),
+        runtime_lock_path=Path("runtime.json"),
+        request_profile_path=Path("profile.json"),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 8, 2, tzinfo=UTC),
+        output_path=Path("plan.json"),
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_ibkr_historical_plan_verify_dispatches_without_provider_or_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_verify_ibkr_historical_plan", operation)
+
+    cli.main(["historical", "ibkr", "plan-verify", "--plan", "plan.json"])
+
+    operation.assert_called_once_with(Path("plan.json"))
+    assert capsys.readouterr().out == ""
