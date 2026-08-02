@@ -2,12 +2,14 @@ import hashlib
 import json
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import cast
 
 import pytest
 
+from qtrad.application import ibkr_historical as historical
 from qtrad.application.ibkr_historical import build_ibkr_contract_selection, build_ibkr_runtime_lock
 from qtrad.domain.ibkr_historical import IbkrContractDecision
+from qtrad.domain.identifiers import InstrumentId
+from qtrad.ports.ibkr_capability import IbkrContractQuery
 from qtrad.runtime.ibkr_historical import (
     load_ibkr_contract_selection,
     load_ibkr_runtime_lock,
@@ -18,6 +20,7 @@ from qtrad.runtime.ibkr_historical import (
 )
 
 _NOW = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
+_QUERY = IbkrContractQuery(InstrumentId("fx:eur-usd"), "EUR", "CASH", "IDEALPRO", "USD", "EUR.USD")
 
 
 def _review() -> dict[str, object]:
@@ -45,9 +48,9 @@ def _review() -> dict[str, object]:
         "schema_version": 1,
         "provider": "ibkr",
         "environment": "paper",
-        "catalogue_name": "capture-ibkr-v1-candidates",
+        "catalogue_name": "fixture-candidates",
         "catalogue_hash": "a" * 64,
-        "probe_spec_name": "operator-probe-v1",
+        "probe_spec_name": "fixture-probe",
         "probe_spec_hash": "b" * 64,
         "api": {"version": "10.49", "package_fingerprint": "c" * 64},
         "observed_at": "2026-08-02T11:00:00Z",
@@ -86,23 +89,7 @@ def _review() -> dict[str, object]:
     }
 
 
-def _fingerprint() -> dict[str, object]:
-    return {
-        "con_id": 12087792,
-        "symbol": "EUR",
-        "security_type": "CASH",
-        "currency": "USD",
-        "exchange": "IDEALPRO",
-        "primary_exchange": None,
-        "local_symbol": "EUR.USD",
-        "trading_class": None,
-        "multiplier": None,
-        "underlying_con_id": None,
-        "contract_month": None,
-    }
-
-
-def _operator_selection(review: dict[str, object]) -> dict[str, object]:
+def _operator(review: dict[str, object]) -> dict[str, object]:
     return {
         "schema_version": 1,
         "capability_review_sha256": review["review_hash"],
@@ -111,139 +98,190 @@ def _operator_selection(review: dict[str, object]) -> dict[str, object]:
                 "instrument_id": "fx:eur-usd",
                 "decision": IbkrContractDecision.ACCEPTED_EXACT_CONTRACT.value,
                 "acquisition_eligible": True,
-                "fingerprint": _fingerprint(),
+                "fingerprint": {
+                    "con_id": 12087792,
+                    "symbol": "EUR",
+                    "security_type": "CASH",
+                    "currency": "USD",
+                    "exchange": "IDEALPRO",
+                    "primary_exchange": None,
+                    "local_symbol": "EUR.USD",
+                    "trading_class": None,
+                    "multiplier": None,
+                    "underlying_con_id": None,
+                    "contract_month": None,
+                },
             }
         ],
     }
 
 
-def test_contract_selection_reconstructs_review_and_replays_from_files(tmp_path: Path) -> None:
-    review = _review()
-    selection = build_ibkr_contract_selection(
+def _sources(tmp_path: Path) -> tuple[Path, Path]:
+    catalogue = tmp_path / "catalogue.toml"
+    catalogue.write_text(
+        'name = "fixture-candidates"\n\n'
+        "[[instrument]]\n"
+        'id = "fx:eur-usd"\n'
+        'display_name = "EUR/USD"\n'
+        'asset_class = "FX"\n'
+        'base_currency = "EUR"\n'
+        'quote_currency = "USD"\n'
+        'search_aliases = ["EUR/USD"]\n'
+    )
+    probe = tmp_path / "probe.toml"
+    probe.write_text(
+        'schema_version = 1\nname = "fixture-probe"\n\n'
+        "[[query]]\n"
+        'instrument_id = "fx:eur-usd"\n'
+        'symbol = "EUR"\n'
+        'security_type = "CASH"\n'
+        'exchange = "IDEALPRO"\n'
+        'currency = "USD"\n'
+        'local_symbol = "EUR.USD"\n'
+    )
+    return catalogue, probe
+
+
+def _selection(review: dict[str, object]):
+    return build_ibkr_contract_selection(
         capability_review=review,
-        operator_selection=_operator_selection(review),
+        operator_selection=_operator(review),
+        canonical_instrument_ids=frozenset({_QUERY.instrument_id}),
+        canonical_queries=frozenset({_QUERY}),
         frozen_by="operator@example.invalid",
         frozen_at=_NOW,
     )
-    path = tmp_path / "selection.json"
-    write_ibkr_contract_selection(path, selection)
 
+
+def test_contract_selection_reconstructs_canonical_closure_and_replays(tmp_path: Path) -> None:
+    catalogue, probe = _sources(tmp_path)
+    from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
+    from qtrad.runtime.universe import load_capture_candidates
+
+    review = _review()
+    candidates, spec = load_capture_candidates(catalogue), load_ibkr_capability_probe_spec(probe)
+    review["catalogue_hash"] = candidates.configuration_hash
+    review["probe_spec_hash"] = spec.configuration_hash
+    unsigned = {key: value for key, value in review.items() if key != "review_hash"}
+    review["review_hash"] = hashlib.sha256(
+        json.dumps(unsigned, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    selection = _selection(review)
+    path, review_path = tmp_path / "selection.json", tmp_path / "review.json"
+    write_ibkr_contract_selection(path, selection)
+    review_path.write_text(json.dumps(review))
     assert load_ibkr_contract_selection(path) == selection
-    review_path = _write_json(tmp_path / "review.json", review)
-    assert verify_ibkr_contract_selection(path, capability_review_path=review_path) == selection
-    with pytest.raises(FileExistsError):
-        write_ibkr_contract_selection(path, selection)
-
-
-def test_contract_selection_rejects_missing_duplicate_and_substituted_decisions() -> None:
-    review = _review()
-    operator = _operator_selection(review)
-    missing = {**operator, "decisions": []}
-    with pytest.raises(ValueError, match="requires decisions"):
-        build_ibkr_contract_selection(
-            capability_review=review,
-            operator_selection=missing,
-            frozen_by="operator",
-            frozen_at=_NOW,
+    assert (
+        verify_ibkr_contract_selection(
+            path,
+            capability_review_path=review_path,
+            catalogue_path=catalogue,
+            probe_spec_path=probe,
         )
-
-    decision_values = cast(list[dict[str, object]], operator["decisions"])
-    duplicate = {**operator, "decisions": decision_values * 2}
-    with pytest.raises(ValueError, match="repeats instrument"):
-        build_ibkr_contract_selection(
-            capability_review=review,
-            operator_selection=duplicate,
-            frozen_by="operator",
-            frozen_at=_NOW,
-        )
-
-    substituted = _operator_selection(review)
-    fingerprint = dict(_fingerprint())
-    fingerprint["con_id"] = 999
-    substituted_decisions = cast(list[dict[str, object]], substituted["decisions"])
-    substituted["decisions"] = [{**substituted_decisions[0], "fingerprint": fingerprint}]
-    with pytest.raises(ValueError, match="exact capability-review match"):
-        build_ibkr_contract_selection(
-            capability_review=review,
-            operator_selection=substituted,
-            frozen_by="operator",
-            frozen_at=_NOW,
-        )
-
-
-def test_contract_selection_loader_rejects_unknown_fields_and_symlink(tmp_path: Path) -> None:
-    review = _review()
-    selection = build_ibkr_contract_selection(
-        capability_review=review,
-        operator_selection=_operator_selection(review),
-        frozen_by="operator",
-        frozen_at=_NOW,
+        == selection
     )
-    path = tmp_path / "selection.json"
-    write_ibkr_contract_selection(path, selection)
-    payload = json.loads(path.read_text())
-    payload["unexpected"] = True
-    path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="unknown or missing fields"):
-        load_ibkr_contract_selection(path)
-
-    path.unlink()
-    path.symlink_to(tmp_path / "target.json")
-    (tmp_path / "target.json").write_text("{}")
-    with pytest.raises(ValueError, match="symlink"):
-        load_ibkr_contract_selection(path)
+    with pytest.raises(ValueError, match="canonical instrument closure"):
+        build_ibkr_contract_selection(
+            capability_review=review,
+            operator_selection=_operator(review),
+            canonical_instrument_ids=frozenset({_QUERY.instrument_id, InstrumentId("fx:aud-usd")}),
+            canonical_queries=frozenset({_QUERY}),
+            frozen_by="operator",
+            frozen_at=_NOW,
+        )
 
 
-def test_runtime_lock_rehashes_archives_and_is_create_only(tmp_path: Path) -> None:
+def test_contract_selection_verifier_requires_replay_inputs() -> None:
+    import inspect
+
+    signature = inspect.signature(verify_ibkr_contract_selection)
+    assert signature.parameters["capability_review_path"].default is inspect.Parameter.empty
+
+
+def test_runtime_lock_replays_actual_environment_and_authoritative_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
     archives = []
     for name in ("gateway.zip", "api.zip", "ibc.zip"):
         path = tmp_path / name
         path.write_bytes(name.encode())
         archives.append(path)
+    image = "sha256:" + "b" * 64
     runtime = build_ibkr_runtime_lock(
         gateway_archive=archives[0],
         api_archive=archives[1],
         ibc_archive=archives[2],
         gateway_version="10.49",
-        api_version="10.49",
+        api_version="10.50",
         ibc_version="3.24.1",
-        qtrad_commit="a" * 40,
-        qtrad_image_digest="sha256:" + "b" * 64,
+        qtrad_image_digest=image,
         frozen_at=_NOW,
-        library_versions={"python": "3.13"},
     )
     path = tmp_path / "runtime-lock.json"
     write_ibkr_runtime_lock(path, runtime)
+    hashes = [hashlib.sha256(item.read_bytes()).hexdigest() for item in archives]
     assert load_ibkr_runtime_lock(path) == runtime
-    assert verify_ibkr_runtime_lock(path) == runtime
-    with pytest.raises(FileExistsError):
-        write_ibkr_runtime_lock(path, runtime)
-
-    archives[1].write_bytes(b"changed")
-    with pytest.raises(ValueError, match="hash mismatch"):
-        verify_ibkr_runtime_lock(path)
-
-
-def test_runtime_lock_rejects_archive_symlink(tmp_path: Path) -> None:
-    real = tmp_path / "real.zip"
-    real.write_bytes(b"archive")
-    link = tmp_path / "link.zip"
-    link.symlink_to(real)
-    with pytest.raises(ValueError, match="symlink"):
-        build_ibkr_runtime_lock(
-            gateway_archive=link,
-            api_archive=real,
-            ibc_archive=real,
-            gateway_version="10.49",
-            api_version="10.49",
-            ibc_version="3.24.1",
-            qtrad_commit="a" * 40,
-            qtrad_image_digest="sha256:" + "b" * 64,
-            frozen_at=_NOW,
-            library_versions={"python": "3.13"},
+    assert (
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
+        )
+        == runtime
+    )
+    copied = tmp_path / "elsewhere"
+    copied.mkdir()
+    copies = []
+    for item in archives:
+        target = copied / item.name
+        target.write_bytes(item.read_bytes())
+        copies.append(target)
+    assert (
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=copies[0],
+            api_archive=copies[1],
+            ibc_archive=copies[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
+        )
+        == runtime
+    )
+    with pytest.raises(ValueError, match="authoritative role attestation"):
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256="0" * 64,
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_image_digest=image,
         )
 
 
-def _write_json(path: Path, value: dict[str, object]) -> Path:
-    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
-    return path
+def test_runtime_lock_rejects_duplicate_archive_roles(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
+    archive = tmp_path / "archive.zip"
+    archive.write_bytes(b"archive")
+    with pytest.raises(ValueError, match="distinct filenames"):
+        build_ibkr_runtime_lock(
+            gateway_archive=archive,
+            api_archive=archive,
+            ibc_archive=archive,
+            gateway_version="10.49",
+            api_version="10.50",
+            ibc_version="3.24.1",
+            qtrad_image_digest="sha256:" + "b" * 64,
+            frozen_at=_NOW,
+        )

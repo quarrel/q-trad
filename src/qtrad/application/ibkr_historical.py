@@ -26,6 +26,7 @@ from qtrad.domain.ibkr_historical import (
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.time import require_utc
+from qtrad.ports.ibkr_capability import IbkrContractQuery
 
 _FINGERPRINT_FIELDS = {
     "con_id",
@@ -54,12 +55,18 @@ def build_ibkr_contract_selection(
     *,
     capability_review: Mapping[str, object],
     operator_selection: Mapping[str, object],
+    canonical_instrument_ids: frozenset[InstrumentId],
+    canonical_queries: frozenset[IbkrContractQuery],
     frozen_by: str,
     frozen_at: datetime,
 ) -> IbkrContractSelection:
     """Reconstruct an exact operator selection against an authenticated review payload."""
 
-    _verify_capability_review(capability_review)
+    _verify_capability_review(
+        capability_review,
+        canonical_instrument_ids=canonical_instrument_ids,
+        canonical_queries=canonical_queries,
+    )
     _require_exact_keys(
         operator_selection,
         {"schema_version", "decisions", "capability_review_sha256"},
@@ -198,34 +205,27 @@ def build_ibkr_runtime_lock(
     gateway_version: str,
     api_version: str,
     ibc_version: str,
-    qtrad_commit: str,
     qtrad_image_digest: str,
     frozen_at: datetime,
-    python_version: str | None = None,
-    library_versions: Mapping[str, str] | None = None,
-    gateway_configuration_identity: str | None = None,
     api_host: str = "127.0.0.1",
     api_port: int = 4002,
     client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID",
 ) -> IbkrAcquisitionRuntime:
-    """Hash exact local archives and construct a non-secret runtime lock."""
-
+    """Recompute the local, non-secret acquisition identity without caller labels."""
     require_utc(frozen_at, "IBKR runtime lock frozen_at")
     archives = (
         _archive_identity(gateway_archive),
         _archive_identity(api_archive),
         _archive_identity(ibc_archive),
     )
-    config_identity = gateway_configuration_identity or sha256_json(
-        {
-            "api_host": api_host,
-            "api_port": api_port,
-            "client_id_policy": client_id_policy,
-            "paper_account_environment": "paper",
-        }
+    if len({archive.filename for archive in archives}) != len(archives):
+        raise ValueError("IBKR runtime archive roles require distinct filenames")
+    config_identity = _gateway_configuration_identity(
+        api_host=api_host, api_port=api_port, client_id_policy=client_id_policy
     )
-    versions = dict(library_versions or _installed_library_versions())
-    python = python_version or platform.python_version()
+    versions = _installed_library_versions()
+    python = platform.python_version()
+    commit = derive_qtrad_commit()
     identity = {
         "contract": IbkrAcquisitionRuntime.CONTRACT,
         "schema_version": IbkrAcquisitionRuntime.SCHEMA_VERSION,
@@ -235,7 +235,7 @@ def build_ibkr_runtime_lock(
         "api_archive": archives[1].as_json_value(),
         "ibc_version": ibc_version,
         "ibc_archive": archives[2].as_json_value(),
-        "qtrad_commit": qtrad_commit,
+        "qtrad_commit": commit,
         "qtrad_image_digest": qtrad_image_digest,
         "python_version": python,
         "library_versions": dict(sorted(versions.items())),
@@ -253,7 +253,7 @@ def build_ibkr_runtime_lock(
         api_archive=archives[1],
         ibc_version=ibc_version,
         ibc_archive=archives[2],
-        qtrad_commit=qtrad_commit,
+        qtrad_commit=commit,
         qtrad_image_digest=qtrad_image_digest,
         python_version=python,
         library_versions=dict(sorted(versions.items())),
@@ -267,7 +267,12 @@ def build_ibkr_runtime_lock(
     )
 
 
-def _verify_capability_review(review: Mapping[str, object]) -> None:
+def _verify_capability_review(
+    review: Mapping[str, object],
+    *,
+    canonical_instrument_ids: frozenset[InstrumentId],
+    canonical_queries: frozenset[IbkrContractQuery],
+) -> None:
     required = {
         "schema_version",
         "provider",
@@ -299,8 +304,43 @@ def _verify_capability_review(review: Mapping[str, object]) -> None:
         raise ValueError("IBKR capability review hash does not match canonical content")
     _mapping_string(_mapping(review, "api"), "version")
     _mapping_string(_mapping(review, "api"), "package_fingerprint")
-    if not isinstance(review.get("instruments"), list) or not review["instruments"]:
-        raise ValueError("IBKR capability review requires instruments")
+    contracts = _review_contracts(review)
+    if frozenset(contracts) != canonical_instrument_ids:
+        raise ValueError("IBKR capability review does not cover the canonical instrument closure")
+    observed_queries = _review_queries(review)
+    if observed_queries != canonical_queries:
+        raise ValueError("IBKR capability review does not cover the canonical probe-query closure")
+
+
+def _review_queries(review: Mapping[str, object]) -> frozenset[IbkrContractQuery]:
+    instruments_value = review["instruments"]
+    if not isinstance(instruments_value, list):
+        raise ValueError("IBKR capability review instruments must be an array")
+    instruments = cast(list[object], instruments_value)
+    queries: set[IbkrContractQuery] = set()
+    for raw_instrument_value in instruments:
+        instrument = _mapping_value(raw_instrument_value, "IBKR capability review instrument")
+        instrument_id = InstrumentId(_string(instrument, "instrument_id"))
+        values = instrument.get("queries")
+        if not isinstance(values, list):
+            raise ValueError("IBKR capability review queries must be an array")
+        for raw_value in cast(list[object], values):
+            result = _mapping_value(raw_value, "IBKR capability review query result")
+            query = _mapping_value(result.get("query"), "IBKR capability review query")
+            candidate = IbkrContractQuery(
+                instrument_id=InstrumentId(_string(query, "instrument_id")),
+                symbol=_string(query, "symbol"),
+                security_type=_string(query, "security_type"),
+                exchange=_string(query, "exchange"),
+                currency=_string(query, "currency"),
+                local_symbol=_optional_string(query, "local_symbol"),
+                trading_class=_optional_string(query, "trading_class"),
+                multiplier=_optional_string(query, "multiplier"),
+            )
+            if candidate.instrument_id != instrument_id or candidate in queries:
+                raise ValueError("IBKR capability review has an invalid or duplicate query closure")
+            queries.add(candidate)
+    return frozenset(queries)
 
 
 def _review_contracts(
@@ -429,8 +469,25 @@ def _fingerprint(payload: Mapping[str, object]) -> IbkrContractFingerprint:
 def _archive_identity(path: Path) -> IbkrArchiveIdentity:
     _require_regular_non_symlink(path, "IBKR runtime archive")
     resolved = path.resolve()
-    return IbkrArchiveIdentity(
-        path=resolved.as_posix(), sha256=hashlib.sha256(resolved.read_bytes()).hexdigest()
+    return IbkrArchiveIdentity(filename=resolved.name, sha256=_sha256_file(resolved))
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _gateway_configuration_identity(*, api_host: str, api_port: int, client_id_policy: str) -> str:
+    return sha256_json(
+        {
+            "api_host": api_host,
+            "api_port": api_port,
+            "client_id_policy": client_id_policy,
+            "paper_account_environment": "paper",
+        }
     )
 
 

@@ -192,19 +192,19 @@ class IbkrContractSelection:
 class IbkrArchiveIdentity:
     """A runtime archive and the exact bytes hashed during lock creation."""
 
-    path: str
+    filename: str
     sha256: str
 
     def __post_init__(self) -> None:
-        if not self.path or not self.path.strip():
-            raise ValueError("IBKR runtime archive path is required")
+        if not self.filename or not self.filename.strip():
+            raise ValueError("IBKR runtime archive filename is required")
         _require_sha256(self.sha256, "IBKR runtime archive hash")
-        parsed = PurePosixPath(self.path)
-        if any(part in {"", ".", ".."} for part in parsed.parts):
-            raise ValueError("IBKR runtime archive path is not canonical")
+        parsed = PurePosixPath(self.filename)
+        if len(parsed.parts) != 1 or parsed.name != self.filename or self.filename in {".", ".."}:
+            raise ValueError("IBKR runtime archive filename must be a safe basename")
 
     def as_json_value(self) -> dict[str, JsonValue]:
-        return {"path": self.path, "sha256": self.sha256}
+        return {"filename": self.filename, "sha256": self.sha256}
 
 
 @dataclass(frozen=True, slots=True)
@@ -239,8 +239,6 @@ class IbkrAcquisitionRuntime:
         if not _IMAGE.fullmatch(self.qtrad_image_digest):
             raise ValueError("q-trad image must be an immutable sha256 digest")
         _require_sha256(self.gateway_configuration_identity, "Gateway configuration identity")
-        if self.gateway_version != self.api_version:
-            raise ValueError("IBKR Gateway and API versions must match")
         if not self.gateway_version or not self.api_version or not self.ibc_version:
             raise ValueError("IBKR runtime versions are required")
         if self.paper_account_environment != "paper":

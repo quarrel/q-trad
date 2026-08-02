@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import cast
 
 from qtrad.application.ibkr_historical import (
+    _gateway_configuration_identity,
     build_ibkr_contract_selection,
     build_ibkr_runtime_lock,
 )
@@ -24,6 +25,8 @@ from qtrad.domain.ibkr_historical import (
     IbkrContractSelectionDecision,
 )
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
+from qtrad.runtime.universe import load_capture_candidates
 
 _MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
 _SELECTION_KEYS = {
@@ -85,19 +88,34 @@ _DECISION_KEYS = {
 }
 
 
-def load_ibkr_capability_review(path: Path) -> dict[str, object]:
-    """Load and authenticate an existing capability-review manifest."""
-
+def load_ibkr_capability_review(
+    path: Path, *, catalogue_path: Path, probe_spec_path: Path
+) -> dict[str, object]:
+    """Load a review and prove it covers the independently reloaded canonical closure."""
     from qtrad.application.ibkr_historical import _verify_capability_review
 
+    candidates = load_capture_candidates(catalogue_path)
+    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
     document = _read_json_object(path, "IBKR capability review")
-    _verify_capability_review(document)
+    _verify_capability_review(
+        document,
+        canonical_instrument_ids=frozenset(item.instrument_id for item in candidates.instruments),
+        canonical_queries=frozenset(probe_spec.queries),
+    )
+    if (
+        document["catalogue_name"] != candidates.name
+        or document["catalogue_hash"] != candidates.configuration_hash
+    ):
+        raise ValueError("IBKR capability review targets a different canonical catalogue")
+    if (
+        document["probe_spec_name"] != probe_spec.name
+        or document["probe_spec_hash"] != probe_spec.configuration_hash
+    ):
+        raise ValueError("IBKR capability review targets a different canonical probe specification")
     return document
 
 
 def load_ibkr_operator_selection(path: Path) -> dict[str, object]:
-    """Load the strict operator-authored selection input without authorising it."""
-
     document = _read_json_document(path, "IBKR operator selection")
     _require_exact_keys(
         document,
@@ -119,12 +137,20 @@ def build_ibkr_contract_selection_from_files(
     *,
     capability_review_path: Path,
     selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
     frozen_by: str,
     frozen_at: datetime,
 ) -> IbkrContractSelection:
+    candidates = load_capture_candidates(catalogue_path)
+    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
     return build_ibkr_contract_selection(
-        capability_review=load_ibkr_capability_review(capability_review_path),
+        capability_review=load_ibkr_capability_review(
+            capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+        ),
         operator_selection=load_ibkr_operator_selection(selection_path),
+        canonical_instrument_ids=frozenset(item.instrument_id for item in candidates.instruments),
+        canonical_queries=frozenset(probe_spec.queries),
         frozen_by=frozen_by,
         frozen_at=frozen_at,
     )
@@ -137,14 +163,14 @@ def write_ibkr_contract_selection(path: Path, selection: IbkrContractSelection) 
 def load_ibkr_contract_selection(path: Path) -> IbkrContractSelection:
     document = _read_json_object(path, "IBKR contract selection")
     _require_exact_keys(document, _SELECTION_KEYS, "IBKR contract selection")
-    if document.get("contract") != IbkrContractSelection.CONTRACT:
-        raise ValueError("IBKR contract selection contract is unsupported")
-    if document.get("schema_version") != IbkrContractSelection.SCHEMA_VERSION:
-        raise ValueError("IBKR contract selection schema version is unsupported")
-    decisions_value = document.get("decisions")
-    if not isinstance(decisions_value, list):
+    if (
+        document.get("contract") != IbkrContractSelection.CONTRACT
+        or document.get("schema_version") != IbkrContractSelection.SCHEMA_VERSION
+    ):
+        raise ValueError("IBKR contract selection contract or schema version is unsupported")
+    values = document.get("decisions")
+    if not isinstance(values, list):
         raise ValueError("IBKR contract selection decisions must be an array")
-    decisions = tuple(_decision_from_json(item) for item in decisions_value)
     selection = IbkrContractSelection(
         capability_review_sha256=_string(document, "capability_review_sha256"),
         catalogue_name=_string(document, "catalogue_name"),
@@ -155,7 +181,7 @@ def load_ibkr_contract_selection(path: Path) -> IbkrContractSelection:
         api_package_fingerprint=_string(document, "api_package_fingerprint"),
         frozen_by=_string(document, "frozen_by"),
         frozen_at=_datetime(document, "frozen_at"),
-        decisions=decisions,
+        decisions=tuple(_decision_from_json(item) for item in values),
         selection_sha256=_string(document, "selection_sha256"),
     )
     if selection.as_json_value() != document:
@@ -164,28 +190,29 @@ def load_ibkr_contract_selection(path: Path) -> IbkrContractSelection:
 
 
 def verify_ibkr_contract_selection(
-    path: Path,
-    *,
-    capability_review_path: Path | None = None,
+    path: Path, *, capability_review_path: Path, catalogue_path: Path, probe_spec_path: Path
 ) -> IbkrContractSelection:
-    """Verify the artifact independently and optionally rebind it to its capability review."""
-
+    """Independently replay a selection; the canonical inputs are deliberately mandatory."""
     selection = load_ibkr_contract_selection(path)
-    if capability_review_path is not None:
-        review = load_ibkr_capability_review(capability_review_path)
-        operator_selection = {
+    review = load_ibkr_capability_review(
+        capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
+    candidates = load_capture_candidates(catalogue_path)
+    probe_spec = load_ibkr_capability_probe_spec(probe_spec_path)
+    rebuilt = build_ibkr_contract_selection(
+        capability_review=review,
+        operator_selection={
             "schema_version": 1,
             "capability_review_sha256": selection.capability_review_sha256,
-            "decisions": [decision.as_json_value() for decision in selection.decisions],
-        }
-        rebuilt = build_ibkr_contract_selection(
-            capability_review=review,
-            operator_selection=operator_selection,
-            frozen_by=selection.frozen_by,
-            frozen_at=selection.frozen_at,
-        )
-        if rebuilt.as_json_value() != selection.as_json_value():
-            raise ValueError("IBKR contract selection does not replay from its capability review")
+            "decisions": [item.as_json_value() for item in selection.decisions],
+        },
+        canonical_instrument_ids=frozenset(item.instrument_id for item in candidates.instruments),
+        canonical_queries=frozenset(probe_spec.queries),
+        frozen_by=selection.frozen_by,
+        frozen_at=selection.frozen_at,
+    )
+    if rebuilt.as_json_value() != selection.as_json_value():
+        raise ValueError("IBKR contract selection does not replay from its capability review")
     return selection
 
 
@@ -197,12 +224,8 @@ def build_ibkr_runtime_lock_from_files(
     gateway_version: str,
     api_version: str,
     ibc_version: str,
-    qtrad_commit: str,
     qtrad_image_digest: str,
     frozen_at: datetime,
-    python_version: str | None = None,
-    library_versions: Mapping[str, str] | None = None,
-    gateway_configuration_identity: str | None = None,
     api_host: str = "127.0.0.1",
     api_port: int = 4002,
     client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID",
@@ -214,12 +237,8 @@ def build_ibkr_runtime_lock_from_files(
         gateway_version=gateway_version,
         api_version=api_version,
         ibc_version=ibc_version,
-        qtrad_commit=qtrad_commit,
         qtrad_image_digest=qtrad_image_digest,
         frozen_at=frozen_at,
-        python_version=python_version,
-        library_versions=library_versions,
-        gateway_configuration_identity=gateway_configuration_identity,
         api_host=api_host,
         api_port=api_port,
         client_id_policy=client_id_policy,
@@ -233,10 +252,11 @@ def write_ibkr_runtime_lock(path: Path, runtime: IbkrAcquisitionRuntime) -> None
 def load_ibkr_runtime_lock(path: Path) -> IbkrAcquisitionRuntime:
     document = _read_json_object(path, "IBKR runtime lock")
     _require_exact_keys(document, _RUNTIME_KEYS, "IBKR runtime lock")
-    if document.get("contract") != IbkrAcquisitionRuntime.CONTRACT:
-        raise ValueError("IBKR runtime lock contract is unsupported")
-    if document.get("schema_version") != IbkrAcquisitionRuntime.SCHEMA_VERSION:
-        raise ValueError("IBKR runtime lock schema version is unsupported")
+    if (
+        document.get("contract") != IbkrAcquisitionRuntime.CONTRACT
+        or document.get("schema_version") != IbkrAcquisitionRuntime.SCHEMA_VERSION
+    ):
+        raise ValueError("IBKR runtime lock contract or schema version is unsupported")
     runtime = IbkrAcquisitionRuntime(
         gateway_version=_string(document, "gateway_version"),
         gateway_archive=_archive_from_json(document.get("gateway_archive")),
@@ -261,37 +281,66 @@ def load_ibkr_runtime_lock(path: Path) -> IbkrAcquisitionRuntime:
     return runtime
 
 
-def verify_ibkr_runtime_lock(path: Path) -> IbkrAcquisitionRuntime:
-    """Verify semantic identity and re-hash all three archives from the published paths."""
-
+def verify_ibkr_runtime_lock(
+    path: Path,
+    *,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_image_digest: str,
+) -> IbkrAcquisitionRuntime:
+    """Replay runtime identity against explicit authoritative archive/image attestations."""
     runtime = load_ibkr_runtime_lock(path)
-    for archive in (runtime.gateway_archive, runtime.api_archive, runtime.ibc_archive):
-        archive_path = Path(archive.path)
-        _require_readable_path(archive_path, "IBKR runtime archive")
-        observed = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-        if observed != archive.sha256:
-            raise ValueError(f"IBKR runtime archive hash mismatch: {archive.path}")
+    expected = (expected_gateway_sha256, expected_api_sha256, expected_ibc_sha256)
+    actual_paths = (gateway_archive, api_archive, ibc_archive)
+    locked = (runtime.gateway_archive, runtime.api_archive, runtime.ibc_archive)
+    for role, archive_path, identity, expected_hash in zip(
+        ("Gateway", "API", "IBC"), actual_paths, locked, expected, strict=True
+    ):
+        _require_sha256(expected_hash, f"expected {role} archive hash")
+        _require_readable_path(archive_path, f"IBKR {role} archive")
+        if archive_path.name != identity.filename:
+            raise ValueError(f"IBKR {role} archive filename does not match the runtime lock")
+        observed = _sha256_file(archive_path)
+        if observed != expected_hash or identity.sha256 != expected_hash:
+            raise ValueError(
+                f"IBKR {role} archive does not match its authoritative role attestation"
+            )
+    rebuilt = build_ibkr_runtime_lock(
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        gateway_version=runtime.gateway_version,
+        api_version=runtime.api_version,
+        ibc_version=runtime.ibc_version,
+        qtrad_image_digest=expected_image_digest,
+        frozen_at=runtime.frozen_at,
+        api_host=runtime.api_host,
+        api_port=runtime.api_port,
+        client_id_policy=runtime.client_id_policy,
+    )
+    if rebuilt.as_json_value() != runtime.as_json_value():
+        raise ValueError("IBKR runtime lock does not replay from the actual runtime identity")
+    if runtime.gateway_configuration_identity != _gateway_configuration_identity(
+        api_host=runtime.api_host,
+        api_port=runtime.api_port,
+        client_id_policy=runtime.client_id_policy,
+    ):
+        raise ValueError("IBKR runtime lock configuration identity is not reconstructed")
     return runtime
 
 
 def _read_json_document(path: Path, label: str) -> dict[str, object]:
     if path.suffix.lower() == ".toml":
-        _require_readable_path(path, label)
-        try:
-            parsed = tomllib.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
-            raise ValueError(f"{label} is invalid") from error
-        if not isinstance(parsed, dict):
-            raise ValueError(f"{label} must be an object")
-        return cast(dict[str, object], parsed)
+        return _read_toml_object(path, label)
     return _read_json_object(path, label)
 
 
 def _read_json_object(path: Path, label: str) -> dict[str, object]:
-    _require_readable_path(path, label)
-    encoded = path.read_bytes()
-    if len(encoded) > _MAX_ARTIFACT_BYTES:
-        raise ValueError(f"{label} exceeds its bounded size")
+    encoded = _read_bounded_bytes(path, label)
     try:
         parsed = json.loads(encoded)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
@@ -299,6 +348,36 @@ def _read_json_object(path: Path, label: str) -> dict[str, object]:
     if not isinstance(parsed, dict):
         raise ValueError(f"{label} must be an object")
     return cast(dict[str, object], parsed)
+
+
+def _read_toml_object(path: Path, label: str) -> dict[str, object]:
+    encoded = _read_bounded_bytes(path, label)
+    try:
+        parsed = tomllib.loads(encoded.decode("utf-8"))
+    except (UnicodeDecodeError, tomllib.TOMLDecodeError) as error:
+        raise ValueError(f"{label} is invalid") from error
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{label} must be an object")
+    return cast(dict[str, object], parsed)
+
+
+def _read_bounded_bytes(path: Path, label: str) -> bytes:
+    _require_readable_path(path, label)
+    if path.stat().st_size > _MAX_ARTIFACT_BYTES:
+        raise ValueError(f"{label} exceeds its bounded size")
+    with path.open("rb") as source:
+        encoded = source.read(_MAX_ARTIFACT_BYTES + 1)
+    if len(encoded) > _MAX_ARTIFACT_BYTES:
+        raise ValueError(f"{label} exceeds its bounded size")
+    return encoded
+
+
+def _sha256_file(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as source:
+        while chunk := source.read(1024 * 1024):
+            digest.update(chunk)
+    return digest.hexdigest()
 
 
 def _write_create_only(path: Path, payload: Mapping[str, JsonValue], label: str) -> None:
@@ -379,23 +458,19 @@ def _validate_operator_decision(value: object) -> None:
         _fingerprint_from_json(value.get("fingerprint"))
     if not isinstance(value.get("acquisition_eligible"), bool):
         raise ValueError("IBKR operator selection acquisition_eligible must be boolean")
-    metadata = value.get("descriptive_metadata", {})
-    if not isinstance(metadata, Mapping):
-        raise ValueError("IBKR operator selection descriptive_metadata must be an object")
 
 
 def _archive_from_json(value: object) -> IbkrArchiveIdentity:
     if not isinstance(value, Mapping):
         raise ValueError("IBKR runtime archive must be an object")
     value = cast(Mapping[str, object], value)
-    _require_exact_keys(value, {"path", "sha256"}, "IBKR runtime archive")
-    return IbkrArchiveIdentity(path=_string(value, "path"), sha256=_string(value, "sha256"))
+    _require_exact_keys(value, {"filename", "sha256"}, "IBKR runtime archive")
+    return IbkrArchiveIdentity(filename=_string(value, "filename"), sha256=_string(value, "sha256"))
 
 
 def _string_mapping(value: object, field: str) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError(f"{field} must be an object")
-    value = cast(Mapping[str, object], value)
     result: dict[str, str] = {}
     for key, item in value.items():
         if not isinstance(key, str) or not key or not isinstance(item, str) or not item:
@@ -448,6 +523,11 @@ def _datetime(value: Mapping[str, object], field: str) -> datetime:
     return parsed
 
 
+def _require_sha256(value: str, label: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError(f"{label} must be a lower-case SHA-256 digest")
+
+
 def _require_exact_keys(
     value: Mapping[str, object],
     expected: set[str],
@@ -456,8 +536,7 @@ def _require_exact_keys(
     allow_missing: set[str] | None = None,
 ) -> None:
     allowed_missing = allow_missing or set()
-    keys = set(value)
-    if keys - expected or (expected - allowed_missing) - keys:
+    if set(value) - expected or (expected - allowed_missing) - set(value):
         raise ValueError(f"{context} has unknown or missing fields")
 
 

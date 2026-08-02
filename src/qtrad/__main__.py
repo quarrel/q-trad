@@ -44,7 +44,6 @@ from qtrad.application.ibkr_capability import (
 )
 from qtrad.application.ibkr_historical import (
     configured_image_digest,
-    derive_qtrad_commit,
 )
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
@@ -255,6 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     select.add_argument("--provider", choices=("ibkr",), required=True)
     select.add_argument("--capability-review", type=Path, required=True)
+    select.add_argument("--catalogue", type=Path, required=True)
+    select.add_argument("--probe-spec", type=Path, required=True)
     select.add_argument("--selection", type=Path, required=True)
     select.add_argument("--frozen-by", required=True)
     select.add_argument("--output", type=Path, required=True)
@@ -274,7 +275,6 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_lock.add_argument("--gateway-version")
     runtime_lock.add_argument("--api-version")
     runtime_lock.add_argument("--ibc-version", default="3.24.1")
-    runtime_lock.add_argument("--qtrad-commit")
     runtime_lock.add_argument("--image-digest")
     runtime_lock.add_argument("--output", type=Path, required=True)
 
@@ -571,6 +571,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             clock,
             capability_review_path=args.capability_review,
             selection_path=args.selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
             frozen_by=args.frozen_by,
             output_path=args.output,
         )
@@ -588,7 +590,6 @@ def main(argv: Sequence[str] | None = None) -> None:
             gateway_version=args.gateway_version,
             api_version=args.api_version,
             ibc_version=args.ibc_version,
-            qtrad_commit=args.qtrad_commit,
             image_digest=args.image_digest,
             output_path=args.output,
         )
@@ -2087,12 +2088,16 @@ def _select_ibkr_instruments(
     *,
     capability_review_path: Path,
     selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
     frozen_by: str,
     output_path: Path,
 ) -> None:
     selection = build_ibkr_contract_selection_from_files(
         capability_review_path=capability_review_path,
         selection_path=selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
         frozen_by=frozen_by,
         frozen_at=clock.now(),
     )
@@ -2122,7 +2127,6 @@ def _inspect_ibkr_runtime_lock(
     gateway_version: str | None,
     api_version: str | None,
     ibc_version: str,
-    qtrad_commit: str | None,
     image_digest: str | None,
     output_path: Path,
 ) -> None:
@@ -2133,7 +2137,6 @@ def _inspect_ibkr_runtime_lock(
         gateway_version=gateway_version or settings.ibkr_gateway_version,
         api_version=api_version or settings.ibkr_api_version,
         ibc_version=ibc_version,
-        qtrad_commit=qtrad_commit or derive_qtrad_commit(require_clean=qtrad_commit is None),
         qtrad_image_digest=configured_image_digest(image_digest),
         frozen_at=clock.now(),
         api_host=settings.ibkr_gateway_host,
