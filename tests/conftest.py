@@ -1,5 +1,6 @@
 """Shared test-environment defaults for deterministic identity-bound artefacts."""
 
+from __future__ import annotations
 import os
 
 
