@@ -48,7 +48,8 @@ admin_psql --command "CREATE DATABASE \"$test_database\""
 export QTRAD_DATABASE_URL="postgresql+asyncpg://${test_user}:${test_password}@${test_host}:${test_port}/${test_database}"
 export QTRAD_TEST_DATABASE_URL="$QTRAD_DATABASE_URL"
 export QTRAD_MIGRATION_DATABASE_URL="postgresql+psycopg://${test_user}:${test_password}@${test_host}:${test_port}/${test_database}"
-
+# Tests exercise immutable image-bound identities with a deterministic fixture digest.
+export QTRAD_IMAGE_DIGEST="${QTRAD_IMAGE_DIGEST:-sha256:0000000000000000000000000000000000000000000000000000000000000000}"
 uv run ruff format --check .
 uv run ruff check .
 uv run pyright

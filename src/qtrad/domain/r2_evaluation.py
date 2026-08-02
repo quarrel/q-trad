@@ -679,6 +679,7 @@ class EvaluationReport:
     configurations: tuple[ConfigurationRecord, ...]
     unavailable_diagnostics: tuple[tuple[str, str], ...]
     report_id: str
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
 
     CONTRACT: ClassVar[str] = R2_EVALUATION_CONTRACT
 
@@ -740,6 +741,7 @@ class EvaluationReport:
         stability: Sequence[StabilitySummary],
         configurations: Sequence[ConfigurationRecord],
         unavailable_diagnostics: Sequence[tuple[str, str]],
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
     ) -> "EvaluationReport":
         common_ids = tuple(sorted(all_model_common_target_ids))
         ordered_models = tuple(sorted(evaluated_models, key=lambda item: item.manifest_id))
@@ -768,6 +770,7 @@ class EvaluationReport:
             ("stability", tuple(stability)),
             ("configurations", ordered_configurations),
             ("unavailable_diagnostics", diagnostics),
+            ("market_data_source_class", market_data_source_class),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -792,6 +795,7 @@ class EvaluationReport:
             configurations=ordered_configurations,
             unavailable_diagnostics=diagnostics,
             report_id=identity,
+            market_data_source_class=market_data_source_class,
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
@@ -820,6 +824,7 @@ class EvaluationReport:
             "unavailable_diagnostics": [
                 {"name": name, "reason": reason} for name, reason in self.unavailable_diagnostics
             ],
+            "market_data_source_class": self.market_data_source_class.value,
         }
 
     def as_json(self) -> dict[str, JsonValue]:

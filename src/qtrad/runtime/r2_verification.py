@@ -6,6 +6,7 @@ while manifests bind their immutable identities, source class and evidence class
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import subprocess
@@ -82,6 +83,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.ports.clock import Clock
+from qtrad.runtime.foundation_bundle import verify_foundation_bundle
 from qtrad.runtime.r2_bundles import (
     atomic_create,
     canonical_bytes,
@@ -107,16 +109,26 @@ def runtime_identities() -> dict[str, str]:
             capture_output=True,
             text=True,
         )
+        status = subprocess.run(
+            ("git", "-C", str(repository), "status", "--porcelain", "--untracked-files=all"),
+            check=True,
+            capture_output=True,
+            text=True,
+        )
     except (OSError, subprocess.CalledProcessError) as exc:
         raise RuntimeError("cannot derive the application commit identity") from exc
+    if status.stdout.strip():
+        raise RuntimeError("application identity requires a clean source tree")
     commit = result.stdout.strip()
     if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
         raise RuntimeError("git did not return a verified commit identity")
     declared_commit = os.environ.get("QTRAD_APPLICATION_COMMIT")
     if declared_commit is not None and declared_commit != commit:
         raise RuntimeError("declared application commit differs from the running source")
-    image_digest = os.environ.get("QTRAD_IMAGE_DIGEST", "source-tree")
-    if image_digest != "source-tree" and (
+    image_digest = os.environ.get("QTRAD_IMAGE_DIGEST")
+    if image_digest is None:
+        raise RuntimeError("QTRAD_IMAGE_DIGEST must identify the immutable application image")
+    if (
         not image_digest.startswith("sha256:")
         or len(image_digest) != len("sha256:") + 64
         or any(character not in "0123456789abcdef" for character in image_digest[7:])
@@ -221,6 +233,27 @@ def _descriptor_payload(
     }
     descriptor_id = sha256(canonical_bytes(semantic)).hexdigest()
     return {**semantic, "descriptor_id": descriptor_id}
+
+
+def _replay_input_payload(
+    *,
+    research_root: Path,
+    paths: Mapping[str, Path],
+) -> dict[str, object]:
+    expected = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
+    if set(paths) != expected:
+        raise ValueError(
+            "representative replay inputs must include foundation, experiment and L0/L1/P0/P1"
+        )
+    children: dict[str, object] = {}
+    for name, path in sorted(paths.items()):
+        if path.is_symlink() or not path.is_file():
+            raise ValueError(f"replay input must be a regular non-symlink file: {name}")
+        children[name] = {
+            "path": str(path.resolve()),
+            "sha256": sha256(path.read_bytes()).hexdigest(),
+        }
+    return {"research_root": str(research_root.resolve()), "children": children}
 
 
 def _descriptor_reference(
@@ -684,6 +717,7 @@ def build_oof_bundle(
     run_kind: str = "REPRESENTATIVE",
     dataset_overrides: Mapping[str, R2FeatureDataset] | None = None,
     manifest_overrides: Mapping[str, Mapping[str, object]] | None = None,
+    replay_inputs: Mapping[str, Path] | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     foundation_source = getattr(verified.bundle, "market_data_source_class", None)
@@ -995,6 +1029,11 @@ def build_oof_bundle(
             "evaluation_report_id": evaluation.report_id,
         }
     )
+    if replay_inputs is not None:
+        descriptor["replay_inputs"] = cast(
+            dict[str, JsonValue],
+            _replay_input_payload(research_root=research_root, paths=replay_inputs),
+        )
     descriptor["descriptor_id"] = sha256(
         canonical_bytes({key: value for key, value in descriptor.items() if key != "descriptor_id"})
     ).hexdigest()
@@ -1059,19 +1098,25 @@ def selection_freeze(
     retained_controls: list[str] = []
     for item in configurations:
         configuration_id = str(item["configuration_id"])
-        model_family = str(item.get("model_family", ""))
-        disposition = (
-            ConfigurationDisposition.RETAINED_CONTROL
-            if model_family == ModelFamily.ZERO_RETURN.value
-            else ConfigurationDisposition.REJECTED
-        )
+        raw_disposition = item.get("disposition")
+        raw_reason = item.get("reason")
+        if (
+            not isinstance(raw_disposition, str)
+            or not isinstance(raw_reason, str)
+            or not raw_reason
+        ):
+            raise ValueError("OOF configuration lacks persisted disposition or reason")
+        try:
+            disposition = ConfigurationDisposition(raw_disposition)
+        except ValueError as exc:
+            raise ValueError("OOF configuration has an unknown disposition") from exc
         if disposition is ConfigurationDisposition.RETAINED_CONTROL:
             retained_controls.append(configuration_id)
         decisions.append(
             SelectionDecision(
                 configuration_id=configuration_id,
                 disposition=disposition,
-                reason="implementation evidence; confirmatory selection remains pending",
+                reason=raw_reason,
                 gates=(),
             )
         )
@@ -1085,9 +1130,16 @@ def selection_freeze(
     thresholds = descriptor.get("acceptance_thresholds")
     if not isinstance(thresholds, dict):
         raise ValueError("OOF descriptor has no authenticated selection thresholds")
-    report_id = register.get("report_id")
+    evaluation_payload = _oof_child_payload(oof_bundle_path, bundle, "qtrad-r2-evaluation-v1")
+    evaluation_report_id = evaluation_payload.get("report_id")
+    report_ref = register.get("evaluation")
     local_ref = register.get("local_comparator")
-    if not isinstance(report_id, str) or not isinstance(local_ref, dict):
+    if (
+        not isinstance(evaluation_report_id, str)
+        or not isinstance(report_ref, dict)
+        or report_ref.get("semantic_id") != evaluation_report_id
+        or not isinstance(local_ref, dict)
+    ):
         raise ValueError("OOF register has incomplete evaluation lineage")
     local_ref_payload = cast(dict[str, object], local_ref)
     local_comparator_id = local_ref_payload.get("semantic_id")
@@ -1101,7 +1153,7 @@ def selection_freeze(
     manifest = SelectionManifest.create(
         experiment_configuration_id=bundle.experiment_configuration_id,
         evidence_class=bundle.evidence_class,
-        evaluation_report_id=report_id,
+        evaluation_report_id=evaluation_report_id,
         local_comparator_manifest_id=local_comparator_id,
         evaluated_configuration_ids=evaluated_ids,
         predeclared_comparators=tuple(ModelFamily),
@@ -1209,10 +1261,10 @@ def build_software_bundle(
     selection = _load_selection(representative_selection_path)
     if selection.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("representative selection must be a typed SelectionManifest")
-    register = _oof_child_payload(
-        representative_oof_bundle_path, representative_oof, "qtrad-r2-evaluation-register-v1"
+    evaluation_payload = _oof_child_payload(
+        representative_oof_bundle_path, representative_oof, "qtrad-r2-evaluation-v1"
     )
-    if selection.get("evaluation_report_id") != register.get("report_id"):
+    if selection.get("evaluation_report_id") != evaluation_payload.get("report_id"):
         raise ValueError("representative selection does not bind the supplied OOF report")
     output.mkdir(parents=True, exist_ok=False)
     _copy_tree(representative_oof_bundle_path.parent, output / "representative" / "oof")
@@ -1284,6 +1336,64 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
+async def _replay_representative_oof_async(path: Path) -> None:
+    bundle = verify_r2_oof_bundle(path)
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    if descriptor.get("run_kind") != "REPRESENTATIVE":
+        raise ValueError("representative replay requires a representative OOF run")
+    raw_inputs = descriptor.get("replay_inputs")
+    if not isinstance(raw_inputs, dict):
+        raise ValueError("representative OOF descriptor has no authenticated replay inputs")
+    raw_root = raw_inputs.get("research_root")
+    raw_children = raw_inputs.get("children")
+    if not isinstance(raw_root, str) or not isinstance(raw_children, dict):
+        raise ValueError("representative replay inputs are malformed")
+    paths: dict[str, Path] = {}
+    for name, value in raw_children.items():
+        if not isinstance(name, str) or not isinstance(value, dict):
+            raise ValueError("representative replay input child is malformed")
+        raw_path = value.get("path")
+        expected_digest = value.get("sha256")
+        if not isinstance(raw_path, str) or not isinstance(expected_digest, str):
+            raise ValueError("representative replay input identity is incomplete")
+        candidate = Path(raw_path)
+        if candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"representative replay input is unavailable: {name}")
+        if sha256(candidate.read_bytes()).hexdigest() != expected_digest:
+            raise ValueError(f"representative replay input changed: {name}")
+        paths[name] = candidate
+    replay = _replay_input_payload(research_root=Path(raw_root), paths=paths)
+    if replay != raw_inputs:
+        raise ValueError("representative replay input identity does not authenticate")
+    verified = await verify_foundation_bundle(
+        root=Path(raw_root),
+        bundle_path=paths["foundation"],
+        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+    )
+    experiment = load_r2_experiment(paths["experiment"])
+    feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
+    with TemporaryDirectory() as temporary:
+        expected_root = Path(temporary) / "oof"
+        build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_paths,
+            research_root=Path(raw_root),
+            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            output=expected_root,
+            run_kind="REPRESENTATIVE",
+            replay_inputs=paths,
+        )
+        if _tree_bytes(path.parent) != _tree_bytes(expected_root):
+            raise ValueError(
+                "representative OOF bundle does not replay to the authenticated pipeline"
+            )
+
+
+def _replay_representative_oof(path: Path) -> None:
+    asyncio.run(_replay_representative_oof_async(path))
+
+
 def _replay_synthetic_oof(path: Path) -> None:
     bundle = verify_r2_oof_bundle(path)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
@@ -1314,7 +1424,7 @@ def verify_oof_bundle(path: Path) -> R2OofBundle:
     return bundle
 
 
-def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
+def _verify_software_bundle_envelope(path: Path) -> R2SoftwareVerificationBundle:
     """Verify both nested OOF integrations and their holdout-free selections."""
     software = verify_r2_software_bundle(path)
     identities = runtime_identities()
@@ -1360,7 +1470,6 @@ def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
             not isinstance(target_instruments, list) or set(target_instruments) != expected_targets
         ):
             raise ValueError("representative software OOF child has the wrong target universe")
-        register = _oof_child_payload(oof_path, oof, "qtrad-r2-evaluation-register-v1")
         payload = _load_selection(root / selection_reference.path)
         if payload.get("contract") != "qtrad-r2-selection-v1":
             raise ValueError("software selection child is not a typed SelectionManifest")
@@ -1376,10 +1485,25 @@ def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
             raise ValueError("software selection evidence class differs from its OOF bundle")
         if payload.get("holdout_state_verification") != "PENDING_R2_H_INTEGRATION":
             raise ValueError("software selection must leave holdout verification pending")
-        if payload.get("evaluation_report_id") != register.get("report_id"):
+        evaluation_payload = _oof_child_payload(oof_path, oof, "qtrad-r2-evaluation-v1")
+        if payload.get("evaluation_report_id") != evaluation_payload.get("report_id"):
             raise ValueError("software selection does not bind the OOF evaluation report")
         if payload.get("application_image_identity") != identities["application_identity"]:
             raise ValueError("software selection identity differs from the running application")
+    return software
+
+
+def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
+    software = _verify_software_bundle_envelope(path)
+    representative = path.parent / software.representative_oof_bundle.path
+    _replay_representative_oof(representative)
+    return software
+
+
+async def verify_software_bundle_async(path: Path) -> R2SoftwareVerificationBundle:
+    software = _verify_software_bundle_envelope(path)
+    representative = path.parent / software.representative_oof_bundle.path
+    await _replay_representative_oof_async(representative)
     return software
 
 

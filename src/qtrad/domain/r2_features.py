@@ -142,6 +142,7 @@ class R2FeatureDataset:
             self.experiment_configuration_id,
             self.feature_set_name,
             self.feature_schema,
+            self.market_data_source_class,
         )
         if self.feature_set_id != expected_set_id:
             raise ValueError("feature set ID does not match its declared name and schema")
@@ -191,6 +192,7 @@ class R2FeatureDataset:
             experiment_configuration_id,
             feature_set_name,
             schema,
+            market_data_source_class,
         )
         if feature_set_id is not None and feature_set_id != expected_set_id:
             raise ValueError("feature set ID does not match its declared name and schema")
@@ -370,13 +372,19 @@ def feature_schema_id(schema: Sequence[FeatureDefinition]) -> str:
     )
 
 
-def feature_set_id(experiment_id: str, name: str, schema: Sequence[FeatureDefinition]) -> str:
+def feature_set_id(
+    experiment_id: str,
+    name: str,
+    schema: Sequence[FeatureDefinition],
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
+) -> str:
     return _hash_json(
         {
             "contract": "qtrad-r2-feature-set-v1",
             "experiment_configuration_id": experiment_id,
             "name": name,
             "raw_feature_schema_id": feature_schema_id(schema),
+            "market_data_source_class": market_data_source_class.value,
         }
     )
 
@@ -417,8 +425,7 @@ class FeatureDatasetSemanticHasher:
             "evidence_class": evidence_class.value,
             "holdout_excluded": holdout_excluded,
         }
-        if market_data_source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
-            identity["market_data_source_class"] = market_data_source_class.value
+        identity["market_data_source_class"] = market_data_source_class.value
         encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode("utf-8")
         self._hash.update(encoded[:-1])
         self._hash.update(b',"rows":[')

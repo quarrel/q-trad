@@ -624,10 +624,6 @@ def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonVa
 
 
 def preprocessing_selection_id(payload: dict[str, JsonValue]) -> str:
-    source = payload.get("market_data_source_class")
-    if source == MarketDataSourceClass.IG_NATIVE_CAPTURE.value:
-        payload = dict(payload)
-        payload.pop("market_data_source_class")
     return _semantic_id(payload)
 
 

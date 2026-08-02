@@ -607,6 +607,7 @@ def _build_evaluation_core(
         fold_dataset_id=experiment.fold_dataset_id,
         local_comparator_manifest_id=local_manifest.manifest_id,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
         metric_policy=experiment.metric_policy,
         forecast_bucket_policy=experiment.forecast_bucket_policy,
         minimum_correlation_rows=minimum_correlation_rows,

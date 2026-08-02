@@ -117,6 +117,7 @@ from qtrad.runtime.r2_verification import (
     selection_freeze,
     verify_oof_bundle,
     verify_software_bundle,
+    verify_software_bundle_async,
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -843,7 +844,7 @@ async def _report_r2_readiness(
     experiment = load_r2_experiment(experiment_path)
     software_verified = False
     if software_bundle_path is not None:
-        software = verify_software_bundle(software_bundle_path)
+        software = await verify_software_bundle_async(software_bundle_path)
         representative = verify_r2_oof_bundle(
             software_bundle_path.parent / software.representative_oof_bundle.path
         )
@@ -885,6 +886,11 @@ async def _build_r2_oof(
         research_root=settings.research_root,
         clock=clock,
         output=output_path,
+        replay_inputs={
+            "foundation": foundation_bundle_path,
+            "experiment": experiment_path,
+            **feature_paths,
+        },
     )
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))
 

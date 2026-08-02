@@ -231,7 +231,12 @@ def iter_raw_feature_rows(
     """Yield canonical feature rows without retaining the output row collection."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    set_identity = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    set_identity = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     yield from _iter_raw_feature_rows(
         foundation,
         experiment,
@@ -1056,7 +1061,12 @@ def verify_raw_feature_manifest_bindings(
     """Authenticate persisted feature metadata before reading feature rows."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    expected_set_id = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    expected_set_id = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     expected_ids = (
         ("observation", manifest.observation_dataset_id, foundation.observations.dataset_id),
         ("panel", manifest.panel_dataset_id, foundation.panel.dataset_id),
@@ -1128,7 +1138,12 @@ def verify_raw_feature_rows(
     """Replay persisted rows in lockstep without materialising the expected dataset."""
     _verify_foundation_bindings(foundation, experiment)
     schema = feature_schema_for_set(experiment, feature_set_name)
-    expected_set_id = feature_set_id(experiment.configuration_id, feature_set_name, schema)
+    expected_set_id = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
     expected = iter_raw_feature_rows(
         foundation,
         experiment,
