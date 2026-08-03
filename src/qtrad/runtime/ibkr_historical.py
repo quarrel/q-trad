@@ -10,8 +10,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from qtrad.application import ibkr_historical as ibkr_application
 from qtrad.application.ibkr_historical import (
     build_ibkr_contract_selection,
+    build_ibkr_historical_plan,
+    build_ibkr_historical_request_profile,
     build_ibkr_runtime_lock,
 )
 from qtrad.domain.events import JsonValue
@@ -22,8 +25,15 @@ from qtrad.domain.ibkr_historical import (
     IbkrContractFingerprint,
     IbkrContractSelection,
     IbkrContractSelectionDecision,
+    IbkrHistoricalPacingPolicy,
+    IbkrHistoricalPlan,
+    IbkrHistoricalRequest,
+    IbkrHistoricalRequestKind,
+    IbkrHistoricalRequestProfile,
+    IbkrPlannedContract,
 )
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.instruments import AssetClass
 from qtrad.runtime.ibkr_capability import ibkr_capability_probe_spec_from_document
 from qtrad.runtime.universe import capture_candidates_from_document
 
@@ -84,6 +94,65 @@ _DECISION_KEYS = {
     "fingerprint",
     "reason",
     "descriptive_metadata",
+}
+
+
+_REQUEST_PROFILE_KEYS = {
+    "contract",
+    "schema_version",
+    "canary_evidence_filename",
+    "canary_evidence_sha256",
+    "frozen_by",
+    "frozen_at",
+    "permitted_bar_durations",
+    "permitted_schedule_durations",
+    "bar_duration_by_asset_class",
+    "schedule_duration",
+    "maximum_in_flight_requests",
+    "request_timeout_seconds",
+    "retry_count",
+    "duplicate_request_protection",
+    "pacing_policy",
+    "profile_sha256",
+}
+_PACING_POLICY_KEYS = {
+    "identical_request_cooldown_seconds",
+    "per_contract_window_seconds",
+    "max_requests_per_contract_window",
+    "rolling_window_seconds",
+    "max_requests_per_rolling_window",
+}
+_PLAN_KEYS = {
+    "contract",
+    "schema_version",
+    "contract_selection_sha256",
+    "runtime_sha256",
+    "request_profile_sha256",
+    "provider",
+    "environment",
+    "planner_qtrad_commit",
+    "planner_qtrad_image_digest",
+    "start",
+    "end",
+    "eligible_contracts",
+    "requests",
+    "plan_sha256",
+}
+_PLANNED_CONTRACT_KEYS = {"instrument_id", "fingerprint"}
+_REQUEST_KEYS = {
+    "instrument_id",
+    "fingerprint",
+    "kind",
+    "interval_start",
+    "interval_end",
+    "end_date_time",
+    "duration",
+    "bar_size",
+    "what_to_show",
+    "use_rth",
+    "format_date",
+    "keep_up_to_date",
+    "request_sha256",
 }
 
 
@@ -191,30 +260,33 @@ def load_ibkr_contract_selection(path: Path) -> IbkrContractSelection:
 
 
 def verify_ibkr_contract_selection(
-    path: Path, *, capability_review_path: Path, catalogue_path: Path, probe_spec_path: Path
+    path: Path,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
 ) -> IbkrContractSelection:
-    """Independently replay a selection; the canonical inputs are deliberately mandatory."""
+    """Replay a selection from the capability review and original operator decisions."""
+
     selection = load_ibkr_contract_selection(path)
     review = load_ibkr_capability_review(
         capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
+    operator_selection = load_ibkr_operator_selection(operator_selection_path)
     candidates, probe_spec = _load_canonical_inputs(
         catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
     rebuilt = build_ibkr_contract_selection(
         capability_review=review,
-        operator_selection={
-            "schema_version": 1,
-            "capability_review_sha256": selection.capability_review_sha256,
-            "decisions": [item.as_json_value() for item in selection.decisions],
-        },
+        operator_selection=operator_selection,
         canonical_instrument_ids=frozenset(item.instrument_id for item in candidates.instruments),
         canonical_queries=frozenset(probe_spec.queries),
         frozen_by=selection.frozen_by,
         frozen_at=selection.frozen_at,
     )
     if rebuilt.as_json_value() != selection.as_json_value():
-        raise ValueError("IBKR contract selection does not replay from its capability review")
+        raise ValueError("IBKR contract selection does not replay from its authenticated inputs")
     return selection
 
 
@@ -292,6 +364,7 @@ def verify_ibkr_runtime_lock(
     expected_gateway_sha256: str,
     expected_api_sha256: str,
     expected_ibc_sha256: str,
+    expected_qtrad_commit: str,
     expected_image_digest: str,
     expected_gateway_version: str,
     expected_api_version: str,
@@ -300,8 +373,18 @@ def verify_ibkr_runtime_lock(
     expected_api_port: int,
     expected_client_id_policy: str,
 ) -> IbkrAcquisitionRuntime:
-    """Replay runtime identity against explicit authoritative archive/image attestations."""
+    """Replay runtime identity against explicit authoritative attestations."""
+
     runtime = load_ibkr_runtime_lock(path)
+    observed_commit = ibkr_application.derive_qtrad_commit()
+    if observed_commit != expected_qtrad_commit:
+        raise ValueError(
+            "IBKR runtime verifier q-trad commit does not match the observed clean source commit"
+        )
+    if runtime.qtrad_commit != expected_qtrad_commit:
+        raise ValueError(
+            "IBKR runtime lock q-trad commit does not match its authoritative attestation"
+        )
     expected = (expected_gateway_sha256, expected_api_sha256, expected_ibc_sha256)
     actual_paths = (gateway_archive, api_archive, ibc_archive)
     locked = (runtime.gateway_archive, runtime.api_archive, runtime.ibc_archive)
@@ -317,13 +400,14 @@ def verify_ibkr_runtime_lock(
             raise ValueError(
                 f"IBKR {role} archive does not match its authoritative role attestation"
             )
-    rebuilt = build_ibkr_runtime_lock(
+    rebuilt = ibkr_application._rebuild_ibkr_runtime_lock(
         gateway_archive=gateway_archive,
         api_archive=api_archive,
         ibc_archive=ibc_archive,
         gateway_version=expected_gateway_version,
         api_version=expected_api_version,
         ibc_version=expected_ibc_version,
+        qtrad_commit=observed_commit,
         qtrad_image_digest=expected_image_digest,
         frozen_at=runtime.frozen_at,
         api_host=expected_api_host,
@@ -333,6 +417,355 @@ def verify_ibkr_runtime_lock(
     if rebuilt.as_json_value() != runtime.as_json_value():
         raise ValueError("IBKR runtime lock does not replay from the actual runtime identity")
     return runtime
+
+
+def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestProfile:
+    """Load the canonical profile structure; evidence authentication is a separate verifier."""
+
+    document = _read_json_object(path, "IBKR historical request profile")
+    _require_exact_keys(document, _REQUEST_PROFILE_KEYS, "IBKR historical request profile")
+    if (
+        document.get("contract") != IbkrHistoricalRequestProfile.CONTRACT
+        or document.get("schema_version") != IbkrHistoricalRequestProfile.SCHEMA_VERSION
+    ):
+        raise ValueError(
+            "IBKR historical request profile contract or schema version is unsupported"
+        )
+    profile = build_ibkr_historical_request_profile(
+        canary_evidence_filename=_string(document, "canary_evidence_filename"),
+        canary_evidence_sha256=_string(document, "canary_evidence_sha256"),
+        frozen_by=_string(document, "frozen_by"),
+        frozen_at=_datetime(document, "frozen_at"),
+        permitted_bar_durations=_string_tuple(
+            document.get("permitted_bar_durations"), "IBKR permitted bar durations"
+        ),
+        permitted_schedule_durations=_string_tuple(
+            document.get("permitted_schedule_durations"), "IBKR permitted schedule durations"
+        ),
+        bar_duration_by_asset_class=_asset_class_durations(
+            document.get("bar_duration_by_asset_class")
+        ),
+        schedule_duration=_string(document, "schedule_duration"),
+        maximum_in_flight_requests=_integer(document, "maximum_in_flight_requests"),
+        request_timeout_seconds=_integer(document, "request_timeout_seconds"),
+        retry_count=_integer(document, "retry_count"),
+        duplicate_request_protection=_string(document, "duplicate_request_protection"),
+        pacing_policy=_pacing_policy_from_json(document.get("pacing_policy")),
+    )
+    if (
+        profile.profile_sha256 != _string(document, "profile_sha256")
+        or profile.as_json_value() != document
+    ):
+        raise ValueError("IBKR historical request profile contains non-canonical fields")
+    return profile
+
+
+def verify_ibkr_historical_request_profile(
+    path: Path,
+    *,
+    canary_evidence_path: Path,
+    expected_frozen_by: str,
+    expected_frozen_at: datetime,
+) -> IbkrHistoricalRequestProfile:
+    """Authenticate profile bytes, canary bytes and operator freeze attestations."""
+
+    profile = load_ibkr_historical_request_profile(path)
+    _require_readable_path(canary_evidence_path, "IBKR canary evidence")
+    if canary_evidence_path.name != profile.canary_evidence_filename:
+        raise ValueError("IBKR canary evidence filename does not match the request profile")
+    if _sha256_file(canary_evidence_path) != profile.canary_evidence_sha256:
+        raise ValueError("IBKR canary evidence does not match the request profile")
+    if profile.frozen_by != expected_frozen_by or profile.frozen_at != expected_frozen_at:
+        raise ValueError("IBKR request profile freeze does not match its operator attestation")
+    return profile
+
+
+def write_ibkr_historical_request_profile(
+    path: Path, profile: IbkrHistoricalRequestProfile
+) -> None:
+    _write_create_only(path, profile.as_json_value(), "IBKR historical request profile")
+
+
+def build_ibkr_historical_plan_from_files(
+    *,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    start: datetime,
+    end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
+) -> IbkrHistoricalPlan:
+    """Compose the planner only from independently verified lower-layer artefacts."""
+
+    candidates, _ = _load_canonical_inputs(
+        catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
+    selection = verify_ibkr_contract_selection(
+        contract_selection_path,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    if candidates.configuration_hash != selection.catalogue_hash:
+        raise ValueError("IBKR catalogue changed while reconstructing the historical plan")
+    asset_class_by_instrument = {
+        instrument.instrument_id: instrument.asset_class for instrument in candidates.instruments
+    }
+    runtime = verify_ibkr_runtime_lock(
+        runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+    )
+    request_profile = verify_ibkr_historical_request_profile(
+        request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_frozen_by=expected_profile_frozen_by,
+        expected_frozen_at=expected_profile_frozen_at,
+    )
+    return build_ibkr_historical_plan(
+        selection=selection,
+        runtime=runtime,
+        request_profile=request_profile,
+        asset_class_by_instrument=asset_class_by_instrument,
+        start=start,
+        end=end,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
+    )
+
+
+def write_ibkr_historical_plan(path: Path, plan: IbkrHistoricalPlan) -> None:
+    _write_create_only(path, plan.as_json_value(), "IBKR historical plan")
+
+
+def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
+    """Independently load and structurally replay an exact, database-free request plan."""
+
+    document = _read_json_object(path, "IBKR historical plan")
+    _require_exact_keys(document, _PLAN_KEYS, "IBKR historical plan")
+    if (
+        document.get("contract") != IbkrHistoricalPlan.CONTRACT
+        or document.get("schema_version") != IbkrHistoricalPlan.SCHEMA_VERSION
+    ):
+        raise ValueError("IBKR historical plan contract or schema version is unsupported")
+    eligible_values = document.get("eligible_contracts")
+    request_values = document.get("requests")
+    if not isinstance(eligible_values, list) or not isinstance(request_values, list):
+        raise ValueError("IBKR historical plan contracts and requests must be arrays")
+    plan = IbkrHistoricalPlan(
+        contract_selection_sha256=_string(document, "contract_selection_sha256"),
+        runtime_sha256=_string(document, "runtime_sha256"),
+        request_profile_sha256=_string(document, "request_profile_sha256"),
+        provider=_string(document, "provider"),
+        environment=_string(document, "environment"),
+        planner_qtrad_commit=_string(document, "planner_qtrad_commit"),
+        planner_qtrad_image_digest=_string(document, "planner_qtrad_image_digest"),
+        start=_datetime(document, "start"),
+        end=_datetime(document, "end"),
+        eligible_contracts=tuple(_planned_contract_from_json(value) for value in eligible_values),
+        requests=tuple(_historical_request_from_json(value) for value in request_values),
+        plan_sha256=_string(document, "plan_sha256"),
+    )
+    if plan.as_json_value() != document:
+        raise ValueError("IBKR historical plan contains non-canonical fields")
+    return plan
+
+
+def verify_ibkr_historical_plan(
+    path: Path,
+    *,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    expected_start: datetime,
+    expected_end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
+) -> IbkrHistoricalPlan:
+    """Replay the plan and its authenticated lower-artifact closure from files only."""
+
+    observed = load_ibkr_historical_plan(path)
+    expected = build_ibkr_historical_plan_from_files(
+        contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+        runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+        request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
+        start=expected_start,
+        end=expected_end,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
+    )
+    if expected.as_json_value() != observed.as_json_value():
+        raise ValueError(
+            "IBKR historical plan does not replay from its authenticated lower artefacts"
+        )
+    return observed
+
+
+def _asset_class_durations(value: object) -> dict[AssetClass, str]:
+    if not isinstance(value, Mapping):
+        raise ValueError("IBKR bar durations by asset class must be an object")
+    raw = cast(Mapping[str, object], value)
+    result: dict[AssetClass, str] = {}
+    for key, duration in raw.items():
+        if not isinstance(key, str):
+            raise ValueError("IBKR bar duration asset class must be a string")
+        try:
+            asset_class = AssetClass(key)
+        except ValueError as error:
+            raise ValueError("IBKR bar duration asset class is unsupported") from error
+        if asset_class in result:
+            raise ValueError("IBKR bar duration asset classes must be unique")
+        if not isinstance(duration, str):
+            raise ValueError("IBKR bar duration must be a string")
+        result[asset_class] = duration
+    return result
+
+
+def _pacing_policy_from_json(value: object) -> IbkrHistoricalPacingPolicy:
+    if not isinstance(value, Mapping):
+        raise ValueError("IBKR pacing policy must be an object")
+    policy = cast(Mapping[str, object], value)
+    _require_exact_keys(policy, _PACING_POLICY_KEYS, "IBKR pacing policy")
+    return IbkrHistoricalPacingPolicy(
+        identical_request_cooldown_seconds=_integer(policy, "identical_request_cooldown_seconds"),
+        per_contract_window_seconds=_integer(policy, "per_contract_window_seconds"),
+        max_requests_per_contract_window=_integer(policy, "max_requests_per_contract_window"),
+        rolling_window_seconds=_integer(policy, "rolling_window_seconds"),
+        max_requests_per_rolling_window=_integer(policy, "max_requests_per_rolling_window"),
+    )
+
+
+def _planned_contract_from_json(value: object) -> IbkrPlannedContract:
+    if not isinstance(value, Mapping):
+        raise ValueError("IBKR planned contract must be an object")
+    item = cast(Mapping[str, object], value)
+    _require_exact_keys(item, _PLANNED_CONTRACT_KEYS, "IBKR planned contract")
+    return IbkrPlannedContract(
+        instrument_id=InstrumentId(_string(item, "instrument_id")),
+        fingerprint=_fingerprint_from_json(item.get("fingerprint")),
+    )
+
+
+def _historical_request_from_json(value: object) -> IbkrHistoricalRequest:
+    if not isinstance(value, Mapping):
+        raise ValueError("IBKR historical request must be an object")
+    item = cast(Mapping[str, object], value)
+    _require_exact_keys(item, _REQUEST_KEYS, "IBKR historical request")
+    try:
+        kind = IbkrHistoricalRequestKind(_string(item, "kind"))
+    except ValueError as error:
+        raise ValueError("IBKR historical request kind is invalid") from error
+    use_rth = item.get("use_rth")
+    keep_up_to_date = item.get("keep_up_to_date")
+    if not isinstance(use_rth, bool) or not isinstance(keep_up_to_date, bool):
+        raise ValueError("IBKR historical request booleans are invalid")
+    return IbkrHistoricalRequest(
+        instrument_id=InstrumentId(_string(item, "instrument_id")),
+        fingerprint=_fingerprint_from_json(item.get("fingerprint")),
+        kind=kind,
+        interval_start=_datetime(item, "interval_start"),
+        interval_end=_datetime(item, "interval_end"),
+        end_date_time=_string(item, "end_date_time"),
+        duration=_string(item, "duration"),
+        bar_size=_nullable_string(item, "bar_size"),
+        what_to_show=_nullable_string(item, "what_to_show"),
+        use_rth=use_rth,
+        format_date=_optional_integer(item, "format_date"),
+        keep_up_to_date=keep_up_to_date,
+        request_sha256=_string(item, "request_sha256"),
+    )
+
+
+def _string_tuple(value: object, field: str) -> tuple[str, ...]:
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{field} must be an array of strings")
+    return tuple(cast(list[str], value))
+
+
+def _nullable_string(value: Mapping[str, object], field: str) -> str | None:
+    item = value.get(field)
+    if item is None:
+        return None
+    if not isinstance(item, str) or not item:
+        raise ValueError(f"{field} must be a non-empty string or null")
+    return item
 
 
 def _load_canonical_inputs(*, catalogue_path: Path, probe_spec_path: Path):

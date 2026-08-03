@@ -1242,3 +1242,152 @@ def test_main_does_not_leave_an_event_loop_running(
 
     with pytest.raises(RuntimeError, match="no running event loop"):
         asyncio.get_running_loop()
+
+
+def _ibkr_plan_cli_arguments(command: str) -> list[str]:
+    arguments = [
+        "historical",
+        "ibkr",
+        command,
+        "--contract-selection",
+        "selection.json",
+        "--operator-selection",
+        "operator.json",
+        "--capability-review",
+        "review.json",
+        "--catalogue",
+        "catalogue.toml",
+        "--probe-spec",
+        "probe.toml",
+        "--runtime-lock",
+        "runtime.json",
+        "--gateway-archive",
+        "gateway.zip",
+        "--api-archive",
+        "api.zip",
+        "--ibc-archive",
+        "ibc.zip",
+        "--expected-gateway-sha256",
+        "a" * 64,
+        "--expected-api-sha256",
+        "b" * 64,
+        "--expected-ibc-sha256",
+        "c" * 64,
+        "--expected-runtime-qtrad-commit",
+        "d" * 40,
+        "--expected-runtime-image-digest",
+        "sha256:" + "e" * 64,
+        "--expected-gateway-version",
+        "10.49",
+        "--expected-api-version",
+        "10.49",
+        "--expected-ibc-version",
+        "3.24.1",
+        "--request-profile",
+        "profile.json",
+        "--canary-evidence",
+        "canary.json",
+        "--profile-frozen-by",
+        "operator@example.invalid",
+        "--profile-frozen-at",
+        "2026-08-02T12:00:00Z",
+        "--planner-image-digest",
+        "sha256:" + "f" * 64,
+        "--start",
+        "2026-02-01T00:00:00Z",
+        "--end",
+        "2026-08-02T00:00:00Z",
+    ]
+    if command == "plan":
+        arguments.extend(["--output", "plan.json"])
+    else:
+        arguments.extend(["--plan", "plan.json"])
+    return arguments
+
+
+def test_ibkr_historical_plan_dispatches_without_provider_or_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_plan_ibkr_historical", operation)
+
+    cli.main(_ibkr_plan_cli_arguments("plan"))
+
+    operation.assert_called_once_with(
+        contract_selection_path=Path("selection.json"),
+        operator_selection_path=Path("operator.json"),
+        capability_review_path=Path("review.json"),
+        catalogue_path=Path("catalogue.toml"),
+        probe_spec_path=Path("probe.toml"),
+        runtime_lock_path=Path("runtime.json"),
+        gateway_archive=Path("gateway.zip"),
+        api_archive=Path("api.zip"),
+        ibc_archive=Path("ibc.zip"),
+        expected_gateway_sha256="a" * 64,
+        expected_api_sha256="b" * 64,
+        expected_ibc_sha256="c" * 64,
+        expected_runtime_qtrad_commit="d" * 40,
+        expected_runtime_image_digest="sha256:" + "e" * 64,
+        expected_gateway_version="10.49",
+        expected_api_version="10.49",
+        expected_ibc_version="3.24.1",
+        expected_api_host="127.0.0.1",
+        expected_api_port=4002,
+        expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        request_profile_path=Path("profile.json"),
+        canary_evidence_path=Path("canary.json"),
+        expected_profile_frozen_by="operator@example.invalid",
+        expected_profile_frozen_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 8, 2, tzinfo=UTC),
+        planner_image_digest="sha256:" + "f" * 64,
+        output_path=Path("plan.json"),
+    )
+    assert capsys.readouterr().out == ""
+
+
+def test_ibkr_historical_plan_verify_dispatches_without_provider_or_database_access(
+    monkeypatch: pytest.MonkeyPatch,
+    cli_environment: Settings,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    del cli_environment
+    operation = Mock()
+    monkeypatch.setattr(cli, "_verify_ibkr_historical_plan", operation)
+
+    cli.main(_ibkr_plan_cli_arguments("plan-verify"))
+
+    operation.assert_called_once_with(
+        plan_path=Path("plan.json"),
+        contract_selection_path=Path("selection.json"),
+        operator_selection_path=Path("operator.json"),
+        capability_review_path=Path("review.json"),
+        catalogue_path=Path("catalogue.toml"),
+        probe_spec_path=Path("probe.toml"),
+        runtime_lock_path=Path("runtime.json"),
+        gateway_archive=Path("gateway.zip"),
+        api_archive=Path("api.zip"),
+        ibc_archive=Path("ibc.zip"),
+        expected_gateway_sha256="a" * 64,
+        expected_api_sha256="b" * 64,
+        expected_ibc_sha256="c" * 64,
+        expected_runtime_qtrad_commit="d" * 40,
+        expected_runtime_image_digest="sha256:" + "e" * 64,
+        expected_gateway_version="10.49",
+        expected_api_version="10.49",
+        expected_ibc_version="3.24.1",
+        expected_api_host="127.0.0.1",
+        expected_api_port=4002,
+        expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        request_profile_path=Path("profile.json"),
+        canary_evidence_path=Path("canary.json"),
+        expected_profile_frozen_by="operator@example.invalid",
+        expected_profile_frozen_at=datetime(2026, 8, 2, 12, tzinfo=UTC),
+        expected_start=datetime(2026, 2, 1, tzinfo=UTC),
+        expected_end=datetime(2026, 8, 2, tzinfo=UTC),
+        planner_image_digest="sha256:" + "f" * 64,
+    )
+    assert capsys.readouterr().out == ""

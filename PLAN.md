@@ -45,9 +45,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   and the locked holdout remain gated on a frozen qualifying foundation.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
-  Stage 1 contract/runtime artefacts and offline verifiers are implemented; no IBKR adapter, account
-  capability, historical dataset or host is implemented or qualified yet, and IBKR evidence cannot
-  substantiate an IG-native conclusion.
+  Stage 1 contract/runtime artefacts and Stage 2 deterministic request-profile/plan artefacts and
+  offline verifiers are implemented; no IBKR adapter, account capability, historical dataset or host
+  is implemented or qualified yet, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
