@@ -272,6 +272,26 @@ def test_runtime_lock_replays_actual_environment_and_authoritative_archives(
         )
         == runtime
     )
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "c" * 40)
+    with pytest.raises(ValueError, match="observed clean source commit"):
+        verify_ibkr_runtime_lock(
+            path,
+            gateway_archive=archives[0],
+            api_archive=archives[1],
+            ibc_archive=archives[2],
+            expected_gateway_sha256=hashes[0],
+            expected_api_sha256=hashes[1],
+            expected_ibc_sha256=hashes[2],
+            expected_qtrad_commit="a" * 40,
+            expected_image_digest=image,
+            expected_gateway_version="10.49",
+            expected_api_version="10.50",
+            expected_ibc_version="3.24.1",
+            expected_api_host="127.0.0.1",
+            expected_api_port=4002,
+            expected_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+        )
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
     copied = tmp_path / "elsewhere"
     copied.mkdir()
     copies = []
@@ -709,7 +729,7 @@ def _write_plan_closure(tmp_path: Path) -> dict[str, Path]:
         paths["ibc_archive"],
     ):
         archive_path.write_bytes(archive_path.name.encode())
-    runtime = build_ibkr_runtime_lock(
+    runtime = historical._rebuild_ibkr_runtime_lock(
         gateway_archive=paths["gateway_archive"],
         api_archive=paths["api_archive"],
         ibc_archive=paths["ibc_archive"],
@@ -833,6 +853,7 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
         selection=selection,
         runtime=runtime,
         request_profile=profile,
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=start,
         end=end,
         planner_qtrad_commit=runtime.qtrad_commit,
@@ -842,6 +863,7 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
         selection=selection,
         runtime=runtime,
         request_profile=_profile(reverse_product_mapping=True),
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=start,
         end=end,
         planner_qtrad_commit=runtime.qtrad_commit,
@@ -879,8 +901,9 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
 
 
 def test_historical_plan_builder_and_verifier_replay_authenticated_lower_artifacts(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
     paths = _write_plan_closure(tmp_path)
     start = datetime(2026, 2, 1, tzinfo=UTC)
     end = datetime(2026, 2, 15, tzinfo=UTC)
@@ -893,8 +916,9 @@ def test_historical_plan_builder_and_verifier_replay_authenticated_lower_artifac
 
 @pytest.mark.parametrize("mutation", ["selection", "runtime", "profile", "canary"])
 def test_historical_plan_verifier_rejects_mutated_lower_artifacts(
-    tmp_path: Path, mutation: str
+    tmp_path: Path, mutation: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
     paths = _write_plan_closure(tmp_path)
     start = datetime(2026, 2, 1, tzinfo=UTC)
     end = datetime(2026, 2, 15, tzinfo=UTC)
@@ -936,6 +960,7 @@ def test_historical_plan_property_preserves_exact_utc_half_open_coverage(
         selection=_selection(_review()),
         runtime=_planning_runtime(),
         request_profile=_profile(),
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=start,
         end=start + timedelta(days=days),
         planner_qtrad_commit="a" * 40,
@@ -944,11 +969,41 @@ def test_historical_plan_property_preserves_exact_utc_half_open_coverage(
     _assert_exact_coverage(plan)
 
 
+def test_historical_plan_uses_catalogue_asset_class_for_mismatched_namespace() -> None:
+    base_selection = _selection(_review())
+    instrument_id = InstrumentId("fx:index-named")
+    decision = replace(base_selection.decisions[0], instrument_id=instrument_id)
+    selection_identity = {
+        **base_selection.identity_payload(),
+        "decisions": [decision.as_json_value()],
+    }
+    selection = replace(
+        base_selection,
+        decisions=(decision,),
+        selection_sha256=sha256_json(selection_identity),
+    )
+    plan = build_ibkr_historical_plan(
+        selection=selection,
+        runtime=_planning_runtime(),
+        request_profile=_profile(fx_duration="1 D", index_duration="1 W"),
+        asset_class_by_instrument={instrument_id: AssetClass.INDEX},
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 15, tzinfo=UTC),
+        planner_qtrad_commit="a" * 40,
+        planner_qtrad_image_digest="sha256:" + "d" * 64,
+    )
+    midpoint = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    assert midpoint.duration == "1 W"
+
+
 def test_historical_request_rejects_ownership_interval_longer_than_duration() -> None:
     plan = build_ibkr_historical_plan(
         selection=_selection(_review()),
         runtime=_planning_runtime(),
         request_profile=_profile(),
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=datetime(2026, 2, 1, tzinfo=UTC),
         end=datetime(2026, 2, 15, tzinfo=UTC),
         planner_qtrad_commit="a" * 40,
@@ -972,6 +1027,7 @@ def test_historical_plan_rejects_unbounded_request_count_before_materialisation(
             selection=_selection(_review()),
             runtime=_planning_runtime(),
             request_profile=_profile(fx_duration="1 D"),
+            asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
             start=datetime(2026, 1, 1, tzinfo=UTC),
             end=datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=20_001),
             planner_qtrad_commit="a" * 40,
@@ -984,6 +1040,7 @@ def test_historical_plan_uses_utc_ownership_across_dst_and_rejects_unsafe_profil
         selection=_selection(_review()),
         runtime=_planning_runtime(),
         request_profile=_profile(),
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=datetime(2026, 3, 8, 6, tzinfo=UTC),
         end=datetime(2026, 3, 10, 6, tzinfo=UTC),
         planner_qtrad_commit="a" * 40,
@@ -1019,6 +1076,7 @@ def test_historical_plan_verifier_rejects_rehashed_request_interval_mutation(
         selection=_selection(_review()),
         runtime=_planning_runtime(),
         request_profile=_profile(),
+        asset_class_by_instrument={_QUERY.instrument_id: AssetClass.FX},
         start=datetime(2026, 2, 1, tzinfo=UTC),
         end=datetime(2026, 2, 15, tzinfo=UTC),
         planner_qtrad_commit="a" * 40,

@@ -469,15 +469,64 @@ Add:
 
 ```text
 qtrad historical ibkr plan \
-  --contract-selection <path> \
-  --runtime-lock <path> \
-  --request-profile <path> \
+  --contract-selection <authenticated-selection-path> \
+  --operator-selection <operator-selection-path> \
+  --capability-review <capability-review-path> \
+  --catalogue <canonical-catalogue-path> \
+  --probe-spec <canonical-probe-spec-path> \
+  --runtime-lock <authenticated-runtime-lock-path> \
+  --gateway-archive <gateway-archive-path> \
+  --api-archive <api-archive-path> \
+  --ibc-archive <ibc-archive-path> \
+  --expected-gateway-sha256 <gateway-sha256> \
+  --expected-api-sha256 <api-sha256> \
+  --expected-ibc-sha256 <ibc-sha256> \
+  --expected-runtime-qtrad-commit <clean-application-commit> \
+  --expected-runtime-image-digest <immutable-image-digest> \
+  --expected-gateway-version <gateway-version> \
+  --expected-api-version <api-version> \
+  --expected-ibc-version <ibc-version> \
+  --expected-api-host <gateway-host> \
+  --expected-api-port <gateway-port> \
+  --expected-client-id-policy <client-id-policy> \
+  --request-profile <authenticated-request-profile-path> \
+  --canary-evidence <authenticated-canary-evidence-path> \
+  --profile-frozen-by <profile-operator> \
+  --profile-frozen-at <profile-freeze-time> \
+  --planner-image-digest <immutable-image-digest> \
   --start 2026-02-01T00:00:00Z \
   --end 2026-08-02T00:00:00Z \
-  --output <path>
+  --output <plan-output-path>
 
 qtrad historical ibkr plan-verify \
-  --plan <path>
+  --plan <plan-path> \
+  --contract-selection <authenticated-selection-path> \
+  --operator-selection <operator-selection-path> \
+  --capability-review <capability-review-path> \
+  --catalogue <canonical-catalogue-path> \
+  --probe-spec <canonical-probe-spec-path> \
+  --runtime-lock <authenticated-runtime-lock-path> \
+  --gateway-archive <gateway-archive-path> \
+  --api-archive <api-archive-path> \
+  --ibc-archive <ibc-archive-path> \
+  --expected-gateway-sha256 <gateway-sha256> \
+  --expected-api-sha256 <api-sha256> \
+  --expected-ibc-sha256 <ibc-sha256> \
+  --expected-runtime-qtrad-commit <clean-application-commit> \
+  --expected-runtime-image-digest <immutable-image-digest> \
+  --expected-gateway-version <gateway-version> \
+  --expected-api-version <api-version> \
+  --expected-ibc-version <ibc-version> \
+  --expected-api-host <gateway-host> \
+  --expected-api-port <gateway-port> \
+  --expected-client-id-policy <client-id-policy> \
+  --request-profile <authenticated-request-profile-path> \
+  --canary-evidence <authenticated-canary-evidence-path> \
+  --profile-frozen-by <profile-operator> \
+  --profile-frozen-at <profile-freeze-time> \
+  --planner-image-digest <immutable-image-digest> \
+  --start 2026-02-01T00:00:00Z \
+  --end 2026-08-02T00:00:00Z
 ```
 
 The planner is entirely independent of PostgreSQL and IB Gateway.

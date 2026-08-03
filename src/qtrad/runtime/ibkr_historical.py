@@ -10,6 +10,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import cast
 
+from qtrad.application import ibkr_historical as ibkr_application
 from qtrad.application.ibkr_historical import (
     build_ibkr_contract_selection,
     build_ibkr_historical_plan,
@@ -375,6 +376,11 @@ def verify_ibkr_runtime_lock(
     """Replay runtime identity against explicit authoritative attestations."""
 
     runtime = load_ibkr_runtime_lock(path)
+    observed_commit = ibkr_application.derive_qtrad_commit()
+    if observed_commit != expected_qtrad_commit:
+        raise ValueError(
+            "IBKR runtime verifier q-trad commit does not match the observed clean source commit"
+        )
     if runtime.qtrad_commit != expected_qtrad_commit:
         raise ValueError(
             "IBKR runtime lock q-trad commit does not match its authoritative attestation"
@@ -394,15 +400,15 @@ def verify_ibkr_runtime_lock(
             raise ValueError(
                 f"IBKR {role} archive does not match its authoritative role attestation"
             )
-    rebuilt = build_ibkr_runtime_lock(
+    rebuilt = ibkr_application._rebuild_ibkr_runtime_lock(
         gateway_archive=gateway_archive,
         api_archive=api_archive,
         ibc_archive=ibc_archive,
         gateway_version=expected_gateway_version,
         api_version=expected_api_version,
         ibc_version=expected_ibc_version,
+        qtrad_commit=observed_commit,
         qtrad_image_digest=expected_image_digest,
-        qtrad_commit=expected_qtrad_commit,
         frozen_at=runtime.frozen_at,
         api_host=expected_api_host,
         api_port=expected_api_port,
@@ -513,6 +519,9 @@ def build_ibkr_historical_plan_from_files(
 ) -> IbkrHistoricalPlan:
     """Compose the planner only from independently verified lower-layer artefacts."""
 
+    candidates, _ = _load_canonical_inputs(
+        catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
+    )
     selection = verify_ibkr_contract_selection(
         contract_selection_path,
         capability_review_path=capability_review_path,
@@ -520,6 +529,11 @@ def build_ibkr_historical_plan_from_files(
         catalogue_path=catalogue_path,
         probe_spec_path=probe_spec_path,
     )
+    if candidates.configuration_hash != selection.catalogue_hash:
+        raise ValueError("IBKR catalogue changed while reconstructing the historical plan")
+    asset_class_by_instrument = {
+        instrument.instrument_id: instrument.asset_class for instrument in candidates.instruments
+    }
     runtime = verify_ibkr_runtime_lock(
         runtime_lock_path,
         gateway_archive=gateway_archive,
@@ -547,6 +561,7 @@ def build_ibkr_historical_plan_from_files(
         selection=selection,
         runtime=runtime,
         request_profile=request_profile,
+        asset_class_by_instrument=asset_class_by_instrument,
         start=start,
         end=end,
         planner_qtrad_commit=planner_qtrad_commit,

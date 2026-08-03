@@ -216,13 +216,46 @@ def build_ibkr_runtime_lock(
     api_version: str,
     ibc_version: str,
     qtrad_image_digest: str,
-    qtrad_commit: str | None = None,
     frozen_at: datetime,
     api_host: str = "127.0.0.1",
     api_port: int = 4002,
     client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID",
 ) -> IbkrAcquisitionRuntime:
-    """Recompute the local, non-secret acquisition identity without caller labels."""
+    """Build a runtime lock from the clean local application identity."""
+
+    return _rebuild_ibkr_runtime_lock(
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        gateway_version=gateway_version,
+        api_version=api_version,
+        ibc_version=ibc_version,
+        qtrad_commit=derive_qtrad_commit(),
+        qtrad_image_digest=qtrad_image_digest,
+        frozen_at=frozen_at,
+        api_host=api_host,
+        api_port=api_port,
+        client_id_policy=client_id_policy,
+    )
+
+
+def _rebuild_ibkr_runtime_lock(
+    *,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    gateway_version: str,
+    api_version: str,
+    ibc_version: str,
+    qtrad_commit: str,
+    qtrad_image_digest: str,
+    frozen_at: datetime,
+    api_host: str = "127.0.0.1",
+    api_port: int = 4002,
+    client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID",
+) -> IbkrAcquisitionRuntime:
+    """Rebuild a runtime lock from observed inputs and an authenticated commit."""
+
     require_utc(frozen_at, "IBKR runtime lock frozen_at")
     archives = (
         _archive_identity(gateway_archive),
@@ -236,7 +269,6 @@ def build_ibkr_runtime_lock(
     )
     versions = _installed_library_versions()
     python = platform.python_version()
-    commit = qtrad_commit or derive_qtrad_commit()
     identity = {
         "contract": IbkrAcquisitionRuntime.CONTRACT,
         "schema_version": IbkrAcquisitionRuntime.SCHEMA_VERSION,
@@ -246,7 +278,7 @@ def build_ibkr_runtime_lock(
         "api_archive": archives[1].as_json_value(),
         "ibc_version": ibc_version,
         "ibc_archive": archives[2].as_json_value(),
-        "qtrad_commit": commit,
+        "qtrad_commit": qtrad_commit,
         "qtrad_image_digest": qtrad_image_digest,
         "python_version": python,
         "library_versions": dict(sorted(versions.items())),
@@ -264,7 +296,7 @@ def build_ibkr_runtime_lock(
         api_archive=archives[1],
         ibc_version=ibc_version,
         ibc_archive=archives[2],
-        qtrad_commit=commit,
+        qtrad_commit=qtrad_commit,
         qtrad_image_digest=qtrad_image_digest,
         python_version=python,
         library_versions=dict(sorted(versions.items())),
@@ -339,6 +371,7 @@ def build_ibkr_historical_plan(
     selection: IbkrContractSelection,
     runtime: IbkrAcquisitionRuntime,
     request_profile: IbkrHistoricalRequestProfile,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
     start: datetime,
     end: datetime,
     planner_qtrad_commit: str,
@@ -375,7 +408,9 @@ def build_ibkr_historical_plan(
         _chunk_count(end - start, duration)
         for contract in accepted
         for duration in (
-            request_profile.bar_duration_by_asset_class[_asset_class(contract.instrument_id)],
+            request_profile.bar_duration_by_asset_class[
+                _catalogue_asset_class(contract.instrument_id, asset_class_by_instrument)
+            ],
             request_profile.schedule_duration,
         )
     )
@@ -387,7 +422,7 @@ def build_ibkr_historical_plan(
 
     requests: list[IbkrHistoricalRequest] = []
     for contract in accepted:
-        asset_class = _asset_class(contract.instrument_id)
+        asset_class = _catalogue_asset_class(contract.instrument_id, asset_class_by_instrument)
         requests.extend(
             _planned_requests(
                 contract=contract,
@@ -492,19 +527,15 @@ def _planned_requests(
     return tuple(requests)
 
 
-def _asset_class(instrument_id: InstrumentId) -> AssetClass:
-    prefix, separator, _ = str(instrument_id).partition(":")
-    if not separator:
-        raise ValueError(f"IBKR historical plan cannot determine asset class for {instrument_id}")
+def _catalogue_asset_class(
+    instrument_id: InstrumentId,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
+) -> AssetClass:
     try:
-        return {
-            "fx": AssetClass.FX,
-            "index": AssetClass.INDEX,
-            "commodity": AssetClass.COMMODITY,
-        }[prefix]
+        return asset_class_by_instrument[instrument_id]
     except KeyError as error:
         raise ValueError(
-            f"IBKR historical plan has no request-profile product class for {instrument_id}"
+            f"IBKR historical plan has no authenticated catalogue asset class for {instrument_id}"
         ) from error
 
 
