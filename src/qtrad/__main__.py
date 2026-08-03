@@ -44,6 +44,7 @@ from qtrad.application.ibkr_capability import (
 )
 from qtrad.application.ibkr_historical import (
     configured_image_digest,
+    derive_qtrad_commit,
 )
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
@@ -283,16 +284,45 @@ def build_parser() -> argparse.ArgumentParser:
     historical_plan = historical_ibkr_sub.add_parser(
         "plan", help="build a deterministic IBKR historical request plan without provider I/O"
     )
-    historical_plan.add_argument("--contract-selection", type=Path, required=True)
-    historical_plan.add_argument("--runtime-lock", type=Path, required=True)
-    historical_plan.add_argument("--request-profile", type=Path, required=True)
+    historical_plan_verify = historical_ibkr_sub.add_parser(
+        "plan-verify", help="independently replay an IBKR plan and its lower-artifact closure"
+    )
+    for historical_plan_command in (historical_plan, historical_plan_verify):
+        historical_plan_command.add_argument("--contract-selection", type=Path, required=True)
+        historical_plan_command.add_argument("--operator-selection", type=Path, required=True)
+        historical_plan_command.add_argument("--capability-review", type=Path, required=True)
+        historical_plan_command.add_argument("--catalogue", type=Path, required=True)
+        historical_plan_command.add_argument("--probe-spec", type=Path, required=True)
+        historical_plan_command.add_argument("--runtime-lock", type=Path, required=True)
+        historical_plan_command.add_argument("--gateway-archive", type=Path, required=True)
+        historical_plan_command.add_argument("--api-archive", type=Path, required=True)
+        historical_plan_command.add_argument("--ibc-archive", type=Path, required=True)
+        historical_plan_command.add_argument("--expected-gateway-sha256", required=True)
+        historical_plan_command.add_argument("--expected-api-sha256", required=True)
+        historical_plan_command.add_argument("--expected-ibc-sha256", required=True)
+        historical_plan_command.add_argument("--expected-runtime-qtrad-commit", required=True)
+        historical_plan_command.add_argument("--expected-runtime-image-digest", required=True)
+        historical_plan_command.add_argument("--expected-gateway-version", required=True)
+        historical_plan_command.add_argument("--expected-api-version", required=True)
+        historical_plan_command.add_argument("--expected-ibc-version", required=True)
+        historical_plan_command.add_argument("--expected-api-host", default="127.0.0.1")
+        historical_plan_command.add_argument("--expected-api-port", type=int, default=4002)
+        historical_plan_command.add_argument(
+            "--expected-client-id-policy", default="DEDICATED_NONZERO_CLIENT_ID"
+        )
+        historical_plan_command.add_argument("--request-profile", type=Path, required=True)
+        historical_plan_command.add_argument("--canary-evidence", type=Path, required=True)
+        historical_plan_command.add_argument("--profile-frozen-by", required=True)
+        historical_plan_command.add_argument(
+            "--profile-frozen-at", type=_utc_timestamp_argument, required=True
+        )
+        historical_plan_command.add_argument("--planner-image-digest", required=True)
     historical_plan.add_argument("--start", type=_utc_minute_argument, required=True)
     historical_plan.add_argument("--end", type=_utc_minute_argument, required=True)
     historical_plan.add_argument("--output", type=Path, required=True)
-    historical_plan_verify = historical_ibkr_sub.add_parser(
-        "plan-verify", help="independently verify a file-only IBKR historical request plan"
-    )
     historical_plan_verify.add_argument("--plan", type=Path, required=True)
+    historical_plan_verify.add_argument("--start", type=_utc_minute_argument, required=True)
+    historical_plan_verify.add_argument("--end", type=_utc_minute_argument, required=True)
 
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -616,10 +646,32 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         _plan_ibkr_historical(
             contract_selection_path=args.contract_selection,
+            operator_selection_path=args.operator_selection,
+            capability_review_path=args.capability_review,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
             runtime_lock_path=args.runtime_lock,
+            gateway_archive=args.gateway_archive,
+            api_archive=args.api_archive,
+            ibc_archive=args.ibc_archive,
+            expected_gateway_sha256=args.expected_gateway_sha256,
+            expected_api_sha256=args.expected_api_sha256,
+            expected_ibc_sha256=args.expected_ibc_sha256,
+            expected_runtime_qtrad_commit=args.expected_runtime_qtrad_commit,
+            expected_runtime_image_digest=args.expected_runtime_image_digest,
+            expected_gateway_version=args.expected_gateway_version,
+            expected_api_version=args.expected_api_version,
+            expected_ibc_version=args.expected_ibc_version,
+            expected_api_host=args.expected_api_host,
+            expected_api_port=args.expected_api_port,
+            expected_client_id_policy=args.expected_client_id_policy,
             request_profile_path=args.request_profile,
+            canary_evidence_path=args.canary_evidence,
+            expected_profile_frozen_by=args.profile_frozen_by,
+            expected_profile_frozen_at=args.profile_frozen_at,
             start=args.start,
             end=args.end,
+            planner_image_digest=args.planner_image_digest,
             output_path=args.output,
         )
     elif (
@@ -627,7 +679,36 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.historical_provider == "ibkr"
         and args.historical_ibkr_command == "plan-verify"
     ):
-        _verify_ibkr_historical_plan(args.plan)
+        _verify_ibkr_historical_plan(
+            plan_path=args.plan,
+            contract_selection_path=args.contract_selection,
+            operator_selection_path=args.operator_selection,
+            capability_review_path=args.capability_review,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+            runtime_lock_path=args.runtime_lock,
+            gateway_archive=args.gateway_archive,
+            api_archive=args.api_archive,
+            ibc_archive=args.ibc_archive,
+            expected_gateway_sha256=args.expected_gateway_sha256,
+            expected_api_sha256=args.expected_api_sha256,
+            expected_ibc_sha256=args.expected_ibc_sha256,
+            expected_runtime_qtrad_commit=args.expected_runtime_qtrad_commit,
+            expected_runtime_image_digest=args.expected_runtime_image_digest,
+            expected_gateway_version=args.expected_gateway_version,
+            expected_api_version=args.expected_api_version,
+            expected_ibc_version=args.expected_ibc_version,
+            expected_api_host=args.expected_api_host,
+            expected_api_port=args.expected_api_port,
+            expected_client_id_policy=args.expected_client_id_policy,
+            request_profile_path=args.request_profile,
+            canary_evidence_path=args.canary_evidence,
+            expected_profile_frozen_by=args.profile_frozen_by,
+            expected_profile_frozen_at=args.profile_frozen_at,
+            expected_start=args.start,
+            expected_end=args.end,
+            planner_image_digest=args.planner_image_digest,
+        )
     elif args.command == "instruments" and args.instrument_command == "promote":
         _promote_universe(
             clock,
@@ -2155,18 +2236,64 @@ def _select_ibkr_instruments(
 def _plan_ibkr_historical(
     *,
     contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
     runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
     request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
     start: datetime,
     end: datetime,
+    planner_image_digest: str,
     output_path: Path,
 ) -> None:
+    planner_commit = derive_qtrad_commit()
     plan = build_ibkr_historical_plan_from_files(
         contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
         runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
         request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
         start=start,
         end=end,
+        planner_qtrad_commit=planner_commit,
+        planner_qtrad_image_digest=planner_image_digest,
     )
     write_ibkr_historical_plan(output_path, plan)
     print(
@@ -2176,20 +2303,74 @@ def _plan_ibkr_historical(
                 "plan_sha256": plan.plan_sha256,
                 "eligible_contract_count": len(plan.eligible_contracts),
                 "request_count": len(plan.requests),
-                "midpoint_bar_request_count": sum(
-                    request.kind.value == "MIDPOINT_BARS" for request in plan.requests
-                ),
-                "schedule_request_count": sum(
-                    request.kind.value == "SCHEDULE" for request in plan.requests
-                ),
             },
             sort_keys=True,
         )
     )
 
 
-def _verify_ibkr_historical_plan(plan_path: Path) -> None:
-    plan = verify_ibkr_historical_plan(plan_path)
+def _verify_ibkr_historical_plan(
+    *,
+    plan_path: Path,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    expected_start: datetime,
+    expected_end: datetime,
+    planner_image_digest: str,
+) -> None:
+    plan = verify_ibkr_historical_plan(
+        plan_path,
+        contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+        runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+        request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
+        expected_start=expected_start,
+        expected_end=expected_end,
+        planner_qtrad_commit=derive_qtrad_commit(),
+        planner_qtrad_image_digest=planner_image_digest,
+    )
     print(
         json.dumps(
             {

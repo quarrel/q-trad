@@ -99,7 +99,10 @@ _DECISION_KEYS = {
 _REQUEST_PROFILE_KEYS = {
     "contract",
     "schema_version",
+    "canary_evidence_filename",
     "canary_evidence_sha256",
+    "frozen_by",
+    "frozen_at",
     "permitted_bar_durations",
     "permitted_schedule_durations",
     "bar_duration_by_asset_class",
@@ -107,6 +110,7 @@ _REQUEST_PROFILE_KEYS = {
     "maximum_in_flight_requests",
     "request_timeout_seconds",
     "retry_count",
+    "duplicate_request_protection",
     "pacing_policy",
     "profile_sha256",
 }
@@ -255,30 +259,33 @@ def load_ibkr_contract_selection(path: Path) -> IbkrContractSelection:
 
 
 def verify_ibkr_contract_selection(
-    path: Path, *, capability_review_path: Path, catalogue_path: Path, probe_spec_path: Path
+    path: Path,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
 ) -> IbkrContractSelection:
-    """Independently replay a selection; the canonical inputs are deliberately mandatory."""
+    """Replay a selection from the capability review and original operator decisions."""
+
     selection = load_ibkr_contract_selection(path)
     review = load_ibkr_capability_review(
         capability_review_path, catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
+    operator_selection = load_ibkr_operator_selection(operator_selection_path)
     candidates, probe_spec = _load_canonical_inputs(
         catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
     rebuilt = build_ibkr_contract_selection(
         capability_review=review,
-        operator_selection={
-            "schema_version": 1,
-            "capability_review_sha256": selection.capability_review_sha256,
-            "decisions": [item.as_json_value() for item in selection.decisions],
-        },
+        operator_selection=operator_selection,
         canonical_instrument_ids=frozenset(item.instrument_id for item in candidates.instruments),
         canonical_queries=frozenset(probe_spec.queries),
         frozen_by=selection.frozen_by,
         frozen_at=selection.frozen_at,
     )
     if rebuilt.as_json_value() != selection.as_json_value():
-        raise ValueError("IBKR contract selection does not replay from its capability review")
+        raise ValueError("IBKR contract selection does not replay from its authenticated inputs")
     return selection
 
 
@@ -356,6 +363,7 @@ def verify_ibkr_runtime_lock(
     expected_gateway_sha256: str,
     expected_api_sha256: str,
     expected_ibc_sha256: str,
+    expected_qtrad_commit: str,
     expected_image_digest: str,
     expected_gateway_version: str,
     expected_api_version: str,
@@ -364,8 +372,13 @@ def verify_ibkr_runtime_lock(
     expected_api_port: int,
     expected_client_id_policy: str,
 ) -> IbkrAcquisitionRuntime:
-    """Replay runtime identity against explicit authoritative archive/image attestations."""
+    """Replay runtime identity against explicit authoritative attestations."""
+
     runtime = load_ibkr_runtime_lock(path)
+    if runtime.qtrad_commit != expected_qtrad_commit:
+        raise ValueError(
+            "IBKR runtime lock q-trad commit does not match its authoritative attestation"
+        )
     expected = (expected_gateway_sha256, expected_api_sha256, expected_ibc_sha256)
     actual_paths = (gateway_archive, api_archive, ibc_archive)
     locked = (runtime.gateway_archive, runtime.api_archive, runtime.ibc_archive)
@@ -389,6 +402,7 @@ def verify_ibkr_runtime_lock(
         api_version=expected_api_version,
         ibc_version=expected_ibc_version,
         qtrad_image_digest=expected_image_digest,
+        qtrad_commit=expected_qtrad_commit,
         frozen_at=runtime.frozen_at,
         api_host=expected_api_host,
         api_port=expected_api_port,
@@ -400,7 +414,7 @@ def verify_ibkr_runtime_lock(
 
 
 def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestProfile:
-    """Load one strict, hash-bound request profile without touching the provider or database."""
+    """Load the canonical profile structure; evidence authentication is a separate verifier."""
 
     document = _read_json_object(path, "IBKR historical request profile")
     _require_exact_keys(document, _REQUEST_PROFILE_KEYS, "IBKR historical request profile")
@@ -412,7 +426,10 @@ def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestPro
             "IBKR historical request profile contract or schema version is unsupported"
         )
     profile = build_ibkr_historical_request_profile(
+        canary_evidence_filename=_string(document, "canary_evidence_filename"),
         canary_evidence_sha256=_string(document, "canary_evidence_sha256"),
+        frozen_by=_string(document, "frozen_by"),
+        frozen_at=_datetime(document, "frozen_at"),
         permitted_bar_durations=_string_tuple(
             document.get("permitted_bar_durations"), "IBKR permitted bar durations"
         ),
@@ -426,6 +443,7 @@ def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestPro
         maximum_in_flight_requests=_integer(document, "maximum_in_flight_requests"),
         request_timeout_seconds=_integer(document, "request_timeout_seconds"),
         retry_count=_integer(document, "retry_count"),
+        duplicate_request_protection=_string(document, "duplicate_request_protection"),
         pacing_policy=_pacing_policy_from_json(document.get("pacing_policy")),
     )
     if (
@@ -433,6 +451,26 @@ def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestPro
         or profile.as_json_value() != document
     ):
         raise ValueError("IBKR historical request profile contains non-canonical fields")
+    return profile
+
+
+def verify_ibkr_historical_request_profile(
+    path: Path,
+    *,
+    canary_evidence_path: Path,
+    expected_frozen_by: str,
+    expected_frozen_at: datetime,
+) -> IbkrHistoricalRequestProfile:
+    """Authenticate profile bytes, canary bytes and operator freeze attestations."""
+
+    profile = load_ibkr_historical_request_profile(path)
+    _require_readable_path(canary_evidence_path, "IBKR canary evidence")
+    if canary_evidence_path.name != profile.canary_evidence_filename:
+        raise ValueError("IBKR canary evidence filename does not match the request profile")
+    if _sha256_file(canary_evidence_path) != profile.canary_evidence_sha256:
+        raise ValueError("IBKR canary evidence does not match the request profile")
+    if profile.frozen_by != expected_frozen_by or profile.frozen_at != expected_frozen_at:
+        raise ValueError("IBKR request profile freeze does not match its operator attestation")
     return profile
 
 
@@ -445,19 +483,74 @@ def write_ibkr_historical_request_profile(
 def build_ibkr_historical_plan_from_files(
     *,
     contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
     runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
     request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
     start: datetime,
     end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
 ) -> IbkrHistoricalPlan:
-    """Compose the pure planner from independently loadable Stage 1/2 artefacts."""
+    """Compose the planner only from independently verified lower-layer artefacts."""
 
+    selection = verify_ibkr_contract_selection(
+        contract_selection_path,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    runtime = verify_ibkr_runtime_lock(
+        runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+    )
+    request_profile = verify_ibkr_historical_request_profile(
+        request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_frozen_by=expected_profile_frozen_by,
+        expected_frozen_at=expected_profile_frozen_at,
+    )
     return build_ibkr_historical_plan(
-        selection=load_ibkr_contract_selection(contract_selection_path),
-        runtime=load_ibkr_runtime_lock(runtime_lock_path),
-        request_profile=load_ibkr_historical_request_profile(request_profile_path),
+        selection=selection,
+        runtime=runtime,
+        request_profile=request_profile,
         start=start,
         end=end,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
     )
 
 
@@ -498,10 +591,76 @@ def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
     return plan
 
 
-def verify_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
-    """Verify the file-only plan closure without PostgreSQL or Gateway access."""
+def verify_ibkr_historical_plan(
+    path: Path,
+    *,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    expected_start: datetime,
+    expected_end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
+) -> IbkrHistoricalPlan:
+    """Replay the plan and its authenticated lower-artifact closure from files only."""
 
-    return load_ibkr_historical_plan(path)
+    observed = load_ibkr_historical_plan(path)
+    expected = build_ibkr_historical_plan_from_files(
+        contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+        runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+        request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
+        start=expected_start,
+        end=expected_end,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
+    )
+    if expected.as_json_value() != observed.as_json_value():
+        raise ValueError(
+            "IBKR historical plan does not replay from its authenticated lower artefacts"
+        )
+    return observed
 
 
 def _asset_class_durations(value: object) -> dict[AssetClass, str]:

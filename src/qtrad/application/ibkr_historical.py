@@ -8,12 +8,13 @@ import os
 import platform
 import subprocess
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_historical import (
+    MAX_PLANNED_REQUESTS,
     IbkrAcquisitionRuntime,
     IbkrArchiveIdentity,
     IbkrContractDecision,
@@ -215,6 +216,7 @@ def build_ibkr_runtime_lock(
     api_version: str,
     ibc_version: str,
     qtrad_image_digest: str,
+    qtrad_commit: str | None = None,
     frozen_at: datetime,
     api_host: str = "127.0.0.1",
     api_port: int = 4002,
@@ -234,7 +236,7 @@ def build_ibkr_runtime_lock(
     )
     versions = _installed_library_versions()
     python = platform.python_version()
-    commit = derive_qtrad_commit()
+    commit = qtrad_commit or derive_qtrad_commit()
     identity = {
         "contract": IbkrAcquisitionRuntime.CONTRACT,
         "schema_version": IbkrAcquisitionRuntime.SCHEMA_VERSION,
@@ -278,7 +280,10 @@ def build_ibkr_runtime_lock(
 
 def build_ibkr_historical_request_profile(
     *,
+    canary_evidence_filename: str,
     canary_evidence_sha256: str,
+    frozen_by: str,
+    frozen_at: datetime,
     permitted_bar_durations: tuple[str, ...],
     permitted_schedule_durations: tuple[str, ...],
     bar_duration_by_asset_class: Mapping[AssetClass, str],
@@ -286,14 +291,18 @@ def build_ibkr_historical_request_profile(
     maximum_in_flight_requests: int,
     request_timeout_seconds: int,
     retry_count: int,
+    duplicate_request_protection: str,
     pacing_policy: IbkrHistoricalPacingPolicy,
 ) -> IbkrHistoricalRequestProfile:
-    """Create the canonical Stage 2 request profile from explicit, offline policy inputs."""
+    """Create the canonical Stage 2 request profile from explicit policy inputs."""
 
     identity = {
         "contract": IbkrHistoricalRequestProfile.CONTRACT,
         "schema_version": IbkrHistoricalRequestProfile.SCHEMA_VERSION,
+        "canary_evidence_filename": canary_evidence_filename,
         "canary_evidence_sha256": canary_evidence_sha256,
+        "frozen_by": frozen_by,
+        "frozen_at": utc_text(frozen_at),
         "permitted_bar_durations": list(permitted_bar_durations),
         "permitted_schedule_durations": list(permitted_schedule_durations),
         "bar_duration_by_asset_class": {
@@ -304,10 +313,14 @@ def build_ibkr_historical_request_profile(
         "maximum_in_flight_requests": maximum_in_flight_requests,
         "request_timeout_seconds": request_timeout_seconds,
         "retry_count": retry_count,
+        "duplicate_request_protection": duplicate_request_protection,
         "pacing_policy": pacing_policy.as_json_value(),
     }
     return IbkrHistoricalRequestProfile(
+        canary_evidence_filename=canary_evidence_filename,
         canary_evidence_sha256=canary_evidence_sha256,
+        frozen_by=frozen_by,
+        frozen_at=frozen_at,
         permitted_bar_durations=permitted_bar_durations,
         permitted_schedule_durations=permitted_schedule_durations,
         bar_duration_by_asset_class=dict(bar_duration_by_asset_class),
@@ -315,6 +328,7 @@ def build_ibkr_historical_request_profile(
         maximum_in_flight_requests=maximum_in_flight_requests,
         request_timeout_seconds=request_timeout_seconds,
         retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
         pacing_policy=pacing_policy,
         profile_sha256=sha256_json(identity),
     )
@@ -327,8 +341,10 @@ def build_ibkr_historical_plan(
     request_profile: IbkrHistoricalRequestProfile,
     start: datetime,
     end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
 ) -> IbkrHistoricalPlan:
-    """Generate all exact IBKR requests without a database, clock or provider dependency."""
+    """Generate exact IBKR requests without a database, clock or provider dependency."""
 
     require_utc(start, "IBKR historical plan start")
     require_utc(end, "IBKR historical plan end")
@@ -350,17 +366,35 @@ def build_ibkr_historical_plan(
     )
     if not accepted:
         raise ValueError("IBKR historical plan has no acquisition-eligible exact contracts")
+    if planner_qtrad_commit != runtime.qtrad_commit:
+        raise ValueError("planner q-trad commit must match the authenticated runtime lock")
+    if planner_qtrad_image_digest != runtime.qtrad_image_digest:
+        raise ValueError("planner image digest must match the authenticated runtime lock")
+
+    request_counts = sum(
+        _chunk_count(end - start, duration)
+        for contract in accepted
+        for duration in (
+            request_profile.bar_duration_by_asset_class[_asset_class(contract.instrument_id)],
+            request_profile.schedule_duration,
+        )
+    )
+    if request_counts > MAX_PLANNED_REQUESTS:
+        raise ValueError(
+            "IBKR historical plan request count exceeds the bounded planner limit: "
+            f"{request_counts} > {MAX_PLANNED_REQUESTS}"
+        )
+
     requests: list[IbkrHistoricalRequest] = []
     for contract in accepted:
         asset_class = _asset_class(contract.instrument_id)
-        bar_duration = request_profile.bar_duration_by_asset_class[asset_class]
         requests.extend(
             _planned_requests(
                 contract=contract,
                 kind=IbkrHistoricalRequestKind.MIDPOINT_BARS,
                 start=start,
                 end=end,
-                duration=bar_duration,
+                duration=request_profile.bar_duration_by_asset_class[asset_class],
             )
         )
         requests.extend(
@@ -381,8 +415,8 @@ def build_ibkr_historical_plan(
         "request_profile_sha256": request_profile.profile_sha256,
         "provider": "ibkr",
         "environment": "paper",
-        "planner_qtrad_commit": runtime.qtrad_commit,
-        "planner_qtrad_image_digest": runtime.qtrad_image_digest,
+        "planner_qtrad_commit": planner_qtrad_commit,
+        "planner_qtrad_image_digest": planner_qtrad_image_digest,
         "start": utc_text(start),
         "end": utc_text(end),
         "eligible_contracts": [item.as_json_value() for item in accepted],
@@ -394,14 +428,20 @@ def build_ibkr_historical_plan(
         request_profile_sha256=request_profile.profile_sha256,
         provider="ibkr",
         environment="paper",
-        planner_qtrad_commit=runtime.qtrad_commit,
-        planner_qtrad_image_digest=runtime.qtrad_image_digest,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
         start=start,
         end=end,
         eligible_contracts=accepted,
         requests=ordered_requests,
         plan_sha256=sha256_json(identity),
     )
+
+
+def _chunk_count(interval: timedelta, duration: str) -> int:
+    step = duration_timedelta(duration)
+    quotient, remainder = divmod(interval, step)
+    return quotient + int(bool(remainder))
 
 
 def _planned_requests(

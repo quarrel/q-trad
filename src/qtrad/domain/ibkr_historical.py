@@ -22,6 +22,7 @@ RUNTIME_LOCK_CONTRACT = "qtrad-ibkr-acquisition-runtime-v1"
 REQUEST_PROFILE_CONTRACT = "qtrad-ibkr-historical-request-profile-v1"
 HISTORICAL_PLAN_CONTRACT = "qtrad-ibkr-historical-plan-v1"
 SCHEMA_VERSION = 1
+MAX_PLANNED_REQUESTS = 20_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -332,7 +333,10 @@ class IbkrHistoricalPacingPolicy:
 class IbkrHistoricalRequestProfile:
     """Immutable, canary-bound request and pacing policy accepted by the pure planner."""
 
+    canary_evidence_filename: str
     canary_evidence_sha256: str
+    frozen_by: str
+    frozen_at: datetime
     permitted_bar_durations: tuple[str, ...]
     permitted_schedule_durations: tuple[str, ...]
     bar_duration_by_asset_class: Mapping[AssetClass, str]
@@ -340,6 +344,7 @@ class IbkrHistoricalRequestProfile:
     maximum_in_flight_requests: int
     request_timeout_seconds: int
     retry_count: int
+    duplicate_request_protection: str
     pacing_policy: IbkrHistoricalPacingPolicy
     profile_sha256: str
 
@@ -347,7 +352,13 @@ class IbkrHistoricalRequestProfile:
     SCHEMA_VERSION = SCHEMA_VERSION
 
     def __post_init__(self) -> None:
+        _require_safe_filename(self.canary_evidence_filename, "IBKR canary evidence filename")
         _require_sha256(self.canary_evidence_sha256, "IBKR request-profile canary evidence hash")
+        if not self.frozen_by or len(self.frozen_by) > 200:
+            raise ValueError("IBKR request profile frozen_by is required and bounded")
+        require_utc(self.frozen_at, "IBKR request profile frozen_at")
+        if self.duplicate_request_protection != "PLAN_REQUEST_ID_UNIQUE_NO_RERUN":
+            raise ValueError("IBKR duplicate-request protection policy is unsupported")
         _require_sha256(self.profile_sha256, "IBKR request-profile hash")
         _validate_duration_set(self.permitted_bar_durations, "IBKR permitted bar durations")
         _validate_duration_set(
@@ -381,7 +392,10 @@ class IbkrHistoricalRequestProfile:
         return {
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
+            "canary_evidence_filename": self.canary_evidence_filename,
             "canary_evidence_sha256": self.canary_evidence_sha256,
+            "frozen_by": self.frozen_by,
+            "frozen_at": _utc_text(self.frozen_at),
             "permitted_bar_durations": list(self.permitted_bar_durations),
             "permitted_schedule_durations": list(self.permitted_schedule_durations),
             "bar_duration_by_asset_class": {
@@ -392,6 +406,7 @@ class IbkrHistoricalRequestProfile:
             "maximum_in_flight_requests": self.maximum_in_flight_requests,
             "request_timeout_seconds": self.request_timeout_seconds,
             "retry_count": self.retry_count,
+            "duplicate_request_protection": self.duplicate_request_protection,
             "pacing_policy": self.pacing_policy.as_json_value(),
         }
 
@@ -442,7 +457,9 @@ class IbkrHistoricalRequest:
             raise ValueError("IBKR request interval must align to UTC minutes")
         if self.end_date_time != ibkr_end_date_time(self.interval_end):
             raise ValueError("IBKR request endDateTime must equal the UTC interval end")
-        _duration_delta(self.duration)
+        duration = _duration_delta(self.duration)
+        if self.interval_end - self.interval_start > duration:
+            raise ValueError("IBKR request ownership interval exceeds its provider duration")
         if self.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
             if (
                 self.bar_size != "1 min"
@@ -659,6 +676,12 @@ def _verify_request_coverage(
 
 def _historical_request_sort_key(value: IbkrHistoricalRequest) -> tuple[str, str, datetime, str]:
     return (str(value.instrument_id), value.kind.value, value.interval_start, value.request_sha256)
+
+
+def _require_safe_filename(value: str, field_name: str) -> None:
+    parsed = PurePosixPath(value)
+    if not value or len(parsed.parts) != 1 or parsed.name != value or value in {".", ".."}:
+        raise ValueError(f"{field_name} must be a safe basename")
 
 
 def _require_sha256(value: str, field_name: str) -> None:
