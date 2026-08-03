@@ -670,58 +670,58 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             if row["result_sha256"] != result_sha256:
                 raise RuntimeError("IBKR publication identity conflicts with its immutable result")
             return
+        await connection.execute(
+            text(
+                """
+                UPDATE ops.ibkr_historical_requests
+                SET publication_status = :publication_status,
+                    result_sha256 = :result_sha256, published_at = :published_at
+                WHERE plan_sha256 = :plan_sha256
+                  AND request_sha256 = :request_sha256
+                """
+            ),
+            {
+                "publication_status": IbkrPublicationStatus.PUBLISHED.value,
+                "result_sha256": result_sha256,
+                "published_at": published_at,
+                "plan_sha256": plan_sha256,
+                "request_sha256": request_sha256,
+            },
+        )
+        unpublished = (
             await connection.execute(
                 text(
                     """
-                    UPDATE ops.ibkr_historical_requests
+                    SELECT EXISTS (
+                        SELECT 1
+                        FROM ops.ibkr_historical_requests
+                        WHERE plan_sha256 = :plan_sha256
+                          AND publication_status = :publication_status
+                    )
+                    """
+                ),
+                {
+                    "plan_sha256": plan_sha256,
+                    "publication_status": IbkrPublicationStatus.PENDING.value,
+                },
+            )
+        ).scalar_one()
+        if not bool(unpublished):
+            await connection.execute(
+                text(
+                    """
+                    UPDATE ops.ibkr_historical_plans
                     SET publication_status = :publication_status,
-                        result_sha256 = :result_sha256, published_at = :published_at
+                        published_at = :published_at
                     WHERE plan_sha256 = :plan_sha256
-                      AND request_sha256 = :request_sha256
                     """
                 ),
                 {
                     "publication_status": IbkrPublicationStatus.PUBLISHED.value,
-                    "result_sha256": result_sha256,
                     "published_at": published_at,
                     "plan_sha256": plan_sha256,
-                    "request_sha256": request_sha256,
                 },
             )
-            unpublished = (
-                await connection.execute(
-                    text(
-                        """
-                        SELECT EXISTS (
-                            SELECT 1
-                            FROM ops.ibkr_historical_requests
-                            WHERE plan_sha256 = :plan_sha256
-                              AND publication_status = :publication_status
-                        )
-                        """
-                    ),
-                    {
-                        "plan_sha256": plan_sha256,
-                        "publication_status": IbkrPublicationStatus.PENDING.value,
-                    },
-                )
-            ).scalar_one()
-            if not bool(unpublished):
-                await connection.execute(
-                    text(
-                        """
-                        UPDATE ops.ibkr_historical_plans
-                        SET publication_status = :publication_status,
-                            published_at = :published_at
-                        WHERE plan_sha256 = :plan_sha256
-                        """
-                    ),
-                    {
-                        "publication_status": IbkrPublicationStatus.PUBLISHED.value,
-                        "published_at": published_at,
-                        "plan_sha256": plan_sha256,
-                    },
-                )
 
     async def _finalize_attempt_locked(
         self,
