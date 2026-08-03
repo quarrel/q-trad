@@ -41,10 +41,10 @@ The named boundaries are:
 | `qtrad-ibkr-acquisition-runtime-v1` | Archives, configuration and runtime labels | Runtime verifier re-hashes exact archives and sanitized configuration and authenticates the clean application commit/image and matched Gateway/API identity |
 | `qtrad-ibkr-historical-request-profile-v1` | Canary results and operator freeze | Profile verifier authenticates the frozen durations, timeouts, concurrency, retry and pacing policy and binds the recorded canary evidence used as its rationale; it does not claim that the profile is objectively reliable or optimal |
 | `qtrad-ibkr-historical-plan-v1` | Selection, runtime lock, profile and requested range | Plan verifier reloads those artefacts and reconstructs the exact request set and half-open coverage without PostgreSQL or IB Gateway |
-| Request-result publication | Durable plan, attempt, callback and terminal records read from PostgreSQL | Publisher snapshots the exact records and derived normalized rows or sessions into a bounded create-only file closure; publication makes no verification claim |
-| `qtrad-ibkr-historical-request-result-v1` | Published plan, result, attempt, callback and terminal files | Request-result verifier reads files only, derives the expected closure, authenticates every member and reconstructs callback ownership, terminal selection, normalized rows or sessions and disposition for one planned request |
+| Request-result publication | Durable plan, attempt, callback and terminal records read from PostgreSQL | Publisher reads one repeatable-read snapshot, preflights bounded row and payload sizes, and derives a bounded create-only file closure; publication makes no verification claim |
+| `qtrad-ibkr-historical-request-result-v2` | Published plan, result, attempt, callback and terminal files | Request-result verifier reads files only, independently reconstructs callback ownership, completion eligibility, marker counts, normalized rows or sessions and both operational and evidence dispositions for one planned request |
 | Operational database reconciliation | Verified request-result evidence and current PostgreSQL records | A separate audit compares operational records with published evidence; it can identify drift but cannot establish or revoke evidence validity |
-| `qtrad-ibkr-historical-result-v1` | Plan and request-result children | Aggregate verifier derives the exact expected child set, rejects omissions, additions and orphans, and recomputes coverage and dispositions |
+| `qtrad-ibkr-historical-result-v2` | Plan and request-result children | Aggregate verifier derives the exact expected child set, rejects omissions, additions and orphans, and recomputes coverage, chunk totals and dispositions |
 | `qtrad-provider-historical-observations-v1` and availability selector | Verified aggregate result and declared-delay policy | Observation verifier replays rows and declared availability, and proves the absence of native receive/persistence timestamps |
 | Source-specific foundation and readiness | Verified observations, selector and foundation configuration | Foundation verifier replays panels, targets, folds, support and source/availability lineage; readiness recomputes the fixed six-target, three-group gate |
 
@@ -79,12 +79,14 @@ when written create-only and independently verified. Published files are never r
 A changed mapping, runtime, profile, range, correction policy or acquisition outcome requires a new
 semantic identity and preserves the earlier artefact, including explicit failures.
 
-The request-result publisher is the only boundary that reads execution records from PostgreSQL. It
-copies the exact registered plan, attempts, callbacks and terminal records into create-only children
-before constructing the result manifest. The independent verifier reads only that published file
-closure and derives its expected members from the published plan. Optional reconciliation from a
-verified result back to PostgreSQL is an operational audit and is neither publication nor evidence
-verification.
+The request-result publisher is the only boundary that reads execution records from PostgreSQL. It reads
+the exact registered plan, attempts, callbacks and terminal records in one read-only repeatable-read
+transaction, preflights bounded row counts and raw payload bytes, and copies them into create-only
+children before constructing the result manifest. The independent verifier reads only that published file
+closure and derives its expected members from the published plan. Publication completion is recorded for
+all request children and the plan in one database transaction after the final verified directory exists.
+Optional reconciliation from a verified result back to PostgreSQL is an operational audit and is neither
+publication nor evidence verification.
 
 ### Recovery, retry and request success
 
@@ -100,13 +102,23 @@ callbacks, evidence/closure failure, unknown global state requiring an operator,
 limits are not silently retried. `NO_DATA_RETURNED` and `SESSION_EVIDENCE_UNAVAILABLE` are terminal
 evidence, not reasons to mutate or split the request. Unrelated planned requests may continue.
 
-A published bar-request result succeeds only when the first eligible attempt has a
-current-generation completion callback, at least one valid accepted row, a complete published
-callback closure, no conflicting duplicate or invalid OHLC, deterministic half-open interval
-ownership, and passes independent file-only request-result verification. A published schedule result
-succeeds under the same closure rules with a structurally valid completed provider schedule; it may
-validly declare no active interval. Partial or superseded-generation callbacks remain evidence but
-cannot contribute accepted rows. Once selected, the first verified success is never rerun or replaced.
+A published result keeps operational request/attempt state separate from evidence disposition. A bar request
+with an operational success and a complete eligible closure is evidence-successful only when it has at
+least one valid accepted row; a complete eligible closure with no accepted rows is `NO_DATA_RETURNED`.
+Invalid OHLC, conflicting duplicates, eligible error callbacks or invalid schedule evidence receive an
+explicit evidence disposition and cannot become accepted observations. A schedule result may declare an
+active or inactive provider interval only from structurally valid in-range schedule evidence; invalid or
+non-overlapping schedule evidence is `SESSION_EVIDENCE_UNAVAILABLE` with session state `UNKNOWN`.
+
+An eligible completion marker must exactly copy the matching completion callback's transport identity,
+payload, eligibility and receive timestamp, and that timestamp must be no later than the attempt's
+terminal timestamp. Every completion callback has exactly one matching marker, including ineligible
+closure evidence, and every SUCCEEDED attempt has exactly one eligible marker. Published attempt,
+callback and completion-marker record identities, plus provider request transport identities
+(connection_session_id, connection_generation, provider_request_id), are unique across the aggregate.
+A closure that independently proves completion must agree with the stored attempt status and disposition;
+an invalidated attempt may instead have a terminal timestamp with no disposition when it precedes a permitted
+retry. Once the first independently valid terminal outcome is selected, it is never rerun or replaced.
 
 ### Independent replay and absence claims
 

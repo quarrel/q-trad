@@ -28,6 +28,7 @@ from qtrad.adapters.ig.market_data import IgDemoConfig, IgDemoMarketDataAdapter
 from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.adapters.parquet.store import ParquetResearchStore
+from qtrad.adapters.postgres.ibkr_historical import PostgresIbkrHistoricalExecutionStore
 from qtrad.adapters.postgres.storage_measurement import PostgresStorageInspector
 from qtrad.adapters.postgres.store import PostgresAuditStore, StreamVersionConflict
 from qtrad.api.app import create_app
@@ -46,6 +47,7 @@ from qtrad.application.ibkr_historical import (
     configured_image_digest,
     derive_qtrad_commit,
 )
+from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
@@ -100,10 +102,15 @@ from qtrad.runtime.ibkr_historical import (
     build_ibkr_contract_selection_from_files,
     build_ibkr_historical_plan_from_files,
     build_ibkr_runtime_lock_from_files,
+    load_ibkr_historical_plan,
     verify_ibkr_historical_plan,
     write_ibkr_contract_selection,
     write_ibkr_historical_plan,
     write_ibkr_runtime_lock,
+)
+from qtrad.runtime.ibkr_results import (
+    publish_ibkr_historical_result,
+    verify_ibkr_historical_result,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
@@ -323,6 +330,15 @@ def build_parser() -> argparse.ArgumentParser:
     historical_plan_verify.add_argument("--plan", type=Path, required=True)
     historical_plan_verify.add_argument("--start", type=_utc_minute_argument, required=True)
     historical_plan_verify.add_argument("--end", type=_utc_minute_argument, required=True)
+    historical_result_build = historical_ibkr_sub.add_parser(
+        "result-build", help="publish and verify one completed IBKR historical result closure"
+    )
+    historical_result_build.add_argument("--plan", type=Path, required=True)
+    historical_result_build.add_argument("--output", type=Path, required=True)
+    historical_result_verify = historical_ibkr_sub.add_parser(
+        "verify", help="independently verify an IBKR historical result closure from files"
+    )
+    historical_result_verify.add_argument("--result", type=Path, required=True)
 
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -709,6 +725,25 @@ def main(argv: Sequence[str] | None = None) -> None:
             expected_end=args.end,
             planner_image_digest=args.planner_image_digest,
         )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "result-build"
+    ):
+        asyncio.run(
+            _build_ibkr_historical_result(
+                settings,
+                clock,
+                plan_path=args.plan,
+                output_path=args.output,
+            )
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "verify"
+    ):
+        _verify_ibkr_historical_result(args.result)
     elif args.command == "instruments" and args.instrument_command == "promote":
         _promote_universe(
             clock,
@@ -2378,6 +2413,68 @@ def _verify_ibkr_historical_plan(
                 "plan_sha256": plan.plan_sha256,
                 "eligible_contract_count": len(plan.eligible_contracts),
                 "request_count": len(plan.requests),
+                "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _build_ibkr_historical_result(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_path: Path,
+    output_path: Path,
+) -> None:
+    await _require_database_at_migration_head(settings)
+    plan = load_ibkr_historical_plan(plan_path)
+    engine = _engine(settings)
+    try:
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+        if output_path.exists():
+            manifest_path = output_path / "manifest.json" if output_path.is_dir() else output_path
+        else:
+            manifest_path = publish_ibkr_historical_result(output_path, artifact)
+        verified = verify_ibkr_historical_result(manifest_path)
+        if verified.aggregate.aggregate_sha256 != artifact.aggregate.aggregate_sha256:
+            raise RuntimeError("IBKR result changed between publication and verification")
+        published_at = clock.now()
+        await store.mark_ibkr_historical_requests_published(
+            plan_sha256=plan.plan_sha256,
+            publications=tuple(
+                (result.request_sha256, result.result_sha256) for result in artifact.request_results
+            ),
+            published_at=published_at,
+        )
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "aggregate_sha256": artifact.aggregate.aggregate_sha256,
+                "manifest": str(manifest_path),
+                "plan_sha256": plan.plan_sha256,
+                "published": True,
+                "request_count": len(artifact.request_results),
+                "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_ibkr_historical_result(result_path: Path) -> None:
+    artifact = verify_ibkr_historical_result(result_path)
+    print(
+        json.dumps(
+            {
+                "aggregate_sha256": artifact.aggregate.aggregate_sha256,
+                "manifest": str(result_path),
+                "plan_sha256": artifact.plan.plan_sha256,
+                "request_count": len(artifact.request_results),
                 "verified": True,
             },
             sort_keys=True,
