@@ -358,6 +358,7 @@ def _derive_request_evidence(
     if any(item.attempt_id not in attempt_ids for item in ordered_markers):
         raise ValueError("IBKR request-result contains an orphan completion marker")
     _validate_callback_closure(ordered_attempts, ordered_callbacks, ordered_markers)
+    _validate_attempt_outcomes(request, ordered_attempts, ordered_callbacks, ordered_markers)
 
     successful_attempts = tuple(
         item
@@ -458,17 +459,25 @@ def _validate_attempt_sequence(
     if len({item.attempt_id for item in attempts}) != len(attempts):
         raise ValueError("IBKR request-result attempt identities are duplicated")
     for index, attempt in enumerate(attempts):
-        if (
-            attempt.status is IbkrAttemptStatus.STARTED
-            or attempt.terminal_at is None
-            or attempt.terminal_disposition is None
-        ):
+        if attempt.status is IbkrAttemptStatus.STARTED or attempt.terminal_at is None:
             raise ValueError("published IBKR attempt is not a completed state transition")
-        if attempt.status is IbkrAttemptStatus.SUCCEEDED:
+        if attempt.status is IbkrAttemptStatus.INVALIDATED:
+            if attempt.terminal_disposition is not None:
+                raise ValueError("invalidated IBKR attempt has a terminal disposition")
+        elif attempt.status is IbkrAttemptStatus.SUCCEEDED:
             if attempt.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED:
                 raise ValueError("successful IBKR attempt has a failure disposition")
-        elif attempt.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED:
-            raise ValueError("failed IBKR attempt has a successful disposition")
+        elif attempt.status in {
+            IbkrAttemptStatus.RETRYABLE_FAILURE,
+            IbkrAttemptStatus.TERMINAL_FAILURE,
+        }:
+            if (
+                attempt.terminal_disposition is None
+                or attempt.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED
+            ):
+                raise ValueError("failed IBKR attempt has an invalid disposition")
+        else:
+            raise ValueError("published IBKR attempt has an unknown status")
         if index:
             previous_terminal_at = attempts[index - 1].terminal_at
             if previous_terminal_at is None:
@@ -503,13 +512,20 @@ def _validate_callback_closure(
                 if callback.sequence == marker.sequence
                 and callback.kind is IbkrHistoricalCallbackKind.COMPLETION
             )
-            if (
-                len(matching_callbacks) != 1
-                or marker.completed_at < matching_callbacks[0].received_at
-                or (
-                    marker.closure_eligible
-                    and (attempt.terminal_at is None or marker.completed_at != attempt.terminal_at)
+            if len(matching_callbacks) != 1:
+                raise ValueError(
+                    "IBKR completion marker does not match its raw completion callback"
                 )
+            completion_callback = matching_callbacks[0]
+            if (
+                marker.attempt_id != completion_callback.attempt_id
+                or marker.connection_session_id != completion_callback.connection_session_id
+                or marker.provider_request_id != completion_callback.provider_request_id
+                or marker.connection_generation != completion_callback.connection_generation
+                or marker.sequence != completion_callback.sequence
+                or marker.completed_at != completion_callback.received_at
+                or marker.payload != completion_callback.payload
+                or marker.closure_eligible != completion_callback.closure_eligible
             ):
                 raise ValueError(
                     "IBKR completion marker does not match its raw completion callback"
@@ -555,6 +571,54 @@ def _validate_callback_closure(
                 raise ValueError("IBKR completion midpoint count does not replay")
             if marker.raw_schedule_callback_count != expected_schedule:
                 raise ValueError("IBKR completion schedule count does not replay")
+
+
+def _validate_attempt_outcomes(
+    request: IbkrHistoricalRequest,
+    attempts: Sequence[IbkrHistoricalAttemptEvidence],
+    callbacks: Sequence[IbkrHistoricalCallbackEvidence],
+    markers: Sequence[IbkrHistoricalCompletionEvidence],
+) -> None:
+    for attempt in attempts:
+        eligible_markers = tuple(
+            marker
+            for marker in markers
+            if marker.attempt_id == attempt.attempt_id
+            and marker.closure_eligible
+            and _completion_matches_attempt(marker, attempt)
+        )
+        if not eligible_markers:
+            continue
+        if len(eligible_markers) > 1:
+            raise ValueError("IBKR attempt has multiple eligible completion markers")
+        marker = next(iter(eligible_markers))
+        eligible_callbacks = tuple(
+            callback
+            for callback in callbacks
+            if callback.attempt_id == attempt.attempt_id
+            and callback.closure_eligible
+            and _callback_matches_attempt(callback, attempt)
+            and callback.sequence < marker.sequence
+        )
+        if any(
+            callback.kind is IbkrHistoricalCallbackKind.ERROR for callback in eligible_callbacks
+        ):
+            expected_status = IbkrAttemptStatus.TERMINAL_FAILURE
+            expected_disposition = IbkrTerminalDisposition.PROVIDER_REJECTED
+        elif (
+            request.kind is IbkrHistoricalRequestKind.SCHEDULE
+            and marker.raw_schedule_callback_count == 0
+        ):
+            expected_status = IbkrAttemptStatus.TERMINAL_FAILURE
+            expected_disposition = IbkrTerminalDisposition.SESSION_EVIDENCE_UNAVAILABLE
+        else:
+            expected_status = IbkrAttemptStatus.SUCCEEDED
+            expected_disposition = IbkrTerminalDisposition.SUCCEEDED
+        if (
+            attempt.status is not expected_status
+            or attempt.terminal_disposition is not expected_disposition
+        ):
+            raise ValueError("IBKR attempt status/disposition does not match its eligible closure")
 
 
 def _empty_result_values(
@@ -762,6 +826,11 @@ def _normalise_bars(
             continue
         if timestamp.second != 0 or timestamp.microsecond != 0:
             raise _EvidenceInvalid("IBKR historical bar timestamp is not minute-aligned")
+        missing = tuple(key for key in _OHLC_KEYS if key not in callback.payload)
+        if missing:
+            raise _EvidenceInvalid(
+                "IBKR historical callback is missing OHLC: " + ", ".join(missing)
+            )
         values = {
             key: _canonical_decimal(callback.payload[key], f"historical bar {key}")
             for key in _OHLC_KEYS
@@ -860,6 +929,15 @@ def _normalise_schedule(
             if clipped_start >= clipped_end:
                 continue
             interval = (clipped_start, clipped_end)
+            for (existing_start, existing_end), existing in sessions_by_interval.items():
+                if (
+                    existing_end > clipped_start
+                    and clipped_end > existing_start
+                    and bool(existing["active"]) is not active
+                ):
+                    raise _EvidenceConflict(
+                        "IBKR schedule declarations overlap with conflicting activity"
+                    )
             existing = sessions_by_interval.get(interval)
             if existing is not None:
                 if bool(existing["active"]) is not active:

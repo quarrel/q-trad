@@ -234,10 +234,6 @@ def _snapshot(
         for index, request in enumerate(requests, start=1)
     )
     bar_attempt, schedule_attempt = attempts
-    bar_completed_at = bar_attempt.terminal_at
-    schedule_completed_at = schedule_attempt.terminal_at
-    assert bar_completed_at is not None
-    assert schedule_completed_at is not None
     callbacks = (
         _callback(
             callback_id=1,
@@ -286,7 +282,7 @@ def _snapshot(
             marker_id=1,
             attempt=bar_attempt,
             sequence=2,
-            completed_at=bar_completed_at,
+            completed_at=callbacks[1].received_at,
             midpoint_count=1,
             schedule_count=0,
         ),
@@ -294,7 +290,7 @@ def _snapshot(
             marker_id=2,
             attempt=schedule_attempt,
             sequence=2,
-            completed_at=schedule_completed_at,
+            completed_at=callbacks[3].received_at,
             midpoint_count=0,
             schedule_count=1,
         ),
@@ -574,3 +570,246 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
     assert build_args.output == Path("result")
     assert verify_args.historical_ibkr_command == "verify"
     assert verify_args.result == Path("result/manifest.json")
+
+
+def test_result_builder_and_file_verifier_accepts_invalidated_restart(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    first_attempt = snapshot.attempts[0]
+    retry_id = UUID("00000000-0000-0000-0000-000000000013")
+    retry_session = UUID("00000000-0000-0000-0000-000000000003")
+    invalidated = replace(
+        first_attempt,
+        status=IbkrAttemptStatus.INVALIDATED,
+        terminal_at=_START + timedelta(seconds=4),
+        terminal_disposition=None,
+        detail="connection generation disconnected before attempt completion",
+    )
+    retry = replace(
+        first_attempt,
+        attempt_id=retry_id,
+        attempt_ordinal=2,
+        connection_session_id=retry_session,
+        provider_request_id=103,
+        started_at=_START + timedelta(seconds=5),
+        terminal_at=_START + timedelta(seconds=8),
+        status=IbkrAttemptStatus.SUCCEEDED,
+        terminal_disposition=IbkrTerminalDisposition.SUCCEEDED,
+        detail=None,
+    )
+    retry_callbacks = tuple(
+        replace(
+            callback,
+            attempt_id=retry_id,
+            connection_session_id=retry_session,
+            provider_request_id=retry.provider_request_id,
+            received_at=callback.received_at + timedelta(seconds=5),
+        )
+        for callback in snapshot.callbacks[:2]
+    )
+    retry_marker = replace(
+        snapshot.completion_markers[0],
+        attempt_id=retry_id,
+        connection_session_id=retry_session,
+        provider_request_id=retry.provider_request_id,
+        completed_at=retry_callbacks[1].received_at,
+    )
+    request_snapshots = tuple(
+        replace(item, attempt_count=2, selected_attempt_id=retry_id)
+        if item.request_sha256 == first_attempt.request_sha256
+        else item
+        for item in snapshot.requests
+    )
+    restarted = replace(
+        snapshot,
+        requests=request_snapshots,
+        attempts=(invalidated, retry, *snapshot.attempts[1:]),
+        callbacks=(*retry_callbacks, *snapshot.callbacks[2:]),
+        completion_markers=(retry_marker, snapshot.completion_markers[1]),
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, restarted)
+    manifest = write_ibkr_historical_result(tmp_path / "restart", artifact)
+    verified = verify_ibkr_historical_result(manifest)
+    bar_result = next(
+        item
+        for item in verified.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+    )
+    assert bar_result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
+    assert [item["status"] for item in bar_result.retry_history] == [
+        IbkrAttemptStatus.INVALIDATED.value,
+        IbkrAttemptStatus.SUCCEEDED.value,
+    ]
+    assert bar_result.retry_history[0]["terminal_disposition"] is None
+
+
+def test_result_builder_accepts_marker_before_attempt_finalization() -> None:
+    plan, snapshot = _build_fixture()
+    adjusted = replace(
+        snapshot,
+        attempts=(
+            replace(snapshot.attempts[0], terminal_at=_START + timedelta(seconds=11)),
+            snapshot.attempts[1],
+        ),
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, adjusted)
+    bar_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+    )
+    assert bar_result.accepted_rows
+
+
+def test_result_replay_rejects_completion_marker_callback_mismatch() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+    mutated_markers = tuple(
+        replace(marker, payload={"stale": True})
+        if marker.attempt_id == result.selected_attempt_id
+        else marker
+        for marker in result.completion_markers
+    )
+    mutated = _rehash_result(result, completion_markers=mutated_markers)
+
+    with pytest.raises(ValueError, match="raw completion callback"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_replay_rejects_valid_closure_labelled_retryable() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+    first = replace(
+        result.attempts[0],
+        status=IbkrAttemptStatus.RETRYABLE_FAILURE,
+        terminal_at=_START + timedelta(seconds=4),
+        terminal_disposition=IbkrTerminalDisposition.PROVIDER_REJECTED,
+        detail="transient provider failure",
+    )
+    second_id = UUID("00000000-0000-0000-0000-000000000014")
+    second_session = UUID("00000000-0000-0000-0000-000000000004")
+    second = replace(
+        result.attempts[0],
+        attempt_id=second_id,
+        attempt_ordinal=2,
+        connection_session_id=second_session,
+        provider_request_id=104,
+        started_at=_START + timedelta(seconds=5),
+        terminal_at=_START + timedelta(seconds=10),
+        status=IbkrAttemptStatus.SUCCEEDED,
+        terminal_disposition=IbkrTerminalDisposition.SUCCEEDED,
+        detail=None,
+    )
+    first_callbacks = tuple(
+        replace(
+            callback,
+            received_at=callback.received_at,
+        )
+        for callback in result.callbacks
+    )
+    second_callbacks = tuple(
+        replace(
+            callback,
+            callback_id=callback.callback_id + 10,
+            attempt_id=second_id,
+            connection_session_id=second_session,
+            provider_request_id=second.provider_request_id,
+            received_at=callback.received_at + timedelta(seconds=5),
+        )
+        for callback in result.callbacks
+    )
+    first_marker = replace(
+        result.completion_markers[0],
+        completed_at=first_callbacks[1].received_at,
+    )
+    second_marker = replace(
+        result.completion_markers[0],
+        marker_id=result.completion_markers[0].marker_id + 10,
+        attempt_id=second_id,
+        connection_session_id=second_session,
+        provider_request_id=second.provider_request_id,
+        completed_at=second_callbacks[1].received_at,
+    )
+    mutated = _rehash_result(
+        result,
+        attempts=(first, second),
+        callbacks=(*first_callbacks, *second_callbacks),
+        completion_markers=(first_marker, second_marker),
+        selected_attempt_id=second_id,
+    )
+
+    with pytest.raises(ValueError, match="status/disposition"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_builder_classifies_missing_ohlc_evidence() -> None:
+    plan, snapshot = _build_fixture()
+    payload = dict(snapshot.callbacks[0].payload)
+    payload.pop("close")
+    malformed = replace(
+        snapshot,
+        callbacks=(replace(snapshot.callbacks[0], payload=payload), *snapshot.callbacks[1:]),
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, malformed)
+    bar_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+    )
+    assert (
+        bar_result.evidence_disposition
+        is IbkrHistoricalEvidenceDisposition.INVALID_CALLBACK_EVIDENCE
+    )
+    assert bar_result.accepted_rows == ()
+
+
+def test_result_builder_classifies_overlapping_schedule_conflict() -> None:
+    plan, snapshot = _build_fixture()
+    schedule_payload = {
+        "sessions": [
+            {
+                "start": utc_text(_START),
+                "end": utc_text(_START + timedelta(seconds=90)),
+                "active": True,
+            },
+            {
+                "start": utc_text(_START + timedelta(minutes=1)),
+                "end": utc_text(_END),
+                "active": False,
+            },
+        ]
+    }
+    conflicting = replace(
+        snapshot,
+        callbacks=(
+            *snapshot.callbacks[:2],
+            replace(snapshot.callbacks[2], payload=schedule_payload),
+            snapshot.callbacks[3],
+        ),
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, conflicting)
+    schedule_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.SCHEDULE.value
+    )
+    assert (
+        schedule_result.evidence_disposition
+        is IbkrHistoricalEvidenceDisposition.CONFLICTING_CALLBACK_EVIDENCE
+    )
+    assert schedule_result.session_state == "UNKNOWN"

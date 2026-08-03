@@ -618,6 +618,7 @@ Normalize historical bars as follows:
 * provider volume, WAP and count fields are retained without assigning unsupported meaning;
 * rows are strictly ordered and uniquely keyed;
 * invalid OHLC and conflicting duplicates produce explicit terminal evidence dispositions; malformed closure evidence fails verification;
+* an eligible completion marker must copy the matching completion callback's transport identity, payload, eligibility and receive time, and its receive time must be no later than the attempt finalization time;
 * callbacks from incomplete or superseded generations remain evidence but cannot become accepted rows.
 
 For boundary callbacks returned by adjacent requests, the planned half-open interval determines ownership. Identical duplicates outside the owning interval remain raw evidence and are not merged into accepted observations.
@@ -631,6 +632,8 @@ session state = UNKNOWN
 ```
 
 The interval must not be classified as inactive.
+
+Schedule sessions are clipped to the planned half-open interval before activity is classified; contradictory overlapping in-range declarations produce explicit conflicting evidence.
 
 Add:
 
@@ -649,7 +652,8 @@ qtrad historical ibkr verify \
 * Every planned request has exactly one terminal result with separate operational and evidence dispositions.
 * Missing, altered, additional and orphaned children fail.
 * Reordered callback input produces the same result.
-* Marker counts, callback eligibility, error-before-completion and first-terminal selection are independently recomputed.
+* Marker counts, callback eligibility, error-before-completion, attempt outcome consistency and first-terminal selection are independently recomputed;
+* an invalidated attempt may have a terminal time with no terminal disposition and may precede a later successful retry.
 * Conflicting or invalid provider evidence is never accepted as normalized output.
 * The PostgreSQL snapshot is repeatable-read and bounded before callback materialization.
 * Publication is staged, verified and create-only; the verified request-to-result mapping is committed atomically.

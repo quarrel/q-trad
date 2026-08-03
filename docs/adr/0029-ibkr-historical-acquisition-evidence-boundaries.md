@@ -109,8 +109,13 @@ Invalid OHLC, conflicting duplicates, eligible error callbacks or invalid schedu
 explicit evidence disposition and cannot become accepted observations. A schedule result may declare an
 active or inactive provider interval only from structurally valid in-range schedule evidence; invalid or
 non-overlapping schedule evidence is `SESSION_EVIDENCE_UNAVAILABLE` with session state `UNKNOWN`.
-Partial or superseded-generation callbacks remain evidence but cannot contribute accepted rows. Once the
-first independently valid terminal outcome is selected, it is never rerun or replaced.
+
+An eligible completion marker must exactly copy the matching completion callback's transport identity,
+payload, eligibility and receive timestamp, and that timestamp must be no later than the attempt's
+terminal timestamp. A closure that independently proves completion must agree with the stored attempt
+status and disposition; an invalidated attempt may instead have a terminal timestamp with no disposition
+when it precedes a permitted retry. Once the first independently valid terminal outcome is selected, it
+is never rerun or replaced.
 
 ### Independent replay and absence claims
 
