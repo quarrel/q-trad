@@ -185,12 +185,21 @@ def _validate_aggregate_result_record_identities(
     attempt_ids: set[UUID] = set()
     callback_ids: set[int] = set()
     marker_ids: set[int] = set()
+    provider_request_identities: set[tuple[UUID, int, int]] = set()
     for result in results:
         _validate_request_result_record_identities(result)
         for attempt in result.attempts:
             if attempt.attempt_id in attempt_ids:
                 raise ValueError("IBKR aggregate attempt identities are duplicated")
             attempt_ids.add(attempt.attempt_id)
+            provider_request_identity = (
+                attempt.connection_session_id,
+                attempt.connection_generation,
+                attempt.provider_request_id,
+            )
+            if provider_request_identity in provider_request_identities:
+                raise ValueError("IBKR aggregate provider request identities are duplicated")
+            provider_request_identities.add(provider_request_identity)
         for callback in result.callbacks:
             if callback.callback_id in callback_ids:
                 raise ValueError("IBKR aggregate callback identities are duplicated")

@@ -114,10 +114,11 @@ An eligible completion marker must exactly copy the matching completion callback
 payload, eligibility and receive timestamp, and that timestamp must be no later than the attempt's
 terminal timestamp. Every completion callback has exactly one matching marker, including ineligible
 closure evidence, and every SUCCEEDED attempt has exactly one eligible marker. Published attempt,
-callback and completion-marker record identities are unique across the aggregate. A closure that
-independently proves completion must agree with the stored attempt status and disposition; an invalidated
-attempt may instead have a terminal timestamp with no disposition when it precedes a permitted retry. Once
-the first independently valid terminal outcome is selected, it is never rerun or replaced.
+callback and completion-marker record identities, plus provider request transport identities
+(connection_session_id, connection_generation, provider_request_id), are unique across the aggregate.
+A closure that independently proves completion must agree with the stored attempt status and disposition;
+an invalidated attempt may instead have a terminal timestamp with no disposition when it precedes a permitted
+retry. Once the first independently valid terminal outcome is selected, it is never rerun or replaced.
 
 ### Independent replay and absence claims
 

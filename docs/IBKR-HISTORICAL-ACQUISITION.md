@@ -621,6 +621,7 @@ Normalize historical bars as follows:
 * an eligible completion marker must copy the matching completion callback's transport identity, payload, eligibility and receive time, and its receive time must be no later than the attempt finalization time;
 * completion callbacks and completion markers form an exact one-to-one closure, including ineligible completions; a SUCCEEDED attempt requires exactly one eligible marker;
 * aggregate activity declarations are reconciled against all in-range structured sessions independent of callback order;
+* provider request transport identities (connection_session_id, connection_generation, provider_request_id) are unique across all attempts;
 * callbacks from incomplete or superseded generations remain evidence but cannot become accepted rows.
 
 For boundary callbacks returned by adjacent requests, the planned half-open interval determines ownership. Identical duplicates outside the owning interval remain raw evidence and are not merged into accepted observations.
@@ -654,7 +655,7 @@ qtrad historical ibkr verify \
 * Every planned request has exactly one terminal result with separate operational and evidence dispositions.
 * Missing, altered, additional and orphaned children fail.
 * Reordered callback input produces the same result.
-* Marker counts, callback eligibility, error-before-completion, attempt outcome consistency and first-terminal selection are independently recomputed; completion callbacks and markers are one-to-one, and published attempt, callback and completion-marker identities are unique across the aggregate;
+* Marker counts, callback eligibility, error-before-completion, attempt outcome consistency and first-terminal selection are independently recomputed; completion callbacks and markers are one-to-one, and published attempt, callback, completion-marker, and provider transport identities are unique across the aggregate;
 * an invalidated attempt may have a terminal time with no terminal disposition and may precede a later successful retry.
 * Conflicting or invalid provider evidence is never accepted as normalized output.
 * The PostgreSQL snapshot is repeatable-read and bounded before callback materialization.

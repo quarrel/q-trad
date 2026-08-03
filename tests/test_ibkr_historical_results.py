@@ -1058,3 +1058,134 @@ def test_aggregate_replay_rejects_duplicate_attempt_identity_across_children() -
             (bar_result, mutated_schedule),
             mutated_aggregate,
         )
+
+
+def test_aggregate_replay_rejects_duplicate_provider_request_identity_across_children() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    bar_result, schedule_result = artifact.request_results
+    source_attempt = bar_result.attempts[0]
+    mutated_attempt = replace(
+        schedule_result.attempts[0],
+        connection_session_id=source_attempt.connection_session_id,
+        connection_generation=source_attempt.connection_generation,
+        provider_request_id=source_attempt.provider_request_id,
+    )
+    mutated_callbacks = tuple(
+        replace(
+            callback,
+            connection_session_id=source_attempt.connection_session_id,
+            connection_generation=source_attempt.connection_generation,
+            provider_request_id=source_attempt.provider_request_id,
+        )
+        for callback in schedule_result.callbacks
+    )
+    mutated_markers = tuple(
+        replace(
+            marker,
+            connection_session_id=source_attempt.connection_session_id,
+            connection_generation=source_attempt.connection_generation,
+            provider_request_id=source_attempt.provider_request_id,
+        )
+        for marker in schedule_result.completion_markers
+    )
+    mutated_schedule = _rehash_result(
+        schedule_result,
+        attempts=(mutated_attempt,),
+        callbacks=mutated_callbacks,
+        completion_markers=mutated_markers,
+    )
+    mutated_aggregate = _rehash_aggregate(
+        artifact.aggregate,
+        (bar_result, mutated_schedule),
+    )
+
+    with pytest.raises(ValueError, match="provider request identities"):
+        replay_ibkr_historical_aggregate_result(
+            plan,
+            snapshot.plan.plan_bytes,
+            (bar_result, mutated_schedule),
+            mutated_aggregate,
+        )
+
+
+def test_aggregate_replay_rejects_duplicate_provider_request_identity_between_retries() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    bar_result, schedule_result = artifact.request_results
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    first_terminal_at = _START + timedelta(seconds=4)
+    second_id = UUID("00000000-0000-0000-0000-000000000014")
+    second_started_at = _START + timedelta(seconds=5)
+    second_terminal_at = _START + timedelta(seconds=10)
+    first = replace(
+        bar_result.attempts[0],
+        status=IbkrAttemptStatus.INVALIDATED,
+        terminal_at=first_terminal_at,
+        terminal_disposition=None,
+        detail="connection invalidated",
+    )
+    second = replace(
+        bar_result.attempts[0],
+        attempt_id=second_id,
+        attempt_ordinal=2,
+        started_at=second_started_at,
+        terminal_at=second_terminal_at,
+        status=IbkrAttemptStatus.SUCCEEDED,
+        terminal_disposition=IbkrTerminalDisposition.SUCCEEDED,
+        detail=None,
+    )
+    second_callbacks = tuple(
+        replace(
+            callback,
+            callback_id=callback.callback_id + 10,
+            attempt_id=second_id,
+            received_at=callback.received_at + timedelta(seconds=5),
+        )
+        for callback in bar_result.callbacks
+    )
+    second_marker = replace(
+        bar_result.completion_markers[0],
+        marker_id=bar_result.completion_markers[0].marker_id + 10,
+        attempt_id=second_id,
+        completed_at=second_callbacks[1].received_at,
+    )
+    retry_history = (
+        {
+            "attempt_id": str(first.attempt_id),
+            "attempt_ordinal": first.attempt_ordinal,
+            "status": first.status.value,
+            "terminal_at": utc_text(first_terminal_at),
+            "terminal_disposition": None,
+        },
+        {
+            "attempt_id": str(second.attempt_id),
+            "attempt_ordinal": second.attempt_ordinal,
+            "status": second.status.value,
+            "terminal_at": utc_text(second_terminal_at),
+            "terminal_disposition": IbkrTerminalDisposition.SUCCEEDED.value,
+        },
+    )
+    mutated_bar = _rehash_result(
+        bar_result,
+        attempts=(first, second),
+        callbacks=second_callbacks,
+        completion_markers=(second_marker,),
+        selected_attempt_id=second_id,
+        retry_history=retry_history,
+    )
+    replay_ibkr_historical_request_result(request, mutated_bar)
+    mutated_aggregate = _rehash_aggregate(
+        artifact.aggregate,
+        (mutated_bar, schedule_result),
+    )
+
+    with pytest.raises(ValueError, match="provider request identities"):
+        replay_ibkr_historical_aggregate_result(
+            plan,
+            snapshot.plan.plan_bytes,
+            (mutated_bar, schedule_result),
+            mutated_aggregate,
+        )
