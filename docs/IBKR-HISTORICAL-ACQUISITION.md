@@ -552,6 +552,8 @@ The planner is entirely independent of PostgreSQL and IB Gateway.
 
 **Form:** database and application-state pull request.
 
+**Status:** Implemented and verified with a fake historical-data port and disposable PostgreSQL state; no real IBKR client or provider data is involved.
+
 Implement transport-independent execution using a fake historical-data port.
 
 PostgreSQL stores:
