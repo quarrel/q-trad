@@ -967,16 +967,45 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     assert [row["sequence"] for row in callback_rows] == [1, 2, 1, 2]
     assert all(row["closure_eligible"] for row in callback_rows)
 
-    result_hashes: list[str] = []
-    for index, request in enumerate(plan.requests, start=1):
-        result_hash = f"{index:064x}"
-        result_hashes.append(result_hash)
-        await store.mark_ibkr_historical_request_published(
+    result_hashes = [f"{index:064x}" for index, _ in enumerate(plan.requests, start=1)]
+    snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+    assert snapshot.plan.plan_sha256 == plan.plan_sha256
+    assert len(snapshot.requests) == len(plan.requests)
+    assert len(snapshot.attempts) == len(plan.requests)
+    assert len(snapshot.callbacks) == len(plan.requests) * 2
+    assert len(snapshot.completion_markers) == len(plan.requests)
+
+    with pytest.raises(RuntimeError, match="unknown request"):
+        await store.mark_ibkr_historical_requests_published(
             plan_sha256=plan.plan_sha256,
-            request_sha256=request.request_sha256,
-            result_sha256=result_hash,
+            publications=(
+                (plan.requests[0].request_sha256, result_hashes[0]),
+                ("a" * 64, "b" * 64),
+            ),
             published_at=_NOW,
         )
+    pending_after_failed_batch = await audit_store.query(
+        """
+        SELECT publication_status
+        FROM ops.ibkr_historical_requests
+        WHERE plan_sha256 = :plan_sha256
+        ORDER BY request_sha256
+        """,
+        {"plan_sha256": plan.plan_sha256},
+    )
+    assert [row["publication_status"] for row in pending_after_failed_batch] == [
+        "PENDING",
+        "PENDING",
+    ]
+
+    await store.mark_ibkr_historical_requests_published(
+        plan_sha256=plan.plan_sha256,
+        publications=tuple(
+            (request.request_sha256, result_hash)
+            for request, result_hash in zip(plan.requests, result_hashes, strict=True)
+        ),
+        published_at=_NOW,
+    )
     await store.mark_ibkr_historical_request_published(
         plan_sha256=plan.plan_sha256,
         request_sha256=plan.requests[0].request_sha256,

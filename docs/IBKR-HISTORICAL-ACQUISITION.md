@@ -263,46 +263,52 @@ The verifier reconstructs every request and proves:
 Add:
 
 ```text
-qtrad-ibkr-historical-request-result-v1
+qtrad-ibkr-historical-request-result-v2
 ```
 
-One result represents one planned request and its terminal disposition.
+One result represents one planned request, with separate durable operational and independently derived evidence outcomes.
 
 It authenticates:
 
 * plan and planned-request identities;
-* all attempt identities;
-* the selected terminal attempt;
-* generation and callback sequence;
-* raw callback closure;
+* all attempt identities and their reconstructed transitions;
+* the first independently valid terminal attempt;
+* generation, callback ownership and callback sequence;
+* raw callback and completion-marker closure;
 * accepted normalized rows or sessions;
-* completion marker;
+* independently recomputed completion-marker counts;
+* operational request/attempt disposition;
+* evidence disposition;
 * error classification;
 * retry history;
-* acquisition timing;
-* request disposition.
+* acquisition timing.
 
-Possible terminal dispositions include:
+The operational terminal disposition describes the durable execution state. The evidence disposition describes what the independently replayed callback closure proves. A request can therefore have `request_status = SUCCEEDED` and `terminal_disposition = SUCCEEDED` while its evidence disposition is `NO_DATA_RETURNED`, `SESSION_EVIDENCE_UNAVAILABLE`, `INVALID_CALLBACK_EVIDENCE` or `CONFLICTING_CALLBACK_EVIDENCE`.
+
+Possible evidence dispositions include:
 
 ```text
 SUCCEEDED
+NO_DATA_RETURNED
 CONTRACT_IDENTITY_CHANGED
 ENTITLEMENT_UNAVAILABLE
-NO_DATA_RETURNED
 INVALID_REQUEST
 RETRY_LIMIT_EXHAUSTED
 PROVIDER_REJECTED
 SESSION_EVIDENCE_UNAVAILABLE
+INCOMPLETE_RESPONSE
+INVALID_CALLBACK_EVIDENCE
+CONFLICTING_CALLBACK_EVIDENCE
 ```
 
-A successful result is the first attempt that independently satisfies the complete request-result contract. Earlier incomplete attempts remain authenticated evidence but do not contribute rows.
+A successful operational result is accepted only after the verifier reconstructs the callback ownership, completion boundary, marker counts, error callbacks and normalized output. Earlier incomplete or superseded attempts remain authenticated evidence but do not contribute rows. A malformed raw closure fails verification rather than being repaired by a summary field.
 
 ## 3.5 Aggregate result
 
 Add:
 
 ```text
-qtrad-ibkr-historical-result-v1
+qtrad-ibkr-historical-result-v2
 ```
 
 It references:
@@ -316,9 +322,11 @@ It references:
 The aggregate verifier independently recomputes:
 
 * plan completeness;
-* request-result identity;
+* request-result identity and evidence dispositions;
 * returned interval coverage;
 * active-session coverage;
+* planned, terminal, operational-success, evidence-success, no-data and failure counts;
+* rows and sessions across every planned chunk for an instrument;
 * missing and conflicting rows;
 * entitlement and failure dispositions;
 * the set of contracts eligible for provider-history construction.
@@ -609,7 +617,7 @@ Normalize historical bars as follows:
 * OHLC is serialized canonically;
 * provider volume, WAP and count fields are retained without assigning unsupported meaning;
 * rows are strictly ordered and uniquely keyed;
-* invalid OHLC and conflicting duplicates fail the request;
+* invalid OHLC and conflicting duplicates produce explicit terminal evidence dispositions; malformed closure evidence fails verification;
 * callbacks from incomplete or superseded generations remain evidence but cannot become accepted rows.
 
 For boundary callbacks returned by adjacent requests, the planned half-open interval determines ownership. Identical duplicates outside the owning interval remain raw evidence and are not merged into accepted observations.
@@ -637,12 +645,14 @@ qtrad historical ibkr verify \
 
 ### Exit criteria
 
-* The verifier starts from files and independently reconstructs accepted closures.
-* Every planned request has exactly one terminal result.
+* The verifier starts from files and independently reconstructs attempt, callback and marker closures.
+* Every planned request has exactly one terminal result with separate operational and evidence dispositions.
 * Missing, altered, additional and orphaned children fail.
 * Reordered callback input produces the same result.
-* Conflicting callbacks fail.
-* Published results are create-only and bounded.
+* Marker counts, callback eligibility, error-before-completion and first-terminal selection are independently recomputed.
+* Conflicting or invalid provider evidence is never accepted as normalized output.
+* The PostgreSQL snapshot is repeatable-read and bounded before callback materialization.
+* Publication is staged, verified and create-only; the verified request-to-result mapping is committed atomically.
 
 ---
 

@@ -8,6 +8,7 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import PurePosixPath
 from uuid import UUID
 
@@ -27,12 +28,31 @@ from qtrad.domain.ibkr_historical import (
 )
 from qtrad.domain.time import require_utc
 
-REQUEST_RESULT_CONTRACT = "qtrad-ibkr-historical-request-result-v1"
-HISTORICAL_RESULT_CONTRACT = "qtrad-ibkr-historical-result-v1"
-RESULT_SCHEMA_VERSION = 1
+REQUEST_RESULT_CONTRACT = "qtrad-ibkr-historical-request-result-v2"
+HISTORICAL_RESULT_CONTRACT = "qtrad-ibkr-historical-result-v2"
+RESULT_SCHEMA_VERSION = 2
 MAX_IBKR_RESULT_BYTES = 8 * 1024 * 1024
 MAX_IBKR_RESULT_CHILDREN = 20_000
+MAX_IBKR_RESULT_ATTEMPTS = 20_000
+MAX_IBKR_RESULT_CALLBACKS = 100_000
+MAX_IBKR_RESULT_COMPLETION_MARKERS = 20_000
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+
+
+class IbkrHistoricalEvidenceDisposition(StrEnum):
+    """Evidence-level outcome derived independently from raw callback closure."""
+
+    SUCCEEDED = "SUCCEEDED"
+    CONTRACT_IDENTITY_CHANGED = "CONTRACT_IDENTITY_CHANGED"
+    ENTITLEMENT_UNAVAILABLE = "ENTITLEMENT_UNAVAILABLE"
+    NO_DATA_RETURNED = "NO_DATA_RETURNED"
+    INVALID_REQUEST = "INVALID_REQUEST"
+    RETRY_LIMIT_EXHAUSTED = "RETRY_LIMIT_EXHAUSTED"
+    PROVIDER_REJECTED = "PROVIDER_REJECTED"
+    SESSION_EVIDENCE_UNAVAILABLE = "SESSION_EVIDENCE_UNAVAILABLE"
+    INCOMPLETE_RESPONSE = "INCOMPLETE_RESPONSE"
+    INVALID_CALLBACK_EVIDENCE = "INVALID_CALLBACK_EVIDENCE"
+    CONFLICTING_CALLBACK_EVIDENCE = "CONFLICTING_CALLBACK_EVIDENCE"
 
 
 @dataclass(frozen=True, slots=True)
@@ -302,6 +322,7 @@ class IbkrHistoricalRequestResult:
     request_payload: dict[str, JsonValue]
     request_status: IbkrRequestStatus
     terminal_disposition: IbkrTerminalDisposition
+    evidence_disposition: IbkrHistoricalEvidenceDisposition
     selected_attempt_id: UUID
     attempts: tuple[IbkrHistoricalAttemptEvidence, ...]
     callbacks: tuple[IbkrHistoricalCallbackEvidence, ...]
@@ -328,10 +349,21 @@ class IbkrHistoricalRequestResult:
                 raise ValueError("successful IBKR request result requires SUCCEEDED disposition")
         elif self.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED:
             raise ValueError("terminal IBKR request result cannot have SUCCEEDED disposition")
+        if (
+            self.request_status is IbkrRequestStatus.TERMINAL
+            and self.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
+        ):
+            raise ValueError("terminal IBKR request result cannot have successful evidence")
         if self.selected_attempt_id.int == 0:
             raise ValueError("IBKR request result selected attempt must be non-zero")
         if not self.attempts:
             raise ValueError("IBKR request result requires attempt evidence")
+        if len(self.attempts) > MAX_IBKR_RESULT_ATTEMPTS:
+            raise ValueError("IBKR request result attempts exceed their bound")
+        if len(self.callbacks) > MAX_IBKR_RESULT_CALLBACKS:
+            raise ValueError("IBKR request result callbacks exceed their bound")
+        if len(self.completion_markers) > MAX_IBKR_RESULT_COMPLETION_MARKERS:
+            raise ValueError("IBKR request result completion markers exceed their bound")
         if any(item.plan_sha256 != self.plan_sha256 for item in self.attempts):
             raise ValueError("IBKR request result attempt plan identity differs")
         if any(item.request_sha256 != self.request_sha256 for item in self.attempts):
@@ -357,6 +389,7 @@ class IbkrHistoricalRequestResult:
             "request_payload": _json_object(self.request_payload, "request payload"),
             "request_status": self.request_status.value,
             "terminal_disposition": self.terminal_disposition.value,
+            "evidence_disposition": self.evidence_disposition.value,
             "selected_attempt_id": str(self.selected_attempt_id),
             "attempts": [item.as_json_value() for item in self.attempts],
             "callbacks": [item.as_json_value() for item in self.callbacks],
@@ -398,6 +431,8 @@ class IbkrHistoricalAggregateResult:
             raise ValueError("IBKR aggregate plan child has an unsupported contract")
         if not self.request_results:
             raise ValueError("IBKR aggregate result requires request-result children")
+        if len(self.request_results) > MAX_IBKR_RESULT_CHILDREN:
+            raise ValueError("IBKR aggregate result children exceed their bound")
         if len({item.path for item in self.request_results}) != len(self.request_results):
             raise ValueError("IBKR aggregate request-result child paths must be unique")
         if len({item.semantic_sha256 for item in self.request_results}) != len(
@@ -482,8 +517,11 @@ def _require_sha256(value: str, field: str) -> None:
 
 __all__ = [
     "HISTORICAL_RESULT_CONTRACT",
+    "MAX_IBKR_RESULT_ATTEMPTS",
     "MAX_IBKR_RESULT_BYTES",
+    "MAX_IBKR_RESULT_CALLBACKS",
     "MAX_IBKR_RESULT_CHILDREN",
+    "MAX_IBKR_RESULT_COMPLETION_MARKERS",
     "REQUEST_RESULT_CONTRACT",
     "RESULT_SCHEMA_VERSION",
     "IbkrHistoricalAggregateResult",
@@ -491,6 +529,7 @@ __all__ = [
     "IbkrHistoricalCallbackEvidence",
     "IbkrHistoricalChildReference",
     "IbkrHistoricalCompletionEvidence",
+    "IbkrHistoricalEvidenceDisposition",
     "IbkrHistoricalExecutionSnapshot",
     "IbkrHistoricalPlanSnapshot",
     "IbkrHistoricalRequestResult",

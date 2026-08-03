@@ -146,6 +146,14 @@ class IbkrHistoricalPublicationStore(Protocol):
         self, *, plan_sha256: str
     ) -> IbkrHistoricalExecutionSnapshot: ...
 
+    async def mark_ibkr_historical_requests_published(
+        self,
+        *,
+        plan_sha256: str,
+        publications: Sequence[tuple[str, str]],
+        published_at: datetime,
+    ) -> None: ...
+
     async def mark_ibkr_historical_request_published(
         self,
         *,

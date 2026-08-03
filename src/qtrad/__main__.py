@@ -109,8 +109,8 @@ from qtrad.runtime.ibkr_historical import (
     write_ibkr_runtime_lock,
 )
 from qtrad.runtime.ibkr_results import (
+    publish_ibkr_historical_result,
     verify_ibkr_historical_result,
-    write_ibkr_historical_result,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.qualification_gap_history import (
@@ -2434,18 +2434,21 @@ async def _build_ibkr_historical_result(
         store = PostgresIbkrHistoricalExecutionStore(engine)
         snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
         artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-        manifest_path = write_ibkr_historical_result(output_path, artifact)
+        if output_path.exists():
+            manifest_path = output_path / "manifest.json" if output_path.is_dir() else output_path
+        else:
+            manifest_path = publish_ibkr_historical_result(output_path, artifact)
         verified = verify_ibkr_historical_result(manifest_path)
         if verified.aggregate.aggregate_sha256 != artifact.aggregate.aggregate_sha256:
             raise RuntimeError("IBKR result changed between publication and verification")
         published_at = clock.now()
-        for result in artifact.request_results:
-            await store.mark_ibkr_historical_request_published(
-                plan_sha256=plan.plan_sha256,
-                request_sha256=result.request_sha256,
-                result_sha256=result.result_sha256,
-                published_at=published_at,
-            )
+        await store.mark_ibkr_historical_requests_published(
+            plan_sha256=plan.plan_sha256,
+            publications=tuple(
+                (result.request_sha256, result.result_sha256) for result in artifact.request_results
+            ),
+            published_at=published_at,
+        )
     finally:
         await engine.dispose()
     print(

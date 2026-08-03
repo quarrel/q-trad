@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import tempfile
 from collections.abc import Mapping
 from datetime import UTC, datetime
 from enum import Enum
@@ -31,6 +34,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalCallbackEvidence,
     IbkrHistoricalChildReference,
     IbkrHistoricalCompletionEvidence,
+    IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalRequestResult,
     IbkrHistoricalResultArtifact,
     canonical_json_bytes,
@@ -76,6 +80,32 @@ def write_ibkr_historical_result(
         target.parent.mkdir(exist_ok=True)
         _write_create_only(target, payload, f"IBKR result file {relative_path}")
     return output_directory / _MANIFEST_NAME
+
+
+def publish_ibkr_historical_result(
+    output_directory: Path,
+    artifact: IbkrHistoricalResultArtifact,
+) -> Path:
+    """Stage, verify, and create-only commit one result directory."""
+
+    destination = _absolute_output_path(output_directory)
+    _require_new_output_directory(destination)
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{destination.name}.staging-", dir=str(destination.parent))
+    )
+    try:
+        staged_manifest = write_ibkr_historical_result(staging, artifact)
+        verified = verify_ibkr_historical_result(staged_manifest)
+        if verified.aggregate.aggregate_sha256 != artifact.aggregate.aggregate_sha256:
+            raise RuntimeError("IBKR result changed between staging and verification")
+        if destination.exists():
+            raise FileExistsError(f"IBKR result output already exists: {destination}")
+        os.rename(staging, destination)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return destination / _MANIFEST_NAME
 
 
 def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
@@ -162,7 +192,10 @@ def _aggregate_from_json(value: Mapping[str, object]) -> IbkrHistoricalAggregate
         },
         "IBKR aggregate result",
     )
-    if value["contract"] != HISTORICAL_RESULT_CONTRACT or value["schema_version"] != 1:
+    if (
+        value["contract"] != HISTORICAL_RESULT_CONTRACT
+        or value["schema_version"] != IbkrHistoricalAggregateResult.SCHEMA_VERSION
+    ):
         raise ValueError("IBKR aggregate result contract or schema version is unsupported")
     request_values = value["request_results"]
     if not isinstance(request_values, list):
@@ -192,6 +225,7 @@ def _request_result_from_json(value: Mapping[str, object]) -> IbkrHistoricalRequ
             "request_payload",
             "request_status",
             "terminal_disposition",
+            "evidence_disposition",
             "selected_attempt_id",
             "attempts",
             "callbacks",
@@ -207,7 +241,10 @@ def _request_result_from_json(value: Mapping[str, object]) -> IbkrHistoricalRequ
         },
         "IBKR request result",
     )
-    if value["contract"] != REQUEST_RESULT_CONTRACT or value["schema_version"] != 1:
+    if (
+        value["contract"] != REQUEST_RESULT_CONTRACT
+        or value["schema_version"] != IbkrHistoricalRequestResult.SCHEMA_VERSION
+    ):
         raise ValueError("IBKR request result contract or schema version is unsupported")
     attempts = _list(value["attempts"], "IBKR request result attempts")
     callbacks = _list(value["callbacks"], "IBKR request result callbacks")
@@ -224,6 +261,11 @@ def _request_result_from_json(value: Mapping[str, object]) -> IbkrHistoricalRequ
         request_status=_enum(value["request_status"], IbkrRequestStatus, "request_status"),
         terminal_disposition=_enum(
             value["terminal_disposition"], IbkrTerminalDisposition, "terminal_disposition"
+        ),
+        evidence_disposition=_enum(
+            value["evidence_disposition"],
+            IbkrHistoricalEvidenceDisposition,
+            "evidence_disposition",
         ),
         selected_attempt_id=_uuid(value["selected_attempt_id"], "selected_attempt_id"),
         attempts=tuple(_attempt_from_json(item) for item in attempts),
@@ -372,23 +414,39 @@ def _child_reference(value: object, field: str) -> IbkrHistoricalChildReference:
 
 
 def _prepare_output_directory(path: Path) -> None:
+    current = _absolute_output_path(path)
+    if current.exists():
+        if not current.is_dir():
+            raise FileExistsError(f"IBKR result output is not a directory: {path}")
+        if any(current.iterdir()):
+            raise FileExistsError(f"IBKR result output directory is not empty: {path}")
+        return
+    if not current.parent.is_dir():
+        raise FileNotFoundError(
+            f"IBKR result output parent directory does not exist: {current.parent}"
+        )
+    current.mkdir()
+
+
+def _absolute_output_path(path: Path) -> Path:
     if ".." in path.parts:
         raise ValueError(f"IBKR result output path escapes its root: {path}")
     current = path if path.is_absolute() else Path.cwd() / path
     for ancestor in (current, *current.parents):
         if ancestor.is_symlink():
             raise ValueError(f"IBKR result output path contains a symlink: {path}")
-    if current.exists():
-        if not current.is_dir():
+    return current
+
+
+def _require_new_output_directory(path: Path) -> None:
+    if path.exists():
+        if not path.is_dir():
             raise FileExistsError(f"IBKR result output is not a directory: {path}")
-        if any(current.iterdir()):
-            raise FileExistsError(f"IBKR result output directory is not empty: {path}")
-    else:
-        if not current.parent.is_dir():
-            raise FileNotFoundError(
-                f"IBKR result output parent directory does not exist: {current.parent}"
-            )
-        current.mkdir()
+        raise FileExistsError(f"IBKR result output already exists: {path}")
+    if not path.parent.is_dir():
+        raise FileNotFoundError(
+            f"IBKR result output parent directory does not exist: {path.parent}"
+        )
 
 
 def _write_create_only(path: Path, payload: bytes, field: str) -> None:
@@ -556,6 +614,7 @@ def _enum[T: Enum](value: object, enum_type: type[T], field: str) -> T:
 
 
 __all__ = [
+    "publish_ibkr_historical_result",
     "verify_ibkr_historical_result",
     "write_ibkr_historical_result",
 ]

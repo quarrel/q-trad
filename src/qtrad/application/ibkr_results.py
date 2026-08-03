@@ -6,8 +6,10 @@ import hashlib
 import json
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 from typing import cast
 from uuid import UUID
 
@@ -32,6 +34,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalCallbackEvidence,
     IbkrHistoricalChildReference,
     IbkrHistoricalCompletionEvidence,
+    IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalExecutionSnapshot,
     IbkrHistoricalRequestResult,
     IbkrHistoricalRequestSnapshot,
@@ -47,6 +50,31 @@ _OHLC_KEYS = ("open", "high", "low", "close")
 _SESSION_START_KEYS = ("startDateTime", "start", "start_time", "interval_start")
 _SESSION_END_KEYS = ("endDateTime", "end", "end_time", "interval_end")
 _SESSION_ACTIVE_KEYS = ("isOpen", "is_open", "active")
+
+
+class _EvidenceInvalid(ValueError):
+    """Provider payload is present but cannot be interpreted as evidence."""
+
+
+class _EvidenceConflict(ValueError):
+    """Provider emitted contradictory evidence for one owned value."""
+
+
+class _EvidenceUnavailable(ValueError):
+    """The provider did not establish schedule evidence for the requested interval."""
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivedRequestEvidence:
+    selected: IbkrHistoricalAttemptEvidence
+    terminal_disposition: IbkrTerminalDisposition
+    evidence_disposition: IbkrHistoricalEvidenceDisposition
+    callbacks: tuple[IbkrHistoricalCallbackEvidence, ...]
+    completion_markers: tuple[IbkrHistoricalCompletionEvidence, ...]
+    accepted_rows: tuple[dict[str, JsonValue], ...]
+    sessions: tuple[dict[str, JsonValue], ...]
+    session_state: str | None
+    error_classification: dict[str, JsonValue] | None
 
 
 def build_ibkr_historical_result_artifact(
@@ -120,7 +148,7 @@ def build_ibkr_historical_aggregate_result(
     coverage, entitlement = _aggregate_summaries(plan, tuple(results_by_hash.values()))
     identity = {
         "contract": HISTORICAL_RESULT_CONTRACT,
-        "schema_version": 1,
+        "schema_version": IbkrHistoricalAggregateResult.SCHEMA_VERSION,
         "plan": plan_ref.as_json_value(),
         "runtime_sha256": plan.runtime_sha256,
         "request_results": [item.as_json_value() for item in child_refs],
@@ -147,87 +175,33 @@ def replay_ibkr_historical_request_result(
         raise ValueError("IBKR request-result identity does not match its plan request")
     if result.request_payload != request.as_json_value():
         raise ValueError("IBKR request-result request payload differs from its plan request")
-    attempts = tuple(sorted(result.attempts, key=lambda item: item.attempt_ordinal))
-    if tuple(item.attempt_ordinal for item in attempts) != tuple(range(1, len(attempts) + 1)):
-        raise ValueError("IBKR request-result attempt ordinals are not contiguous")
-    attempt_by_id = {item.attempt_id: item for item in attempts}
-    if len(attempt_by_id) != len(attempts):
-        raise ValueError("IBKR request-result attempt identities are duplicated")
-    for callback in result.callbacks:
-        attempt = attempt_by_id.get(callback.attempt_id)
-        if attempt is None:
-            raise ValueError("IBKR request-result contains an orphan callback")
-        if callback.closure_eligible and not _callback_matches_attempt(callback, attempt):
-            raise ValueError("eligible IBKR callback does not belong to its attempt")
-    for marker in result.completion_markers:
-        attempt = attempt_by_id.get(marker.attempt_id)
-        if attempt is None:
-            raise ValueError("IBKR request-result contains an orphan completion marker")
-        if marker.closure_eligible and not _completion_matches_attempt(marker, attempt):
-            raise ValueError("eligible IBKR completion does not belong to its attempt")
-        if not any(
-            callback.attempt_id == marker.attempt_id
-            and callback.sequence == marker.sequence
-            and callback.kind is IbkrHistoricalCallbackKind.COMPLETION
-            for callback in result.callbacks
-        ):
-            raise ValueError("IBKR completion marker has no matching raw completion callback")
-    selected = attempt_by_id.get(result.selected_attempt_id)
-    if selected is None:
-        raise ValueError("IBKR request-result selected attempt is absent")
-    if selected.terminal_at is None:
-        raise ValueError("IBKR request-result selected attempt is unfinished")
-    if result.request_status is IbkrRequestStatus.SUCCEEDED:
-        if (
-            selected.status is not IbkrAttemptStatus.SUCCEEDED
-            or selected.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED
-        ):
-            raise ValueError("successful IBKR request-result selected attempt is not successful")
-    elif (
-        selected.status is not IbkrAttemptStatus.TERMINAL_FAILURE
-        or selected.terminal_disposition is None
-        or selected.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED
-    ):
-        raise ValueError("terminal IBKR request-result selected attempt is not terminal failure")
-    selected_markers = _eligible_markers(result, selected)
-    if result.request_status is IbkrRequestStatus.SUCCEEDED and len(selected_markers) != 1:
-        raise ValueError("successful IBKR request-result requires one eligible completion")
-    completion = selected_markers[0] if selected_markers else None
-    accepted_callbacks = _accepted_callbacks(result.callbacks, selected, completion)
-    if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-        expected_rows = (
-            _normalise_bars(request, accepted_callbacks)
-            if result.request_status is IbkrRequestStatus.SUCCEEDED
-            else ()
-        )
-        if result.request_status is IbkrRequestStatus.SUCCEEDED and not expected_rows:
-            raise ValueError("successful IBKR bar result has no accepted rows")
-        if result.sessions or result.session_state is not None:
-            raise ValueError("IBKR bar result must not contain schedule state")
-        if tuple(result.accepted_rows) != expected_rows:
-            raise ValueError("IBKR request-result accepted rows do not replay")
-    else:
-        expected_sessions, expected_state = (
-            _normalise_schedule(request, accepted_callbacks)
-            if result.request_status is IbkrRequestStatus.SUCCEEDED
-            else ((), "UNKNOWN")
-        )
-        if tuple(result.sessions) != expected_sessions:
-            raise ValueError("IBKR request-result sessions do not replay")
-        if result.session_state != expected_state:
-            raise ValueError("IBKR request-result session state does not replay")
-        if result.accepted_rows:
-            raise ValueError("IBKR schedule result must not contain bar rows")
-    expected_start = min(item.started_at for item in attempts)
+    derived = _derive_request_evidence(
+        request=request,
+        request_status=result.request_status,
+        selected_attempt_id=result.selected_attempt_id,
+        attempts=result.attempts,
+        callbacks=result.callbacks,
+        completion_markers=result.completion_markers,
+    )
+    if result.terminal_disposition is not derived.terminal_disposition:
+        raise ValueError("IBKR request-result operational disposition does not replay")
+    if result.evidence_disposition is not derived.evidence_disposition:
+        raise ValueError("IBKR request-result evidence disposition does not replay")
+    if tuple(result.accepted_rows) != derived.accepted_rows:
+        raise ValueError("IBKR request-result accepted rows do not replay")
+    if tuple(result.sessions) != derived.sessions:
+        raise ValueError("IBKR request-result sessions do not replay")
+    if result.session_state != derived.session_state:
+        raise ValueError("IBKR request-result session state does not replay")
+    expected_start = min(item.started_at for item in result.attempts)
     if result.acquisition_started_at != expected_start:
         raise ValueError("IBKR request-result acquisition start does not replay")
-    if result.acquisition_completed_at != selected.terminal_at:
+    if result.acquisition_completed_at != derived.selected.terminal_at:
         raise ValueError("IBKR request-result acquisition completion does not replay")
-    expected_retry_history = _retry_history(attempts)
+    expected_retry_history = _retry_history(result.attempts)
     if tuple(result.retry_history) != expected_retry_history:
         raise ValueError("IBKR request-result retry history does not replay")
-    expected_error = _error_classification(result.request_status, selected)
-    if result.error_classification != expected_error:
+    if result.error_classification != derived.error_classification:
         raise ValueError("IBKR request-result error classification does not replay")
 
 
@@ -285,25 +259,6 @@ def _build_request_result(
     selected_id = request_snapshot.selected_attempt_id
     if selected_id is None:
         raise ValueError("IBKR terminal request has no selected attempt")
-    selected = next((item for item in attempts if item.attempt_id == selected_id), None)
-    if selected is None:
-        raise ValueError("IBKR selected attempt is absent from the publication snapshot")
-    if selected.terminal_at is None:
-        raise ValueError("IBKR selected attempt is unfinished")
-    if request_snapshot.status is IbkrRequestStatus.SUCCEEDED:
-        if (
-            selected.status is not IbkrAttemptStatus.SUCCEEDED
-            or selected.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED
-        ):
-            raise ValueError("successful IBKR request has an invalid selected attempt")
-        disposition = IbkrTerminalDisposition.SUCCEEDED
-    else:
-        if (
-            selected.status is not IbkrAttemptStatus.TERMINAL_FAILURE
-            or selected.terminal_disposition in {None, IbkrTerminalDisposition.SUCCEEDED}
-        ):
-            raise ValueError("terminal IBKR request has an invalid selected attempt")
-        disposition = cast(IbkrTerminalDisposition, selected.terminal_disposition)
     callbacks = tuple(
         sorted(
             (
@@ -324,67 +279,304 @@ def _build_request_result(
             key=lambda item: (str(item.attempt_id), item.sequence, item.marker_id),
         )
     )
-    selected_markers = _eligible_markers_for_evidence(markers, selected)
-    if request_snapshot.status is IbkrRequestStatus.SUCCEEDED and len(selected_markers) != 1:
-        raise ValueError("successful IBKR request has no unique eligible completion marker")
-    completion = selected_markers[0] if selected_markers else None
-    accepted_callbacks = _accepted_callbacks(callbacks, selected, completion)
-    if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-        rows = (
-            _normalise_bars(request, accepted_callbacks)
-            if request_snapshot.status is IbkrRequestStatus.SUCCEEDED
-            else ()
-        )
-        if request_snapshot.status is IbkrRequestStatus.SUCCEEDED and not rows:
-            raise ValueError("successful IBKR bar request returned no accepted rows")
-        sessions: tuple[dict[str, JsonValue], ...] = ()
-        session_state = None
-    else:
-        rows = ()
-        sessions, session_state = (
-            _normalise_schedule(request, accepted_callbacks)
-            if request_snapshot.status is IbkrRequestStatus.SUCCEEDED
-            else ((), "UNKNOWN")
-        )
+    derived = _derive_request_evidence(
+        request=request,
+        request_status=request_snapshot.status,
+        selected_attempt_id=selected_id,
+        attempts=attempts,
+        callbacks=callbacks,
+        completion_markers=markers,
+    )
+    selected_terminal_at = derived.selected.terminal_at
+    if selected_terminal_at is None:
+        raise ValueError("IBKR selected attempt is unfinished")
     start = min(item.started_at for item in attempts)
-    error = _error_classification(request_snapshot.status, selected)
     identity = _request_identity(
         plan_sha256=request_snapshot.plan_sha256,
         request_sha256=request_snapshot.request_sha256,
         request_payload=request_snapshot.request_payload,
         request_status=request_snapshot.status,
-        terminal_disposition=disposition,
+        terminal_disposition=derived.terminal_disposition,
+        evidence_disposition=derived.evidence_disposition,
         selected_attempt_id=selected_id,
         attempts=attempts,
         callbacks=callbacks,
         completion_markers=markers,
-        accepted_rows=rows,
-        sessions=sessions,
-        session_state=session_state,
+        accepted_rows=derived.accepted_rows,
+        sessions=derived.sessions,
+        session_state=derived.session_state,
         acquisition_started_at=start,
-        acquisition_completed_at=selected.terminal_at,
+        acquisition_completed_at=selected_terminal_at,
         retry_history=_retry_history(attempts),
-        error_classification=error,
+        error_classification=derived.error_classification,
     )
     return IbkrHistoricalRequestResult(
         plan_sha256=request_snapshot.plan_sha256,
         request_sha256=request_snapshot.request_sha256,
         request_payload=request_snapshot.request_payload,
         request_status=request_snapshot.status,
-        terminal_disposition=disposition,
+        terminal_disposition=derived.terminal_disposition,
+        evidence_disposition=derived.evidence_disposition,
         selected_attempt_id=selected_id,
         attempts=attempts,
         callbacks=callbacks,
         completion_markers=markers,
+        accepted_rows=derived.accepted_rows,
+        sessions=derived.sessions,
+        session_state=derived.session_state,
+        acquisition_started_at=start,
+        acquisition_completed_at=selected_terminal_at,
+        retry_history=_retry_history(attempts),
+        error_classification=derived.error_classification,
+        result_sha256=_sha256_json(identity),
+    )
+
+
+def _derive_request_evidence(
+    *,
+    request: IbkrHistoricalRequest,
+    request_status: IbkrRequestStatus,
+    selected_attempt_id: UUID,
+    attempts: Sequence[IbkrHistoricalAttemptEvidence],
+    callbacks: Sequence[IbkrHistoricalCallbackEvidence],
+    completion_markers: Sequence[IbkrHistoricalCompletionEvidence],
+) -> _DerivedRequestEvidence:
+    ordered_attempts = tuple(sorted(attempts, key=lambda item: item.attempt_ordinal))
+    _validate_attempt_sequence(ordered_attempts)
+    attempt_ids = {item.attempt_id for item in ordered_attempts}
+    ordered_callbacks = tuple(
+        sorted(callbacks, key=lambda item: (str(item.attempt_id), item.sequence, item.callback_id))
+    )
+    ordered_markers = tuple(
+        sorted(
+            completion_markers,
+            key=lambda item: (str(item.attempt_id), item.sequence, item.marker_id),
+        )
+    )
+    if any(item.attempt_id not in attempt_ids for item in ordered_callbacks):
+        raise ValueError("IBKR request-result contains an orphan callback")
+    if any(item.attempt_id not in attempt_ids for item in ordered_markers):
+        raise ValueError("IBKR request-result contains an orphan completion marker")
+    _validate_callback_closure(ordered_attempts, ordered_callbacks, ordered_markers)
+
+    successful_attempts = tuple(
+        item
+        for item in ordered_attempts
+        if item.status is IbkrAttemptStatus.SUCCEEDED
+        and item.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED
+    )
+    if successful_attempts:
+        if request_status is not IbkrRequestStatus.SUCCEEDED:
+            raise ValueError("successful attempt is inconsistent with terminal request status")
+        selected = successful_attempts[0]
+        if any(item.attempt_ordinal > selected.attempt_ordinal for item in ordered_attempts):
+            raise ValueError("IBKR attempt sequence continues after the first successful attempt")
+        terminal_disposition = IbkrTerminalDisposition.SUCCEEDED
+    else:
+        if request_status is not IbkrRequestStatus.TERMINAL:
+            raise ValueError("terminal request has no terminal failure attempt")
+        selected = ordered_attempts[-1]
+        if selected.status is not IbkrAttemptStatus.TERMINAL_FAILURE:
+            raise ValueError("terminal request does not select its final terminal failure attempt")
+        if selected.terminal_disposition in {None, IbkrTerminalDisposition.SUCCEEDED}:
+            raise ValueError("terminal request selected attempt has no failure disposition")
+        terminal_disposition = cast(IbkrTerminalDisposition, selected.terminal_disposition)
+    if selected.attempt_id != selected_attempt_id:
+        raise ValueError(
+            "IBKR request-result selected attempt is not the first valid terminal outcome"
+        )
+
+    eligible_markers = _eligible_markers_for_evidence(ordered_markers, selected)
+    if len(eligible_markers) > 1:
+        raise ValueError("IBKR request-result has multiple eligible completion markers")
+    completion = eligible_markers[0] if eligible_markers else None
+    eligible_callbacks = _accepted_callbacks(ordered_callbacks, selected, completion)
+
+    if request_status is IbkrRequestStatus.TERMINAL:
+        evidence_disposition = _evidence_for_terminal(terminal_disposition)
+        rows, sessions, session_state = _empty_result_values(request)
+        error_detail = selected.detail
+    elif any(callback.kind is IbkrHistoricalCallbackKind.ERROR for callback in eligible_callbacks):
+        evidence_disposition = IbkrHistoricalEvidenceDisposition.PROVIDER_REJECTED
+        rows, sessions, session_state = _empty_result_values(request)
+        error_detail = "provider emitted an error callback before completion"
+    elif completion is None:
+        evidence_disposition = IbkrHistoricalEvidenceDisposition.INCOMPLETE_RESPONSE
+        rows, sessions, session_state = _empty_result_values(request)
+        error_detail = "successful request has no independently eligible completion marker"
+    else:
+        try:
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+                rows = _normalise_bars(request, eligible_callbacks)
+                sessions, session_state = (), None
+                evidence_disposition = (
+                    IbkrHistoricalEvidenceDisposition.SUCCEEDED
+                    if rows
+                    else IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED
+                )
+            else:
+                rows = ()
+                sessions, session_state = _normalise_schedule(request, eligible_callbacks)
+                evidence_disposition = IbkrHistoricalEvidenceDisposition.SUCCEEDED
+            error_detail = None
+        except _EvidenceConflict as error:
+            evidence_disposition = IbkrHistoricalEvidenceDisposition.CONFLICTING_CALLBACK_EVIDENCE
+            rows, sessions, session_state = _empty_result_values(request)
+            error_detail = str(error)
+        except _EvidenceUnavailable as error:
+            evidence_disposition = IbkrHistoricalEvidenceDisposition.SESSION_EVIDENCE_UNAVAILABLE
+            rows, sessions, session_state = _empty_result_values(request)
+            error_detail = str(error)
+        except _EvidenceInvalid as error:
+            evidence_disposition = IbkrHistoricalEvidenceDisposition.INVALID_CALLBACK_EVIDENCE
+            rows, sessions, session_state = _empty_result_values(request)
+            error_detail = str(error)
+        except ValueError as error:
+            evidence_disposition = IbkrHistoricalEvidenceDisposition.INVALID_CALLBACK_EVIDENCE
+            rows, sessions, session_state = _empty_result_values(request)
+            error_detail = str(error)
+    return _DerivedRequestEvidence(
+        selected=selected,
+        terminal_disposition=terminal_disposition,
+        evidence_disposition=evidence_disposition,
+        callbacks=ordered_callbacks,
+        completion_markers=ordered_markers,
         accepted_rows=rows,
         sessions=sessions,
         session_state=session_state,
-        acquisition_started_at=start,
-        acquisition_completed_at=selected.terminal_at,
-        retry_history=_retry_history(attempts),
-        error_classification=error,
-        result_sha256=_sha256_json(identity),
+        error_classification=_error_classification(evidence_disposition, selected, error_detail),
     )
+
+
+def _validate_attempt_sequence(
+    attempts: Sequence[IbkrHistoricalAttemptEvidence],
+) -> None:
+    if not attempts:
+        raise ValueError("IBKR request-result requires attempt evidence")
+    if tuple(item.attempt_ordinal for item in attempts) != tuple(range(1, len(attempts) + 1)):
+        raise ValueError("IBKR request-result attempt ordinals are not contiguous")
+    if len({item.attempt_id for item in attempts}) != len(attempts):
+        raise ValueError("IBKR request-result attempt identities are duplicated")
+    for index, attempt in enumerate(attempts):
+        if (
+            attempt.status is IbkrAttemptStatus.STARTED
+            or attempt.terminal_at is None
+            or attempt.terminal_disposition is None
+        ):
+            raise ValueError("published IBKR attempt is not a completed state transition")
+        if attempt.status is IbkrAttemptStatus.SUCCEEDED:
+            if attempt.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED:
+                raise ValueError("successful IBKR attempt has a failure disposition")
+        elif attempt.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED:
+            raise ValueError("failed IBKR attempt has a successful disposition")
+        if index:
+            previous_terminal_at = attempts[index - 1].terminal_at
+            if previous_terminal_at is None:
+                raise ValueError("previous IBKR attempt transition is unfinished")
+            if previous_terminal_at > attempt.started_at:
+                raise ValueError("IBKR attempt transitions overlap or are out of order")
+
+
+def _validate_callback_closure(
+    attempts: Sequence[IbkrHistoricalAttemptEvidence],
+    callbacks: Sequence[IbkrHistoricalCallbackEvidence],
+    markers: Sequence[IbkrHistoricalCompletionEvidence],
+) -> None:
+    for attempt in attempts:
+        attempt_callbacks = tuple(
+            item for item in callbacks if item.attempt_id == attempt.attempt_id
+        )
+        sequences = tuple(item.sequence for item in attempt_callbacks)
+        if sequences != tuple(range(1, len(attempt_callbacks) + 1)):
+            raise ValueError("IBKR callback sequences are not unique and monotonic")
+        if any(
+            previous.received_at > current.received_at
+            for previous, current in pairwise(attempt_callbacks)
+        ):
+            raise ValueError("IBKR callback received times are not monotonic")
+        attempt_markers = tuple(item for item in markers if item.attempt_id == attempt.attempt_id)
+        matching_markers: list[IbkrHistoricalCompletionEvidence] = []
+        for marker in attempt_markers:
+            matching_callbacks = tuple(
+                callback
+                for callback in attempt_callbacks
+                if callback.sequence == marker.sequence
+                and callback.kind is IbkrHistoricalCallbackKind.COMPLETION
+            )
+            if (
+                len(matching_callbacks) != 1
+                or marker.completed_at < matching_callbacks[0].received_at
+                or (
+                    marker.closure_eligible
+                    and (attempt.terminal_at is None or marker.completed_at != attempt.terminal_at)
+                )
+            ):
+                raise ValueError(
+                    "IBKR completion marker does not match its raw completion callback"
+                )
+            expected = (
+                _completion_matches_attempt(marker, attempt)
+                and attempt.terminal_at is not None
+                and marker.completed_at <= attempt.terminal_at
+            )
+            if marker.closure_eligible != expected:
+                raise ValueError("IBKR completion marker eligibility does not replay")
+            if marker.closure_eligible:
+                matching_markers.append(marker)
+        if len(matching_markers) > 1:
+            raise ValueError("IBKR attempt has multiple eligible completion markers")
+        completion = matching_markers[0] if matching_markers else None
+        for callback in attempt_callbacks:
+            expected = _callback_matches_attempt(callback, attempt)
+            if completion is not None:
+                expected = (
+                    expected
+                    and callback.sequence <= completion.sequence
+                    and callback.received_at <= completion.completed_at
+                )
+            elif attempt.terminal_at is not None:
+                expected = expected and callback.received_at <= attempt.terminal_at
+            if callback.closure_eligible != expected:
+                raise ValueError("IBKR callback eligibility does not replay")
+        for marker in attempt_markers:
+            expected_midpoint = sum(
+                callback.closure_eligible
+                and callback.sequence < marker.sequence
+                and callback.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR
+                for callback in attempt_callbacks
+            )
+            expected_schedule = sum(
+                callback.closure_eligible
+                and callback.sequence < marker.sequence
+                and callback.kind is IbkrHistoricalCallbackKind.SCHEDULE
+                for callback in attempt_callbacks
+            )
+            if marker.raw_midpoint_bar_callback_count != expected_midpoint:
+                raise ValueError("IBKR completion midpoint count does not replay")
+            if marker.raw_schedule_callback_count != expected_schedule:
+                raise ValueError("IBKR completion schedule count does not replay")
+
+
+def _empty_result_values(
+    request: IbkrHistoricalRequest,
+) -> tuple[
+    tuple[dict[str, JsonValue], ...],
+    tuple[dict[str, JsonValue], ...],
+    str | None,
+]:
+    return (
+        ((), (), None)
+        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+        else ((), (), "UNKNOWN")
+    )
+
+
+def _evidence_for_terminal(
+    disposition: IbkrTerminalDisposition,
+) -> IbkrHistoricalEvidenceDisposition:
+    if disposition is IbkrTerminalDisposition.SUCCEEDED:
+        raise ValueError("terminal request cannot have SUCCEEDED disposition")
+    return IbkrHistoricalEvidenceDisposition(disposition.value)
 
 
 def _validate_snapshot_plan(
@@ -410,43 +602,87 @@ def _aggregate_summaries(
 ) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
     result_by_hash = {item.request_sha256: item for item in results}
     per_instrument: dict[str, dict[str, JsonValue]] = {}
-    disposition_counts: dict[str, int] = defaultdict(int)
-    eligible: list[JsonValue] = []
+    evidence_disposition_counts: dict[str, int] = defaultdict(int)
+    operational_disposition_counts: dict[str, int] = defaultdict(int)
     for request in plan.requests:
         result = result_by_hash[request.request_sha256]
         instrument = str(request.instrument_id)
         entry = per_instrument.setdefault(
             instrument,
             {
-                "bar_request_status": None,
-                "bar_disposition": None,
+                "bar_planned_request_count": 0,
+                "bar_terminal_request_count": 0,
+                "bar_successful_request_count": 0,
+                "bar_no_data_request_count": 0,
+                "bar_failed_request_count": 0,
                 "bar_rows": 0,
-                "schedule_request_status": None,
-                "schedule_disposition": None,
+                "schedule_planned_request_count": 0,
+                "schedule_terminal_request_count": 0,
+                "schedule_successful_request_count": 0,
+                "schedule_no_data_request_count": 0,
+                "schedule_failed_request_count": 0,
                 "schedule_sessions": 0,
             },
         )
-        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            entry["bar_request_status"] = result.request_status.value
-            entry["bar_disposition"] = result.terminal_disposition.value
-            entry["bar_rows"] = len(result.accepted_rows)
+        prefix = "bar" if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "schedule"
+        planned_key = f"{prefix}_planned_request_count"
+        terminal_key = f"{prefix}_terminal_request_count"
+        successful_key = f"{prefix}_successful_request_count"
+        no_data_key = f"{prefix}_no_data_request_count"
+        failed_key = f"{prefix}_failed_request_count"
+        entry[planned_key] = cast(int, entry[planned_key]) + 1
+        if result.request_status in {IbkrRequestStatus.SUCCEEDED, IbkrRequestStatus.TERMINAL}:
+            entry[terminal_key] = cast(int, entry[terminal_key]) + 1
+        if result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED:
+            entry[successful_key] = cast(int, entry[successful_key]) + 1
+        elif result.evidence_disposition is IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED:
+            entry[no_data_key] = cast(int, entry[no_data_key]) + 1
         else:
-            entry["schedule_request_status"] = result.request_status.value
-            entry["schedule_disposition"] = result.terminal_disposition.value
-            entry["schedule_sessions"] = len(result.sessions)
-        disposition_counts[result.terminal_disposition.value] += 1
+            entry[failed_key] = cast(int, entry[failed_key]) + 1
+        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+            entry["bar_rows"] = cast(int, entry["bar_rows"]) + len(result.accepted_rows)
+        else:
+            entry["schedule_sessions"] = cast(int, entry["schedule_sessions"]) + len(
+                result.sessions
+            )
+        evidence_disposition_counts[result.evidence_disposition.value] += 1
+        operational_disposition_counts[result.terminal_disposition.value] += 1
+
+    eligible: list[JsonValue] = []
     for instrument, entry in sorted(per_instrument.items()):
+        bar_planned = cast(int, entry["bar_planned_request_count"])
+        schedule_planned = cast(int, entry["schedule_planned_request_count"])
         if (
-            entry["bar_request_status"] == IbkrRequestStatus.SUCCEEDED.value
-            and entry["schedule_request_status"] == IbkrRequestStatus.SUCCEEDED.value
-            and int(cast(int, entry["bar_rows"])) > 0
+            bar_planned > 0
+            and schedule_planned > 0
+            and cast(int, entry["bar_terminal_request_count"]) == bar_planned
+            and cast(int, entry["schedule_terminal_request_count"]) == schedule_planned
+            and cast(int, entry["bar_successful_request_count"]) == bar_planned
+            and cast(int, entry["schedule_successful_request_count"]) == schedule_planned
+            and cast(int, entry["bar_rows"]) > 0
         ):
             eligible.append(instrument)
     coverage: dict[str, JsonValue] = {
         "planned_request_count": len(plan.requests),
         "terminal_request_count": len(results),
-        "successful_request_count": sum(
+        "operational_successful_request_count": sum(
             item.request_status is IbkrRequestStatus.SUCCEEDED for item in results
+        ),
+        "successful_request_count": sum(
+            item.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
+            for item in results
+        ),
+        "no_data_request_count": sum(
+            item.evidence_disposition is IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED
+            for item in results
+        ),
+        "failed_request_count": sum(
+            item.evidence_disposition
+            not in {
+                IbkrHistoricalEvidenceDisposition.SUCCEEDED,
+                IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED,
+            }
+            for item in results
         ),
         "accepted_bar_row_count": sum(len(item.accepted_rows) for item in results),
         "provider_session_count": sum(len(item.sessions) for item in results),
@@ -455,7 +691,8 @@ def _aggregate_summaries(
         },
     }
     entitlement: dict[str, JsonValue] = {
-        "disposition_counts": dict(sorted(disposition_counts.items())),
+        "disposition_counts": dict(sorted(evidence_disposition_counts.items())),
+        "operational_disposition_counts": dict(sorted(operational_disposition_counts.items())),
         "provider_history_eligible_instruments": eligible,
     }
     return coverage, entitlement
@@ -488,13 +725,6 @@ def _eligible_markers_for_evidence(
         and marker.closure_eligible
         and _completion_matches_attempt(marker, selected)
     )
-
-
-def _eligible_markers(
-    result: IbkrHistoricalRequestResult,
-    selected: IbkrHistoricalAttemptEvidence,
-) -> tuple[IbkrHistoricalCompletionEvidence, ...]:
-    return _eligible_markers_for_evidence(result.completion_markers, selected)
 
 
 def _callback_matches_attempt(
@@ -531,7 +761,7 @@ def _normalise_bars(
         if timestamp < request.interval_start or timestamp >= request.interval_end:
             continue
         if timestamp.second != 0 or timestamp.microsecond != 0:
-            raise ValueError("IBKR historical bar timestamp is not minute-aligned")
+            raise _EvidenceInvalid("IBKR historical bar timestamp is not minute-aligned")
         values = {
             key: _canonical_decimal(callback.payload[key], f"historical bar {key}")
             for key in _OHLC_KEYS
@@ -545,7 +775,7 @@ def _normalise_bars(
             or decimals["open"] > decimals["high"]
             or decimals["close"] > decimals["high"]
         ):
-            raise ValueError("IBKR historical callback contains invalid OHLC")
+            raise _EvidenceInvalid("IBKR historical callback contains invalid OHLC")
         row: dict[str, JsonValue] = {
             "bar_start": timestamp.isoformat().replace("+00:00", "Z"),
             "bar_end": min(timestamp + _MINUTE, request.interval_end)
@@ -565,7 +795,9 @@ def _normalise_bars(
             if {key: value for key, value in previous.items() if key != "callback_sequence"} != {
                 key: value for key, value in row.items() if key != "callback_sequence"
             }:
-                raise ValueError("IBKR historical callback contains conflicting duplicate OHLC")
+                raise _EvidenceConflict(
+                    "IBKR historical callback contains conflicting duplicate OHLC"
+                )
             continue
         by_start[timestamp] = row
     return tuple(by_start[key] for key in sorted(by_start))
@@ -575,66 +807,91 @@ def _normalise_schedule(
     request: IbkrHistoricalRequest,
     callbacks: Sequence[IbkrHistoricalCallbackEvidence],
 ) -> tuple[tuple[dict[str, JsonValue], ...], str]:
-    sessions: list[dict[str, JsonValue]] = []
-    declared_activity: list[bool] = []
+    sessions_by_interval: dict[tuple[datetime, datetime], dict[str, JsonValue]] = {}
+    activity_declarations: set[bool] = set()
+    saw_nonempty_sessions = False
+    saw_schedule_callback = False
     for callback in callbacks:
         if callback.kind is not IbkrHistoricalCallbackKind.SCHEDULE:
             continue
+        saw_schedule_callback = True
         payload = callback.payload
         session_values = payload.get("sessions")
         if session_values is None:
-            active = _optional_bool(payload, _SESSION_ACTIVE_KEYS)
+            try:
+                active = _optional_bool(payload, _SESSION_ACTIVE_KEYS)
+            except ValueError as error:
+                raise _EvidenceUnavailable(str(error)) from error
             if active is None:
-                raise ValueError("IBKR schedule callback has no structural session evidence")
-            declared_activity.append(active)
+                raise _EvidenceUnavailable(
+                    "IBKR schedule callback has no structural session evidence"
+                )
+            if activity_declarations and active not in activity_declarations:
+                raise _EvidenceConflict("IBKR schedule activity declarations conflict")
+            activity_declarations.add(active)
             continue
         if not isinstance(session_values, list):
-            raise ValueError("IBKR schedule sessions must be an array")
+            raise _EvidenceUnavailable("IBKR schedule sessions must be an array")
         if not session_values:
-            declared_activity.append(False)
+            if activity_declarations and True in activity_declarations:
+                raise _EvidenceConflict("IBKR schedule activity declarations conflict")
+            activity_declarations.add(False)
             continue
+        saw_nonempty_sessions = True
         for raw_session in session_values:
             if not isinstance(raw_session, Mapping):
-                raise ValueError("IBKR schedule session must be an object")
+                raise _EvidenceUnavailable("IBKR schedule session must be an object")
             session = cast(Mapping[str, JsonValue], raw_session)
             start_value = _first_present(session, _SESSION_START_KEYS)
             end_value = _first_present(session, _SESSION_END_KEYS)
             active_value = _first_present(session, _SESSION_ACTIVE_KEYS)
             if start_value is None or end_value is None or active_value is None:
-                raise ValueError("IBKR schedule session lacks required fields")
-            start = _provider_datetime(start_value, "schedule session start")
-            end = _provider_datetime(end_value, "schedule session end")
+                raise _EvidenceUnavailable("IBKR schedule session lacks required fields")
+            try:
+                start = _provider_datetime(start_value, "schedule session start")
+                end = _provider_datetime(end_value, "schedule session end")
+                active = _bool_value(active_value, "schedule session active")
+            except ValueError as error:
+                raise _EvidenceUnavailable(str(error)) from error
             if end <= start:
-                raise ValueError("IBKR schedule session interval is invalid")
-            active = _bool_value(active_value, "schedule session active")
+                raise _EvidenceUnavailable("IBKR schedule session interval is invalid")
             clipped_start = max(start, request.interval_start)
             clipped_end = min(end, request.interval_end)
             if clipped_start >= clipped_end:
                 continue
-            declared_activity.append(active)
-            sessions.append(
-                {
-                    "interval_start": clipped_start.isoformat().replace("+00:00", "Z"),
-                    "interval_end": clipped_end.isoformat().replace("+00:00", "Z"),
-                    "active": active,
-                    "callback_sequence": callback.sequence,
-                    "provider_session": dict(session),
-                }
-            )
-    if not callbacks or not any(
-        callback.kind is IbkrHistoricalCallbackKind.SCHEDULE for callback in callbacks
-    ):
-        raise ValueError("successful IBKR schedule request has no schedule callback")
-    if not declared_activity:
-        raise ValueError("IBKR schedule callback has no declared activity")
-    state = "ACTIVE" if any(declared_activity) else "INACTIVE"
-    sessions.sort(
-        key=lambda item: (
-            str(item["interval_start"]),
-            cast(int, item["callback_sequence"]),
+            interval = (clipped_start, clipped_end)
+            existing = sessions_by_interval.get(interval)
+            if existing is not None:
+                if bool(existing["active"]) is not active:
+                    raise _EvidenceConflict("IBKR schedule declarations conflict for one interval")
+                continue
+            if activity_declarations and active not in activity_declarations:
+                raise _EvidenceConflict("IBKR schedule activity declarations conflict")
+            sessions_by_interval[interval] = {
+                "interval_start": clipped_start.isoformat().replace("+00:00", "Z"),
+                "interval_end": clipped_end.isoformat().replace("+00:00", "Z"),
+                "active": active,
+                "callback_sequence": callback.sequence,
+                "provider_session": dict(session),
+            }
+    if not saw_schedule_callback:
+        raise _EvidenceUnavailable("successful IBKR schedule request has no schedule callback")
+    if saw_nonempty_sessions and not sessions_by_interval and not activity_declarations:
+        raise _EvidenceUnavailable("IBKR schedule sessions do not overlap the requested interval")
+    if not activity_declarations and not sessions_by_interval:
+        raise _EvidenceUnavailable("IBKR schedule callback has no declared activity")
+    activity_values = set(activity_declarations)
+    activity_values.update(bool(item["active"]) for item in sessions_by_interval.values())
+    if len(activity_values) > 1 and not sessions_by_interval:
+        raise _EvidenceConflict("IBKR schedule activity declarations conflict")
+    state = "ACTIVE" if any(activity_values) else "INACTIVE"
+    sessions = tuple(
+        sorted(
+            sessions_by_interval.values(),
+            key=lambda item: (str(item["interval_start"]), cast(int, item["callback_sequence"])),
         )
     )
-    return tuple(sessions), state
+    return sessions, state
 
 
 def _provider_epoch(payload: Mapping[str, JsonValue], field: str) -> datetime:
@@ -678,13 +935,13 @@ def _provider_datetime(value: JsonValue, field: str) -> datetime:
 
 def _canonical_decimal(value: JsonValue, field: str) -> str:
     if isinstance(value, bool) or value is None:
-        raise ValueError(f"{field} must be a finite decimal")
+        raise _EvidenceInvalid(f"{field} must be a finite decimal")
     try:
         parsed = Decimal(str(value))
     except (InvalidOperation, ValueError) as error:
-        raise ValueError(f"{field} must be a finite decimal") from error
+        raise _EvidenceInvalid(f"{field} must be a finite decimal") from error
     if not parsed.is_finite():
-        raise ValueError(f"{field} must be a finite decimal")
+        raise _EvidenceInvalid(f"{field} must be a finite decimal")
     text = format(parsed, "f")
     if "." in text:
         text = text.rstrip("0").rstrip(".")
@@ -713,16 +970,18 @@ def _retry_history(
 
 
 def _error_classification(
-    status: IbkrRequestStatus,
+    evidence_disposition: IbkrHistoricalEvidenceDisposition,
     selected: IbkrHistoricalAttemptEvidence,
+    detail: str | None,
 ) -> dict[str, JsonValue] | None:
-    if status is IbkrRequestStatus.SUCCEEDED:
+    if evidence_disposition in {
+        IbkrHistoricalEvidenceDisposition.SUCCEEDED,
+        IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED,
+    }:
         return None
-    if selected.terminal_disposition is None:
-        raise ValueError("terminal IBKR attempt lacks an error disposition")
     return {
-        "disposition": selected.terminal_disposition.value,
-        "detail": selected.detail,
+        "disposition": evidence_disposition.value,
+        "detail": detail if detail is not None else selected.detail,
     }
 
 
@@ -733,6 +992,7 @@ def _request_identity(
     request_payload: dict[str, JsonValue],
     request_status: IbkrRequestStatus,
     terminal_disposition: IbkrTerminalDisposition,
+    evidence_disposition: IbkrHistoricalEvidenceDisposition,
     selected_attempt_id: UUID,
     attempts: Sequence[IbkrHistoricalAttemptEvidence],
     callbacks: Sequence[IbkrHistoricalCallbackEvidence],
@@ -747,12 +1007,13 @@ def _request_identity(
 ) -> dict[str, JsonValue]:
     return {
         "contract": REQUEST_RESULT_CONTRACT,
-        "schema_version": 1,
+        "schema_version": IbkrHistoricalRequestResult.SCHEMA_VERSION,
         "plan_sha256": plan_sha256,
         "request_sha256": request_sha256,
         "request_payload": request_payload,
         "request_status": request_status.value,
         "terminal_disposition": terminal_disposition.value,
+        "evidence_disposition": evidence_disposition.value,
         "selected_attempt_id": str(selected_attempt_id),
         "attempts": [item.as_json_value() for item in attempts],
         "callbacks": [item.as_json_value() for item in callbacks],

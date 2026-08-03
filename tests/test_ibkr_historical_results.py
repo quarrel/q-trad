@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
 
 import pytest
 
-from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
+from qtrad.application.ibkr_results import (
+    build_ibkr_historical_result_artifact,
+    replay_ibkr_historical_request_result,
+)
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrAttemptStatus,
@@ -32,13 +35,19 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
     IbkrHistoricalCompletionEvidence,
+    IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalExecutionSnapshot,
     IbkrHistoricalPlanSnapshot,
+    IbkrHistoricalRequestResult,
     IbkrHistoricalRequestSnapshot,
     sha256_bytes,
 )
 from qtrad.domain.identifiers import InstrumentId
-from qtrad.runtime.ibkr_results import verify_ibkr_historical_result, write_ibkr_historical_result
+from qtrad.runtime.ibkr_results import (
+    publish_ibkr_historical_result,
+    verify_ibkr_historical_result,
+    write_ibkr_historical_result,
+)
 
 _START = datetime(2026, 2, 1, tzinfo=UTC)
 _END = _START + timedelta(minutes=2)
@@ -386,15 +395,15 @@ def test_result_verifier_rejects_missing_and_orphan_children(tmp_path: Path) -> 
         verify_ibkr_historical_result(manifest)
 
 
-def test_result_verifier_rejects_conflicting_bar_duplicate(tmp_path: Path) -> None:
+def test_result_builder_classifies_conflicting_bar_duplicate() -> None:
     plan, snapshot = _build_fixture()
     bar_attempt = snapshot.attempts[0]
     duplicate = _callback(
         callback_id=99,
         attempt=bar_attempt,
-        sequence=1,
+        sequence=2,
         kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
-        received_at=_START + timedelta(seconds=6),
+        received_at=_START + timedelta(seconds=2, microseconds=500_000),
         payload={
             "date": int((_START + timedelta(minutes=1)).timestamp()),
             "open": "1.1000",
@@ -403,9 +412,150 @@ def test_result_verifier_rejects_conflicting_bar_duplicate(tmp_path: Path) -> No
             "close": "1.1006",
         },
     )
-    conflicting = replace(snapshot, callbacks=(*snapshot.callbacks, duplicate))
-    with pytest.raises(ValueError, match="conflicting duplicate"):
-        build_ibkr_historical_result_artifact(plan, conflicting)
+    shifted_completion = replace(snapshot.callbacks[1], sequence=3)
+    shifted_marker = replace(
+        snapshot.completion_markers[0],
+        sequence=3,
+        raw_midpoint_bar_callback_count=2,
+    )
+    conflicting = replace(
+        snapshot,
+        callbacks=(
+            snapshot.callbacks[0],
+            duplicate,
+            shifted_completion,
+            *snapshot.callbacks[2:],
+        ),
+        completion_markers=(shifted_marker, snapshot.completion_markers[1]),
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, conflicting)
+    bar_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+    )
+    assert (
+        bar_result.evidence_disposition
+        is IbkrHistoricalEvidenceDisposition.CONFLICTING_CALLBACK_EVIDENCE
+    )
+    assert bar_result.accepted_rows == ()
+
+
+def test_result_builder_distinguishes_no_data_from_operational_success() -> None:
+    plan, snapshot = _build_fixture()
+    outside_bar = replace(
+        snapshot.callbacks[0],
+        payload={
+            **snapshot.callbacks[0].payload,
+            "date": int(_END.timestamp()),
+        },
+    )
+    no_data = replace(snapshot, callbacks=(outside_bar, *snapshot.callbacks[1:]))
+
+    artifact = build_ibkr_historical_result_artifact(plan, no_data)
+    bar_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+    )
+    assert bar_result.request_status is IbkrRequestStatus.SUCCEEDED
+    assert bar_result.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED
+    assert bar_result.evidence_disposition is IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED
+    assert bar_result.accepted_rows == ()
+    assert artifact.aggregate.coverage_summary["no_data_request_count"] == 1
+
+
+def test_result_builder_classifies_unavailable_schedule_evidence() -> None:
+    plan, snapshot = _build_fixture()
+    outside_schedule = replace(
+        snapshot.callbacks[2],
+        payload={
+            "sessions": [
+                {
+                    "start": utc_text(_END + timedelta(minutes=1)),
+                    "end": utc_text(_END + timedelta(minutes=2)),
+                    "active": True,
+                }
+            ]
+        },
+    )
+    unavailable = replace(
+        snapshot, callbacks=(*snapshot.callbacks[:2], outside_schedule, *snapshot.callbacks[3:])
+    )
+
+    artifact = build_ibkr_historical_result_artifact(plan, unavailable)
+    schedule_result = next(
+        item
+        for item in artifact.request_results
+        if item.request_payload["kind"] == IbkrHistoricalRequestKind.SCHEDULE.value
+    )
+    assert (
+        schedule_result.evidence_disposition
+        is IbkrHistoricalEvidenceDisposition.SESSION_EVIDENCE_UNAVAILABLE
+    )
+    assert schedule_result.session_state == "UNKNOWN"
+    assert schedule_result.sessions == ()
+
+
+def _rehash_result(
+    result: IbkrHistoricalRequestResult,
+    **changes: object,
+) -> IbkrHistoricalRequestResult:
+    mutated = object.__new__(IbkrHistoricalRequestResult)
+    for field in fields(result):
+        object.__setattr__(
+            mutated,
+            field.name,
+            changes.get(field.name, getattr(result, field.name)),
+        )
+    object.__setattr__(mutated, "result_sha256", sha256_json(mutated.identity_payload()))
+    return mutated
+
+
+def test_result_replay_rejects_mutated_closure_and_marker_counts() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+
+    mutated_callbacks = tuple(
+        replace(callback, closure_eligible=False)
+        if callback.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR
+        else callback
+        for callback in result.callbacks
+    )
+    mutated = _rehash_result(result, callbacks=mutated_callbacks)
+    with pytest.raises(ValueError, match="eligibility"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+    mutated_markers = tuple(
+        replace(marker, raw_midpoint_bar_callback_count=0)
+        if marker.attempt_id == result.selected_attempt_id
+        else marker
+        for marker in result.completion_markers
+    )
+    mutated = _rehash_result(result, completion_markers=mutated_markers)
+    with pytest.raises(ValueError, match="midpoint count"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    output = tmp_path / "staged-result"
+
+    manifest = publish_ibkr_historical_result(output, artifact)
+
+    assert verify_ibkr_historical_result(manifest).aggregate.aggregate_sha256 == (
+        artifact.aggregate.aggregate_sha256
+    )
+    with pytest.raises(FileExistsError):
+        publish_ibkr_historical_result(output, artifact)
 
 
 def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
