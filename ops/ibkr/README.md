@@ -4,9 +4,12 @@ These files are deployment templates for the separate paper, read-only IBKR runt
 licensed Gateway/API archives, IBC configuration, passwords, 2FA material or rendered environment
 files into Git.
 
-The continuous IBKR adapter and its operator API are not implemented in this milestone. The host
-entry point is therefore verification-only: it checks the invariants and never starts a Gateway,
-ingest or health service. The bounded capability probe remains the only executable IBKR operation.
+The continuous IBKR adapter and its operator API are not implemented. The direct official TWS
+historical adapter and bounded request-profile canary now exist in the application. Host deployment and
+account-gated qualification are still intentionally gated: the host entry point remains verification-only
+and never starts a Gateway, ingest or health service. The bounded capability probe and file-only
+canary/profile verifiers are the only executable IBKR operations until the Stage 5 deployment runbook is
+explicitly authorised.
 
 Before running the bounded probe:
 

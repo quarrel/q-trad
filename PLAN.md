@@ -47,8 +47,10 @@ work and records only the milestone sequence needed to reach the next trustworth
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,
   Stage 3 durable execution state-machine artefacts and Stage 4 create-only result publication/file-only
-  verification artefacts are implemented; no IBKR adapter, account capability, historical dataset or host
-  is implemented or qualified yet, and IBKR evidence cannot substantiate an IG-native conclusion.
+  verification artefacts are implemented. Stage 5 adapter, callback normalization, immutable canary
+  evidence and file-only canary/profile operations are implemented locally; account-gated review, host
+  deployment and request-profile canary evidence remain pending, and IBKR evidence cannot substantiate
+  an IG-native conclusion.
 
 ## Milestones
 

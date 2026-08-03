@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Deliberate guard: the continuous adapter/API does not exist in this milestone.
-echo "qtrad-ibkr-ingest is scaffolding only; no continuous IBKR adapter is implemented" >&2
+# Deliberate guard: the Stage 5 adapter/canary is implemented but host qualification is pending.
+echo "qtrad-ibkr-ingest is gated; no qualified continuous IBKR host operation is enabled" >&2
 exit 78
 
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"

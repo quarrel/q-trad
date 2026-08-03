@@ -91,6 +91,8 @@ class _Callback:
     values: tuple[object, ...]
     generation: int = -1
     arrival_sequence: int = 0
+    diagnostic: str | None = None
+    message_sha256: str | None = None
 
 
 class IbkrConnectionIntegrityError(RuntimeError):
@@ -895,6 +897,25 @@ def _official_client(
                 next(sequence),
             )
 
+        def historicalSchedule(
+            self,
+            reqId: int,
+            startDateTime: str,
+            endDateTime: str,
+            timeZone: str,
+            sessions: Sequence[object],
+        ) -> None:
+            _emit(
+                callbacks,
+                _Callback(
+                    "historical_schedule",
+                    reqId,
+                    (startDateTime, endDateTime, timeZone, tuple(sessions)),
+                ),
+                generation,
+                next(sequence),
+            )
+
         def headTimestamp(self, reqId: int, headTimestamp: str) -> None:
             _emit(
                 callbacks,
@@ -911,9 +932,20 @@ def _official_client(
             errorString: str,
             advancedOrderRejectJson: str,
         ) -> None:
+            classification = _error_classification(errorCode)
             _emit(
                 callbacks,
-                _Callback("error", reqId, (errorTime, errorCode, _error_classification(errorCode))),
+                _Callback(
+                    "error",
+                    reqId,
+                    (errorTime, errorCode, classification),
+                    diagnostic=f"IBKR_{errorCode}_{classification}",
+                    message_sha256=(
+                        hashlib.sha256(errorString.encode("utf-8")).hexdigest()
+                        if errorString
+                        else None
+                    ),
+                ),
                 generation,
                 next(sequence),
             )

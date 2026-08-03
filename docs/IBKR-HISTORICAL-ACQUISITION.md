@@ -667,6 +667,12 @@ qtrad historical ibkr verify \
 
 **Form:** provider-adapter pull request followed by an operational deployment.
 
+**Software status:** The direct official TWS historical adapter, contract reauthentication,
+generation-fenced MIDPOINT/SCHEDULE callback normalization, sanitized error evidence, bounded
+cancellation/timeout handling, immutable canary evidence and file-only canary/profile operations are
+implemented. Host deployment, account-gated reauthentication and the recorded request-profile canary
+remain operational exit work; this implementation does not claim a qualified host or historical data.
+
 Extend the shared IBKR session engine with:
 
 * contract-detail reauthentication;

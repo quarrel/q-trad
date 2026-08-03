@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 from uuid import UUID
 
+from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrHistoricalAttempt,
     IbkrHistoricalAttemptOutcome,
@@ -16,11 +18,49 @@ from qtrad.domain.ibkr_execution import (
     IbkrPlanRegistrationStatus,
 )
 from qtrad.domain.ibkr_historical import (
+    IbkrContractFingerprint,
     IbkrHistoricalPacingPolicy,
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
 )
 from qtrad.domain.ibkr_results import IbkrHistoricalExecutionSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrContractReauthentication:
+    """Immutable evidence for one contract-details reauthentication request."""
+
+    request_id: int
+    connection_generation: int
+    expected: IbkrContractFingerprint
+    observed: tuple[IbkrContractFingerprint, ...]
+    status: str
+    error_codes: tuple[int, ...] = ()
+    diagnostics: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        if self.request_id <= 0:
+            raise ValueError("IBKR reauthentication request ID must be positive")
+        if self.connection_generation <= 0:
+            raise ValueError("IBKR reauthentication generation must be positive")
+        if self.status not in {"MATCH", "MISMATCH", "TIMEOUT", "ERROR"}:
+            raise ValueError("IBKR reauthentication status is unsupported")
+        if any(code < 0 for code in self.error_codes):
+            raise ValueError("IBKR reauthentication error codes must be non-negative")
+        if any(not value or len(value) > 200 for value in self.diagnostics):
+            raise ValueError("IBKR reauthentication diagnostics must be bounded")
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {
+            "request_id": self.request_id,
+            "connection_generation": self.connection_generation,
+            "expected": self.expected.as_json_value(),
+            "observed": [value.as_json_value() for value in self.observed],
+            "status": self.status,
+            "error_codes": list(self.error_codes),
+            "diagnostics": list(self.diagnostics),
+        }
+
 
 IbkrHistoricalCallbackSink = Callable[[IbkrHistoricalCallback], Awaitable[None]]
 
@@ -165,6 +205,7 @@ class IbkrHistoricalPublicationStore(Protocol):
 
 
 __all__ = [
+    "IbkrContractReauthentication",
     "IbkrHistoricalCallbackSink",
     "IbkrHistoricalDataPort",
     "IbkrHistoricalExecutionStore",
