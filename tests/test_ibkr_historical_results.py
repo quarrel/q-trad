@@ -9,6 +9,7 @@ import pytest
 
 from qtrad.application.ibkr_results import (
     build_ibkr_historical_result_artifact,
+    replay_ibkr_historical_aggregate_result,
     replay_ibkr_historical_request_result,
 )
 from qtrad.domain.events import JsonValue
@@ -32,6 +33,7 @@ from qtrad.domain.ibkr_historical import (
     utc_text,
 )
 from qtrad.domain.ibkr_results import (
+    IbkrHistoricalAggregateResult,
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
     IbkrHistoricalCompletionEvidence,
@@ -40,6 +42,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalPlanSnapshot,
     IbkrHistoricalRequestResult,
     IbkrHistoricalRequestSnapshot,
+    canonical_json_bytes,
     sha256_bytes,
 )
 from qtrad.domain.identifiers import InstrumentId
@@ -509,6 +512,27 @@ def _rehash_result(
     return mutated
 
 
+def _rehash_aggregate(
+    aggregate: IbkrHistoricalAggregateResult,
+    request_results: tuple[IbkrHistoricalRequestResult, ...],
+) -> IbkrHistoricalAggregateResult:
+    sorted_results = tuple(sorted(request_results, key=lambda item: item.request_sha256))
+    child_refs = tuple(
+        replace(
+            child,
+            semantic_sha256=result.result_sha256,
+            bytes_sha256=sha256_bytes(canonical_json_bytes(result.as_json_value())),
+        )
+        for child, result in zip(aggregate.request_results, sorted_results, strict=True)
+    )
+    mutated = object.__new__(IbkrHistoricalAggregateResult)
+    for field in fields(aggregate):
+        object.__setattr__(mutated, field.name, getattr(aggregate, field.name))
+    object.__setattr__(mutated, "request_results", child_refs)
+    object.__setattr__(mutated, "aggregate_sha256", sha256_json(mutated.identity_payload()))
+    return mutated
+
+
 def test_result_replay_rejects_mutated_closure_and_marker_counts() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
@@ -813,3 +837,224 @@ def test_result_builder_classifies_overlapping_schedule_conflict() -> None:
         is IbkrHistoricalEvidenceDisposition.CONFLICTING_CALLBACK_EVIDENCE
     )
     assert schedule_result.session_state == "UNKNOWN"
+
+
+def test_result_replay_rejects_missing_completion_marker() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+    mutated = _rehash_result(result, completion_markers=())
+
+    with pytest.raises(ValueError, match="one-to-one"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_replay_rejects_success_without_completion_callback_or_marker() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+    callbacks = tuple(
+        callback
+        for callback in result.callbacks
+        if callback.kind is not IbkrHistoricalCallbackKind.COMPLETION
+    )
+    mutated = _rehash_result(result, callbacks=callbacks, completion_markers=())
+
+    with pytest.raises(ValueError, match="eligible completion marker"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_replay_rejects_duplicate_request_record_identities() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    request = next(
+        item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    result = next(
+        item for item in artifact.request_results if item.request_sha256 == request.request_sha256
+    )
+
+    duplicate_callback = replace(
+        result.callbacks[1],
+        callback_id=result.callbacks[0].callback_id,
+    )
+    mutated = _rehash_result(
+        result,
+        callbacks=(result.callbacks[0], duplicate_callback),
+    )
+    with pytest.raises(ValueError, match="callback identities"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+    duplicate_marker = replace(
+        result.completion_markers[0],
+        marker_id=result.completion_markers[0].marker_id,
+    )
+    mutated = _rehash_result(
+        result,
+        completion_markers=(result.completion_markers[0], duplicate_marker),
+    )
+    with pytest.raises(ValueError, match="completion marker identities"):
+        replay_ibkr_historical_request_result(request, mutated)
+
+
+def test_result_builder_reconciles_schedule_activity_order_independently() -> None:
+    plan, snapshot = _build_fixture()
+    active_session: dict[str, JsonValue] = {
+        "start": utc_text(_START),
+        "end": utc_text(_END),
+        "active": True,
+    }
+    inactive_session: dict[str, JsonValue] = {
+        "start": utc_text(_START),
+        "end": utc_text(_END),
+        "active": False,
+    }
+    cases: tuple[tuple[dict[str, JsonValue], dict[str, JsonValue]], ...] = (
+        ({"sessions": [active_session]}, {"active": False}),
+        ({"active": False}, {"sessions": [active_session]}),
+        ({"sessions": [active_session]}, {"sessions": []}),
+        ({"sessions": []}, {"sessions": [active_session]}),
+        ({"sessions": [inactive_session]}, {"active": True}),
+        ({"active": True}, {"sessions": [inactive_session]}),
+    )
+
+    for first_payload, second_payload in cases:
+        first_callback = replace(snapshot.callbacks[2], payload=first_payload)
+        second_callback = replace(
+            snapshot.callbacks[2],
+            callback_id=5,
+            sequence=2,
+            received_at=_START + timedelta(seconds=5),
+            payload=second_payload,
+        )
+        completion = replace(
+            snapshot.callbacks[3],
+            sequence=3,
+            received_at=_START + timedelta(seconds=6),
+        )
+        marker = replace(
+            snapshot.completion_markers[1],
+            sequence=3,
+            completed_at=completion.received_at,
+            raw_schedule_callback_count=2,
+        )
+        mutated = replace(
+            snapshot,
+            callbacks=(
+                snapshot.callbacks[0],
+                snapshot.callbacks[1],
+                first_callback,
+                second_callback,
+                completion,
+            ),
+            completion_markers=(snapshot.completion_markers[0], marker),
+        )
+        schedule_artifact = build_ibkr_historical_result_artifact(plan, mutated)
+        schedule_result = next(
+            item
+            for item in schedule_artifact.request_results
+            if item.request_payload["kind"] == IbkrHistoricalRequestKind.SCHEDULE.value
+        )
+        assert (
+            schedule_result.evidence_disposition
+            is IbkrHistoricalEvidenceDisposition.CONFLICTING_CALLBACK_EVIDENCE
+        )
+        assert schedule_result.session_state == "UNKNOWN"
+
+
+def test_aggregate_replay_rejects_duplicate_callback_identity_across_children() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    bar_result, schedule_result = artifact.request_results
+    duplicate_callback = replace(
+        schedule_result.callbacks[0],
+        callback_id=bar_result.callbacks[0].callback_id,
+    )
+    mutated_schedule = _rehash_result(
+        schedule_result,
+        callbacks=(duplicate_callback, *schedule_result.callbacks[1:]),
+    )
+    mutated_aggregate = _rehash_aggregate(
+        artifact.aggregate,
+        (bar_result, mutated_schedule),
+    )
+
+    with pytest.raises(ValueError, match="aggregate callback identities"):
+        replay_ibkr_historical_aggregate_result(
+            plan,
+            snapshot.plan.plan_bytes,
+            (bar_result, mutated_schedule),
+            mutated_aggregate,
+        )
+
+
+def test_aggregate_replay_rejects_duplicate_marker_identity_across_children() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    bar_result, schedule_result = artifact.request_results
+    duplicate_marker = replace(
+        schedule_result.completion_markers[0],
+        marker_id=bar_result.completion_markers[0].marker_id,
+    )
+    mutated_schedule = _rehash_result(
+        schedule_result,
+        completion_markers=(duplicate_marker,),
+    )
+    mutated_aggregate = _rehash_aggregate(
+        artifact.aggregate,
+        (bar_result, mutated_schedule),
+    )
+
+    with pytest.raises(ValueError, match="aggregate completion marker identities"):
+        replay_ibkr_historical_aggregate_result(
+            plan,
+            snapshot.plan.plan_bytes,
+            (bar_result, mutated_schedule),
+            mutated_aggregate,
+        )
+
+
+def test_aggregate_replay_rejects_duplicate_attempt_identity_across_children() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    bar_result, schedule_result = artifact.request_results
+    shared_attempt_id = bar_result.attempts[0].attempt_id
+    mutated_attempt = replace(schedule_result.attempts[0], attempt_id=shared_attempt_id)
+    mutated_callbacks = tuple(
+        replace(callback, attempt_id=shared_attempt_id) for callback in schedule_result.callbacks
+    )
+    mutated_markers = tuple(
+        replace(marker, attempt_id=shared_attempt_id)
+        for marker in schedule_result.completion_markers
+    )
+    retry_history = ({**schedule_result.retry_history[0], "attempt_id": str(shared_attempt_id)},)
+    mutated_schedule = _rehash_result(
+        schedule_result,
+        attempts=(mutated_attempt,),
+        callbacks=mutated_callbacks,
+        completion_markers=mutated_markers,
+        selected_attempt_id=shared_attempt_id,
+        retry_history=retry_history,
+    )
+    mutated_aggregate = _rehash_aggregate(
+        artifact.aggregate,
+        (bar_result, mutated_schedule),
+    )
+
+    with pytest.raises(ValueError, match="aggregate attempt identities"):
+        replay_ibkr_historical_aggregate_result(
+            plan,
+            snapshot.plan.plan_bytes,
+            (bar_result, mutated_schedule),
+            mutated_aggregate,
+        )

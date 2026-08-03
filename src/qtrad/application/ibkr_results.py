@@ -130,6 +130,7 @@ def build_ibkr_historical_aggregate_result(
     results_by_hash = {item.request_sha256: item for item in request_results}
     if set(results_by_hash) != {item.request_sha256 for item in plan.requests}:
         raise ValueError("IBKR aggregate result identities differ from the plan")
+    _validate_aggregate_result_record_identities(request_results)
     plan_ref = IbkrHistoricalChildReference(
         path="plan.json",
         contract=HISTORICAL_PLAN_CONTRACT,
@@ -165,6 +166,41 @@ def build_ibkr_historical_aggregate_result(
     )
 
 
+def _validate_request_result_record_identities(
+    result: IbkrHistoricalRequestResult,
+) -> None:
+    if len({item.attempt_id for item in result.attempts}) != len(result.attempts):
+        raise ValueError("IBKR request-result attempt identities are duplicated")
+    if len({item.callback_id for item in result.callbacks}) != len(result.callbacks):
+        raise ValueError("IBKR request-result callback identities are duplicated")
+    if len({item.marker_id for item in result.completion_markers}) != len(
+        result.completion_markers
+    ):
+        raise ValueError("IBKR request-result completion marker identities are duplicated")
+
+
+def _validate_aggregate_result_record_identities(
+    results: Sequence[IbkrHistoricalRequestResult],
+) -> None:
+    attempt_ids: set[UUID] = set()
+    callback_ids: set[int] = set()
+    marker_ids: set[int] = set()
+    for result in results:
+        _validate_request_result_record_identities(result)
+        for attempt in result.attempts:
+            if attempt.attempt_id in attempt_ids:
+                raise ValueError("IBKR aggregate attempt identities are duplicated")
+            attempt_ids.add(attempt.attempt_id)
+        for callback in result.callbacks:
+            if callback.callback_id in callback_ids:
+                raise ValueError("IBKR aggregate callback identities are duplicated")
+            callback_ids.add(callback.callback_id)
+        for marker in result.completion_markers:
+            if marker.marker_id in marker_ids:
+                raise ValueError("IBKR aggregate completion marker identities are duplicated")
+            marker_ids.add(marker.marker_id)
+
+
 def replay_ibkr_historical_request_result(
     request: IbkrHistoricalRequest,
     result: IbkrHistoricalRequestResult,
@@ -175,6 +211,7 @@ def replay_ibkr_historical_request_result(
         raise ValueError("IBKR request-result identity does not match its plan request")
     if result.request_payload != request.as_json_value():
         raise ValueError("IBKR request-result request payload differs from its plan request")
+    _validate_request_result_record_identities(result)
     derived = _derive_request_evidence(
         request=request,
         request_status=result.request_status,
@@ -223,6 +260,7 @@ def replay_ibkr_historical_aggregate_result(
         raise ValueError("IBKR aggregate replay request closure differs from the plan")
     for request, result in zip(expected_requests, actual_results, strict=True):
         replay_ibkr_historical_request_result(request, result)
+    _validate_aggregate_result_record_identities(actual_results)
     expected = build_ibkr_historical_aggregate_result(plan, plan_bytes, request_results)
     if expected.as_json_value() != aggregate.as_json_value():
         raise ValueError("IBKR aggregate result does not replay from its children")
@@ -504,19 +542,23 @@ def _validate_callback_closure(
         ):
             raise ValueError("IBKR callback received times are not monotonic")
         attempt_markers = tuple(item for item in markers if item.attempt_id == attempt.attempt_id)
+        completion_callbacks = tuple(
+            callback
+            for callback in attempt_callbacks
+            if callback.kind is IbkrHistoricalCallbackKind.COMPLETION
+        )
+        if len(completion_callbacks) != len(attempt_markers):
+            raise ValueError("IBKR completion callbacks and markers are not one-to-one")
         matching_markers: list[IbkrHistoricalCompletionEvidence] = []
-        for marker in attempt_markers:
-            matching_callbacks = tuple(
-                callback
-                for callback in attempt_callbacks
-                if callback.sequence == marker.sequence
-                and callback.kind is IbkrHistoricalCallbackKind.COMPLETION
+        for completion_callback in completion_callbacks:
+            matching_markers_for_callback = tuple(
+                marker
+                for marker in attempt_markers
+                if marker.sequence == completion_callback.sequence
             )
-            if len(matching_callbacks) != 1:
-                raise ValueError(
-                    "IBKR completion marker does not match its raw completion callback"
-                )
-            completion_callback = matching_callbacks[0]
+            if len(matching_markers_for_callback) != 1:
+                raise ValueError("IBKR completion callbacks and markers are not one-to-one")
+            marker = matching_markers_for_callback[0]
             if (
                 marker.attempt_id != completion_callback.attempt_id
                 or marker.connection_session_id != completion_callback.connection_session_id
@@ -587,6 +629,10 @@ def _validate_attempt_outcomes(
             and marker.closure_eligible
             and _completion_matches_attempt(marker, attempt)
         )
+        if attempt.status is IbkrAttemptStatus.SUCCEEDED and len(eligible_markers) != 1:
+            raise ValueError(
+                "successful IBKR attempt requires exactly one eligible completion marker"
+            )
         if not eligible_markers:
             continue
         if len(eligible_markers) > 1:
@@ -958,8 +1004,17 @@ def _normalise_schedule(
         raise _EvidenceUnavailable("IBKR schedule sessions do not overlap the requested interval")
     if not activity_declarations and not sessions_by_interval:
         raise _EvidenceUnavailable("IBKR schedule callback has no declared activity")
+    structured_activity_values = {bool(item["active"]) for item in sessions_by_interval.values()}
+    if (
+        activity_declarations
+        and structured_activity_values
+        and len(activity_declarations | structured_activity_values) > 1
+    ):
+        raise _EvidenceConflict(
+            "IBKR schedule activity declarations conflict with structured sessions"
+        )
     activity_values = set(activity_declarations)
-    activity_values.update(bool(item["active"]) for item in sessions_by_interval.values())
+    activity_values.update(structured_activity_values)
     if len(activity_values) > 1 and not sessions_by_interval:
         raise _EvidenceConflict("IBKR schedule activity declarations conflict")
     state = "ACTIVE" if any(activity_values) else "INACTIVE"
