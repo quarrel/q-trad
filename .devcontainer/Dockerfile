@@ -16,11 +16,18 @@ COPY --from=node /usr/local/bin/node /usr/local/bin/node
 COPY --from=node /usr/local/lib/node_modules /usr/local/lib/node_modules
 
 RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && install -d -m 0755 /etc/apt/keyrings /etc/apt/sources.list.d \
+    && curl -fsSL \
+        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+        https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+    && chmod a+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+        >/etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
     && apt-get install -y --no-install-recommends \
         bash-completion \
         build-essential \
-        ca-certificates \
-        curl \
         dnsutils \
         docker-cli \
         docker-compose \
