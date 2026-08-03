@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from collections import defaultdict
 from collections.abc import Mapping
 from dataclasses import replace
@@ -10,8 +11,9 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
 
+import psycopg
 import pytest
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
@@ -1465,5 +1467,97 @@ async def test_postgres_selected_attempt_cannot_be_mutated_across_requests() -> 
                         "request_sha256": request_rows[0]["request_sha256"],
                     },
                 )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_result_snapshot_is_repeatable_read_under_mutation() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        plan, profile = _unique_plan()
+        await store.register_ibkr_historical_plan(
+            plan,
+            plan_bytes=ibkr_historical_plan_bytes(plan),
+            registered_at=_NOW,
+        )
+        await IbkrHistoricalExecutor(
+            store,
+            FakeHistoricalDataPort({kind.value: ["success"] for kind in IbkrHistoricalRequestKind}),
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+        snapshot_started = threading.Event()
+        mutation_done = threading.Event()
+
+        def pause_after_plan_snapshot(
+            _connection: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            if (
+                "SELECT PLAN_SHA256, PLAN_BYTES" not in statement.upper()
+                or snapshot_started.is_set()
+            ):
+                return
+            snapshot_started.set()
+            if not mutation_done.wait(timeout=30):
+                raise RuntimeError("concurrent publication mutation did not complete")
+
+        sync_database_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+
+        def mutate_publication_state() -> None:
+            try:
+                with (
+                    psycopg.connect(sync_database_url, autocommit=True) as connection,
+                    connection.cursor() as cursor,
+                ):
+                    if not snapshot_started.wait(timeout=30):
+                        raise RuntimeError("result snapshot did not start")
+                    cursor.execute(
+                        """
+                            UPDATE ops.ibkr_historical_requests
+                            SET publication_status = %s, result_sha256 = %s, published_at = %s
+                            WHERE plan_sha256 = %s
+                            """,
+                        ("PUBLISHED", "a" * 64, _NOW, plan.plan_sha256),
+                    )
+            finally:
+                mutation_done.set()
+
+        event.listen(engine.sync_engine, "after_cursor_execute", pause_after_plan_snapshot)
+        mutation_task = asyncio.create_task(asyncio.to_thread(mutate_publication_state))
+        try:
+            snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        finally:
+            event.remove(engine.sync_engine, "after_cursor_execute", pause_after_plan_snapshot)
+            await mutation_task
+
+        assert all(
+            request.publication_status is IbkrPublicationStatus.PENDING
+            for request in snapshot.requests
+        )
+        current_rows = await audit_store.query(
+            """
+            SELECT publication_status
+            FROM ops.ibkr_historical_requests
+            WHERE plan_sha256 = :plan_sha256
+            """,
+            {"plan_sha256": plan.plan_sha256},
+        )
+        assert all(row["publication_status"] == "PUBLISHED" for row in current_rows)
     finally:
         await engine.dispose()
