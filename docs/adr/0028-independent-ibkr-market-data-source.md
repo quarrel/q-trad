@@ -63,9 +63,14 @@ receive/persistence lineage. Refetches never overwrite retained evidence. Histor
 extrema do not establish a contemporaneous spread without separate validation against observed
 top-of-book capture.
 
-One-minute historical MIDPOINT acquisition is the initial research bootstrap. BID/ASK requests are
-bounded follow-up evidence. One-second history is limited to predeclared investigations; live
-streaming is the preferred high-frequency path.
+One-minute historical MIDPOINT OHLC acquisition is deliberately the initial research bootstrap.
+`MIDPOINT` names the price basis, while every retained bar contains open, high, low and close. It gives
+the first full-universe experiment the smallest broadly supported, internally consistent request set
+and therefore the fastest trustworthy test of whether simple cross-market forecasting information
+justifies continuing. This sequencing does not make midpoint OHLC sufficient for every later
+volatility, cost or execution question. BID/ASK OHLC requests are bounded follow-up evidence.
+One-second history is limited to predeclared investigations; live streaming is the preferred
+high-frequency path.
 
 Actual account access, bulk acquisition, host deployment and publication remain separately
 authorised operations. The normative staged gates are defined by

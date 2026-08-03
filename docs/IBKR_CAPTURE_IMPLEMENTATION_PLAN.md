@@ -286,8 +286,8 @@ qtrad instruments review
 ```
 
 Probe without ingestion: exact contracts, live/delayed/unavailable data, bid/ask/size fields,
-one-minute MIDPOINT/BID/ASK, bounded one-second support, earliest history, timezone/RTH behaviour,
-entitlement errors and completion latency.
+one-minute MIDPOINT/BID/ASK OHLC, bounded one-second support, earliest history, timezone/RTH
+behaviour, entitlement errors and completion latency.
 
 Exit gate: at least twenty exact mappings, or an explicitly accepted smaller universe with every
 unmatched or ambiguous concept quarantined. No mapping, price basis, product equivalence, session or
@@ -355,11 +355,17 @@ Fixture exit evidence proves:
 
 Acquire in order:
 
-1. 16–26 weeks of one-minute MIDPOINT, all-hours history for accepted contracts.
-2. Bounded BID and ASK history for the six confirmatory candidates, expanding only after semantics
-   and coverage are useful.
-3. One active-day, one-second MIDPOINT investigation for those candidates only when tied to a declared
-   feature or microstructure question.
+1. 16–26 weeks of one-minute MIDPOINT OHLC, all-hours history for accepted contracts.
+2. Bounded BID and ASK OHLC history for the six confirmatory candidates, expanding only after
+   semantics and coverage are useful.
+3. One active-day, one-second MIDPOINT OHLC investigation for those candidates only when tied to a
+   declared feature or microstructure question.
+
+`MIDPOINT` is the requested price basis, not a scalar close-only payload. The first full-universe phase
+retains open, high, low and close and uses MIDPOINT because it is the smallest broadly supported,
+internally consistent request set that can answer the initial R2 forecasting question quickly. This
+sequencing is an early evidence decision, not a claim that midpoint OHLC is sufficient for later
+specialised volatility, spread, slippage or execution work.
 
 Build and independently verify request/result manifests, provider-history observations with
 authenticated `available_at`, the versioned availability selector, panels, targets, folds and a thin
@@ -509,8 +515,8 @@ proceed concurrently under the existing R2 plan.
 **Software complete:** adapter, planner, live ingestion composition, provider-history foundation,
 independent verification and host lifecycle pass fixture evidence without claiming a dataset or host.
 
-**Historical bootstrap complete:** an immutable verified 16+ week one-minute MIDPOINT foundation can
-enter the frozen source-specific R2 workflow.
+**Historical bootstrap complete:** an immutable verified 16+ week one-minute MIDPOINT OHLC
+foundation can enter the frozen source-specific R2 workflow.
 
 **Capture complete:** the accepted universe streams into its independent canonical store with
 truthful health, reconnect recovery, backup and restore evidence, and the operator-authenticated

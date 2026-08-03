@@ -124,6 +124,27 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
 - **Approval:** approved and merged by PR #29.
 - **Amendment date:** 2026-07-29.
 
+### Amendment 4 — bounded Garman–Klass midpoint-OHLC ablation
+
+- **Original requirement:** the initial local volatility/range family used close-to-close realised
+  standard deviation, absolute returns and high-low ranges, and deferred specialised volatility
+  estimators until that simple family had been evaluated.
+- **Revised requirement:** the existing simple family remains the required baseline. Exactly one
+  specialised estimator, a midpoint-OHLC Garman–Klass variance proxy, is predeclared as an optional,
+  separately identified ablation. It is not part of the default `L1` feature set and does not gate
+  existing R2 software completion. Activating it requires a new immutable feature-set identity,
+  causal feature implementation and verification before selection freeze or holdout access.
+- **Rationale:** the retained bars already contain midpoint open, high, low and close. A single bounded
+  comparison can test whether intrabar range and open-to-close information adds useful chronological
+  signal without opening a general volatility-estimator search.
+- **Evidence impact:** existing feature, fit, forecast, evaluation and selection artefacts remain valid
+  for their declared schemas and do not contain this proxy. Any experiment that activates it must
+  rebuild and independently verify all affected downstream artefacts under new semantic identities;
+  prior outcomes cannot be relabelled.
+- **Approval:** explicitly approved by the user for documentation; implementation remains subject to
+  normal code and evidence review.
+- **Amendment date:** 2026-08-03.
+
 ---
 
 ## 3. Research questions
@@ -924,7 +945,27 @@ Initial features may include:
 - available interval count; and
 - window coverage ratio.
 
-Do not introduce multiple specialised volatility estimators until the simple family has been evaluated.
+The simple family remains the required baseline. The only predeclared specialised estimator is an
+optional Garman–Klass variance-proxy ablation over full midpoint OHLC bars:
+
+```text
+gk_variance_1m =
+    0.5 * log(high / low)^2
+    - (2 * log(2) - 1) * log(close / open)^2
+
+mean_gk_variance_L = mean(gk_variance_1m over configured window L)
+```
+
+Every contributing bar must come from the same authenticated MID price basis, listing and source
+lineage selected at the row's current cutoff. Open, high, low and close must be positive and satisfy
+the verified OHLC ordering. Invalid OHLC fails verification; absent intervals remain absent and reduce
+explicit coverage. The configured local-volatility/range coverage threshold applies, and no value is
+interpolated or forward-filled.
+
+The estimator identity, formula, aggregation, window and coverage policy participate in feature-set
+identity. Report it as a **midpoint-OHLC Garman–Klass variance proxy**, not observed volatility, spread,
+slippage or executable-price evidence. Do not introduce another specialised volatility estimator
+without a separately approved amendment.
 
 ### 10.5 Feature family C — time and availability state
 
@@ -1021,10 +1062,11 @@ Avoid combinatorial feature searches.
 The initial declared ladder is:
 
 ```text
-L0  local returns + time/availability
-L1  L0 + local volatility/range
-L2  L1 + spread, when eligible
-L3  L2 + quote imbalance, when eligible
+L0     local returns + time/availability
+L1     L0 + simple local volatility/range
+L1-GK  L1 + midpoint-OHLC Garman–Klass variance proxy, when explicitly activated
+L2     selected L1 variant + spread, when eligible
+L3     L2 + quote imbalance, when eligible
 
 P0  pooled model using the selected local feature set
 P1  P0 + pooled cross-asset context
@@ -1986,6 +2028,10 @@ The holdout command should be operationally distinct from OOF work to make accid
 - correction before cutoff is included;
 - ambiguous sources fail;
 - late gaps are retrospective only;
+- exact Garman–Klass formula and rolling aggregation replay when the optional ablation is active;
+- non-positive or invalidly ordered OHLC fails verification;
+- missing Garman–Klass intervals reduce explicit coverage and are never filled;
+- activating the Garman–Klass proxy changes feature and downstream semantic identities;
 - context aggregates exclude the target;
 - input order does not change identity;
 - holdout rows are absent from confirmatory OOF features;

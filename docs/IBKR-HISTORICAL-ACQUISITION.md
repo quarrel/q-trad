@@ -21,16 +21,23 @@ The initial acquisition range remains:
 [2026-02-01T00:00:00Z, 2026-08-02T00:00:00Z)
 ```
 
-The initial data request remains:
+The initial historical request remains:
 
 ```text
 bar size:       1 minute
-data type:      MIDPOINT
+whatToShow:     MIDPOINT
+bar payload:    full midpoint OHLC
 use RTH:        false
 format date:    epoch
 keep up to date:false
 session data:   SCHEDULE
 ```
+
+`MIDPOINT` names the IBKR price basis; it does not mean a close-only observation. Every accepted bar
+retains its midpoint open, high, low and close. This is deliberately the first full-universe bootstrap
+because it provides the smallest broadly supported, internally consistent request set for the fastest
+trustworthy R2 forecasting test while native quote history accumulates. It does not declare midpoint
+OHLC sufficient for every later volatility, spread, cost or execution question.
 
 Historical availability is explicitly **declared rather than measured**:
 
@@ -709,7 +716,7 @@ Four-week chunks may be selected if demonstrated reliable. They are not assumed 
 ### Exit criteria
 
 * Contract reauthentication succeeds or produces immutable mismatch evidence.
-* One-day MIDPOINT and `SCHEDULE` results independently verify.
+* One-day MIDPOINT OHLC and `SCHEDULE` results independently verify.
 * The request profile is based on recorded canary evidence.
 * No full 20-contract plan has yet been registered.
 
