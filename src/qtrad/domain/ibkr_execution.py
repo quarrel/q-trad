@@ -52,6 +52,7 @@ class IbkrTerminalDisposition(StrEnum):
     RETRY_LIMIT_EXHAUSTED = "RETRY_LIMIT_EXHAUSTED"
     PROVIDER_REJECTED = "PROVIDER_REJECTED"
     SESSION_EVIDENCE_UNAVAILABLE = "SESSION_EVIDENCE_UNAVAILABLE"
+    INCOMPLETE_RESPONSE = "INCOMPLETE_RESPONSE"
 
 
 class IbkrPublicationStatus(StrEnum):
@@ -68,12 +69,15 @@ class IbkrPlanRegistrationStatus(StrEnum):
 class IbkrHistoricalCallback:
     """One callback as received from a historical-data transport."""
 
+    provider_request_id: int
     connection_generation: int
     kind: IbkrHistoricalCallbackKind
     received_at: datetime
     payload: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
+        if self.provider_request_id <= 0:
+            raise ValueError("IBKR callback provider request ID must be positive")
         if self.connection_generation <= 0:
             raise ValueError("IBKR callback connection generation must be positive")
         require_utc(self.received_at, "IBKR callback received_at")
@@ -127,6 +131,7 @@ class IbkrHistoricalCallbackRecord:
 
     callback_id: int
     attempt_id: UUID
+    provider_request_id: int
     connection_generation: int
     sequence: int
     kind: IbkrHistoricalCallbackKind
@@ -137,6 +142,8 @@ class IbkrHistoricalCallbackRecord:
     def __post_init__(self) -> None:
         if self.callback_id <= 0:
             raise ValueError("IBKR callback ID must be positive")
+        if self.provider_request_id <= 0:
+            raise ValueError("IBKR callback provider request ID must be positive")
         if self.connection_generation <= 0:
             raise ValueError("IBKR callback connection generation must be positive")
         if self.sequence <= 0:
@@ -150,21 +157,24 @@ class IbkrHistoricalCompletionMarker:
 
     marker_id: int
     attempt_id: UUID
+    provider_request_id: int
     connection_generation: int
     sequence: int
     completed_at: datetime
-    accepted_row_count: int
-    schedule_interval_count: int
+    raw_midpoint_bar_callback_count: int
+    raw_schedule_callback_count: int
     closure_eligible: bool
     payload: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
         if self.marker_id <= 0:
             raise ValueError("IBKR completion marker ID must be positive")
+        if self.provider_request_id <= 0:
+            raise ValueError("IBKR completion marker provider request ID must be positive")
         if self.connection_generation <= 0 or self.sequence <= 0:
             raise ValueError("IBKR completion marker identity must be positive")
         require_utc(self.completed_at, "IBKR completion marker completed_at")
-        if self.accepted_row_count < 0 or self.schedule_interval_count < 0:
+        if self.raw_midpoint_bar_callback_count < 0 or self.raw_schedule_callback_count < 0:
             raise ValueError("IBKR completion marker counts cannot be negative")
 
 

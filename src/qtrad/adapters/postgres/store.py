@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import AsyncIterator, Mapping, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
@@ -18,6 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from qtrad.application.run_reconciliation import verify_run_reconciliation_plan_hash
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
+from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
 from qtrad.domain.market_data import BarProvenance, DataQuality, MarketBar, PriceBasis
@@ -307,14 +308,27 @@ class PostgresAuditStore(AuditStore):
         contract_key: str,
         request_fingerprint: str,
         weight: int,
+        request_profile_sha256: str,
+        pacing_policy: IbkrHistoricalPacingPolicy,
     ) -> bool:
-        """Reserve an IBKR request atomically, or report that it must wait."""
+        """Reserve an IBKR request atomically under the supplied frozen policy."""
         require_utc(requested_at, "IBKR pacing requested_at")
         if not request_kind or not contract_key or not request_fingerprint:
             raise ValueError("IBKR pacing identity fields must be non-empty")
         if weight <= 0:
             raise ValueError("IBKR pacing weight must be positive")
-
+        if len(request_profile_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in request_profile_sha256
+        ):
+            raise ValueError("IBKR pacing request profile hash must be a lower-case SHA-256")
+        duplicate_cutoff = requested_at - timedelta(
+            seconds=pacing_policy.identical_request_cooldown_seconds
+        )
+        contract_cutoff = requested_at - timedelta(
+            seconds=pacing_policy.per_contract_window_seconds
+        )
+        rolling_cutoff = requested_at - timedelta(seconds=pacing_policy.rolling_window_seconds)
+        global_cutoff = requested_at - timedelta(seconds=1)
         async with self._engine.begin() as connection:
             await connection.execute(
                 text("SELECT pg_advisory_xact_lock(hashtext('qtrad.ibkr.request_pacing'))")
@@ -323,10 +337,12 @@ class PostgresAuditStore(AuditStore):
                 text(
                     """
                     DELETE FROM ops.ibkr_request_pacing
-                    WHERE requested_at < :requested_at - INTERVAL '10 minutes'
+                    WHERE requested_at < :rolling_cutoff
                     """
                 ),
-                {"requested_at": requested_at},
+                {
+                    "rolling_cutoff": rolling_cutoff,
+                },
             )
             duplicate = await connection.execute(
                 text(
@@ -336,7 +352,7 @@ class PostgresAuditStore(AuditStore):
                         WHERE request_kind = :request_kind
                           AND contract_key = :contract_key
                           AND request_fingerprint = :request_fingerprint
-                          AND requested_at >= :requested_at - INTERVAL '15 seconds'
+                          AND requested_at > :duplicate_cutoff
                     )
                     """
                 ),
@@ -344,7 +360,7 @@ class PostgresAuditStore(AuditStore):
                     "request_kind": request_kind,
                     "contract_key": contract_key,
                     "request_fingerprint": request_fingerprint,
-                    "requested_at": requested_at,
+                    "duplicate_cutoff": duplicate_cutoff,
                 },
             )
             if bool(duplicate.scalar_one()):
@@ -354,34 +370,34 @@ class PostgresAuditStore(AuditStore):
                     """
                     SELECT COALESCE(SUM(weight), 0)
                     FROM ops.ibkr_request_pacing
-                    WHERE requested_at >= :requested_at - INTERVAL '1 second'
+                    WHERE requested_at > :global_cutoff
                     """
                 ),
-                {"requested_at": requested_at},
+                {"global_cutoff": global_cutoff},
             )
             if int(global_weight.scalar_one()) + weight > 45:
                 return False
             if request_kind in {"historical", "BID_ASK"}:
-                window_seconds = "2 seconds"
-                max_weight = 6
-                scoped_kind = request_kind
                 contract_weight = await connection.execute(
                     text(
-                        f"""
+                        """
                         SELECT COALESCE(SUM(weight), 0)
                         FROM ops.ibkr_request_pacing
                         WHERE request_kind = :request_kind
                           AND contract_key = :contract_key
-                          AND requested_at >= :requested_at - INTERVAL '{window_seconds}'
+                          AND requested_at > :contract_cutoff
                         """
                     ),
                     {
-                        "request_kind": scoped_kind,
+                        "request_kind": request_kind,
                         "contract_key": contract_key,
-                        "requested_at": requested_at,
+                        "contract_cutoff": contract_cutoff,
                     },
                 )
-                if int(contract_weight.scalar_one()) + weight > max_weight:
+                if (
+                    int(contract_weight.scalar_one()) + weight
+                    > pacing_policy.max_requests_per_contract_window
+                ):
                     return False
             if request_kind == "historical":
                 historical_weight = await connection.execute(
@@ -390,21 +406,28 @@ class PostgresAuditStore(AuditStore):
                         SELECT COALESCE(SUM(weight), 0)
                         FROM ops.ibkr_request_pacing
                         WHERE request_kind = 'historical'
-                          AND requested_at >= :requested_at - INTERVAL '10 minutes'
+                          AND requested_at > :rolling_cutoff
                         """
                     ),
-                    {"requested_at": requested_at},
+                    {
+                        "rolling_cutoff": rolling_cutoff,
+                    },
                 )
-                if int(historical_weight.scalar_one()) + weight > 60:
+                if (
+                    int(historical_weight.scalar_one()) + weight
+                    > pacing_policy.max_requests_per_rolling_window
+                ):
                     return False
             await connection.execute(
                 text(
                     """
                     INSERT INTO ops.ibkr_request_pacing (
                         reservation_id, requested_at, request_kind, contract_key,
-                        request_fingerprint, weight
-                    ) VALUES (:reservation_id, :requested_at, :request_kind,
-                              :contract_key, :request_fingerprint, :weight)
+                        request_fingerprint, weight, profile_sha256
+                    ) VALUES (
+                        :reservation_id, :requested_at, :request_kind, :contract_key,
+                        :request_fingerprint, :weight, :profile_sha256
+                    )
                     """
                 ),
                 {
@@ -414,6 +437,7 @@ class PostgresAuditStore(AuditStore):
                     "contract_key": contract_key,
                     "request_fingerprint": request_fingerprint,
                     "weight": weight,
+                    "profile_sha256": request_profile_sha256,
                 },
             )
         return True

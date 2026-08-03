@@ -371,6 +371,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             )
             closure_eligible = (
                 str(attempt["status"]) == IbkrAttemptStatus.STARTED.value
+                and int(attempt["provider_request_id"]) == callback.provider_request_id
                 and int(attempt["connection_generation"]) == callback.connection_generation
             )
             callback_id = int(
@@ -379,17 +380,20 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         text(
                             """
                             INSERT INTO ops.ibkr_historical_callbacks (
-                                attempt_id, connection_generation, sequence, callback_kind,
-                                received_at, payload, closure_eligible
+                                attempt_id, provider_request_id, connection_generation,
+                                sequence, callback_kind, received_at, payload,
+                                closure_eligible
                             ) VALUES (
-                                :attempt_id, :connection_generation, :sequence, :callback_kind,
-                                :received_at, CAST(:payload AS jsonb), :closure_eligible
+                                :attempt_id, :provider_request_id, :connection_generation,
+                                :sequence, :callback_kind, :received_at,
+                                CAST(:payload AS jsonb), :closure_eligible
                             )
                             RETURNING callback_id
                             """
                         ),
                         {
                             "attempt_id": attempt_id,
+                            "provider_request_id": callback.provider_request_id,
                             "connection_generation": callback.connection_generation,
                             "sequence": sequence,
                             "callback_kind": callback.kind.value,
@@ -401,7 +405,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                 ).scalar_one()
             )
             if callback.kind is IbkrHistoricalCallbackKind.COMPLETION:
-                accepted_row_count = int(
+                raw_midpoint_bar_callback_count = int(
                     (
                         await connection.execute(
                             text(
@@ -422,7 +426,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         )
                     ).scalar_one()
                 )
-                schedule_interval_count = int(
+                raw_schedule_callback_count = int(
                     (
                         await connection.execute(
                             text(
@@ -447,23 +451,25 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     text(
                         """
                         INSERT INTO ops.ibkr_historical_completion_markers (
-                            attempt_id, connection_generation, sequence, completed_at,
-                            accepted_row_count, schedule_interval_count,
-                            closure_eligible, payload
+                            attempt_id, provider_request_id, connection_generation,
+                            sequence, completed_at, raw_midpoint_bar_callback_count,
+                            raw_schedule_callback_count, closure_eligible, payload
                         ) VALUES (
-                            :attempt_id, :connection_generation, :sequence, :completed_at,
-                            :accepted_row_count, :schedule_interval_count,
-                            :closure_eligible, CAST(:payload AS jsonb)
+                            :attempt_id, :provider_request_id, :connection_generation,
+                            :sequence, :completed_at, :raw_midpoint_bar_callback_count,
+                            :raw_schedule_callback_count, :closure_eligible,
+                            CAST(:payload AS jsonb)
                         )
                         """
                     ),
                     {
                         "attempt_id": attempt_id,
+                        "provider_request_id": callback.provider_request_id,
                         "connection_generation": callback.connection_generation,
                         "sequence": sequence,
                         "completed_at": callback.received_at,
-                        "accepted_row_count": accepted_row_count,
-                        "schedule_interval_count": schedule_interval_count,
+                        "raw_midpoint_bar_callback_count": raw_midpoint_bar_callback_count,
+                        "raw_schedule_callback_count": raw_schedule_callback_count,
                         "closure_eligible": closure_eligible,
                         "payload": _json_text(payload),
                     },
@@ -471,6 +477,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
         return IbkrHistoricalCallbackRecord(
             callback_id=callback_id,
             attempt_id=attempt_id,
+            provider_request_id=callback.provider_request_id,
             connection_generation=callback.connection_generation,
             sequence=sequence,
             kind=callback.kind,
@@ -646,11 +653,16 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     await connection.execute(
                         text(
                             """
-                        SELECT status, publication_status, result_sha256
-                        FROM ops.ibkr_historical_requests
-                        WHERE plan_sha256 = :plan_sha256
-                          AND request_sha256 = :request_sha256
-                        FOR UPDATE
+                        SELECT r.status, r.publication_status, r.result_sha256,
+                               r.selected_attempt_id,
+                               a.status AS selected_attempt_status,
+                               a.terminal_disposition AS selected_terminal_disposition
+                        FROM ops.ibkr_historical_requests AS r
+                        LEFT JOIN ops.ibkr_historical_attempts AS a
+                          ON a.attempt_id = r.selected_attempt_id
+                        WHERE r.plan_sha256 = :plan_sha256
+                          AND r.request_sha256 = :request_sha256
+                        FOR UPDATE OF r
                         """
                         ),
                         {
@@ -664,8 +676,21 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             )
             if row is None:
                 raise RuntimeError("IBKR publication targets an unknown request")
-            if str(row["status"]) != IbkrRequestStatus.SUCCEEDED.value:
-                raise RuntimeError("IBKR publication requires a successful request")
+            if str(row["status"]) not in {
+                IbkrRequestStatus.SUCCEEDED.value,
+                IbkrRequestStatus.TERMINAL.value,
+            }:
+                raise RuntimeError("IBKR publication requires a terminal request")
+            if (
+                row["selected_attempt_id"] is None
+                or str(row["selected_attempt_status"])
+                not in {
+                    IbkrAttemptStatus.SUCCEEDED.value,
+                    IbkrAttemptStatus.TERMINAL_FAILURE.value,
+                }
+                or not row["selected_terminal_disposition"]
+            ):
+                raise RuntimeError("IBKR publication requires a selected terminal attempt")
             if str(row["publication_status"]) == IbkrPublicationStatus.PUBLISHED.value:
                 if row["result_sha256"] != result_sha256:
                     raise RuntimeError(
@@ -743,12 +768,14 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                 await connection.execute(
                     text(
                         """
-                    SELECT marker_id, attempt_id, connection_generation, sequence,
-                           completed_at, accepted_row_count, schedule_interval_count,
+                    SELECT marker_id, attempt_id, provider_request_id,
+                           connection_generation, sequence, completed_at,
+                           raw_midpoint_bar_callback_count, raw_schedule_callback_count,
                            closure_eligible, payload
                     FROM ops.ibkr_historical_completion_markers
                     WHERE attempt_id = :attempt_id
-                      AND connection_generation = :connection_generation
+                          AND connection_generation = :connection_generation
+                          AND provider_request_id = :provider_request_id
                       AND closure_eligible
                     ORDER BY sequence
                     LIMIT 1
@@ -757,6 +784,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     {
                         "attempt_id": attempt_id,
                         "connection_generation": row["connection_generation"],
+                        "provider_request_id": row["provider_request_id"],
                     },
                 )
             )
@@ -794,13 +822,10 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             disposition = IbkrTerminalDisposition.PROVIDER_REJECTED
             detail = "provider emitted an error callback before completion"
         elif (
-            request_kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
-            and int(marker["accepted_row_count"]) == 0
+            request_kind is IbkrHistoricalRequestKind.SCHEDULE
+            and int(marker["raw_schedule_callback_count"]) == 0
         ):
-            request_status = IbkrRequestStatus.TERMINAL
-            attempt_status = IbkrAttemptStatus.TERMINAL_FAILURE
-            disposition = IbkrTerminalDisposition.NO_DATA_RETURNED
-            detail = "provider completed the exact bar request without an accepted row"
+            raise IbkrHistoricalIncomplete("IBKR schedule attempt has no raw schedule callback")
         else:
             request_status = IbkrRequestStatus.SUCCEEDED
             attempt_status = IbkrAttemptStatus.SUCCEEDED

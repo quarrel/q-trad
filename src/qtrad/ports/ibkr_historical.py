@@ -14,7 +14,11 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalCallbackRecord,
     IbkrPlanRegistrationStatus,
 )
-from qtrad.domain.ibkr_historical import IbkrHistoricalPlan, IbkrHistoricalRequest
+from qtrad.domain.ibkr_historical import (
+    IbkrHistoricalPacingPolicy,
+    IbkrHistoricalPlan,
+    IbkrHistoricalRequest,
+)
 
 IbkrHistoricalCallbackSink = Callable[[IbkrHistoricalCallback], Awaitable[None]]
 
@@ -37,7 +41,10 @@ class IbkrHistoricalDataPort(Protocol):
 
 
 class IbkrHistoricalPacer(Protocol):
-    """Durable pacing reservation boundary."""
+    """Durable pacing reservation boundary bound to the authenticated request profile."""
+
+    @property
+    def request_profile_sha256(self) -> str: ...
 
     async def reserve(
         self,
@@ -45,6 +52,9 @@ class IbkrHistoricalPacer(Protocol):
         contract_key: str,
         request_fingerprint: str,
         weight: int,
+        *,
+        request_profile_sha256: str,
+        pacing_policy: IbkrHistoricalPacingPolicy,
     ) -> float: ...
 
 

@@ -31,6 +31,7 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalRetryableError,
     IbkrHistoricalTerminalError,
     IbkrPlanRegistrationStatus,
+    IbkrPublicationStatus,
     IbkrRequestStatus,
     IbkrTerminalDisposition,
     ibkr_historical_plan_bytes,
@@ -103,7 +104,13 @@ def _request(kind: IbkrHistoricalRequestKind) -> IbkrHistoricalRequest:
     )
 
 
-def _profile(*, retry_count: int = 1):
+def _profile(
+    *,
+    retry_count: int = 1,
+    pacing_policy: IbkrHistoricalPacingPolicy | None = None,
+) -> IbkrHistoricalRequestProfile:
+    if pacing_policy is None:
+        pacing_policy = IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55)
     return build_ibkr_historical_request_profile(
         canary_evidence_filename="canary.json",
         canary_evidence_sha256="a" * 64,
@@ -121,7 +128,7 @@ def _profile(*, retry_count: int = 1):
         request_timeout_seconds=1,
         retry_count=retry_count,
         duplicate_request_protection="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
-        pacing_policy=IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55),
+        pacing_policy=pacing_policy,
     )
 
 
@@ -172,6 +179,10 @@ class MemoryExecutionStore:
         self.markers: dict[UUID, list[IbkrHistoricalCompletionMarker]] = defaultdict(list)
         self._callback_ids = 0
         self._marker_ids = 0
+        self.fail_invalidation = False
+        self.publication_status: dict[tuple[str, str], IbkrPublicationStatus] = {}
+        self.result_hashes: dict[tuple[str, str], str] = {}
+        self.plan_publication_status: dict[str, IbkrPublicationStatus] = {}
 
     async def register_ibkr_historical_plan(
         self,
@@ -190,10 +201,11 @@ class MemoryExecutionStore:
         self.plan_requests[plan.plan_sha256] = {
             request.request_sha256: request for request in plan.requests
         }
+        self.plan_publication_status[plan.plan_sha256] = IbkrPublicationStatus.PENDING
         for request in plan.requests:
-            self.request_status[(plan.plan_sha256, request.request_sha256)] = (
-                IbkrRequestStatus.PENDING
-            )
+            key = (plan.plan_sha256, request.request_sha256)
+            self.request_status[key] = IbkrRequestStatus.PENDING
+            self.publication_status[key] = IbkrPublicationStatus.PENDING
         return IbkrPlanRegistrationStatus.REGISTERED
 
     async def recover_ibkr_historical_execution(
@@ -267,6 +279,7 @@ class MemoryExecutionStore:
         sequence = len(self.callbacks[attempt_id]) + 1
         eligible = (
             attempt.status is IbkrAttemptStatus.STARTED
+            and callback.provider_request_id == attempt.provider_request_id
             and callback.connection_generation == attempt.connection_generation
         )
         self._callback_ids += 1
@@ -274,6 +287,7 @@ class MemoryExecutionStore:
         record = IbkrHistoricalCallbackRecord(
             callback_id=self._callback_ids,
             attempt_id=attempt_id,
+            provider_request_id=callback.provider_request_id,
             connection_generation=callback.connection_generation,
             sequence=sequence,
             kind=callback.kind,
@@ -288,16 +302,17 @@ class MemoryExecutionStore:
                 IbkrHistoricalCompletionMarker(
                     marker_id=self._marker_ids,
                     attempt_id=attempt_id,
+                    provider_request_id=callback.provider_request_id,
                     connection_generation=callback.connection_generation,
                     sequence=sequence,
                     completed_at=callback.received_at,
-                    accepted_row_count=sum(
+                    raw_midpoint_bar_callback_count=sum(
                         item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR
                         and item.closure_eligible
                         for item in self.callbacks[attempt_id]
                         if item.sequence < sequence
                     ),
-                    schedule_interval_count=sum(
+                    raw_schedule_callback_count=sum(
                         item.kind is IbkrHistoricalCallbackKind.SCHEDULE and item.closure_eligible
                         for item in self.callbacks[attempt_id]
                         if item.sequence < sequence
@@ -322,6 +337,7 @@ class MemoryExecutionStore:
                 item
                 for item in self.markers[attempt_id]
                 if item.closure_eligible
+                and item.provider_request_id == attempt.provider_request_id
                 and item.connection_generation == attempt.connection_generation
             ),
             None,
@@ -341,13 +357,10 @@ class MemoryExecutionStore:
             disposition = IbkrTerminalDisposition.PROVIDER_REJECTED
             detail = "provider emitted an error callback before completion"
         elif (
-            request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
-            and marker.accepted_row_count == 0
+            request.kind is IbkrHistoricalRequestKind.SCHEDULE
+            and marker.raw_schedule_callback_count == 0
         ):
-            status = IbkrAttemptStatus.TERMINAL_FAILURE
-            request_status = IbkrRequestStatus.TERMINAL
-            disposition = IbkrTerminalDisposition.NO_DATA_RETURNED
-            detail = "no accepted bar"
+            raise IbkrHistoricalIncomplete("schedule request has no raw schedule callback")
         else:
             status = IbkrAttemptStatus.SUCCEEDED
             request_status = IbkrRequestStatus.SUCCEEDED
@@ -408,6 +421,8 @@ class MemoryExecutionStore:
         invalidated_at: datetime,
         maximum_attempts: int,
     ) -> tuple[IbkrHistoricalAttemptOutcome, ...]:
+        if self.fail_invalidation:
+            raise RuntimeError("injected invalidation failure")
         outcomes: list[IbkrHistoricalAttemptOutcome] = []
         for attempt in tuple(self.attempts.values()):
             if (
@@ -437,7 +452,43 @@ class MemoryExecutionStore:
         result_sha256: str,
         published_at: datetime,
     ) -> None:
-        del plan_sha256, request_sha256, result_sha256, published_at
+        del published_at
+        key = (plan_sha256, request_sha256)
+        if key not in self.request_status:
+            raise RuntimeError("IBKR publication targets an unknown request")
+        if self.request_status[key] not in {
+            IbkrRequestStatus.SUCCEEDED,
+            IbkrRequestStatus.TERMINAL,
+        }:
+            raise RuntimeError("IBKR publication requires a terminal request")
+        selected = next(
+            (
+                attempt
+                for attempt in self.attempts.values()
+                if attempt.plan_sha256 == plan_sha256
+                and attempt.request_sha256 == request_sha256
+                and attempt.status
+                in {IbkrAttemptStatus.SUCCEEDED, IbkrAttemptStatus.TERMINAL_FAILURE}
+                and attempt.terminal_disposition is not None
+            ),
+            None,
+        )
+        if selected is None:
+            raise RuntimeError("IBKR publication requires a selected terminal attempt")
+        if self.publication_status[key] is IbkrPublicationStatus.PUBLISHED:
+            if self.result_hashes[key] != result_sha256:
+                raise RuntimeError("IBKR publication identity conflicts with its immutable result")
+            return
+        self.publication_status[key] = IbkrPublicationStatus.PUBLISHED
+        self.result_hashes[key] = result_sha256
+        if all(
+            status is IbkrPublicationStatus.PUBLISHED
+            for status in (
+                self.publication_status[(plan_sha256, request.request_sha256)]
+                for request in self.plan_requests[plan_sha256].values()
+            )
+        ):
+            self.plan_publication_status[plan_sha256] = IbkrPublicationStatus.PUBLISHED
 
     async def _invalidate(
         self, attempt_id: UUID, invalidated_at: datetime, maximum_attempts: int
@@ -477,10 +528,24 @@ class MemoryExecutionStore:
 
 
 class FakePacer:
+    def __init__(self, request_profile_sha256: str) -> None:
+        self.request_profile_sha256 = request_profile_sha256
+        self.calls: list[tuple[str, str, str, IbkrHistoricalPacingPolicy]] = []
+
     async def reserve(
-        self, request_kind: str, contract_key: str, request_fingerprint: str, weight: int
+        self,
+        request_kind: str,
+        contract_key: str,
+        request_fingerprint: str,
+        weight: int,
+        *,
+        request_profile_sha256: str,
+        pacing_policy: IbkrHistoricalPacingPolicy,
     ) -> float:
-        del request_kind, contract_key, request_fingerprint, weight
+        if request_profile_sha256 != self.request_profile_sha256:
+            raise ValueError("fake pacer received an unexpected profile")
+        self.calls.append((request_kind, contract_key, request_fingerprint, pacing_policy))
+        assert weight == 1
         return 0.0
 
 
@@ -506,7 +571,6 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         connection_generation: int,
         callback: IbkrHistoricalCallbackSink,
     ) -> None:
-        del request_id
         self.calls.append(request.request_sha256)
         action = self.behaviours[request.kind.value].pop(0)
         if action == "crash_before":
@@ -523,9 +587,11 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         callback_generation = (
             connection_generation + 1 if action == "stale" else connection_generation
         )
+        callback_request_id = request_id + 1 if action == "wrong_request_id" else request_id
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS and action != "stale":
             await callback(
                 IbkrHistoricalCallback(
+                    provider_request_id=callback_request_id,
                     connection_generation=callback_generation,
                     kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
                     received_at=_NOW,
@@ -537,6 +603,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         elif request.kind is IbkrHistoricalRequestKind.SCHEDULE and action != "stale":
             await callback(
                 IbkrHistoricalCallback(
+                    provider_request_id=callback_request_id,
                     connection_generation=callback_generation,
                     kind=IbkrHistoricalCallbackKind.SCHEDULE,
                     received_at=_NOW,
@@ -545,6 +612,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
             )
         await callback(
             IbkrHistoricalCallback(
+                provider_request_id=callback_request_id,
                 connection_generation=callback_generation,
                 kind=IbkrHistoricalCallbackKind.COMPLETION,
                 received_at=_NOW,
@@ -563,7 +631,7 @@ def _executor(
     executor = IbkrHistoricalExecutor(
         store,
         provider,
-        FakePacer(),
+        FakePacer(profile.profile_sha256),
         clock=lambda: _NOW,
         sleep=asyncio.sleep,
     )
@@ -578,7 +646,9 @@ async def test_success_is_idempotent_and_callbacks_are_monotonic() -> None:
         {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
     )
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
 
     first = await executor.execute(plan, profile)
     second = await executor.execute(plan, profile)
@@ -607,7 +677,7 @@ async def test_transient_retry_and_unrelated_terminal_request() -> None:
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
 
     summary = await IbkrHistoricalExecutor(
-        store, provider, FakePacer(), clock=lambda: _NOW
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
     ).execute(plan, profile)
 
     assert {outcome.request_status for outcome in summary.outcomes} == {
@@ -635,7 +705,9 @@ async def test_crash_before_send_is_invalidated_and_restarted() -> None:
         }
     )
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
 
     with pytest.raises(ExceptionGroup) as error:
         await executor.execute(plan, profile)
@@ -662,7 +734,9 @@ async def test_crash_during_callbacks_is_invalidated_and_restarted() -> None:
         }
     )
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
 
     with pytest.raises(ExceptionGroup) as error:
         await executor.execute(plan, profile)
@@ -692,7 +766,9 @@ async def test_crash_after_completion_is_recovered_without_rerun() -> None:
         }
     )
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
 
     with pytest.raises(ExceptionGroup) as error:
         await executor.execute(plan, profile)
@@ -720,7 +796,7 @@ async def test_stale_generation_callbacks_cannot_enter_successful_closure() -> N
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
 
     summary = await IbkrHistoricalExecutor(
-        store, provider, FakePacer(), clock=lambda: _NOW
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
     ).execute(plan, profile)
 
     stale_outcome = next(
@@ -733,7 +809,7 @@ async def test_stale_generation_callbacks_cannot_enter_successful_closure() -> N
             if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
         )
     )
-    assert stale_outcome.disposition is IbkrTerminalDisposition.SESSION_EVIDENCE_UNAVAILABLE
+    assert stale_outcome.disposition is IbkrTerminalDisposition.INCOMPLETE_RESPONSE
     assert any(
         not callback.closure_eligible
         for callbacks in store.callbacks.values()
@@ -752,7 +828,9 @@ async def test_disconnect_invalidates_unfinished_attempt_for_restart() -> None:
         }
     )
     await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
 
     with pytest.raises(ExceptionGroup) as error:
         await executor.execute(plan, profile)
@@ -819,7 +897,9 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     provider = FakeHistoricalDataPort(
         {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
     )
-    executor = IbkrHistoricalExecutor(store, provider, FakePacer(), clock=lambda: _NOW)
+    executor = IbkrHistoricalExecutor(
+        store, provider, FakePacer(profile.profile_sha256), clock=lambda: _NOW
+    )
     first = await executor.execute(plan, profile)
     assert len(provider.calls) == len(plan.requests)
     assert all(
@@ -923,6 +1003,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     await store.append_ibkr_historical_callback(
         attempt_id=stale.attempt_id,
         callback=IbkrHistoricalCallback(
+            provider_request_id=800,
             connection_generation=9,
             kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
             received_at=_NOW,
@@ -932,6 +1013,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     await store.append_ibkr_historical_callback(
         attempt_id=stale.attempt_id,
         callback=IbkrHistoricalCallback(
+            provider_request_id=800,
             connection_generation=9,
             kind=IbkrHistoricalCallbackKind.COMPLETION,
             received_at=_NOW,
@@ -965,3 +1047,231 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     )
     assert stale_rows == [{"closure_eligible": False}, {"closure_eligible": False}]
     await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_same_generation_wrong_provider_request_id_cannot_close_attempt() -> None:
+    store = MemoryExecutionStore()
+    plan, _ = _plan()
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+    request = next(
+        request
+        for request in plan.requests
+        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    attempt = await store.start_ibkr_historical_attempt(
+        plan_sha256=plan.plan_sha256,
+        request_sha256=request.request_sha256,
+        connection_generation=1,
+        provider_request_id=101,
+        started_at=_NOW,
+        maximum_attempts=2,
+    )
+    assert attempt is not None
+
+    record = await store.append_ibkr_historical_callback(
+        attempt_id=attempt.attempt_id,
+        callback=IbkrHistoricalCallback(
+            provider_request_id=102,
+            connection_generation=1,
+            kind=IbkrHistoricalCallbackKind.COMPLETION,
+            received_at=_NOW,
+            payload={},
+        ),
+    )
+
+    assert record.provider_request_id == 102
+    assert not record.closure_eligible
+    with pytest.raises(IbkrHistoricalIncomplete, match="no eligible marker"):
+        await store.finalize_ibkr_historical_attempt(
+            attempt_id=attempt.attempt_id,
+            completed_at=_NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_schedule_completion_without_schedule_callback_is_incomplete() -> None:
+    store = MemoryExecutionStore()
+    plan, _ = _plan()
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+    request = next(
+        request for request in plan.requests if request.kind is IbkrHistoricalRequestKind.SCHEDULE
+    )
+    attempt = await store.start_ibkr_historical_attempt(
+        plan_sha256=plan.plan_sha256,
+        request_sha256=request.request_sha256,
+        connection_generation=1,
+        provider_request_id=201,
+        started_at=_NOW,
+        maximum_attempts=2,
+    )
+    assert attempt is not None
+
+    await store.append_ibkr_historical_callback(
+        attempt_id=attempt.attempt_id,
+        callback=IbkrHistoricalCallback(
+            provider_request_id=201,
+            connection_generation=1,
+            kind=IbkrHistoricalCallbackKind.COMPLETION,
+            received_at=_NOW,
+            payload={},
+        ),
+    )
+
+    assert store.markers[attempt.attempt_id][0].raw_schedule_callback_count == 0
+    with pytest.raises(IbkrHistoricalIncomplete, match="no raw schedule callback"):
+        await store.finalize_ibkr_historical_attempt(
+            attempt_id=attempt.attempt_id,
+            completed_at=_NOW,
+        )
+
+
+@pytest.mark.asyncio
+async def test_disconnect_cleanup_disconnects_after_invalidation_failure() -> None:
+    store = MemoryExecutionStore()
+    store.fail_invalidation = True
+    plan, profile = _plan()
+    provider = FakeHistoricalDataPort(
+        {
+            IbkrHistoricalRequestKind.MIDPOINT_BARS.value: ["disconnect"],
+            IbkrHistoricalRequestKind.SCHEDULE.value: ["success"],
+        }
+    )
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+    with pytest.raises(RuntimeError, match="injected invalidation failure"):
+        await IbkrHistoricalExecutor(
+            store,
+            provider,
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+    assert provider.disconnect_count == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_requests_are_publishable_after_execution() -> None:
+    cases = (
+        (
+            {
+                IbkrHistoricalRequestKind.MIDPOINT_BARS.value: ["success"],
+                IbkrHistoricalRequestKind.SCHEDULE.value: ["terminal"],
+            },
+            IbkrTerminalDisposition.ENTITLEMENT_UNAVAILABLE,
+        ),
+        (
+            {
+                IbkrHistoricalRequestKind.MIDPOINT_BARS.value: ["success"],
+                IbkrHistoricalRequestKind.SCHEDULE.value: ["timeout", "timeout"],
+            },
+            IbkrTerminalDisposition.RETRY_LIMIT_EXHAUSTED,
+        ),
+    )
+
+    for behaviours, expected_disposition in cases:
+        store = MemoryExecutionStore()
+        plan, profile = _unique_plan()
+        provider = FakeHistoricalDataPort(behaviours)
+        await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+        summary = await IbkrHistoricalExecutor(
+            store,
+            provider,
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+        assert expected_disposition in {outcome.disposition for outcome in summary.outcomes}
+        assert all(
+            outcome.request_status in {IbkrRequestStatus.SUCCEEDED, IbkrRequestStatus.TERMINAL}
+            for outcome in summary.outcomes
+        )
+        for index, request in enumerate(plan.requests, start=1):
+            await store.mark_ibkr_historical_request_published(
+                plan_sha256=plan.plan_sha256,
+                request_sha256=request.request_sha256,
+                result_sha256=f"{index:064x}",
+                published_at=_NOW,
+            )
+        assert store.plan_publication_status[plan.plan_sha256] is IbkrPublicationStatus.PUBLISHED
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_store_publishes_terminal_attempts() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        cases = (
+            (
+                {
+                    IbkrHistoricalRequestKind.MIDPOINT_BARS.value: ["success"],
+                    IbkrHistoricalRequestKind.SCHEDULE.value: ["terminal"],
+                },
+                IbkrTerminalDisposition.ENTITLEMENT_UNAVAILABLE,
+            ),
+            (
+                {
+                    IbkrHistoricalRequestKind.MIDPOINT_BARS.value: ["success"],
+                    IbkrHistoricalRequestKind.SCHEDULE.value: ["timeout", "timeout"],
+                },
+                IbkrTerminalDisposition.RETRY_LIMIT_EXHAUSTED,
+            ),
+        )
+
+        for case_index, (behaviours, expected_disposition) in enumerate(cases, start=1):
+            plan, profile = _unique_plan()
+            await store.register_ibkr_historical_plan(
+                plan,
+                plan_bytes=ibkr_historical_plan_bytes(plan),
+                registered_at=_NOW,
+            )
+            summary = await IbkrHistoricalExecutor(
+                store,
+                FakeHistoricalDataPort(behaviours),
+                FakePacer(profile.profile_sha256),
+                clock=lambda: _NOW,
+                request_id_start=case_index * 100,
+            ).execute(plan, profile)
+
+            assert expected_disposition in {outcome.disposition for outcome in summary.outcomes}
+            assert any(
+                outcome.request_status is IbkrRequestStatus.TERMINAL for outcome in summary.outcomes
+            )
+            for index, request in enumerate(plan.requests, start=1):
+                await store.mark_ibkr_historical_request_published(
+                    plan_sha256=plan.plan_sha256,
+                    request_sha256=request.request_sha256,
+                    result_sha256=f"{index:064x}",
+                    published_at=_NOW,
+                )
+
+            request_rows = await audit_store.query(
+                """
+                SELECT status, publication_status
+                FROM ops.ibkr_historical_requests
+                WHERE plan_sha256 = :plan_sha256
+                """,
+                {"plan_sha256": plan.plan_sha256},
+            )
+            assert all(row["status"] in {"SUCCEEDED", "TERMINAL"} for row in request_rows)
+            assert all(row["publication_status"] == "PUBLISHED" for row in request_rows)
+            plan_rows = await audit_store.query(
+                """
+                SELECT publication_status
+                FROM ops.ibkr_historical_plans
+                WHERE plan_sha256 = :plan_sha256
+                """,
+                {"plan_sha256": plan.plan_sha256},
+            )
+            assert plan_rows == [{"publication_status": "PUBLISHED"}]
+    finally:
+        await engine.dispose()

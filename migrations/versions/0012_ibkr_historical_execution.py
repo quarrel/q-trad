@@ -11,6 +11,7 @@ depends_on: str | Sequence[str] | None = None
 
 
 def upgrade() -> None:
+    op.execute("ALTER TABLE ops.ibkr_request_pacing ADD COLUMN profile_sha256 TEXT")
     op.execute(
         """
         CREATE TABLE ops.ibkr_historical_plans (
@@ -67,6 +68,7 @@ def upgrade() -> None:
             terminal_disposition TEXT,
             detail TEXT,
             UNIQUE (plan_sha256, request_sha256, attempt_ordinal),
+            UNIQUE (connection_generation, provider_request_id),
             FOREIGN KEY (plan_sha256, request_sha256)
                 REFERENCES ops.ibkr_historical_requests(plan_sha256, request_sha256),
             CHECK (
@@ -92,6 +94,7 @@ def upgrade() -> None:
             callback_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             attempt_id UUID NOT NULL
                 REFERENCES ops.ibkr_historical_attempts(attempt_id),
+            provider_request_id BIGINT NOT NULL CHECK (provider_request_id > 0),
             connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
             sequence BIGINT NOT NULL CHECK (sequence > 0),
             callback_kind TEXT NOT NULL,
@@ -108,11 +111,14 @@ def upgrade() -> None:
             marker_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             attempt_id UUID NOT NULL
                 REFERENCES ops.ibkr_historical_attempts(attempt_id),
+            provider_request_id BIGINT NOT NULL CHECK (provider_request_id > 0),
             connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
             sequence BIGINT NOT NULL CHECK (sequence > 0),
             completed_at TIMESTAMPTZ NOT NULL,
-            accepted_row_count INTEGER NOT NULL CHECK (accepted_row_count >= 0),
-            schedule_interval_count INTEGER NOT NULL CHECK (schedule_interval_count >= 0),
+            raw_midpoint_bar_callback_count INTEGER NOT NULL
+                CHECK (raw_midpoint_bar_callback_count >= 0),
+            raw_schedule_callback_count INTEGER NOT NULL
+                CHECK (raw_schedule_callback_count >= 0),
             closure_eligible BOOLEAN NOT NULL,
             payload JSONB NOT NULL,
             UNIQUE (attempt_id, sequence)
@@ -135,3 +141,4 @@ def downgrade() -> None:
     op.execute("DROP TABLE ops.ibkr_historical_attempts")
     op.execute("DROP TABLE ops.ibkr_historical_requests")
     op.execute("DROP TABLE ops.ibkr_historical_plans")
+    op.execute("ALTER TABLE ops.ibkr_request_pacing DROP COLUMN profile_sha256")

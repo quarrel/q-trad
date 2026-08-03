@@ -23,6 +23,7 @@ from qtrad.domain.ibkr_execution import (
 from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
+    IbkrHistoricalRequestKind,
     IbkrHistoricalRequestProfile,
 )
 from qtrad.domain.time import require_utc
@@ -64,6 +65,8 @@ class IbkrHistoricalExecutor:
 
         if plan.request_profile_sha256 != request_profile.profile_sha256:
             raise ValueError("IBKR execution profile does not match the registered plan")
+        if self._pacer.request_profile_sha256 != request_profile.profile_sha256:
+            raise ValueError("IBKR pacing profile does not match the execution profile")
         maximum_attempts = request_profile.retry_count + 1
         recovered_at = self._now("IBKR execution recovery time")
         recovered = tuple(
@@ -106,13 +109,15 @@ class IbkrHistoricalExecutor:
                     request = request_by_hash[request_hash]
                     group.create_task(run(request))
         finally:
-            await self._store.invalidate_ibkr_historical_attempts(
-                plan_sha256=plan.plan_sha256,
-                connection_generation=generation,
-                invalidated_at=self._now("IBKR execution disconnect time"),
-                maximum_attempts=maximum_attempts,
-            )
-            await self._provider.disconnect()
+            try:
+                await self._store.invalidate_ibkr_historical_attempts(
+                    plan_sha256=plan.plan_sha256,
+                    connection_generation=generation,
+                    invalidated_at=self._now("IBKR execution disconnect time"),
+                    maximum_attempts=maximum_attempts,
+                )
+            finally:
+                await self._provider.disconnect()
 
         return IbkrHistoricalExecutionSummary(plan.plan_sha256, tuple(outcomes), generation)
 
@@ -132,6 +137,8 @@ class IbkrHistoricalExecutor:
                     str(request.fingerprint.con_id),
                     request.request_sha256,
                     1,
+                    request_profile_sha256=request_profile.profile_sha256,
+                    pacing_policy=request_profile.pacing_policy,
                 )
                 if delay == 0:
                     break
@@ -194,10 +201,15 @@ class IbkrHistoricalExecutor:
                         completed_at=self._now("IBKR completion time"),
                     )
                 except IbkrHistoricalIncomplete:
+                    disposition = (
+                        IbkrTerminalDisposition.SESSION_EVIDENCE_UNAVAILABLE
+                        if request.kind is IbkrHistoricalRequestKind.SCHEDULE
+                        else IbkrTerminalDisposition.INCOMPLETE_RESPONSE
+                    )
                     outcome = await self._store.fail_ibkr_historical_attempt(
                         attempt_id=attempt.attempt_id,
                         failed_at=self._now("IBKR incomplete-response time"),
-                        disposition=IbkrTerminalDisposition.SESSION_EVIDENCE_UNAVAILABLE.value,
+                        disposition=disposition.value,
                         detail="provider call completed without a valid completion marker",
                         retryable=False,
                         maximum_attempts=maximum_attempts,
