@@ -595,6 +595,8 @@ The executor passes the frozen request-profile pacing policy to the durable ledg
 
 **Form:** immutable evidence pull request.
 
+**Status:** Implemented and covered by deterministic file-only fixtures; no real IBKR client or provider data is involved.
+
 Implement request-result and aggregate-result builders from database state.
 
 Normalize historical bars as follows:

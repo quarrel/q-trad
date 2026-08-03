@@ -11,6 +11,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     MAX_IBKR_PLAN_BYTES,
     IbkrAttemptStatus,
@@ -29,6 +30,14 @@ from qtrad.domain.ibkr_execution import (
     ibkr_historical_plan_bytes_sha256,
 )
 from qtrad.domain.ibkr_historical import IbkrHistoricalPlan, IbkrHistoricalRequestKind
+from qtrad.domain.ibkr_results import (
+    IbkrHistoricalAttemptEvidence,
+    IbkrHistoricalCallbackEvidence,
+    IbkrHistoricalCompletionEvidence,
+    IbkrHistoricalExecutionSnapshot,
+    IbkrHistoricalPlanSnapshot,
+    IbkrHistoricalRequestSnapshot,
+)
 from qtrad.domain.time import require_utc
 from qtrad.ports.ibkr_historical import IbkrHistoricalExecutionStore
 
@@ -246,6 +255,115 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                 )
             ).scalars()
             return tuple(str(value) for value in rows)
+
+    async def read_ibkr_historical_execution(
+        self, *, plan_sha256: str
+    ) -> IbkrHistoricalExecutionSnapshot:
+        _require_sha256(plan_sha256, "IBKR publication snapshot plan hash")
+        async with self._engine.connect() as connection:
+            plan_row = (
+                (
+                    await connection.execute(
+                        text(
+                            """
+                        SELECT plan_sha256, plan_bytes, plan_bytes_sha256, plan_payload,
+                               registered_at, publication_status
+                        FROM ops.ibkr_historical_plans
+                        WHERE plan_sha256 = :plan_sha256
+                        """
+                        ),
+                        {"plan_sha256": plan_sha256},
+                    )
+                )
+                .mappings()
+                .one_or_none()
+            )
+            if plan_row is None:
+                raise RuntimeError("IBKR publication snapshot targets an unknown plan")
+            request_rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT plan_sha256, request_sha256, request_payload, instrument_id,
+                               request_kind, interval_start, interval_end, status,
+                               attempt_count, selected_attempt_id, publication_status,
+                               result_sha256, published_at
+                        FROM ops.ibkr_historical_requests
+                        WHERE plan_sha256 = :plan_sha256
+                        ORDER BY request_sha256
+                        """
+                    ),
+                    {"plan_sha256": plan_sha256},
+                )
+            ).mappings()
+            attempt_rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT attempt_id, plan_sha256, request_sha256, attempt_ordinal,
+                               connection_session_id, provider_request_id,
+                               connection_generation, started_at, status,
+                               terminal_at, terminal_disposition, detail
+                        FROM ops.ibkr_historical_attempts
+                        WHERE plan_sha256 = :plan_sha256
+                        ORDER BY request_sha256, attempt_ordinal, attempt_id
+                        """
+                    ),
+                    {"plan_sha256": plan_sha256},
+                )
+            ).mappings()
+            callback_rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT c.callback_id, c.attempt_id, c.connection_session_id,
+                               c.provider_request_id, c.connection_generation,
+                               c.sequence, c.callback_kind, c.received_at,
+                               c.payload, c.closure_eligible
+                        FROM ops.ibkr_historical_callbacks AS c
+                        JOIN ops.ibkr_historical_attempts AS a
+                          ON a.attempt_id = c.attempt_id
+                        WHERE a.plan_sha256 = :plan_sha256
+                        ORDER BY c.attempt_id, c.sequence, c.callback_id
+                        """
+                    ),
+                    {"plan_sha256": plan_sha256},
+                )
+            ).mappings()
+            marker_rows = (
+                await connection.execute(
+                    text(
+                        """
+                        SELECT m.marker_id, m.attempt_id, m.connection_session_id,
+                               m.provider_request_id, m.connection_generation,
+                               m.sequence, m.completed_at,
+                               m.raw_midpoint_bar_callback_count,
+                               m.raw_schedule_callback_count,
+                               m.closure_eligible, m.payload
+                        FROM ops.ibkr_historical_completion_markers AS m
+                        JOIN ops.ibkr_historical_attempts AS a
+                          ON a.attempt_id = m.attempt_id
+                        WHERE a.plan_sha256 = :plan_sha256
+                        ORDER BY m.attempt_id, m.sequence, m.marker_id
+                        """
+                    ),
+                    {"plan_sha256": plan_sha256},
+                )
+            ).mappings()
+            return IbkrHistoricalExecutionSnapshot(
+                plan=IbkrHistoricalPlanSnapshot(
+                    plan_sha256=str(plan_row["plan_sha256"]),
+                    plan_bytes=_bytes_value(plan_row["plan_bytes"], "stored IBKR plan bytes"),
+                    plan_bytes_sha256=str(plan_row["plan_bytes_sha256"]),
+                    plan_payload=_json_object(plan_row["plan_payload"], "stored IBKR plan payload"),
+                    registered_at=cast(datetime, plan_row["registered_at"]),
+                    publication_status=IbkrPublicationStatus(str(plan_row["publication_status"])),
+                ),
+                requests=tuple(_request_snapshot_from_row(row) for row in request_rows),
+                attempts=tuple(_attempt_evidence_from_row(row) for row in attempt_rows),
+                callbacks=tuple(_callback_evidence_from_row(row) for row in callback_rows),
+                completion_markers=tuple(_completion_evidence_from_row(row) for row in marker_rows),
+            )
 
     async def start_ibkr_historical_attempt(
         self,
@@ -1027,6 +1145,83 @@ def _attempt_outcome_from_row(row: Mapping[str, Any]) -> IbkrHistoricalAttemptOu
         request_status=request_status,
         disposition=outcome_disposition,
     )
+
+
+def _request_snapshot_from_row(row: Mapping[Any, Any]) -> IbkrHistoricalRequestSnapshot:
+    return IbkrHistoricalRequestSnapshot(
+        plan_sha256=str(row["plan_sha256"]),
+        request_sha256=str(row["request_sha256"]),
+        request_payload=_json_object(row["request_payload"], "stored IBKR request payload"),
+        instrument_id=str(row["instrument_id"]),
+        request_kind=str(row["request_kind"]),
+        interval_start=cast(datetime, row["interval_start"]),
+        interval_end=cast(datetime, row["interval_end"]),
+        status=IbkrRequestStatus(str(row["status"])),
+        attempt_count=int(row["attempt_count"]),
+        selected_attempt_id=cast(UUID | None, row["selected_attempt_id"]),
+        publication_status=IbkrPublicationStatus(str(row["publication_status"])),
+        result_sha256=(None if row["result_sha256"] is None else str(row["result_sha256"])),
+        published_at=cast(datetime | None, row["published_at"]),
+    )
+
+
+def _attempt_evidence_from_row(row: Mapping[Any, Any]) -> IbkrHistoricalAttemptEvidence:
+    disposition = (
+        None
+        if row["terminal_disposition"] is None
+        else IbkrTerminalDisposition(str(row["terminal_disposition"]))
+    )
+    return IbkrHistoricalAttemptEvidence(
+        attempt_id=cast(UUID, row["attempt_id"]),
+        plan_sha256=str(row["plan_sha256"]),
+        request_sha256=str(row["request_sha256"]),
+        attempt_ordinal=int(row["attempt_ordinal"]),
+        connection_session_id=cast(UUID, row["connection_session_id"]),
+        provider_request_id=int(row["provider_request_id"]),
+        connection_generation=int(row["connection_generation"]),
+        started_at=cast(datetime, row["started_at"]),
+        status=IbkrAttemptStatus(str(row["status"])),
+        terminal_at=cast(datetime | None, row["terminal_at"]),
+        terminal_disposition=disposition,
+        detail=cast(str | None, row["detail"]),
+    )
+
+
+def _callback_evidence_from_row(row: Mapping[Any, Any]) -> IbkrHistoricalCallbackEvidence:
+    return IbkrHistoricalCallbackEvidence(
+        callback_id=int(row["callback_id"]),
+        attempt_id=cast(UUID, row["attempt_id"]),
+        connection_session_id=cast(UUID, row["connection_session_id"]),
+        provider_request_id=int(row["provider_request_id"]),
+        connection_generation=int(row["connection_generation"]),
+        sequence=int(row["sequence"]),
+        kind=IbkrHistoricalCallbackKind(str(row["callback_kind"])),
+        received_at=cast(datetime, row["received_at"]),
+        payload=_json_object(row["payload"], "stored IBKR callback payload"),
+        closure_eligible=bool(row["closure_eligible"]),
+    )
+
+
+def _completion_evidence_from_row(row: Mapping[Any, Any]) -> IbkrHistoricalCompletionEvidence:
+    return IbkrHistoricalCompletionEvidence(
+        marker_id=int(row["marker_id"]),
+        attempt_id=cast(UUID, row["attempt_id"]),
+        connection_session_id=cast(UUID, row["connection_session_id"]),
+        provider_request_id=int(row["provider_request_id"]),
+        connection_generation=int(row["connection_generation"]),
+        sequence=int(row["sequence"]),
+        completed_at=cast(datetime, row["completed_at"]),
+        raw_midpoint_bar_callback_count=int(row["raw_midpoint_bar_callback_count"]),
+        raw_schedule_callback_count=int(row["raw_schedule_callback_count"]),
+        closure_eligible=bool(row["closure_eligible"]),
+        payload=_json_object(row["payload"], "stored IBKR completion payload"),
+    )
+
+
+def _json_object(value: object, field: str) -> dict[str, JsonValue]:
+    if not isinstance(value, Mapping):
+        raise TypeError(f"{field} must be a JSON object")
+    return cast(dict[str, JsonValue], dict(value))
 
 
 def _json_text(value: object) -> str:

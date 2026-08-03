@@ -20,6 +20,7 @@ from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
 )
+from qtrad.domain.ibkr_results import IbkrHistoricalExecutionSnapshot
 
 IbkrHistoricalCallbackSink = Callable[[IbkrHistoricalCallback], Awaitable[None]]
 
@@ -138,9 +139,27 @@ class IbkrHistoricalExecutionStore(Protocol):
     ) -> None: ...
 
 
+class IbkrHistoricalPublicationStore(Protocol):
+    """Read-only publication snapshot and immutable-result status boundary."""
+
+    async def read_ibkr_historical_execution(
+        self, *, plan_sha256: str
+    ) -> IbkrHistoricalExecutionSnapshot: ...
+
+    async def mark_ibkr_historical_request_published(
+        self,
+        *,
+        plan_sha256: str,
+        request_sha256: str,
+        result_sha256: str,
+        published_at: datetime,
+    ) -> None: ...
+
+
 __all__ = [
     "IbkrHistoricalCallbackSink",
     "IbkrHistoricalDataPort",
     "IbkrHistoricalExecutionStore",
     "IbkrHistoricalPacer",
+    "IbkrHistoricalPublicationStore",
 ]
