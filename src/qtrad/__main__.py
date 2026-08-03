@@ -2512,11 +2512,16 @@ async def _review_instruments(
             ),
         )
         from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
+        from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
 
         engine = _engine(settings)
         adapter = None
         try:
-            pacing = IbkrPostgresPacing(PostgresAuditStore(engine))
+            pacing = IbkrPostgresPacing(
+                PostgresAuditStore(engine),
+                request_profile_sha256=checkpoint_configuration,
+                pacing_policy=IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55),
+            )
             adapter = _ibkr_capability_adapter(
                 settings,
                 checkpoint=checkpoint,

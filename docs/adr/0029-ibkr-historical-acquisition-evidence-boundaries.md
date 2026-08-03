@@ -91,7 +91,7 @@ verification.
 Only a failure classified by the frozen policy as transient is retryable: a transport timeout,
 disconnect, transient farm unavailability, pacing rejection eligible for deferred retry, or a database
 failure proven to have occurred before provider I/O. Each provider retry is a new append-only attempt
-bound to the connection generation it uses, within the fixed attempt limit and backoff policy. A
+bound to the durable connection session identity and its generation, within the fixed attempt limit and backoff policy. A
 database failure after send recovers the persisted attempt; it cannot authorize another provider
 request until the fixed state machine has classified that attempt as incomplete and retryable.
 

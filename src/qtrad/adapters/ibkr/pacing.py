@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Protocol
 
+from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
+
 
 @dataclass(frozen=True, slots=True)
 class IbkrRequestReservation:
@@ -142,6 +144,11 @@ class IbkrPacingPolicy:
         return delay
 
 
+def _require_profile_sha256(value: str) -> None:
+    if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError("IBKR pacing request profile hash must be a lower-case SHA-256")
+
+
 class IbkrPacingLedger(Protocol):
     async def reserve_ibkr_request(
         self,
@@ -151,24 +158,35 @@ class IbkrPacingLedger(Protocol):
         contract_key: str,
         request_fingerprint: str,
         weight: int,
+        request_profile_sha256: str,
+        pacing_policy: IbkrHistoricalPacingPolicy,
     ) -> bool: ...
 
 
 class IbkrPostgresPacing:
-    """Adapter callback that makes every request reserve durable pacing state first."""
+    """Adapter callback bound to one authenticated historical request profile."""
 
     def __init__(
         self,
         ledger: IbkrPacingLedger,
         *,
+        request_profile_sha256: str,
+        pacing_policy: IbkrHistoricalPacingPolicy,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         retry_seconds: float = 1.0,
     ) -> None:
+        _require_profile_sha256(request_profile_sha256)
         if retry_seconds <= 0:
             raise ValueError("IBKR pacing retry seconds must be positive")
         self._ledger = ledger
+        self._request_profile_sha256 = request_profile_sha256
+        self._pacing_policy = pacing_policy
         self._clock = clock
         self._retry_seconds = retry_seconds
+
+    @property
+    def request_profile_sha256(self) -> str:
+        return self._request_profile_sha256
 
     async def reserve(
         self,
@@ -176,7 +194,20 @@ class IbkrPostgresPacing:
         contract_key: str,
         request_fingerprint: str,
         weight: int,
+        *,
+        request_profile_sha256: str | None = None,
+        pacing_policy: IbkrHistoricalPacingPolicy | None = None,
     ) -> float:
+        bound_profile_sha256 = (
+            self._request_profile_sha256
+            if request_profile_sha256 is None
+            else request_profile_sha256
+        )
+        bound_pacing_policy = self._pacing_policy if pacing_policy is None else pacing_policy
+        if bound_profile_sha256 != self._request_profile_sha256:
+            raise ValueError("IBKR pacing request profile hash does not match its binding")
+        if bound_pacing_policy != self._pacing_policy:
+            raise ValueError("IBKR pacing policy does not match its binding")
         requested_at = self._clock()
         if requested_at.tzinfo is None or requested_at.utcoffset() is None:
             raise ValueError("IBKR pacing clock must return an aware timestamp")
@@ -186,6 +217,8 @@ class IbkrPostgresPacing:
             contract_key=contract_key,
             request_fingerprint=request_fingerprint,
             weight=weight,
+            request_profile_sha256=bound_profile_sha256,
+            pacing_policy=bound_pacing_policy,
         ):
             return self._retry_seconds
         return 0.0

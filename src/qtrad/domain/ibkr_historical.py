@@ -23,6 +23,7 @@ REQUEST_PROFILE_CONTRACT = "qtrad-ibkr-historical-request-profile-v1"
 HISTORICAL_PLAN_CONTRACT = "qtrad-ibkr-historical-plan-v1"
 SCHEMA_VERSION = 1
 MAX_PLANNED_REQUESTS = 20_000
+MAX_IBKR_HISTORICAL_COOLDOWN_SECONDS = 3_600
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE = re.compile(r"^sha256:[0-9a-f]{64}$")
@@ -308,7 +309,9 @@ class IbkrHistoricalPacingPolicy:
     max_requests_per_rolling_window: int
 
     def __post_init__(self) -> None:
-        if not 15 <= self.identical_request_cooldown_seconds <= 3600:
+        if not (
+            15 <= self.identical_request_cooldown_seconds <= MAX_IBKR_HISTORICAL_COOLDOWN_SECONDS
+        ):
             raise ValueError("IBKR identical-request cooldown must be between 15 and 3600 seconds")
         if self.per_contract_window_seconds != 2:
             raise ValueError("IBKR per-contract pacing window must be exactly two seconds")
