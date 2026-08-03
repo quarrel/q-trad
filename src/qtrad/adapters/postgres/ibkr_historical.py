@@ -252,6 +252,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
         *,
         plan_sha256: str,
         request_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         provider_request_id: int,
         started_at: datetime,
@@ -259,6 +260,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
     ) -> IbkrHistoricalAttempt | None:
         _require_sha256(plan_sha256, "IBKR attempt plan hash")
         _require_sha256(request_sha256, "IBKR attempt request hash")
+        _require_session_id(connection_session_id, "IBKR attempt connection session ID")
         _require_positive(connection_generation, "IBKR attempt connection generation")
         _require_positive(provider_request_id, "IBKR provider request ID")
         _require_maximum_attempts(maximum_attempts)
@@ -299,10 +301,12 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     """
                     INSERT INTO ops.ibkr_historical_attempts (
                         attempt_id, plan_sha256, request_sha256, attempt_ordinal,
-                        provider_request_id, connection_generation, started_at, status
+                        connection_session_id, provider_request_id,
+                        connection_generation, started_at, status
                     ) VALUES (
                         :attempt_id, :plan_sha256, :request_sha256, :attempt_ordinal,
-                        :provider_request_id, :connection_generation, :started_at, :status
+                        :connection_session_id, :provider_request_id,
+                        :connection_generation, :started_at, :status
                     )
                     """
                 ),
@@ -311,6 +315,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     "plan_sha256": plan_sha256,
                     "request_sha256": request_sha256,
                     "attempt_ordinal": attempt_ordinal,
+                    "connection_session_id": connection_session_id,
                     "provider_request_id": provider_request_id,
                     "connection_generation": connection_generation,
                     "started_at": started_at,
@@ -338,6 +343,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             plan_sha256=plan_sha256,
             request_sha256=request_sha256,
             attempt_ordinal=attempt_ordinal,
+            connection_session_id=connection_session_id,
             provider_request_id=provider_request_id,
             connection_generation=connection_generation,
             started_at=started_at,
@@ -371,6 +377,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             )
             closure_eligible = (
                 str(attempt["status"]) == IbkrAttemptStatus.STARTED.value
+                and attempt["connection_session_id"] == callback.connection_session_id
                 and int(attempt["provider_request_id"]) == callback.provider_request_id
                 and int(attempt["connection_generation"]) == callback.connection_generation
             )
@@ -380,11 +387,13 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         text(
                             """
                             INSERT INTO ops.ibkr_historical_callbacks (
-                                attempt_id, provider_request_id, connection_generation,
+                                attempt_id, connection_session_id, provider_request_id,
+                                connection_generation,
                                 sequence, callback_kind, received_at, payload,
                                 closure_eligible
                             ) VALUES (
-                                :attempt_id, :provider_request_id, :connection_generation,
+                                :attempt_id, :connection_session_id, :provider_request_id,
+                                :connection_generation,
                                 :sequence, :callback_kind, :received_at,
                                 CAST(:payload AS jsonb), :closure_eligible
                             )
@@ -393,6 +402,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         ),
                         {
                             "attempt_id": attempt_id,
+                            "connection_session_id": callback.connection_session_id,
                             "provider_request_id": callback.provider_request_id,
                             "connection_generation": callback.connection_generation,
                             "sequence": sequence,
@@ -451,11 +461,13 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     text(
                         """
                         INSERT INTO ops.ibkr_historical_completion_markers (
-                            attempt_id, provider_request_id, connection_generation,
+                            attempt_id, connection_session_id, provider_request_id,
+                            connection_generation,
                             sequence, completed_at, raw_midpoint_bar_callback_count,
                             raw_schedule_callback_count, closure_eligible, payload
                         ) VALUES (
-                            :attempt_id, :provider_request_id, :connection_generation,
+                            :attempt_id, :connection_session_id, :provider_request_id,
+                            :connection_generation,
                             :sequence, :completed_at, :raw_midpoint_bar_callback_count,
                             :raw_schedule_callback_count, :closure_eligible,
                             CAST(:payload AS jsonb)
@@ -464,6 +476,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     ),
                     {
                         "attempt_id": attempt_id,
+                        "connection_session_id": callback.connection_session_id,
                         "provider_request_id": callback.provider_request_id,
                         "connection_generation": callback.connection_generation,
                         "sequence": sequence,
@@ -477,6 +490,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
         return IbkrHistoricalCallbackRecord(
             callback_id=callback_id,
             attempt_id=attempt_id,
+            connection_session_id=callback.connection_session_id,
             provider_request_id=callback.provider_request_id,
             connection_generation=callback.connection_generation,
             sequence=sequence,
@@ -587,11 +601,13 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
         self,
         *,
         plan_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         invalidated_at: datetime,
         maximum_attempts: int,
     ) -> Sequence[IbkrHistoricalAttemptOutcome]:
         _require_sha256(plan_sha256, "IBKR invalidation plan hash")
+        _require_session_id(connection_session_id, "IBKR invalidation connection session ID")
         _require_positive(connection_generation, "IBKR invalidation connection generation")
         _require_maximum_attempts(maximum_attempts)
         require_utc(invalidated_at, "IBKR invalidation time")
@@ -604,6 +620,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         SELECT attempt_id
                         FROM ops.ibkr_historical_attempts
                         WHERE plan_sha256 = :plan_sha256
+                          AND connection_session_id = :connection_session_id
                           AND connection_generation = :connection_generation
                           AND status = :status
                         ORDER BY attempt_ordinal, attempt_id
@@ -612,6 +629,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     ),
                     {
                         "plan_sha256": plan_sha256,
+                        "connection_session_id": connection_session_id,
                         "connection_generation": connection_generation,
                         "status": IbkrAttemptStatus.STARTED.value,
                     },
@@ -660,6 +678,8 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                         FROM ops.ibkr_historical_requests AS r
                         LEFT JOIN ops.ibkr_historical_attempts AS a
                           ON a.attempt_id = r.selected_attempt_id
+                         AND a.plan_sha256 = r.plan_sha256
+                         AND a.request_sha256 = r.request_sha256
                         WHERE r.plan_sha256 = :plan_sha256
                           AND r.request_sha256 = :request_sha256
                         FOR UPDATE OF r
@@ -676,21 +696,32 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
             )
             if row is None:
                 raise RuntimeError("IBKR publication targets an unknown request")
-            if str(row["status"]) not in {
+            request_status = str(row["status"])
+            if request_status not in {
                 IbkrRequestStatus.SUCCEEDED.value,
                 IbkrRequestStatus.TERMINAL.value,
             }:
                 raise RuntimeError("IBKR publication requires a terminal request")
-            if (
-                row["selected_attempt_id"] is None
-                or str(row["selected_attempt_status"])
-                not in {
-                    IbkrAttemptStatus.SUCCEEDED.value,
-                    IbkrAttemptStatus.TERMINAL_FAILURE.value,
-                }
-                or not row["selected_terminal_disposition"]
-            ):
+            selected_attempt_status = row["selected_attempt_status"]
+            selected_terminal_disposition = row["selected_terminal_disposition"]
+            if row["selected_attempt_id"] is None:
                 raise RuntimeError("IBKR publication requires a selected terminal attempt")
+            if request_status == IbkrRequestStatus.SUCCEEDED.value:
+                if (
+                    str(selected_attempt_status) != IbkrAttemptStatus.SUCCEEDED.value
+                    or str(selected_terminal_disposition) != IbkrTerminalDisposition.SUCCEEDED.value
+                ):
+                    raise RuntimeError(
+                        "successful IBKR publication requires a successful selected attempt"
+                    )
+            elif (
+                str(selected_attempt_status) != IbkrAttemptStatus.TERMINAL_FAILURE.value
+                or not selected_terminal_disposition
+                or str(selected_terminal_disposition) == IbkrTerminalDisposition.SUCCEEDED.value
+            ):
+                raise RuntimeError(
+                    "terminal IBKR publication requires a non-success selected attempt"
+                )
             if str(row["publication_status"]) == IbkrPublicationStatus.PUBLISHED.value:
                 if row["result_sha256"] != result_sha256:
                     raise RuntimeError(
@@ -768,12 +799,13 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                 await connection.execute(
                     text(
                         """
-                    SELECT marker_id, attempt_id, provider_request_id,
-                           connection_generation, sequence, completed_at,
+                    SELECT marker_id, attempt_id, connection_session_id,
+                           provider_request_id, connection_generation, sequence, completed_at,
                            raw_midpoint_bar_callback_count, raw_schedule_callback_count,
                            closure_eligible, payload
                     FROM ops.ibkr_historical_completion_markers
                     WHERE attempt_id = :attempt_id
+                          AND connection_session_id = :connection_session_id
                           AND connection_generation = :connection_generation
                           AND provider_request_id = :provider_request_id
                       AND closure_eligible
@@ -783,6 +815,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                     ),
                     {
                         "attempt_id": attempt_id,
+                        "connection_session_id": row["connection_session_id"],
                         "connection_generation": row["connection_generation"],
                         "provider_request_id": row["provider_request_id"],
                     },
@@ -941,7 +974,7 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
         result = await connection.execute(
             text(
                 """
-                SELECT a.attempt_id, a.plan_sha256, a.request_sha256,
+                SELECT a.attempt_id, a.connection_session_id, a.plan_sha256, a.request_sha256,
                        a.attempt_ordinal, a.provider_request_id,
                        a.connection_generation, a.started_at, a.status,
                        a.terminal_at, a.terminal_disposition, a.detail,
@@ -972,6 +1005,7 @@ def _attempt_outcome_from_row(row: Mapping[str, Any]) -> IbkrHistoricalAttemptOu
         plan_sha256=str(row["plan_sha256"]),
         request_sha256=str(row["request_sha256"]),
         attempt_ordinal=int(row["attempt_ordinal"]),
+        connection_session_id=cast(UUID, row["connection_session_id"]),
         provider_request_id=int(row["provider_request_id"]),
         connection_generation=int(row["connection_generation"]),
         started_at=cast(datetime, row["started_at"]),
@@ -1009,6 +1043,11 @@ def _bytes_value(value: object, field: str) -> bytes:
 
 def _not_before(value: datetime, lower_bound: datetime) -> datetime:
     return max(value, lower_bound)
+
+
+def _require_session_id(value: UUID, field: str) -> None:
+    if value.int == 0:
+        raise ValueError(f"{field} must be a non-zero UUID")
 
 
 def _require_positive(value: int, field: str) -> None:

@@ -84,11 +84,9 @@ class IbkrHistoricalExecutor:
         if unknown:
             raise RuntimeError("durable IBKR state contains a request outside the registered plan")
 
-        generation = await self._provider.connect()
-        if generation <= 0:
-            raise RuntimeError(
-                "IBKR historical provider returned a non-positive connection generation"
-            )
+        connection = await self._provider.connect()
+        connection_session_id = connection.connection_session_id
+        connection_generation = connection.connection_generation
         outcomes: list[IbkrHistoricalAttemptOutcome] = list(recovered)
         try:
             semaphore = asyncio.Semaphore(request_profile.maximum_in_flight_requests)
@@ -99,7 +97,8 @@ class IbkrHistoricalExecutor:
                         plan=plan,
                         request=request,
                         request_profile=request_profile,
-                        connection_generation=generation,
+                        connection_session_id=connection_session_id,
+                        connection_generation=connection_generation,
                     )
                     if outcome is not None:
                         outcomes.append(outcome)
@@ -112,14 +111,17 @@ class IbkrHistoricalExecutor:
             try:
                 await self._store.invalidate_ibkr_historical_attempts(
                     plan_sha256=plan.plan_sha256,
-                    connection_generation=generation,
+                    connection_session_id=connection_session_id,
+                    connection_generation=connection_generation,
                     invalidated_at=self._now("IBKR execution disconnect time"),
                     maximum_attempts=maximum_attempts,
                 )
             finally:
                 await self._provider.disconnect()
 
-        return IbkrHistoricalExecutionSummary(plan.plan_sha256, tuple(outcomes), generation)
+        return IbkrHistoricalExecutionSummary(
+            plan.plan_sha256, tuple(outcomes), connection_generation
+        )
 
     async def _execute_request(
         self,
@@ -127,6 +129,7 @@ class IbkrHistoricalExecutor:
         plan: IbkrHistoricalPlan,
         request: IbkrHistoricalRequest,
         request_profile: IbkrHistoricalRequestProfile,
+        connection_session_id: UUID,
         connection_generation: int,
     ) -> IbkrHistoricalAttemptOutcome | None:
         maximum_attempts = request_profile.retry_count + 1
@@ -147,6 +150,7 @@ class IbkrHistoricalExecutor:
             attempt = await self._store.start_ibkr_historical_attempt(
                 plan_sha256=plan.plan_sha256,
                 request_sha256=request.request_sha256,
+                connection_session_id=connection_session_id,
                 connection_generation=connection_generation,
                 provider_request_id=next(self._request_ids),
                 started_at=self._now("IBKR attempt start time"),
@@ -162,6 +166,7 @@ class IbkrHistoricalExecutor:
                     self._provider.request_historical(
                         request,
                         request_id=attempt.provider_request_id,
+                        connection_session_id=connection_session_id,
                         connection_generation=connection_generation,
                         callback=callback_sink,
                     ),
@@ -170,6 +175,7 @@ class IbkrHistoricalExecutor:
             except IbkrHistoricalDisconnected:
                 await self._store.invalidate_ibkr_historical_attempts(
                     plan_sha256=plan.plan_sha256,
+                    connection_session_id=connection_session_id,
                     connection_generation=connection_generation,
                     invalidated_at=self._now("IBKR disconnect time"),
                     maximum_attempts=maximum_attempts,

@@ -11,6 +11,8 @@ from typing import cast
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from qtrad.adapters.postgres.ibkr_historical import PostgresIbkrHistoricalExecutionStore
@@ -26,6 +28,7 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalCallbackKind,
     IbkrHistoricalCallbackRecord,
     IbkrHistoricalCompletionMarker,
+    IbkrHistoricalConnection,
     IbkrHistoricalDisconnected,
     IbkrHistoricalIncomplete,
     IbkrHistoricalRetryableError,
@@ -56,6 +59,7 @@ from qtrad.ports.ibkr_historical import (
 )
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
+_SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
 _INSTRUMENT = InstrumentId("fx:aud-usd")
 _FINGERPRINT = IbkrContractFingerprint(
     con_id=42,
@@ -183,6 +187,7 @@ class MemoryExecutionStore:
         self.publication_status: dict[tuple[str, str], IbkrPublicationStatus] = {}
         self.result_hashes: dict[tuple[str, str], str] = {}
         self.plan_publication_status: dict[str, IbkrPublicationStatus] = {}
+        self.selected_attempt_ids: dict[tuple[str, str], UUID | None] = {}
 
     async def register_ibkr_historical_plan(
         self,
@@ -206,6 +211,7 @@ class MemoryExecutionStore:
             key = (plan.plan_sha256, request.request_sha256)
             self.request_status[key] = IbkrRequestStatus.PENDING
             self.publication_status[key] = IbkrPublicationStatus.PENDING
+            self.selected_attempt_ids[key] = None
         return IbkrPlanRegistrationStatus.REGISTERED
 
     async def recover_ibkr_historical_execution(
@@ -243,6 +249,7 @@ class MemoryExecutionStore:
         *,
         plan_sha256: str,
         request_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         provider_request_id: int,
         started_at: datetime,
@@ -259,6 +266,7 @@ class MemoryExecutionStore:
             attempt_id=uuid4(),
             plan_sha256=plan_sha256,
             request_sha256=request_sha256,
+            connection_session_id=connection_session_id,
             attempt_ordinal=ordinal,
             provider_request_id=provider_request_id,
             connection_generation=connection_generation,
@@ -279,6 +287,7 @@ class MemoryExecutionStore:
         sequence = len(self.callbacks[attempt_id]) + 1
         eligible = (
             attempt.status is IbkrAttemptStatus.STARTED
+            and callback.connection_session_id == attempt.connection_session_id
             and callback.provider_request_id == attempt.provider_request_id
             and callback.connection_generation == attempt.connection_generation
         )
@@ -287,6 +296,7 @@ class MemoryExecutionStore:
         record = IbkrHistoricalCallbackRecord(
             callback_id=self._callback_ids,
             attempt_id=attempt_id,
+            connection_session_id=callback.connection_session_id,
             provider_request_id=callback.provider_request_id,
             connection_generation=callback.connection_generation,
             sequence=sequence,
@@ -302,6 +312,7 @@ class MemoryExecutionStore:
                 IbkrHistoricalCompletionMarker(
                     marker_id=self._marker_ids,
                     attempt_id=attempt_id,
+                    connection_session_id=callback.connection_session_id,
                     provider_request_id=callback.provider_request_id,
                     connection_generation=callback.connection_generation,
                     sequence=sequence,
@@ -338,6 +349,7 @@ class MemoryExecutionStore:
                 for item in self.markers[attempt_id]
                 if item.closure_eligible
                 and item.provider_request_id == attempt.provider_request_id
+                and item.connection_session_id == attempt.connection_session_id
                 and item.connection_generation == attempt.connection_generation
             ),
             None,
@@ -376,6 +388,8 @@ class MemoryExecutionStore:
         )
         self.attempts[attempt_id] = updated
         self.request_status[(attempt.plan_sha256, attempt.request_sha256)] = request_status
+        if request_status is not IbkrRequestStatus.PENDING:
+            self.selected_attempt_ids[(attempt.plan_sha256, attempt.request_sha256)] = attempt_id
         return self._outcome(updated)
 
     async def fail_ibkr_historical_attempt(
@@ -411,12 +425,15 @@ class MemoryExecutionStore:
         )
         self.attempts[attempt_id] = updated
         self.request_status[(attempt.plan_sha256, attempt.request_sha256)] = request_status
+        if request_status is IbkrRequestStatus.TERMINAL:
+            self.selected_attempt_ids[(attempt.plan_sha256, attempt.request_sha256)] = attempt_id
         return self._outcome(updated)
 
     async def invalidate_ibkr_historical_attempts(
         self,
         *,
         plan_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         invalidated_at: datetime,
         maximum_attempts: int,
@@ -427,6 +444,7 @@ class MemoryExecutionStore:
         for attempt in tuple(self.attempts.values()):
             if (
                 attempt.plan_sha256 == plan_sha256
+                and attempt.connection_session_id == connection_session_id
                 and attempt.connection_generation == connection_generation
                 and attempt.status is IbkrAttemptStatus.STARTED
             ):
@@ -461,20 +479,23 @@ class MemoryExecutionStore:
             IbkrRequestStatus.TERMINAL,
         }:
             raise RuntimeError("IBKR publication requires a terminal request")
-        selected = next(
-            (
-                attempt
-                for attempt in self.attempts.values()
-                if attempt.plan_sha256 == plan_sha256
-                and attempt.request_sha256 == request_sha256
-                and attempt.status
-                in {IbkrAttemptStatus.SUCCEEDED, IbkrAttemptStatus.TERMINAL_FAILURE}
-                and attempt.terminal_disposition is not None
-            ),
-            None,
-        )
+        selected_id = self.selected_attempt_ids[key]
+        selected = self.attempts.get(selected_id) if selected_id is not None else None
         if selected is None:
             raise RuntimeError("IBKR publication requires a selected terminal attempt")
+        if selected.plan_sha256 != plan_sha256 or selected.request_sha256 != request_sha256:
+            raise RuntimeError("IBKR publication requires a request-bound selected attempt")
+        if self.request_status[key] is IbkrRequestStatus.SUCCEEDED:
+            if (
+                selected.status is not IbkrAttemptStatus.SUCCEEDED
+                or selected.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED
+            ):
+                raise RuntimeError("IBKR publication requires a successful selected attempt")
+        elif (
+            selected.status is not IbkrAttemptStatus.TERMINAL_FAILURE
+            or selected.terminal_disposition in {None, IbkrTerminalDisposition.SUCCEEDED}
+        ):
+            raise RuntimeError("IBKR publication requires a non-success selected attempt")
         if self.publication_status[key] is IbkrPublicationStatus.PUBLISHED:
             if self.result_hashes[key] != result_sha256:
                 raise RuntimeError("IBKR publication identity conflicts with its immutable result")
@@ -510,6 +531,8 @@ class MemoryExecutionStore:
         self.request_status[(attempt.plan_sha256, attempt.request_sha256)] = (
             IbkrRequestStatus.TERMINAL if exhausted else IbkrRequestStatus.PENDING
         )
+        if exhausted:
+            self.selected_attempt_ids[(attempt.plan_sha256, attempt.request_sha256)] = attempt_id
         return self._outcome(updated)
 
     def _outcome(self, attempt: IbkrHistoricalAttempt) -> IbkrHistoricalAttemptOutcome:
@@ -556,9 +579,12 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         self.connect_count = 0
         self.disconnect_count = 0
 
-    async def connect(self) -> int:
+    async def connect(self) -> IbkrHistoricalConnection:
         self.connect_count += 1
-        return self.connect_count
+        return IbkrHistoricalConnection(
+            connection_session_id=uuid4(),
+            connection_generation=self.connect_count,
+        )
 
     async def disconnect(self) -> None:
         self.disconnect_count += 1
@@ -568,6 +594,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         request: IbkrHistoricalRequest,
         *,
         request_id: int,
+        connection_session_id: UUID,
         connection_generation: int,
         callback: IbkrHistoricalCallbackSink,
     ) -> None:
@@ -591,6 +618,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS and action != "stale":
             await callback(
                 IbkrHistoricalCallback(
+                    connection_session_id=connection_session_id,
                     provider_request_id=callback_request_id,
                     connection_generation=callback_generation,
                     kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
@@ -603,6 +631,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
         elif request.kind is IbkrHistoricalRequestKind.SCHEDULE and action != "stale":
             await callback(
                 IbkrHistoricalCallback(
+                    connection_session_id=connection_session_id,
                     provider_request_id=callback_request_id,
                     connection_generation=callback_generation,
                     kind=IbkrHistoricalCallbackKind.SCHEDULE,
@@ -612,6 +641,7 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
             )
         await callback(
             IbkrHistoricalCallback(
+                connection_session_id=connection_session_id,
                 provider_request_id=callback_request_id,
                 connection_generation=callback_generation,
                 kind=IbkrHistoricalCallbackKind.COMPLETION,
@@ -976,6 +1006,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     started = await store.start_ibkr_historical_attempt(
         plan_sha256=recovery_plan.plan_sha256,
         request_sha256=recovery_request.request_sha256,
+        connection_session_id=_SESSION_ID,
         connection_generation=7,
         provider_request_id=700,
         started_at=_NOW,
@@ -994,6 +1025,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     stale = await store.start_ibkr_historical_attempt(
         plan_sha256=recovery_plan.plan_sha256,
         request_sha256=recovery_request.request_sha256,
+        connection_session_id=_SESSION_ID,
         connection_generation=8,
         provider_request_id=800,
         started_at=_NOW,
@@ -1003,6 +1035,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     await store.append_ibkr_historical_callback(
         attempt_id=stale.attempt_id,
         callback=IbkrHistoricalCallback(
+            connection_session_id=_SESSION_ID,
             provider_request_id=800,
             connection_generation=9,
             kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
@@ -1013,6 +1046,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     await store.append_ibkr_historical_callback(
         attempt_id=stale.attempt_id,
         callback=IbkrHistoricalCallback(
+            connection_session_id=_SESSION_ID,
             provider_request_id=800,
             connection_generation=9,
             kind=IbkrHistoricalCallbackKind.COMPLETION,
@@ -1062,6 +1096,7 @@ async def test_same_generation_wrong_provider_request_id_cannot_close_attempt() 
     attempt = await store.start_ibkr_historical_attempt(
         plan_sha256=plan.plan_sha256,
         request_sha256=request.request_sha256,
+        connection_session_id=_SESSION_ID,
         connection_generation=1,
         provider_request_id=101,
         started_at=_NOW,
@@ -1072,6 +1107,7 @@ async def test_same_generation_wrong_provider_request_id_cannot_close_attempt() 
     record = await store.append_ibkr_historical_callback(
         attempt_id=attempt.attempt_id,
         callback=IbkrHistoricalCallback(
+            connection_session_id=_SESSION_ID,
             provider_request_id=102,
             connection_generation=1,
             kind=IbkrHistoricalCallbackKind.COMPLETION,
@@ -1100,6 +1136,7 @@ async def test_schedule_completion_without_schedule_callback_is_incomplete() -> 
     attempt = await store.start_ibkr_historical_attempt(
         plan_sha256=plan.plan_sha256,
         request_sha256=request.request_sha256,
+        connection_session_id=_SESSION_ID,
         connection_generation=1,
         provider_request_id=201,
         started_at=_NOW,
@@ -1110,6 +1147,7 @@ async def test_schedule_completion_without_schedule_callback_is_incomplete() -> 
     await store.append_ibkr_historical_callback(
         attempt_id=attempt.attempt_id,
         callback=IbkrHistoricalCallback(
+            connection_session_id=_SESSION_ID,
             provider_request_id=201,
             connection_generation=1,
             kind=IbkrHistoricalCallbackKind.COMPLETION,
@@ -1273,5 +1311,130 @@ async def test_postgres_store_publishes_terminal_attempts() -> None:
                 {"plan_sha256": plan.plan_sha256},
             )
             assert plan_rows == [{"publication_status": "PUBLISHED"}]
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_fresh_session_namespaces_restarted_request_ids() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        plan, profile = _unique_plan()
+        await store.register_ibkr_historical_plan(
+            plan,
+            plan_bytes=ibkr_historical_plan_bytes(plan),
+            registered_at=_NOW,
+        )
+
+        first_provider = FakeHistoricalDataPort(
+            {kind.value: [] for kind in IbkrHistoricalRequestKind}
+        )
+        first_connection = await first_provider.connect()
+        started = await store.start_ibkr_historical_attempt(
+            plan_sha256=plan.plan_sha256,
+            request_sha256=plan.requests[0].request_sha256,
+            connection_session_id=first_connection.connection_session_id,
+            connection_generation=first_connection.connection_generation,
+            provider_request_id=1,
+            started_at=_NOW,
+            maximum_attempts=2,
+        )
+        assert started is not None
+        await first_provider.disconnect()
+
+        second_provider = FakeHistoricalDataPort(
+            {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
+        )
+        summary = await IbkrHistoricalExecutor(
+            store,
+            second_provider,
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+        assert second_provider.connect_count == 1
+        assert summary.connection_generation == 1
+        assert sum(
+            outcome.request_status is IbkrRequestStatus.SUCCEEDED for outcome in summary.outcomes
+        ) == len(plan.requests)
+        attempt_rows = await audit_store.query(
+            """
+            SELECT connection_session_id, connection_generation, provider_request_id
+            FROM ops.ibkr_historical_attempts
+            WHERE plan_sha256 = :plan_sha256
+            ORDER BY attempt_id
+            """,
+            {"plan_sha256": plan.plan_sha256},
+        )
+        assert len(attempt_rows) == len(plan.requests) + 1
+        assert {int(row["connection_generation"]) for row in attempt_rows} == {1}
+        assert sum(int(row["provider_request_id"]) == 1 for row in attempt_rows) == 2
+        assert len({str(row["connection_session_id"]) for row in attempt_rows}) == 2
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_selected_attempt_cannot_be_mutated_across_requests() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        plan, profile = _unique_plan()
+        await store.register_ibkr_historical_plan(
+            plan,
+            plan_bytes=ibkr_historical_plan_bytes(plan),
+            registered_at=_NOW,
+        )
+        await IbkrHistoricalExecutor(
+            store,
+            FakeHistoricalDataPort({kind.value: ["success"] for kind in IbkrHistoricalRequestKind}),
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+        request_rows = await audit_store.query(
+            """
+            SELECT request_sha256, selected_attempt_id
+            FROM ops.ibkr_historical_requests
+            WHERE plan_sha256 = :plan_sha256
+            ORDER BY request_sha256
+            """,
+            {"plan_sha256": plan.plan_sha256},
+        )
+        assert len(request_rows) == 2
+        assert all(row["selected_attempt_id"] is not None for row in request_rows)
+        with pytest.raises(IntegrityError):
+            async with engine.begin() as connection:
+                await connection.execute(
+                    text(
+                        """
+                        UPDATE ops.ibkr_historical_requests
+                        SET selected_attempt_id = :selected_attempt_id
+                        WHERE plan_sha256 = :plan_sha256
+                          AND request_sha256 = :request_sha256
+                        """
+                    ),
+                    {
+                        "selected_attempt_id": request_rows[1]["selected_attempt_id"],
+                        "plan_sha256": plan.plan_sha256,
+                        "request_sha256": request_rows[0]["request_sha256"],
+                    },
+                )
     finally:
         await engine.dispose()

@@ -136,7 +136,7 @@ remains offline/replay.
   `qtrad-ibkr-historical-plan-v1` contracts plus a PostgreSQL- and Gateway-independent deterministic
   planner and file-only plan verifier. Stage 3 adds a transport-independent PostgreSQL execution
   state machine with byte-stable registration, pre-I/O attempt persistence, append-only
-  provider-ID- and generation-bearing callbacks, profile-bound pacing reservations, completion markers, restart recovery and publication state, with
+  connection-session-namespaced provider callbacks, profile-bound pacing reservations, completion markers, restart recovery and publication state, with
   fake-port transition and crash-injection coverage. It remains inert until an account-gated
   capability review, exact operator selection and later Stage 5 canary evidence are available;
   no historical dataset, entitlement evidence or research result has been created. IBKR history

@@ -12,6 +12,7 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalAttemptOutcome,
     IbkrHistoricalCallback,
     IbkrHistoricalCallbackRecord,
+    IbkrHistoricalConnection,
     IbkrPlanRegistrationStatus,
 )
 from qtrad.domain.ibkr_historical import (
@@ -26,7 +27,7 @@ IbkrHistoricalCallbackSink = Callable[[IbkrHistoricalCallback], Awaitable[None]]
 class IbkrHistoricalDataPort(Protocol):
     """Market-data-only provider boundary; no order operation is available."""
 
-    async def connect(self) -> int: ...
+    async def connect(self) -> IbkrHistoricalConnection: ...
 
     async def disconnect(self) -> None: ...
 
@@ -35,6 +36,7 @@ class IbkrHistoricalDataPort(Protocol):
         request: IbkrHistoricalRequest,
         *,
         request_id: int,
+        connection_session_id: UUID,
         connection_generation: int,
         callback: IbkrHistoricalCallbackSink,
     ) -> None: ...
@@ -84,6 +86,7 @@ class IbkrHistoricalExecutionStore(Protocol):
         *,
         plan_sha256: str,
         request_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         provider_request_id: int,
         started_at: datetime,
@@ -119,6 +122,7 @@ class IbkrHistoricalExecutionStore(Protocol):
         self,
         *,
         plan_sha256: str,
+        connection_session_id: UUID,
         connection_generation: int,
         invalidated_at: datetime,
         maximum_attempts: int,

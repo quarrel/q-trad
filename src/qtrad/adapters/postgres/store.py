@@ -18,7 +18,10 @@ from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 from qtrad.application.run_reconciliation import verify_run_reconciliation_plan_hash
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillPlanItem
-from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
+from qtrad.domain.ibkr_historical import (
+    MAX_IBKR_HISTORICAL_COOLDOWN_SECONDS,
+    IbkrHistoricalPacingPolicy,
+)
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
 from qtrad.domain.market_data import BarProvenance, DataQuality, MarketBar, PriceBasis
@@ -328,6 +331,13 @@ class PostgresAuditStore(AuditStore):
             seconds=pacing_policy.per_contract_window_seconds
         )
         rolling_cutoff = requested_at - timedelta(seconds=pacing_policy.rolling_window_seconds)
+        retention_cutoff = requested_at - timedelta(
+            seconds=max(
+                MAX_IBKR_HISTORICAL_COOLDOWN_SECONDS,
+                pacing_policy.identical_request_cooldown_seconds,
+                pacing_policy.rolling_window_seconds,
+            )
+        )
         global_cutoff = requested_at - timedelta(seconds=1)
         async with self._engine.begin() as connection:
             await connection.execute(
@@ -337,11 +347,11 @@ class PostgresAuditStore(AuditStore):
                 text(
                     """
                     DELETE FROM ops.ibkr_request_pacing
-                    WHERE requested_at < :rolling_cutoff
+                    WHERE requested_at < :retention_cutoff
                     """
                 ),
                 {
-                    "rolling_cutoff": rolling_cutoff,
+                    "retention_cutoff": retention_cutoff,
                 },
             )
             duplicate = await connection.execute(

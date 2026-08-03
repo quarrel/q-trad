@@ -66,9 +66,23 @@ class IbkrPlanRegistrationStatus(StrEnum):
 
 
 @dataclass(frozen=True, slots=True)
+class IbkrHistoricalConnection:
+    """Provider session namespace and its callback-fencing generation."""
+
+    connection_session_id: UUID
+    connection_generation: int
+
+    def __post_init__(self) -> None:
+        _require_connection_session_id(self.connection_session_id, "IBKR connection session ID")
+        if self.connection_generation <= 0:
+            raise ValueError("IBKR connection generation must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class IbkrHistoricalCallback:
     """One callback as received from a historical-data transport."""
 
+    connection_session_id: UUID
     provider_request_id: int
     connection_generation: int
     kind: IbkrHistoricalCallbackKind
@@ -76,6 +90,7 @@ class IbkrHistoricalCallback:
     payload: Mapping[str, JsonValue]
 
     def __post_init__(self) -> None:
+        _require_connection_session_id(self.connection_session_id, "IBKR callback session ID")
         if self.provider_request_id <= 0:
             raise ValueError("IBKR callback provider request ID must be positive")
         if self.connection_generation <= 0:
@@ -93,6 +108,7 @@ class IbkrHistoricalAttempt:
     attempt_id: UUID
     plan_sha256: str
     request_sha256: str
+    connection_session_id: UUID
     attempt_ordinal: int
     provider_request_id: int
     connection_generation: int
@@ -105,6 +121,7 @@ class IbkrHistoricalAttempt:
     def __post_init__(self) -> None:
         _require_sha256(self.plan_sha256, "IBKR attempt plan hash")
         _require_sha256(self.request_sha256, "IBKR attempt request hash")
+        _require_connection_session_id(self.connection_session_id, "IBKR attempt session ID")
         if self.attempt_ordinal <= 0:
             raise ValueError("IBKR attempt ordinal must be positive")
         if self.provider_request_id <= 0:
@@ -131,6 +148,7 @@ class IbkrHistoricalCallbackRecord:
 
     callback_id: int
     attempt_id: UUID
+    connection_session_id: UUID
     provider_request_id: int
     connection_generation: int
     sequence: int
@@ -142,6 +160,9 @@ class IbkrHistoricalCallbackRecord:
     def __post_init__(self) -> None:
         if self.callback_id <= 0:
             raise ValueError("IBKR callback ID must be positive")
+        _require_connection_session_id(
+            self.connection_session_id, "IBKR callback record session ID"
+        )
         if self.provider_request_id <= 0:
             raise ValueError("IBKR callback provider request ID must be positive")
         if self.connection_generation <= 0:
@@ -157,6 +178,7 @@ class IbkrHistoricalCompletionMarker:
 
     marker_id: int
     attempt_id: UUID
+    connection_session_id: UUID
     provider_request_id: int
     connection_generation: int
     sequence: int
@@ -169,6 +191,9 @@ class IbkrHistoricalCompletionMarker:
     def __post_init__(self) -> None:
         if self.marker_id <= 0:
             raise ValueError("IBKR completion marker ID must be positive")
+        _require_connection_session_id(
+            self.connection_session_id, "IBKR completion marker session ID"
+        )
         if self.provider_request_id <= 0:
             raise ValueError("IBKR completion marker provider request ID must be positive")
         if self.connection_generation <= 0 or self.sequence <= 0:
@@ -253,6 +278,11 @@ def ibkr_historical_plan_bytes_sha256(plan_bytes: bytes) -> str:
     if len(plan_bytes) > MAX_IBKR_PLAN_BYTES:
         raise ValueError("IBKR historical plan bytes exceed their bounded size")
     return sha256(plan_bytes).hexdigest()
+
+
+def _require_connection_session_id(value: UUID, field_name: str) -> None:
+    if value.int == 0:
+        raise ValueError(f"{field_name} must be a non-zero UUID")
 
 
 def _require_sha256(value: str, field_name: str) -> None:

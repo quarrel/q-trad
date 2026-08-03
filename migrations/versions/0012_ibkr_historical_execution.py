@@ -60,6 +60,7 @@ def upgrade() -> None:
             plan_sha256 TEXT NOT NULL,
             request_sha256 TEXT NOT NULL,
             attempt_ordinal INTEGER NOT NULL CHECK (attempt_ordinal > 0),
+            connection_session_id UUID NOT NULL,
             provider_request_id BIGINT NOT NULL CHECK (provider_request_id > 0),
             connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
             started_at TIMESTAMPTZ NOT NULL,
@@ -68,7 +69,8 @@ def upgrade() -> None:
             terminal_disposition TEXT,
             detail TEXT,
             UNIQUE (plan_sha256, request_sha256, attempt_ordinal),
-            UNIQUE (connection_generation, provider_request_id),
+            UNIQUE (plan_sha256, request_sha256, attempt_id),
+            UNIQUE (connection_session_id, connection_generation, provider_request_id),
             FOREIGN KEY (plan_sha256, request_sha256)
                 REFERENCES ops.ibkr_historical_requests(plan_sha256, request_sha256),
             CHECK (
@@ -84,6 +86,14 @@ def upgrade() -> None:
     )
     op.execute(
         """
+        ALTER TABLE ops.ibkr_historical_requests
+        ADD CONSTRAINT fk_ibkr_historical_requests_selected_attempt
+        FOREIGN KEY (plan_sha256, request_sha256, selected_attempt_id)
+        REFERENCES ops.ibkr_historical_attempts(plan_sha256, request_sha256, attempt_id)
+        """
+    )
+    op.execute(
+        """
         CREATE INDEX ix_ibkr_historical_attempts_plan_status
             ON ops.ibkr_historical_attempts (plan_sha256, status)
         """
@@ -94,6 +104,7 @@ def upgrade() -> None:
             callback_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             attempt_id UUID NOT NULL
                 REFERENCES ops.ibkr_historical_attempts(attempt_id),
+            connection_session_id UUID NOT NULL,
             provider_request_id BIGINT NOT NULL CHECK (provider_request_id > 0),
             connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
             sequence BIGINT NOT NULL CHECK (sequence > 0),
@@ -111,6 +122,7 @@ def upgrade() -> None:
             marker_id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
             attempt_id UUID NOT NULL
                 REFERENCES ops.ibkr_historical_attempts(attempt_id),
+            connection_session_id UUID NOT NULL,
             provider_request_id BIGINT NOT NULL CHECK (provider_request_id > 0),
             connection_generation BIGINT NOT NULL CHECK (connection_generation > 0),
             sequence BIGINT NOT NULL CHECK (sequence > 0),
@@ -138,6 +150,10 @@ def downgrade() -> None:
     op.execute("DROP TABLE ops.ibkr_historical_completion_markers")
     op.execute("DROP TABLE ops.ibkr_historical_callbacks")
     op.execute("DROP INDEX ix_ibkr_historical_attempts_plan_status")
+    op.execute(
+        "ALTER TABLE ops.ibkr_historical_requests "
+        "DROP CONSTRAINT fk_ibkr_historical_requests_selected_attempt"
+    )
     op.execute("DROP TABLE ops.ibkr_historical_attempts")
     op.execute("DROP TABLE ops.ibkr_historical_requests")
     op.execute("DROP TABLE ops.ibkr_historical_plans")

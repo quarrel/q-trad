@@ -563,7 +563,7 @@ PostgreSQL stores:
 * pacing reservations bound to the frozen request profile and pacing policy;
 * attempt starts;
 * attempt terminal states;
-* provider-ID- and generation-bearing callback records;
+* callback records namespaced by connection session ID, provider request ID and generation;
 * completion markers;
 * publication status.
 
@@ -572,14 +572,15 @@ Required properties:
 * registration is idempotent only for byte-identical plan content;
 * an attempt is persisted before provider I/O;
 * callbacks are append-only;
-* every callback carries provider request ID, connection generation and monotonic sequence;
-* stale-generation callbacks cannot enter a successful closure;
+* every callback carries connection session ID, provider request ID, connection generation and monotonic sequence;
+* stale session or generation callbacks cannot enter a successful closure;
+* selected-attempt publication is bound to plan and request identity and terminal disposition;
 * a disconnect invalidates unfinished attempts;
 * a completed successful planned request is never rerun;
 * terminal failures do not block unrelated requests;
 * crash recovery derives work from durable state rather than process memory.
 
-The executor passes the frozen request-profile pacing policy to the durable ledger. It uses a conservative internal rate below provider limits; IBKR documents identical-request, per-contract burst and 60-request-per-ten-minute historical pacing constraints.
+The executor passes the frozen request-profile pacing policy to the durable ledger, which retains reservations for the maximum supported cooldown across pacing profiles. It uses a conservative internal rate below provider limits; IBKR documents identical-request, per-contract burst and 60-request-per-ten-minute historical pacing constraints.
 
 ### Exit criteria
 

@@ -242,6 +242,45 @@ async def test_postgres_pacing_enforces_exact_bound_policy_atomically() -> None:
             request_fingerprint="fingerprint-" + uuid4().hex,
         )
 
+        long_policy = IbkrHistoricalPacingPolicy(3600, 2, 5, 600, 55)
+        long_profile = uuid4().hex + uuid4().hex
+        short_profile = uuid4().hex + uuid4().hex
+        long_contract = "long-cooldown-" + uuid4().hex
+        long_fingerprint = "fingerprint-" + uuid4().hex
+        long_now = now + timedelta(seconds=2800)
+        assert await _reserve(
+            store,
+            requested_at=long_now,
+            request_profile_sha256=long_profile,
+            pacing_policy=long_policy,
+            contract_key=long_contract,
+            request_fingerprint=long_fingerprint,
+        )
+        assert not await _reserve(
+            store,
+            requested_at=long_now + timedelta(seconds=601),
+            request_profile_sha256=long_profile,
+            pacing_policy=long_policy,
+            contract_key=long_contract,
+            request_fingerprint=long_fingerprint,
+        )
+        assert await _reserve(
+            store,
+            requested_at=long_now + timedelta(seconds=601),
+            request_profile_sha256=short_profile,
+            pacing_policy=_POLICY,
+            contract_key="short-profile-" + uuid4().hex,
+            request_fingerprint="fingerprint-" + uuid4().hex,
+        )
+        assert not await _reserve(
+            store,
+            requested_at=long_now + timedelta(seconds=602),
+            request_profile_sha256=long_profile,
+            pacing_policy=long_policy,
+            contract_key=long_contract,
+            request_fingerprint=long_fingerprint,
+        )
+
         concurrent_policy = IbkrHistoricalPacingPolicy(15, 2, 1, 600, 55)
         concurrent_profile = uuid4().hex + uuid4().hex
         concurrent_contract = "concurrent-" + uuid4().hex
