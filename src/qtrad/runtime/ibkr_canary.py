@@ -14,6 +14,7 @@ from qtrad.application.ibkr_canary import (
     IbkrHistoricalCanaryCaseResult,
     IbkrHistoricalCanaryEvidence,
     IbkrHistoricalCanaryRequestResult,
+    replay_ibkr_historical_canary_evidence,
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import IbkrHistoricalCallbackKind
@@ -52,6 +53,9 @@ _REQUEST_RESULT_KEYS = {
     "schedule_session_count",
     "error_codes",
     "callbacks",
+    "expected_connection_session_id",
+    "expected_provider_request_id",
+    "expected_connection_generation",
     "detail",
     "stop_reason",
 }
@@ -78,9 +82,8 @@ def load_ibkr_historical_canary_evidence(
     path: Path,
 ) -> IbkrHistoricalCanaryEvidence:
     """Load and replay canonical canary evidence without provider access."""
-
     document = runtime._read_json_object(path, "IBKR historical canary evidence")
-    return _evidence_from_json(document)
+    return replay_ibkr_historical_canary_evidence(_evidence_from_json(document))
 
 
 def verify_ibkr_historical_canary_evidence(
@@ -206,9 +209,34 @@ def _request_result_from_json(value: object) -> IbkrHistoricalCanaryRequestResul
         schedule_session_count=runtime._integer(item, "schedule_session_count"),
         error_codes=_non_negative_integer_tuple(item.get("error_codes"), "error_codes"),
         callbacks=tuple(_callback_from_json(value) for value in callbacks),
+        expected_connection_session_id=_nullable_uuid(item, "expected_connection_session_id"),
+        expected_provider_request_id=_nullable_integer(item, "expected_provider_request_id"),
+        expected_connection_generation=_nullable_integer(item, "expected_connection_generation"),
         detail=_nullable_diagnostic(item, "detail"),
         stop_reason=_nullable_diagnostic(item, "stop_reason"),
     )
+
+
+def _nullable_uuid(value: Mapping[str, object], field: str) -> UUID | None:
+    item = value.get(field)
+    if item is None:
+        return None
+    if not isinstance(item, str):
+        raise ValueError(f"{field} must be a canonical UUID or null")
+    try:
+        parsed = UUID(item)
+    except ValueError as error:
+        raise ValueError(f"{field} must be a canonical UUID or null") from error
+    if str(parsed) != item:
+        raise ValueError(f"{field} must be a canonical UUID or null")
+    return parsed
+
+
+def _nullable_integer(value: Mapping[str, object], field: str) -> int | None:
+    item = value.get(field)
+    if item is None:
+        return None
+    return runtime._integer(value, field)
 
 
 def _callback_from_json(value: object) -> dict[str, JsonValue]:
@@ -257,7 +285,7 @@ def _nullable_diagnostic(value: Mapping[str, object], field: str) -> str | None:
         not isinstance(item, str)
         or not item
         or len(item) > _MAX_DIAGNOSTIC_LENGTH
-        or any(character in item for character in "\\r\\n\\x00")
+        or any(character in item for character in "\r\n\x00")
     ):
         raise ValueError(f"{field} must be a bounded diagnostic or null")
     return item
@@ -272,7 +300,7 @@ def _bounded_string_tuple(value: object, field: str) -> tuple[str, ...]:
             not isinstance(item, str)
             or not item
             or len(item) > _MAX_DIAGNOSTIC_LENGTH
-            or any(character in item for character in "\\r\\n\\x00")
+            or any(character in item for character in "\r\n\x00")
         ):
             raise ValueError(f"{field} must contain bounded strings")
         result.append(item)

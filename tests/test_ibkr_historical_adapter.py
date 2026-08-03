@@ -41,9 +41,9 @@ _FINGERPRINT = IbkrContractFingerprint(
 
 def _request(kind: IbkrHistoricalRequestKind) -> IbkrHistoricalRequest:
     end = _START + timedelta(hours=2)
-    bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
-    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
-    format_date = 2 if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
+    bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
+    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
+    format_date = 2
     identity: dict[str, JsonValue] = {
         "instrument_id": "fx:eur-usd",
         "fingerprint": _FINGERPRINT.as_json_value(),
@@ -76,9 +76,16 @@ def _request(kind: IbkrHistoricalRequestKind) -> IbkrHistoricalRequest:
 
 
 class _HistoricalClient:
-    def __init__(self, callbacks: Queue[capability._Callback], *, error: bool = False) -> None:
+    def __init__(
+        self,
+        callbacks: Queue[capability._Callback],
+        *,
+        error: bool = False,
+        error_text: str = "provider message",
+    ) -> None:
         self._callbacks = callbacks
         self._error = error
+        self._error_text = error_text
         self.cancelled: list[int] = []
         self.historical_calls: list[tuple[int, tuple[object, ...]]] = []
         self.contract_calls: list[int] = []
@@ -131,8 +138,8 @@ class _HistoricalClient:
                     "error",
                     request_id,
                     (1_770_000_000, 162, "REQUEST_ERROR"),
-                    diagnostic="provider message",
-                    message_sha256="a" * 64,
+                    diagnostic=self._error_text,
+                    message_sha256=sha256_json({"message": self._error_text}),
                 )
             )
             return
@@ -216,7 +223,18 @@ async def test_historical_adapter_correlates_bars_and_schedule(
     assert bars[0].payload["date"] == int((_START + timedelta(minutes=1)).timestamp())
     assert bars[0].payload["open"] == "1.1"
     assert received[-1].kind is IbkrHistoricalCallbackKind.COMPLETION
-    assert created[0].historical_calls[0][1][4:8] == ("MIDPOINT", 0, 2, False)
+    first_call = created[0].historical_calls[0][1]
+    assert isinstance(first_call[0], SimpleNamespace)
+    assert first_call[1:] == (
+        ibkr_end_date_time(_START + timedelta(hours=2)),
+        "1 D",
+        "1 min",
+        "MIDPOINT",
+        0,
+        2,
+        False,
+        [],
+    )
 
     received.clear()
     await adapter.request_historical(
@@ -234,19 +252,39 @@ async def test_historical_adapter_correlates_bars_and_schedule(
     assert session["active"] is True
     assert session["start"] == "2026-02-01T00:00:00Z"
     assert received[-1].kind is IbkrHistoricalCallbackKind.COMPLETION
-    assert created[0].historical_calls[1][1][4:8] == ("SCHEDULE", 0, 2, False)
+    schedule_call = created[0].historical_calls[1][1]
+    assert isinstance(schedule_call[0], SimpleNamespace)
+    assert schedule_call[1:] == (
+        ibkr_end_date_time(_START + timedelta(hours=2)),
+        "1 D",
+        "1 day",
+        "SCHEDULE",
+        0,
+        2,
+        False,
+        [],
+    )
     await adapter.disconnect()
 
 
+@pytest.mark.parametrize(
+    "error_text",
+    (
+        "No market data permissions for this request",
+        "Historical market data Service error message",
+        "No data of type MIDPOINT available for this request",
+    ),
+)
 @pytest.mark.asyncio
 async def test_historical_adapter_reauthenticates_and_retains_sanitized_error(
     monkeypatch: pytest.MonkeyPatch,
+    error_text: str,
 ) -> None:
     monkeypatch.setattr(historical, "_contract", lambda query: SimpleNamespace())
     created: list[_HistoricalClient] = []
 
     def factory(callbacks: Queue[capability._Callback]) -> _HistoricalClient:
-        client = _HistoricalClient(callbacks, error=bool(created))
+        client = _HistoricalClient(callbacks, error=bool(created), error_text=error_text)
         created.append(client)
         return client
 
@@ -276,10 +314,7 @@ async def test_historical_adapter_reauthenticates_and_retains_sanitized_error(
             connection_generation=connection.connection_generation,
             callback=collect,
         )
-    assert (
-        getattr(raised.value, "disposition", None)
-        is IbkrTerminalDisposition.ENTITLEMENT_UNAVAILABLE
-    )
+    assert getattr(raised.value, "disposition", None) is IbkrTerminalDisposition.PROVIDER_REJECTED
     error = next(item for item in received if item.kind is IbkrHistoricalCallbackKind.ERROR)
     assert error.payload["error_code"] == 162
     assert error.payload["diagnostic"] == "IBKR_162_REQUEST_ERROR"

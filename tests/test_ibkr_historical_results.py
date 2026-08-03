@@ -42,6 +42,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalPlanSnapshot,
     IbkrHistoricalRequestResult,
     IbkrHistoricalRequestSnapshot,
+    IbkrHistoricalResultArtifact,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -79,9 +80,9 @@ _ATTEMPTS = (
 
 
 def _request(kind: IbkrHistoricalRequestKind) -> IbkrHistoricalRequest:
-    bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
-    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
-    format_date = 2 if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None
+    bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
+    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
+    format_date = 2
     identity: dict[str, JsonValue] = {
         "instrument_id": str(_INSTRUMENT),
         "fingerprint": _FINGERPRINT.as_json_value(),
@@ -328,6 +329,23 @@ def _snapshot(
 def _build_fixture() -> tuple[IbkrHistoricalPlan, IbkrHistoricalExecutionSnapshot]:
     plan, requests = _plan()
     return plan, _snapshot(plan, requests)
+
+
+def _bar_and_schedule_results(
+    artifact: IbkrHistoricalResultArtifact,
+) -> tuple[IbkrHistoricalRequestResult, IbkrHistoricalRequestResult]:
+    return (
+        next(
+            item
+            for item in artifact.request_results
+            if item.request_payload["kind"] == IbkrHistoricalRequestKind.MIDPOINT_BARS.value
+        ),
+        next(
+            item
+            for item in artifact.request_results
+            if item.request_payload["kind"] == IbkrHistoricalRequestKind.SCHEDULE.value
+        ),
+    )
 
 
 def test_result_builder_and_file_verifier_replay_a_create_only_closure(tmp_path: Path) -> None:
@@ -975,7 +993,7 @@ def test_result_builder_reconciles_schedule_activity_order_independently() -> No
 def test_aggregate_replay_rejects_duplicate_callback_identity_across_children() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    bar_result, schedule_result = artifact.request_results
+    bar_result, schedule_result = _bar_and_schedule_results(artifact)
     duplicate_callback = replace(
         schedule_result.callbacks[0],
         callback_id=bar_result.callbacks[0].callback_id,
@@ -1001,7 +1019,7 @@ def test_aggregate_replay_rejects_duplicate_callback_identity_across_children() 
 def test_aggregate_replay_rejects_duplicate_marker_identity_across_children() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    bar_result, schedule_result = artifact.request_results
+    bar_result, schedule_result = _bar_and_schedule_results(artifact)
     duplicate_marker = replace(
         schedule_result.completion_markers[0],
         marker_id=bar_result.completion_markers[0].marker_id,
@@ -1027,7 +1045,7 @@ def test_aggregate_replay_rejects_duplicate_marker_identity_across_children() ->
 def test_aggregate_replay_rejects_duplicate_attempt_identity_across_children() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    bar_result, schedule_result = artifact.request_results
+    bar_result, schedule_result = _bar_and_schedule_results(artifact)
     shared_attempt_id = bar_result.attempts[0].attempt_id
     mutated_attempt = replace(schedule_result.attempts[0], attempt_id=shared_attempt_id)
     mutated_callbacks = tuple(
@@ -1063,7 +1081,7 @@ def test_aggregate_replay_rejects_duplicate_attempt_identity_across_children() -
 def test_aggregate_replay_rejects_duplicate_provider_request_identity_across_children() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    bar_result, schedule_result = artifact.request_results
+    bar_result, schedule_result = _bar_and_schedule_results(artifact)
     source_attempt = bar_result.attempts[0]
     mutated_attempt = replace(
         schedule_result.attempts[0],
@@ -1112,7 +1130,7 @@ def test_aggregate_replay_rejects_duplicate_provider_request_identity_across_chi
 def test_aggregate_replay_rejects_duplicate_provider_request_identity_between_retries() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    bar_result, schedule_result = artifact.request_results
+    bar_result, schedule_result = _bar_and_schedule_results(artifact)
     request = next(
         item for item in plan.requests if item.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
     )

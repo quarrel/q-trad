@@ -47,11 +47,10 @@ from qtrad.ports.ibkr_historical import (
     IbkrHistoricalDataPort,
 )
 
-_HISTORICAL_SCHEDULE_FORMAT_DATE = 2
 _CONNECTION_ERROR_DISPOSITIONS = frozenset(
     {"CONNECTION_LOST", "PORT_RESET", "CONNECTION_RESTORED_DATA_LOST"}
 )
-_ENTITLEMENT_ERROR_CODES = frozenset({162, 354, 10167, 10186})
+_ENTITLEMENT_ERROR_CODES = frozenset({354, 10167, 10186})
 _INVALID_REQUEST_ERROR_CODES = frozenset({321, 322, 319})
 _CONTRACT_MISMATCH_ERROR_CODES = frozenset({200, 201})
 
@@ -142,7 +141,7 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
                     observed=(),
                     status="TIMEOUT",
                     error_codes=_callback_error_codes(error.callbacks),
-                    diagnostics=_callback_diagnostics(error.callbacks),
+                    diagnostics=("IBKR_REAUTH_TIMEOUT",),
                 )
 
             error_callbacks = tuple(item for item in callbacks if item.kind == "error")
@@ -238,10 +237,10 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
                         api_contract,
                         request.end_date_time,
                         request.duration,
-                        "",
-                        "SCHEDULE",
+                        cast(str, request.bar_size),
+                        cast(str, request.what_to_show),
                         int(request.use_rth),
-                        _HISTORICAL_SCHEDULE_FORMAT_DATE,
+                        cast(int, request.format_date),
                         request.keep_up_to_date,
                         [],
                     )

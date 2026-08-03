@@ -476,13 +476,15 @@ class IbkrHistoricalRequest:
                 )
         elif self.kind is IbkrHistoricalRequestKind.SCHEDULE:
             if (
-                self.bar_size is not None
-                or self.what_to_show is not None
+                self.bar_size != "1 day"
+                or self.what_to_show != "SCHEDULE"
                 or self.use_rth
-                or self.format_date is not None
+                or self.format_date != 2
                 or self.keep_up_to_date
             ):
-                raise ValueError("IBKR schedule request has unsupported historical-bar parameters")
+                raise ValueError(
+                    "IBKR schedule request parameters are not the frozen one-day profile"
+                )
         else:
             raise ValueError("IBKR historical request kind is unsupported")
         _require_sha256(self.request_sha256, "IBKR historical request hash")
