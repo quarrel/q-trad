@@ -58,6 +58,12 @@ _REQUEST_RESULT_KEYS = {
     "expected_connection_generation",
     "detail",
     "stop_reason",
+    "outcome_source",
+    "closure_limit",
+    "retained_callback_count",
+    "retained_callback_bytes",
+    "rejected_callback_bytes",
+    "rejected_callback_sha256",
 }
 _CALLBACK_KEYS = {
     "connection_session_id",
@@ -214,6 +220,12 @@ def _request_result_from_json(value: object) -> IbkrHistoricalCanaryRequestResul
         expected_connection_generation=_nullable_integer(item, "expected_connection_generation"),
         detail=_nullable_diagnostic(item, "detail"),
         stop_reason=_nullable_diagnostic(item, "stop_reason"),
+        outcome_source=runtime._string(item, "outcome_source"),
+        closure_limit=_nullable_diagnostic(item, "closure_limit"),
+        retained_callback_count=_nullable_integer(item, "retained_callback_count"),
+        retained_callback_bytes=_nullable_integer(item, "retained_callback_bytes"),
+        rejected_callback_bytes=_nullable_integer(item, "rejected_callback_bytes"),
+        rejected_callback_sha256=_nullable_diagnostic(item, "rejected_callback_sha256"),
     )
 
 

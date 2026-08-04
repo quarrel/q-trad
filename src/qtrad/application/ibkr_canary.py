@@ -40,7 +40,7 @@ from qtrad.ports.ibkr_historical import (
 )
 
 IBKR_CANARY_CONTRACT = "qtrad-ibkr-historical-canary-v1"
-IBKR_CANARY_SCHEMA_VERSION = 1
+IBKR_CANARY_SCHEMA_VERSION = 2
 IBKR_CANARY_DURATIONS = ("1 D", "1 W", "2 W", "4 W")
 IBKR_CANARY_GROUPS = (AssetClass.FX, AssetClass.INDEX, AssetClass.COMMODITY)
 CallableClock = Callable[[], datetime]
@@ -48,6 +48,11 @@ CallableClock = Callable[[], datetime]
 IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST = 50_000
 IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES = 4_000_000
 IBKR_CANARY_EXCESSIVE_CLOSURE_REASON = "EXCESSIVE_OPERATIONAL_CLOSURE"
+IBKR_CANARY_OUTCOME_CALLBACKS = "CALLBACKS"
+IBKR_CANARY_OUTCOME_EXCEPTION = "EXCEPTION"
+IBKR_CANARY_OUTCOME_NOT_RUN = "NOT_RUN"
+IBKR_CANARY_CLOSURE_LIMIT_COUNT = "CALLBACK_COUNT"
+IBKR_CANARY_CLOSURE_LIMIT_BYTES = "RETAINED_CALLBACK_BYTES"
 
 
 def _callback_encoded_upper_bound(item: IbkrHistoricalCallback) -> int:
@@ -66,15 +71,42 @@ def _callback_evidence_bytes(
 class _CanaryClosureLimit(Exception):
     """Raised before a canary request can make its evidence unwritable."""
 
+    def __init__(
+        self,
+        limit: str,
+        *,
+        retained_callback_count: int,
+        retained_callback_bytes: int,
+        rejected_callback_bytes: int,
+        rejected_callback_sha256: str,
+    ) -> None:
+        self.limit = limit
+        self.retained_callback_count = retained_callback_count
+        self.retained_callback_bytes = retained_callback_bytes
+        self.rejected_callback_bytes = rejected_callback_bytes
+        self.rejected_callback_sha256 = rejected_callback_sha256
+        super().__init__(f"IBKR canary {limit.lower()} closure limit exceeded")
+
 
 @dataclass(slots=True)
 class _CanaryEvidenceBudget:
     retained_callback_bytes: int = 0
 
-    def reserve(self, item: IbkrHistoricalCallback) -> None:
+    def reserve(
+        self,
+        item: IbkrHistoricalCallback,
+        *,
+        retained_callback_count: int,
+    ) -> None:
         upper_bound = _callback_encoded_upper_bound(item)
         if self.retained_callback_bytes + upper_bound > IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES:
-            raise _CanaryClosureLimit("IBKR canary retained callback evidence limit exceeded")
+            raise _CanaryClosureLimit(
+                IBKR_CANARY_CLOSURE_LIMIT_BYTES,
+                retained_callback_count=retained_callback_count,
+                retained_callback_bytes=self.retained_callback_bytes,
+                rejected_callback_bytes=upper_bound,
+                rejected_callback_sha256=sha256_json(_callback_json(item)),
+            )
         self.retained_callback_bytes += upper_bound
 
 
@@ -85,8 +117,15 @@ class _CanaryCallbackCollector:
 
     def append(self, item: IbkrHistoricalCallback) -> None:
         if len(self.callbacks) >= IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST:
-            raise _CanaryClosureLimit("IBKR canary per-request callback count limit exceeded")
-        self.budget.reserve(item)
+            upper_bound = _callback_encoded_upper_bound(item)
+            raise _CanaryClosureLimit(
+                IBKR_CANARY_CLOSURE_LIMIT_COUNT,
+                retained_callback_count=len(self.callbacks),
+                retained_callback_bytes=self.budget.retained_callback_bytes,
+                rejected_callback_bytes=upper_bound,
+                rejected_callback_sha256=sha256_json(_callback_json(item)),
+            )
+        self.budget.reserve(item, retained_callback_count=len(self.callbacks))
         self.callbacks.append(item)
 
 
@@ -156,6 +195,12 @@ class IbkrHistoricalCanaryRequestResult:
     expected_connection_generation: int | None = None
     detail: str | None = None
     stop_reason: str | None = None
+    outcome_source: str = IBKR_CANARY_OUTCOME_CALLBACKS
+    closure_limit: str | None = None
+    retained_callback_count: int | None = None
+    retained_callback_bytes: int | None = None
+    rejected_callback_bytes: int | None = None
+    rejected_callback_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -170,6 +215,31 @@ class IbkrHistoricalCanaryRequestResult:
             "NOT_RUN",
         }:
             raise ValueError("IBKR canary request status is unsupported")
+        if self.outcome_source not in {
+            IBKR_CANARY_OUTCOME_CALLBACKS,
+            IBKR_CANARY_OUTCOME_EXCEPTION,
+            IBKR_CANARY_OUTCOME_NOT_RUN,
+        }:
+            raise ValueError("IBKR canary request outcome source is unsupported")
+        if self.status == "NOT_RUN":
+            if self.outcome_source != IBKR_CANARY_OUTCOME_NOT_RUN:
+                raise ValueError("IBKR canary not-run request must have a not-run outcome source")
+        elif self.outcome_source == IBKR_CANARY_OUTCOME_NOT_RUN:
+            raise ValueError("IBKR canary attempted request cannot have a not-run outcome source")
+        if (
+            self.outcome_source == IBKR_CANARY_OUTCOME_CALLBACKS
+            and self.status in {"ERROR", "DISCONNECTED", "RETRYABLE_FAILURE"}
+            and not any(
+                value.get("kind") == IbkrHistoricalCallbackKind.ERROR.value
+                for value in self.callbacks
+            )
+        ):
+            raise ValueError("IBKR callback-derived provider outcome requires an error callback")
+        if self.outcome_source == IBKR_CANARY_OUTCOME_EXCEPTION and self.status in {
+            "SUCCESS",
+            "NO_DATA",
+        }:
+            raise ValueError("IBKR exception outcome source is invalid for a successful result")
         identity = (
             self.expected_connection_session_id,
             self.expected_provider_request_id,
@@ -198,6 +268,46 @@ class IbkrHistoricalCanaryRequestResult:
             raise ValueError("IBKR canary evidence counts cannot be negative")
         if any(code < 0 for code in self.error_codes):
             raise ValueError("IBKR canary provider error codes must be non-negative")
+        closure_values = (
+            self.closure_limit,
+            self.retained_callback_count,
+            self.retained_callback_bytes,
+            self.rejected_callback_bytes,
+            self.rejected_callback_sha256,
+        )
+        if any(value is not None for value in closure_values) and not all(
+            value is not None for value in closure_values
+        ):
+            raise ValueError("IBKR canary closure witness must be complete")
+        if self.status == "EXCESSIVE_CLOSURE":
+            retained_count = self.retained_callback_count
+            retained_bytes = self.retained_callback_bytes
+            rejected_bytes = self.rejected_callback_bytes
+            rejected_digest = self.rejected_callback_sha256
+            if (
+                self.outcome_source != IBKR_CANARY_OUTCOME_EXCEPTION
+                or self.closure_limit is None
+                or retained_count is None
+                or retained_bytes is None
+                or rejected_bytes is None
+                or rejected_digest is None
+            ):
+                raise ValueError("IBKR excessive closure must retain an exception witness")
+            if self.closure_limit not in {
+                IBKR_CANARY_CLOSURE_LIMIT_COUNT,
+                IBKR_CANARY_CLOSURE_LIMIT_BYTES,
+            }:
+                raise ValueError("IBKR canary closure limit type is unsupported")
+            if retained_count != self.callback_count or retained_count < 0:
+                raise ValueError("IBKR canary retained callback count witness is invalid")
+            if retained_bytes < 0 or rejected_bytes <= 0:
+                raise ValueError("IBKR canary callback byte witness is invalid")
+            if len(rejected_digest) != 64 or any(
+                character not in "0123456789abcdef" for character in rejected_digest
+            ):
+                raise ValueError("IBKR canary rejected callback digest is invalid")
+        elif any(value is not None for value in closure_values):
+            raise ValueError("IBKR canary closure witness is only valid for excessive closure")
         for value in (self.detail, self.stop_reason):
             if value is not None and (not value or len(value) > 2_000):
                 raise ValueError("IBKR canary diagnostic fields must be bounded")
@@ -220,6 +330,12 @@ class IbkrHistoricalCanaryRequestResult:
             "expected_connection_generation": self.expected_connection_generation,
             "detail": self.detail,
             "stop_reason": self.stop_reason,
+            "outcome_source": self.outcome_source,
+            "closure_limit": self.closure_limit,
+            "retained_callback_count": self.retained_callback_count,
+            "retained_callback_bytes": self.retained_callback_bytes,
+            "rejected_callback_bytes": self.rejected_callback_bytes,
+            "rejected_callback_sha256": self.rejected_callback_sha256,
         }
 
 
@@ -343,6 +459,7 @@ async def run_ibkr_historical_canary(
     try:
         unique_fingerprints = tuple(dict.fromkeys(case.fingerprint for case in ordered_cases))
         reauthentication = await adapter.reauthenticate_contracts(unique_fingerprints)
+        _validate_reauthentication_transport(reauthentication)
         reauth_by_fingerprint = {item.expected: item for item in reauthentication}
         cases_out: list[IbkrHistoricalCanaryCaseResult] = []
         stop_reason: str | None = None
@@ -509,6 +626,7 @@ async def _run_case(
                 "EXCESSIVE_CLOSURE",
                 str(error),
                 IBKR_CANARY_EXCESSIVE_CLOSURE_REASON,
+                closure=error,
                 expected_connection_session_id=connection_session_id,
                 expected_provider_request_id=provider_request_id,
                 expected_connection_generation=connection_generation,
@@ -563,7 +681,7 @@ async def _run_case(
                 collector.callbacks,
                 "INVALID",
                 "IBKR_HISTORICAL_INCOMPLETE_RESPONSE",
-                "DETERMINISTIC_RESULT_VERIFY_FAILURE",
+                "PROVIDER_INCOMPLETE_RESPONSE",
                 expected_connection_session_id=connection_session_id,
                 expected_provider_request_id=provider_request_id,
                 expected_connection_generation=connection_generation,
@@ -602,7 +720,11 @@ def _request_for_case(
     kind: IbkrHistoricalRequestKind,
 ) -> IbkrHistoricalRequest:
     bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
-    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
+    what_to_show = (
+        ("TRADES" if case.fingerprint.security_type == "IND" else "MIDPOINT")
+        if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+        else "SCHEDULE"
+    )
     format_date = 2
     identity: dict[str, JsonValue] = {
         "instrument_id": str(case.instrument_id),
@@ -692,6 +814,13 @@ def _verify_request_callbacks(
             "canary completion callback count is not exactly one",
             "DETERMINISTIC_RESULT_VERIFY_FAILURE",
         )
+    if callbacks[-1].kind is not IbkrHistoricalCallbackKind.COMPLETION:
+        return finish(
+            "INVALID",
+            "canary completion callback must close the callback sequence",
+            "DETERMINISTIC_RESULT_VERIFY_FAILURE",
+        )
+    completion = completions[0]
     if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
         if any(item.kind is IbkrHistoricalCallbackKind.SCHEDULE for item in callbacks):
             return finish(
@@ -702,7 +831,8 @@ def _verify_request_callbacks(
         bars = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR]
         try:
             for item in bars:
-                _verify_bar(item.payload)
+                _verify_bar(item.payload, request)
+            _verify_completion_payload(request, completion.payload)
         except ValueError as error:
             return finish("INVALID", str(error), "DETERMINISTIC_RESULT_VERIFY_FAILURE")
         if not bars:
@@ -722,7 +852,8 @@ def _verify_request_callbacks(
             "DETERMINISTIC_RESULT_VERIFY_FAILURE",
         )
     try:
-        session_count = _verify_schedule(schedules[0].payload)
+        session_count = _verify_schedule(schedules[0].payload, request)
+        _verify_completion_payload(request, completion.payload, schedules[0].payload)
     except ValueError as error:
         return finish("INVALID", str(error), "INCONSISTENT_SCHEDULE")
     return finish("SUCCESS", None, None, schedule_session_count=session_count)
@@ -763,13 +894,21 @@ def _callback_identity_error(
     return None
 
 
-def _verify_bar(payload: Mapping[str, JsonValue]) -> None:
+def _verify_bar(
+    payload: Mapping[str, JsonValue],
+    request: IbkrHistoricalRequest | None = None,
+) -> None:
     required = ("date", "open", "high", "low", "close")
     if any(key not in payload for key in required):
         raise ValueError("canary midpoint bar lacks required OHLC evidence")
     timestamp = payload["date"]
     if isinstance(timestamp, bool) or not isinstance(timestamp, int):
         raise ValueError("canary midpoint bar date is not an epoch")
+    if request is not None:
+        interval_start = int(request.interval_start.timestamp())
+        interval_end = int(request.interval_end.timestamp())
+        if not interval_start <= timestamp < interval_end:
+            raise ValueError("canary midpoint bar date is outside request interval")
     values: dict[str, Decimal] = {}
     for key in ("open", "high", "low", "close"):
         value = payload[key]
@@ -791,7 +930,21 @@ def _verify_bar(payload: Mapping[str, JsonValue]) -> None:
         raise ValueError("canary midpoint bar contains invalid OHLC")
 
 
-def _verify_schedule(payload: Mapping[str, JsonValue]) -> int:
+def _verify_schedule(
+    payload: Mapping[str, JsonValue],
+    request: IbkrHistoricalRequest | None = None,
+) -> int:
+    schedule_start = _canary_datetime(payload.get("start"), "canary schedule start")
+    schedule_end = _canary_datetime(payload.get("end"), "canary schedule end")
+    time_zone = payload.get("time_zone")
+    if not isinstance(time_zone, str) or not time_zone:
+        raise ValueError("canary schedule time zone is invalid")
+    if schedule_end <= schedule_start:
+        raise ValueError("canary schedule range is invalid")
+    if request is not None and (
+        schedule_start < request.interval_start or schedule_end > request.interval_end
+    ):
+        raise ValueError("canary schedule range is outside request interval")
     sessions = payload.get("sessions")
     if not isinstance(sessions, list):
         raise ValueError("canary schedule has no structural sessions array")
@@ -799,17 +952,45 @@ def _verify_schedule(payload: Mapping[str, JsonValue]) -> int:
     for value in sessions:
         if not isinstance(value, dict):
             raise ValueError("canary schedule session is not an object")
-        start = _utc_datetime(value.get("start"))
-        end = _utc_datetime(value.get("end"))
+        start = _canary_datetime(value.get("start"), "canary session start")
+        end = _canary_datetime(value.get("end"), "canary session end")
         active = value.get("active")
         if not isinstance(active, bool) or end <= start:
             raise ValueError("canary schedule session interval is invalid")
+        if start < schedule_start or end > schedule_end:
+            raise ValueError("canary schedule session is outside schedule range")
+        if request is not None and (start < request.interval_start or end > request.interval_end):
+            raise ValueError("canary schedule session is outside request interval")
         intervals.append((start, end, active))
     for index, (start, end, active) in enumerate(intervals):
         for other_start, other_end, other_active in intervals[index + 1 :]:
             if other_start < end and other_end > start and other_active != active:
                 raise ValueError("canary schedule has conflicting overlapping sessions")
     return len(intervals)
+
+
+def _verify_completion_payload(
+    request: IbkrHistoricalRequest,
+    payload: Mapping[str, JsonValue],
+    schedule_payload: Mapping[str, JsonValue] | None = None,
+) -> None:
+    if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+        if not payload or set(payload) != {"start", "end"}:
+            if payload:
+                raise ValueError("canary completion range must contain start and end")
+            return
+        start = _canary_datetime(payload.get("start"), "canary completion start")
+        end = _canary_datetime(payload.get("end"), "canary completion end")
+        if (start, end) != (request.interval_start, request.interval_end):
+            raise ValueError("canary completion range does not match request interval")
+        return
+    if set(payload) != {"start", "end", "time_zone"}:
+        raise ValueError("canary schedule completion range is incomplete")
+    if schedule_payload is None:
+        raise ValueError("canary schedule completion lacks schedule evidence")
+    for key in ("start", "end", "time_zone"):
+        if payload.get(key) != schedule_payload.get(key):
+            raise ValueError("canary schedule completion does not match schedule evidence")
 
 
 def _result(
@@ -825,6 +1006,12 @@ def _result(
     expected_connection_session_id: UUID | None = None,
     expected_provider_request_id: int | None = None,
     expected_connection_generation: int | None = None,
+    outcome_source: str = IBKR_CANARY_OUTCOME_CALLBACKS,
+    closure_limit: str | None = None,
+    retained_callback_count: int | None = None,
+    retained_callback_bytes: int | None = None,
+    rejected_callback_bytes: int | None = None,
+    rejected_callback_sha256: str | None = None,
 ) -> IbkrHistoricalCanaryRequestResult:
     if callbacks and expected_connection_session_id is None:
         first = callbacks[0]
@@ -844,6 +1031,12 @@ def _result(
         expected_connection_generation=expected_connection_generation,
         detail=detail,
         stop_reason=stop_reason,
+        outcome_source=outcome_source,
+        closure_limit=closure_limit,
+        retained_callback_count=retained_callback_count,
+        retained_callback_bytes=retained_callback_bytes,
+        rejected_callback_bytes=rejected_callback_bytes,
+        rejected_callback_sha256=rejected_callback_sha256,
     )
 
 
@@ -854,6 +1047,7 @@ def _exception_result(
     detail: str,
     stop_reason: str,
     *,
+    closure: _CanaryClosureLimit | None = None,
     expected_connection_session_id: UUID | None = None,
     expected_provider_request_id: int | None = None,
     expected_connection_generation: int | None = None,
@@ -887,6 +1081,14 @@ def _exception_result(
         expected_connection_session_id=expected_connection_session_id,
         expected_provider_request_id=expected_provider_request_id,
         expected_connection_generation=expected_connection_generation,
+        outcome_source=IBKR_CANARY_OUTCOME_EXCEPTION,
+        closure_limit=closure.limit if closure is not None else None,
+        retained_callback_count=(closure.retained_callback_count if closure is not None else None),
+        retained_callback_bytes=closure.retained_callback_bytes if closure is not None else None,
+        rejected_callback_bytes=closure.rejected_callback_bytes if closure is not None else None,
+        rejected_callback_sha256=(
+            closure.rejected_callback_sha256 if closure is not None else None
+        ),
     )
 
 
@@ -894,7 +1096,15 @@ def _not_run_request(
     request: IbkrHistoricalRequest,
     reason: str,
 ) -> IbkrHistoricalCanaryRequestResult:
-    return _result(request, (), "NOT_RUN", reason, reason, ())
+    return _result(
+        request,
+        (),
+        "NOT_RUN",
+        reason,
+        reason,
+        (),
+        outcome_source=IBKR_CANARY_OUTCOME_NOT_RUN,
+    )
 
 
 def _blocked_case(
@@ -994,15 +1204,30 @@ def _callback_json(item: IbkrHistoricalCallback) -> dict[str, JsonValue]:
     }
 
 
+def _canary_datetime(value: JsonValue | None, label: str) -> datetime:
+    try:
+        return _utc_datetime(value)
+    except ValueError:
+        if not isinstance(value, str):
+            raise ValueError(f"{label} is not a UTC timestamp") from None
+        candidate = value.removesuffix(" UTC")
+        for pattern in ("%Y%m%d-%H:%M:%S", "%Y%m%d:%H:%M:%S", "%Y%m%d %H:%M:%S"):
+            try:
+                return datetime.strptime(candidate, pattern).replace(tzinfo=UTC)
+            except ValueError:
+                continue
+        raise ValueError(f"{label} is not a parseable UTC timestamp") from None
+
+
 def _utc_datetime(value: JsonValue | None) -> datetime:
     if not isinstance(value, str):
-        raise ValueError("canary schedule timestamp must be UTC text")
+        raise ValueError("canary timestamp must be UTC text")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as error:
-        raise ValueError("canary schedule timestamp is not ISO-8601") from error
+        raise ValueError("canary timestamp is not ISO-8601") from error
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
-        raise ValueError("canary schedule timestamp is not UTC")
+        raise ValueError("canary timestamp is not UTC")
     return parsed.astimezone(UTC)
 
 
@@ -1045,9 +1270,16 @@ def replay_ibkr_historical_canary_evidence(
         reauth = reauthentication[case_result.case.fingerprint]
         _replay_case_result(case_result)
         for request_result in case_result.requests:
-            retained_callback_bytes += _callback_evidence_bytes(
-                tuple(_callback_from_evidence(value) for value in request_result.callbacks)
+            callbacks = tuple(_callback_from_evidence(value) for value in request_result.callbacks)
+            for callback in callbacks:
+                if not evidence.started_at <= callback.received_at <= evidence.completed_at:
+                    raise ValueError("IBKR canary callback is outside canary execution interval")
+            _replay_closure_witness(
+                request_result,
+                callbacks,
+                retained_callback_bytes=retained_callback_bytes,
             )
+            retained_callback_bytes += _callback_evidence_bytes(callbacks)
             if request_result.status == "NOT_RUN":
                 continue
             if request_result.expected_provider_request_id != next_provider_request_id:
@@ -1086,6 +1318,21 @@ def replay_ibkr_historical_canary_evidence(
     return evidence
 
 
+def _validate_reauthentication_transport(
+    items: Sequence[IbkrContractReauthentication],
+) -> None:
+    identities = tuple((item.connection_generation, item.request_id) for item in items)
+    if len(set(identities)) != len(identities) or len({item.request_id for item in items}) != len(
+        items
+    ):
+        raise ValueError("IBKR canary reauthentication transport identities are duplicated")
+    generations = {item.connection_generation for item in items}
+    if len(generations) != 1:
+        raise ValueError("IBKR canary reauthentication transport generation is not common")
+    if any(previous[1] >= following[1] for previous, following in pairwise(identities)):
+        raise ValueError("IBKR canary reauthentication request sequence is not ordered")
+
+
 def _replay_reauthentication(
     evidence: IbkrHistoricalCanaryEvidence,
 ) -> dict[IbkrContractFingerprint, IbkrContractReauthentication]:
@@ -1093,6 +1340,7 @@ def _replay_reauthentication(
     observed = evidence.reauthentication
     if len(observed) != len(expected) or {item.expected for item in observed} != set(expected):
         raise ValueError("IBKR canary reauthentication coverage is invalid")
+    _validate_reauthentication_transport(observed)
     result: dict[IbkrContractFingerprint, IbkrContractReauthentication] = {}
     for item in observed:
         if item.expected in result:
@@ -1167,7 +1415,8 @@ def _replay_request_result(
 ) -> None:
     if result.status == "NOT_RUN":
         if (
-            not result.stop_reason
+            result.outcome_source != IBKR_CANARY_OUTCOME_NOT_RUN
+            or not result.stop_reason
             or result.callbacks
             or result.callback_count
             or result.bar_count
@@ -1213,7 +1462,12 @@ def _replay_request_result(
         or result.error_codes != error_codes
     ):
         raise ValueError("IBKR canary callback counts or classifications are not replayable")
+    if result.status == "INVALID" and result.outcome_source == IBKR_CANARY_OUTCOME_EXCEPTION:
+        _replay_callbackless_exception(result, callbacks)
+        return
     if result.status in {"SUCCESS", "NO_DATA", "INVALID"}:
+        if result.outcome_source != IBKR_CANARY_OUTCOME_CALLBACKS:
+            raise ValueError("IBKR canary callback outcome source is invalid")
         derived = _verify_request_callbacks(
             result.request,
             callbacks,
@@ -1230,16 +1484,30 @@ def _replay_request_result(
         ):
             raise ValueError("IBKR canary request status is not replayable")
         return
-    if result.status == "ERROR" or result.status in {"DISCONNECTED", "RETRYABLE_FAILURE"}:
-        if not any(item.kind is IbkrHistoricalCallbackKind.ERROR for item in callbacks):
-            raise ValueError("IBKR canary provider outcome lacks an error callback")
-        derived_status, derived_stop_reason = _replay_error_outcome(callbacks)
-        if derived_status != result.status or derived_stop_reason != result.stop_reason:
-            raise ValueError("IBKR canary provider outcome is not replayable")
+    if result.status in {"ERROR", "DISCONNECTED", "RETRYABLE_FAILURE"}:
+        error_callbacks = tuple(
+            item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.ERROR
+        )
+        if result.outcome_source == IBKR_CANARY_OUTCOME_CALLBACKS:
+            if not error_callbacks:
+                raise ValueError("IBKR callback-derived provider outcome lacks an error callback")
+            derived_status, derived_stop_reason = _replay_error_outcome(callbacks)
+            if derived_status != result.status or derived_stop_reason != result.stop_reason:
+                raise ValueError("IBKR canary provider outcome is not replayable")
+        elif result.outcome_source == IBKR_CANARY_OUTCOME_EXCEPTION:
+            if error_callbacks:
+                derived_status, derived_stop_reason = _replay_error_outcome(callbacks)
+                if derived_status != result.status or derived_stop_reason != result.stop_reason:
+                    raise ValueError("IBKR canary provider outcome is not replayable")
+            else:
+                _replay_callbackless_exception(result, callbacks)
+        else:
+            raise ValueError("IBKR canary provider outcome source is invalid")
         return
     if result.status == "TIMEOUT":
         if (
-            result.stop_reason != "TIMEOUT"
+            result.outcome_source != IBKR_CANARY_OUTCOME_EXCEPTION
+            or result.stop_reason != "TIMEOUT"
             or any(item.kind is IbkrHistoricalCallbackKind.COMPLETION for item in callbacks)
             or any(item.kind is IbkrHistoricalCallbackKind.ERROR for item in callbacks)
         ):
@@ -1247,9 +1515,9 @@ def _replay_request_result(
         return
     if result.status == "EXCESSIVE_CLOSURE":
         if (
-            result.stop_reason != IBKR_CANARY_EXCESSIVE_CLOSURE_REASON
+            result.outcome_source != IBKR_CANARY_OUTCOME_EXCEPTION
+            or result.stop_reason != IBKR_CANARY_EXCESSIVE_CLOSURE_REASON
             or any(item.kind is IbkrHistoricalCallbackKind.COMPLETION for item in callbacks)
-            or _callback_evidence_bytes(callbacks) > IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES
         ):
             raise ValueError("IBKR canary excessive closure outcome is not replayable")
         return
@@ -1284,15 +1552,74 @@ def _replay_callback_counts(
             raise ValueError("IBKR canary midpoint callback set contains a schedule")
         bars = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR]
         for item in bars:
-            _verify_bar(item.payload)
+            _verify_bar(item.payload, request)
         return len(bars), 0, tuple(sorted(error_codes))
     if any(item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR for item in callbacks):
         raise ValueError("IBKR canary schedule callback set contains a midpoint bar")
     schedules = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.SCHEDULE]
     if len(schedules) > 1:
         raise ValueError("IBKR canary schedule callback set contains multiple schedules")
-    session_count = _verify_schedule(schedules[0].payload) if schedules else 0
+    session_count = _verify_schedule(schedules[0].payload, request) if schedules else 0
     return 0, session_count, tuple(sorted(error_codes))
+
+
+def _replay_closure_witness(
+    result: IbkrHistoricalCanaryRequestResult,
+    callbacks: Sequence[IbkrHistoricalCallback],
+    *,
+    retained_callback_bytes: int,
+) -> None:
+    if result.status != "EXCESSIVE_CLOSURE":
+        return
+    retained_callback_count = result.retained_callback_count
+    retained_bytes = result.retained_callback_bytes
+    rejected_callback_bytes = result.rejected_callback_bytes
+    if retained_callback_count is None or retained_bytes is None or rejected_callback_bytes is None:
+        raise ValueError("IBKR canary closure witness is incomplete")
+    if retained_callback_count != len(callbacks):
+        raise ValueError("IBKR canary closure witness callback count is invalid")
+    if retained_bytes != retained_callback_bytes:
+        raise ValueError("IBKR canary closure witness retained bytes are invalid")
+    if result.closure_limit == IBKR_CANARY_CLOSURE_LIMIT_COUNT:
+        if retained_callback_count != IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST:
+            raise ValueError("IBKR canary closure witness does not prove callback limit")
+    elif result.closure_limit == IBKR_CANARY_CLOSURE_LIMIT_BYTES:
+        if retained_bytes + rejected_callback_bytes <= IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES:
+            raise ValueError("IBKR canary closure witness does not prove byte limit")
+    else:
+        raise ValueError("IBKR canary closure witness limit is unsupported")
+
+
+def _replay_callbackless_exception(
+    result: IbkrHistoricalCanaryRequestResult,
+    callbacks: Sequence[IbkrHistoricalCallback],
+) -> None:
+    if any(item.kind is IbkrHistoricalCallbackKind.COMPLETION for item in callbacks):
+        raise ValueError("IBKR callback-less exception contains a completion callback")
+    if result.status == "DISCONNECTED":
+        if result.stop_reason != "DISCONNECT_OR_GENERATION_INVALIDATION":
+            raise ValueError("IBKR callback-less provider stop reason is invalid")
+    elif result.status == "RETRYABLE_FAILURE":
+        if result.stop_reason != "THROTTLING_OR_RETRYABLE_PROVIDER_FAILURE":
+            raise ValueError("IBKR callback-less provider stop reason is invalid")
+    elif result.status == "INVALID":
+        if result.stop_reason != "PROVIDER_INCOMPLETE_RESPONSE":
+            raise ValueError("IBKR callback-less parser stop reason is invalid")
+    elif result.status == "ERROR":
+        allowed_stop_reasons = {
+            "PROVIDER_CONTRACT_IDENTITY_CHANGED",
+            "PROVIDER_ENTITLEMENT_UNAVAILABLE",
+            "PROVIDER_NO_DATA_RETURNED",
+            "PROVIDER_INVALID_REQUEST",
+            "PROVIDER_RETRY_LIMIT_EXHAUSTED",
+            "PROVIDER_PROVIDER_REJECTED",
+            "PROVIDER_SESSION_EVIDENCE_UNAVAILABLE",
+            "PROVIDER_INCOMPLETE_RESPONSE",
+        }
+        if result.stop_reason not in allowed_stop_reasons:
+            raise ValueError("IBKR callback-less provider stop reason is invalid")
+    else:
+        raise ValueError("IBKR callback-less exception status is unsupported")
 
 
 def _replay_error_outcome(

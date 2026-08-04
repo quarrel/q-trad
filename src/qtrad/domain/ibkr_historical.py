@@ -464,15 +464,18 @@ class IbkrHistoricalRequest:
         if self.interval_end - self.interval_start > duration:
             raise ValueError("IBKR request ownership interval exceeds its provider duration")
         if self.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+            expected_what_to_show = (
+                "TRADES" if self.fingerprint.security_type == "IND" else "MIDPOINT"
+            )
             if (
                 self.bar_size != "1 min"
-                or self.what_to_show != "MIDPOINT"
+                or self.what_to_show != expected_what_to_show
                 or self.use_rth
                 or self.format_date != 2
                 or self.keep_up_to_date
             ):
                 raise ValueError(
-                    "IBKR MIDPOINT request parameters are not the frozen one-minute profile"
+                    "IBKR one-minute bar request parameters are not the frozen profile"
                 )
         elif self.kind is IbkrHistoricalRequestKind.SCHEDULE:
             if (

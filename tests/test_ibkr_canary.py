@@ -28,6 +28,11 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalCallback,
     IbkrHistoricalCallbackKind,
     IbkrHistoricalConnection,
+    IbkrHistoricalDisconnected,
+    IbkrHistoricalIncomplete,
+    IbkrHistoricalRetryableError,
+    IbkrHistoricalTerminalError,
+    IbkrTerminalDisposition,
 )
 from qtrad.domain.ibkr_historical import (
     IbkrContractFingerprint,
@@ -53,12 +58,16 @@ _RUNTIME_HASH = "a" * 64
 _SELECTION_HASH = "b" * 64
 
 
-def _fingerprint(con_id: int, symbol: str) -> IbkrContractFingerprint:
-
+def _fingerprint(
+    con_id: int,
+    symbol: str,
+    *,
+    security_type: str = "CASH",
+) -> IbkrContractFingerprint:
     return IbkrContractFingerprint(
         con_id=con_id,
         symbol=symbol,
-        security_type="CASH",
+        security_type=security_type,
         currency="USD",
         exchange="IDEALPRO",
         primary_exchange=None,
@@ -73,7 +82,10 @@ def _fingerprint(con_id: int, symbol: str) -> IbkrContractFingerprint:
 def _cases() -> tuple[IbkrHistoricalCanaryCase, ...]:
     representatives = {
         AssetClass.FX: (InstrumentId("fx:eur-usd"), _fingerprint(11, "EUR")),
-        AssetClass.INDEX: (InstrumentId("index:spx"), _fingerprint(22, "SPX")),
+        AssetClass.INDEX: (
+            InstrumentId("index:spx"),
+            _fingerprint(22, "SPX", security_type="IND"),
+        ),
         AssetClass.COMMODITY: (InstrumentId("commodity:gold"), _fingerprint(33, "GOLD")),
     }
     return build_adjacent_ibkr_canary_cases(representatives, anchor_end=_START)
@@ -100,7 +112,7 @@ def _callbacks(
                 **identity,
                 "kind": "MIDPOINT_BAR",
                 "payload": {
-                    "date": int(case.interval_end.timestamp()),
+                    "date": int(case.interval_start.timestamp()),
                     "open": "1.0",
                     "high": "1.1",
                     "low": "0.9",
@@ -182,7 +194,7 @@ def _evidence() -> IbkrHistoricalCanaryEvidence:
         )
     identity = {
         "contract": "qtrad-ibkr-historical-canary-v1",
-        "schema_version": 1,
+        "schema_version": ibkr_canary.IBKR_CANARY_SCHEMA_VERSION,
         "runtime_sha256": _RUNTIME_HASH,
         "selection_sha256": _SELECTION_HASH,
         "started_at": utc_text(_START),
@@ -207,7 +219,11 @@ def _rehash_evidence(
     evidence: IbkrHistoricalCanaryEvidence,
     cases: tuple[IbkrHistoricalCanaryCaseResult, ...],
     stop_reason: str | None,
+    reauthentication: tuple[IbkrContractReauthentication, ...] | None = None,
 ) -> IbkrHistoricalCanaryEvidence:
+    retained_reauthentication = (
+        evidence.reauthentication if reauthentication is None else reauthentication
+    )
     identity: dict[str, JsonValue] = {
         "contract": ibkr_canary.IBKR_CANARY_CONTRACT,
         "schema_version": ibkr_canary.IBKR_CANARY_SCHEMA_VERSION,
@@ -215,12 +231,13 @@ def _rehash_evidence(
         "selection_sha256": evidence.selection_sha256,
         "started_at": utc_text(evidence.started_at),
         "completed_at": utc_text(evidence.completed_at),
-        "reauthentication": [item.as_json_value() for item in evidence.reauthentication],
+        "reauthentication": [item.as_json_value() for item in retained_reauthentication],
         "cases": [item.as_json_value() for item in cases],
         "stop_reason": stop_reason,
     }
     return replace(
         evidence,
+        reauthentication=retained_reauthentication,
         cases=cases,
         stop_reason=stop_reason,
         evidence_sha256=sha256_json(identity),
@@ -275,7 +292,7 @@ class _BudgetAdapter:
                 kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
                 received_at=_START,
                 payload={
-                    "date": int(_START.timestamp()),
+                    "date": int(request.interval_start.timestamp()),
                     "open": "1",
                     "high": "1",
                     "low": "1",
@@ -284,6 +301,39 @@ class _BudgetAdapter:
                 },
             )
         )
+
+
+class _FailureAdapter(_BudgetAdapter):
+    def __init__(
+        self,
+        fail_kind: ibkr_canary.IbkrHistoricalRequestKind,
+        error: BaseException,
+    ) -> None:
+        super().__init__()
+        self.fail_kind = fail_kind
+        self.error = error
+
+    async def request_historical(
+        self,
+        request: IbkrHistoricalRequest,
+        *,
+        request_id: int,
+        connection_session_id: UUID,
+        connection_generation: int,
+        callback: IbkrHistoricalCallbackSink,
+    ) -> None:
+        self.request_count += 1
+        if request.kind is self.fail_kind:
+            raise self.error
+        case = next(
+            case
+            for case in _cases()
+            if case.instrument_id == request.instrument_id
+            and case.interval_start == request.interval_start
+            and case.interval_end == request.interval_end
+        )
+        for value in _callbacks(case, request.kind, request_id):
+            await callback(ibkr_canary._callback_from_evidence(value))
 
 
 def test_adjacent_canary_cases_cover_groups_and_durations() -> None:
@@ -305,6 +355,24 @@ def test_adjacent_canary_cases_cover_groups_and_durations() -> None:
     assert all(
         representative[left].interval_start == representative[right].interval_end
         for left, right in pairwise(IBKR_CANARY_DURATIONS)
+    )
+
+
+def test_native_index_canary_uses_trades_for_bar_requests() -> None:
+    index_case = next(case for case in _cases() if case.group is AssetClass.INDEX)
+    fx_case = next(case for case in _cases() if case.group is AssetClass.FX)
+
+    assert (
+        ibkr_canary._request_for_case(
+            index_case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
+        ).what_to_show
+        == "TRADES"
+    )
+    assert (
+        ibkr_canary._request_for_case(
+            fx_case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
+        ).what_to_show
+        == "MIDPOINT"
     )
 
 
@@ -331,6 +399,64 @@ async def test_canary_closes_before_retained_callbacks_exceed_writer_limit(
     assert output.stat().st_size < 8 * 1024 * 1024
     loaded = verify_ibkr_historical_canary_evidence(output)
     assert loaded.stop_reason == stop_reason
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fail_kind", "error"),
+    [
+        (
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            IbkrHistoricalDisconnected(),
+        ),
+        (
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            IbkrHistoricalRetryableError(),
+        ),
+        (
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            IbkrHistoricalIncomplete(),
+        ),
+        (
+            ibkr_canary.IbkrHistoricalRequestKind.SCHEDULE,
+            IbkrHistoricalIncomplete(),
+        ),
+        (
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            IbkrHistoricalTerminalError(
+                IbkrTerminalDisposition.PROVIDER_REJECTED,
+                "sanitized terminal failure",
+            ),
+        ),
+    ],
+    ids=(
+        "global-disconnect",
+        "callback-buffer-exhaustion",
+        "malformed-bar",
+        "malformed-schedule",
+        "terminal-error",
+    ),
+)
+async def test_callbackless_exception_evidence_round_trips(
+    tmp_path: Path,
+    fail_kind: ibkr_canary.IbkrHistoricalRequestKind,
+    error: BaseException,
+) -> None:
+    evidence = await run_ibkr_historical_canary(
+        _FailureAdapter(fail_kind, error),
+        _cases(),
+        runtime_sha256=_RUNTIME_HASH,
+        selection_sha256=_SELECTION_HASH,
+        clock=lambda: _START,
+    )
+    failed_index = 0 if fail_kind is ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS else 1
+    failed_request = evidence.cases[0].requests[failed_index]
+    assert failed_request.outcome_source == ibkr_canary.IBKR_CANARY_OUTCOME_EXCEPTION
+
+    output = tmp_path / "exception.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    loaded = verify_ibkr_historical_canary_evidence(output)
+    assert loaded.cases[0].requests[failed_index].status == failed_request.status
 
 
 def test_canary_evidence_round_trips_and_freezes_conservative_profile(
@@ -458,7 +584,7 @@ def test_canary_writer_rejects_actual_eight_mib_boundary_crossing(
         )
 
 
-def test_canary_writer_accepts_bounded_excessive_closure_evidence(
+def test_canary_verifier_rejects_unwitnessed_excessive_closure_evidence(
     tmp_path: Path,
 ) -> None:
     evidence = _evidence()
@@ -471,6 +597,12 @@ def test_canary_writer_accepts_bounded_excessive_closure_evidence(
         callback_count=1,
         stop_reason=stop_reason,
         detail="callback evidence bound reached",
+        outcome_source=ibkr_canary.IBKR_CANARY_OUTCOME_EXCEPTION,
+        closure_limit=ibkr_canary.IBKR_CANARY_CLOSURE_LIMIT_BYTES,
+        retained_callback_count=1,
+        retained_callback_bytes=0,
+        rejected_callback_bytes=1,
+        rejected_callback_sha256="c" * 64,
     )
     not_run = ibkr_canary._not_run_request(first_case.requests[1].request, stop_reason)
     stopped_case = replace(
@@ -490,8 +622,102 @@ def test_canary_writer_accepts_bounded_excessive_closure_evidence(
     write_ibkr_historical_canary_evidence(
         output, _rehash_evidence(evidence, stopped_cases, stop_reason)
     )
-    loaded = verify_ibkr_historical_canary_evidence(output)
-    assert loaded.stop_reason == stop_reason
+    with pytest.raises(ValueError, match="closure witness"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_reauthentication_duplicate_ids(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence()
+    mutated = list(evidence.reauthentication)
+    mutated[1] = replace(mutated[1], request_id=mutated[0].request_id)
+    output = tmp_path / "duplicate-reauth.json"
+    write_ibkr_historical_canary_evidence(
+        output, _rehash_evidence(evidence, evidence.cases, None, tuple(mutated))
+    )
+    with pytest.raises(ValueError, match="transport identities"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_reauthentication_mixed_generation(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence()
+    mutated = list(evidence.reauthentication)
+    mutated[1] = replace(mutated[1], connection_generation=2)
+    output = tmp_path / "mixed-reauth.json"
+    write_ibkr_historical_canary_evidence(
+        output, _rehash_evidence(evidence, evidence.cases, None, tuple(mutated))
+    )
+    with pytest.raises(ValueError, match="generation"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_completion_reordering(tmp_path: Path) -> None:
+    evidence = _evidence()
+    output = tmp_path / "completion-order.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    callbacks = document["cases"][0]["requests"][0]["callbacks"]
+    document["cases"][0]["requests"][0]["callbacks"] = list(reversed(callbacks))
+    _rewrite_rehashed_document(output, document)
+    with pytest.raises(ValueError, match="status is not replayable"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_out_of_window_bar(tmp_path: Path) -> None:
+    evidence = _evidence()
+    output = tmp_path / "bar-window.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    document["cases"][0]["requests"][0]["callbacks"][0]["payload"]["date"] = int(
+        evidence.cases[0].case.interval_end.timestamp()
+    )
+    _rewrite_rehashed_document(output, document)
+    with pytest.raises(ValueError, match="outside request interval"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_out_of_window_schedule(tmp_path: Path) -> None:
+    evidence = _evidence()
+    output = tmp_path / "schedule-window.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    schedule = document["cases"][0]["requests"][1]["callbacks"][0]["payload"]
+    schedule["start"] = utc_text(evidence.cases[0].case.interval_start - timedelta(minutes=1))
+    _rewrite_rehashed_document(output, document)
+    with pytest.raises(ValueError, match="outside request interval"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_schedule_completion_mismatch(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence()
+    output = tmp_path / "schedule-completion.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    completion = document["cases"][0]["requests"][1]["callbacks"][1]["payload"]
+    completion["end"] = utc_text(evidence.cases[0].case.interval_end - timedelta(minutes=1))
+    _rewrite_rehashed_document(output, document)
+    with pytest.raises(ValueError, match="status is not replayable"):
+        verify_ibkr_historical_canary_evidence(output)
+
+
+def test_file_verifier_rejects_rehashed_callback_outside_execution_interval(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence()
+    output = tmp_path / "callback-time.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    document["cases"][0]["requests"][0]["callbacks"][0]["received_at"] = utc_text(
+        evidence.started_at - timedelta(minutes=1)
+    )
+    _rewrite_rehashed_document(output, document)
+    with pytest.raises(ValueError, match="execution interval"):
+        verify_ibkr_historical_canary_evidence(output)
 
 
 def test_canary_evidence_rejects_tampered_hash(tmp_path: Path) -> None:
