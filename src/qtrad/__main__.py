@@ -39,6 +39,7 @@ from qtrad.application.backfill_planning import (
 )
 from qtrad.application.capture_feed import CaptureFeedCursor, advance_capture_feed_cursor
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
+from qtrad.application.ibkr_canary import freeze_ibkr_request_profile_from_canary
 from qtrad.application.ibkr_capability import (
     build_ibkr_capability_preflight,
     build_ibkr_capability_review,
@@ -69,6 +70,7 @@ from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
+from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import ProviderListing
 from qtrad.domain.market_data import (
@@ -97,6 +99,7 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
 )
+from qtrad.runtime.ibkr_canary import verify_ibkr_historical_canary_evidence
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_historical import (
     build_ibkr_contract_selection_from_files,
@@ -106,6 +109,7 @@ from qtrad.runtime.ibkr_historical import (
     verify_ibkr_historical_plan,
     write_ibkr_contract_selection,
     write_ibkr_historical_plan,
+    write_ibkr_historical_request_profile,
     write_ibkr_runtime_lock,
 )
 from qtrad.runtime.ibkr_results import (
@@ -288,6 +292,32 @@ def build_parser() -> argparse.ArgumentParser:
     runtime_lock.add_argument("--ibc-version", default="3.24.1")
     runtime_lock.add_argument("--image-digest")
     runtime_lock.add_argument("--output", type=Path, required=True)
+    canary_verify = historical_ibkr_sub.add_parser(
+        "canary-verify", help="verify immutable Stage 5 canary evidence without provider I/O"
+    )
+    canary_verify.add_argument("--evidence", type=Path, required=True)
+    canary_verify.add_argument("--expected-runtime-sha256")
+    canary_verify.add_argument("--expected-selection-sha256")
+
+    profile_freeze = historical_ibkr_sub.add_parser(
+        "profile-freeze", help="freeze a request profile from verified Stage 5 canary evidence"
+    )
+    profile_freeze.add_argument("--canary-evidence", type=Path, required=True)
+    profile_freeze.add_argument("--canary-evidence-filename")
+    profile_freeze.add_argument("--output", type=Path, required=True)
+    profile_freeze.add_argument("--frozen-by", required=True)
+    profile_freeze.add_argument("--frozen-at", type=_utc_timestamp_argument, required=True)
+    profile_freeze.add_argument("--maximum-in-flight-requests", type=int, default=1)
+    profile_freeze.add_argument("--request-timeout-seconds", type=int, default=60)
+    profile_freeze.add_argument("--retry-count", type=int, default=1)
+    profile_freeze.add_argument(
+        "--duplicate-request-protection",
+        default="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+    )
+    profile_freeze.add_argument("--identical-request-cooldown-seconds", type=int, default=15)
+    profile_freeze.add_argument("--max-requests-per-contract-window", type=int, default=5)
+    profile_freeze.add_argument("--max-requests-per-rolling-window", type=int, default=55)
+
     historical_plan = historical_ibkr_sub.add_parser(
         "plan", help="build a deterministic IBKR historical request plan without provider I/O"
     )
@@ -322,6 +352,22 @@ def build_parser() -> argparse.ArgumentParser:
         historical_plan_command.add_argument("--profile-frozen-by", required=True)
         historical_plan_command.add_argument(
             "--profile-frozen-at", type=_utc_timestamp_argument, required=True
+        )
+        historical_plan_command.add_argument("--maximum-in-flight-requests", type=int, default=1)
+        historical_plan_command.add_argument("--request-timeout-seconds", type=int, default=60)
+        historical_plan_command.add_argument("--retry-count", type=int, default=1)
+        historical_plan_command.add_argument(
+            "--duplicate-request-protection",
+            default="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        )
+        historical_plan_command.add_argument(
+            "--identical-request-cooldown-seconds", type=int, default=15
+        )
+        historical_plan_command.add_argument(
+            "--max-requests-per-contract-window", type=int, default=5
+        )
+        historical_plan_command.add_argument(
+            "--max-requests-per-rolling-window", type=int, default=55
         )
         historical_plan_command.add_argument("--planner-image-digest", required=True)
     historical_plan.add_argument("--start", type=_utc_minute_argument, required=True)
@@ -658,6 +704,35 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "historical"
         and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "canary-verify"
+    ):
+        _verify_ibkr_historical_canary(
+            args.evidence,
+            expected_runtime_sha256=args.expected_runtime_sha256,
+            expected_selection_sha256=args.expected_selection_sha256,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "profile-freeze"
+    ):
+        _freeze_ibkr_historical_profile(
+            args.canary_evidence,
+            output_path=args.output,
+            canary_evidence_filename=args.canary_evidence_filename,
+            frozen_by=args.frozen_by,
+            frozen_at=args.frozen_at,
+            maximum_in_flight_requests=args.maximum_in_flight_requests,
+            request_timeout_seconds=args.request_timeout_seconds,
+            retry_count=args.retry_count,
+            duplicate_request_protection=args.duplicate_request_protection,
+            identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+            max_requests_per_contract_window=args.max_requests_per_contract_window,
+            max_requests_per_rolling_window=args.max_requests_per_rolling_window,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
         and args.historical_ibkr_command == "plan"
     ):
         _plan_ibkr_historical(
@@ -685,6 +760,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             canary_evidence_path=args.canary_evidence,
             expected_profile_frozen_by=args.profile_frozen_by,
             expected_profile_frozen_at=args.profile_frozen_at,
+            maximum_in_flight_requests=args.maximum_in_flight_requests,
+            request_timeout_seconds=args.request_timeout_seconds,
+            retry_count=args.retry_count,
+            duplicate_request_protection=args.duplicate_request_protection,
+            identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+            max_requests_per_contract_window=args.max_requests_per_contract_window,
+            max_requests_per_rolling_window=args.max_requests_per_rolling_window,
             start=args.start,
             end=args.end,
             planner_image_digest=args.planner_image_digest,
@@ -721,6 +803,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             canary_evidence_path=args.canary_evidence,
             expected_profile_frozen_by=args.profile_frozen_by,
             expected_profile_frozen_at=args.profile_frozen_at,
+            maximum_in_flight_requests=args.maximum_in_flight_requests,
+            request_timeout_seconds=args.request_timeout_seconds,
+            retry_count=args.retry_count,
+            duplicate_request_protection=args.duplicate_request_protection,
+            identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+            max_requests_per_contract_window=args.max_requests_per_contract_window,
+            max_requests_per_rolling_window=args.max_requests_per_rolling_window,
             expected_start=args.start,
             expected_end=args.end,
             planner_image_digest=args.planner_image_digest,
@@ -2294,6 +2383,13 @@ def _plan_ibkr_historical(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
     start: datetime,
     end: datetime,
     planner_image_digest: str,
@@ -2325,6 +2421,17 @@ def _plan_ibkr_historical(
         canary_evidence_path=canary_evidence_path,
         expected_profile_frozen_by=expected_profile_frozen_by,
         expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
         start=start,
         end=end,
         planner_qtrad_commit=planner_commit,
@@ -2371,6 +2478,13 @@ def _verify_ibkr_historical_plan(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
     expected_start: datetime,
     expected_end: datetime,
     planner_image_digest: str,
@@ -2401,6 +2515,17 @@ def _verify_ibkr_historical_plan(
         canary_evidence_path=canary_evidence_path,
         expected_profile_frozen_by=expected_profile_frozen_by,
         expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
         expected_start=expected_start,
         expected_end=expected_end,
         planner_qtrad_commit=derive_qtrad_commit(),
@@ -2476,6 +2601,84 @@ def _verify_ibkr_historical_result(result_path: Path) -> None:
                 "plan_sha256": artifact.plan.plan_sha256,
                 "request_count": len(artifact.request_results),
                 "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_ibkr_historical_canary(
+    evidence_path: Path,
+    *,
+    expected_runtime_sha256: str | None,
+    expected_selection_sha256: str | None,
+) -> None:
+    for value, field in (
+        (expected_runtime_sha256, "expected runtime hash"),
+        (expected_selection_sha256, "expected selection hash"),
+    ):
+        if value is not None:
+            _require_sha256_argument(value, field)
+    evidence = verify_ibkr_historical_canary_evidence(
+        evidence_path,
+        expected_runtime_sha256=expected_runtime_sha256,
+        expected_selection_sha256=expected_selection_sha256,
+    )
+    print(
+        json.dumps(
+            {
+                "evidence": str(evidence_path),
+                "evidence_sha256": evidence.evidence_sha256,
+                "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _freeze_ibkr_historical_profile(
+    evidence_path: Path,
+    *,
+    output_path: Path,
+    canary_evidence_filename: str | None,
+    frozen_by: str,
+    frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
+) -> None:
+    evidence = verify_ibkr_historical_canary_evidence(evidence_path)
+    canary_evidence_file_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
+    profile = freeze_ibkr_request_profile_from_canary(
+        evidence,
+        canary_evidence_filename=canary_evidence_filename or evidence_path.name,
+        canary_evidence_file_sha256=canary_evidence_file_sha256,
+        frozen_by=frozen_by,
+        frozen_at=frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
+    )
+    write_ibkr_historical_request_profile(output_path, profile)
+    print(
+        json.dumps(
+            {
+                "output": str(output_path),
+                "profile_sha256": profile.profile_sha256,
+                "canary_evidence_sha256": profile.canary_evidence_sha256,
+                "frozen": True,
             },
             sort_keys=True,
         )

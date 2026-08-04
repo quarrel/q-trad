@@ -667,6 +667,12 @@ qtrad historical ibkr verify \
 
 **Form:** provider-adapter pull request followed by an operational deployment.
 
+**Software status:** The direct official TWS historical adapter, contract reauthentication,
+generation-fenced MIDPOINT/SCHEDULE callback normalization, sanitized error evidence, bounded
+cancellation/timeout handling, immutable canary evidence and file-only canary/profile operations are
+implemented. Host deployment, account-gated reauthentication and the recorded request-profile canary
+remain operational exit work; this implementation does not claim a qualified host or historical data.
+
 Extend the shared IBKR session engine with:
 
 * contract-detail reauthentication;
@@ -707,6 +713,8 @@ FX
 index
 commodity
 ```
+
+The index representative must be an account-reviewed `CFD` independently verified to support `MIDPOINT`. This Stage 5 boundary is CFD-only: IBKR represents ETFs with `STK`, so an ETF requires a separate authenticated product model. Native `IND` contracts are excluded from this midpoint-only stage; `TRADES` bars are a different price basis and require a separately declared acquisition contract.
 
 Test increasingly large request durations, for example:
 

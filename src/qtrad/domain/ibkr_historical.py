@@ -22,6 +22,7 @@ RUNTIME_LOCK_CONTRACT = "qtrad-ibkr-acquisition-runtime-v1"
 REQUEST_PROFILE_CONTRACT = "qtrad-ibkr-historical-request-profile-v1"
 HISTORICAL_PLAN_CONTRACT = "qtrad-ibkr-historical-plan-v1"
 SCHEMA_VERSION = 1
+REQUEST_PROFILE_SCHEMA_VERSION = 2
 MAX_PLANNED_REQUESTS = 20_000
 MAX_IBKR_HISTORICAL_COOLDOWN_SECONDS = 3_600
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -338,6 +339,9 @@ class IbkrHistoricalRequestProfile:
 
     canary_evidence_filename: str
     canary_evidence_sha256: str
+    canary_evidence_file_sha256: str
+    canary_runtime_sha256: str
+    canary_selection_sha256: str
     frozen_by: str
     frozen_at: datetime
     permitted_bar_durations: tuple[str, ...]
@@ -352,11 +356,16 @@ class IbkrHistoricalRequestProfile:
     profile_sha256: str
 
     CONTRACT = REQUEST_PROFILE_CONTRACT
-    SCHEMA_VERSION = SCHEMA_VERSION
+    SCHEMA_VERSION = REQUEST_PROFILE_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_safe_filename(self.canary_evidence_filename, "IBKR canary evidence filename")
-        _require_sha256(self.canary_evidence_sha256, "IBKR request-profile canary evidence hash")
+        _require_sha256(self.canary_evidence_sha256, "IBKR semantic canary evidence hash")
+        _require_sha256(
+            self.canary_evidence_file_sha256, "IBKR serialized canary evidence file hash"
+        )
+        _require_sha256(self.canary_runtime_sha256, "IBKR canary runtime hash")
+        _require_sha256(self.canary_selection_sha256, "IBKR canary selection hash")
         if not self.frozen_by or len(self.frozen_by) > 200:
             raise ValueError("IBKR request profile frozen_by is required and bounded")
         require_utc(self.frozen_at, "IBKR request profile frozen_at")
@@ -397,6 +406,9 @@ class IbkrHistoricalRequestProfile:
             "schema_version": self.SCHEMA_VERSION,
             "canary_evidence_filename": self.canary_evidence_filename,
             "canary_evidence_sha256": self.canary_evidence_sha256,
+            "canary_evidence_file_sha256": self.canary_evidence_file_sha256,
+            "canary_runtime_sha256": self.canary_runtime_sha256,
+            "canary_selection_sha256": self.canary_selection_sha256,
             "frozen_by": self.frozen_by,
             "frozen_at": _utc_text(self.frozen_at),
             "permitted_bar_durations": list(self.permitted_bar_durations),
@@ -464,25 +476,30 @@ class IbkrHistoricalRequest:
         if self.interval_end - self.interval_start > duration:
             raise ValueError("IBKR request ownership interval exceeds its provider duration")
         if self.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
+            if self.fingerprint.security_type == "IND":
+                raise ValueError("IBKR midpoint bar requests cannot use native IND contracts")
+            expected_what_to_show = "MIDPOINT"
             if (
                 self.bar_size != "1 min"
-                or self.what_to_show != "MIDPOINT"
+                or self.what_to_show != expected_what_to_show
                 or self.use_rth
                 or self.format_date != 2
                 or self.keep_up_to_date
             ):
                 raise ValueError(
-                    "IBKR MIDPOINT request parameters are not the frozen one-minute profile"
+                    "IBKR one-minute bar request parameters are not the frozen profile"
                 )
         elif self.kind is IbkrHistoricalRequestKind.SCHEDULE:
             if (
-                self.bar_size is not None
-                or self.what_to_show is not None
+                self.bar_size != "1 day"
+                or self.what_to_show != "SCHEDULE"
                 or self.use_rth
-                or self.format_date is not None
+                or self.format_date != 2
                 or self.keep_up_to_date
             ):
-                raise ValueError("IBKR schedule request has unsupported historical-bar parameters")
+                raise ValueError(
+                    "IBKR schedule request parameters are not the frozen one-day profile"
+                )
         else:
             raise ValueError("IBKR historical request kind is unsupported")
         _require_sha256(self.request_sha256, "IBKR historical request hash")

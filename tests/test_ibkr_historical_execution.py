@@ -87,10 +87,12 @@ def _request(kind: IbkrHistoricalRequestKind) -> IbkrHistoricalRequest:
         "interval_end": utc_text(_NOW + timedelta(days=1)),
         "end_date_time": "20260102-00:00:00 UTC",
         "duration": "1 D",
-        "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
-        "what_to_show": "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+        "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day",
+        "what_to_show": (
+            "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
+        ),
         "use_rth": False,
-        "format_date": 2 if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+        "format_date": 2,
         "keep_up_to_date": False,
     }
     return IbkrHistoricalRequest(
@@ -120,6 +122,9 @@ def _profile(
     return build_ibkr_historical_request_profile(
         canary_evidence_filename="canary.json",
         canary_evidence_sha256="a" * 64,
+        canary_evidence_file_sha256="b" * 64,
+        canary_runtime_sha256="c" * 64,
+        canary_selection_sha256="d" * 64,
         frozen_by="test-operator",
         frozen_at=_NOW,
         permitted_bar_durations=("1 D",),

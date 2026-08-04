@@ -314,6 +314,9 @@ def build_ibkr_historical_request_profile(
     *,
     canary_evidence_filename: str,
     canary_evidence_sha256: str,
+    canary_evidence_file_sha256: str,
+    canary_runtime_sha256: str,
+    canary_selection_sha256: str,
     frozen_by: str,
     frozen_at: datetime,
     permitted_bar_durations: tuple[str, ...],
@@ -333,6 +336,9 @@ def build_ibkr_historical_request_profile(
         "schema_version": IbkrHistoricalRequestProfile.SCHEMA_VERSION,
         "canary_evidence_filename": canary_evidence_filename,
         "canary_evidence_sha256": canary_evidence_sha256,
+        "canary_evidence_file_sha256": canary_evidence_file_sha256,
+        "canary_runtime_sha256": canary_runtime_sha256,
+        "canary_selection_sha256": canary_selection_sha256,
         "frozen_by": frozen_by,
         "frozen_at": utc_text(frozen_at),
         "permitted_bar_durations": list(permitted_bar_durations),
@@ -351,6 +357,9 @@ def build_ibkr_historical_request_profile(
     return IbkrHistoricalRequestProfile(
         canary_evidence_filename=canary_evidence_filename,
         canary_evidence_sha256=canary_evidence_sha256,
+        canary_evidence_file_sha256=canary_evidence_file_sha256,
+        canary_runtime_sha256=canary_runtime_sha256,
+        canary_selection_sha256=canary_selection_sha256,
         frozen_by=frozen_by,
         frozen_at=frozen_at,
         permitted_bar_durations=permitted_bar_durations,
@@ -385,6 +394,9 @@ def build_ibkr_historical_plan(
         raise ValueError("IBKR historical plan end must follow start")
     if any(value.second or value.microsecond for value in (start, end)):
         raise ValueError("IBKR historical plan range must align to UTC minutes")
+    validate_ibkr_historical_index_selection(
+        selection, asset_class_by_instrument=asset_class_by_instrument
+    )
     accepted = tuple(
         sorted(
             (
@@ -500,10 +512,12 @@ def _planned_requests(
             "interval_end": utc_text(interval_end),
             "end_date_time": ibkr_end_date_time(interval_end),
             "duration": duration,
-            "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
-            "what_to_show": "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+            "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day",
+            "what_to_show": (
+                "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
+            ),
             "use_rth": False,
-            "format_date": 2 if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else None,
+            "format_date": 2,
             "keep_up_to_date": False,
         }
         requests.append(
@@ -537,6 +551,27 @@ def _catalogue_asset_class(
         raise ValueError(
             f"IBKR historical plan has no authenticated catalogue asset class for {instrument_id}"
         ) from error
+
+
+def validate_ibkr_historical_index_selection(
+    selection: IbkrContractSelection,
+    *,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
+) -> None:
+    """Require the Stage 5 CFD-only product boundary for every eligible index."""
+    for decision in selection.decisions:
+        if (
+            decision.decision is IbkrContractDecision.ACCEPTED_EXACT_CONTRACT
+            and decision.acquisition_eligible
+            and _catalogue_asset_class(decision.instrument_id, asset_class_by_instrument)
+            is AssetClass.INDEX
+        ):
+            fingerprint = decision.fingerprint
+            if fingerprint is None or fingerprint.security_type != "CFD":
+                raise ValueError(
+                    "IBKR midpoint historical plans require every "
+                    "acquisition-eligible index contract to be a CFD"
+                )
 
 
 def _request_sort_key(value: IbkrHistoricalRequest) -> tuple[str, str, datetime, str]:
