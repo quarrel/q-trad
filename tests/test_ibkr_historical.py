@@ -32,6 +32,7 @@ from qtrad.runtime.ibkr_historical import (
     build_ibkr_historical_plan_from_files,
     load_ibkr_contract_selection,
     load_ibkr_historical_plan,
+    load_ibkr_historical_plan_bytes,
     load_ibkr_historical_request_profile,
     load_ibkr_runtime_lock,
     verify_ibkr_contract_selection,
@@ -1218,6 +1219,9 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
     plan_path = tmp_path / "plan.json"
     write_ibkr_historical_plan(plan_path, plan)
     assert load_ibkr_historical_plan(plan_path) == plan
+    assert load_ibkr_historical_plan_bytes(plan_path.read_bytes()) == plan
+    with pytest.raises(ValueError, match="must contain an object"):
+        load_ibkr_historical_plan_bytes(b"[]")
 
 
 def test_historical_plan_rejects_additional_eligible_stk_index(

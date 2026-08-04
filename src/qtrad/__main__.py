@@ -106,6 +106,8 @@ from qtrad.runtime.ibkr_historical import (
     build_ibkr_historical_plan_from_files,
     build_ibkr_runtime_lock_from_files,
     load_ibkr_historical_plan,
+    load_ibkr_historical_plan_bytes,
+    load_ibkr_historical_request_profile,
     verify_ibkr_historical_plan,
     write_ibkr_contract_selection,
     write_ibkr_historical_plan,
@@ -376,6 +378,16 @@ def build_parser() -> argparse.ArgumentParser:
     historical_plan_verify.add_argument("--plan", type=Path, required=True)
     historical_plan_verify.add_argument("--start", type=_utc_minute_argument, required=True)
     historical_plan_verify.add_argument("--end", type=_utc_minute_argument, required=True)
+    historical_register = historical_ibkr_sub.add_parser(
+        "register", help="register one verified IBKR historical plan for execution"
+    )
+    historical_register.add_argument("--plan", type=Path, required=True)
+    historical_register.add_argument("--confirm-plan-hash", required=True)
+    historical_execute = historical_ibkr_sub.add_parser(
+        "execute", help="execute one registered IBKR historical plan"
+    )
+    historical_execute.add_argument("--plan-id", required=True)
+    historical_execute.add_argument("--request-profile", type=Path, required=True)
     historical_result_build = historical_ibkr_sub.add_parser(
         "result-build", help="publish and verify one completed IBKR historical result closure"
     )
@@ -813,6 +825,32 @@ def main(argv: Sequence[str] | None = None) -> None:
             expected_start=args.start,
             expected_end=args.end,
             planner_image_digest=args.planner_image_digest,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "register"
+    ):
+        asyncio.run(
+            _register_ibkr_historical_plan(
+                settings,
+                clock,
+                plan_path=args.plan,
+                confirmed_plan_hash=args.confirm_plan_hash,
+            )
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "execute"
+    ):
+        asyncio.run(
+            _execute_ibkr_historical_plan(
+                settings,
+                clock,
+                plan_id=args.plan_id,
+                request_profile_path=args.request_profile,
+            )
         )
     elif (
         args.command == "historical"
@@ -2539,6 +2577,118 @@ def _verify_ibkr_historical_plan(
                 "eligible_contract_count": len(plan.eligible_contracts),
                 "request_count": len(plan.requests),
                 "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _register_ibkr_historical_plan(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_path: Path,
+    confirmed_plan_hash: str,
+) -> None:
+    _require_sha256_argument(confirmed_plan_hash, "IBKR historical plan hash")
+    plan = load_ibkr_historical_plan(plan_path)
+    if plan.plan_sha256 != confirmed_plan_hash:
+        raise ValueError("confirmed IBKR historical plan hash does not match the reviewed plan")
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    try:
+        status = await PostgresIbkrHistoricalExecutionStore(engine).register_ibkr_historical_plan(
+            plan,
+            plan_bytes=None,
+            registered_at=clock.now(),
+        )
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_sha256": plan.plan_sha256,
+                "request_count": len(plan.requests),
+                "status": status.value,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _execute_ibkr_historical_plan(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_id: str,
+    request_profile_path: Path,
+) -> None:
+    _require_sha256_argument(plan_id, "IBKR historical plan ID")
+    request_profile = load_ibkr_historical_request_profile(request_profile_path)
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    try:
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan_id)
+        plan = load_ibkr_historical_plan_bytes(snapshot.plan.plan_bytes)
+        if plan.plan_sha256 != plan_id:
+            raise RuntimeError("registered IBKR plan bytes do not match the requested plan ID")
+        if plan.request_profile_sha256 != request_profile.profile_sha256:
+            raise ValueError("IBKR request profile does not match the registered plan")
+        from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint
+        from qtrad.adapters.ibkr.historical import OfficialIbkrHistoricalAdapter
+        from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
+        from qtrad.application.ibkr_execution import IbkrHistoricalExecutor
+
+        api_package_fingerprint = settings.ibkr_api_package_fingerprint
+        if api_package_fingerprint is None:
+            raise ValueError(
+                "IBKR historical execution requires the verified official API package fingerprint"
+            )
+        provider = OfficialIbkrHistoricalAdapter(
+            IbkrGatewayEndpoint(
+                host=settings.ibkr_gateway_host,
+                port=settings.ibkr_gateway_port,
+                client_id=settings.ibkr_client_id,
+            ),
+            request_timeout_seconds=request_profile.request_timeout_seconds,
+            upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
+            connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
+            handshake_timeout_seconds=settings.ibkr_handshake_timeout_seconds,
+            server_time_timeout_seconds=settings.ibkr_server_time_timeout_seconds,
+            contract_timeout_seconds=settings.ibkr_contract_timeout_seconds,
+            historical_timeout_seconds=request_profile.request_timeout_seconds,
+            api_identity=IbkrApiIdentity(
+                package_fingerprint=api_package_fingerprint,
+                version=settings.ibkr_api_version,
+            ),
+        )
+        pacer = IbkrPostgresPacing(
+            PostgresAuditStore(engine),
+            request_profile_sha256=request_profile.profile_sha256,
+            pacing_policy=request_profile.pacing_policy,
+            clock=clock.now,
+        )
+        summary = await IbkrHistoricalExecutor(
+            store,
+            provider,
+            pacer,
+            clock=clock.now,
+        ).execute(plan, request_profile)
+    finally:
+        await engine.dispose()
+    status_counts: dict[str, int] = {}
+    for outcome in summary.outcomes:
+        status = outcome.request_status.value
+        status_counts[status] = status_counts.get(status, 0) + 1
+    print(
+        json.dumps(
+            {
+                "connection_generation": summary.connection_generation,
+                "outcome_count": len(summary.outcomes),
+                "plan_sha256": summary.plan_sha256,
+                "request_status_counts": status_counts,
+                "executed": True,
             },
             sort_keys=True,
         )

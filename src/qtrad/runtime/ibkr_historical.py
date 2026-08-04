@@ -635,17 +635,45 @@ def write_ibkr_historical_plan(path: Path, plan: IbkrHistoricalPlan) -> None:
 def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
     """Independently load and structurally replay an exact, database-free request plan."""
 
-    document = _read_json_object(path, "IBKR historical plan")
-    _require_exact_keys(document, _PLAN_KEYS, "IBKR historical plan")
+    return _load_ibkr_historical_plan_document(
+        _read_json_object(path, "IBKR historical plan"),
+        "IBKR historical plan",
+    )
+
+
+def load_ibkr_historical_plan_bytes(encoded: bytes) -> IbkrHistoricalPlan:
+    """Load a bounded registered plan without trusting mutable filesystem state."""
+
+    if not encoded:
+        raise ValueError("IBKR historical plan bytes cannot be empty")
+    if len(encoded) > _MAX_ARTIFACT_BYTES:
+        raise ValueError("IBKR historical plan bytes exceed their bounded size")
+    try:
+        parsed = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("IBKR historical plan bytes are invalid JSON") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("IBKR historical plan bytes must contain an object")
+    return _load_ibkr_historical_plan_document(
+        cast(dict[str, object], parsed),
+        "IBKR historical plan bytes",
+    )
+
+
+def _load_ibkr_historical_plan_document(
+    document: dict[str, object],
+    label: str,
+) -> IbkrHistoricalPlan:
+    _require_exact_keys(document, _PLAN_KEYS, label)
     if (
         document.get("contract") != IbkrHistoricalPlan.CONTRACT
         or document.get("schema_version") != IbkrHistoricalPlan.SCHEMA_VERSION
     ):
-        raise ValueError("IBKR historical plan contract or schema version is unsupported")
+        raise ValueError(f"{label} contract or schema version is unsupported")
     eligible_values = document.get("eligible_contracts")
     request_values = document.get("requests")
     if not isinstance(eligible_values, list) or not isinstance(request_values, list):
-        raise ValueError("IBKR historical plan contracts and requests must be arrays")
+        raise ValueError(f"{label} contracts and requests must be arrays")
     plan = IbkrHistoricalPlan(
         contract_selection_sha256=_string(document, "contract_selection_sha256"),
         runtime_sha256=_string(document, "runtime_sha256"),
@@ -661,7 +689,7 @@ def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
         plan_sha256=_string(document, "plan_sha256"),
     )
     if plan.as_json_value() != document:
-        raise ValueError("IBKR historical plan contains non-canonical fields")
+        raise ValueError(f"{label} contains non-canonical fields")
     return plan
 
 

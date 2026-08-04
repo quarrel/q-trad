@@ -200,6 +200,38 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
             ),
         ),
         (
+            [
+                "historical",
+                "ibkr",
+                "register",
+                "--plan",
+                "ibkr-plan.json",
+                "--confirm-plan-hash",
+                "a" * 64,
+            ],
+            "_register_ibkr_historical_plan",
+            (
+                ("plan_path", Path("ibkr-plan.json")),
+                ("confirmed_plan_hash", "a" * 64),
+            ),
+        ),
+        (
+            [
+                "historical",
+                "ibkr",
+                "execute",
+                "--plan-id",
+                "a" * 64,
+                "--request-profile",
+                "request-profile.json",
+            ],
+            "_execute_ibkr_historical_plan",
+            (
+                ("plan_id", "a" * 64),
+                ("request_profile_path", Path("request-profile.json")),
+            ),
+        ),
+        (
             ["backfill", "execute", "--plan-hash", "a" * 64],
             "_execute_backfill",
             (("plan_hash", "a" * 64),),
