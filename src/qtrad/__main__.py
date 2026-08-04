@@ -48,7 +48,10 @@ from qtrad.application.ibkr_historical import (
     configured_image_digest,
     derive_qtrad_commit,
 )
-from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
+from qtrad.application.ibkr_results import (
+    build_ibkr_historical_result_artifact,
+    verify_ibkr_historical_execution_snapshot,
+)
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.r2_features import (
@@ -106,7 +109,10 @@ from qtrad.runtime.ibkr_historical import (
     build_ibkr_historical_plan_from_files,
     build_ibkr_runtime_lock_from_files,
     load_ibkr_historical_plan,
+    load_ibkr_historical_plan_artifact,
+    load_ibkr_historical_plan_bytes,
     verify_ibkr_historical_plan,
+    verify_ibkr_historical_plan_closure,
     write_ibkr_contract_selection,
     write_ibkr_historical_plan,
     write_ibkr_historical_request_profile,
@@ -216,6 +222,56 @@ def _require_sha256_argument(value: str, field: str) -> None:
         raise ValueError(f"{field} must be lower-case SHA-256")
 
 
+def _add_ibkr_historical_closure_arguments(
+    parser: argparse.ArgumentParser,
+    *,
+    include_plan: bool,
+    include_runtime_attestation: bool,
+    include_planner_image: bool,
+) -> None:
+    if include_plan:
+        parser.add_argument("--plan", type=Path, required=True)
+    parser.add_argument("--contract-selection", type=Path, required=True)
+    parser.add_argument("--operator-selection", type=Path, required=True)
+    parser.add_argument("--capability-review", type=Path, required=True)
+    parser.add_argument("--catalogue", type=Path, required=True)
+    parser.add_argument("--probe-spec", type=Path, required=True)
+    parser.add_argument("--runtime-lock", type=Path, required=True)
+    parser.add_argument("--gateway-archive", type=Path, required=True)
+    parser.add_argument("--api-archive", type=Path, required=True)
+    parser.add_argument("--ibc-archive", type=Path, required=True)
+    parser.add_argument("--expected-gateway-sha256", required=True)
+    parser.add_argument("--expected-api-sha256", required=True)
+    parser.add_argument("--expected-ibc-sha256", required=True)
+    if include_runtime_attestation:
+        parser.add_argument("--expected-runtime-qtrad-commit", required=True)
+        parser.add_argument("--expected-runtime-image-digest", required=True)
+        parser.add_argument("--expected-gateway-version", required=True)
+        parser.add_argument("--expected-api-version", required=True)
+        parser.add_argument("--expected-ibc-version", required=True)
+        parser.add_argument("--expected-api-host", default="127.0.0.1")
+        parser.add_argument("--expected-api-port", type=int, default=4002)
+        parser.add_argument("--expected-client-id-policy", default="DEDICATED_NONZERO_CLIENT_ID")
+    parser.add_argument("--request-profile", type=Path, required=True)
+    parser.add_argument("--canary-evidence", type=Path, required=True)
+    parser.add_argument("--profile-frozen-by", required=True)
+    parser.add_argument("--profile-frozen-at", type=_utc_timestamp_argument, required=True)
+    parser.add_argument("--maximum-in-flight-requests", type=int, default=1)
+    parser.add_argument("--request-timeout-seconds", type=int, default=60)
+    parser.add_argument("--retry-count", type=int, default=1)
+    parser.add_argument(
+        "--duplicate-request-protection",
+        default="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+    )
+    parser.add_argument("--identical-request-cooldown-seconds", type=int, default=15)
+    parser.add_argument("--max-requests-per-contract-window", type=int, default=5)
+    parser.add_argument("--max-requests-per-rolling-window", type=int, default=55)
+    parser.add_argument("--start", type=_utc_minute_argument, required=True)
+    parser.add_argument("--end", type=_utc_minute_argument, required=True)
+    if include_planner_image:
+        parser.add_argument("--planner-image-digest", required=True)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="qtrad")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -321,61 +377,45 @@ def build_parser() -> argparse.ArgumentParser:
     historical_plan = historical_ibkr_sub.add_parser(
         "plan", help="build a deterministic IBKR historical request plan without provider I/O"
     )
+    _add_ibkr_historical_closure_arguments(
+        historical_plan,
+        include_plan=False,
+        include_runtime_attestation=True,
+        include_planner_image=True,
+    )
+    historical_plan.add_argument("--output", type=Path, required=True)
+
     historical_plan_verify = historical_ibkr_sub.add_parser(
         "plan-verify", help="independently replay an IBKR plan and its lower-artifact closure"
     )
-    for historical_plan_command in (historical_plan, historical_plan_verify):
-        historical_plan_command.add_argument("--contract-selection", type=Path, required=True)
-        historical_plan_command.add_argument("--operator-selection", type=Path, required=True)
-        historical_plan_command.add_argument("--capability-review", type=Path, required=True)
-        historical_plan_command.add_argument("--catalogue", type=Path, required=True)
-        historical_plan_command.add_argument("--probe-spec", type=Path, required=True)
-        historical_plan_command.add_argument("--runtime-lock", type=Path, required=True)
-        historical_plan_command.add_argument("--gateway-archive", type=Path, required=True)
-        historical_plan_command.add_argument("--api-archive", type=Path, required=True)
-        historical_plan_command.add_argument("--ibc-archive", type=Path, required=True)
-        historical_plan_command.add_argument("--expected-gateway-sha256", required=True)
-        historical_plan_command.add_argument("--expected-api-sha256", required=True)
-        historical_plan_command.add_argument("--expected-ibc-sha256", required=True)
-        historical_plan_command.add_argument("--expected-runtime-qtrad-commit", required=True)
-        historical_plan_command.add_argument("--expected-runtime-image-digest", required=True)
-        historical_plan_command.add_argument("--expected-gateway-version", required=True)
-        historical_plan_command.add_argument("--expected-api-version", required=True)
-        historical_plan_command.add_argument("--expected-ibc-version", required=True)
-        historical_plan_command.add_argument("--expected-api-host", default="127.0.0.1")
-        historical_plan_command.add_argument("--expected-api-port", type=int, default=4002)
-        historical_plan_command.add_argument(
-            "--expected-client-id-policy", default="DEDICATED_NONZERO_CLIENT_ID"
-        )
-        historical_plan_command.add_argument("--request-profile", type=Path, required=True)
-        historical_plan_command.add_argument("--canary-evidence", type=Path, required=True)
-        historical_plan_command.add_argument("--profile-frozen-by", required=True)
-        historical_plan_command.add_argument(
-            "--profile-frozen-at", type=_utc_timestamp_argument, required=True
-        )
-        historical_plan_command.add_argument("--maximum-in-flight-requests", type=int, default=1)
-        historical_plan_command.add_argument("--request-timeout-seconds", type=int, default=60)
-        historical_plan_command.add_argument("--retry-count", type=int, default=1)
-        historical_plan_command.add_argument(
-            "--duplicate-request-protection",
-            default="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
-        )
-        historical_plan_command.add_argument(
-            "--identical-request-cooldown-seconds", type=int, default=15
-        )
-        historical_plan_command.add_argument(
-            "--max-requests-per-contract-window", type=int, default=5
-        )
-        historical_plan_command.add_argument(
-            "--max-requests-per-rolling-window", type=int, default=55
-        )
-        historical_plan_command.add_argument("--planner-image-digest", required=True)
-    historical_plan.add_argument("--start", type=_utc_minute_argument, required=True)
-    historical_plan.add_argument("--end", type=_utc_minute_argument, required=True)
-    historical_plan.add_argument("--output", type=Path, required=True)
-    historical_plan_verify.add_argument("--plan", type=Path, required=True)
-    historical_plan_verify.add_argument("--start", type=_utc_minute_argument, required=True)
-    historical_plan_verify.add_argument("--end", type=_utc_minute_argument, required=True)
+    _add_ibkr_historical_closure_arguments(
+        historical_plan_verify,
+        include_plan=True,
+        include_runtime_attestation=True,
+        include_planner_image=True,
+    )
+
+    historical_register = historical_ibkr_sub.add_parser(
+        "register", help="register one verified IBKR historical plan for execution"
+    )
+    _add_ibkr_historical_closure_arguments(
+        historical_register,
+        include_plan=True,
+        include_runtime_attestation=True,
+        include_planner_image=True,
+    )
+    historical_register.add_argument("--confirm-plan-hash", required=True)
+
+    historical_execute = historical_ibkr_sub.add_parser(
+        "execute", help="execute one registered IBKR historical plan"
+    )
+    historical_execute.add_argument("--plan-id", required=True)
+    _add_ibkr_historical_closure_arguments(
+        historical_execute,
+        include_plan=False,
+        include_runtime_attestation=False,
+        include_planner_image=False,
+    )
     historical_result_build = historical_ibkr_sub.add_parser(
         "result-build", help="publish and verify one completed IBKR historical result closure"
     )
@@ -813,6 +853,90 @@ def main(argv: Sequence[str] | None = None) -> None:
             expected_start=args.start,
             expected_end=args.end,
             planner_image_digest=args.planner_image_digest,
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "register"
+    ):
+        asyncio.run(
+            _register_ibkr_historical_plan(
+                settings,
+                clock,
+                plan_path=args.plan,
+                confirmed_plan_hash=args.confirm_plan_hash,
+                contract_selection_path=args.contract_selection,
+                operator_selection_path=args.operator_selection,
+                capability_review_path=args.capability_review,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+                runtime_lock_path=args.runtime_lock,
+                gateway_archive=args.gateway_archive,
+                api_archive=args.api_archive,
+                ibc_archive=args.ibc_archive,
+                expected_gateway_sha256=args.expected_gateway_sha256,
+                expected_api_sha256=args.expected_api_sha256,
+                expected_ibc_sha256=args.expected_ibc_sha256,
+                expected_runtime_qtrad_commit=args.expected_runtime_qtrad_commit,
+                expected_runtime_image_digest=args.expected_runtime_image_digest,
+                expected_gateway_version=args.expected_gateway_version,
+                expected_api_version=args.expected_api_version,
+                expected_ibc_version=args.expected_ibc_version,
+                expected_api_host=args.expected_api_host,
+                expected_api_port=args.expected_api_port,
+                expected_client_id_policy=args.expected_client_id_policy,
+                request_profile_path=args.request_profile,
+                canary_evidence_path=args.canary_evidence,
+                expected_profile_frozen_by=args.profile_frozen_by,
+                expected_profile_frozen_at=args.profile_frozen_at,
+                maximum_in_flight_requests=args.maximum_in_flight_requests,
+                request_timeout_seconds=args.request_timeout_seconds,
+                retry_count=args.retry_count,
+                duplicate_request_protection=args.duplicate_request_protection,
+                identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+                max_requests_per_contract_window=args.max_requests_per_contract_window,
+                max_requests_per_rolling_window=args.max_requests_per_rolling_window,
+                expected_start=args.start,
+                expected_end=args.end,
+                planner_image_digest=args.planner_image_digest,
+            )
+        )
+    elif (
+        args.command == "historical"
+        and args.historical_provider == "ibkr"
+        and args.historical_ibkr_command == "execute"
+    ):
+        asyncio.run(
+            _execute_ibkr_historical_plan(
+                settings,
+                clock,
+                plan_id=args.plan_id,
+                contract_selection_path=args.contract_selection,
+                operator_selection_path=args.operator_selection,
+                capability_review_path=args.capability_review,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+                runtime_lock_path=args.runtime_lock,
+                gateway_archive=args.gateway_archive,
+                api_archive=args.api_archive,
+                ibc_archive=args.ibc_archive,
+                expected_gateway_sha256=args.expected_gateway_sha256,
+                expected_api_sha256=args.expected_api_sha256,
+                expected_ibc_sha256=args.expected_ibc_sha256,
+                request_profile_path=args.request_profile,
+                canary_evidence_path=args.canary_evidence,
+                expected_profile_frozen_by=args.profile_frozen_by,
+                expected_profile_frozen_at=args.profile_frozen_at,
+                maximum_in_flight_requests=args.maximum_in_flight_requests,
+                request_timeout_seconds=args.request_timeout_seconds,
+                retry_count=args.retry_count,
+                duplicate_request_protection=args.duplicate_request_protection,
+                identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+                max_requests_per_contract_window=args.max_requests_per_contract_window,
+                max_requests_per_rolling_window=args.max_requests_per_rolling_window,
+                expected_start=args.start,
+                expected_end=args.end,
+            )
         )
     elif (
         args.command == "historical"
@@ -2539,6 +2663,285 @@ def _verify_ibkr_historical_plan(
                 "eligible_contract_count": len(plan.eligible_contracts),
                 "request_count": len(plan.requests),
                 "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _register_ibkr_historical_plan(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_path: Path,
+    confirmed_plan_hash: str,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
+    expected_start: datetime,
+    expected_end: datetime,
+    planner_image_digest: str,
+) -> None:
+    _require_sha256_argument(confirmed_plan_hash, "IBKR historical plan hash")
+    plan, plan_bytes = load_ibkr_historical_plan_artifact(plan_path)
+    verified = verify_ibkr_historical_plan_closure(
+        contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+        runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+        request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        identical_request_cooldown_seconds=identical_request_cooldown_seconds,
+        max_requests_per_contract_window=max_requests_per_contract_window,
+        max_requests_per_rolling_window=max_requests_per_rolling_window,
+        start=expected_start,
+        end=expected_end,
+        planner_qtrad_commit=derive_qtrad_commit(),
+        planner_qtrad_image_digest=planner_image_digest,
+    )
+    if verified.plan.as_json_value() != plan.as_json_value():
+        raise ValueError("IBKR plan does not replay from its authenticated lower artefacts")
+    if plan.plan_sha256 != confirmed_plan_hash:
+        raise ValueError("confirmed IBKR historical plan hash does not match the reviewed plan")
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    try:
+        status = await PostgresIbkrHistoricalExecutionStore(engine).register_ibkr_historical_plan(
+            plan,
+            plan_bytes=plan_bytes,
+            registered_at=clock.now(),
+        )
+    finally:
+        await engine.dispose()
+    print(
+        json.dumps(
+            {
+                "plan_sha256": plan.plan_sha256,
+                "request_count": len(plan.requests),
+                "status": status.value,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+async def _execute_ibkr_historical_plan(
+    settings: Settings,
+    clock: Clock,
+    *,
+    plan_id: str,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
+    expected_start: datetime,
+    expected_end: datetime,
+) -> None:
+    _require_sha256_argument(plan_id, "IBKR historical plan ID")
+    await _require_database_at_migration_head(settings)
+    engine = _engine(settings)
+    try:
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan_id)
+        plan = load_ibkr_historical_plan_bytes(snapshot.plan.plan_bytes)
+        if plan.plan_sha256 != plan_id:
+            raise RuntimeError("registered IBKR plan bytes do not match the requested plan ID")
+
+        current_commit = derive_qtrad_commit()
+        current_image_digest = configured_image_digest()
+        verified = verify_ibkr_historical_plan_closure(
+            contract_selection_path=contract_selection_path,
+            operator_selection_path=operator_selection_path,
+            capability_review_path=capability_review_path,
+            catalogue_path=catalogue_path,
+            probe_spec_path=probe_spec_path,
+            runtime_lock_path=runtime_lock_path,
+            gateway_archive=gateway_archive,
+            api_archive=api_archive,
+            ibc_archive=ibc_archive,
+            expected_gateway_sha256=expected_gateway_sha256,
+            expected_api_sha256=expected_api_sha256,
+            expected_ibc_sha256=expected_ibc_sha256,
+            expected_runtime_qtrad_commit=current_commit,
+            expected_runtime_image_digest=current_image_digest,
+            expected_gateway_version=settings.ibkr_gateway_version,
+            expected_api_version=settings.ibkr_api_version,
+            expected_ibc_version=settings.ibkr_ibc_version,
+            expected_api_host=settings.ibkr_gateway_host,
+            expected_api_port=settings.ibkr_gateway_port,
+            expected_client_id_policy=settings.ibkr_client_id_policy,
+            request_profile_path=request_profile_path,
+            canary_evidence_path=canary_evidence_path,
+            expected_profile_frozen_by=expected_profile_frozen_by,
+            expected_profile_frozen_at=expected_profile_frozen_at,
+            maximum_in_flight_requests=maximum_in_flight_requests,
+            request_timeout_seconds=request_timeout_seconds,
+            retry_count=retry_count,
+            duplicate_request_protection=duplicate_request_protection,
+            identical_request_cooldown_seconds=identical_request_cooldown_seconds,
+            max_requests_per_contract_window=max_requests_per_contract_window,
+            max_requests_per_rolling_window=max_requests_per_rolling_window,
+            start=expected_start,
+            end=expected_end,
+            planner_qtrad_commit=plan.planner_qtrad_commit,
+            planner_qtrad_image_digest=plan.planner_qtrad_image_digest,
+        )
+        if verified.plan.as_json_value() != plan.as_json_value():
+            raise ValueError("registered IBKR plan does not replay from its lower-artifact closure")
+        if not (
+            verified.runtime.runtime_sha256
+            == plan.runtime_sha256
+            == verified.request_profile.canary_runtime_sha256
+        ):
+            raise ValueError("IBKR runtime identity is not bound across plan and request profile")
+        api_package_fingerprint = settings.ibkr_api_package_fingerprint
+        if api_package_fingerprint is None:
+            raise ValueError(
+                "IBKR historical execution requires the verified official API package fingerprint"
+            )
+        if api_package_fingerprint != verified.selection.api_package_fingerprint:
+            raise ValueError("current IBKR API package fingerprint differs from the selection")
+        request_profile = verified.request_profile
+        verify_ibkr_historical_execution_snapshot(
+            plan,
+            snapshot,
+            maximum_attempts=request_profile.retry_count + 1,
+            allow_recoverable_started=True,
+        )
+        recovered = await store.recover_ibkr_historical_execution(
+            plan_sha256=plan.plan_sha256,
+            recovered_at=clock.now(),
+            maximum_attempts=request_profile.retry_count + 1,
+        )
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        verify_ibkr_historical_execution_snapshot(
+            plan,
+            snapshot,
+            maximum_attempts=request_profile.retry_count + 1,
+        )
+
+        from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint
+        from qtrad.adapters.ibkr.historical import OfficialIbkrHistoricalAdapter
+        from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
+        from qtrad.application.ibkr_execution import IbkrHistoricalExecutor
+
+        provider = OfficialIbkrHistoricalAdapter(
+            IbkrGatewayEndpoint(
+                host=settings.ibkr_gateway_host,
+                port=settings.ibkr_gateway_port,
+                client_id=settings.ibkr_client_id,
+            ),
+            request_timeout_seconds=request_profile.request_timeout_seconds,
+            upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
+            connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
+            handshake_timeout_seconds=settings.ibkr_handshake_timeout_seconds,
+            server_time_timeout_seconds=settings.ibkr_server_time_timeout_seconds,
+            contract_timeout_seconds=settings.ibkr_contract_timeout_seconds,
+            historical_timeout_seconds=request_profile.request_timeout_seconds,
+            api_identity=IbkrApiIdentity(
+                package_fingerprint=api_package_fingerprint,
+                version=settings.ibkr_api_version,
+            ),
+        )
+        pacer = IbkrPostgresPacing(
+            PostgresAuditStore(engine),
+            request_profile_sha256=request_profile.profile_sha256,
+            pacing_policy=request_profile.pacing_policy,
+            clock=clock.now,
+        )
+        summary = await IbkrHistoricalExecutor(
+            store,
+            provider,
+            pacer,
+            clock=clock.now,
+        ).execute_pending(
+            plan,
+            request_profile,
+            recovered_outcomes=recovered,
+        )
+    finally:
+        await engine.dispose()
+    status_counts: dict[str, int] = {}
+    for outcome in summary.outcomes:
+        status = outcome.request_status.value
+        status_counts[status] = status_counts.get(status, 0) + 1
+    print(
+        json.dumps(
+            {
+                "connection_generation": summary.connection_generation,
+                "outcome_count": len(summary.outcomes),
+                "plan_sha256": summary.plan_sha256,
+                "request_status_counts": status_counts,
+                "executed": True,
             },
             sort_keys=True,
         )

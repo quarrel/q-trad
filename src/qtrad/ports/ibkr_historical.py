@@ -72,6 +72,10 @@ class IbkrHistoricalDataPort(Protocol):
 
     async def disconnect(self) -> None: ...
 
+    async def reauthenticate_contracts(
+        self, fingerprints: Sequence[IbkrContractFingerprint]
+    ) -> tuple[IbkrContractReauthentication, ...]: ...
+
     async def request_historical(
         self,
         request: IbkrHistoricalRequest,

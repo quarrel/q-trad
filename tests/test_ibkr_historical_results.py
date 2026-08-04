@@ -11,6 +11,7 @@ from qtrad.application.ibkr_results import (
     build_ibkr_historical_result_artifact,
     replay_ibkr_historical_aggregate_result,
     replay_ibkr_historical_request_result,
+    verify_ibkr_historical_execution_snapshot,
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
@@ -329,6 +330,46 @@ def _snapshot(
 def _build_fixture() -> tuple[IbkrHistoricalPlan, IbkrHistoricalExecutionSnapshot]:
     plan, requests = _plan()
     return plan, _snapshot(plan, requests)
+
+
+def test_execution_snapshot_preflight_rejects_database_mutations() -> None:
+    plan, snapshot = _build_fixture()
+    verify_ibkr_historical_execution_snapshot(plan, snapshot, maximum_attempts=2)
+
+    deleted = replace(
+        snapshot,
+        requests=snapshot.requests[:1],
+        attempts=snapshot.attempts[:1],
+        callbacks=snapshot.callbacks[:2],
+        completion_markers=snapshot.completion_markers[:1],
+    )
+    with pytest.raises(ValueError, match="request closure"):
+        verify_ibkr_historical_execution_snapshot(plan, deleted, maximum_attempts=2)
+
+    altered_request = replace(
+        snapshot.requests[0],
+        request_payload={**snapshot.requests[0].request_payload, "duration": "2 D"},
+    )
+    altered = replace(snapshot, requests=(altered_request, *snapshot.requests[1:]))
+    with pytest.raises(ValueError, match="payload or canonical"):
+        verify_ibkr_historical_execution_snapshot(plan, altered, maximum_attempts=2)
+
+    extra_request = replace(snapshot.requests[0], request_sha256="f" * 64)
+    extra = replace(snapshot, requests=(*snapshot.requests, extra_request))
+    with pytest.raises(ValueError, match="request closure"):
+        verify_ibkr_historical_execution_snapshot(plan, extra, maximum_attempts=2)
+
+    fabricated_terminal = replace(
+        snapshot.requests[0],
+        status=IbkrRequestStatus.TERMINAL,
+        selected_attempt_id=None,
+    )
+    fabricated = replace(
+        snapshot,
+        requests=(fabricated_terminal, *snapshot.requests[1:]),
+    )
+    with pytest.raises(ValueError, match="terminal IBKR request"):
+        verify_ibkr_historical_execution_snapshot(plan, fabricated, maximum_attempts=2)
 
 
 def _bar_and_schedule_results(

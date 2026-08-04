@@ -5,9 +5,11 @@ import json
 import os
 import threading
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import cast
 from uuid import UUID, uuid4
 
@@ -17,10 +19,12 @@ from sqlalchemy import event, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
+from qtrad import __main__ as cli
 from qtrad.adapters.postgres.ibkr_historical import PostgresIbkrHistoricalExecutionStore
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.application.ibkr_execution import IbkrHistoricalExecutor
 from qtrad.application.ibkr_historical import build_ibkr_historical_request_profile
+from qtrad.application.ibkr_results import verify_ibkr_historical_execution_snapshot
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrAttemptStatus,
@@ -53,12 +57,15 @@ from qtrad.domain.ibkr_historical import (
     sha256_json,
     utc_text,
 )
+from qtrad.domain.ibkr_results import IbkrHistoricalExecutionSnapshot
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.instruments import AssetClass
 from qtrad.ports.ibkr_historical import (
+    IbkrContractReauthentication,
     IbkrHistoricalCallbackSink,
     IbkrHistoricalDataPort,
 )
+from qtrad.runtime.settings import Settings
 
 _NOW = datetime(2026, 1, 1, tzinfo=UTC)
 _SESSION_ID = UUID("00000000-0000-0000-0000-000000000001")
@@ -583,6 +590,8 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
     def __init__(self, behaviours: Mapping[str, list[str]]) -> None:
         self.behaviours = {key: list(value) for key, value in behaviours.items()}
         self.calls: list[str] = []
+        self.reauthentication_calls: list[tuple[IbkrContractFingerprint, ...]] = []
+        self.reauthentication_status = "MATCH"
         self.connect_count = 0
         self.disconnect_count = 0
 
@@ -595,6 +604,22 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
 
     async def disconnect(self) -> None:
         self.disconnect_count += 1
+
+    async def reauthenticate_contracts(
+        self, fingerprints: Sequence[IbkrContractFingerprint]
+    ) -> tuple[IbkrContractReauthentication, ...]:
+        expected = tuple(fingerprints)
+        self.reauthentication_calls.append(expected)
+        return tuple(
+            IbkrContractReauthentication(
+                request_id=index,
+                connection_generation=self.connect_count,
+                expected=fingerprint,
+                observed=(fingerprint,),
+                status=self.reauthentication_status,
+            )
+            for index, fingerprint in enumerate(expected, start=100)
+        )
 
     async def request_historical(
         self,
@@ -673,6 +698,30 @@ def _executor(
         sleep=asyncio.sleep,
     )
     return executor, plan, profile
+
+
+@pytest.mark.asyncio
+async def test_contract_reauthentication_mismatch_prevents_historical_request() -> None:
+    store = MemoryExecutionStore()
+    plan, profile = _plan()
+    provider = FakeHistoricalDataPort(
+        {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
+    )
+    provider.reauthentication_status = "MISMATCH"
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+    with pytest.raises(RuntimeError, match="current-generation MATCH"):
+        await IbkrHistoricalExecutor(
+            store,
+            provider,
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+    assert provider.calls == []
+    assert provider.reauthentication_calls == [
+        tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    ]
 
 
 @pytest.mark.asyncio
@@ -855,7 +904,7 @@ async def test_stale_generation_callbacks_cannot_enter_successful_closure() -> N
 
 
 @pytest.mark.asyncio
-async def test_disconnect_invalidates_unfinished_attempt_for_restart() -> None:
+async def test_disconnect_invalidates_unfinished_attempt_for_restart_and_reauthenticates() -> None:
     store = MemoryExecutionStore()
     plan, profile = _plan()
     provider = FakeHistoricalDataPort(
@@ -878,6 +927,8 @@ async def test_disconnect_invalidates_unfinished_attempt_for_restart() -> None:
 
     await executor.execute(plan, profile)
     assert len(provider.calls) == 3
+    expected_fingerprints = tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    assert provider.reauthentication_calls == [expected_fingerprints, expected_fingerprints]
 
 
 def _unique_plan() -> tuple[IbkrHistoricalPlan, IbkrHistoricalRequestProfile]:
@@ -981,6 +1032,13 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     assert len(snapshot.attempts) == len(plan.requests)
     assert len(snapshot.callbacks) == len(plan.requests) * 2
     assert len(snapshot.completion_markers) == len(plan.requests)
+    verify_ibkr_historical_execution_snapshot(
+        plan,
+        snapshot,
+        maximum_attempts=profile.retry_count + 1,
+    )
+    expected_fingerprints = tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    assert provider.reauthentication_calls == [expected_fingerprints]
 
     with pytest.raises(RuntimeError, match="unknown request"):
         await store.mark_ibkr_historical_requests_published(
@@ -1117,6 +1175,456 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     )
     assert stale_rows == [{"closure_eligible": False}, {"closure_eligible": False}]
     await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_cli_postgres_execution_recovers_before_provider_construction(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        plan, profile = _unique_plan()
+        await store.register_ibkr_historical_plan(
+            plan,
+            plan_bytes=ibkr_historical_plan_bytes(plan),
+            registered_at=_NOW,
+        )
+
+        recovered_request = plan.requests[0]
+        recovery_session_id = uuid4()
+        started = await store.start_ibkr_historical_attempt(
+            plan_sha256=plan.plan_sha256,
+            request_sha256=recovered_request.request_sha256,
+            connection_session_id=recovery_session_id,
+            connection_generation=7,
+            provider_request_id=700,
+            started_at=_NOW,
+            maximum_attempts=profile.retry_count + 1,
+        )
+        assert started is not None
+        for kind, payload in (
+            (
+                IbkrHistoricalCallbackKind.MIDPOINT_BAR,
+                {"open": "1", "close": "1"},
+            ),
+            (IbkrHistoricalCallbackKind.COMPLETION, {}),
+        ):
+            await store.append_ibkr_historical_callback(
+                attempt_id=started.attempt_id,
+                callback=IbkrHistoricalCallback(
+                    connection_session_id=recovery_session_id,
+                    provider_request_id=700,
+                    connection_generation=7,
+                    kind=kind,
+                    received_at=_NOW,
+                    payload=payload,
+                ),
+            )
+
+        pre_recovery = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        pre_recovery_attempt = next(
+            attempt
+            for attempt in pre_recovery.attempts
+            if attempt.request_sha256 == recovered_request.request_sha256
+        )
+        pre_recovery_marker = next(
+            marker
+            for marker in pre_recovery.completion_markers
+            if marker.attempt_id == pre_recovery_attempt.attempt_id
+        )
+        assert pre_recovery_attempt.status is IbkrAttemptStatus.STARTED
+        assert pre_recovery_marker.closure_eligible
+
+        events: list[str] = []
+        real_verify = cli.verify_ibkr_historical_execution_snapshot
+
+        def verify_wrapper(
+            plan_arg: IbkrHistoricalPlan,
+            snapshot_arg: IbkrHistoricalExecutionSnapshot,
+            *,
+            maximum_attempts: int,
+            allow_recoverable_started: bool = False,
+        ) -> None:
+            real_verify(
+                plan_arg,
+                snapshot_arg,
+                maximum_attempts=maximum_attempts,
+                allow_recoverable_started=allow_recoverable_started,
+            )
+            events.append(
+                "pre_recovery_verified" if allow_recoverable_started else "strict_verified"
+            )
+
+        monkeypatch.setattr(cli, "verify_ibkr_historical_execution_snapshot", verify_wrapper)
+
+        settings = cast(
+            Settings,
+            SimpleNamespace(
+                database_url=database_url,
+                ibkr_gateway_version="10.49",
+                ibkr_api_version="10.49",
+                ibkr_ibc_version="3.24.1",
+                ibkr_gateway_host="127.0.0.1",
+                ibkr_gateway_port=4002,
+                ibkr_client_id=7,
+                ibkr_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
+                ibkr_api_package_fingerprint="d" * 64,
+                ibkr_upstream_recovery_timeout_seconds=180,
+                ibkr_connect_timeout_seconds=5,
+                ibkr_handshake_timeout_seconds=15,
+                ibkr_server_time_timeout_seconds=10,
+                ibkr_contract_timeout_seconds=10,
+            ),
+        )
+
+        verified = SimpleNamespace(
+            plan=plan,
+            runtime=SimpleNamespace(runtime_sha256=plan.runtime_sha256),
+            request_profile=profile,
+            selection=SimpleNamespace(
+                api_package_fingerprint=settings.ibkr_api_package_fingerprint
+            ),
+        )
+        monkeypatch.setattr(
+            cli,
+            "verify_ibkr_historical_plan_closure",
+            lambda **_: verified,
+        )
+        monkeypatch.setattr(cli, "derive_qtrad_commit", lambda: plan.planner_qtrad_commit)
+        monkeypatch.setattr(
+            cli,
+            "configured_image_digest",
+            lambda: plan.planner_qtrad_image_digest,
+        )
+
+        async def skip_database_check(_settings: Settings) -> None:
+            return None
+
+        monkeypatch.setattr(cli, "_require_database_at_migration_head", skip_database_check)
+        monkeypatch.setattr(cli, "_engine", lambda _settings: engine)
+
+        provider_holder: list[object] = []
+
+        class RecordingProvider:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                del args, kwargs
+                if events != ["pre_recovery_verified", "strict_verified"]:
+                    raise AssertionError(
+                        "provider was constructed before strict post-recovery verification"
+                    )
+                events.append("provider_constructed")
+                self.delegate = FakeHistoricalDataPort(
+                    {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
+                )
+                provider_holder.append(self)
+
+            async def connect(self) -> IbkrHistoricalConnection:
+                if "strict_verified" not in events:
+                    raise AssertionError("provider connected before strict verification")
+                events.append("provider_connected")
+                return await self.delegate.connect()
+
+            async def disconnect(self) -> None:
+                await self.delegate.disconnect()
+
+            async def reauthenticate_contracts(
+                self,
+                fingerprints: Sequence[IbkrContractFingerprint],
+            ) -> tuple[IbkrContractReauthentication, ...]:
+                return await self.delegate.reauthenticate_contracts(fingerprints)
+
+            async def request_historical(
+                self,
+                request: IbkrHistoricalRequest,
+                *,
+                request_id: int,
+                connection_session_id: UUID,
+                connection_generation: int,
+                callback: IbkrHistoricalCallbackSink,
+            ) -> None:
+                await self.delegate.request_historical(
+                    request,
+                    request_id=request_id,
+                    connection_session_id=connection_session_id,
+                    connection_generation=connection_generation,
+                    callback=callback,
+                )
+
+        monkeypatch.setattr(
+            "qtrad.adapters.ibkr.historical.OfficialIbkrHistoricalAdapter",
+            RecordingProvider,
+        )
+        monkeypatch.setattr(
+            "qtrad.adapters.ibkr.pacing.IbkrPostgresPacing",
+            lambda *_args, **_kwargs: FakePacer(profile.profile_sha256),
+        )
+
+        class FixedClock:
+            def now(self) -> datetime:
+                return _NOW
+
+        await cli._execute_ibkr_historical_plan(
+            settings,
+            FixedClock(),
+            plan_id=plan.plan_sha256,
+            contract_selection_path=Path("selection.json"),
+            operator_selection_path=Path("operator.json"),
+            capability_review_path=Path("review.json"),
+            catalogue_path=Path("catalogue.toml"),
+            probe_spec_path=Path("probe.toml"),
+            runtime_lock_path=Path("runtime.json"),
+            gateway_archive=Path("gateway.zip"),
+            api_archive=Path("api.zip"),
+            ibc_archive=Path("ibc.zip"),
+            expected_gateway_sha256="a" * 64,
+            expected_api_sha256="b" * 64,
+            expected_ibc_sha256="c" * 64,
+            request_profile_path=Path("profile.json"),
+            canary_evidence_path=Path("canary.json"),
+            expected_profile_frozen_by="test-operator",
+            expected_profile_frozen_at=_NOW,
+            maximum_in_flight_requests=profile.maximum_in_flight_requests,
+            request_timeout_seconds=profile.request_timeout_seconds,
+            retry_count=profile.retry_count,
+            duplicate_request_protection=profile.duplicate_request_protection,
+            identical_request_cooldown_seconds=15,
+            max_requests_per_contract_window=5,
+            max_requests_per_rolling_window=55,
+            expected_start=plan.start,
+            expected_end=plan.end,
+        )
+        result = json.loads(capsys.readouterr().out)
+        assert result["outcome_count"] == 2
+        assert result["request_status_counts"] == {"SUCCEEDED": 2}
+
+        assert events == [
+            "pre_recovery_verified",
+            "strict_verified",
+            "provider_constructed",
+            "provider_connected",
+        ]
+        assert len(provider_holder) == 1
+        provider = cast(RecordingProvider, provider_holder[0])
+        pending_request = next(
+            request
+            for request in plan.requests
+            if request.request_sha256 != recovered_request.request_sha256
+        )
+        assert provider.delegate.calls == [pending_request.request_sha256]
+        assert recovered_request.request_sha256 not in provider.delegate.calls
+        assert provider.delegate.connect_count == 1
+
+        post_engine = create_async_engine(database_url)
+        try:
+            post_store = PostgresIbkrHistoricalExecutionStore(post_engine)
+            post_recovery = await post_store.read_ibkr_historical_execution(
+                plan_sha256=plan.plan_sha256
+            )
+        finally:
+            await post_engine.dispose()
+
+        recovered_attempt = next(
+            attempt
+            for attempt in post_recovery.attempts
+            if attempt.request_sha256 == recovered_request.request_sha256
+        )
+        assert recovered_attempt.status is IbkrAttemptStatus.SUCCEEDED
+        recovered_request_snapshot = next(
+            request
+            for request in post_recovery.requests
+            if request.request_sha256 == recovered_request.request_sha256
+        )
+        assert recovered_request_snapshot.status is IbkrRequestStatus.SUCCEEDED
+        assert all(
+            attempt.status is not IbkrAttemptStatus.STARTED for attempt in post_recovery.attempts
+        )
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_reports_recovered_outcomes_without_provider_connection() -> None:
+    store = MemoryExecutionStore()
+    plan, profile = _plan()
+    provider = FakeHistoricalDataPort({kind.value: [] for kind in IbkrHistoricalRequestKind})
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+    for provider_request_id, request in enumerate(plan.requests, start=1):
+        connection_session_id = uuid4()
+        attempt = await store.start_ibkr_historical_attempt(
+            plan_sha256=plan.plan_sha256,
+            request_sha256=request.request_sha256,
+            connection_session_id=connection_session_id,
+            connection_generation=1,
+            provider_request_id=provider_request_id,
+            started_at=_NOW,
+            maximum_attempts=profile.retry_count + 1,
+        )
+        assert attempt is not None
+        callback_kind = (
+            IbkrHistoricalCallbackKind.MIDPOINT_BAR
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+            else IbkrHistoricalCallbackKind.SCHEDULE
+        )
+        callback_payload = (
+            {"open": "1", "close": "1"}
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+            else {"active": False}
+        )
+        for kind, payload in (
+            (callback_kind, callback_payload),
+            (IbkrHistoricalCallbackKind.COMPLETION, {}),
+        ):
+            await store.append_ibkr_historical_callback(
+                attempt_id=attempt.attempt_id,
+                callback=IbkrHistoricalCallback(
+                    connection_session_id=connection_session_id,
+                    provider_request_id=provider_request_id,
+                    connection_generation=1,
+                    kind=kind,
+                    received_at=_NOW,
+                    payload=payload,
+                ),
+            )
+
+    recovered = await store.recover_ibkr_historical_execution(
+        plan_sha256=plan.plan_sha256,
+        recovered_at=_NOW,
+        maximum_attempts=profile.retry_count + 1,
+    )
+    summary = await IbkrHistoricalExecutor(
+        store,
+        provider,
+        FakePacer(profile.profile_sha256),
+        clock=lambda: _NOW,
+    ).execute_pending(
+        plan,
+        profile,
+        recovered_outcomes=recovered,
+    )
+
+    assert summary.outcomes == recovered
+    assert {outcome.request_status for outcome in summary.outcomes} == {IbkrRequestStatus.SUCCEEDED}
+    assert provider.connect_count == 0
+    assert provider.disconnect_count == 0
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_execution_snapshot_rejects_request_closure_mutations() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    audit_store = PostgresAuditStore(engine)
+    await audit_store.seed_instruments()
+    store = PostgresIbkrHistoricalExecutionStore(engine)
+
+    try:
+        for mutation in ("deleted", "altered", "extra", "terminal"):
+            plan, profile = _unique_plan()
+            await store.register_ibkr_historical_plan(
+                plan,
+                plan_bytes=ibkr_historical_plan_bytes(plan),
+                registered_at=_NOW,
+            )
+            async with engine.begin() as connection:
+                if mutation == "deleted":
+                    await connection.execute(
+                        text(
+                            """
+                            DELETE FROM ops.ibkr_historical_requests
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+                elif mutation == "altered":
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE ops.ibkr_historical_requests
+                            SET request_payload = request_payload || '{"duration":"2 D"}'::jsonb
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+                elif mutation == "extra":
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO ops.ibkr_historical_requests (
+                                plan_sha256, request_sha256, request_payload, instrument_id,
+                                request_kind, interval_start, interval_end, status,
+                                attempt_count, publication_status
+                            )
+                            SELECT plan_sha256, :extra_request_sha256, request_payload,
+                                   instrument_id, request_kind, interval_start, interval_end,
+                                   'PENDING', 0, 'PENDING'
+                            FROM ops.ibkr_historical_requests
+                            WHERE plan_sha256 = :plan_sha256
+                            ORDER BY request_sha256
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "extra_request_sha256": "f" * 64,
+                        },
+                    )
+                else:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE ops.ibkr_historical_requests
+                            SET status = 'TERMINAL', selected_attempt_id = NULL
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+
+            snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+            match = {
+                "deleted": "request closure",
+                "altered": "payload or canonical",
+                "extra": "request closure",
+                "terminal": "terminal IBKR request",
+            }[mutation]
+            with pytest.raises(ValueError, match=match):
+                verify_ibkr_historical_execution_snapshot(
+                    plan,
+                    snapshot,
+                    maximum_attempts=profile.retry_count + 1,
+                )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio

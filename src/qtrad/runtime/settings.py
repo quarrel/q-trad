@@ -27,8 +27,10 @@ class Settings(BaseSettings):
     ibkr_gateway_host: str = "127.0.0.1"
     ibkr_gateway_port: int = 4002
     ibkr_client_id: int = 71
+    ibkr_client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID"
     ibkr_api_version: Literal["10.49", "10.45"] = "10.49"
     ibkr_gateway_version: Literal["10.49", "10.45"] = "10.49"
+    ibkr_ibc_version: str = "3.24.1"
     ibkr_api_package_fingerprint: str | None = None
     ibkr_connect_timeout_seconds: float = 5.0
     ibkr_handshake_timeout_seconds: float = 15.0

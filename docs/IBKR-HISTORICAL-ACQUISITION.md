@@ -765,13 +765,18 @@ Generate the final immutable plan using:
 
 The total request count is derived from that profile. It is not hardcoded as 160 unless the verified profile actually produces 140 bar requests and 20 schedule requests.
 
+The execution command loads the immutable registered plan from PostgreSQL. It requires the frozen profile file separately because the registered plan binds the profile by identity but does not duplicate its policy fields.
+
+Registration replays the complete lower-artifact closure and confirms the reconstructed plan before its first database write. Execution repeats that replay, verifies the runtime and deployment identity against the registered plan and frozen profile, and rejects any mismatch before provider construction or socket I/O. It also verifies the exact PostgreSQL request closure, canonical request columns, attempt state, selected-attempt relationship and terminal evidence.
+
+Every newly opened provider connection reauthenticates the exact unique contract-fingerprint set for the plan. Historical requests start only after all current-generation reauthentication results are MATCH.
 Commands:
 
 ```text
 qtrad historical ibkr plan ...
 qtrad historical ibkr plan-verify --plan <path>
-qtrad historical ibkr register --plan <path>
-qtrad historical ibkr execute --plan-id <id>
+qtrad historical ibkr register --plan <path> --confirm-plan-hash <sha256>
+qtrad historical ibkr execute --plan-id <sha256> --request-profile <path>
 qtrad historical ibkr result-build --plan <path> --output <directory>
 qtrad historical ibkr verify --result <manifest>
 ```

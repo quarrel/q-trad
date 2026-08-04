@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Sequence
 from datetime import UTC, datetime
 from functools import partial
 from itertools import count
@@ -21,6 +21,7 @@ from qtrad.domain.ibkr_execution import (
     IbkrTerminalDisposition,
 )
 from qtrad.domain.ibkr_historical import (
+    IbkrContractFingerprint,
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
     IbkrHistoricalRequestKind,
@@ -28,6 +29,7 @@ from qtrad.domain.ibkr_historical import (
 )
 from qtrad.domain.time import require_utc
 from qtrad.ports.ibkr_historical import (
+    IbkrContractReauthentication,
     IbkrHistoricalDataPort,
     IbkrHistoricalExecutionStore,
     IbkrHistoricalPacer,
@@ -56,6 +58,23 @@ class IbkrHistoricalExecutor:
         self._sleep = sleep
         self._request_ids = count(request_id_start)
 
+    async def recover(
+        self,
+        plan: IbkrHistoricalPlan,
+        request_profile: IbkrHistoricalRequestProfile,
+    ) -> tuple[IbkrHistoricalAttemptOutcome, ...]:
+        """Recover durable work without opening a provider connection."""
+
+        maximum_attempts = self._validate_profile(plan, request_profile)
+        recovered_at = self._now("IBKR execution recovery time")
+        return tuple(
+            await self._store.recover_ibkr_historical_execution(
+                plan_sha256=plan.plan_sha256,
+                recovered_at=recovered_at,
+                maximum_attempts=maximum_attempts,
+            )
+        )
+
     async def execute(
         self,
         plan: IbkrHistoricalPlan,
@@ -63,19 +82,24 @@ class IbkrHistoricalExecutor:
     ) -> IbkrHistoricalExecutionSummary:
         """Recover durable work, then execute every still-pending planned request."""
 
-        if plan.request_profile_sha256 != request_profile.profile_sha256:
-            raise ValueError("IBKR execution profile does not match the registered plan")
-        if self._pacer.request_profile_sha256 != request_profile.profile_sha256:
-            raise ValueError("IBKR pacing profile does not match the execution profile")
-        maximum_attempts = request_profile.retry_count + 1
-        recovered_at = self._now("IBKR execution recovery time")
-        recovered = tuple(
-            await self._store.recover_ibkr_historical_execution(
-                plan_sha256=plan.plan_sha256,
-                recovered_at=recovered_at,
-                maximum_attempts=maximum_attempts,
-            )
+        recovered = await self.recover(plan, request_profile)
+        return await self.execute_pending(
+            plan,
+            request_profile,
+            recovered_outcomes=recovered,
         )
+
+    async def execute_pending(
+        self,
+        plan: IbkrHistoricalPlan,
+        request_profile: IbkrHistoricalRequestProfile,
+        *,
+        recovered_outcomes: Sequence[IbkrHistoricalAttemptOutcome],
+    ) -> IbkrHistoricalExecutionSummary:
+        """Execute pending work after the caller has completed and verified recovery."""
+
+        maximum_attempts = self._validate_profile(plan, request_profile)
+        recovered = tuple(recovered_outcomes)
         request_by_hash = {request.request_sha256: request for request in plan.requests}
         pending_hashes = await self._store.pending_ibkr_historical_requests(plan.plan_sha256)
         if not pending_hashes:
@@ -89,6 +113,15 @@ class IbkrHistoricalExecutor:
         connection_generation = connection.connection_generation
         outcomes: list[IbkrHistoricalAttemptOutcome] = list(recovered)
         try:
+            fingerprints = tuple(
+                dict.fromkeys(contract.fingerprint for contract in plan.eligible_contracts)
+            )
+            reauthentication = await self._provider.reauthenticate_contracts(fingerprints)
+            _validate_contract_reauthentication(
+                reauthentication,
+                expected=fingerprints,
+                connection_generation=connection_generation,
+            )
             semaphore = asyncio.Semaphore(request_profile.maximum_in_flight_requests)
 
             async def run(request: IbkrHistoricalRequest) -> None:
@@ -122,6 +155,17 @@ class IbkrHistoricalExecutor:
         return IbkrHistoricalExecutionSummary(
             plan.plan_sha256, tuple(outcomes), connection_generation
         )
+
+    def _validate_profile(
+        self,
+        plan: IbkrHistoricalPlan,
+        request_profile: IbkrHistoricalRequestProfile,
+    ) -> int:
+        if plan.request_profile_sha256 != request_profile.profile_sha256:
+            raise ValueError("IBKR execution profile does not match the registered plan")
+        if self._pacer.request_profile_sha256 != request_profile.profile_sha256:
+            raise ValueError("IBKR pacing profile does not match the execution profile")
+        return request_profile.retry_count + 1
 
     async def _execute_request(
         self,
@@ -238,3 +282,24 @@ class IbkrHistoricalExecutor:
         value = self._clock()
         require_utc(value, label)
         return value.astimezone(UTC)
+
+
+def _validate_contract_reauthentication(
+    results: Sequence[IbkrContractReauthentication],
+    *,
+    expected: tuple[IbkrContractFingerprint, ...],
+    connection_generation: int,
+) -> None:
+    if len(results) != len(expected) or {item.expected for item in results} != set(expected):
+        raise RuntimeError("IBKR contract reauthentication did not cover the exact plan set")
+    if len({item.expected for item in results}) != len(results):
+        raise RuntimeError("IBKR contract reauthentication returned duplicate evidence")
+    for result in results:
+        if (
+            result.connection_generation != connection_generation
+            or result.status != "MATCH"
+            or result.observed != (result.expected,)
+        ):
+            raise RuntimeError(
+                "IBKR contract reauthentication did not establish a current-generation MATCH"
+            )

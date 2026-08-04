@@ -6,6 +6,7 @@ import hashlib
 import json
 import tomllib
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import cast
@@ -157,6 +158,16 @@ _REQUEST_KEYS = {
     "keep_up_to_date",
     "request_sha256",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrHistoricalPlanVerification:
+    """Verified lower-artifact closure and the deterministic plan it produces."""
+
+    plan: IbkrHistoricalPlan
+    selection: IbkrContractSelection
+    runtime: IbkrAcquisitionRuntime
+    request_profile: IbkrHistoricalRequestProfile
 
 
 def load_ibkr_capability_review(
@@ -568,7 +579,84 @@ def build_ibkr_historical_plan_from_files(
     planner_qtrad_image_digest: str,
 ) -> IbkrHistoricalPlan:
     """Compose the planner only from independently verified lower-layer artefacts."""
+    return verify_ibkr_historical_plan_closure(
+        contract_selection_path=contract_selection_path,
+        operator_selection_path=operator_selection_path,
+        capability_review_path=capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+        runtime_lock_path=runtime_lock_path,
+        gateway_archive=gateway_archive,
+        api_archive=api_archive,
+        ibc_archive=ibc_archive,
+        expected_gateway_sha256=expected_gateway_sha256,
+        expected_api_sha256=expected_api_sha256,
+        expected_ibc_sha256=expected_ibc_sha256,
+        expected_runtime_qtrad_commit=expected_runtime_qtrad_commit,
+        expected_runtime_image_digest=expected_runtime_image_digest,
+        expected_gateway_version=expected_gateway_version,
+        expected_api_version=expected_api_version,
+        expected_ibc_version=expected_ibc_version,
+        expected_api_host=expected_api_host,
+        expected_api_port=expected_api_port,
+        expected_client_id_policy=expected_client_id_policy,
+        request_profile_path=request_profile_path,
+        canary_evidence_path=canary_evidence_path,
+        expected_profile_frozen_by=expected_profile_frozen_by,
+        expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        identical_request_cooldown_seconds=pacing_policy.identical_request_cooldown_seconds,
+        max_requests_per_contract_window=pacing_policy.max_requests_per_contract_window,
+        max_requests_per_rolling_window=pacing_policy.max_requests_per_rolling_window,
+        start=start,
+        end=end,
+        planner_qtrad_commit=planner_qtrad_commit,
+        planner_qtrad_image_digest=planner_qtrad_image_digest,
+    ).plan
 
+
+def verify_ibkr_historical_plan_closure(
+    *,
+    contract_selection_path: Path,
+    operator_selection_path: Path,
+    capability_review_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    runtime_lock_path: Path,
+    gateway_archive: Path,
+    api_archive: Path,
+    ibc_archive: Path,
+    expected_gateway_sha256: str,
+    expected_api_sha256: str,
+    expected_ibc_sha256: str,
+    expected_runtime_qtrad_commit: str,
+    expected_runtime_image_digest: str,
+    expected_gateway_version: str,
+    expected_api_version: str,
+    expected_ibc_version: str,
+    expected_api_host: str,
+    expected_api_port: int,
+    expected_client_id_policy: str,
+    request_profile_path: Path,
+    canary_evidence_path: Path,
+    expected_profile_frozen_by: str,
+    expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
+    start: datetime,
+    end: datetime,
+    planner_qtrad_commit: str,
+    planner_qtrad_image_digest: str,
+) -> IbkrHistoricalPlanVerification:
+    """Verify the complete lower-artifact closure and rebuild its exact plan."""
     candidates, _ = _load_canonical_inputs(
         catalogue_path=catalogue_path, probe_spec_path=probe_spec_path
     )
@@ -614,9 +702,15 @@ def build_ibkr_historical_plan_from_files(
         request_timeout_seconds=request_timeout_seconds,
         retry_count=retry_count,
         duplicate_request_protection=duplicate_request_protection,
-        pacing_policy=pacing_policy,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
     )
-    return build_ibkr_historical_plan(
+    plan = build_ibkr_historical_plan(
         selection=selection,
         runtime=runtime,
         request_profile=request_profile,
@@ -626,26 +720,57 @@ def build_ibkr_historical_plan_from_files(
         planner_qtrad_commit=planner_qtrad_commit,
         planner_qtrad_image_digest=planner_qtrad_image_digest,
     )
+    return IbkrHistoricalPlanVerification(plan, selection, runtime, request_profile)
 
 
 def write_ibkr_historical_plan(path: Path, plan: IbkrHistoricalPlan) -> None:
     _write_create_only(path, plan.as_json_value(), "IBKR historical plan")
 
 
+def load_ibkr_historical_plan_artifact(path: Path) -> tuple[IbkrHistoricalPlan, bytes]:
+    """Load one plan once and retain the exact bytes that were verified."""
+    encoded = _read_bounded_bytes(path, "IBKR historical plan")
+    return load_ibkr_historical_plan_bytes(encoded), encoded
+
+
 def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
     """Independently load and structurally replay an exact, database-free request plan."""
+    return load_ibkr_historical_plan_artifact(path)[0]
 
-    document = _read_json_object(path, "IBKR historical plan")
-    _require_exact_keys(document, _PLAN_KEYS, "IBKR historical plan")
+
+def load_ibkr_historical_plan_bytes(encoded: bytes) -> IbkrHistoricalPlan:
+    """Load a bounded registered plan without trusting mutable filesystem state."""
+
+    if not encoded:
+        raise ValueError("IBKR historical plan bytes cannot be empty")
+    if len(encoded) > _MAX_ARTIFACT_BYTES:
+        raise ValueError("IBKR historical plan bytes exceed their bounded size")
+    try:
+        parsed = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("IBKR historical plan bytes are invalid JSON") from error
+    if not isinstance(parsed, dict):
+        raise ValueError("IBKR historical plan bytes must contain an object")
+    return _load_ibkr_historical_plan_document(
+        cast(dict[str, object], parsed),
+        "IBKR historical plan bytes",
+    )
+
+
+def _load_ibkr_historical_plan_document(
+    document: dict[str, object],
+    label: str,
+) -> IbkrHistoricalPlan:
+    _require_exact_keys(document, _PLAN_KEYS, label)
     if (
         document.get("contract") != IbkrHistoricalPlan.CONTRACT
         or document.get("schema_version") != IbkrHistoricalPlan.SCHEMA_VERSION
     ):
-        raise ValueError("IBKR historical plan contract or schema version is unsupported")
+        raise ValueError(f"{label} contract or schema version is unsupported")
     eligible_values = document.get("eligible_contracts")
     request_values = document.get("requests")
     if not isinstance(eligible_values, list) or not isinstance(request_values, list):
-        raise ValueError("IBKR historical plan contracts and requests must be arrays")
+        raise ValueError(f"{label} contracts and requests must be arrays")
     plan = IbkrHistoricalPlan(
         contract_selection_sha256=_string(document, "contract_selection_sha256"),
         runtime_sha256=_string(document, "runtime_sha256"),
@@ -661,7 +786,7 @@ def load_ibkr_historical_plan(path: Path) -> IbkrHistoricalPlan:
         plan_sha256=_string(document, "plan_sha256"),
     )
     if plan.as_json_value() != document:
-        raise ValueError("IBKR historical plan contains non-canonical fields")
+        raise ValueError(f"{label} contains non-canonical fields")
     return plan
 
 
@@ -705,7 +830,7 @@ def verify_ibkr_historical_plan(
     """Replay the plan and its authenticated lower-artifact closure from files only."""
 
     observed = load_ibkr_historical_plan(path)
-    expected = build_ibkr_historical_plan_from_files(
+    verified = verify_ibkr_historical_plan_closure(
         contract_selection_path=contract_selection_path,
         operator_selection_path=operator_selection_path,
         capability_review_path=capability_review_path,
@@ -734,13 +859,15 @@ def verify_ibkr_historical_plan(
         request_timeout_seconds=request_timeout_seconds,
         retry_count=retry_count,
         duplicate_request_protection=duplicate_request_protection,
-        pacing_policy=pacing_policy,
+        identical_request_cooldown_seconds=pacing_policy.identical_request_cooldown_seconds,
+        max_requests_per_contract_window=pacing_policy.max_requests_per_contract_window,
+        max_requests_per_rolling_window=pacing_policy.max_requests_per_rolling_window,
         start=expected_start,
         end=expected_end,
         planner_qtrad_commit=planner_qtrad_commit,
         planner_qtrad_image_digest=planner_qtrad_image_digest,
     )
-    if expected.as_json_value() != observed.as_json_value():
+    if verified.plan.as_json_value() != observed.as_json_value():
         raise ValueError(
             "IBKR historical plan does not replay from its authenticated lower artefacts"
         )
