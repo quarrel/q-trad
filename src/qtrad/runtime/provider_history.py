@@ -811,3 +811,49 @@ def _sha256_json(value: object) -> str:
     if not isinstance(converted, dict):
         raise TypeError("provider-history identity must be an object")
     return sha256_json(converted)
+
+
+def read_provider_history_observations(
+    path: Path,
+) -> tuple[ProviderHistoricalDataset, tuple[ProviderHistoricalObservation, ...]]:
+    """Verify a provider-history closure, then decode every canonical Parquet row."""
+
+    dataset = verify_provider_history(path)
+    manifest_path = _require_file(path, "provider-history manifest")
+    document = _mapping(
+        _parse_json(
+            _read_bounded(manifest_path, "provider-history manifest"),
+            "provider-history manifest",
+        ),
+        "provider-history manifest",
+    )
+    raw_files = document["files"]
+    if not isinstance(raw_files, list):
+        raise ValueError("provider-history files are invalid")
+    rows: list[ProviderHistoricalObservation] = []
+    root = manifest_path.parent
+    for item in raw_files:
+        reference = _file_reference(item)
+        partition = _read_parquet_rows(
+            _safe_child(
+                root,
+                _string(reference["path"], "provider-history partition path"),
+                "provider-history partition",
+            ),
+            expected_row_count=_int(reference["row_count"], "provider-history partition row count"),
+            row_upper_bound=_int(reference["row_upper_bound"], "provider-history row upper bound"),
+        )
+        rows.extend(partition.rows)
+    ordered = tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row.instrument_id,
+                row.interval_start,
+                row.request_sha256,
+            ),
+        )
+    )
+    if len(ordered) != dataset.row_count:
+        raise ValueError("provider-history row reader count differs from verified dataset")
+    return dataset, ordered

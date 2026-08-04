@@ -105,6 +105,10 @@ from qtrad.runtime.foundation_bundle import (
 )
 from qtrad.runtime.ibkr_canary import verify_ibkr_historical_canary_evidence
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
+from qtrad.runtime.ibkr_foundation import (
+    verify_ibkr_foundation,
+    write_ibkr_foundation,
+)
 from qtrad.runtime.ibkr_historical import (
     build_ibkr_contract_selection_from_files,
     build_ibkr_historical_plan_from_files,
@@ -573,10 +577,16 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify every foundation child and cross-reference"
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
-    foundation_build = research_foundation_sub.add_parser(
-        "build", help="build an immutable causal foundation bundle from observations"
+    foundation_readiness = research_foundation_sub.add_parser(
+        "readiness", help="report fixed IBKR historical foundation readiness"
     )
-    foundation_build.add_argument("--observations-manifest", type=Path, required=True)
+    foundation_readiness.add_argument("--bundle", type=Path, required=True)
+    foundation_build = research_foundation_sub.add_parser(
+        "build", help="build an immutable causal foundation bundle from one source"
+    )
+    foundation_source = foundation_build.add_mutually_exclusive_group(required=True)
+    foundation_source.add_argument("--observations-manifest", type=Path)
+    foundation_source.add_argument("--provider-history-manifest", type=Path)
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
@@ -1147,6 +1157,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 observations_manifest_path=args.observations_manifest,
+                provider_history_manifest_path=args.provider_history_manifest,
                 configuration_path=args.configuration,
                 output_path=args.output,
             )
@@ -1157,6 +1168,12 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.foundation_command == "verify"
     ):
         asyncio.run(_verify_foundation_bundle(settings, clock, args.bundle))
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "readiness"
+    ):
+        _report_ibkr_foundation_readiness(args.bundle)
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -1737,10 +1754,36 @@ async def _build_foundation_bundle(
     settings: Settings,
     clock: Clock,
     *,
-    observations_manifest_path: Path,
+    observations_manifest_path: Path | None,
+    provider_history_manifest_path: Path | None,
     configuration_path: Path,
     output_path: Path,
 ) -> None:
+    if (observations_manifest_path is None) == (provider_history_manifest_path is None):
+        raise ValueError("exactly one foundation source must be provided")
+    configuration = load_foundation_config(configuration_path)
+    if provider_history_manifest_path is not None:
+        build = write_ibkr_foundation(
+            output_path,
+            provider_manifest=provider_history_manifest_path,
+            configuration=configuration,
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": build.readiness.CONTRACT,
+                    "output": str(output_path),
+                    "source_class": "IBKR_HISTORICAL_RESEARCH",
+                    "readiness": build.readiness.as_json(),
+                    "provider_history_dataset_sha256": (build.provider_history.dataset_sha256),
+                },
+                sort_keys=True,
+            )
+        )
+        return
+
+    if observations_manifest_path is None:
+        raise ValueError("observation manifest must be provided for the native source")
     expected_directory = settings.research_root.resolve() / "manifests"
     if observations_manifest_path.parent.resolve() != expected_directory:
         raise ValueError("observation manifest must be inside the configured research root")
@@ -1750,7 +1793,6 @@ async def _build_foundation_bundle(
         observations_manifest_path.stem
     )
     evidence = verify_observation_build_evidence(observation_manifest, observations)
-    configuration = load_foundation_config(configuration_path)
     verify_foundation_configuration_evidence(configuration, observations, evidence)
     panel = build_asof_panel(
         observations,
@@ -1793,6 +1835,28 @@ async def _build_foundation_bundle(
 
 
 async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_path: Path) -> None:
+    if bundle_path.is_file() and not bundle_path.is_symlink():
+        try:
+            document = json.loads(bundle_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            document = None
+        if (
+            isinstance(document, dict)
+            and document.get("contract") == "qtrad-ibkr-historical-foundation-v1"
+        ):
+            verified = verify_ibkr_foundation(bundle_path)
+            print(
+                json.dumps(
+                    {
+                        "contract": verified.readiness.CONTRACT,
+                        "bundle": str(bundle_path),
+                        "source_class": "IBKR_HISTORICAL_RESEARCH",
+                        "readiness": verified.readiness.as_json(),
+                    },
+                    sort_keys=True,
+                )
+            )
+            return
     verified = await verify_foundation_bundle(
         root=settings.research_root,
         bundle_path=bundle_path,
@@ -1816,6 +1880,12 @@ async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_pat
             sort_keys=True,
         )
     )
+
+
+def _report_ibkr_foundation_readiness(bundle_path: Path) -> None:
+    """Verify and report Stage 8 readiness only; no R2 artefact is loaded."""
+    verified = verify_ibkr_foundation(bundle_path)
+    print(json.dumps(verified.readiness.as_json(), sort_keys=True))
 
 
 def _validate_observation_snapshot(
