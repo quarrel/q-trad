@@ -480,19 +480,15 @@ class ProviderHistoricalPartition:
         if not self.rows:
             raise ValueError("provider-history partitions must contain observations")
         key = (self.instrument_id, self.partition_date)
-        if any(
-            (row.instrument_id, row.interval_start.date()) != key
-            for row in self.rows
-        ):
+        if any((row.instrument_id, row.interval_start.date()) != key for row in self.rows):
             raise ValueError("provider-history partition rows differ from its key")
         if tuple(sorted(self.rows, key=row_sort_key)) != self.rows:
             raise ValueError("provider-history partition rows must be in canonical order")
         identities = [row.observation_sha256 for row in self.rows]
         if len(set(identities)) != len(identities):
             raise ValueError("provider-history partition observation identities must be unique")
-        if (
-            not self._identity_validation_bypass
-            and self.partition_sha256 != sha256_json(self.identity_payload())
+        if not self._identity_validation_bypass and self.partition_sha256 != sha256_json(
+            self.identity_payload()
         ):
             raise ValueError("provider-history partition identity does not match canonical content")
 

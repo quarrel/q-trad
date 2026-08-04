@@ -494,8 +494,9 @@ def test_provider_history_cli_round_trip_arguments() -> None:
     assert verify_args.observations_command == "verify-provider-history"
 
 
-def test_provider_history_eligibility_replays_two_chunks_and_excludes_incomplete_instrument(
-) -> None:
+def test_provider_history_eligibility_replays_two_chunks_and_excludes_incomplete_instrument() -> (
+    None
+):
     artifact = _build_stage6_artifact(
         day_count=2,
         no_data_bar_days=frozenset({1}),
@@ -552,9 +553,7 @@ def test_provider_history_rejects_footer_overbound_before_decoding(
         artifact,
         availability_delay=timedelta(minutes=5),
     )
-    partition = next(
-        iter_provider_history_partitions(artifact, policy=dataset.availability_policy)
-    )
+    partition = next(iter_provider_history_partitions(artifact, policy=dataset.availability_policy))
     malicious_path = tmp_path / "malicious.parquet"
     malicious_path.write_bytes(
         provider_history_runtime._parquet_bytes((partition.rows[0], partition.rows[0]))

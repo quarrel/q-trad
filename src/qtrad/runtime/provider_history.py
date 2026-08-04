@@ -221,7 +221,6 @@ def write_provider_history(
     return root / _MANIFEST_NAME
 
 
-
 def _partition_path(key: tuple[str, date]) -> str:
     instrument_digest = sha256_json({"instrument_id": key[0]})
     return (
@@ -292,9 +291,7 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     expected_bound_by_path = {
         _partition_path(key): row_bound for key, row_bound in partition_bounds.items()
     }
-    expected_key_by_path = {
-        _partition_path(key): key for key in partition_bounds
-    }
+    expected_key_by_path = {_partition_path(key): key for key in partition_bounds}
     files = document["files"]
     if not isinstance(files, list) or len(files) > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history files are invalid or exceed their bound")
@@ -465,8 +462,6 @@ def _dataset_from_manifest(
     if dataset_sha256 != dataset.dataset_sha256:
         raise ValueError("provider-history dataset identity does not match its manifest")
     return dataset
-
-
 
 
 def _source_reference(value: object) -> dict[str, object]:

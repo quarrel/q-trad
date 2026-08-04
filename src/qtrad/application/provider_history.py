@@ -289,22 +289,16 @@ def _schedule_evidence(
         for result in schedule_results
     ):
         raise ValueError("provider-history requires successful schedule evidence")
-    request_hashes = [
-        _plan_request(artifact, result).request_sha256 for result in schedule_results
-    ]
+    request_hashes = [_plan_request(artifact, result).request_sha256 for result in schedule_results]
     result_hashes = [result.result_sha256 for result in schedule_results]
     states = {result.session_state for result in schedule_results}
     sessions = [session for result in schedule_results for session in result.sessions]
     sessions_json = cast(list[JsonValue], sessions)
     request_sha256: JsonValue = (
-        request_hashes[0]
-        if len(request_hashes) == 1
-        else cast(list[JsonValue], request_hashes)
+        request_hashes[0] if len(request_hashes) == 1 else cast(list[JsonValue], request_hashes)
     )
     result_sha256: JsonValue = (
-        result_hashes[0]
-        if len(result_hashes) == 1
-        else cast(list[JsonValue], result_hashes)
+        result_hashes[0] if len(result_hashes) == 1 else cast(list[JsonValue], result_hashes)
     )
     return {
         "request_sha256": request_sha256,
@@ -312,8 +306,6 @@ def _schedule_evidence(
         "schedule_state": next(iter(states)) if len(states) == 1 else "MIXED",
         "sessions": sessions_json,
     }
-
-
 
 
 def _timestamp(value: object, field: str) -> datetime:
