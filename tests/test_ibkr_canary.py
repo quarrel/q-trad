@@ -84,7 +84,7 @@ def _cases() -> tuple[IbkrHistoricalCanaryCase, ...]:
         AssetClass.FX: (InstrumentId("fx:eur-usd"), _fingerprint(11, "EUR")),
         AssetClass.INDEX: (
             InstrumentId("index:spx"),
-            _fingerprint(22, "SPX", security_type="IND"),
+            _fingerprint(22, "SPX", security_type="CFD"),
         ),
         AssetClass.COMMODITY: (InstrumentId("commodity:gold"), _fingerprint(33, "GOLD")),
     }
@@ -303,6 +303,29 @@ class _BudgetAdapter:
         )
 
 
+class _AggregateByteAdapter(_BudgetAdapter):
+    async def request_historical(
+        self,
+        request: IbkrHistoricalRequest,
+        *,
+        request_id: int,
+        connection_session_id: UUID,
+        connection_generation: int,
+        callback: IbkrHistoricalCallbackSink,
+    ) -> None:
+        self.request_count += 1
+        case = next(
+            case
+            for case in _cases()
+            if case.instrument_id == request.instrument_id
+            and case.interval_start == request.interval_start
+            and case.interval_end == request.interval_end
+        )
+        item = ibkr_canary._callback_from_evidence(_callbacks(case, request.kind, request_id)[0])
+        for _ in range(4):
+            await callback(item)
+
+
 class _FailureAdapter(_BudgetAdapter):
     def __init__(
         self,
@@ -358,22 +381,21 @@ def test_adjacent_canary_cases_cover_groups_and_durations() -> None:
     )
 
 
-def test_native_index_canary_uses_trades_for_bar_requests() -> None:
+def test_index_canary_requires_midpoint_capable_representation() -> None:
     index_case = next(case for case in _cases() if case.group is AssetClass.INDEX)
-    fx_case = next(case for case in _cases() if case.group is AssetClass.FX)
 
+    assert index_case.fingerprint.security_type == "CFD"
     assert (
         ibkr_canary._request_for_case(
             index_case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
         ).what_to_show
-        == "TRADES"
-    )
-    assert (
-        ibkr_canary._request_for_case(
-            fx_case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
-        ).what_to_show
         == "MIDPOINT"
     )
+    with pytest.raises(ValueError, match="CFD or ETF"):
+        replace(
+            index_case,
+            fingerprint=_fingerprint(22, "SPX", security_type="IND"),
+        )
 
 
 @pytest.mark.asyncio
@@ -399,6 +421,112 @@ async def test_canary_closes_before_retained_callbacks_exceed_writer_limit(
     assert output.stat().st_size < 8 * 1024 * 1024
     loaded = verify_ibkr_historical_canary_evidence(output)
     assert loaded.stop_reason == stop_reason
+
+
+@pytest.mark.asyncio
+async def test_canary_byte_closure_replays_current_request_callbacks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sample = ibkr_canary._callback_from_evidence(
+        _callbacks(
+            _cases()[0],
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            1_000_000,
+        )[0]
+    )
+    callback_bytes = ibkr_canary._callback_encoded_upper_bound(sample)
+    monkeypatch.setattr(
+        ibkr_canary,
+        "IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES",
+        callback_bytes * 3,
+    )
+
+    evidence = await run_ibkr_historical_canary(
+        _AggregateByteAdapter(),
+        _cases(),
+        runtime_sha256=_RUNTIME_HASH,
+        selection_sha256=_SELECTION_HASH,
+        clock=lambda: _START,
+    )
+    request_result = evidence.cases[0].requests[0]
+    assert request_result.status == "EXCESSIVE_CLOSURE"
+    assert request_result.retained_callback_count == 3
+    assert request_result.retained_callback_bytes == callback_bytes * 3
+    assert request_result.rejected_callback is not None
+
+    output = tmp_path / "aggregate-byte-closure.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    loaded = verify_ibkr_historical_canary_evidence(output)
+    assert loaded.as_json_value() == evidence.as_json_value()
+
+
+@pytest.mark.asyncio
+async def test_canary_count_closure_round_trips(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(ibkr_canary, "IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST", 1)
+    evidence = await run_ibkr_historical_canary(
+        _FailureAdapter(
+            ibkr_canary.IbkrHistoricalRequestKind.SCHEDULE,
+            IbkrHistoricalIncomplete(),
+        ),
+        _cases(),
+        runtime_sha256=_RUNTIME_HASH,
+        selection_sha256=_SELECTION_HASH,
+        clock=lambda: _START,
+    )
+    request_result = evidence.cases[0].requests[0]
+    assert request_result.status == "EXCESSIVE_CLOSURE"
+    assert request_result.closure_limit == ibkr_canary.IBKR_CANARY_CLOSURE_LIMIT_COUNT
+    assert request_result.retained_callback_count == 1
+    assert request_result.rejected_callback is not None
+
+    output = tmp_path / "count-closure.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    loaded = verify_ibkr_historical_canary_evidence(output)
+    assert loaded.cases[0].requests[0].closure_limit == (
+        ibkr_canary.IBKR_CANARY_CLOSURE_LIMIT_COUNT
+    )
+
+
+@pytest.mark.asyncio
+async def test_file_verifier_rejects_rehashed_rejected_callback_witness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sample = ibkr_canary._callback_from_evidence(
+        _callbacks(
+            _cases()[0],
+            ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            1_000_000,
+        )[0]
+    )
+    callback_bytes = ibkr_canary._callback_encoded_upper_bound(sample)
+    monkeypatch.setattr(
+        ibkr_canary,
+        "IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES",
+        callback_bytes * 3,
+    )
+    evidence = await run_ibkr_historical_canary(
+        _AggregateByteAdapter(),
+        _cases(),
+        runtime_sha256=_RUNTIME_HASH,
+        selection_sha256=_SELECTION_HASH,
+        clock=lambda: _START,
+    )
+    output = tmp_path / "rehashed-rejected-callback.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = cast(dict[str, object], json.loads(output.read_text()))
+    cases = cast(list[dict[str, object]], document["cases"])
+    requests = cast(list[dict[str, object]], cases[0]["requests"])
+    request = requests[0]
+    rejected_bytes = request["rejected_callback_bytes"]
+    assert isinstance(rejected_bytes, int)
+    request["rejected_callback_bytes"] = rejected_bytes + 1_000_000
+    request["rejected_callback_sha256"] = "c" * 64
+    _rewrite_rehashed_document(output, document)
+
+    with pytest.raises(ValueError, match="rejected callback witness"):
+        verify_ibkr_historical_canary_evidence(output)
 
 
 @pytest.mark.asyncio
@@ -515,6 +643,53 @@ def test_file_verifier_replays_callback_counts_after_rehashed_mutation(
         verify_ibkr_historical_canary_evidence(output)
 
 
+def test_file_verifier_accepts_sparse_market_completion_range(tmp_path: Path) -> None:
+    evidence = _evidence()
+    index_case_index = next(
+        index
+        for index, case_result in enumerate(evidence.cases)
+        if case_result.case.group is AssetClass.INDEX
+    )
+    case_result = evidence.cases[index_case_index]
+    request_result = case_result.requests[0]
+    first_bar = dict(request_result.callbacks[0])
+    last_bar = dict(request_result.callbacks[0])
+    first_bar_at = case_result.case.interval_start + timedelta(hours=1)
+    last_bar_at = case_result.case.interval_end - timedelta(minutes=2)
+    first_bar["payload"] = {
+        **cast(dict[str, JsonValue], first_bar["payload"]),
+        "date": int(first_bar_at.timestamp()),
+    }
+    last_bar["payload"] = {
+        **cast(dict[str, JsonValue], last_bar["payload"]),
+        "date": int(last_bar_at.timestamp()),
+    }
+    completion = dict(request_result.callbacks[1])
+    completion["payload"] = {
+        "start": utc_text(first_bar_at),
+        "end": utc_text(last_bar_at),
+    }
+    sparse_request = replace(
+        request_result,
+        callbacks=(first_bar, last_bar, completion),
+        callback_count=3,
+        bar_count=2,
+    )
+    sparse_cases = list(evidence.cases)
+    sparse_cases[index_case_index] = replace(
+        case_result,
+        requests=(sparse_request, case_result.requests[1]),
+    )
+    output = tmp_path / "sparse-completion.json"
+    write_ibkr_historical_canary_evidence(
+        output,
+        _rehash_evidence(evidence, tuple(sparse_cases), None),
+    )
+
+    loaded = verify_ibkr_historical_canary_evidence(output)
+    assert loaded.cases[index_case_index].requests[0].status == "SUCCESS"
+
+
 def test_file_verifier_rejects_rehashed_transport_identity_mutation(
     tmp_path: Path,
 ) -> None:
@@ -603,6 +778,7 @@ def test_canary_verifier_rejects_unwitnessed_excessive_closure_evidence(
         retained_callback_bytes=0,
         rejected_callback_bytes=1,
         rejected_callback_sha256="c" * 64,
+        rejected_callback=first_case.requests[0].callbacks[0],
     )
     not_run = ibkr_canary._not_run_request(first_case.requests[1].request, stop_reason)
     stopped_case = replace(

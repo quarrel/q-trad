@@ -714,6 +714,8 @@ index
 commodity
 ```
 
+The index representative must be an account-reviewed `CFD` or `ETF` independently verified to support `MIDPOINT`. Native `IND` contracts are excluded from this midpoint-only stage; `TRADES` bars are a different price basis and require a separately declared acquisition contract.
+
 Test increasingly large request durations, for example:
 
 ```text

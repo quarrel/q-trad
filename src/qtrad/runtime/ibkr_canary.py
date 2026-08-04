@@ -64,6 +64,7 @@ _REQUEST_RESULT_KEYS = {
     "retained_callback_bytes",
     "rejected_callback_bytes",
     "rejected_callback_sha256",
+    "rejected_callback",
 }
 _CALLBACK_KEYS = {
     "connection_session_id",
@@ -226,6 +227,7 @@ def _request_result_from_json(value: object) -> IbkrHistoricalCanaryRequestResul
         retained_callback_bytes=_nullable_integer(item, "retained_callback_bytes"),
         rejected_callback_bytes=_nullable_integer(item, "rejected_callback_bytes"),
         rejected_callback_sha256=_nullable_diagnostic(item, "rejected_callback_sha256"),
+        rejected_callback=_nullable_callback(item, "rejected_callback"),
     )
 
 
@@ -249,6 +251,13 @@ def _nullable_integer(value: Mapping[str, object], field: str) -> int | None:
     if item is None:
         return None
     return runtime._integer(value, field)
+
+
+def _nullable_callback(value: Mapping[str, object], field: str) -> dict[str, JsonValue] | None:
+    item = value.get(field)
+    if item is None:
+        return None
+    return _callback_from_json(item)
 
 
 def _callback_from_json(value: object) -> dict[str, JsonValue]:

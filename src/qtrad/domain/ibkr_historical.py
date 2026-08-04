@@ -464,9 +464,9 @@ class IbkrHistoricalRequest:
         if self.interval_end - self.interval_start > duration:
             raise ValueError("IBKR request ownership interval exceeds its provider duration")
         if self.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            expected_what_to_show = (
-                "TRADES" if self.fingerprint.security_type == "IND" else "MIDPOINT"
-            )
+            if self.fingerprint.security_type == "IND":
+                raise ValueError("IBKR midpoint bar requests cannot use native IND contracts")
+            expected_what_to_show = "MIDPOINT"
             if (
                 self.bar_size != "1 min"
                 or self.what_to_show != expected_what_to_show

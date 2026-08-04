@@ -502,9 +502,7 @@ def _planned_requests(
             "duration": duration,
             "bar_size": "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day",
             "what_to_show": (
-                ("TRADES" if contract.fingerprint.security_type == "IND" else "MIDPOINT")
-                if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
-                else "SCHEDULE"
+                "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
             ),
             "use_rth": False,
             "format_date": 2,

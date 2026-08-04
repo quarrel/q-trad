@@ -40,9 +40,10 @@ from qtrad.ports.ibkr_historical import (
 )
 
 IBKR_CANARY_CONTRACT = "qtrad-ibkr-historical-canary-v1"
-IBKR_CANARY_SCHEMA_VERSION = 2
+IBKR_CANARY_SCHEMA_VERSION = 3
 IBKR_CANARY_DURATIONS = ("1 D", "1 W", "2 W", "4 W")
 IBKR_CANARY_GROUPS = (AssetClass.FX, AssetClass.INDEX, AssetClass.COMMODITY)
+IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES = frozenset({"CFD", "ETF"})
 CallableClock = Callable[[], datetime]
 
 IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST = 50_000
@@ -77,14 +78,14 @@ class _CanaryClosureLimit(Exception):
         *,
         retained_callback_count: int,
         retained_callback_bytes: int,
-        rejected_callback_bytes: int,
-        rejected_callback_sha256: str,
+        rejected_callback: IbkrHistoricalCallback,
     ) -> None:
         self.limit = limit
         self.retained_callback_count = retained_callback_count
         self.retained_callback_bytes = retained_callback_bytes
-        self.rejected_callback_bytes = rejected_callback_bytes
-        self.rejected_callback_sha256 = rejected_callback_sha256
+        self.rejected_callback = _callback_json(rejected_callback)
+        self.rejected_callback_bytes = _callback_encoded_upper_bound(rejected_callback)
+        self.rejected_callback_sha256 = sha256_json(self.rejected_callback)
         super().__init__(f"IBKR canary {limit.lower()} closure limit exceeded")
 
 
@@ -104,8 +105,7 @@ class _CanaryEvidenceBudget:
                 IBKR_CANARY_CLOSURE_LIMIT_BYTES,
                 retained_callback_count=retained_callback_count,
                 retained_callback_bytes=self.retained_callback_bytes,
-                rejected_callback_bytes=upper_bound,
-                rejected_callback_sha256=sha256_json(_callback_json(item)),
+                rejected_callback=item,
             )
         self.retained_callback_bytes += upper_bound
 
@@ -117,13 +117,11 @@ class _CanaryCallbackCollector:
 
     def append(self, item: IbkrHistoricalCallback) -> None:
         if len(self.callbacks) >= IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST:
-            upper_bound = _callback_encoded_upper_bound(item)
             raise _CanaryClosureLimit(
                 IBKR_CANARY_CLOSURE_LIMIT_COUNT,
                 retained_callback_count=len(self.callbacks),
                 retained_callback_bytes=self.budget.retained_callback_bytes,
-                rejected_callback_bytes=upper_bound,
-                rejected_callback_sha256=sha256_json(_callback_json(item)),
+                rejected_callback=item,
             )
         self.budget.reserve(item, retained_callback_count=len(self.callbacks))
         self.callbacks.append(item)
@@ -152,6 +150,13 @@ class IbkrHistoricalCanaryCase:
     def __post_init__(self) -> None:
         if self.group not in IBKR_CANARY_GROUPS:
             raise ValueError("IBKR canary group must be FX, INDEX or COMMODITY")
+        if (
+            self.group is AssetClass.INDEX
+            and self.fingerprint.security_type not in IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES
+        ):
+            raise ValueError(
+                "IBKR midpoint canary index representative must be a CFD or ETF, not a native IND"
+            )
         if self.duration not in IBKR_CANARY_DURATIONS:
             raise ValueError("IBKR canary duration is not one of the frozen test durations")
         require_utc(self.interval_start, "IBKR canary interval start")
@@ -201,6 +206,7 @@ class IbkrHistoricalCanaryRequestResult:
     retained_callback_bytes: int | None = None
     rejected_callback_bytes: int | None = None
     rejected_callback_sha256: str | None = None
+    rejected_callback: dict[str, JsonValue] | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {
@@ -274,6 +280,7 @@ class IbkrHistoricalCanaryRequestResult:
             self.retained_callback_bytes,
             self.rejected_callback_bytes,
             self.rejected_callback_sha256,
+            self.rejected_callback,
         )
         if any(value is not None for value in closure_values) and not all(
             value is not None for value in closure_values
@@ -284,6 +291,7 @@ class IbkrHistoricalCanaryRequestResult:
             retained_bytes = self.retained_callback_bytes
             rejected_bytes = self.rejected_callback_bytes
             rejected_digest = self.rejected_callback_sha256
+            rejected_callback = self.rejected_callback
             if (
                 self.outcome_source != IBKR_CANARY_OUTCOME_EXCEPTION
                 or self.closure_limit is None
@@ -291,6 +299,7 @@ class IbkrHistoricalCanaryRequestResult:
                 or retained_bytes is None
                 or rejected_bytes is None
                 or rejected_digest is None
+                or rejected_callback is None
             ):
                 raise ValueError("IBKR excessive closure must retain an exception witness")
             if self.closure_limit not in {
@@ -298,6 +307,8 @@ class IbkrHistoricalCanaryRequestResult:
                 IBKR_CANARY_CLOSURE_LIMIT_BYTES,
             }:
                 raise ValueError("IBKR canary closure limit type is unsupported")
+            if not isinstance(cast(object, rejected_callback), dict):
+                raise ValueError("IBKR canary rejected callback witness must be an object")
             if retained_count != self.callback_count or retained_count < 0:
                 raise ValueError("IBKR canary retained callback count witness is invalid")
             if retained_bytes < 0 or rejected_bytes <= 0:
@@ -336,6 +347,7 @@ class IbkrHistoricalCanaryRequestResult:
             "retained_callback_bytes": self.retained_callback_bytes,
             "rejected_callback_bytes": self.rejected_callback_bytes,
             "rejected_callback_sha256": self.rejected_callback_sha256,
+            "rejected_callback": self.rejected_callback,
         }
 
 
@@ -720,11 +732,7 @@ def _request_for_case(
     kind: IbkrHistoricalRequestKind,
 ) -> IbkrHistoricalRequest:
     bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
-    what_to_show = (
-        ("TRADES" if case.fingerprint.security_type == "IND" else "MIDPOINT")
-        if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
-        else "SCHEDULE"
-    )
+    what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
     format_date = 2
     identity: dict[str, JsonValue] = {
         "instrument_id": str(case.instrument_id),
@@ -832,7 +840,7 @@ def _verify_request_callbacks(
         try:
             for item in bars:
                 _verify_bar(item.payload, request)
-            _verify_completion_payload(request, completion.payload)
+            _verify_completion_payload(request, completion.payload, bars=bars)
         except ValueError as error:
             return finish("INVALID", str(error), "DETERMINISTIC_RESULT_VERIFY_FAILURE")
         if not bars:
@@ -853,7 +861,11 @@ def _verify_request_callbacks(
         )
     try:
         session_count = _verify_schedule(schedules[0].payload, request)
-        _verify_completion_payload(request, completion.payload, schedules[0].payload)
+        _verify_completion_payload(
+            request,
+            completion.payload,
+            schedule_payload=schedules[0].payload,
+        )
     except ValueError as error:
         return finish("INVALID", str(error), "INCONSISTENT_SCHEDULE")
     return finish("SUCCESS", None, None, schedule_session_count=session_count)
@@ -972,17 +984,31 @@ def _verify_schedule(
 def _verify_completion_payload(
     request: IbkrHistoricalRequest,
     payload: Mapping[str, JsonValue],
+    *,
+    bars: Sequence[IbkrHistoricalCallback] = (),
     schedule_payload: Mapping[str, JsonValue] | None = None,
 ) -> None:
     if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-        if not payload or set(payload) != {"start", "end"}:
-            if payload:
-                raise ValueError("canary completion range must contain start and end")
+        if not payload:
+            if bars:
+                raise ValueError("canary completion range is required with retained bars")
             return
+        if set(payload) != {"start", "end"}:
+            raise ValueError("canary completion range must contain start and end")
         start = _canary_datetime(payload.get("start"), "canary completion start")
         end = _canary_datetime(payload.get("end"), "canary completion end")
-        if (start, end) != (request.interval_start, request.interval_end):
-            raise ValueError("canary completion range does not match request interval")
+        if end <= start:
+            raise ValueError("canary completion range is invalid")
+        if start < request.interval_start or end > request.interval_end:
+            raise ValueError("canary completion range is outside request interval")
+        if bars:
+            bar_timestamps = [cast(int, item.payload["date"]) for item in bars]
+            first_bar_timestamp = min(bar_timestamps)
+            last_bar_timestamp = max(bar_timestamps)
+            if int(start.timestamp()) != first_bar_timestamp:
+                raise ValueError("canary completion start does not match first retained bar")
+            if int(end.timestamp()) < last_bar_timestamp:
+                raise ValueError("canary completion end does not contain last retained bar")
         return
     if set(payload) != {"start", "end", "time_zone"}:
         raise ValueError("canary schedule completion range is incomplete")
@@ -1012,6 +1038,7 @@ def _result(
     retained_callback_bytes: int | None = None,
     rejected_callback_bytes: int | None = None,
     rejected_callback_sha256: str | None = None,
+    rejected_callback: dict[str, JsonValue] | None = None,
 ) -> IbkrHistoricalCanaryRequestResult:
     if callbacks and expected_connection_session_id is None:
         first = callbacks[0]
@@ -1037,6 +1064,7 @@ def _result(
         retained_callback_bytes=retained_callback_bytes,
         rejected_callback_bytes=rejected_callback_bytes,
         rejected_callback_sha256=rejected_callback_sha256,
+        rejected_callback=rejected_callback,
     )
 
 
@@ -1089,6 +1117,7 @@ def _exception_result(
         rejected_callback_sha256=(
             closure.rejected_callback_sha256 if closure is not None else None
         ),
+        rejected_callback=closure.rejected_callback if closure is not None else None,
     )
 
 
@@ -1274,12 +1303,15 @@ def replay_ibkr_historical_canary_evidence(
             for callback in callbacks:
                 if not evidence.started_at <= callback.received_at <= evidence.completed_at:
                     raise ValueError("IBKR canary callback is outside canary execution interval")
+            current_callback_bytes = _callback_evidence_bytes(callbacks)
             _replay_closure_witness(
                 request_result,
                 callbacks,
-                retained_callback_bytes=retained_callback_bytes,
+                prior_retained_callback_bytes=retained_callback_bytes,
+                execution_start=evidence.started_at,
+                execution_end=evidence.completed_at,
             )
-            retained_callback_bytes += _callback_evidence_bytes(callbacks)
+            retained_callback_bytes += current_callback_bytes
             if request_result.status == "NOT_RUN":
                 continue
             if request_result.expected_provider_request_id != next_provider_request_id:
@@ -1567,24 +1599,53 @@ def _replay_closure_witness(
     result: IbkrHistoricalCanaryRequestResult,
     callbacks: Sequence[IbkrHistoricalCallback],
     *,
-    retained_callback_bytes: int,
+    prior_retained_callback_bytes: int,
+    execution_start: datetime,
+    execution_end: datetime,
 ) -> None:
     if result.status != "EXCESSIVE_CLOSURE":
         return
     retained_callback_count = result.retained_callback_count
     retained_bytes = result.retained_callback_bytes
     rejected_callback_bytes = result.rejected_callback_bytes
-    if retained_callback_count is None or retained_bytes is None or rejected_callback_bytes is None:
+    rejected_callback_sha256 = result.rejected_callback_sha256
+    rejected_callback_evidence = result.rejected_callback
+    if (
+        retained_callback_count is None
+        or retained_bytes is None
+        or rejected_callback_bytes is None
+        or rejected_callback_sha256 is None
+        or rejected_callback_evidence is None
+    ):
         raise ValueError("IBKR canary closure witness is incomplete")
     if retained_callback_count != len(callbacks):
         raise ValueError("IBKR canary closure witness callback count is invalid")
-    if retained_bytes != retained_callback_bytes:
+    expected_retained_bytes = prior_retained_callback_bytes + _callback_evidence_bytes(callbacks)
+    if retained_bytes != expected_retained_bytes:
         raise ValueError("IBKR canary closure witness retained bytes are invalid")
+    rejected_callback = _callback_from_evidence(rejected_callback_evidence)
+    identity_error = _callback_identity_error(
+        (rejected_callback,),
+        expected_connection_session_id=result.expected_connection_session_id,
+        expected_provider_request_id=result.expected_provider_request_id,
+        expected_connection_generation=result.expected_connection_generation,
+    )
+    if identity_error is not None:
+        raise ValueError(identity_error)
+    if not execution_start <= rejected_callback.received_at <= execution_end:
+        raise ValueError("IBKR canary rejected callback is outside canary execution interval")
+    expected_rejected_bytes = _callback_encoded_upper_bound(rejected_callback)
+    expected_rejected_sha256 = sha256_json(_callback_json(rejected_callback))
+    if (
+        rejected_callback_bytes != expected_rejected_bytes
+        or rejected_callback_sha256 != expected_rejected_sha256
+    ):
+        raise ValueError("IBKR canary rejected callback witness is not replayable")
     if result.closure_limit == IBKR_CANARY_CLOSURE_LIMIT_COUNT:
         if retained_callback_count != IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST:
             raise ValueError("IBKR canary closure witness does not prove callback limit")
     elif result.closure_limit == IBKR_CANARY_CLOSURE_LIMIT_BYTES:
-        if retained_bytes + rejected_callback_bytes <= IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES:
+        if retained_bytes + expected_rejected_bytes <= IBKR_CANARY_MAX_RETAINED_CALLBACK_BYTES:
             raise ValueError("IBKR canary closure witness does not prove byte limit")
     else:
         raise ValueError("IBKR canary closure witness limit is unsupported")
