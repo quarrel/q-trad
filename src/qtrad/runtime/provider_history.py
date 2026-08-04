@@ -164,7 +164,10 @@ def write_provider_history(
         "manifest_sha256": _sha256_json(manifest_identity),
     }
     root = _absolute_output_path(output_directory)
-    _write_create_only(root / _MANIFEST_NAME, canonical_json_bytes(manifest_document))
+    _write_create_only(
+        root / _MANIFEST_NAME,
+        canonical_json_bytes(cast(Mapping[str, JsonValue], manifest_document)),
+    )
     _write_create_only(
         root / _OBSERVATIONS_PATH,
         parquet_bytes,
@@ -549,7 +552,7 @@ def _parse_json(payload: bytes, field: str) -> object:
 def _mapping(value: object, field: str) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise TypeError(f"{field} must be an object")
-    return dict(value)
+    return {key: item for key, item in cast(Mapping[str, object], value).items()}
 
 
 def _require_exact_keys(value: Mapping[str, object], expected: set[str], field: str) -> None:
