@@ -118,6 +118,139 @@ def build_ibkr_historical_result_artifact(
     )
 
 
+def verify_ibkr_historical_execution_snapshot(
+    plan: IbkrHistoricalPlan,
+    snapshot: IbkrHistoricalExecutionSnapshot,
+    *,
+    maximum_attempts: int,
+) -> None:
+    """Verify the exact durable execution closure before provider construction."""
+
+    if maximum_attempts <= 0:
+        raise ValueError("IBKR execution maximum attempts must be positive")
+    _validate_snapshot_plan(plan, snapshot)
+    expected_by_hash = {request.request_sha256: request for request in plan.requests}
+    actual_hashes = {request.request_sha256 for request in snapshot.requests}
+    if len(snapshot.requests) != len(expected_by_hash) or actual_hashes != set(expected_by_hash):
+        raise ValueError("IBKR execution snapshot request closure differs from the plan")
+    request_by_hash = {request.request_sha256: request for request in snapshot.requests}
+    attempts_by_request = _group_by(snapshot.attempts, key=lambda item: item.request_sha256)
+    callbacks_by_attempt = _group_by(snapshot.callbacks, key=lambda item: item.attempt_id)
+    markers_by_attempt = _group_by(snapshot.completion_markers, key=lambda item: item.attempt_id)
+
+    for request in plan.requests:
+        stored = request_by_hash[request.request_sha256]
+        expected_columns = (
+            request.as_json_value(),
+            str(request.instrument_id),
+            request.kind.value,
+            request.interval_start,
+            request.interval_end,
+        )
+        stored_columns = (
+            stored.request_payload,
+            stored.instrument_id,
+            stored.request_kind,
+            stored.interval_start,
+            stored.interval_end,
+        )
+        if stored_columns != expected_columns:
+            raise ValueError(
+                "IBKR stored request payload or canonical columns differ from the plan"
+            )
+
+        attempts = tuple(
+            sorted(
+                attempts_by_request.get(request.request_sha256, ()),
+                key=lambda item: item.attempt_ordinal,
+            )
+        )
+        if len(attempts) != stored.attempt_count:
+            raise ValueError("IBKR stored attempt count does not match its attempt closure")
+        if len(attempts) > maximum_attempts:
+            raise ValueError("IBKR stored attempts exceed the frozen retry policy")
+        if tuple(item.attempt_ordinal for item in attempts) != tuple(range(1, len(attempts) + 1)):
+            raise ValueError("IBKR stored attempt ordinals are not contiguous")
+
+        for attempt in attempts:
+            callbacks = callbacks_by_attempt.get(attempt.attempt_id, ())
+            markers = markers_by_attempt.get(attempt.attempt_id, ())
+            _validate_callback_closure((attempt,), callbacks, markers)
+            _validate_attempt_outcomes(request, (attempt,), callbacks, markers)
+
+        selected = (
+            None
+            if stored.selected_attempt_id is None
+            else next(
+                (
+                    attempt
+                    for attempt in attempts
+                    if attempt.attempt_id == stored.selected_attempt_id
+                ),
+                None,
+            )
+        )
+        if stored.selected_attempt_id is not None and selected is None:
+            raise ValueError("IBKR stored selected attempt is absent from its attempt closure")
+
+        if stored.publication_status.value == "PUBLISHED":
+            if stored.result_sha256 is None or stored.published_at is None:
+                raise ValueError("published IBKR request lacks publication evidence")
+        elif stored.result_sha256 is not None or stored.published_at is not None:
+            raise ValueError("unpublished IBKR request contains publication evidence")
+
+        if stored.status is IbkrRequestStatus.PENDING:
+            if selected is not None or any(
+                attempt.status
+                not in {IbkrAttemptStatus.RETRYABLE_FAILURE, IbkrAttemptStatus.INVALIDATED}
+                for attempt in attempts
+            ):
+                raise ValueError("pending IBKR request has an invalid attempt relationship")
+        elif stored.status is IbkrRequestStatus.IN_FLIGHT:
+            started = tuple(
+                attempt for attempt in attempts if attempt.status is IbkrAttemptStatus.STARTED
+            )
+            if (
+                selected is not None
+                or len(started) != 1
+                or not attempts
+                or started[0].attempt_id != attempts[-1].attempt_id
+                or any(
+                    attempt.status
+                    in {IbkrAttemptStatus.SUCCEEDED, IbkrAttemptStatus.TERMINAL_FAILURE}
+                    for attempt in attempts
+                )
+            ):
+                raise ValueError("in-flight IBKR request has an invalid attempt relationship")
+        elif stored.status is IbkrRequestStatus.SUCCEEDED:
+            if (
+                selected is None
+                or selected.status is not IbkrAttemptStatus.SUCCEEDED
+                or selected.terminal_disposition is not IbkrTerminalDisposition.SUCCEEDED
+                or not attempts
+                or selected.attempt_id != attempts[-1].attempt_id
+                or sum(
+                    marker.closure_eligible
+                    for marker in markers_by_attempt.get(selected.attempt_id, ())
+                )
+                != 1
+            ):
+                raise ValueError("successful IBKR request has invalid terminal evidence")
+        elif stored.status is IbkrRequestStatus.TERMINAL:
+            if (
+                selected is None
+                or selected.status is not IbkrAttemptStatus.TERMINAL_FAILURE
+                or selected.terminal_disposition is None
+                or selected.terminal_disposition is IbkrTerminalDisposition.SUCCEEDED
+                or not attempts
+                or selected.attempt_id != attempts[-1].attempt_id
+                or any(attempt.status is IbkrAttemptStatus.STARTED for attempt in attempts)
+            ):
+                raise ValueError("terminal IBKR request has invalid terminal evidence")
+        else:
+            raise ValueError("IBKR stored request status is unsupported")
+
+
 def build_ibkr_historical_aggregate_result(
     plan: IbkrHistoricalPlan,
     plan_bytes: bytes,
@@ -1216,4 +1349,5 @@ __all__ = [
     "publish_ibkr_historical_results",
     "replay_ibkr_historical_aggregate_result",
     "replay_ibkr_historical_request_result",
+    "verify_ibkr_historical_execution_snapshot",
 ]

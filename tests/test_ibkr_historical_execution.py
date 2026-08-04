@@ -5,7 +5,7 @@ import json
 import os
 import threading
 from collections import defaultdict
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import cast
@@ -21,6 +21,7 @@ from qtrad.adapters.postgres.ibkr_historical import PostgresIbkrHistoricalExecut
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.application.ibkr_execution import IbkrHistoricalExecutor
 from qtrad.application.ibkr_historical import build_ibkr_historical_request_profile
+from qtrad.application.ibkr_results import verify_ibkr_historical_execution_snapshot
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrAttemptStatus,
@@ -56,6 +57,7 @@ from qtrad.domain.ibkr_historical import (
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.instruments import AssetClass
 from qtrad.ports.ibkr_historical import (
+    IbkrContractReauthentication,
     IbkrHistoricalCallbackSink,
     IbkrHistoricalDataPort,
 )
@@ -583,6 +585,8 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
     def __init__(self, behaviours: Mapping[str, list[str]]) -> None:
         self.behaviours = {key: list(value) for key, value in behaviours.items()}
         self.calls: list[str] = []
+        self.reauthentication_calls: list[tuple[IbkrContractFingerprint, ...]] = []
+        self.reauthentication_status = "MATCH"
         self.connect_count = 0
         self.disconnect_count = 0
 
@@ -595,6 +599,22 @@ class FakeHistoricalDataPort(IbkrHistoricalDataPort):
 
     async def disconnect(self) -> None:
         self.disconnect_count += 1
+
+    async def reauthenticate_contracts(
+        self, fingerprints: Sequence[IbkrContractFingerprint]
+    ) -> tuple[IbkrContractReauthentication, ...]:
+        expected = tuple(fingerprints)
+        self.reauthentication_calls.append(expected)
+        return tuple(
+            IbkrContractReauthentication(
+                request_id=index,
+                connection_generation=self.connect_count,
+                expected=fingerprint,
+                observed=(fingerprint,),
+                status=self.reauthentication_status,
+            )
+            for index, fingerprint in enumerate(expected, start=100)
+        )
 
     async def request_historical(
         self,
@@ -673,6 +693,30 @@ def _executor(
         sleep=asyncio.sleep,
     )
     return executor, plan, profile
+
+
+@pytest.mark.asyncio
+async def test_contract_reauthentication_mismatch_prevents_historical_request() -> None:
+    store = MemoryExecutionStore()
+    plan, profile = _plan()
+    provider = FakeHistoricalDataPort(
+        {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
+    )
+    provider.reauthentication_status = "MISMATCH"
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+    with pytest.raises(RuntimeError, match="current-generation MATCH"):
+        await IbkrHistoricalExecutor(
+            store,
+            provider,
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+    assert provider.calls == []
+    assert provider.reauthentication_calls == [
+        tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    ]
 
 
 @pytest.mark.asyncio
@@ -855,7 +899,7 @@ async def test_stale_generation_callbacks_cannot_enter_successful_closure() -> N
 
 
 @pytest.mark.asyncio
-async def test_disconnect_invalidates_unfinished_attempt_for_restart() -> None:
+async def test_disconnect_invalidates_unfinished_attempt_for_restart_and_reauthenticates() -> None:
     store = MemoryExecutionStore()
     plan, profile = _plan()
     provider = FakeHistoricalDataPort(
@@ -878,6 +922,8 @@ async def test_disconnect_invalidates_unfinished_attempt_for_restart() -> None:
 
     await executor.execute(plan, profile)
     assert len(provider.calls) == 3
+    expected_fingerprints = tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    assert provider.reauthentication_calls == [expected_fingerprints, expected_fingerprints]
 
 
 def _unique_plan() -> tuple[IbkrHistoricalPlan, IbkrHistoricalRequestProfile]:
@@ -981,6 +1027,13 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     assert len(snapshot.attempts) == len(plan.requests)
     assert len(snapshot.callbacks) == len(plan.requests) * 2
     assert len(snapshot.completion_markers) == len(plan.requests)
+    verify_ibkr_historical_execution_snapshot(
+        plan,
+        snapshot,
+        maximum_attempts=profile.retry_count + 1,
+    )
+    expected_fingerprints = tuple(contract.fingerprint for contract in plan.eligible_contracts)
+    assert provider.reauthentication_calls == [expected_fingerprints]
 
     with pytest.raises(RuntimeError, match="unknown request"):
         await store.mark_ibkr_historical_requests_published(
@@ -1117,6 +1170,113 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     )
     assert stale_rows == [{"closure_eligible": False}, {"closure_eligible": False}]
     await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
+async def test_postgres_execution_snapshot_rejects_request_closure_mutations() -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    audit_store = PostgresAuditStore(engine)
+    await audit_store.seed_instruments()
+    store = PostgresIbkrHistoricalExecutionStore(engine)
+
+    try:
+        for mutation in ("deleted", "altered", "extra", "terminal"):
+            plan, profile = _unique_plan()
+            await store.register_ibkr_historical_plan(
+                plan,
+                plan_bytes=ibkr_historical_plan_bytes(plan),
+                registered_at=_NOW,
+            )
+            async with engine.begin() as connection:
+                if mutation == "deleted":
+                    await connection.execute(
+                        text(
+                            """
+                            DELETE FROM ops.ibkr_historical_requests
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+                elif mutation == "altered":
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE ops.ibkr_historical_requests
+                            SET request_payload = request_payload || '{"duration":"2 D"}'::jsonb
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+                elif mutation == "extra":
+                    await connection.execute(
+                        text(
+                            """
+                            INSERT INTO ops.ibkr_historical_requests (
+                                plan_sha256, request_sha256, request_payload, instrument_id,
+                                request_kind, interval_start, interval_end, status,
+                                attempt_count, publication_status
+                            )
+                            SELECT plan_sha256, :extra_request_sha256, request_payload,
+                                   instrument_id, request_kind, interval_start, interval_end,
+                                   'PENDING', 0, 'PENDING'
+                            FROM ops.ibkr_historical_requests
+                            WHERE plan_sha256 = :plan_sha256
+                            ORDER BY request_sha256
+                            LIMIT 1
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "extra_request_sha256": "f" * 64,
+                        },
+                    )
+                else:
+                    await connection.execute(
+                        text(
+                            """
+                            UPDATE ops.ibkr_historical_requests
+                            SET status = 'TERMINAL', selected_attempt_id = NULL
+                            WHERE plan_sha256 = :plan_sha256
+                              AND request_sha256 = :request_sha256
+                            """
+                        ),
+                        {
+                            "plan_sha256": plan.plan_sha256,
+                            "request_sha256": plan.requests[0].request_sha256,
+                        },
+                    )
+
+            snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+            match = {
+                "deleted": "request closure",
+                "altered": "payload or canonical",
+                "extra": "request closure",
+                "terminal": "terminal IBKR request",
+            }[mutation]
+            with pytest.raises(ValueError, match=match):
+                verify_ibkr_historical_execution_snapshot(
+                    plan,
+                    snapshot,
+                    maximum_attempts=profile.retry_count + 1,
+                )
+    finally:
+        await engine.dispose()
 
 
 @pytest.mark.asyncio
