@@ -60,8 +60,7 @@ def replay_provider_history_dataset(
 ) -> ProviderHistoricalDataset:
     """Recompute row, availability, and dataset identities from persisted rows."""
     rebuilt_rows = tuple(
-        ProviderHistoricalObservation.create(**_observation_values(row))
-        for row in dataset.rows
+        ProviderHistoricalObservation.create(**_observation_values(row)) for row in dataset.rows
     )
     return ProviderHistoricalDataset.create(
         rows=rebuilt_rows,

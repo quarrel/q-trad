@@ -209,6 +209,8 @@ def _utc_minute_argument(value: str) -> datetime:
     if parsed.second or parsed.microsecond:
         raise argparse.ArgumentTypeError("timestamp must be an ISO-8601 UTC minute")
     return parsed
+
+
 def _availability_delay_argument(value: str) -> timedelta:
     from qtrad.domain.provider_history import parse_declared_delay
 
@@ -1674,6 +1676,7 @@ async def _verify_research_observations(
             sort_keys=True,
         )
     )
+
 
 def _build_provider_history(
     *,

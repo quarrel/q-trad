@@ -18,18 +18,14 @@ from qtrad.domain.ibkr_results import canonical_json_bytes
 from qtrad.domain.time import require_utc
 
 PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT = "qtrad-provider-historical-observations-v1"
-PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT = (
-    "qtrad-provider-history-availability-selector-v1"
-)
+PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT = "qtrad-provider-history-availability-selector-v1"
 PROVIDER_HISTORY_SCHEMA_VERSION = 1
 PROVIDER_HISTORY_SOURCE_CLASS = "IBKR_HISTORICAL_RESEARCH"
 PROVIDER_HISTORY_PROVIDER = "ibkr"
 PROVIDER_HISTORY_ENVIRONMENT = "paper"
 PROVIDER_HISTORY_BAR_BASIS = "MIDPOINT"
 PROVIDER_HISTORY_POLICY = "BAR_END_PLUS_DECLARED_PROVIDER_DELAY"
-PROVIDER_HISTORY_CORRECTION_POLICY = (
-    "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE"
-)
+PROVIDER_HISTORY_CORRECTION_POLICY = "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE"
 NATIVE_MEASURED_AVAILABILITY = "NATIVE_MEASURED_AVAILABILITY"
 PROVIDER_HISTORY_DECLARED_DELAY = "PROVIDER_HISTORY_DECLARED_DELAY"
 
@@ -41,9 +37,9 @@ _FORBIDDEN_NATIVE_FIELDS = {"received_at", "persisted_at"}
 
 
 def sha256_json(value: object) -> str:
-    encoded = json.dumps(
-        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
-    ).encode("utf-8")
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode(
+        "utf-8"
+    )
     return hashlib.sha256(encoded).hexdigest()
 
 
@@ -249,8 +245,7 @@ class ProviderHistoricalObservation:
         if self.interval_end <= self.interval_start:
             raise ValueError("provider-history interval must be non-empty")
         if any(
-            value.second or value.microsecond
-            for value in (self.interval_start, self.interval_end)
+            value.second or value.microsecond for value in (self.interval_start, self.interval_end)
         ):
             raise ValueError("provider-history interval must align to UTC minutes")
         for field_name, value in (
@@ -299,9 +294,8 @@ class ProviderHistoricalObservation:
                 _decimal(value, f"provider-history {field_name}")
         if self.callback_sequence is not None and self.callback_sequence < 0:
             raise ValueError("provider-history callback sequence cannot be negative")
-        if (
-            not self._identity_validation_bypass
-            and self.observation_sha256 != sha256_json(self.identity_payload())
+        if not self._identity_validation_bypass and self.observation_sha256 != sha256_json(
+            self.identity_payload()
         ):
             raise ValueError(
                 "provider-history observation identity does not match canonical content"
@@ -510,9 +504,8 @@ class ProviderHistoricalDataset:
                 raise ValueError("provider-history row lineage differs from dataset lineage")
             if row.availability_delay != self.availability_policy.delay_text:
                 raise ValueError("provider-history row delay differs from dataset policy")
-        if (
-            not self._identity_validation_bypass
-            and self.dataset_sha256 != sha256_json(self.identity_payload())
+        if not self._identity_validation_bypass and self.dataset_sha256 != sha256_json(
+            self.identity_payload()
         ):
             raise ValueError("provider-history dataset identity does not match canonical content")
 

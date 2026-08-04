@@ -211,9 +211,7 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
         raise ValueError("provider-history manifest bytes are not canonical")
     dataset_document = _mapping(document["dataset"], "provider-history dataset")
 
-    policy = ProviderHistoricalAvailabilityPolicy.from_json_value(
-        document["availability_policy"]
-    )
+    policy = ProviderHistoricalAvailabilityPolicy.from_json_value(document["availability_policy"])
     dataset_values = _dataset_from_manifest(dataset_document, policy)
     source_reference = _source_reference(document["source_result"])
     if source_reference["path"] != _SOURCE_MANIFEST_PATH:
@@ -392,10 +390,7 @@ def _parquet_bytes(rows: tuple[ProviderHistoricalObservation, ...]) -> bytes:
         frame = pl.DataFrame(payloads)
     else:
         frame = pl.DataFrame(
-            {
-                field: pl.Series(field, [], dtype=pl.String)
-                for field in _OBSERVATION_FIELDS
-            }
+            {field: pl.Series(field, [], dtype=pl.String) for field in _OBSERVATION_FIELDS}
         )
     buffer = io.BytesIO()
     frame.write_parquet(buffer)
@@ -585,5 +580,3 @@ def _sha256_json(value: object) -> str:
     if not isinstance(converted, dict):
         raise TypeError("provider-history identity must be an object")
     return sha256_json(converted)
-
-
