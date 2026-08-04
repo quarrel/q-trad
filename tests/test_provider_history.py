@@ -8,6 +8,7 @@ from uuid import UUID
 
 import pytest
 
+import qtrad.__main__ as qtrad_main
 import qtrad.application.provider_history as provider_history_application
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
@@ -719,6 +720,32 @@ def test_provider_history_replays_source_before_parquet_decoding(
     )
     with pytest.raises(ValueError, match="child bytes digest"):
         verify_provider_history(manifest)
+
+
+def test_provider_history_build_replays_source_before_bounds(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    child = next((result_manifest.parent / "requests").glob("*.json"))
+    child.write_bytes(child.read_bytes() + b"mutation")
+
+    def fail_if_bounds_derived(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("partition bounds must not be derived before Stage 6 replay")
+
+    monkeypatch.setattr(
+        provider_history_application,
+        "_partition_row_bounds",
+        fail_if_bounds_derived,
+    )
+    with pytest.raises(ValueError, match="child bytes digest"):
+        qtrad_main._build_provider_history(
+            historical_result_path=result_manifest,
+            availability_delay=timedelta(minutes=5),
+            output_path=tmp_path / "provider",
+        )
 
 
 def test_provider_history_orders_hashed_partition_paths(tmp_path: Path) -> None:

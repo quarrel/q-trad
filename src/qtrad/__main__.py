@@ -1686,6 +1686,8 @@ def _build_provider_history(
     output_path: Path,
 ) -> None:
     source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
+    for _ in source_artifact.iter_request_results():
+        pass
     dataset = build_provider_history_dataset(
         source_artifact,
         availability_delay=availability_delay,
