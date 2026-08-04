@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import UUID
@@ -36,8 +37,10 @@ from qtrad.domain.ibkr_historical import (
     utc_text,
 )
 from qtrad.domain.ibkr_results import (
+    REQUEST_RESULT_CONTRACT,
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
+    IbkrHistoricalChildReference,
     IbkrHistoricalCompletionEvidence,
     IbkrHistoricalExecutionSnapshot,
     IbkrHistoricalPlanSnapshot,
@@ -99,12 +102,14 @@ def _request(
     kind: IbkrHistoricalRequestKind,
     *,
     duration: str = "1 D",
+    instrument: InstrumentId = _INSTRUMENT,
+    fingerprint: IbkrContractFingerprint = _FINGERPRINT,
 ) -> IbkrHistoricalRequest:
     bar_size = "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
     what_to_show = "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
     identity: dict[str, JsonValue] = {
-        "instrument_id": str(_INSTRUMENT),
-        "fingerprint": _FINGERPRINT.as_json_value(),
+        "instrument_id": str(instrument),
+        "fingerprint": fingerprint.as_json_value(),
         "kind": kind.value,
         "interval_start": utc_text(start),
         "interval_end": utc_text(end),
@@ -117,8 +122,8 @@ def _request(
         "keep_up_to_date": False,
     }
     return IbkrHistoricalRequest(
-        instrument_id=_INSTRUMENT,
-        fingerprint=_FINGERPRINT,
+        instrument_id=instrument,
+        fingerprint=fingerprint,
         kind=kind,
         interval_start=start,
         interval_end=end,
@@ -208,6 +213,9 @@ def _build_stage6_artifact(
     no_data_bar_days: frozenset[int] = frozenset(),
     minute_span: bool = False,
     bars_per_request: int = 1,
+    instruments: tuple[tuple[InstrumentId, IbkrContractFingerprint], ...] = (
+        (_INSTRUMENT, _FINGERPRINT),
+    ),
 ):
     if bars_per_request <= 0:
         raise ValueError("bars_per_request must be positive")
@@ -218,36 +226,47 @@ def _build_stage6_artifact(
             _START + day * span,
             _START + (day + 1) * span,
             IbkrHistoricalRequestKind.MIDPOINT_BARS,
+            instrument=instrument,
+            fingerprint=fingerprint,
         )
+        for instrument, fingerprint in instruments
         for day in range(day_count)
     )
     if minute_span:
-        schedule_requests = (
+        schedule_requests = tuple(
             _request(
                 _START,
                 end,
                 IbkrHistoricalRequestKind.SCHEDULE,
                 duration="1 D",
-            ),
+                instrument=instrument,
+                fingerprint=fingerprint,
+            )
+            for instrument, fingerprint in instruments
         )
     else:
         schedule_requests_list: list[IbkrHistoricalRequest] = []
-        schedule_start = _START
-        while schedule_start < end:
-            schedule_end = min(schedule_start + timedelta(days=28), end)
-            schedule_days = (schedule_end - schedule_start).days
-            schedule_requests_list.append(
-                _request(
-                    schedule_start,
-                    schedule_end,
-                    IbkrHistoricalRequestKind.SCHEDULE,
-                    duration=f"{schedule_days} D",
+        for instrument, fingerprint in instruments:
+            schedule_start = _START
+            while schedule_start < end:
+                schedule_end = min(schedule_start + timedelta(days=28), end)
+                schedule_days = (schedule_end - schedule_start).days
+                schedule_requests_list.append(
+                    _request(
+                        schedule_start,
+                        schedule_end,
+                        IbkrHistoricalRequestKind.SCHEDULE,
+                        duration=f"{schedule_days} D",
+                        instrument=instrument,
+                        fingerprint=fingerprint,
+                    )
                 )
-            )
-            schedule_start = schedule_end
+                schedule_start = schedule_end
         schedule_requests = tuple(schedule_requests_list)
     requests = bar_requests + schedule_requests
-    eligible = (IbkrPlannedContract(_INSTRUMENT, _FINGERPRINT),)
+    eligible = tuple(
+        IbkrPlannedContract(instrument, fingerprint) for instrument, fingerprint in instruments
+    )
     plan_identity: dict[str, JsonValue] = {
         "contract": HISTORICAL_PLAN_CONTRACT,
         "schema_version": 1,
@@ -260,7 +279,7 @@ def _build_stage6_artifact(
         "planner_qtrad_image_digest": "sha256:" + "f" * 64,
         "start": utc_text(_START),
         "end": utc_text(_START + day_count * span),
-        "eligible_contracts": [eligible[0].as_json_value()],
+        "eligible_contracts": [contract.as_json_value() for contract in eligible],
         "requests": [
             request.as_json_value()
             for request in sorted(
@@ -382,7 +401,7 @@ def _build_stage6_artifact(
                 plan_sha256=plan.plan_sha256,
                 request_sha256=request.request_sha256,
                 request_payload=request.as_json_value(),
-                instrument_id=str(_INSTRUMENT),
+                instrument_id=str(request.instrument_id),
                 request_kind=request.kind.value,
                 interval_start=request.interval_start,
                 interval_end=request.interval_end,
@@ -689,5 +708,79 @@ def test_provider_history_replays_source_before_parquet_decoding(
         raise AssertionError("Parquet decoding must not begin before Stage 6 replay")
 
     monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", fail_if_decoded)
+
+    def fail_if_bounds_derived(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("partition bounds must not be derived before Stage 6 replay")
+
+    monkeypatch.setattr(
+        provider_history_application,
+        "_partition_row_bounds",
+        fail_if_bounds_derived,
+    )
     with pytest.raises(ValueError, match="child bytes digest"):
         verify_provider_history(manifest)
+
+
+def test_provider_history_orders_hashed_partition_paths(tmp_path: Path) -> None:
+    second_instrument = InstrumentId("fx:eur-usd")
+    second_fingerprint = replace(
+        _FINGERPRINT,
+        con_id=43,
+        symbol="EUR",
+        local_symbol="EUR.USD",
+        trading_class="EUR.USD",
+    )
+    artifact = _build_stage6_artifact(
+        day_count=1,
+        instruments=(
+            (_INSTRUMENT, _FINGERPRINT),
+            (second_instrument, second_fingerprint),
+        ),
+    )
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    dataset = build_provider_history_dataset(
+        artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+    dataset_paths = [
+        provider_history_runtime._partition_path(
+            (str(partition.instrument_id), partition.partition_date)
+        )
+        for partition in dataset.partitions
+    ]
+    assert dataset_paths != sorted(dataset_paths)
+
+    provider_manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=artifact,
+        dataset=dataset,
+    )
+    verify_provider_history(provider_manifest)
+
+
+def test_provider_history_accepts_maximum_stage6_child_bound() -> None:
+    artifact = _build_stage6_artifact(day_count=1)
+    request_references = tuple(
+        IbkrHistoricalChildReference(
+            path=f"requests/{index:05d}.json",
+            contract=REQUEST_RESULT_CONTRACT,
+            semantic_sha256=f"{index:064x}",
+            bytes_sha256=f"{index + 20_000:064x}",
+        )
+        for index in range(20_000)
+    )
+    aggregate_identity = artifact.aggregate.identity_payload()
+    aggregate_identity["request_results"] = [
+        reference.as_json_value() for reference in request_references
+    ]
+    aggregate = replace(
+        artifact.aggregate,
+        request_results=request_references,
+        aggregate_sha256=sha256_json(aggregate_identity),
+    )
+    source = replace(artifact, aggregate=aggregate)
+
+    digests = provider_history_runtime._source_file_digests(source, b"manifest")
+
+    assert len(digests) == 20_002

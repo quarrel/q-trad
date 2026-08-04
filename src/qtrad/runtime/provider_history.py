@@ -201,6 +201,7 @@ def write_provider_history(
     else:
         raise ValueError("provider-history dataset contains a partition absent from source replay")
 
+    partition_references.sort(key=lambda item: str(item["path"]))
     if len(source_files) + len(partition_references) + 1 > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history closure exceeds its file bound")
     source_reference = {
@@ -291,6 +292,8 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
     source_stream = verify_ibkr_historical_result_stream(source_path)
+    for _ in source_stream.iter_request_results():
+        pass
     expected = build_provider_history_dataset(
         source_stream,
         availability_delay=policy.delay,
@@ -624,7 +627,7 @@ def _source_file_digests(
     }
     for reference in source.aggregate.request_results:
         digests[reference.path] = reference.bytes_sha256
-    if len(digests) > MAX_IBKR_RESULT_CHILDREN:
+    if len(source.aggregate.request_results) > MAX_IBKR_RESULT_CHILDREN:
         raise ValueError("source result closure exceeds its bound")
     return digests
 
