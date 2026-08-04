@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 
+from qtrad.application.ibkr_results import replay_ibkr_historical_aggregate_result
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_historical import IbkrHistoricalRequest, IbkrHistoricalRequestKind
 from qtrad.domain.ibkr_results import (
@@ -38,11 +39,15 @@ def build_provider_history_dataset(
         policy=PROVIDER_HISTORY_POLICY,
         delay=availability_delay,
     )
+    eligible_instruments = _provider_history_eligible_instruments(artifact)
     rows = tuple(
         row
         for request_result in artifact.request_results
         for request in (_plan_request(artifact, request_result),)
-        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+        if (
+            request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+            and str(request.instrument_id) in eligible_instruments
+        )
         for row in _build_observations(artifact, request, request_result, policy=policy)
     )
     return ProviderHistoricalDataset.create(
@@ -53,6 +58,53 @@ def build_provider_history_dataset(
         aggregate_sha256=artifact.aggregate.aggregate_sha256,
         availability_policy=policy,
     )
+
+
+def provider_history_partition_row_bounds(
+    artifact: IbkrHistoricalResultArtifact,
+) -> dict[tuple[str, date], int]:
+    eligible_instruments = _provider_history_eligible_instruments(artifact)
+    bounds: dict[tuple[str, date], int] = {}
+    for request in artifact.plan.requests:
+        if (
+            request.kind is not IbkrHistoricalRequestKind.MIDPOINT_BARS
+            or str(request.instrument_id) not in eligible_instruments
+        ):
+            continue
+        day = request.interval_start.replace(hour=0, minute=0, second=0, microsecond=0)
+        while day < request.interval_end:
+            next_day = day + timedelta(days=1)
+            overlap_start = max(request.interval_start, day)
+            overlap_end = min(request.interval_end, next_day)
+            minutes = int((overlap_end - overlap_start).total_seconds() // 60)
+            if minutes:
+                key = (str(request.instrument_id), day.date())
+                bounds[key] = bounds.get(key, 0) + minutes
+            day = next_day
+    return bounds
+
+
+def _provider_history_eligible_instruments(
+    artifact: IbkrHistoricalResultArtifact,
+) -> frozenset[str]:
+    replay_ibkr_historical_aggregate_result(
+        artifact.plan,
+        artifact.plan_bytes,
+        artifact.request_results,
+        artifact.aggregate,
+    )
+    raw = artifact.aggregate.entitlement_summary.get("provider_history_eligible_instruments")
+    if not isinstance(raw, list):
+        raise ValueError("IBKR aggregate provider-history eligibility summary is invalid")
+    eligible_items: list[str] = []
+    for item in raw:
+        if not isinstance(item, str) or not item:
+            raise ValueError("IBKR aggregate provider-history eligibility summary is invalid")
+        eligible_items.append(item)
+    eligible = frozenset(eligible_items)
+    if len(eligible) != len(raw):
+        raise ValueError("IBKR aggregate provider-history eligibility summary is not unique")
+    return eligible
 
 
 def replay_provider_history_dataset(
