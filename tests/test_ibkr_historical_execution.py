@@ -122,6 +122,9 @@ def _profile(
     return build_ibkr_historical_request_profile(
         canary_evidence_filename="canary.json",
         canary_evidence_sha256="a" * 64,
+        canary_evidence_file_sha256="b" * 64,
+        canary_runtime_sha256="c" * 64,
+        canary_selection_sha256="d" * 64,
         frozen_by="test-operator",
         frozen_at=_NOW,
         permitted_bar_durations=("1 D",),

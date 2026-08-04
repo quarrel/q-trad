@@ -47,6 +47,9 @@ from qtrad.runtime.ibkr_historical import (
 _NOW = datetime(2026, 8, 2, 12, 0, tzinfo=UTC)
 _CANARY_BYTES = b"verified-canary-evidence"
 _CANARY_HASH = hashlib.sha256(_CANARY_BYTES).hexdigest()
+_CANARY_FILE_HASH = hashlib.sha256(b"serialized-canary-file").hexdigest()
+_CANARY_RUNTIME_HASH = "c" * 64
+_CANARY_SELECTION_HASH = "d" * 64
 _QUERY = IbkrContractQuery(InstrumentId("fx:eur-usd"), "EUR", "CASH", "IDEALPRO", "USD", "EUR.USD")
 
 
@@ -169,12 +172,173 @@ def _sources(tmp_path: Path) -> tuple[Path, Path]:
     return catalogue, probe
 
 
-def _selection(review: dict[str, object]):
+def _closure_sources(tmp_path: Path) -> tuple[Path, Path]:
+    catalogue = tmp_path / "catalogue.toml"
+    catalogue.write_text(
+        'name = "fixture-candidates"\n\n'
+        "[[instrument]]\n"
+        'id = "fx:eur-usd"\n'
+        'display_name = "EUR/USD"\n'
+        'asset_class = "FX"\n'
+        'base_currency = "EUR"\n'
+        'quote_currency = "USD"\n'
+        'search_aliases = ["EUR/USD"]\n\n'
+        "[[instrument]]\n"
+        'id = "index:spx"\n'
+        'display_name = "S&P 500"\n'
+        'asset_class = "INDEX"\n'
+        'base_currency = "USD"\n'
+        'quote_currency = "USD"\n'
+        'search_aliases = ["SPX"]\n\n'
+        "[[instrument]]\n"
+        'id = "commodity:gold"\n'
+        'display_name = "Gold"\n'
+        'asset_class = "COMMODITY"\n'
+        'base_currency = "USD"\n'
+        'quote_currency = "USD"\n'
+        'search_aliases = ["GOLD"]\n'
+    )
+    probe = tmp_path / "probe.toml"
+    probe.write_text(
+        'schema_version = 1\nname = "fixture-probe"\n\n'
+        "[[query]]\n"
+        'instrument_id = "fx:eur-usd"\n'
+        'symbol = "EUR"\n'
+        'security_type = "CASH"\n'
+        'exchange = "IDEALPRO"\n'
+        'currency = "USD"\n'
+        'local_symbol = "EUR.USD"\n\n'
+        "[[query]]\n"
+        'instrument_id = "index:spx"\n'
+        'symbol = "SPX"\n'
+        'security_type = "CFD"\n'
+        'exchange = "IDEALPRO"\n'
+        'currency = "USD"\n'
+        'local_symbol = "SPX.USD"\n\n'
+        "[[query]]\n"
+        'instrument_id = "commodity:gold"\n'
+        'symbol = "GOLD"\n'
+        'security_type = "FUT"\n'
+        'exchange = "IDEALPRO"\n'
+        'currency = "USD"\n'
+        'local_symbol = "GOLD.USD"\n'
+    )
+    return catalogue, probe
+
+
+def _closure_review() -> dict[str, object]:
+    review = _review()
+    instruments = cast(list[dict[str, object]], review["instruments"])
+    base_instrument = instruments[0]
+    base_query = cast(list[dict[str, object]], base_instrument["queries"])[0]
+    base_contract = cast(list[dict[str, object]], base_query["contracts"])[0]
+    base_contract["con_id"] = 11
+    base_contract["trading_class"] = "EUR.USD"
+    representatives = (
+        ("index:spx", "S&P 500", "SPX", "CFD", "IDEALPRO", "SPX.USD", 22),
+        ("commodity:gold", "Gold", "GOLD", "FUT", "IDEALPRO", "GOLD.USD", 33),
+    )
+    for (
+        instrument_id,
+        display_name,
+        symbol,
+        security_type,
+        exchange,
+        local_symbol,
+        con_id,
+    ) in representatives:
+        query = dict(cast(dict[str, object], base_query["query"]))
+        query.update(
+            instrument_id=instrument_id,
+            symbol=symbol,
+            security_type=security_type,
+            exchange=exchange,
+            local_symbol=local_symbol,
+        )
+        contract = dict(base_contract)
+        contract.update(
+            con_id=con_id,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            security_type=security_type,
+            exchange=exchange,
+            currency="USD",
+            minimum_tick="0.01",
+            market_rule_ids=[],
+            valid_exchanges=[exchange],
+            long_name=display_name,
+            timezone="UTC",
+            trading_class=f"{symbol}.USD",
+            trading_hours="20260802:0000-0000",
+            liquid_hours="20260802:0000-0000",
+        )
+        instruments.append(
+            {
+                "instrument_id": instrument_id,
+                "display_name": display_name,
+                "status": "OPERATOR_SELECTION_REQUIRED",
+                "returned_contract_count": 1,
+                "queries": [{"query": query, "contracts": [contract], "requests": []}],
+            }
+        )
+    review["instruments"] = instruments
+    return review
+
+
+def _closure_operator(review: dict[str, object]) -> dict[str, object]:
+    operator = _operator(review)
+    decisions = cast(list[dict[str, object]], operator["decisions"])
+    base_decision = decisions[0]
+    base_fingerprint = dict(cast(dict[str, object], base_decision["fingerprint"]))
+    base_fingerprint["con_id"] = 11
+    base_fingerprint["trading_class"] = "EUR.USD"
+    base_decision["fingerprint"] = base_fingerprint
+    representatives = (
+        ("index:spx", "SPX", "CFD", "IDEALPRO", "SPX.USD", 22),
+        ("commodity:gold", "GOLD", "FUT", "IDEALPRO", "GOLD.USD", 33),
+    )
+    for instrument_id, symbol, security_type, exchange, local_symbol, con_id in representatives:
+        decision = dict(base_decision)
+        fingerprint = dict(base_decision["fingerprint"])
+        fingerprint.update(
+            con_id=con_id,
+            symbol=symbol,
+            local_symbol=local_symbol,
+            security_type=security_type,
+            exchange=exchange,
+            trading_class=f"{symbol}.USD",
+        )
+        decision.update(instrument_id=instrument_id, fingerprint=fingerprint)
+        decisions.append(decision)
+    operator["decisions"] = decisions
+    return operator
+
+
+def _canonical_queries(review: dict[str, object]) -> frozenset[IbkrContractQuery]:
+    instruments = cast(list[dict[str, object]], review["instruments"])
+    return frozenset(
+        IbkrContractQuery(
+            InstrumentId(str(cast(dict[str, object], item["query"])["instrument_id"])),
+            str(cast(dict[str, object], item["query"])["symbol"]),
+            str(cast(dict[str, object], item["query"])["security_type"]),
+            str(cast(dict[str, object], item["query"])["exchange"]),
+            str(cast(dict[str, object], item["query"])["currency"]),
+            str(cast(dict[str, object], item["query"])["local_symbol"]),
+        )
+        for instrument in instruments
+        for item in cast(list[dict[str, object]], instrument["queries"])
+    )
+
+
+def _selection(review: dict[str, object], *, operator_selection: dict[str, object] | None = None):
+    canonical_queries = _canonical_queries(review)
     return build_ibkr_contract_selection(
         capability_review=review,
-        operator_selection=_operator(review),
-        canonical_instrument_ids=frozenset({_QUERY.instrument_id}),
-        canonical_queries=frozenset({_QUERY}),
+        operator_selection=(
+            operator_selection if operator_selection is not None else _operator(review)
+        ),
+        canonical_instrument_ids=frozenset(query.instrument_id for query in canonical_queries),
+        canonical_queries=canonical_queries,
         frozen_by="operator@example.invalid",
         frozen_at=_NOW,
     )
@@ -626,6 +790,9 @@ def _profile(
     return build_ibkr_historical_request_profile(
         canary_evidence_filename="canary.json",
         canary_evidence_sha256=_CANARY_HASH,
+        canary_evidence_file_sha256=_CANARY_FILE_HASH,
+        canary_runtime_sha256=_CANARY_RUNTIME_HASH,
+        canary_selection_sha256=_CANARY_SELECTION_HASH,
         frozen_by="operator@example.invalid",
         frozen_at=_NOW,
         permitted_bar_durations=("1 D", "1 W", "2 W", "4 W"),
@@ -691,12 +858,84 @@ def _planning_runtime() -> IbkrAcquisitionRuntime:
     )
 
 
+def _closure_canary_evidence(runtime_sha256: str, selection_sha256: str):
+    from qtrad.application.ibkr_canary import IbkrHistoricalCanaryEvidence
+    from qtrad.domain.ibkr_historical import IbkrHistoricalRequest
+    from tests.test_ibkr_canary import _evidence as canary_fixture
+
+    fixture = canary_fixture()
+
+    def adapt_fingerprint(fingerprint):
+        if fingerprint.symbol != "GOLD":
+            return fingerprint
+        return replace(fingerprint, security_type="FUT")
+
+    def adapt_request(request):
+        fingerprint = adapt_fingerprint(request.fingerprint)
+        identity = dict(request.identity_payload())
+        identity["fingerprint"] = fingerprint.as_json_value()
+        return IbkrHistoricalRequest(
+            instrument_id=request.instrument_id,
+            fingerprint=fingerprint,
+            kind=request.kind,
+            interval_start=request.interval_start,
+            interval_end=request.interval_end,
+            end_date_time=request.end_date_time,
+            duration=request.duration,
+            bar_size=request.bar_size,
+            what_to_show=request.what_to_show,
+            use_rth=request.use_rth,
+            format_date=request.format_date,
+            keep_up_to_date=request.keep_up_to_date,
+            request_sha256=sha256_json(identity),
+        )
+
+    cases = tuple(
+        replace(
+            result,
+            case=replace(result.case, fingerprint=adapt_fingerprint(result.case.fingerprint)),
+            requests=tuple(
+                replace(request_result, request=adapt_request(request_result.request))
+                for request_result in result.requests
+            ),
+        )
+        for result in fixture.cases
+    )
+    reauthentication = tuple(
+        replace(
+            item,
+            expected=adapt_fingerprint(item.expected),
+            observed=tuple(adapt_fingerprint(value) for value in item.observed),
+        )
+        for item in fixture.reauthentication
+    )
+    identity = dict(fixture.identity_payload())
+    identity["runtime_sha256"] = runtime_sha256
+    identity["selection_sha256"] = selection_sha256
+    identity["reauthentication"] = [item.as_json_value() for item in reauthentication]
+    identity["cases"] = [item.as_json_value() for item in cases]
+    return IbkrHistoricalCanaryEvidence(
+        runtime_sha256=runtime_sha256,
+        selection_sha256=selection_sha256,
+        started_at=fixture.started_at,
+        completed_at=fixture.completed_at,
+        reauthentication=reauthentication,
+        cases=cases,
+        stop_reason=fixture.stop_reason,
+        evidence_sha256=sha256_json(identity),
+    )
+
+
 def _write_plan_closure(tmp_path: Path) -> dict[str, Path]:
-    catalogue, probe = _sources(tmp_path)
+    from qtrad.application.ibkr_canary import (
+        freeze_ibkr_request_profile_from_canary,
+    )
+    from qtrad.runtime.ibkr_canary import write_ibkr_historical_canary_evidence
     from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
     from qtrad.runtime.universe import load_capture_candidates
 
-    review = _review()
+    catalogue, probe = _closure_sources(tmp_path)
+    review = _closure_review()
     candidates = load_capture_candidates(catalogue)
     probe_spec = load_ibkr_capability_probe_spec(probe)
     review["catalogue_hash"] = candidates.configuration_hash
@@ -720,8 +959,10 @@ def _write_plan_closure(tmp_path: Path) -> dict[str, Path]:
         "profile": tmp_path / "profile.json",
     }
     paths["review"].write_text(json.dumps(review))
-    paths["operator"].write_text(json.dumps(_operator(review)))
-    write_ibkr_contract_selection(paths["selection"], _selection(review))
+    operator = _closure_operator(review)
+    paths["operator"].write_text(json.dumps(operator))
+    selection = _selection(review, operator_selection=operator)
+    write_ibkr_contract_selection(paths["selection"], selection)
 
     for archive_path in (
         paths["gateway_archive"],
@@ -741,8 +982,29 @@ def _write_plan_closure(tmp_path: Path) -> dict[str, Path]:
         frozen_at=_NOW,
     )
     write_ibkr_runtime_lock(paths["runtime"], runtime)
-    paths["canary"].write_bytes(_CANARY_BYTES)
-    write_ibkr_historical_request_profile(paths["profile"], _profile())
+
+    evidence = _closure_canary_evidence(runtime.runtime_sha256, selection.selection_sha256)
+    write_ibkr_historical_canary_evidence(paths["canary"], evidence)
+    canary_file_sha256 = hashlib.sha256(paths["canary"].read_bytes()).hexdigest()
+    profile = freeze_ibkr_request_profile_from_canary(
+        evidence,
+        canary_evidence_filename=paths["canary"].name,
+        canary_evidence_file_sha256=canary_file_sha256,
+        frozen_by="operator@example.invalid",
+        frozen_at=_NOW,
+        maximum_in_flight_requests=2,
+        request_timeout_seconds=60,
+        retry_count=5,
+        duplicate_request_protection="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds=15,
+            per_contract_window_seconds=2,
+            max_requests_per_contract_window=5,
+            rolling_window_seconds=600,
+            max_requests_per_rolling_window=55,
+        ),
+    )
+    write_ibkr_historical_request_profile(paths["profile"], profile)
     return paths
 
 
@@ -773,6 +1035,17 @@ def _build_plan_from_closure(paths: dict[str, Path], start: datetime, end: datet
         canary_evidence_path=paths["canary"],
         expected_profile_frozen_by="operator@example.invalid",
         expected_profile_frozen_at=_NOW,
+        maximum_in_flight_requests=2,
+        request_timeout_seconds=60,
+        retry_count=5,
+        duplicate_request_protection="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds=15,
+            per_contract_window_seconds=2,
+            max_requests_per_contract_window=5,
+            rolling_window_seconds=600,
+            max_requests_per_rolling_window=55,
+        ),
         start=start,
         end=end,
         planner_qtrad_commit=runtime.qtrad_commit,
@@ -809,10 +1082,59 @@ def _verify_plan_from_closure(
         canary_evidence_path=paths["canary"],
         expected_profile_frozen_by="operator@example.invalid",
         expected_profile_frozen_at=_NOW,
+        maximum_in_flight_requests=2,
+        request_timeout_seconds=60,
+        retry_count=5,
+        duplicate_request_protection="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds=15,
+            per_contract_window_seconds=2,
+            max_requests_per_contract_window=5,
+            rolling_window_seconds=600,
+            max_requests_per_rolling_window=55,
+        ),
         expected_start=start,
         expected_end=end,
         planner_qtrad_commit="a" * 40,
         planner_qtrad_image_digest="sha256:" + "d" * 64,
+    )
+
+
+def _verify_profile_from_closure(paths: dict[str, Path]):
+    from qtrad.runtime.universe import load_capture_candidates
+
+    candidates = load_capture_candidates(paths["catalogue"])
+    selection = verify_ibkr_contract_selection(
+        paths["selection"],
+        capability_review_path=paths["review"],
+        operator_selection_path=paths["operator"],
+        catalogue_path=paths["catalogue"],
+        probe_spec_path=paths["probe"],
+    )
+    runtime = load_ibkr_runtime_lock(paths["runtime"])
+    return verify_ibkr_historical_request_profile(
+        paths["profile"],
+        canary_evidence_path=paths["canary"],
+        expected_runtime_sha256=runtime.runtime_sha256,
+        expected_selection_sha256=selection.selection_sha256,
+        selection=selection,
+        asset_class_by_instrument={
+            instrument.instrument_id: instrument.asset_class
+            for instrument in candidates.instruments
+        },
+        expected_frozen_by="operator@example.invalid",
+        expected_frozen_at=_NOW,
+        maximum_in_flight_requests=2,
+        request_timeout_seconds=60,
+        retry_count=5,
+        duplicate_request_protection="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds=15,
+            per_contract_window_seconds=2,
+            max_requests_per_contract_window=5,
+            rolling_window_seconds=600,
+            max_requests_per_rolling_window=55,
+        ),
     )
 
 
@@ -821,6 +1143,18 @@ def _rehash_document(path: Path, hash_field: str) -> None:
     unsigned = {key: value for key, value in payload.items() if key != hash_field}
     payload[hash_field] = sha256_json(unsigned)
     path.write_text(json.dumps(payload))
+
+
+def _rebind_profile_to_canary(paths: dict[str, Path]) -> None:
+    _rehash_document(paths["canary"], "evidence_sha256")
+    canary_payload = json.loads(paths["canary"].read_text())
+    profile_payload = json.loads(paths["profile"].read_text())
+    profile_payload["canary_evidence_sha256"] = canary_payload["evidence_sha256"]
+    profile_payload["canary_evidence_file_sha256"] = hashlib.sha256(
+        paths["canary"].read_bytes()
+    ).hexdigest()
+    paths["profile"].write_text(json.dumps(profile_payload))
+    _rehash_document(paths["profile"], "profile_sha256")
 
 
 def _assert_exact_coverage(plan) -> None:
@@ -881,21 +1215,7 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
             assert request.format_date == 2
             assert request.keep_up_to_date is False
 
-    profile_path = tmp_path / "profile.json"
     plan_path = tmp_path / "plan.json"
-    canary_path = tmp_path / "canary.json"
-    canary_path.write_bytes(_CANARY_BYTES)
-    write_ibkr_historical_request_profile(profile_path, profile)
-    assert load_ibkr_historical_request_profile(profile_path) == profile
-    assert (
-        verify_ibkr_historical_request_profile(
-            profile_path,
-            canary_evidence_path=canary_path,
-            expected_frozen_by=profile.frozen_by,
-            expected_frozen_at=profile.frozen_at,
-        )
-        == profile
-    )
     write_ibkr_historical_plan(plan_path, plan)
     assert load_ibkr_historical_plan(plan_path) == plan
 
@@ -905,6 +1225,9 @@ def test_historical_plan_builder_and_verifier_replay_authenticated_lower_artifac
 ) -> None:
     monkeypatch.setattr(historical, "derive_qtrad_commit", lambda: "a" * 40)
     paths = _write_plan_closure(tmp_path)
+    assert _verify_profile_from_closure(paths) == load_ibkr_historical_request_profile(
+        paths["profile"]
+    )
     start = datetime(2026, 2, 1, tzinfo=UTC)
     end = datetime(2026, 2, 15, tzinfo=UTC)
     plan = _build_plan_from_closure(paths, start, end)
@@ -914,7 +1237,10 @@ def test_historical_plan_builder_and_verifier_replay_authenticated_lower_artifac
     assert _verify_plan_from_closure(plan_path, paths, start, end) == plan
 
 
-@pytest.mark.parametrize("mutation", ["selection", "runtime", "profile", "canary"])
+@pytest.mark.parametrize(
+    "mutation",
+    ["selection", "runtime", "duration", "pacing", "representative", "group", "canary"],
+)
 def test_historical_plan_verifier_rejects_mutated_lower_artifacts(
     tmp_path: Path, mutation: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -936,11 +1262,46 @@ def test_historical_plan_verifier_rejects_mutated_lower_artifacts(
         payload["gateway_version"] = "99.99"
         paths["runtime"].write_text(json.dumps(payload))
         _rehash_document(paths["runtime"], "runtime_sha256")
-    elif mutation == "profile":
+    elif mutation == "duration":
         payload = json.loads(paths["profile"].read_text())
         payload["schedule_duration"] = "1 D"
         paths["profile"].write_text(json.dumps(payload))
         _rehash_document(paths["profile"], "profile_sha256")
+    elif mutation == "pacing":
+        payload = json.loads(paths["profile"].read_text())
+        payload["pacing_policy"]["identical_request_cooldown_seconds"] = 16
+        paths["profile"].write_text(json.dumps(payload))
+        _rehash_document(paths["profile"], "profile_sha256")
+    elif mutation == "representative":
+        payload = json.loads(paths["canary"].read_text())
+        cases = payload["cases"]
+        replacement = next(item["case"] for item in cases if item["case"]["group"] == "INDEX")
+        for item in cases:
+            if item["case"]["group"] != "FX":
+                continue
+            item["case"]["instrument_id"] = replacement["instrument_id"]
+            item["case"]["fingerprint"] = dict(replacement["fingerprint"])
+            for request_result in item["requests"]:
+                request = request_result["request"]
+                request["instrument_id"] = replacement["instrument_id"]
+                request["fingerprint"] = dict(replacement["fingerprint"])
+                request["request_sha256"] = sha256_json(
+                    {key: value for key, value in request.items() if key != "request_sha256"}
+                )
+        payload["reauthentication"] = [
+            item for item in payload["reauthentication"] if item["expected"]["symbol"] != "EUR"
+        ]
+        paths["canary"].write_text(json.dumps(payload))
+        _rebind_profile_to_canary(paths)
+    elif mutation == "group":
+        payload = json.loads(paths["canary"].read_text())
+        for item in payload["cases"]:
+            if item["case"]["group"] == "FX":
+                item["case"]["group"] = "INDEX"
+            elif item["case"]["group"] == "INDEX":
+                item["case"]["group"] = "FX"
+        paths["canary"].write_text(json.dumps(payload))
+        _rebind_profile_to_canary(paths)
     else:
         paths["canary"].write_bytes(b"mutated-canary-evidence")
 
@@ -1051,6 +1412,9 @@ def test_historical_plan_uses_utc_ownership_across_dst_and_rejects_unsafe_profil
         build_ibkr_historical_request_profile(
             canary_evidence_filename="canary.json",
             canary_evidence_sha256=_CANARY_HASH,
+            canary_evidence_file_sha256=_CANARY_FILE_HASH,
+            canary_runtime_sha256=_CANARY_RUNTIME_HASH,
+            canary_selection_sha256=_CANARY_SELECTION_HASH,
             frozen_by="operator@example.invalid",
             frozen_at=_NOW,
             permitted_bar_durations=("1 M",),

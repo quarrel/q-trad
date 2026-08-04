@@ -22,7 +22,9 @@ from qtrad.domain.ibkr_execution import (
     IbkrHistoricalTerminalError,
 )
 from qtrad.domain.ibkr_historical import (
+    IbkrContractDecision,
     IbkrContractFingerprint,
+    IbkrContractSelection,
     IbkrHistoricalPacingPolicy,
     IbkrHistoricalRequest,
     IbkrHistoricalRequestKind,
@@ -43,7 +45,7 @@ IBKR_CANARY_CONTRACT = "qtrad-ibkr-historical-canary-v1"
 IBKR_CANARY_SCHEMA_VERSION = 3
 IBKR_CANARY_DURATIONS = ("1 D", "1 W", "2 W", "4 W")
 IBKR_CANARY_GROUPS = (AssetClass.FX, AssetClass.INDEX, AssetClass.COMMODITY)
-IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES = frozenset({"CFD", "ETF"})
+IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES = frozenset({"CFD"})
 CallableClock = Callable[[], datetime]
 
 IBKR_CANARY_MAX_CALLBACKS_PER_REQUEST = 50_000
@@ -155,7 +157,7 @@ class IbkrHistoricalCanaryCase:
             and self.fingerprint.security_type not in IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES
         ):
             raise ValueError(
-                "IBKR midpoint canary index representative must be a CFD or ETF, not a native IND"
+                "IBKR midpoint canary index representative must be a CFD in this stage"
             )
         if self.duration not in IBKR_CANARY_DURATIONS:
             raise ValueError("IBKR canary duration is not one of the frozen test durations")
@@ -527,6 +529,7 @@ def freeze_ibkr_request_profile_from_canary(
     evidence: IbkrHistoricalCanaryEvidence,
     *,
     canary_evidence_filename: str,
+    canary_evidence_file_sha256: str,
     frozen_by: str,
     frozen_at: datetime,
     maximum_in_flight_requests: int,
@@ -588,6 +591,9 @@ def freeze_ibkr_request_profile_from_canary(
     return build_ibkr_historical_request_profile(
         canary_evidence_filename=canary_evidence_filename,
         canary_evidence_sha256=evidence.evidence_sha256,
+        canary_evidence_file_sha256=canary_evidence_file_sha256,
+        canary_runtime_sha256=evidence.runtime_sha256,
+        canary_selection_sha256=evidence.selection_sha256,
         frozen_by=frozen_by,
         frozen_at=frozen_at,
         permitted_bar_durations=permitted_bar,
@@ -600,6 +606,38 @@ def freeze_ibkr_request_profile_from_canary(
         duplicate_request_protection=duplicate_request_protection,
         pacing_policy=pacing_policy,
     )
+
+
+def validate_ibkr_historical_canary_selection(
+    evidence: IbkrHistoricalCanaryEvidence,
+    *,
+    selection: IbkrContractSelection,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
+) -> None:
+    """Prove each canary representative is the selected contract for its catalogue group."""
+    if evidence.selection_sha256 != selection.selection_sha256:
+        raise ValueError("IBKR canary selection hash does not match the verified selection")
+    decisions_by_instrument = {item.instrument_id: item for item in selection.decisions}
+    for group in IBKR_CANARY_GROUPS:
+        group_cases = tuple(item.case for item in evidence.cases if item.case.group is group)
+        representatives = {(item.instrument_id, item.fingerprint) for item in group_cases}
+        if len(representatives) != 1:
+            raise ValueError("IBKR canary representative must be stable across its durations")
+        case = group_cases[0]
+        if asset_class_by_instrument.get(case.instrument_id) is not group:
+            raise ValueError("IBKR canary representative group does not match the catalogue")
+        decision = decisions_by_instrument.get(case.instrument_id)
+        if (
+            decision is None
+            or decision.decision is not IbkrContractDecision.ACCEPTED_EXACT_CONTRACT
+            or not decision.acquisition_eligible
+            or decision.fingerprint is None
+        ):
+            raise ValueError(
+                "IBKR canary representative is not an acquisition-eligible selection entry"
+            )
+        if decision.fingerprint != case.fingerprint:
+            raise ValueError("IBKR canary representative fingerprint does not match the selection")
 
 
 async def _run_case(
@@ -1735,4 +1773,5 @@ __all__ = [
     "freeze_ibkr_request_profile_from_canary",
     "replay_ibkr_historical_canary_evidence",
     "run_ibkr_historical_canary",
+    "validate_ibkr_historical_canary_selection",
 ]

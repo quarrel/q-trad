@@ -102,6 +102,9 @@ _REQUEST_PROFILE_KEYS = {
     "schema_version",
     "canary_evidence_filename",
     "canary_evidence_sha256",
+    "canary_evidence_file_sha256",
+    "canary_runtime_sha256",
+    "canary_selection_sha256",
     "frozen_by",
     "frozen_at",
     "permitted_bar_durations",
@@ -434,6 +437,9 @@ def load_ibkr_historical_request_profile(path: Path) -> IbkrHistoricalRequestPro
     profile = build_ibkr_historical_request_profile(
         canary_evidence_filename=_string(document, "canary_evidence_filename"),
         canary_evidence_sha256=_string(document, "canary_evidence_sha256"),
+        canary_evidence_file_sha256=_string(document, "canary_evidence_file_sha256"),
+        canary_runtime_sha256=_string(document, "canary_runtime_sha256"),
+        canary_selection_sha256=_string(document, "canary_selection_sha256"),
         frozen_by=_string(document, "frozen_by"),
         frozen_at=_datetime(document, "frozen_at"),
         permitted_bar_durations=_string_tuple(
@@ -464,19 +470,58 @@ def verify_ibkr_historical_request_profile(
     path: Path,
     *,
     canary_evidence_path: Path,
+    expected_runtime_sha256: str,
+    expected_selection_sha256: str,
+    selection: IbkrContractSelection,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
     expected_frozen_by: str,
     expected_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    pacing_policy: IbkrHistoricalPacingPolicy,
 ) -> IbkrHistoricalRequestProfile:
-    """Authenticate profile bytes, canary bytes and operator freeze attestations."""
-
+    """Replay the canary and rebuild the complete request profile from trusted inputs."""
     profile = load_ibkr_historical_request_profile(path)
     _require_readable_path(canary_evidence_path, "IBKR canary evidence")
     if canary_evidence_path.name != profile.canary_evidence_filename:
         raise ValueError("IBKR canary evidence filename does not match the request profile")
-    if _sha256_file(canary_evidence_path) != profile.canary_evidence_sha256:
-        raise ValueError("IBKR canary evidence does not match the request profile")
-    if profile.frozen_by != expected_frozen_by or profile.frozen_at != expected_frozen_at:
-        raise ValueError("IBKR request profile freeze does not match its operator attestation")
+    serialized_sha256 = _sha256_file(canary_evidence_path)
+    if serialized_sha256 != profile.canary_evidence_file_sha256:
+        raise ValueError("IBKR serialized canary evidence does not match the request profile")
+    from qtrad.application.ibkr_canary import (
+        freeze_ibkr_request_profile_from_canary,
+        validate_ibkr_historical_canary_selection,
+    )
+    from qtrad.runtime.ibkr_canary import verify_ibkr_historical_canary_evidence
+
+    evidence = verify_ibkr_historical_canary_evidence(
+        canary_evidence_path,
+        expected_runtime_sha256=expected_runtime_sha256,
+        expected_selection_sha256=expected_selection_sha256,
+    )
+    if evidence.evidence_sha256 != profile.canary_evidence_sha256:
+        raise ValueError("IBKR semantic canary evidence does not match the request profile")
+    validate_ibkr_historical_canary_selection(
+        evidence,
+        selection=selection,
+        asset_class_by_instrument=asset_class_by_instrument,
+    )
+    rebuilt = freeze_ibkr_request_profile_from_canary(
+        evidence,
+        canary_evidence_filename=profile.canary_evidence_filename,
+        canary_evidence_file_sha256=serialized_sha256,
+        frozen_by=expected_frozen_by,
+        frozen_at=expected_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=pacing_policy,
+    )
+    if profile.as_json_value() != rebuilt.as_json_value():
+        raise ValueError("IBKR request profile does not rebuild from verified canary and policy")
     return profile
 
 
@@ -512,6 +557,11 @@ def build_ibkr_historical_plan_from_files(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    pacing_policy: IbkrHistoricalPacingPolicy,
     start: datetime,
     end: datetime,
     planner_qtrad_commit: str,
@@ -554,8 +604,17 @@ def build_ibkr_historical_plan_from_files(
     request_profile = verify_ibkr_historical_request_profile(
         request_profile_path,
         canary_evidence_path=canary_evidence_path,
+        expected_runtime_sha256=runtime.runtime_sha256,
+        expected_selection_sha256=selection.selection_sha256,
+        selection=selection,
+        asset_class_by_instrument=asset_class_by_instrument,
         expected_frozen_by=expected_profile_frozen_by,
         expected_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=pacing_policy,
     )
     return build_ibkr_historical_plan(
         selection=selection,
@@ -633,6 +692,11 @@ def verify_ibkr_historical_plan(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    pacing_policy: IbkrHistoricalPacingPolicy,
     expected_start: datetime,
     expected_end: datetime,
     planner_qtrad_commit: str,
@@ -666,6 +730,11 @@ def verify_ibkr_historical_plan(
         canary_evidence_path=canary_evidence_path,
         expected_profile_frozen_by=expected_profile_frozen_by,
         expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=pacing_policy,
         start=expected_start,
         end=expected_end,
         planner_qtrad_commit=planner_qtrad_commit,

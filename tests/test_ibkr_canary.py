@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from dataclasses import replace
@@ -381,7 +382,8 @@ def test_adjacent_canary_cases_cover_groups_and_durations() -> None:
     )
 
 
-def test_index_canary_requires_midpoint_capable_representation() -> None:
+@pytest.mark.parametrize("security_type", ["IND", "ETF"])
+def test_index_canary_requires_midpoint_capable_representation(security_type: str) -> None:
     index_case = next(case for case in _cases() if case.group is AssetClass.INDEX)
 
     assert index_case.fingerprint.security_type == "CFD"
@@ -391,10 +393,10 @@ def test_index_canary_requires_midpoint_capable_representation() -> None:
         ).what_to_show
         == "MIDPOINT"
     )
-    with pytest.raises(ValueError, match="CFD or ETF"):
+    with pytest.raises(ValueError, match="CFD in this stage"):
         replace(
             index_case,
-            fingerprint=_fingerprint(22, "SPX", security_type="IND"),
+            fingerprint=_fingerprint(22, "SPX", security_type=security_type),
         )
 
 
@@ -604,6 +606,7 @@ def test_canary_evidence_round_trips_and_freezes_conservative_profile(
     profile = freeze_ibkr_request_profile_from_canary(
         loaded,
         canary_evidence_filename=output.name,
+        canary_evidence_file_sha256=hashlib.sha256(output.read_bytes()).hexdigest(),
         frozen_by="operator",
         frozen_at=_START,
         maximum_in_flight_requests=1,

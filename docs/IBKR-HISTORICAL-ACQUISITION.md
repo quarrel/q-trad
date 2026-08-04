@@ -714,7 +714,7 @@ index
 commodity
 ```
 
-The index representative must be an account-reviewed `CFD` or `ETF` independently verified to support `MIDPOINT`. Native `IND` contracts are excluded from this midpoint-only stage; `TRADES` bars are a different price basis and require a separately declared acquisition contract.
+The index representative must be an account-reviewed `CFD` independently verified to support `MIDPOINT`. This Stage 5 boundary is CFD-only: IBKR represents ETFs with `STK`, so an ETF requires a separate authenticated product model. Native `IND` contracts are excluded from this midpoint-only stage; `TRADES` bars are a different price basis and require a separately declared acquisition contract.
 
 Test increasingly large request durations, for example:
 

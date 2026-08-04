@@ -353,6 +353,22 @@ def build_parser() -> argparse.ArgumentParser:
         historical_plan_command.add_argument(
             "--profile-frozen-at", type=_utc_timestamp_argument, required=True
         )
+        historical_plan_command.add_argument("--maximum-in-flight-requests", type=int, default=1)
+        historical_plan_command.add_argument("--request-timeout-seconds", type=int, default=60)
+        historical_plan_command.add_argument("--retry-count", type=int, default=1)
+        historical_plan_command.add_argument(
+            "--duplicate-request-protection",
+            default="PLAN_REQUEST_ID_UNIQUE_NO_RERUN",
+        )
+        historical_plan_command.add_argument(
+            "--identical-request-cooldown-seconds", type=int, default=15
+        )
+        historical_plan_command.add_argument(
+            "--max-requests-per-contract-window", type=int, default=5
+        )
+        historical_plan_command.add_argument(
+            "--max-requests-per-rolling-window", type=int, default=55
+        )
         historical_plan_command.add_argument("--planner-image-digest", required=True)
     historical_plan.add_argument("--start", type=_utc_minute_argument, required=True)
     historical_plan.add_argument("--end", type=_utc_minute_argument, required=True)
@@ -744,6 +760,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             canary_evidence_path=args.canary_evidence,
             expected_profile_frozen_by=args.profile_frozen_by,
             expected_profile_frozen_at=args.profile_frozen_at,
+            maximum_in_flight_requests=args.maximum_in_flight_requests,
+            request_timeout_seconds=args.request_timeout_seconds,
+            retry_count=args.retry_count,
+            duplicate_request_protection=args.duplicate_request_protection,
+            identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+            max_requests_per_contract_window=args.max_requests_per_contract_window,
+            max_requests_per_rolling_window=args.max_requests_per_rolling_window,
             start=args.start,
             end=args.end,
             planner_image_digest=args.planner_image_digest,
@@ -780,6 +803,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             canary_evidence_path=args.canary_evidence,
             expected_profile_frozen_by=args.profile_frozen_by,
             expected_profile_frozen_at=args.profile_frozen_at,
+            maximum_in_flight_requests=args.maximum_in_flight_requests,
+            request_timeout_seconds=args.request_timeout_seconds,
+            retry_count=args.retry_count,
+            duplicate_request_protection=args.duplicate_request_protection,
+            identical_request_cooldown_seconds=args.identical_request_cooldown_seconds,
+            max_requests_per_contract_window=args.max_requests_per_contract_window,
+            max_requests_per_rolling_window=args.max_requests_per_rolling_window,
             expected_start=args.start,
             expected_end=args.end,
             planner_image_digest=args.planner_image_digest,
@@ -2353,6 +2383,13 @@ def _plan_ibkr_historical(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
     start: datetime,
     end: datetime,
     planner_image_digest: str,
@@ -2384,6 +2421,17 @@ def _plan_ibkr_historical(
         canary_evidence_path=canary_evidence_path,
         expected_profile_frozen_by=expected_profile_frozen_by,
         expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
         start=start,
         end=end,
         planner_qtrad_commit=planner_commit,
@@ -2430,6 +2478,13 @@ def _verify_ibkr_historical_plan(
     canary_evidence_path: Path,
     expected_profile_frozen_by: str,
     expected_profile_frozen_at: datetime,
+    maximum_in_flight_requests: int,
+    request_timeout_seconds: int,
+    retry_count: int,
+    duplicate_request_protection: str,
+    identical_request_cooldown_seconds: int,
+    max_requests_per_contract_window: int,
+    max_requests_per_rolling_window: int,
     expected_start: datetime,
     expected_end: datetime,
     planner_image_digest: str,
@@ -2460,6 +2515,17 @@ def _verify_ibkr_historical_plan(
         canary_evidence_path=canary_evidence_path,
         expected_profile_frozen_by=expected_profile_frozen_by,
         expected_profile_frozen_at=expected_profile_frozen_at,
+        maximum_in_flight_requests=maximum_in_flight_requests,
+        request_timeout_seconds=request_timeout_seconds,
+        retry_count=retry_count,
+        duplicate_request_protection=duplicate_request_protection,
+        pacing_policy=IbkrHistoricalPacingPolicy(
+            identical_request_cooldown_seconds,
+            2,
+            max_requests_per_contract_window,
+            600,
+            max_requests_per_rolling_window,
+        ),
         expected_start=expected_start,
         expected_end=expected_end,
         planner_qtrad_commit=derive_qtrad_commit(),
@@ -2586,9 +2652,11 @@ def _freeze_ibkr_historical_profile(
     max_requests_per_rolling_window: int,
 ) -> None:
     evidence = verify_ibkr_historical_canary_evidence(evidence_path)
+    canary_evidence_file_sha256 = hashlib.sha256(evidence_path.read_bytes()).hexdigest()
     profile = freeze_ibkr_request_profile_from_canary(
         evidence,
         canary_evidence_filename=canary_evidence_filename or evidence_path.name,
+        canary_evidence_file_sha256=canary_evidence_file_sha256,
         frozen_by=frozen_by,
         frozen_at=frozen_at,
         maximum_in_flight_requests=maximum_in_flight_requests,
