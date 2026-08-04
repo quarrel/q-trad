@@ -2875,6 +2875,18 @@ async def _execute_ibkr_historical_plan(
             plan,
             snapshot,
             maximum_attempts=request_profile.retry_count + 1,
+            allow_recoverable_started=True,
+        )
+        await store.recover_ibkr_historical_execution(
+            plan_sha256=plan.plan_sha256,
+            recovered_at=clock.now(),
+            maximum_attempts=request_profile.retry_count + 1,
+        )
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        verify_ibkr_historical_execution_snapshot(
+            plan,
+            snapshot,
+            maximum_attempts=request_profile.retry_count + 1,
         )
 
         from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint

@@ -123,12 +123,17 @@ def verify_ibkr_historical_execution_snapshot(
     snapshot: IbkrHistoricalExecutionSnapshot,
     *,
     maximum_attempts: int,
+    allow_recoverable_started: bool = False,
 ) -> None:
-    """Verify the exact durable execution closure before provider construction."""
+    """Verify the durable execution closure for the selected recovery phase."""
 
     if maximum_attempts <= 0:
         raise ValueError("IBKR execution maximum attempts must be positive")
     _validate_snapshot_plan(plan, snapshot)
+    if not allow_recoverable_started and any(
+        attempt.status is IbkrAttemptStatus.STARTED for attempt in snapshot.attempts
+    ):
+        raise ValueError("IBKR execution snapshot contains unrecovered STARTED attempts")
     expected_by_hash = {request.request_sha256: request for request in plan.requests}
     actual_hashes = {request.request_sha256 for request in snapshot.requests}
     if len(snapshot.requests) != len(expected_by_hash) or actual_hashes != set(expected_by_hash):
@@ -175,8 +180,19 @@ def verify_ibkr_historical_execution_snapshot(
         for attempt in attempts:
             callbacks = callbacks_by_attempt.get(attempt.attempt_id, ())
             markers = markers_by_attempt.get(attempt.attempt_id, ())
-            _validate_callback_closure((attempt,), callbacks, markers)
-            _validate_attempt_outcomes(request, (attempt,), callbacks, markers)
+            _validate_callback_closure(
+                (attempt,),
+                callbacks,
+                markers,
+                allow_recoverable_started=allow_recoverable_started,
+            )
+            _validate_attempt_outcomes(
+                request,
+                (attempt,),
+                callbacks,
+                markers,
+                allow_recoverable_started=allow_recoverable_started,
+            )
 
         selected = (
             None
@@ -537,8 +553,19 @@ def _derive_request_evidence(
         raise ValueError("IBKR request-result contains an orphan callback")
     if any(item.attempt_id not in attempt_ids for item in ordered_markers):
         raise ValueError("IBKR request-result contains an orphan completion marker")
-    _validate_callback_closure(ordered_attempts, ordered_callbacks, ordered_markers)
-    _validate_attempt_outcomes(request, ordered_attempts, ordered_callbacks, ordered_markers)
+    _validate_callback_closure(
+        ordered_attempts,
+        ordered_callbacks,
+        ordered_markers,
+        allow_recoverable_started=False,
+    )
+    _validate_attempt_outcomes(
+        request,
+        ordered_attempts,
+        ordered_callbacks,
+        ordered_markers,
+        allow_recoverable_started=False,
+    )
 
     successful_attempts = tuple(
         item
@@ -670,6 +697,8 @@ def _validate_callback_closure(
     attempts: Sequence[IbkrHistoricalAttemptEvidence],
     callbacks: Sequence[IbkrHistoricalCallbackEvidence],
     markers: Sequence[IbkrHistoricalCompletionEvidence],
+    *,
+    allow_recoverable_started: bool,
 ) -> None:
     for attempt in attempts:
         attempt_callbacks = tuple(
@@ -714,11 +743,11 @@ def _validate_callback_closure(
                 raise ValueError(
                     "IBKR completion marker does not match its raw completion callback"
                 )
-            expected = (
-                _completion_matches_attempt(marker, attempt)
-                and attempt.terminal_at is not None
-                and marker.completed_at <= attempt.terminal_at
-            )
+            expected = _completion_matches_attempt(marker, attempt)
+            if attempt.terminal_at is not None:
+                expected = expected and marker.completed_at <= attempt.terminal_at
+            elif not allow_recoverable_started:
+                expected = False
             if marker.closure_eligible != expected:
                 raise ValueError("IBKR completion marker eligibility does not replay")
             if marker.closure_eligible:
@@ -762,6 +791,8 @@ def _validate_attempt_outcomes(
     attempts: Sequence[IbkrHistoricalAttemptEvidence],
     callbacks: Sequence[IbkrHistoricalCallbackEvidence],
     markers: Sequence[IbkrHistoricalCompletionEvidence],
+    *,
+    allow_recoverable_started: bool,
 ) -> None:
     for attempt in attempts:
         eligible_markers = tuple(
@@ -771,14 +802,18 @@ def _validate_attempt_outcomes(
             and marker.closure_eligible
             and _completion_matches_attempt(marker, attempt)
         )
+        if len(eligible_markers) > 1:
+            raise ValueError("IBKR attempt has multiple eligible completion markers")
+        if attempt.status is IbkrAttemptStatus.STARTED:
+            if not allow_recoverable_started:
+                raise ValueError("IBKR started attempt has an eligible completion marker")
+            continue
         if attempt.status is IbkrAttemptStatus.SUCCEEDED and len(eligible_markers) != 1:
             raise ValueError(
                 "successful IBKR attempt requires exactly one eligible completion marker"
             )
         if not eligible_markers:
             continue
-        if len(eligible_markers) > 1:
-            raise ValueError("IBKR attempt has multiple eligible completion markers")
         marker = next(iter(eligible_markers))
         eligible_callbacks = tuple(
             callback
