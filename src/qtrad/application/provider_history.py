@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from typing import cast
 
 from qtrad.application.ibkr_results import replay_ibkr_historical_aggregate_result
 from qtrad.domain.events import JsonValue
@@ -24,6 +26,8 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalDataset,
     ProviderHistoricalObservation,
+    ProviderHistoricalPartition,
+    ProviderHistoricalPartitionReference,
 )
 from qtrad.domain.time import require_utc
 
@@ -33,25 +37,18 @@ def build_provider_history_dataset(
     *,
     availability_delay: timedelta,
 ) -> ProviderHistoricalDataset:
-    """Translate only the independently replayable aggregate closure into observations."""
+    """Build bounded partition identities from the independently replayable aggregate closure."""
     policy = ProviderHistoricalAvailabilityPolicy(
         selector=PROVIDER_HISTORY_DECLARED_DELAY,
         policy=PROVIDER_HISTORY_POLICY,
         delay=availability_delay,
     )
-    eligible_instruments = _provider_history_eligible_instruments(artifact)
-    rows = tuple(
-        row
-        for request_result in artifact.request_results
-        for request in (_plan_request(artifact, request_result),)
-        if (
-            request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
-            and str(request.instrument_id) in eligible_instruments
-        )
-        for row in _build_observations(artifact, request, request_result, policy=policy)
+    partitions = tuple(
+        ProviderHistoricalPartitionReference.from_partition(partition)
+        for partition in iter_provider_history_partitions(artifact, policy=policy)
     )
     return ProviderHistoricalDataset.create(
-        rows=rows,
+        partitions=partitions,
         contract_selection_sha256=artifact.plan.contract_selection_sha256,
         plan_sha256=artifact.plan.plan_sha256,
         runtime_sha256=artifact.plan.runtime_sha256,
@@ -64,6 +61,13 @@ def provider_history_partition_row_bounds(
     artifact: IbkrHistoricalResultArtifact,
 ) -> dict[tuple[str, date], int]:
     eligible_instruments = _provider_history_eligible_instruments(artifact)
+    return _partition_row_bounds(artifact, eligible_instruments)
+
+
+def _partition_row_bounds(
+    artifact: IbkrHistoricalResultArtifact,
+    eligible_instruments: frozenset[str],
+) -> dict[tuple[str, date], int]:
     bounds: dict[tuple[str, date], int] = {}
     for request in artifact.plan.requests:
         if (
@@ -82,6 +86,56 @@ def provider_history_partition_row_bounds(
                 bounds[key] = bounds.get(key, 0) + minutes
             day = next_day
     return bounds
+
+
+def iter_provider_history_partitions(
+    artifact: IbkrHistoricalResultArtifact,
+    *,
+    policy: ProviderHistoricalAvailabilityPolicy,
+) -> Iterator[ProviderHistoricalPartition]:
+    """Yield one bounded canonical instrument-day partition at a time."""
+    eligible_instruments = _provider_history_eligible_instruments(artifact)
+    bounds = _partition_row_bounds(artifact, eligible_instruments)
+    result_by_hash = {item.request_sha256: item for item in artifact.request_results}
+    if len(result_by_hash) != len(artifact.request_results):
+        raise ValueError("provider-history request result identities are not unique")
+
+    current_key: tuple[str, date] | None = None
+    current_rows: list[ProviderHistoricalObservation] = []
+    for request in sorted(
+        artifact.plan.requests,
+        key=lambda item: (
+            str(item.instrument_id),
+            item.interval_start,
+            item.interval_end,
+            item.kind.value,
+            item.request_sha256,
+        ),
+    ):
+        if (
+            request.kind is not IbkrHistoricalRequestKind.MIDPOINT_BARS
+            or str(request.instrument_id) not in eligible_instruments
+        ):
+            continue
+        request_result = result_by_hash.get(request.request_sha256)
+        if request_result is None:
+            raise ValueError("provider-history result request is absent from the verified plan")
+        for row in _iter_observations(artifact, request, request_result, policy=policy):
+            key = (row.instrument_id, row.interval_start.date())
+            if current_key is not None and key < current_key:
+                raise ValueError("provider-history observations are not ordered by partition")
+            if current_key is not None and key != current_key:
+                yield ProviderHistoricalPartition.create(rows=tuple(current_rows))
+                current_rows = []
+            current_key = key
+            row_upper_bound = bounds.get(key)
+            if row_upper_bound is None:
+                raise ValueError("provider-history partition is absent from the source plan")
+            if len(current_rows) >= row_upper_bound:
+                raise ValueError("provider-history partition rows exceed source-plan capacity")
+            current_rows.append(row)
+    if current_rows:
+        yield ProviderHistoricalPartition.create(rows=tuple(current_rows))
 
 
 def _provider_history_eligible_instruments(
@@ -110,12 +164,9 @@ def _provider_history_eligible_instruments(
 def replay_provider_history_dataset(
     dataset: ProviderHistoricalDataset,
 ) -> ProviderHistoricalDataset:
-    """Recompute row, availability, and dataset identities from persisted rows."""
-    rebuilt_rows = tuple(
-        ProviderHistoricalObservation.create(**_observation_values(row)) for row in dataset.rows
-    )
+    """Recompute the root identity from bounded semantic partition references."""
     return ProviderHistoricalDataset.create(
-        rows=rebuilt_rows,
+        partitions=dataset.partitions,
         contract_selection_sha256=dataset.contract_selection_sha256,
         plan_sha256=dataset.plan_sha256,
         runtime_sha256=dataset.runtime_sha256,
@@ -143,21 +194,21 @@ def _plan_request(
     return request
 
 
-def _build_observations(
+def _iter_observations(
     artifact: IbkrHistoricalResultArtifact,
     request: IbkrHistoricalRequest,
     request_result: IbkrHistoricalRequestResult,
     *,
     policy: ProviderHistoricalAvailabilityPolicy,
-) -> tuple[ProviderHistoricalObservation, ...]:
+) -> Iterator[ProviderHistoricalObservation]:
     if request_result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED:
         if request_result.accepted_rows:
             raise ValueError(
                 "provider-history cannot accept bars from unsuccessful request evidence"
             )
-        return ()
+        return
     if not request_result.accepted_rows:
-        return ()
+        return
     attempt = next(
         (
             item
@@ -172,114 +223,97 @@ def _build_observations(
         artifact,
         request.instrument_id,
     )
-    rows: list[ProviderHistoricalObservation] = []
     for raw in request_result.accepted_rows:
         row = dict(raw)
         start = _timestamp(row["bar_start"], "bar_start")
         end = _timestamp(row["bar_end"], "bar_end")
-        rows.append(
-            ProviderHistoricalObservation.create(
-                source_class=PROVIDER_HISTORY_SOURCE_CLASS,
-                provider=PROVIDER_HISTORY_PROVIDER,
-                environment=PROVIDER_HISTORY_ENVIRONMENT,
-                instrument_id=str(request.instrument_id),
-                contract_selection_identity=artifact.plan.contract_selection_sha256,
-                plan_sha256=artifact.plan.plan_sha256,
-                interval_start=start,
-                interval_end=end,
-                basis=PROVIDER_HISTORY_BAR_BASIS,
-                open=_price(row["open"], "open"),
-                high=_price(row["high"], "high"),
-                low=_price(row["low"], "low"),
-                close=_price(row["close"], "close"),
-                request_sha256=request.request_sha256,
-                result_sha256=request_result.result_sha256,
-                aggregate_sha256=artifact.aggregate.aggregate_sha256,
-                attempt_id=attempt.attempt_id,
-                attempt_started_at=attempt.started_at,
-                attempt_completed_at=attempt.terminal_at,
-                acquisition_started_at=request_result.acquisition_started_at,
-                acquisition_completed_at=request_result.acquisition_completed_at,
-                available_at=end + policy.delay,
-                availability_selector=policy.selector,
-                availability_policy=policy.policy,
-                availability_delay=policy.delay_text,
-                correction_policy=PROVIDER_HISTORY_CORRECTION_POLICY,
-                schedule_evidence=schedule_evidence,
-                gap_disposition="BAR_ACCEPTED",
-                volume=None if row.get("volume") is None else str(row["volume"]),
-                wap=None if row.get("wap") is None else str(row["wap"]),
-                count=_optional_int(row.get("count"), "count"),
-                callback_sequence=(
-                    None
-                    if row.get("callback_sequence") is None
-                    else _optional_int(row.get("callback_sequence"), "callback_sequence")
-                ),
-            )
+        yield ProviderHistoricalObservation.create(
+            source_class=PROVIDER_HISTORY_SOURCE_CLASS,
+            provider=PROVIDER_HISTORY_PROVIDER,
+            environment=PROVIDER_HISTORY_ENVIRONMENT,
+            instrument_id=str(request.instrument_id),
+            contract_selection_identity=artifact.plan.contract_selection_sha256,
+            plan_sha256=artifact.plan.plan_sha256,
+            interval_start=start,
+            interval_end=end,
+            basis=PROVIDER_HISTORY_BAR_BASIS,
+            open=_price(row["open"], "open"),
+            high=_price(row["high"], "high"),
+            low=_price(row["low"], "low"),
+            close=_price(row["close"], "close"),
+            request_sha256=request.request_sha256,
+            result_sha256=request_result.result_sha256,
+            aggregate_sha256=artifact.aggregate.aggregate_sha256,
+            attempt_id=attempt.attempt_id,
+            attempt_started_at=attempt.started_at,
+            attempt_completed_at=attempt.terminal_at,
+            acquisition_started_at=request_result.acquisition_started_at,
+            acquisition_completed_at=request_result.acquisition_completed_at,
+            available_at=end + policy.delay,
+            availability_selector=policy.selector,
+            availability_policy=policy.policy,
+            availability_delay=policy.delay_text,
+            correction_policy=PROVIDER_HISTORY_CORRECTION_POLICY,
+            schedule_evidence=schedule_evidence,
+            gap_disposition="BAR_ACCEPTED",
+            volume=None if row.get("volume") is None else str(row["volume"]),
+            wap=None if row.get("wap") is None else str(row["wap"]),
+            count=_optional_int(row.get("count"), "count"),
+            callback_sequence=(
+                None
+                if row.get("callback_sequence") is None
+                else _optional_int(row.get("callback_sequence"), "callback_sequence")
+            ),
         )
-    return tuple(rows)
 
 
 def _schedule_evidence(
     artifact: IbkrHistoricalResultArtifact,
     instrument_id: object,
 ) -> dict[str, JsonValue]:
-    schedule_results = [
-        result
-        for result in artifact.request_results
-        if (
-            _plan_request(artifact, result).instrument_id == instrument_id
-            and _plan_request(artifact, result).kind is IbkrHistoricalRequestKind.SCHEDULE
-        )
-    ]
-    if len(schedule_results) != 1:
-        raise ValueError("provider-history requires exactly one schedule result per instrument")
-    result = schedule_results[0]
-    if result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED:
+    schedule_results = sorted(
+        (
+            result
+            for result in artifact.request_results
+            if (
+                _plan_request(artifact, result).instrument_id == instrument_id
+                and _plan_request(artifact, result).kind is IbkrHistoricalRequestKind.SCHEDULE
+            )
+        ),
+        key=lambda result: _plan_request(artifact, result).interval_start,
+    )
+    if not schedule_results:
+        raise ValueError("provider-history requires schedule evidence per instrument")
+    if any(
+        result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED
+        for result in schedule_results
+    ):
         raise ValueError("provider-history requires successful schedule evidence")
+    request_hashes = [
+        _plan_request(artifact, result).request_sha256 for result in schedule_results
+    ]
+    result_hashes = [result.result_sha256 for result in schedule_results]
+    states = {result.session_state for result in schedule_results}
+    sessions = [session for result in schedule_results for session in result.sessions]
+    sessions_json = cast(list[JsonValue], sessions)
+    request_sha256: JsonValue = (
+        request_hashes[0]
+        if len(request_hashes) == 1
+        else cast(list[JsonValue], request_hashes)
+    )
+    result_sha256: JsonValue = (
+        result_hashes[0]
+        if len(result_hashes) == 1
+        else cast(list[JsonValue], result_hashes)
+    )
     return {
-        "request_sha256": _plan_request(artifact, result).request_sha256,
-        "result_sha256": result.result_sha256,
-        "schedule_state": result.session_state,
-        "sessions": list(result.sessions),
+        "request_sha256": request_sha256,
+        "result_sha256": result_sha256,
+        "schedule_state": next(iter(states)) if len(states) == 1 else "MIXED",
+        "sessions": sessions_json,
     }
 
 
-def _observation_values(row: ProviderHistoricalObservation) -> dict[str, object]:
-    return {
-        "source_class": row.source_class,
-        "provider": row.provider,
-        "environment": row.environment,
-        "instrument_id": row.instrument_id,
-        "contract_selection_identity": row.contract_selection_identity,
-        "plan_sha256": row.plan_sha256,
-        "interval_start": row.interval_start,
-        "interval_end": row.interval_end,
-        "basis": row.basis,
-        "open": row.open,
-        "high": row.high,
-        "low": row.low,
-        "close": row.close,
-        "request_sha256": row.request_sha256,
-        "result_sha256": row.result_sha256,
-        "aggregate_sha256": row.aggregate_sha256,
-        "attempt_id": row.attempt_id,
-        "attempt_started_at": row.attempt_started_at,
-        "attempt_completed_at": row.attempt_completed_at,
-        "acquisition_started_at": row.acquisition_started_at,
-        "acquisition_completed_at": row.acquisition_completed_at,
-        "available_at": row.available_at,
-        "availability_selector": row.availability_selector,
-        "availability_policy": row.availability_policy,
-        "availability_delay": row.availability_delay,
-        "correction_policy": row.correction_policy,
-        "schedule_evidence": dict(row.schedule_evidence),
-        "gap_disposition": row.gap_disposition,
-        "volume": row.volume,
-        "wap": row.wap,
-        "count": row.count,
-        "callback_sequence": row.callback_sequence,
-    }
 
 
 def _timestamp(value: object, field: str) -> datetime:

@@ -16,6 +16,7 @@ import polars as pl
 
 from qtrad.application.provider_history import (
     build_provider_history_dataset,
+    iter_provider_history_partitions,
     provider_history_partition_row_bounds,
     replay_provider_history_dataset,
 )
@@ -36,6 +37,8 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalDataset,
     ProviderHistoricalObservation,
+    ProviderHistoricalPartition,
+    ProviderHistoricalPartitionReference,
     sha256_json,
 )
 from qtrad.runtime.ibkr_results import verify_ibkr_historical_result
@@ -136,22 +139,35 @@ def write_provider_history(
     source_files = _source_files(source_root)
     partition_bounds = provider_history_partition_row_bounds(source_artifact)
     source_plan_row_bound = sum(partition_bounds.values())
-    if len(dataset.rows) > source_plan_row_bound:
+    if dataset.row_count > source_plan_row_bound:
         raise ValueError("provider-history rows exceed source-plan capacity")
 
     root = _absolute_output_path(output_directory)
     partition_references: list[dict[str, object]] = []
     partition_paths: set[str] = set()
-    for key, rows in _iter_observation_partitions(dataset.rows):
-        row_upper_bound = partition_bounds.get(key)
+    expected_partitions = iter(dataset.partitions)
+    for partition in iter_provider_history_partitions(
+        source_artifact,
+        policy=dataset.availability_policy,
+    ):
+        row_upper_bound = partition_bounds.get(partition.key)
         if row_upper_bound is None:
             raise ValueError("provider-history partition is absent from the source plan")
-        if len(rows) > row_upper_bound:
+        if partition.row_count > row_upper_bound:
             raise ValueError("provider-history partition rows exceed source-plan capacity")
-        parquet_bytes = _parquet_bytes(rows)
+        try:
+            expected_partition = next(expected_partitions)
+        except StopIteration as error:
+            raise ValueError(
+                "provider-history source replay produced an unexpected partition"
+            ) from error
+        actual_partition = ProviderHistoricalPartitionReference.from_partition(partition)
+        if actual_partition != expected_partition:
+            raise ValueError("provider-history dataset differs from source replay")
+        parquet_bytes = _parquet_bytes(partition.rows)
         if not parquet_bytes or len(parquet_bytes) > _MAX_FILE_BYTES:
             raise ValueError("provider-history Parquet partition exceeds its bound")
-        relative_path = _partition_path(key)
+        relative_path = _partition_path(partition.key)
         if relative_path in partition_paths:
             raise ValueError("provider-history partition path is duplicated")
         partition_paths.add(relative_path)
@@ -160,12 +176,18 @@ def write_provider_history(
             {
                 "path": relative_path,
                 "bytes_sha256": sha256_bytes(parquet_bytes),
-                "row_count": len(rows),
+                "partition_sha256": partition.partition_sha256,
+                "row_count": partition.row_count,
                 "row_upper_bound": row_upper_bound,
             }
         )
+    try:
+        next(expected_partitions)
+    except StopIteration:
+        pass
+    else:
+        raise ValueError("provider-history dataset contains a partition absent from source replay")
 
-    partition_references.sort(key=lambda item: str(item["path"]))
     if len(source_files) + len(partition_references) + 1 > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history closure exceeds its file bound")
     source_manifest_bytes = source_files["manifest.json"]
@@ -198,25 +220,6 @@ def write_provider_history(
     )
     return root / _MANIFEST_NAME
 
-
-def _iter_observation_partitions(
-    rows: tuple[ProviderHistoricalObservation, ...],
-) -> list[tuple[tuple[str, date], tuple[ProviderHistoricalObservation, ...]]]:
-    partitions: list[tuple[tuple[str, date], tuple[ProviderHistoricalObservation, ...]]] = []
-    current_key: tuple[str, date] | None = None
-    current_rows: list[ProviderHistoricalObservation] = []
-    for row in rows:
-        key = (row.instrument_id, row.interval_start.date())
-        if current_key is not None and key < current_key:
-            raise ValueError("provider-history rows are not ordered by partition")
-        if current_key is not None and key != current_key:
-            partitions.append((current_key, tuple(current_rows)))
-            current_rows = []
-        current_key = key
-        current_rows.append(row)
-    if current_key is not None:
-        partitions.append((current_key, tuple(current_rows)))
-    return partitions
 
 
 def _partition_path(key: tuple[str, date]) -> str:
@@ -262,7 +265,7 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
         raise ValueError("provider-history manifest bytes are not canonical")
     dataset_document = _mapping(document["dataset"], "provider-history dataset")
     policy = ProviderHistoricalAvailabilityPolicy.from_json_value(document["availability_policy"])
-    dataset_values = _dataset_from_manifest(dataset_document, policy)
+    dataset = _dataset_from_manifest(dataset_document, policy)
 
     source_reference = _source_reference(document["source_result"])
     if source_reference["path"] != _SOURCE_MANIFEST_PATH:
@@ -284,15 +287,22 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     )
     if source_plan_row_bound != sum(partition_bounds.values()):
         raise ValueError("provider-history source-plan row bound does not match its source")
-    expected_paths = {_MANIFEST_NAME}
+    if dataset.row_count > source_plan_row_bound:
+        raise ValueError("provider-history dataset exceeds its source-plan capacity")
     expected_bound_by_path = {
         _partition_path(key): row_bound for key, row_bound in partition_bounds.items()
+    }
+    expected_key_by_path = {
+        _partition_path(key): key for key in partition_bounds
     }
     files = document["files"]
     if not isinstance(files, list) or len(files) > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history files are invalid or exceed their bound")
+    expected_paths = {_MANIFEST_NAME}
     paths: list[str] = []
-    rows: list[ProviderHistoricalObservation] = []
+    observed_refs: list[ProviderHistoricalPartitionReference] = []
+    expected_refs = {partition.key: partition for partition in dataset.partitions}
+    seen_keys: set[tuple[str, date]] = set()
     for item in files:
         reference = _file_reference(item)
         relative_path = _string(reference["path"], "provider-history partition path")
@@ -302,48 +312,54 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
             raise ValueError("provider-history partition references are not canonical")
         paths.append(relative_path)
         expected_row_bound = expected_bound_by_path[relative_path]
-        if (
-            _int(reference["row_upper_bound"], "provider-history row upper bound")
-            != expected_row_bound
-        ):
-            raise ValueError("provider-history partition bound differs from its source plan")
         row_count = _int(reference["row_count"], "provider-history partition row count")
-        if row_count > expected_row_bound:
-            raise ValueError("provider-history partition exceeds its source-plan bound")
         partition_path = _safe_child(root, relative_path, "provider-history partition")
         parquet_bytes = _read_bounded(partition_path, "provider-history Parquet partition")
         if sha256_bytes(parquet_bytes) != str(reference["bytes_sha256"]):
             raise ValueError("provider-history Parquet partition bytes do not match its reference")
-        rows.extend(
-            _read_parquet_rows(
-                partition_path,
-                expected_row_count=row_count,
-                row_upper_bound=expected_row_bound,
-            )
+        partition = _read_parquet_rows(
+            partition_path,
+            expected_row_count=row_count,
+            row_upper_bound=expected_row_bound,
         )
+        key = partition.key
+        if key != expected_key_by_path[relative_path]:
+            raise ValueError("provider-history partition content differs from its canonical path")
+        if key in seen_keys:
+            raise ValueError("provider-history partition references are duplicated")
+        expected_partition = expected_refs.get(key)
+        actual_partition = ProviderHistoricalPartitionReference.from_partition(partition)
+        if expected_partition is None or actual_partition != expected_partition:
+            raise ValueError(
+                "provider-history partition identity differs from its dataset reference"
+            )
+        if actual_partition.partition_sha256 != str(reference["partition_sha256"]):
+            raise ValueError("provider-history partition identity differs from its file reference")
+        seen_keys.add(key)
+        observed_refs.append(actual_partition)
         expected_paths.add(relative_path)
 
-    if len(rows) != _int(dataset_values["row_count"], "provider-history dataset row count"):
-        raise ValueError("provider-history row count does not match its manifest")
+    if seen_keys != set(expected_refs):
+        raise ValueError("provider-history partition closure differs from its dataset references")
     observed = ProviderHistoricalDataset.create(
-        rows=tuple(rows),
-        contract_selection_sha256=str(dataset_values["contract_selection_sha256"]),
-        plan_sha256=str(dataset_values["plan_sha256"]),
-        runtime_sha256=str(dataset_values["runtime_sha256"]),
-        aggregate_sha256=str(dataset_values["aggregate_sha256"]),
+        partitions=tuple(observed_refs),
+        contract_selection_sha256=dataset.contract_selection_sha256,
+        plan_sha256=dataset.plan_sha256,
+        runtime_sha256=dataset.runtime_sha256,
+        aggregate_sha256=dataset.aggregate_sha256,
         availability_policy=policy,
     )
-    if observed.dataset_sha256 != str(dataset_values["dataset_sha256"]):
+    if observed.dataset_sha256 != dataset.dataset_sha256:
         raise ValueError("provider-history dataset identity does not match its manifest")
     replayed = replay_provider_history_dataset(observed)
     if replayed.dataset_sha256 != observed.dataset_sha256:
-        raise ValueError("provider-history row replay changed its dataset identity")
+        raise ValueError("provider-history partition replay changed its dataset identity")
     expected = build_provider_history_dataset(
         source_artifact,
         availability_delay=policy.delay,
     )
     if expected.dataset_sha256 != observed.dataset_sha256:
-        raise ValueError("provider-history rows do not replay from request-result children")
+        raise ValueError("provider-history partitions do not replay from request-result children")
 
     expected_paths.update(
         f"{_SOURCE_DIRECTORY}/{relative_path}"
@@ -356,7 +372,7 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
 def _dataset_from_manifest(
     value: Mapping[str, object],
     policy: ProviderHistoricalAvailabilityPolicy,
-) -> dict[str, object]:
+) -> ProviderHistoricalDataset:
     _require_exact_keys(
         value,
         {
@@ -370,7 +386,7 @@ def _dataset_from_manifest(
             "runtime_sha256",
             "aggregate_sha256",
             "availability_policy",
-            "observation_sha256",
+            "partitions",
             "row_count",
             "dataset_sha256",
         },
@@ -388,14 +404,41 @@ def _dataset_from_manifest(
         raise ValueError("provider-history dataset environment is unsupported")
     if value["availability_policy"] != policy.as_json_value():
         raise ValueError("provider-history dataset policy differs from its manifest")
-    observation_hashes = value["observation_sha256"]
-    if not isinstance(observation_hashes, list):
-        raise ValueError("provider-history observation identity list is invalid")
-    for observation_hash in observation_hashes:
-        _require_digest(observation_hash, "provider-history observation identity")
-    row_count = _int(value["row_count"], "provider-history dataset row count")
-    if row_count != len(observation_hashes):
-        raise ValueError("provider-history dataset row count is inconsistent")
+    raw_partitions = value["partitions"]
+    if not isinstance(raw_partitions, list) or len(raw_partitions) > _MAX_CLOSURE_FILES:
+        raise ValueError("provider-history partition references are invalid or exceed their bound")
+    partitions: list[ProviderHistoricalPartitionReference] = []
+    for item in raw_partitions:
+        partition = _mapping(item, "provider-history partition reference")
+        _require_exact_keys(
+            partition,
+            {"instrument_id", "partition_date", "row_count", "partition_sha256"},
+            "provider-history partition reference",
+        )
+        instrument_id = _string(partition["instrument_id"], "provider-history partition instrument")
+        partition_date_text = _string(
+            partition["partition_date"],
+            "provider-history partition date",
+        )
+        try:
+            partition_date = date.fromisoformat(partition_date_text)
+        except ValueError as error:
+            raise ValueError("provider-history partition date is invalid") from error
+        if partition_date.isoformat() != partition_date_text:
+            raise ValueError("provider-history partition date is not canonical")
+        partition_sha256 = _string(
+            partition["partition_sha256"],
+            "provider-history partition identity",
+        )
+        _require_digest(partition_sha256, "provider-history partition identity")
+        partitions.append(
+            ProviderHistoricalPartitionReference(
+                instrument_id=instrument_id,
+                partition_date=partition_date,
+                row_count=_int(partition["row_count"], "provider-history partition row count"),
+                partition_sha256=partition_sha256,
+            )
+        )
     lineage = {
         "contract_selection_sha256": _string(
             value["contract_selection_sha256"], "contract_selection_sha256"
@@ -406,25 +449,24 @@ def _dataset_from_manifest(
     }
     for field, digest in lineage.items():
         _require_digest(digest, f"provider-history {field}")
-    identity = {
-        "contract": PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
-        "schema_version": PROVIDER_HISTORY_SCHEMA_VERSION,
-        "source_class": PROVIDER_HISTORY_SOURCE_CLASS,
-        "provider": PROVIDER_HISTORY_PROVIDER,
-        "environment": PROVIDER_HISTORY_ENVIRONMENT,
-        **lineage,
-        "availability_policy": policy.as_json_value(),
-        "observation_sha256": [str(item) for item in observation_hashes],
-    }
+    dataset = ProviderHistoricalDataset.create(
+        partitions=tuple(partitions),
+        contract_selection_sha256=lineage["contract_selection_sha256"],
+        plan_sha256=lineage["plan_sha256"],
+        runtime_sha256=lineage["runtime_sha256"],
+        aggregate_sha256=lineage["aggregate_sha256"],
+        availability_policy=policy,
+    )
+    row_count = _int(value["row_count"], "provider-history dataset row count")
+    if row_count != dataset.row_count:
+        raise ValueError("provider-history dataset row count is inconsistent")
     dataset_sha256 = _string(value["dataset_sha256"], "dataset_sha256")
     _require_digest(dataset_sha256, "dataset_sha256")
-    if dataset_sha256 != sha256_json(identity):
+    if dataset_sha256 != dataset.dataset_sha256:
         raise ValueError("provider-history dataset identity does not match its manifest")
-    return {
-        **lineage,
-        "row_count": row_count,
-        "dataset_sha256": dataset_sha256,
-    }
+    return dataset
+
+
 
 
 def _source_reference(value: object) -> dict[str, object]:
@@ -446,13 +488,14 @@ def _file_reference(value: object) -> dict[str, object]:
     mapping = _mapping(value, "provider-history file reference")
     _require_exact_keys(
         mapping,
-        {"path", "bytes_sha256", "row_count", "row_upper_bound"},
+        {"path", "bytes_sha256", "partition_sha256", "row_count", "row_upper_bound"},
         "file reference",
     )
     _require_digest(mapping["bytes_sha256"], "provider-history file bytes identity")
+    _require_digest(mapping["partition_sha256"], "provider-history partition identity")
     row_count = _int(mapping["row_count"], "provider-history file row count")
     row_upper_bound = _int(mapping["row_upper_bound"], "provider-history row upper bound")
-    if row_count < 0 or row_upper_bound <= 0 or row_count > row_upper_bound:
+    if row_count <= 0 or row_upper_bound <= 0 or row_count > row_upper_bound:
         raise ValueError("provider-history file row bounds are invalid")
     return dict(mapping)
 
@@ -484,20 +527,29 @@ def _read_parquet_rows(
     *,
     expected_row_count: int,
     row_upper_bound: int,
-) -> tuple[ProviderHistoricalObservation, ...]:
-    if expected_row_count < 0 or expected_row_count > row_upper_bound:
+) -> ProviderHistoricalPartition:
+    if expected_row_count <= 0 or expected_row_count > row_upper_bound:
         raise ValueError("provider-history Parquet row bounds are invalid")
     schema = pl.read_parquet_schema(path)
     if set(schema) != set(_OBSERVATION_FIELDS):
         raise ValueError("provider-history Parquet columns are not exact")
-    metadata = pl.read_parquet_metadata(path)
-    if not isinstance(metadata, dict) or not metadata:
-        raise ValueError("provider-history Parquet metadata is invalid")
+    footer_row_count = _parquet_footer_row_count(path)
+    if footer_row_count > row_upper_bound:
+        raise ValueError("provider-history Parquet footer row count exceeds its bound")
+    if footer_row_count != expected_row_count:
+        raise ValueError("provider-history Parquet footer row count does not match its reference")
 
     observed: list[ProviderHistoricalObservation] = []
+    decoded_count = 0
     for frame in pl.scan_parquet(path).collect_batches(chunk_size=_READ_BATCH_ROWS):
         if frame.height > _READ_BATCH_ROWS:
             raise ValueError("provider-history Parquet batch exceeds its bound")
+        next_count = decoded_count + frame.height
+        if next_count > row_upper_bound:
+            raise ValueError("provider-history Parquet decoded rows exceed their bound")
+        if next_count > expected_row_count:
+            raise ValueError("provider-history Parquet decoded rows exceed their reference")
+        decoded_count = next_count
         for raw in frame.to_dicts():
             row = dict(raw)
             schedule = row["schedule_evidence"]
@@ -505,9 +557,23 @@ def _read_parquet_rows(
                 raise ValueError("provider-history schedule evidence column is not canonical JSON")
             row["schedule_evidence"] = json.loads(schedule)
             observed.append(ProviderHistoricalObservation.from_json_value(row))
-    if len(observed) != expected_row_count:
+    if decoded_count != expected_row_count:
         raise ValueError("provider-history Parquet decoded row count does not match its reference")
-    return tuple(observed)
+    return ProviderHistoricalPartition.create(rows=tuple(observed))
+
+
+def _parquet_footer_row_count(path: Path) -> int:
+    """Read the Parquet footer row count without decoding observation columns."""
+    try:
+        footer = pl.scan_parquet(path).select(pl.len().alias("_row_count")).collect()
+    except Exception as error:
+        raise ValueError("provider-history Parquet footer row count is unreadable") from error
+    if footer.height != 1:
+        raise ValueError("provider-history Parquet footer row count is invalid")
+    value = footer.item()
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError("provider-history Parquet footer row count is invalid")
+    return value
 
 
 def _source_files(root: Path) -> dict[str, bytes]:

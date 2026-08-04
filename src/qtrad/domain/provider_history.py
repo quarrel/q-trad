@@ -7,7 +7,7 @@ import json
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from typing import Any, cast
@@ -466,15 +466,134 @@ def _parse_time(value: str, field: str) -> datetime:
 
 
 @dataclass(frozen=True, slots=True)
-class ProviderHistoricalDataset:
-    """Semantic identity for the complete provider-history observation set."""
+class ProviderHistoricalPartition:
+    """Bounded semantic identity for one instrument-day partition."""
 
+    instrument_id: str
+    partition_date: date
     rows: tuple[ProviderHistoricalObservation, ...]
+    partition_sha256: str
+    _identity_validation_bypass: bool = field(default=False, repr=False, compare=False)
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.partition_sha256, "provider-history partition identity")
+        if not self.rows:
+            raise ValueError("provider-history partitions must contain observations")
+        key = (self.instrument_id, self.partition_date)
+        if any(
+            (row.instrument_id, row.interval_start.date()) != key
+            for row in self.rows
+        ):
+            raise ValueError("provider-history partition rows differ from its key")
+        if tuple(sorted(self.rows, key=row_sort_key)) != self.rows:
+            raise ValueError("provider-history partition rows must be in canonical order")
+        identities = [row.observation_sha256 for row in self.rows]
+        if len(set(identities)) != len(identities):
+            raise ValueError("provider-history partition observation identities must be unique")
+        if (
+            not self._identity_validation_bypass
+            and self.partition_sha256 != sha256_json(self.identity_payload())
+        ):
+            raise ValueError("provider-history partition identity does not match canonical content")
+
+    @property
+    def key(self) -> tuple[str, date]:
+        return (self.instrument_id, self.partition_date)
+
+    @property
+    def row_count(self) -> int:
+        return len(self.rows)
+
+    def identity_payload(self) -> dict[str, JsonValue]:
+        return {
+            "contract": PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
+            "schema_version": PROVIDER_HISTORY_SCHEMA_VERSION,
+            "instrument_id": self.instrument_id,
+            "partition_date": self.partition_date.isoformat(),
+            "observation_sha256": [row.observation_sha256 for row in self.rows],
+        }
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {
+            **self.identity_payload(),
+            "row_count": self.row_count,
+            "partition_sha256": self.partition_sha256,
+        }
+
+    @classmethod
+    def create(
+        cls,
+        rows: tuple[ProviderHistoricalObservation, ...],
+    ) -> ProviderHistoricalPartition:
+        if not rows:
+            raise ValueError("provider-history partitions must contain observations")
+        ordered = tuple(sorted(rows, key=row_sort_key))
+        provisional = cls(
+            instrument_id=ordered[0].instrument_id,
+            partition_date=ordered[0].interval_start.date(),
+            rows=ordered,
+            partition_sha256="0" * 64,
+            _identity_validation_bypass=True,
+        )
+        return replace(
+            provisional,
+            partition_sha256=sha256_json(provisional.identity_payload()),
+            _identity_validation_bypass=False,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoricalPartitionReference:
+    """Bounded root-manifest reference to one semantic provider-history partition."""
+
+    instrument_id: str
+    partition_date: date
+    row_count: int
+    partition_sha256: str
+
+    def __post_init__(self) -> None:
+        if not self.instrument_id:
+            raise ValueError("provider-history partition instrument is required")
+        if self.row_count <= 0:
+            raise ValueError("provider-history partition row count must be positive")
+        _require_sha256(self.partition_sha256, "provider-history partition identity")
+
+    @property
+    def key(self) -> tuple[str, date]:
+        return (self.instrument_id, self.partition_date)
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {
+            "instrument_id": self.instrument_id,
+            "partition_date": self.partition_date.isoformat(),
+            "row_count": self.row_count,
+            "partition_sha256": self.partition_sha256,
+        }
+
+    @classmethod
+    def from_partition(
+        cls,
+        partition: ProviderHistoricalPartition,
+    ) -> ProviderHistoricalPartitionReference:
+        return cls(
+            instrument_id=partition.instrument_id,
+            partition_date=partition.partition_date,
+            row_count=partition.row_count,
+            partition_sha256=partition.partition_sha256,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoricalDataset:
+    """Root semantic identity over ordered provider-history partition references."""
+
+    partitions: tuple[ProviderHistoricalPartitionReference, ...]
     contract_selection_sha256: str
     plan_sha256: str
     runtime_sha256: str
     aggregate_sha256: str
     availability_policy: ProviderHistoricalAvailabilityPolicy
+    row_count: int
     dataset_sha256: str
     _identity_validation_bypass: bool = field(default=False, repr=False, compare=False)
 
@@ -490,20 +609,15 @@ class ProviderHistoricalDataset:
             ("dataset identity", self.dataset_sha256),
         ):
             _require_sha256(value, f"provider-history {field_name}")
-        if tuple(sorted(self.rows, key=lambda row: row_sort_key(row))) != self.rows:
-            raise ValueError("provider-history rows must be in canonical order")
-        identities = [row.observation_sha256 for row in self.rows]
-        if len(set(identities)) != len(identities):
-            raise ValueError("provider-history observation identities must be unique")
-        for row in self.rows:
-            if (
-                row.contract_selection_identity != self.contract_selection_sha256
-                or row.plan_sha256 != self.plan_sha256
-                or row.aggregate_sha256 != self.aggregate_sha256
-            ):
-                raise ValueError("provider-history row lineage differs from dataset lineage")
-            if row.availability_delay != self.availability_policy.delay_text:
-                raise ValueError("provider-history row delay differs from dataset policy")
+        if tuple(sorted(self.partitions, key=lambda item: item.key)) != self.partitions:
+            raise ValueError("provider-history partition references must be in canonical order")
+        keys = [partition.key for partition in self.partitions]
+        if len(set(keys)) != len(keys):
+            raise ValueError("provider-history partition references must be unique")
+        if self.row_count < 0 or self.row_count != sum(
+            partition.row_count for partition in self.partitions
+        ):
+            raise ValueError("provider-history dataset row count is inconsistent")
         if not self._identity_validation_bypass and self.dataset_sha256 != sha256_json(
             self.identity_payload()
         ):
@@ -521,20 +635,20 @@ class ProviderHistoricalDataset:
             "runtime_sha256": self.runtime_sha256,
             "aggregate_sha256": self.aggregate_sha256,
             "availability_policy": self.availability_policy.as_json_value(),
-            "observation_sha256": [row.observation_sha256 for row in self.rows],
+            "partitions": [partition.as_json_value() for partition in self.partitions],
         }
 
     def as_json_value(self) -> dict[str, JsonValue]:
         return {
             **self.identity_payload(),
-            "row_count": len(self.rows),
+            "row_count": self.row_count,
             "dataset_sha256": self.dataset_sha256,
         }
 
     @classmethod
     def create(
         cls,
-        rows: tuple[ProviderHistoricalObservation, ...],
+        partitions: tuple[ProviderHistoricalPartitionReference, ...],
         *,
         contract_selection_sha256: str,
         plan_sha256: str,
@@ -542,14 +656,15 @@ class ProviderHistoricalDataset:
         aggregate_sha256: str,
         availability_policy: ProviderHistoricalAvailabilityPolicy,
     ) -> ProviderHistoricalDataset:
-        ordered = tuple(sorted(rows, key=row_sort_key))
+        ordered = tuple(sorted(partitions, key=lambda item: item.key))
         provisional = cls(
-            rows=ordered,
+            partitions=ordered,
             contract_selection_sha256=contract_selection_sha256,
             plan_sha256=plan_sha256,
             runtime_sha256=runtime_sha256,
             aggregate_sha256=aggregate_sha256,
             availability_policy=availability_policy,
+            row_count=sum(partition.row_count for partition in ordered),
             dataset_sha256="0" * 64,
             _identity_validation_bypass=True,
         )
