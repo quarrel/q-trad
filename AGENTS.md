@@ -217,7 +217,6 @@ plausible defaults.
 ## GitHub
 - You have the `gh` CLI tool installed and authenticated locally via your shell context.
 - To view actions, check PRs, or merge queues, run the standard CLI commands via your native shell execution tool (e.g., `gh pr list`, `gh run view`, `gh pr merge --auto`).
-- DO NOT look for or try to invoke dedicated `github__` MCP tools.
 
 The GitHub fine-grained PAT used here cannot be granted Checks API access. This is an expected platform
 limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
