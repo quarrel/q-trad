@@ -1184,6 +1184,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
 @pytest.mark.asyncio
 async def test_cli_postgres_execution_recovers_before_provider_construction(
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
     assert database_url is not None
@@ -1403,6 +1404,9 @@ async def test_cli_postgres_execution_recovers_before_provider_construction(
             expected_start=plan.start,
             expected_end=plan.end,
         )
+        result = json.loads(capsys.readouterr().out)
+        assert result["outcome_count"] == 2
+        assert result["request_status_counts"] == {"SUCCEEDED": 2}
 
         assert events == [
             "pre_recovery_verified",
@@ -1447,6 +1451,73 @@ async def test_cli_postgres_execution_recovers_before_provider_construction(
         )
     finally:
         await engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_execute_pending_reports_recovered_outcomes_without_provider_connection() -> None:
+    store = MemoryExecutionStore()
+    plan, profile = _plan()
+    provider = FakeHistoricalDataPort({kind.value: [] for kind in IbkrHistoricalRequestKind})
+    await store.register_ibkr_historical_plan(plan, plan_bytes=None, registered_at=_NOW)
+
+    for provider_request_id, request in enumerate(plan.requests, start=1):
+        connection_session_id = uuid4()
+        attempt = await store.start_ibkr_historical_attempt(
+            plan_sha256=plan.plan_sha256,
+            request_sha256=request.request_sha256,
+            connection_session_id=connection_session_id,
+            connection_generation=1,
+            provider_request_id=provider_request_id,
+            started_at=_NOW,
+            maximum_attempts=profile.retry_count + 1,
+        )
+        assert attempt is not None
+        callback_kind = (
+            IbkrHistoricalCallbackKind.MIDPOINT_BAR
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+            else IbkrHistoricalCallbackKind.SCHEDULE
+        )
+        callback_payload = (
+            {"open": "1", "close": "1"}
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+            else {"active": False}
+        )
+        for kind, payload in (
+            (callback_kind, callback_payload),
+            (IbkrHistoricalCallbackKind.COMPLETION, {}),
+        ):
+            await store.append_ibkr_historical_callback(
+                attempt_id=attempt.attempt_id,
+                callback=IbkrHistoricalCallback(
+                    connection_session_id=connection_session_id,
+                    provider_request_id=provider_request_id,
+                    connection_generation=1,
+                    kind=kind,
+                    received_at=_NOW,
+                    payload=payload,
+                ),
+            )
+
+    recovered = await store.recover_ibkr_historical_execution(
+        plan_sha256=plan.plan_sha256,
+        recovered_at=_NOW,
+        maximum_attempts=profile.retry_count + 1,
+    )
+    summary = await IbkrHistoricalExecutor(
+        store,
+        provider,
+        FakePacer(profile.profile_sha256),
+        clock=lambda: _NOW,
+    ).execute_pending(
+        plan,
+        profile,
+        recovered_outcomes=recovered,
+    )
+
+    assert summary.outcomes == recovered
+    assert {outcome.request_status for outcome in summary.outcomes} == {IbkrRequestStatus.SUCCEEDED}
+    assert provider.connect_count == 0
+    assert provider.disconnect_count == 0
 
 
 @pytest.mark.skipif(

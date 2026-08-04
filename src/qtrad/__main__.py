@@ -2877,7 +2877,7 @@ async def _execute_ibkr_historical_plan(
             maximum_attempts=request_profile.retry_count + 1,
             allow_recoverable_started=True,
         )
-        await store.recover_ibkr_historical_execution(
+        recovered = await store.recover_ibkr_historical_execution(
             plan_sha256=plan.plan_sha256,
             recovered_at=clock.now(),
             maximum_attempts=request_profile.retry_count + 1,
@@ -2923,7 +2923,11 @@ async def _execute_ibkr_historical_plan(
             provider,
             pacer,
             clock=clock.now,
-        ).execute(plan, request_profile)
+        ).execute_pending(
+            plan,
+            request_profile,
+            recovered_outcomes=recovered,
+        )
     finally:
         await engine.dispose()
     status_counts: dict[str, int] = {}
