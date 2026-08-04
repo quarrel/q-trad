@@ -54,6 +54,7 @@ from qtrad.application.ibkr_results import (
 )
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
+from qtrad.application.provider_history import build_provider_history_dataset
 from qtrad.application.r2_features import (
     R2FoundationInputs,
     feature_schema_for_set,
@@ -121,8 +122,13 @@ from qtrad.runtime.ibkr_historical import (
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
+    verify_ibkr_historical_result_stream,
 )
 from qtrad.runtime.logging import configure_logging
+from qtrad.runtime.provider_history import (
+    publish_provider_history,
+    verify_provider_history,
+)
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     build_qualification_gap_plan_set_history_artifact,
@@ -204,6 +210,17 @@ def _utc_minute_argument(value: str) -> datetime:
     if parsed.second or parsed.microsecond:
         raise argparse.ArgumentTypeError("timestamp must be an ISO-8601 UTC minute")
     return parsed
+
+
+def _availability_delay_argument(value: str) -> timedelta:
+    from qtrad.domain.provider_history import parse_declared_delay
+
+    try:
+        return parse_declared_delay(value)
+    except ValueError as error:
+        raise argparse.ArgumentTypeError(
+            "availability delay must be a whole-second ISO-8601 duration"
+        ) from error
 
 
 def _utc_timestamp_argument(value: str) -> datetime:
@@ -532,6 +549,20 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="independently verify an observation manifest and its Parquet files"
     )
     observations_verify.add_argument("--manifest", type=Path, required=True)
+    provider_history_build = research_observations_sub.add_parser(
+        "build-provider-history",
+        help="build provider-history observations from a verified IBKR result",
+    )
+    provider_history_build.add_argument("--historical-result", type=Path, required=True)
+    provider_history_build.add_argument(
+        "--availability-delay", type=_availability_delay_argument, required=True
+    )
+    provider_history_build.add_argument("--output", type=Path, required=True)
+    provider_history_verify = research_observations_sub.add_parser(
+        "verify-provider-history",
+        help="independently verify provider-history observations and their source closure",
+    )
+    provider_history_verify.add_argument("--manifest", type=Path, required=True)
     research_foundation = research_sub.add_parser(
         "foundation", help="verify an immutable causal foundation bundle"
     )
@@ -1092,6 +1123,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         asyncio.run(_verify_research_observations(settings, clock, args.manifest))
     elif (
         args.command == "research"
+        and args.research_command == "observations"
+        and args.observations_command == "build-provider-history"
+    ):
+        _build_provider_history(
+            historical_result_path=args.historical_result,
+            availability_delay=args.availability_delay,
+            output_path=args.output,
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
+        and args.observations_command == "verify-provider-history"
+    ):
+        _verify_provider_history(args.manifest)
+    elif (
+        args.command == "research"
         and args.research_command == "foundation"
         and args.foundation_command == "build"
     ):
@@ -1626,6 +1673,60 @@ async def _verify_research_observations(
                 "files": len(verified.files),
                 "availability_delay_report": evidence.payload["availability_delay_report"],
                 "revision_delay_report": evidence.payload["revision_delay_report"],
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _build_provider_history(
+    *,
+    historical_result_path: Path,
+    availability_delay: timedelta,
+    output_path: Path,
+) -> None:
+    source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
+    for _ in source_artifact.iter_request_results():
+        pass
+    dataset = build_provider_history_dataset(
+        source_artifact,
+        availability_delay=availability_delay,
+    )
+    manifest_path = publish_provider_history(
+        output_path,
+        source_manifest=historical_result_path,
+        source_artifact=source_artifact,
+        dataset=dataset,
+    )
+    verified = verify_provider_history(manifest_path)
+    if verified.dataset_sha256 != dataset.dataset_sha256:
+        raise RuntimeError("provider-history changed between publication and verification")
+    print(
+        json.dumps(
+            {
+                "contract": verified.CONTRACT,
+                "manifest": str(manifest_path),
+                "dataset_sha256": verified.dataset_sha256,
+                "availability_delay": verified.availability_policy.delay_text,
+                "rows": verified.row_count,
+                "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _verify_provider_history(manifest_path: Path) -> None:
+    dataset = verify_provider_history(manifest_path)
+    print(
+        json.dumps(
+            {
+                "contract": dataset.CONTRACT,
+                "manifest": str(manifest_path),
+                "dataset_sha256": dataset.dataset_sha256,
+                "availability_delay": dataset.availability_policy.delay_text,
+                "rows": dataset.row_count,
+                "verified": True,
             },
             sort_keys=True,
         )
