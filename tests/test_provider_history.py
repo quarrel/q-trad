@@ -675,3 +675,19 @@ def test_provider_history_streams_one_result_and_partition_at_a_time(
 
     assert max_result_live == 1
     assert max_partition_live == 1
+
+
+def test_provider_history_replays_source_before_parquet_decoding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    child = next((manifest.parent / "source-result" / "requests").glob("*.json"))
+    child.write_bytes(child.read_bytes() + b"mutation")
+
+    def fail_if_decoded(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("Parquet decoding must not begin before Stage 6 replay")
+
+    monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", fail_if_decoded)
+    with pytest.raises(ValueError, match="child bytes digest"):
+        verify_provider_history(manifest)

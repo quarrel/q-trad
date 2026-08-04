@@ -291,6 +291,12 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
     source_stream = verify_ibkr_historical_result_stream(source_path)
+    expected = build_provider_history_dataset(
+        source_stream,
+        availability_delay=policy.delay,
+    )
+    if expected.dataset_sha256 != dataset.dataset_sha256:
+        raise ValueError("provider-history dataset does not replay from request-result children")
     if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
         raise ValueError("embedded IBKR result identity does not match provider history")
     if source_stream.plan.plan_sha256 != source_reference["plan_sha256"]:
@@ -378,12 +384,6 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     replayed = replay_provider_history_dataset(observed)
     if replayed.dataset_sha256 != observed.dataset_sha256:
         raise ValueError("provider-history partition replay changed its dataset identity")
-    expected = build_provider_history_dataset(
-        source_stream,
-        availability_delay=policy.delay,
-    )
-    if expected.dataset_sha256 != observed.dataset_sha256:
-        raise ValueError("provider-history partitions do not replay from request-result children")
     expected_paths.update(
         f"{_SOURCE_DIRECTORY}/{relative_path}" for relative_path in source_file_paths
     )
