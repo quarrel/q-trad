@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import io
 import json
 import os
@@ -15,6 +16,7 @@ from typing import cast
 import polars as pl
 
 from qtrad.application.provider_history import (
+    ProviderHistorySource,
     build_provider_history_dataset,
     iter_provider_history_partitions,
     provider_history_partition_row_bounds,
@@ -23,7 +25,8 @@ from qtrad.application.provider_history import (
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
-    IbkrHistoricalResultArtifact,
+    MAX_IBKR_RESULT_BYTES,
+    MAX_IBKR_RESULT_CHILDREN,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -41,9 +44,12 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalPartitionReference,
     sha256_json,
 )
-from qtrad.runtime.ibkr_results import verify_ibkr_historical_result
+from qtrad.runtime.ibkr_results import (
+    verify_ibkr_historical_result_stream,
+)
 
 _MANIFEST_NAME = "manifest.json"
+_PLAN_NAME = "plan.json"
 _OBSERVATIONS_DIRECTORY = "observations"
 _SOURCE_DIRECTORY = "source-result"
 _SOURCE_MANIFEST_PATH = f"{_SOURCE_DIRECTORY}/manifest.json"
@@ -94,7 +100,7 @@ def publish_provider_history(
     output_directory: Path,
     *,
     source_manifest: Path,
-    source_artifact: IbkrHistoricalResultArtifact,
+    source_artifact: ProviderHistorySource,
     dataset: ProviderHistoricalDataset,
 ) -> Path:
     """Stage, verify, and atomically create one provider-history closure."""
@@ -131,12 +137,19 @@ def write_provider_history(
     output_directory: Path,
     *,
     source_root: Path,
-    source_artifact: IbkrHistoricalResultArtifact,
+    source_artifact: ProviderHistorySource,
     dataset: ProviderHistoricalDataset,
 ) -> Path:
     """Write one bounded provider-history closure without replacing any bytes."""
     _prepare_output_directory(output_directory)
     source_files = _source_files(source_root)
+    source_manifest_bytes = _read_bounded(
+        source_root / _MANIFEST_NAME,
+        "IBKR historical result manifest",
+    )
+    source_digests = _source_file_digests(source_artifact, source_manifest_bytes)
+    if source_files != set(source_digests):
+        raise ValueError("source result closure differs from its manifest")
     partition_bounds = provider_history_partition_row_bounds(source_artifact)
     source_plan_row_bound = sum(partition_bounds.values())
     if dataset.row_count > source_plan_row_bound:
@@ -190,7 +203,6 @@ def write_provider_history(
 
     if len(source_files) + len(partition_references) + 1 > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history closure exceeds its file bound")
-    source_manifest_bytes = source_files["manifest.json"]
     source_reference = {
         "path": _SOURCE_MANIFEST_PATH,
         "contract": HISTORICAL_RESULT_CONTRACT,
@@ -212,8 +224,13 @@ def write_provider_history(
         **manifest_identity,
         "manifest_sha256": _sha256_json(manifest_identity),
     }
-    for relative_path, payload in source_files.items():
-        _write_create_only(root / _SOURCE_DIRECTORY / relative_path, payload)
+    for relative_path in source_files:
+        _copy_source_file(
+            source_root,
+            root / _SOURCE_DIRECTORY,
+            relative_path,
+            expected_digest=source_digests[relative_path],
+        )
     _write_create_only(
         root / _MANIFEST_NAME,
         canonical_json_bytes(cast(Mapping[str, JsonValue], manifest_document)),
@@ -273,13 +290,13 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     source_bytes = _read_bounded(source_path, "embedded IBKR result manifest")
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
-    source_artifact = verify_ibkr_historical_result(source_path)
-    if source_artifact.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
+    source_stream = verify_ibkr_historical_result_stream(source_path)
+    if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
         raise ValueError("embedded IBKR result identity does not match provider history")
-    if source_artifact.plan.plan_sha256 != source_reference["plan_sha256"]:
+    if source_stream.plan.plan_sha256 != source_reference["plan_sha256"]:
         raise ValueError("embedded IBKR plan identity does not match provider history")
-
-    partition_bounds = provider_history_partition_row_bounds(source_artifact)
+    source_file_paths = _source_files(source_stream.source_root)
+    partition_bounds = provider_history_partition_row_bounds(source_stream)
     source_plan_row_bound = _int(
         document["source_plan_row_bound"],
         "provider-history source-plan row bound",
@@ -295,6 +312,8 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     files = document["files"]
     if not isinstance(files, list) or len(files) > _MAX_CLOSURE_FILES:
         raise ValueError("provider-history files are invalid or exceed their bound")
+    if 1 + len(source_file_paths) + len(files) > _MAX_CLOSURE_FILES:
+        raise ValueError("provider-history closure exceeds its file bound")
     expected_paths = {_MANIFEST_NAME}
     paths: list[str] = []
     observed_refs: list[ProviderHistoricalPartitionReference] = []
@@ -309,6 +328,14 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
             raise ValueError("provider-history partition references are not canonical")
         paths.append(relative_path)
         expected_row_bound = expected_bound_by_path[relative_path]
+        declared_row_bound = _int(
+            reference["row_upper_bound"],
+            "provider-history partition row upper bound",
+        )
+        if declared_row_bound != expected_row_bound:
+            raise ValueError(
+                "provider-history partition row upper bound differs from its source plan"
+            )
         row_count = _int(reference["row_count"], "provider-history partition row count")
         partition_path = _safe_child(root, relative_path, "provider-history partition")
         parquet_bytes = _read_bounded(partition_path, "provider-history Parquet partition")
@@ -352,15 +379,13 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     if replayed.dataset_sha256 != observed.dataset_sha256:
         raise ValueError("provider-history partition replay changed its dataset identity")
     expected = build_provider_history_dataset(
-        source_artifact,
+        source_stream,
         availability_delay=policy.delay,
     )
     if expected.dataset_sha256 != observed.dataset_sha256:
         raise ValueError("provider-history partitions do not replay from request-result children")
-
     expected_paths.update(
-        f"{_SOURCE_DIRECTORY}/{relative_path}"
-        for relative_path in _source_files_from_disk(root / _SOURCE_DIRECTORY)
+        f"{_SOURCE_DIRECTORY}/{relative_path}" for relative_path in source_file_paths
     )
     _require_exact_tree(root, expected_paths)
     return observed
@@ -571,9 +596,9 @@ def _parquet_footer_row_count(path: Path) -> int:
     return value
 
 
-def _source_files(root: Path) -> dict[str, bytes]:
+def _source_files(root: Path) -> set[str]:
     root = _require_directory(root, "source result root")
-    files: dict[str, bytes] = {}
+    files: set[str] = set()
     for path in root.rglob("*"):
         if path.is_symlink():
             raise ValueError("source result closure contains a symlink")
@@ -581,17 +606,62 @@ def _source_files(root: Path) -> dict[str, bytes]:
             relative = path.relative_to(root).as_posix()
             if not relative or relative.startswith("/") or ".." in Path(relative).parts:
                 raise ValueError("source result closure contains an unsafe path")
-            files[relative] = _read_bounded(path, f"source result child {relative}")
+            files.add(relative)
         elif not path.is_dir():
             raise ValueError("source result closure contains a non-regular path")
-    if "manifest.json" not in files:
-        raise FileNotFoundError("source result closure has no manifest")
+    if _PLAN_NAME not in files or _MANIFEST_NAME not in files:
+        raise FileNotFoundError("source result closure is missing its manifest or plan")
     return files
 
 
+def _source_file_digests(
+    source: ProviderHistorySource,
+    manifest_bytes: bytes,
+) -> dict[str, str]:
+    digests = {
+        _MANIFEST_NAME: sha256_bytes(manifest_bytes),
+        _PLAN_NAME: source.aggregate.plan.bytes_sha256,
+    }
+    for reference in source.aggregate.request_results:
+        digests[reference.path] = reference.bytes_sha256
+    if len(digests) > MAX_IBKR_RESULT_CHILDREN:
+        raise ValueError("source result closure exceeds its bound")
+    return digests
+
+
+def _copy_source_file(
+    source_root: Path,
+    destination_root: Path,
+    relative_path: str,
+    *,
+    expected_digest: str,
+) -> None:
+    if not relative_path or relative_path.startswith("/") or ".." in Path(relative_path).parts:
+        raise ValueError("source result closure contains an unsafe path")
+    source_path = source_root / relative_path
+    if source_path.is_symlink() or not source_path.is_file():
+        raise ValueError(f"source result child is not a regular file: {relative_path}")
+    size = source_path.stat().st_size
+    if size <= 0 or size > MAX_IBKR_RESULT_BYTES:
+        raise ValueError(f"source result child exceeds its bounded size: {relative_path}")
+    target = destination_root / relative_path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    digest = hashlib.sha256()
+    try:
+        with source_path.open("rb") as source, target.open("xb") as destination:
+            while chunk := source.read(1024 * 1024):
+                digest.update(chunk)
+                destination.write(chunk)
+    except FileExistsError as error:
+        raise FileExistsError(f"provider-history path already exists: {target}") from error
+    if digest.hexdigest() != expected_digest:
+        raise ValueError(
+            f"source result child bytes digest does not match its manifest: {relative_path}"
+        )
+
+
 def _source_files_from_disk(root: Path) -> set[str]:
-    files = _source_files(root)
-    return set(files)
+    return _source_files(root)
 
 
 def _require_exact_tree(root: Path, expected: set[str]) -> None:

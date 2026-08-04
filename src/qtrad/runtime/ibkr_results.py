@@ -6,7 +6,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
@@ -14,8 +14,7 @@ from typing import cast
 from uuid import UUID
 
 from qtrad.application.ibkr_results import (
-    replay_ibkr_historical_aggregate_result,
-    replay_ibkr_historical_request_result,
+    IbkrHistoricalAggregateReplay,
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
@@ -24,6 +23,7 @@ from qtrad.domain.ibkr_execution import (
     IbkrRequestStatus,
     IbkrTerminalDisposition,
 )
+from qtrad.domain.ibkr_historical import IbkrHistoricalPlan, IbkrHistoricalRequest
 from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
     MAX_IBKR_RESULT_BYTES,
@@ -108,14 +108,70 @@ def publish_ibkr_historical_result(
     return destination / _MANIFEST_NAME
 
 
-def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
-    """Verify a result directory from files only; PostgreSQL is never queried."""
+class IbkrHistoricalResultStream:
+    """Read and replay one Stage 6 request-result child at a time."""
 
+    def __init__(
+        self,
+        *,
+        source_root: Path,
+        plan: IbkrHistoricalPlan,
+        plan_bytes: bytes,
+        aggregate: IbkrHistoricalAggregateResult,
+        references_by_path: Mapping[str, IbkrHistoricalChildReference],
+    ) -> None:
+        self.source_root = source_root
+        self.plan = plan
+        self.plan_bytes = plan_bytes
+        self.aggregate = aggregate
+        self._references_by_path = references_by_path
+        self.source_files = tuple(sorted({_MANIFEST_NAME, _PLAN_NAME, *references_by_path}))
+
+    def iter_request_results(
+        self,
+        *,
+        request_order: Sequence[IbkrHistoricalRequest] | None = None,
+    ) -> Iterator[IbkrHistoricalRequestResult]:
+        if request_order is None:
+            order = tuple(sorted(self.plan.requests, key=lambda item: item.request_sha256))
+        else:
+            order = tuple(request_order)
+        if len(order) != len(self.plan.requests) or {item.request_sha256 for item in order} != {
+            item.request_sha256 for item in self.plan.requests
+        }:
+            raise ValueError("IBKR result stream request order differs from the plan")
+        replay = IbkrHistoricalAggregateReplay(self.plan, self.plan_bytes, self.aggregate)
+        for request in order:
+            relative_path = f"{_REQUEST_DIRECTORY}/{request.request_sha256}.json"
+            reference = self._references_by_path[relative_path]
+            child_path = _safe_child(self.source_root, relative_path, "IBKR request-result child")
+            child_bytes = _read_bytes(child_path, "IBKR request-result child")
+            if sha256_bytes(child_bytes) != reference.bytes_sha256:
+                raise ValueError(
+                    "IBKR request-result child bytes digest does not match its manifest"
+                )
+            result = _request_result_from_json(_parse_json(child_bytes, "IBKR request result"))
+            if child_bytes != canonical_json_bytes(result.as_json_value()):
+                raise ValueError("IBKR request result bytes are not canonical")
+            if result.plan_sha256 != self.plan.plan_sha256:
+                raise ValueError("IBKR request result belongs to another plan")
+            if result.request_sha256 != request.request_sha256:
+                raise ValueError("IBKR request result does not match its planned request")
+            if result.result_sha256 != reference.semantic_sha256:
+                raise ValueError(
+                    "IBKR request result semantic identity does not match its manifest"
+                )
+            replay.accept(request, result)
+            yield result
+        replay.finish()
+
+
+def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStream:
+    """Verify a Stage 6 closure header and return a one-child-at-a-time reader."""
     manifest_path = _require_file(path, "IBKR result manifest")
     root = manifest_path.parent
     manifest_bytes = _read_bytes(manifest_path, "IBKR aggregate result")
-    manifest_document = _parse_json(manifest_bytes, "IBKR aggregate result")
-    aggregate = _aggregate_from_json(manifest_document)
+    aggregate = _aggregate_from_json(_parse_json(manifest_bytes, "IBKR aggregate result"))
     if manifest_bytes != canonical_json_bytes(aggregate.as_json_value()):
         raise ValueError("IBKR aggregate result bytes are not canonical")
     if aggregate.plan.path != _PLAN_NAME:
@@ -131,49 +187,38 @@ def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
         raise ValueError("IBKR published plan semantic identity does not match its manifest")
     if aggregate.runtime_sha256 != plan.runtime_sha256:
         raise ValueError("IBKR aggregate runtime identity differs from its plan")
-    expected_paths = {_MANIFEST_NAME, _PLAN_NAME, _REQUEST_DIRECTORY}
     if len(aggregate.request_results) > MAX_IBKR_RESULT_CHILDREN:
         raise ValueError("IBKR aggregate child count exceeds its bound")
     request_hashes = {request.request_sha256 for request in plan.requests}
     references_by_path = {reference.path: reference for reference in aggregate.request_results}
-    if len(references_by_path) != len(aggregate.request_results):
-        raise ValueError("IBKR aggregate child paths are duplicated")
-    if set(references_by_path) != {
+    expected_paths = {
         f"{_REQUEST_DIRECTORY}/{request_hash}.json" for request_hash in request_hashes
-    }:
+    }
+    if set(references_by_path) != expected_paths:
         raise ValueError("IBKR aggregate child closure differs from its plan")
-    results: list[IbkrHistoricalRequestResult] = []
-    for request in sorted(plan.requests, key=lambda item: item.request_sha256):
-        relative_path = f"{_REQUEST_DIRECTORY}/{request.request_sha256}.json"
-        reference = references_by_path[relative_path]
+    for reference in aggregate.request_results:
         if reference.contract != REQUEST_RESULT_CONTRACT:
             raise ValueError("IBKR aggregate request child contract is unsupported")
-        child_path = _safe_child(root, relative_path, "IBKR request-result child")
-        if not child_path.is_file():
-            raise ValueError("IBKR request-result child closure is missing")
-        child_bytes = _read_bytes(child_path, "IBKR request-result child")
-        if sha256_bytes(child_bytes) != reference.bytes_sha256:
-            raise ValueError("IBKR request-result child bytes digest does not match its manifest")
-        result_document = _parse_json(child_bytes, "IBKR request result")
-        result = _request_result_from_json(result_document)
-        if child_bytes != canonical_json_bytes(result.as_json_value()):
-            raise ValueError("IBKR request result bytes are not canonical")
-        if result.plan_sha256 != plan.plan_sha256:
-            raise ValueError("IBKR request result belongs to another plan")
-        if result.request_sha256 != request.request_sha256:
-            raise ValueError("IBKR request result does not match its planned request")
-        if result.result_sha256 != reference.semantic_sha256:
-            raise ValueError("IBKR request result semantic identity does not match its manifest")
-        replay_ibkr_historical_request_result(request, result)
-        results.append(result)
-        expected_paths.add(relative_path)
-    _require_exact_tree(root, expected_paths)
-    replay_ibkr_historical_aggregate_result(plan, plan_bytes, tuple(results), aggregate)
-    return IbkrHistoricalResultArtifact(
+        _safe_child(root, reference.path, "IBKR request-result child")
+    _require_exact_tree(root, {_MANIFEST_NAME, _PLAN_NAME, _REQUEST_DIRECTORY, *expected_paths})
+    return IbkrHistoricalResultStream(
+        source_root=root,
         plan=plan,
         plan_bytes=plan_bytes,
-        request_results=tuple(results),
         aggregate=aggregate,
+        references_by_path=references_by_path,
+    )
+
+
+def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
+    """Verify a result directory from files only; PostgreSQL is never queried."""
+    stream = verify_ibkr_historical_result_stream(path)
+    results = tuple(stream.iter_request_results())
+    return IbkrHistoricalResultArtifact(
+        plan=stream.plan,
+        plan_bytes=stream.plan_bytes,
+        request_results=results,
+        aggregate=stream.aggregate,
     )
 
 

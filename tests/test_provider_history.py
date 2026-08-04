@@ -7,6 +7,7 @@ from uuid import UUID
 
 import pytest
 
+import qtrad.application.provider_history as provider_history_application
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
 from qtrad.application.provider_history import (
@@ -41,12 +42,20 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalExecutionSnapshot,
     IbkrHistoricalPlanSnapshot,
     IbkrHistoricalRequestSnapshot,
+    canonical_json_bytes,
     sha256_bytes,
 )
 from qtrad.domain.identifiers import InstrumentId
-from qtrad.domain.provider_history import ProviderHistoricalObservation
+from qtrad.domain.provider_history import (
+    ProviderHistoricalAvailabilityPolicy,
+    ProviderHistoricalObservation,
+)
 from qtrad.runtime import provider_history as provider_history_runtime
-from qtrad.runtime.ibkr_results import write_ibkr_historical_result
+from qtrad.runtime.ibkr_results import (
+    IbkrHistoricalResultStream,
+    verify_ibkr_historical_result_stream,
+    write_ibkr_historical_result,
+)
 from qtrad.runtime.provider_history import publish_provider_history, verify_provider_history
 from tests.test_ibkr_historical_results import _build_fixture
 
@@ -577,3 +586,92 @@ def test_provider_history_rejects_footer_overbound_before_decoding(
             row_upper_bound=bounds[partition.key],
         )
     assert not decoded
+
+
+def test_provider_history_rejects_declared_row_upper_bound_mutation(tmp_path: Path) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    document = json.loads(manifest.read_text())
+    document["files"][0]["row_upper_bound"] += 1
+    identity = dict(document)
+    identity.pop("manifest_sha256")
+    document["manifest_sha256"] = sha256_json(identity)
+    manifest.write_bytes(canonical_json_bytes(document))
+
+    with pytest.raises(ValueError, match="row upper bound"):
+        verify_provider_history(manifest)
+
+
+def test_provider_history_enforces_combined_closure_file_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    monkeypatch.setattr(provider_history_runtime, "_MAX_CLOSURE_FILES", 5)
+
+    with pytest.raises(ValueError, match="closure exceeds its file bound"):
+        verify_provider_history(manifest)
+
+
+def test_provider_history_streams_one_result_and_partition_at_a_time(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    artifact = _build_stage6_artifact(day_count=2)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    source_stream = verify_ibkr_historical_result_stream(result_manifest)
+    result_live = 0
+    max_result_live = 0
+    partition_live = 0
+    max_partition_live = 0
+    original_results = IbkrHistoricalResultStream.iter_request_results
+    original_partitions = provider_history_application.iter_provider_history_partitions
+
+    def tracked_results(
+        stream: IbkrHistoricalResultStream,
+        *,
+        request_order: tuple[IbkrHistoricalRequest, ...] | None = None,
+    ):
+        nonlocal result_live, max_result_live
+        for result in original_results(stream, request_order=request_order):
+            result_live += 1
+            max_result_live = max(max_result_live, result_live)
+            yield result
+            result_live -= 1
+
+    def tracked_partitions(
+        source: provider_history_application.ProviderHistorySource,
+        *,
+        policy: ProviderHistoricalAvailabilityPolicy,
+    ):
+        nonlocal partition_live, max_partition_live
+        for partition in original_partitions(source, policy=policy):
+            partition_live += 1
+            max_partition_live = max(max_partition_live, partition_live)
+            yield partition
+            partition_live -= 1
+
+    monkeypatch.setattr(IbkrHistoricalResultStream, "iter_request_results", tracked_results)
+    monkeypatch.setattr(
+        provider_history_application,
+        "iter_provider_history_partitions",
+        tracked_partitions,
+    )
+    monkeypatch.setattr(
+        provider_history_runtime,
+        "iter_provider_history_partitions",
+        tracked_partitions,
+    )
+    dataset = build_provider_history_dataset(
+        source_stream,
+        availability_delay=timedelta(minutes=5),
+    )
+    manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=source_stream,
+        dataset=dataset,
+    )
+    verify_provider_history(manifest)
+
+    assert max_result_live == 1
+    assert max_partition_live == 1

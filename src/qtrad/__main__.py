@@ -122,6 +122,7 @@ from qtrad.runtime.ibkr_historical import (
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
+    verify_ibkr_historical_result_stream,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.provider_history import (
@@ -1684,7 +1685,7 @@ def _build_provider_history(
     availability_delay: timedelta,
     output_path: Path,
 ) -> None:
-    source_artifact = verify_ibkr_historical_result(historical_result_path)
+    source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
     dataset = build_provider_history_dataset(
         source_artifact,
         availability_delay=availability_delay,
