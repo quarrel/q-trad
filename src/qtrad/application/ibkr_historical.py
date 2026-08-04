@@ -394,6 +394,9 @@ def build_ibkr_historical_plan(
         raise ValueError("IBKR historical plan end must follow start")
     if any(value.second or value.microsecond for value in (start, end)):
         raise ValueError("IBKR historical plan range must align to UTC minutes")
+    validate_ibkr_historical_index_selection(
+        selection, asset_class_by_instrument=asset_class_by_instrument
+    )
     accepted = tuple(
         sorted(
             (
@@ -548,6 +551,27 @@ def _catalogue_asset_class(
         raise ValueError(
             f"IBKR historical plan has no authenticated catalogue asset class for {instrument_id}"
         ) from error
+
+
+def validate_ibkr_historical_index_selection(
+    selection: IbkrContractSelection,
+    *,
+    asset_class_by_instrument: Mapping[InstrumentId, AssetClass],
+) -> None:
+    """Require the Stage 5 CFD-only product boundary for every eligible index."""
+    for decision in selection.decisions:
+        if (
+            decision.decision is IbkrContractDecision.ACCEPTED_EXACT_CONTRACT
+            and decision.acquisition_eligible
+            and _catalogue_asset_class(decision.instrument_id, asset_class_by_instrument)
+            is AssetClass.INDEX
+        ):
+            fingerprint = decision.fingerprint
+            if fingerprint is None or fingerprint.security_type != "CFD":
+                raise ValueError(
+                    "IBKR midpoint historical plans require every "
+                    "acquisition-eligible index contract to be a CFD"
+                )
 
 
 def _request_sort_key(value: IbkrHistoricalRequest) -> tuple[str, str, datetime, str]:

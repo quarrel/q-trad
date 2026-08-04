@@ -11,7 +11,10 @@ from itertools import count, pairwise
 from typing import Protocol, cast
 from uuid import UUID
 
-from qtrad.application.ibkr_historical import build_ibkr_historical_request_profile
+from qtrad.application.ibkr_historical import (
+    build_ibkr_historical_request_profile,
+    validate_ibkr_historical_index_selection,
+)
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrHistoricalCallback,
@@ -617,6 +620,9 @@ def validate_ibkr_historical_canary_selection(
     """Prove each canary representative is the selected contract for its catalogue group."""
     if evidence.selection_sha256 != selection.selection_sha256:
         raise ValueError("IBKR canary selection hash does not match the verified selection")
+    validate_ibkr_historical_index_selection(
+        selection, asset_class_by_instrument=asset_class_by_instrument
+    )
     decisions_by_instrument = {item.instrument_id: item for item in selection.decisions}
     for group in IBKR_CANARY_GROUPS:
         group_cases = tuple(item.case for item in evidence.cases if item.case.group is group)

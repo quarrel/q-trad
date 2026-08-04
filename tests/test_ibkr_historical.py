@@ -1220,6 +1220,62 @@ def test_historical_plan_is_deterministic_file_replayable_and_uses_frozen_midpoi
     assert load_ibkr_historical_plan(plan_path) == plan
 
 
+def test_historical_plan_rejects_additional_eligible_stk_index(
+    tmp_path: Path,
+) -> None:
+    paths = _write_plan_closure(tmp_path)
+    selection = load_ibkr_contract_selection(paths["selection"])
+    index_decision = next(
+        decision
+        for decision in selection.decisions
+        if decision.instrument_id == InstrumentId("index:spx")
+    )
+    assert index_decision.fingerprint is not None
+    additional_instrument_id = InstrumentId("index:additional-stk")
+    additional_decision = replace(
+        index_decision,
+        instrument_id=additional_instrument_id,
+        fingerprint=replace(
+            index_decision.fingerprint,
+            con_id=90000001,
+            symbol="STKX",
+            security_type="STK",
+            local_symbol="STKX",
+            trading_class="STKX",
+        ),
+    )
+    decisions = (*selection.decisions, additional_decision)
+    mutated_selection = replace(
+        selection,
+        decisions=decisions,
+        selection_sha256=sha256_json(
+            {
+                **selection.identity_payload(),
+                "decisions": [item.as_json_value() for item in decisions],
+            }
+        ),
+    )
+    runtime = load_ibkr_runtime_lock(paths["runtime"])
+    request_profile = load_ibkr_historical_request_profile(paths["profile"])
+
+    with pytest.raises(ValueError, match="CFD"):
+        build_ibkr_historical_plan(
+            selection=mutated_selection,
+            runtime=runtime,
+            request_profile=request_profile,
+            asset_class_by_instrument={
+                InstrumentId("fx:eur-usd"): AssetClass.FX,
+                InstrumentId("index:spx"): AssetClass.INDEX,
+                additional_instrument_id: AssetClass.INDEX,
+                InstrumentId("commodity:gold"): AssetClass.COMMODITY,
+            },
+            start=datetime(2026, 2, 1, tzinfo=UTC),
+            end=datetime(2026, 2, 15, tzinfo=UTC),
+            planner_qtrad_commit=runtime.qtrad_commit,
+            planner_qtrad_image_digest=runtime.qtrad_image_digest,
+        )
+
+
 def test_historical_plan_builder_and_verifier_replay_authenticated_lower_artifacts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1333,7 +1389,13 @@ def test_historical_plan_property_preserves_exact_utc_half_open_coverage(
 def test_historical_plan_uses_catalogue_asset_class_for_mismatched_namespace() -> None:
     base_selection = _selection(_review())
     instrument_id = InstrumentId("fx:index-named")
-    decision = replace(base_selection.decisions[0], instrument_id=instrument_id)
+    base_fingerprint = base_selection.decisions[0].fingerprint
+    assert base_fingerprint is not None
+    decision = replace(
+        base_selection.decisions[0],
+        instrument_id=instrument_id,
+        fingerprint=replace(base_fingerprint, security_type="CFD"),
+    )
     selection_identity = {
         **base_selection.identity_payload(),
         "decisions": [decision.as_json_value()],
