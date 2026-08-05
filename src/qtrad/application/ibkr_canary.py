@@ -1124,8 +1124,8 @@ def _verify_completion_payload(
             bar_timestamps = [cast(int, item.payload["date"]) for item in bars]
             first_bar_timestamp = min(bar_timestamps)
             last_bar_timestamp = max(bar_timestamps)
-            if int(start.timestamp()) != first_bar_timestamp:
-                raise ValueError("canary completion start does not match first retained bar")
+            if first_bar_timestamp < int(start.timestamp()):
+                raise ValueError("canary completion range starts after first retained bar")
             if int(end.timestamp()) < last_bar_timestamp:
                 raise ValueError("canary completion end does not contain last retained bar")
         return

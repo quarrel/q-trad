@@ -1052,3 +1052,49 @@ def test_canary_representatives_reject_wrong_group_and_non_cfd_index() -> None:
             _selection_for_representatives(index_security_type="STK"),
             representatives=_representative_ids(),
         )
+
+
+def _midpoint_bar_callback(timestamp: int) -> IbkrHistoricalCallback:
+    return IbkrHistoricalCallback(
+        connection_session_id=UUID("11111111-1111-4111-8111-111111111111"),
+        provider_request_id=1_000_000,
+        connection_generation=1,
+        kind=IbkrHistoricalCallbackKind.MIDPOINT_BAR,
+        received_at=_START,
+        payload={
+            "date": timestamp,
+            "open": "1",
+            "high": "1",
+            "low": "1",
+            "close": "1",
+        },
+    )
+
+
+def test_completion_range_allows_session_gap_before_first_bar() -> None:
+    case = _cases()[0]
+    request = ibkr_canary._request_for_case(
+        case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    bar = _midpoint_bar_callback(int((case.interval_start + timedelta(hours=1)).timestamp()))
+
+    ibkr_canary._verify_completion_payload(
+        request,
+        {"start": utc_text(case.interval_start), "end": utc_text(case.interval_end)},
+        bars=(bar,),
+    )
+
+
+def test_completion_range_rejects_bar_before_start() -> None:
+    case = _cases()[0]
+    request = ibkr_canary._request_for_case(
+        case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    bar = _midpoint_bar_callback(int((case.interval_start - timedelta(minutes=1)).timestamp()))
+
+    with pytest.raises(ValueError, match="starts after first retained bar"):
+        ibkr_canary._verify_completion_payload(
+            request,
+            {"start": utc_text(case.interval_start), "end": utc_text(case.interval_end)},
+            bars=(bar,),
+        )
