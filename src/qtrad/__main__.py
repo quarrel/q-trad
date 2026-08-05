@@ -81,7 +81,10 @@ from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
-from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
+from qtrad.domain.ibkr_historical import (
+    IbkrAcquisitionRuntime,
+    IbkrHistoricalPacingPolicy,
+)
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import AssetClass, ProviderListing
 from qtrad.domain.market_data import (
@@ -128,6 +131,7 @@ from qtrad.runtime.ibkr_historical import (
     load_ibkr_historical_plan_artifact,
     load_ibkr_historical_plan_bytes,
     load_ibkr_runtime_lock,
+    reserve_create_only_output,
     verify_ibkr_historical_plan,
     verify_ibkr_historical_plan_closure,
     write_ibkr_contract_selection,
@@ -3280,6 +3284,32 @@ def _verify_ibkr_historical_result(result_path: Path) -> None:
     )
 
 
+_IBKR_IMAGE_REPOSITORY = "qtrad-ibkr"
+
+
+def _require_ibkr_image_binding(runtime: IbkrAcquisitionRuntime) -> None:
+    image_reference = configured_image_digest()
+    repository, at_separator, digest = image_reference.rpartition("@")
+    algorithm, digest_separator, image_digest = digest.partition(":")
+    if (
+        repository.rsplit("/", 1)[-1] != _IBKR_IMAGE_REPOSITORY
+        or at_separator != "@"
+        or algorithm != "sha256"
+        or digest_separator != ":"
+        or len(image_digest) != 64
+        or any(character not in "0123456789abcdef" for character in image_digest)
+    ):
+        raise ValueError(
+            "IBKR canary requires QTRAD_IMAGE_DIGEST to be an immutable "
+            "qtrad-ibkr@sha256 image reference"
+        )
+    expected_digest = f"sha256:{image_digest}"
+    if runtime.qtrad_image_digest != expected_digest:
+        raise ValueError(
+            "configured qtrad-ibkr image digest differs from the locked runtime image digest"
+        )
+
+
 async def _run_ibkr_historical_canary(
     settings: Settings,
     clock: Clock,
@@ -3300,86 +3330,85 @@ async def _run_ibkr_historical_canary(
             "IBKR canary execution is account-gated; pass --execute-account-canary "
             "only after Gateway access is authorised"
         )
-    if output_path.exists():
-        raise FileExistsError(f"IBKR canary evidence output already exists: {output_path}")
-    if not output_path.parent.is_dir():
-        raise FileNotFoundError(
-            f"IBKR canary evidence output directory does not exist: {output_path.parent}"
-        )
+    with reserve_create_only_output(
+        output_path, "IBKR historical canary evidence"
+    ) as output_reservation:
+        runtime = load_ibkr_runtime_lock(runtime_lock_path)
+        _require_ibkr_image_binding(runtime)
+        selection = load_ibkr_contract_selection(contract_selection_path)
+        if runtime.gateway_version != settings.ibkr_gateway_version:
+            raise ValueError("IBKR runtime lock Gateway version differs from current settings")
+        if runtime.api_version != settings.ibkr_api_version:
+            raise ValueError("IBKR runtime lock API version differs from current settings")
+        if runtime.api_host != settings.ibkr_gateway_host:
+            raise ValueError("IBKR runtime lock API host differs from current settings")
+        if runtime.api_port != settings.ibkr_gateway_port:
+            raise ValueError("IBKR runtime lock API port differs from current settings")
+        if runtime.client_id_policy != settings.ibkr_client_id_policy:
+            raise ValueError("IBKR runtime lock client-ID policy differs from current settings")
+        api_package_fingerprint = settings.ibkr_api_package_fingerprint
+        if api_package_fingerprint is None:
+            raise ValueError(
+                "IBKR canary execution requires the verified official API package fingerprint"
+            )
+        if selection.api_version != settings.ibkr_api_version:
+            raise ValueError("IBKR contract selection API version differs from current settings")
+        if selection.api_package_fingerprint != api_package_fingerprint:
+            raise ValueError("current IBKR API package fingerprint differs from the selection")
 
-    runtime = load_ibkr_runtime_lock(runtime_lock_path)
-    selection = load_ibkr_contract_selection(contract_selection_path)
-    if runtime.gateway_version != settings.ibkr_gateway_version:
-        raise ValueError("IBKR runtime lock Gateway version differs from current settings")
-    if runtime.api_version != settings.ibkr_api_version:
-        raise ValueError("IBKR runtime lock API version differs from current settings")
-    if runtime.api_host != settings.ibkr_gateway_host:
-        raise ValueError("IBKR runtime lock API host differs from current settings")
-    if runtime.api_port != settings.ibkr_gateway_port:
-        raise ValueError("IBKR runtime lock API port differs from current settings")
-    if runtime.client_id_policy != settings.ibkr_client_id_policy:
-        raise ValueError("IBKR runtime lock client-ID policy differs from current settings")
-    api_package_fingerprint = settings.ibkr_api_package_fingerprint
-    if api_package_fingerprint is None:
-        raise ValueError(
-            "IBKR canary execution requires the verified official API package fingerprint"
+        representative_ids = {
+            AssetClass.FX: InstrumentId(fx_representative_id),
+            AssetClass.INDEX: InstrumentId(index_representative_id),
+            AssetClass.COMMODITY: InstrumentId(commodity_representative_id),
+        }
+        asset_class_by_instrument = ibkr_historical_selection_asset_classes(selection)
+        representatives = validate_ibkr_historical_canary_representatives(
+            selection, representatives=representative_ids
         )
-    if selection.api_version != settings.ibkr_api_version:
-        raise ValueError("IBKR contract selection API version differs from current settings")
-    if selection.api_package_fingerprint != api_package_fingerprint:
-        raise ValueError("current IBKR API package fingerprint differs from the selection")
+        cases = build_adjacent_ibkr_canary_cases(representatives, anchor_end=anchor_end)
+        pacing_identity = hashlib.sha256(
+            json.dumps(
+                {
+                    "contract": "qtrad-ibkr-historical-canary-v1",
+                    "runtime_sha256": runtime.runtime_sha256,
+                    "selection_sha256": selection.selection_sha256,
+                },
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
 
-    representative_ids = {
-        AssetClass.FX: InstrumentId(fx_representative_id),
-        AssetClass.INDEX: InstrumentId(index_representative_id),
-        AssetClass.COMMODITY: InstrumentId(commodity_representative_id),
-    }
-    asset_class_by_instrument = ibkr_historical_selection_asset_classes(selection)
-    representatives = validate_ibkr_historical_canary_representatives(
-        selection, representatives=representative_ids
-    )
-    cases = build_adjacent_ibkr_canary_cases(representatives, anchor_end=anchor_end)
-    pacing_identity = hashlib.sha256(
-        json.dumps(
-            {
-                "contract": "qtrad-ibkr-historical-canary-v1",
-                "runtime_sha256": runtime.runtime_sha256,
-                "selection_sha256": selection.selection_sha256,
-            },
-            sort_keys=True,
-            separators=(",", ":"),
-        ).encode("utf-8")
-    ).hexdigest()
+        await _require_database_at_migration_head(settings)
+        engine = _engine(settings)
+        try:
+            from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
 
-    await _require_database_at_migration_head(settings)
-    engine = _engine(settings)
-    try:
-        from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
-
-        pacing = IbkrPostgresPacing(
-            PostgresAuditStore(engine),
-            request_profile_sha256=pacing_identity,
-            pacing_policy=IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55),
-            clock=clock.now,
-        )
-        adapter = _ibkr_historical_canary_adapter(
-            settings, pacing_reserver=pacing.reserve, clock=clock
-        )
-        evidence = await run_ibkr_historical_canary(
-            adapter,
-            cases,
-            runtime_sha256=runtime.runtime_sha256,
-            selection_sha256=selection.selection_sha256,
-            clock=clock.now,
-        )
-        validate_ibkr_historical_canary_selection(
-            evidence,
-            selection=selection,
-            asset_class_by_instrument=asset_class_by_instrument,
-        )
-        write_ibkr_historical_canary_evidence(output_path, evidence)
-    finally:
-        await engine.dispose()
+            pacing = IbkrPostgresPacing(
+                PostgresAuditStore(engine),
+                request_profile_sha256=pacing_identity,
+                pacing_policy=IbkrHistoricalPacingPolicy(15, 2, 5, 600, 55),
+                clock=clock.now,
+            )
+            adapter = _ibkr_historical_canary_adapter(
+                settings, pacing_reserver=pacing.reserve, clock=clock
+            )
+            evidence = await run_ibkr_historical_canary(
+                adapter,
+                cases,
+                runtime_sha256=runtime.runtime_sha256,
+                selection_sha256=selection.selection_sha256,
+                clock=clock.now,
+            )
+            validate_ibkr_historical_canary_selection(
+                evidence,
+                selection=selection,
+                asset_class_by_instrument=asset_class_by_instrument,
+            )
+            write_ibkr_historical_canary_evidence(
+                output_path, evidence, reservation=output_reservation
+            )
+        finally:
+            await engine.dispose()
     print(
         json.dumps(
             {

@@ -49,6 +49,7 @@ from qtrad.ports.ibkr_historical import (
     IbkrContractReauthentication,
     IbkrHistoricalCallbackSink,
 )
+from qtrad.runtime import ibkr_historical as ibkr_runtime
 from qtrad.runtime.ibkr_canary import (
     load_ibkr_historical_canary_evidence,
     verify_ibkr_historical_canary_evidence,
@@ -911,6 +912,24 @@ def test_canary_evidence_rejects_tampered_hash(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="evidence hash"):
         load_ibkr_historical_canary_evidence(output)
+
+
+def test_canary_output_reservation_is_create_only_and_symlink_safe(tmp_path: Path) -> None:
+    output = tmp_path / "canary.json"
+    with ibkr_runtime.reserve_create_only_output(output, "canary evidence") as reservation:
+        assert output.exists()
+        reservation.publish({"status": "published"}, "canary evidence")
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "published"}
+    with pytest.raises(FileExistsError, match="already exists"):
+        ibkr_runtime.reserve_create_only_output(output, "canary evidence")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ibkr_runtime.reserve_create_only_output(linked_root / "canary.json", "canary evidence")
 
 
 def test_canary_cli_exposes_file_only_verification_and_profile_freeze() -> None:

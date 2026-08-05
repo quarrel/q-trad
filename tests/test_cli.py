@@ -1667,7 +1667,7 @@ def _canary_run_arguments(*, safety_flag: bool = True) -> list[str]:
         "--index-representative-id",
         "index:spx",
         "--commodity-representative-id",
-        "commodity:gold",
+        "commodity:spot-gold",
         "--anchor-end",
         "2026-08-05T12:00:00Z",
         "--output",
@@ -1724,13 +1724,142 @@ def test_canary_run_rejects_existing_output_before_provider_io(
                 contract_selection_path=tmp_path / "selection.json",
                 fx_representative_id="fx:eur-usd",
                 index_representative_id="index:spx",
-                commodity_representative_id="commodity:gold",
+                commodity_representative_id="commodity:spot-gold",
                 anchor_end=datetime(2026, 8, 5, 12, tzinfo=UTC),
                 output_path=output_path,
                 execute_account_canary=True,
             )
         )
     operation.assert_not_awaited()
+
+
+def test_canary_run_requires_immutable_ibkr_image_before_database_or_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime = SimpleNamespace(qtrad_image_digest="sha256:" + "e" * 64)
+    load_runtime = Mock(return_value=runtime)
+    load_selection = Mock()
+    database_gate = AsyncMock()
+    engine_factory = Mock()
+    adapter_factory = Mock()
+
+    def missing_image() -> str:
+        raise RuntimeError("QTRAD_IMAGE_DIGEST is required")
+
+    monkeypatch.setattr(cli, "load_ibkr_runtime_lock", load_runtime)
+    monkeypatch.setattr(cli, "load_ibkr_contract_selection", load_selection)
+    monkeypatch.setattr(cli, "configured_image_digest", missing_image)
+    monkeypatch.setattr(cli, "_require_database_at_migration_head", database_gate)
+    monkeypatch.setattr(cli, "_engine", engine_factory)
+    monkeypatch.setattr(cli, "_ibkr_historical_canary_adapter", adapter_factory)
+
+    with pytest.raises(RuntimeError, match="QTRAD_IMAGE_DIGEST"):
+        asyncio.run(
+            cli._run_ibkr_historical_canary(
+                cast(Settings, SimpleNamespace()),
+                cast(Clock, SimpleNamespace()),
+                runtime_lock_path=tmp_path / "runtime.json",
+                contract_selection_path=tmp_path / "selection.json",
+                fx_representative_id="fx:eur-usd",
+                index_representative_id="index:australia-200",
+                commodity_representative_id="commodity:spot-gold",
+                anchor_end=datetime(2026, 8, 5, 12, tzinfo=UTC),
+                output_path=tmp_path / "canary.json",
+                execute_account_canary=True,
+            )
+        )
+
+    load_runtime.assert_called_once()
+    load_selection.assert_not_called()
+    database_gate.assert_not_awaited()
+    engine_factory.assert_not_called()
+    adapter_factory.assert_not_called()
+    assert not (tmp_path / "canary.json").exists()
+
+
+@pytest.mark.parametrize(
+    ("image_reference", "error"),
+    [
+        (
+            "qtrad-ibkr@sha256:" + "f" * 64,
+            "locked runtime image digest",
+        ),
+        ("qtrad-app@sha256:" + "e" * 64, "qtrad-ibkr@sha256"),
+    ],
+)
+def test_canary_run_rejects_mismatched_ibkr_image_before_database_or_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    image_reference: str,
+    error: str,
+) -> None:
+    runtime = SimpleNamespace(qtrad_image_digest="sha256:" + "e" * 64)
+    load_runtime = Mock(return_value=runtime)
+    load_selection = Mock()
+    database_gate = AsyncMock()
+    engine_factory = Mock()
+    adapter_factory = Mock()
+
+    monkeypatch.setattr(cli, "load_ibkr_runtime_lock", load_runtime)
+    monkeypatch.setattr(cli, "load_ibkr_contract_selection", load_selection)
+    monkeypatch.setattr(cli, "configured_image_digest", lambda: image_reference)
+    monkeypatch.setattr(cli, "_require_database_at_migration_head", database_gate)
+    monkeypatch.setattr(cli, "_engine", engine_factory)
+    monkeypatch.setattr(cli, "_ibkr_historical_canary_adapter", adapter_factory)
+
+    with pytest.raises(ValueError, match=error):
+        asyncio.run(
+            cli._run_ibkr_historical_canary(
+                cast(Settings, SimpleNamespace()),
+                cast(Clock, SimpleNamespace()),
+                runtime_lock_path=tmp_path / "runtime.json",
+                contract_selection_path=tmp_path / "selection.json",
+                fx_representative_id="fx:eur-usd",
+                index_representative_id="index:australia-200",
+                commodity_representative_id="commodity:spot-gold",
+                anchor_end=datetime(2026, 8, 5, 12, tzinfo=UTC),
+                output_path=tmp_path / "canary.json",
+                execute_account_canary=True,
+            )
+        )
+
+    load_runtime.assert_called_once()
+    load_selection.assert_not_called()
+    database_gate.assert_not_awaited()
+    engine_factory.assert_not_called()
+    adapter_factory.assert_not_called()
+    assert not (tmp_path / "canary.json").exists()
+
+
+def test_canary_run_rejects_ancestor_symlink_before_provider_io(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(outside, target_is_directory=True)
+    load_runtime = Mock()
+    monkeypatch.setattr(cli, "load_ibkr_runtime_lock", load_runtime)
+
+    with pytest.raises(ValueError, match="symlink"):
+        asyncio.run(
+            cli._run_ibkr_historical_canary(
+                cast(Settings, SimpleNamespace()),
+                cast(Clock, SimpleNamespace()),
+                runtime_lock_path=tmp_path / "runtime.json",
+                contract_selection_path=tmp_path / "selection.json",
+                fx_representative_id="fx:eur-usd",
+                index_representative_id="index:australia-200",
+                commodity_representative_id="commodity:spot-gold",
+                anchor_end=datetime(2026, 8, 5, 12, tzinfo=UTC),
+                output_path=linked_root / "canary.json",
+                execute_account_canary=True,
+            )
+        )
+
+    load_runtime.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -1745,6 +1874,7 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
         api_port=4002,
         client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         runtime_sha256="a" * 64,
+        qtrad_image_digest="sha256:" + "e" * 64,
     )
     selection = SimpleNamespace(
         api_version="10.49",
@@ -1782,6 +1912,11 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
         return cases
 
     monkeypatch.setattr(cli, "load_ibkr_runtime_lock", lambda path: runtime)
+    monkeypatch.setattr(
+        cli,
+        "configured_image_digest",
+        lambda: "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-ibkr@sha256:" + "e" * 64,
+    )
     monkeypatch.setattr(cli, "load_ibkr_contract_selection", lambda path: selection)
     monkeypatch.setattr(
         cli,
@@ -1821,8 +1956,8 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
         runtime_lock_path=tmp_path / "runtime.json",
         contract_selection_path=tmp_path / "selection.json",
         fx_representative_id="fx:eur-usd",
-        index_representative_id="index:spx",
-        commodity_representative_id="commodity:gold",
+        index_representative_id="index:australia-200",
+        commodity_representative_id="commodity:spot-gold",
         anchor_end=anchor_end,
         output_path=tmp_path / "canary.json",
         execute_account_canary=True,
@@ -1835,7 +1970,10 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
     assert runner.await_args.kwargs["runtime_sha256"] == "a" * 64
     assert runner.await_args.kwargs["selection_sha256"] == "c" * 64
     assert runner.await_args.kwargs["clock"] is clock.now
-    writer.assert_called_once_with(tmp_path / "canary.json", evidence)
+    assert writer.call_args is not None
+    writer_call = writer.call_args
+    assert writer_call.args == (tmp_path / "canary.json", evidence)
+    assert writer_call.kwargs["reservation"].path == tmp_path / "canary.json"
     assert disposed is True
 
 
@@ -1851,6 +1989,7 @@ async def test_canary_run_composition_failure_writes_no_evidence(
         api_port=4002,
         client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
         runtime_sha256="a" * 64,
+        qtrad_image_digest="sha256:" + "e" * 64,
     )
     selection = SimpleNamespace(
         api_version="10.49",
@@ -1867,6 +2006,11 @@ async def test_canary_run_composition_failure_writes_no_evidence(
             engine_disposed = True
 
     monkeypatch.setattr(cli, "load_ibkr_runtime_lock", lambda path: runtime)
+    monkeypatch.setattr(
+        cli,
+        "configured_image_digest",
+        lambda: "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-ibkr@sha256:" + "e" * 64,
+    )
     monkeypatch.setattr(cli, "load_ibkr_contract_selection", lambda path: selection)
     monkeypatch.setattr(
         cli,
@@ -1913,8 +2057,8 @@ async def test_canary_run_composition_failure_writes_no_evidence(
             runtime_lock_path=tmp_path / "runtime.json",
             contract_selection_path=tmp_path / "selection.json",
             fx_representative_id="fx:eur-usd",
-            index_representative_id="index:spx",
-            commodity_representative_id="commodity:gold",
+            index_representative_id="index:australia-200",
+            commodity_representative_id="commodity:spot-gold",
             anchor_end=datetime(2026, 8, 5, tzinfo=UTC),
             output_path=output,
             execute_account_canary=True,
@@ -1923,3 +2067,11 @@ async def test_canary_run_composition_failure_writes_no_evidence(
     writer.assert_not_called()
     assert not output.exists()
     assert engine_disposed is True
+
+
+def test_canary_runbook_invokes_installed_console_script_directly() -> None:
+    runbook_path = Path(__file__).parents[1] / "docs" / "IBKR-HISTORICAL-ACQUISITION.md"
+    runbook = runbook_path.read_text(encoding="utf-8")
+
+    assert "qtrad historical ibkr canary-run" in runbook
+    assert "uv run qtrad historical ibkr canary-run" not in runbook
