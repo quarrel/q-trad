@@ -13,16 +13,24 @@ concurrency:
 env:
   OCI_REGISTRY: syd.ocir.io
   OCI_IMAGE: syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-app
+  OCI_IBKR_IMAGE: syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-ibkr
+  IBKR_API_URL: https://interactivebrokers.github.io/downloads/twsapi_macunix.1049.02.zip
+  IBKR_API_SHA256: d1878128eb725bf744ab796f0ad518b915f2fce0f2c4ab3b9476f8a7fcf7649a
+  IBKR_API_VERSION: "10.49"
+  IBKR_GATEWAY_EXPECTED_VERSION: "10.49"
+  IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256: 261421ac5967c53bbc8f97b7a25c894c7303de7c6da0c04c81ef5360886c6d33
 
 jobs:
   publish:
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-24.04
-    timeout-minutes: 45
+    timeout-minutes: 75
     environment: capture-release
     steps:
       - name: Check out repository
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@29109295f81e9208d7d86ff1c6c12d2833863392 # v3.6.0
@@ -38,7 +46,7 @@ jobs:
           password: ${{ secrets.OCI_REGISTRY_TOKEN }}
 
       - name: Build and publish immutable commit image
-        id: build
+        id: build_application
         uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
         with:
           context: .
@@ -47,15 +55,76 @@ jobs:
           tags: ${{ env.OCI_IMAGE }}:${{ github.sha }}
           provenance: mode=max
           sbom: true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          cache-from: type=gha,scope=application-image
+          cache-to: type=gha,mode=max,scope=application-image
 
-      - name: Record published digest
+      - name: Prepare verified IBKR API build context
+        id: ibkr_identity
         env:
-          IMAGE_DIGEST: ${{ steps.build.outputs.digest }}
+          APPLICATION_COMMIT: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          install -d -m 0755 "$RUNNER_TEMP/ibkr-api-build/api-source"
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
+            "$IBKR_API_URL"
+          printf '%s  %s\n' \
+            "$IBKR_API_SHA256" "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
+            | sha256sum --check --strict
+          unzip -q "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
+            'IBJts/source/pythonclient/*' \
+            -d "$RUNNER_TEMP/ibkr-api-build/api-source"
+          api_source_fingerprint="$(bash ops/ibkr/source-manifest-fingerprint.sh \
+            "$RUNNER_TEMP/ibkr-api-build/api-source/IBJts/source/pythonclient")"
+          source_digest="$(git archive --format=tar "$APPLICATION_COMMIT" | sha256sum | cut -d ' ' -f 1)"
+          source_epoch="$(git show -s --format=%ct "$APPLICATION_COMMIT")"
+          build_time="$(date -u -d "@$source_epoch" +%Y-%m-%dT%H:%M:%SZ)"
+          {
+            echo "api_source_fingerprint=$api_source_fingerprint"
+            echo "source_digest=$source_digest"
+            echo "source_epoch=$source_epoch"
+            echo "build_time=$build_time"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Build and publish immutable IBKR image
+        id: build_ibkr
+        uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83 # v6.18.0
+        with:
+          context: .
+          file: Dockerfile.ibkr
+          build-contexts: |
+            ibkr-api=${{ runner.temp }}/ibkr-api-build
+          platforms: linux/arm64
+          push: true
+          tags: ${{ env.OCI_IBKR_IMAGE }}:${{ github.sha }}
+          build-args: |
+            QTRAD_BASE_IMAGE=${{ env.OCI_IMAGE }}@${{ steps.build_application.outputs.digest }}
+            IBKR_API_SHA256=${{ env.IBKR_API_SHA256 }}
+            IBKR_API_SOURCE_MANIFEST_SHA256=${{ steps.ibkr_identity.outputs.api_source_fingerprint }}
+            IBKR_API_VERSION=${{ env.IBKR_API_VERSION }}
+            IBKR_GATEWAY_EXPECTED_VERSION=${{ env.IBKR_GATEWAY_EXPECTED_VERSION }}
+            IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256=${{ env.IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256 }}
+            QTRAD_SOURCE_DIGEST=${{ steps.ibkr_identity.outputs.source_digest }}
+            QTRAD_APP_COMMIT=${{ github.sha }}
+            QTRAD_BUILD_TIME=${{ steps.ibkr_identity.outputs.build_time }}
+            SOURCE_DATE_EPOCH=${{ steps.ibkr_identity.outputs.source_epoch }}
+          provenance: mode=max
+          sbom: true
+          cache-from: type=gha,scope=ibkr-image
+          cache-to: type=gha,mode=max,scope=ibkr-image
+
+      - name: Record published digests
+        env:
+          APPLICATION_IMAGE_DIGEST: ${{ steps.build_application.outputs.digest }}
+          IBKR_IMAGE_DIGEST: ${{ steps.build_ibkr.outputs.digest }}
+          IBKR_API_SOURCE_FINGERPRINT: ${{ steps.ibkr_identity.outputs.api_source_fingerprint }}
         run: |
           {
-            echo '### Published image'
+            echo '### Published images'
             echo
-            echo "\`${OCI_IMAGE}@${IMAGE_DIGEST}\`"
+            echo "\`${OCI_IMAGE}@${APPLICATION_IMAGE_DIGEST}\`"
+            echo
+            echo "\`${OCI_IBKR_IMAGE}@${IBKR_IMAGE_DIGEST}\`"
+            echo
+            echo "IBKR API source fingerprint: \`${IBKR_API_SOURCE_FINGERPRINT}\`"
           } >> "$GITHUB_STEP_SUMMARY"

@@ -55,7 +55,7 @@ jq -e --arg version "$gateway_version" --arg archive_sha "$gateway_archive_sha" 
 docker image inspect "$image" >/dev/null
 labels="$(docker image inspect "$image" --format '{{json .Config.Labels}}')"
 jq -e     --arg api "${QTRAD_IBKR_API_VERSION:-10.49}"     --arg gateway "$gateway_version"     '."org.qtrad.ibkr.api.version" == $api
-     and ."org.qtrad.ibkr.gateway.version" == $gateway
+     and ."org.qtrad.ibkr.gateway.expected.version" == $gateway
      and (.["org.qtrad.ibkr.api.archive.sha256"] | test("^[0-9a-f]{64}$"))
      and (.["org.qtrad.source.digest"] | test("^[0-9a-f]{64}$"))
      and (.["org.opencontainers.image.revision"] | test("^[0-9a-f]{40,64}$"))
@@ -74,9 +74,9 @@ api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAG
 }
 jq -e --arg fingerprint "$api_fingerprint" --arg gateway_sha "$gateway_archive_sha" '
     .["org.qtrad.ibkr.api.source-manifest.sha256"] == $fingerprint
-    and .["org.qtrad.ibkr.gateway.archive.sha256"] == $gateway_sha
+    and .["org.qtrad.ibkr.gateway.expected.archive.sha256"] == $gateway_sha
 ' <<<"$labels" >/dev/null || {
-    echo "image fingerprints do not match the configured API/Gateway identities" >&2
+    echo "image fingerprints do not match the configured API/expected Gateway identities" >&2
     exit 1
 }
 [[ -d "$evidence_root" && -w "$evidence_root" ]] || {

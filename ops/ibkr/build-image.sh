@@ -70,12 +70,12 @@ docker buildx build \
     --build-arg "QTRAD_BASE_IMAGE=$base_image" \
     --build-arg "IBKR_API_SHA256=$expected_sha" \
     --build-arg "IBKR_API_VERSION=$api_version" \
-    --build-arg "IBKR_GATEWAY_VERSION=$gateway_version" \
+    --build-arg "IBKR_GATEWAY_EXPECTED_VERSION=$gateway_version" \
     --build-arg "QTRAD_SOURCE_DIGEST=$source_digest" \
     --build-arg "QTRAD_APP_COMMIT=$app_commit" \
     --build-arg "QTRAD_BUILD_TIME=$build_time" \
     --build-arg "SOURCE_DATE_EPOCH=$source_epoch" \
-    --build-arg "IBKR_GATEWAY_ARCHIVE_SHA256=$gateway_archive_sha" \
+    --build-arg "IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256=$gateway_archive_sha" \
     --build-arg "IBKR_API_SOURCE_MANIFEST_SHA256=$api_source_fingerprint" \
     --tag "$repository:$build_tag" \
     --push \
