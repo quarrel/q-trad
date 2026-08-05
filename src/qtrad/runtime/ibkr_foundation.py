@@ -260,7 +260,8 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
         _MAX_MANIFEST_BYTES,
         "provider-history manifest",
     )
-    if hashlib.sha256(provider_bytes).hexdigest() != _text(
+    provider_manifest_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    if provider_manifest_sha256 != _text(
         document["provider_history_sha256"],
         "provider-history manifest hash",
     ):
@@ -280,7 +281,18 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
         raise ValueError("IBKR foundation metadata differs from independent replay")
     expected_rows = _child_rows(replay)
     expected_dataset_ids = _child_dataset_ids(replay)
-    _verify_children(root, children, expected_rows, expected_dataset_ids)
+    expected_lineage = _child_lineage(
+        replay,
+        source_evidence,
+        provider_manifest_sha256,
+    )
+    _verify_children(
+        root,
+        children,
+        expected_rows,
+        expected_dataset_ids,
+        expected_lineage,
+    )
 
     if replay.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
         raise ValueError("IBKR foundation source dataset differs from provider history")
@@ -293,6 +305,19 @@ def load_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
     return verify_ibkr_foundation(path)
 
 
+def _child_lineage(
+    build: IBKRFoundationBuild,
+    source_evidence: ProviderHistorySourceEvidence,
+    provider_manifest_sha256: str,
+) -> dict[str, JsonValue]:
+    return {
+        "provider_manifest_sha256": provider_manifest_sha256,
+        "provider_dataset_sha256": build.provider_history.dataset_sha256,
+        "plan_sha256": source_evidence.source_artifact.plan.plan_sha256,
+        "aggregate_sha256": source_evidence.source_artifact.aggregate.aggregate_sha256,
+    }
+
+
 def _write_children(
     child_root: Path,
     bundle_root: Path,
@@ -300,13 +325,8 @@ def _write_children(
     source_evidence: ProviderHistorySourceEvidence,
     provider_manifest: Path,
 ) -> dict[str, JsonValue]:
-    provider_dataset = build.provider_history
-    lineage: dict[str, JsonValue] = {
-        "provider_manifest_sha256": hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
-        "provider_dataset_sha256": provider_dataset.dataset_sha256,
-        "plan_sha256": source_evidence.source_artifact.plan.plan_sha256,
-        "aggregate_sha256": source_evidence.source_artifact.aggregate.aggregate_sha256,
-    }
+    provider_manifest_sha256 = hashlib.sha256(provider_manifest.read_bytes()).hexdigest()
+    lineage = _child_lineage(build, source_evidence, provider_manifest_sha256)
     rows = _child_rows(build)
     dataset_ids = _child_dataset_ids(build)
     children: dict[str, JsonValue] = {}
@@ -397,6 +417,7 @@ def _verify_children(
     children: Mapping[str, object],
     expected_rows: Mapping[str, tuple[dict[str, JsonValue], ...]],
     expected_dataset_ids: Mapping[str, str],
+    expected_lineage: Mapping[str, JsonValue],
 ) -> None:
     if set(children) != set(_CHILD_KINDS):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
@@ -410,7 +431,7 @@ def _verify_children(
             raise ValueError("IBKR foundation child part count exceeds its bound")
         observed_rows: list[dict[str, JsonValue]] = []
         previous_path = ""
-        for raw_part in raw_parts:
+        for part_index, raw_part in enumerate(raw_parts):
             reference = _child_reference(raw_part, kind)
             manifest_reference = _text(
                 reference["manifest_path"],
@@ -444,13 +465,36 @@ def _verify_children(
                 "child manifest hash",
             ):
                 raise ValueError("IBKR foundation child manifest hash differs from its reference")
-            if _text(manifest["kind"], "child kind") != kind:
+            manifest_kind = _text(manifest["kind"], "child kind")
+            if manifest_kind != kind:
                 raise ValueError("IBKR foundation child kind differs from its reference")
-            if _text(manifest["dataset_id"], "child dataset ID") != expected_dataset_ids[kind]:
+            manifest_dataset_id = _text(manifest["dataset_id"], "child dataset ID")
+            if manifest_dataset_id != expected_dataset_ids[kind]:
                 raise ValueError("IBKR foundation child dataset differs from replay")
+            manifest_part_index = _int(manifest["part_index"], "child part index")
+            if manifest_part_index != part_index:
+                raise ValueError("IBKR foundation child part index is not contiguous")
+            manifest_row_count = _int(manifest["row_count"], "child row count")
+            manifest_file = _text(manifest["file"], "child Parquet path")
+            manifest_file_sha256 = _text(manifest["file_sha256"], "child Parquet hash")
+            manifest_lineage = _mapping(manifest["lineage"], "child lineage")
+            if manifest_lineage != dict(expected_lineage):
+                raise ValueError("IBKR foundation child lineage differs from replay")
+            expected_reference: dict[str, object] = {
+                "kind": manifest_kind,
+                "dataset_id": manifest_dataset_id,
+                "manifest_id": manifest_hash[:24],
+                "manifest_path": manifest_reference,
+                "manifest_sha256": manifest_hash,
+                "row_count": manifest_row_count,
+                "file": manifest_file,
+                "file_sha256": manifest_file_sha256,
+            }
+            if reference != expected_reference:
+                raise ValueError("IBKR foundation child reference differs from its manifest")
             file_path = _safe_child(
                 bundle_root,
-                _text(manifest["file"], "child Parquet path"),
+                manifest_file,
                 "IBKR foundation child Parquet",
             )
             parquet_bytes = _bounded_bytes(
@@ -459,16 +503,11 @@ def _verify_children(
                 "IBKR foundation child Parquet",
             )
             file_hash = hashlib.sha256(parquet_bytes).hexdigest()
-            if file_hash != _text(manifest["file_sha256"], "child Parquet hash"):
+            if file_hash != manifest_file_sha256:
                 raise ValueError("IBKR foundation child Parquet bytes changed")
-            if file_hash != _text(
-                reference["file_sha256"],
-                "child Parquet hash",
-            ):
-                raise ValueError("IBKR foundation child Parquet hash differs from its reference")
             rows = _read_child_rows(
                 file_path,
-                expected_row_count=_int(manifest["row_count"], "child row count"),
+                expected_row_count=manifest_row_count,
             )
             if _sha([_canonical_row(row) for row in rows]) != _text(
                 manifest["rows_sha256"],
@@ -479,7 +518,7 @@ def _verify_children(
             expected_files.update(
                 {
                     manifest_reference,
-                    _text(manifest["file"], "child Parquet path"),
+                    manifest_file,
                 }
             )
         if tuple(observed_rows) != expected_rows[kind]:

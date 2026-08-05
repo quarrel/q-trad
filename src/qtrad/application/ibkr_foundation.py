@@ -243,6 +243,12 @@ def evaluate_ibkr_foundation_readiness(
 
     causes: set[IBKRFoundationReadinessCause] = set()
     active_intervals = active_intervals or {}
+
+    def is_confirmatory_gap(gap: Mapping[str, JsonValue]) -> bool:
+        instrument_id = gap.get("instrument_id")
+        return isinstance(instrument_id, str) and instrument_id in candidate_names
+
+    confirmatory_gaps = tuple(gap for gap in provider_gaps if is_confirmatory_gap(gap))
     request_evidence: dict[str, JsonValue] = {}
     for candidate in sorted(candidate_names):
         candidate_requests = requests_by_instrument.get(candidate, [])
@@ -327,7 +333,7 @@ def evaluate_ibkr_foundation_readiness(
         for candidate in sorted(candidate_names)
     ):
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_ROWS)
-    if provider_gaps or fold_count == 0:
+    if confirmatory_gaps or fold_count == 0:
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT)
 
     ordered_causes = tuple(cause for cause in IBKRFoundationReadinessCause if cause in causes)
@@ -344,7 +350,8 @@ def evaluate_ibkr_foundation_readiness(
         rows_by_candidate=rows_by_candidate,
         evidence={
             "provider_row_count": len(provider_rows),
-            "provider_gap_count": len(provider_gaps),
+            "provider_gap_count": len(confirmatory_gaps),
+            "total_provider_gap_count": len(provider_gaps),
             "target_row_count": len(targets.rows),
             "fold_count": fold_count,
             "primary_horizon_seconds": primary_horizon.total_seconds(),
@@ -440,34 +447,39 @@ def _provider_evidence(
             _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
             for raw in result.accepted_rows
         }
-        missing_start: datetime | None = None
-        cursor = request.interval_start
-        while cursor < request.interval_end:
-            if cursor not in accepted_starts:
-                if missing_start is None:
-                    missing_start = cursor
-            elif missing_start is not None:
+        for active_start, active_end in intervals.get(instrument_id, ()):
+            expected_start = max(active_start, request.interval_start)
+            expected_end = min(active_end, request.interval_end)
+            if expected_start >= expected_end:
+                continue
+            missing_start: datetime | None = None
+            cursor = expected_start
+            while cursor < expected_end:
+                if cursor not in accepted_starts:
+                    if missing_start is None:
+                        missing_start = cursor
+                elif missing_start is not None:
+                    gaps.append(
+                        _gap(
+                            instrument_id,
+                            missing_start,
+                            cursor,
+                            request.request_sha256,
+                            result.result_sha256,
+                        )
+                    )
+                    missing_start = None
+                cursor += timedelta(minutes=1)
+            if missing_start is not None:
                 gaps.append(
                     _gap(
                         instrument_id,
                         missing_start,
-                        cursor,
+                        expected_end,
                         request.request_sha256,
                         result.result_sha256,
                     )
                 )
-                missing_start = None
-            cursor += timedelta(minutes=1)
-        if missing_start is not None:
-            gaps.append(
-                _gap(
-                    instrument_id,
-                    missing_start,
-                    request.interval_end,
-                    request.request_sha256,
-                    result.result_sha256,
-                )
-            )
     return (
         {instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())},
         tuple(gaps),
