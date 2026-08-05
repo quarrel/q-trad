@@ -163,6 +163,7 @@ def test_ibkr_source_manifest_fingerprint_matches_runtime_contract(tmp_path: Pat
     package_root.mkdir(parents=True)
     (package_root / "__init__.py").write_bytes(b"init")
     (package_root / "client.py").write_bytes(b"client")
+    (package_root / "ibapi.pyproj").write_bytes(b"project metadata")
     (package_root / "ignored.pyc").write_bytes(b"generated")
     (package_root / "__pycache__").mkdir()
     (package_root / "__pycache__" / "client.cpython-313.pyc").write_bytes(b"cache")

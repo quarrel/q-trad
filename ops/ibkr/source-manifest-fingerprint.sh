@@ -20,7 +20,7 @@ while IFS= read -r -d '' file; do
             ;;
     esac
     case "$basename" in
-        RECORD|METADATA|WHEEL|INSTALLER|direct_url.json|top_level.txt)
+        RECORD|METADATA|WHEEL|INSTALLER|direct_url.json|top_level.txt|*.pyproj)
             continue
             ;;
     esac
