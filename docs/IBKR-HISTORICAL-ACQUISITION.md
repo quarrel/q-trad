@@ -743,6 +743,27 @@ qtrad-ibkr-historical-request-profile-v1
 
 Four-week chunks may be selected if demonstrated reliable. They are not assumed in advance.
 
+### Supported canary execution
+
+On the authorised paper-account host, after the runtime lock and contract selection have been
+independently verified, run:
+
+~~~bash
+uv run qtrad historical ibkr canary-run \
+  --runtime-lock /srv/qtrad/ibkr/runtime-lock.json \
+  --contract-selection /srv/qtrad/ibkr/contract-selection.json \
+  --fx-representative-id fx:eur-usd \
+  --index-representative-id index:australia-200 \
+  --commodity-representative-id commodity:gold \
+  --anchor-end 2026-08-05T00:00:00Z \
+  --output /srv/qtrad/ibkr/evidence/canary-2026-08-05.json \
+  --execute-account-canary
+~~~
+
+The output is create-only qtrad-ibkr-historical-canary-v1 evidence. Full acquisition cannot begin
+until the resulting evidence independently verifies; this command does not deploy the Gateway,
+freeze a request profile, register a plan or start full acquisition.
+
 ### Exit criteria
 
 * Contract reauthentication succeeds or produces immutable mismatch evidence.
