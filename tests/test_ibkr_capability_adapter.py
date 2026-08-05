@@ -522,3 +522,18 @@ async def test_historical_timeout_retains_prior_connection_notice() -> None:
     assert evidence.status == "TIMEOUT"
     assert evidence.error_codes == ("IBKR_1102",)
     assert evidence.error_times == (1_785_000_000,)
+
+
+def test_callback_queue_accepts_historical_reader_burst() -> None:
+    callbacks = capability._CallbackQueue(maxsize=capability.IBKR_CALLBACK_QUEUE_MAXSIZE)
+
+    for request_id in range(2_001):
+        capability._emit(
+            callbacks,
+            capability._Callback("historical_data", request_id, (object(),)),
+            generation=1,
+            arrival_sequence=request_id,
+        )
+
+    assert callbacks.qsize() == 2_001
+    assert callbacks.overflowed.is_set() is False

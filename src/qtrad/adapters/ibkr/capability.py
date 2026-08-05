@@ -107,6 +107,9 @@ class IbkrRequestTimeout(TimeoutError):
         self.callbacks = tuple(callbacks)
 
 
+IBKR_CALLBACK_QUEUE_MAXSIZE = 50_000
+
+
 class _CallbackQueue(Queue[_Callback]):
     def __init__(self, maxsize: int) -> None:
         super().__init__(maxsize=maxsize)
@@ -154,7 +157,9 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         self._server_time_timeout_seconds = server_time_timeout_seconds
         self._contract_timeout_seconds = contract_timeout_seconds or request_timeout_seconds
         self._historical_timeout_seconds = historical_timeout_seconds or request_timeout_seconds
-        self._callbacks: _CallbackQueue = _CallbackQueue(maxsize=2_000)
+        # Match the bounded historical callback budget; API reader bursts must not
+        # overflow before the asyncio consumer can drain the queue.
+        self._callbacks: _CallbackQueue = _CallbackQueue(maxsize=IBKR_CALLBACK_QUEUE_MAXSIZE)
         self._deferred_callbacks: deque[_Callback] = deque()
         if client_factory is None and api_identity is None:
             raise ValueError("IBKR capability adapter requires a verified official API identity")
