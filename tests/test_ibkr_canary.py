@@ -422,7 +422,7 @@ async def test_canary_closes_before_retained_callbacks_exceed_writer_limit(
 
     output = tmp_path / "stopped.json"
     write_ibkr_historical_canary_evidence(output, evidence)
-    assert output.stat().st_size < 8 * 1024 * 1024
+    assert output.stat().st_size < ibkr_runtime._MAX_ARTIFACT_BYTES
     loaded = verify_ibkr_historical_canary_evidence(output)
     assert loaded.stop_reason == stop_reason
 
@@ -740,7 +740,7 @@ def test_file_verifier_rejects_rehashed_adjacency_mutation(tmp_path: Path) -> No
         verify_ibkr_historical_canary_evidence(output)
 
 
-def test_canary_writer_rejects_actual_eight_mib_boundary_crossing(
+def test_canary_writer_rejects_actual_artifact_boundary_crossing(
     tmp_path: Path,
 ) -> None:
     evidence = _evidence()
@@ -749,7 +749,7 @@ def test_canary_writer_rejects_actual_eight_mib_boundary_crossing(
     huge_callback = dict(first_request.callbacks[0])
     huge_callback["payload"] = {
         **cast(dict[str, JsonValue], huge_callback["payload"]),
-        "padding": "x" * (8 * 1024 * 1024),
+        "padding": "x" * ibkr_runtime._MAX_ARTIFACT_BYTES,
     }
     huge_request = replace(
         first_request,

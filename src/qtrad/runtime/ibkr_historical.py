@@ -39,7 +39,8 @@ from qtrad.domain.instruments import AssetClass
 from qtrad.runtime.ibkr_capability import ibkr_capability_probe_spec_from_document
 from qtrad.runtime.universe import capture_candidates_from_document
 
-_MAX_ARTIFACT_BYTES = 8 * 1024 * 1024
+# Stage 5 retains complete callback evidence across the planned four-week windows.
+_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
 _SELECTION_KEYS = {
     "contract",
     "schema_version",
