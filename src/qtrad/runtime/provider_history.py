@@ -17,6 +17,7 @@ import polars as pl
 
 from qtrad.application.provider_history import (
     ProviderHistorySource,
+    ProviderHistorySourceEvidence,
     build_provider_history_dataset,
     iter_provider_history_partitions,
     provider_history_partition_row_bounds,
@@ -45,6 +46,7 @@ from qtrad.domain.provider_history import (
     sha256_json,
 )
 from qtrad.runtime.ibkr_results import (
+    verify_ibkr_historical_result,
     verify_ibkr_historical_result_stream,
 )
 
@@ -819,6 +821,31 @@ def read_provider_history_observations(
     """Verify a provider-history closure, then decode every canonical Parquet row."""
 
     dataset = verify_provider_history(path)
+    return dataset, _read_provider_history_rows(path, dataset)
+
+
+def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEvidence:
+    """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
+
+    dataset = verify_provider_history(path)
+    manifest_path = _require_file(path, "provider-history manifest")
+    source_path = _safe_child(
+        manifest_path.parent,
+        _SOURCE_MANIFEST_PATH,
+        "embedded IBKR result manifest",
+    )
+    source_artifact = verify_ibkr_historical_result(source_path)
+    return ProviderHistorySourceEvidence(
+        dataset=dataset,
+        observations=_read_provider_history_rows(path, dataset),
+        source_artifact=source_artifact,
+    )
+
+
+def _read_provider_history_rows(
+    path: Path,
+    dataset: ProviderHistoricalDataset,
+) -> tuple[ProviderHistoricalObservation, ...]:
     manifest_path = _require_file(path, "provider-history manifest")
     document = _mapping(
         _parse_json(
@@ -856,4 +883,4 @@ def read_provider_history_observations(
     )
     if len(ordered) != dataset.row_count:
         raise ValueError("provider-history row reader count differs from verified dataset")
-    return dataset, ordered
+    return ordered

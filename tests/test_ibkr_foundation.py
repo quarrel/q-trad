@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,10 +12,12 @@ import pytest
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import build_ibkr_foundation
+from qtrad.domain.foundation import InstrumentRole
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_CANDIDATES,
     IBKR_CONFIRMATORY_GROUPS,
     IBKR_CONFIRMATORY_INSTRUMENTS,
+    IBKRFoundationReadinessCause,
     IBKRFoundationReadinessState,
 )
 from qtrad.domain.market_data import BarProvenance
@@ -24,7 +27,7 @@ from qtrad.runtime.ibkr_foundation import (
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
-from qtrad.runtime.provider_history import read_provider_history_observations
+from qtrad.runtime.provider_history import read_provider_history_source_evidence
 from tests.test_provider_history import _published_provider_history
 from tests.test_r1_foundation import _config
 
@@ -55,8 +58,8 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         end=datetime(2026, 2, 3, tzinfo=UTC),
     )
 
-    provider_dataset, provider_rows = read_provider_history_observations(provider_manifest)
-    build = build_ibkr_foundation(provider_dataset, provider_rows, configuration)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    build = build_ibkr_foundation(source_evidence, configuration)
 
     assert (
         build.readiness.state
@@ -88,10 +91,86 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         )
 
     document = json.loads(bundle.read_text(encoding="utf-8"))
+    assert not Path(document["provider_history_manifest"]).is_absolute()
+    assert set(document["payload"]["children"]) == {
+        "observations",
+        "panel",
+        "targets",
+        "folds",
+    }
+    assert all(
+        "rows" not in child
+        for children in document["payload"]["children"].values()
+        for child in children
+    )
+    assert document["payload"]["readiness"]["evidence"]["fold_count"] == 0
+    assert "INSUFFICIENT_COMMON_SUPPORT" in document["payload"]["readiness"]["causes"]
     document["payload"]["readiness"]["state"] = "QUALIFYING_HISTORY_READY"
     bundle.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(ValueError, match="payload identity"):
+    with pytest.raises(
+        ValueError,
+        match=r"manifest bytes are not canonical|payload identity",
+    ):
         verify_ibkr_foundation(bundle)
+
+
+def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    extra_instrument = "fx:nzd-usd"
+    extra_configuration = replace(
+        configuration,
+        ordered_instruments=(*configuration.ordered_instruments, extra_instrument),
+        instrument_roles={
+            **configuration.instrument_roles,
+            extra_instrument: InstrumentRole.TARGET,
+        },
+    )
+
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    build = build_ibkr_foundation(source_evidence, extra_configuration)
+
+    assert build.configuration.instrument_roles[extra_instrument] is InstrumentRole.CONTEXT
+    assert all(row.instrument_id != extra_instrument for row in build.targets.rows)
+    assert (
+        IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT in build.readiness.causes
+        or build.readiness.evidence["fold_count"] == 0
+    )
+
+
+def test_stage8_zero_valid_folds_remains_insufficient(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+
+    def no_valid_folds(*args: object, **kwargs: object) -> object:
+        raise ValueError("no scientifically valid expanding folds are available")
+
+    monkeypatch.setattr(
+        "qtrad.application.ibkr_foundation.build_expanding_folds",
+        no_valid_folds,
+    )
+    build = build_ibkr_foundation(
+        read_provider_history_source_evidence(provider_manifest),
+        configuration,
+    )
+
+    assert build.folds.folds == ()
+    assert IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT in build.readiness.causes
+    assert (
+        build.readiness.state
+        is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+    )
 
 
 def test_stage8_cli_requires_one_foundation_source() -> None:

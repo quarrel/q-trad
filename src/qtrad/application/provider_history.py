@@ -53,6 +53,30 @@ class ProviderHistoryResultSource(Protocol):
 ProviderHistorySource = IbkrHistoricalResultArtifact | ProviderHistoryResultSource
 
 
+@dataclass(frozen=True, slots=True)
+class ProviderHistorySourceEvidence:
+    """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
+
+    dataset: ProviderHistoricalDataset
+    observations: tuple[ProviderHistoricalObservation, ...]
+    source_artifact: IbkrHistoricalResultArtifact
+
+    def __post_init__(self) -> None:
+        if (
+            self.dataset.contract_selection_sha256
+            != self.source_artifact.plan.contract_selection_sha256
+        ):
+            raise ValueError("provider-history source contract selection differs from its dataset")
+        if self.dataset.plan_sha256 != self.source_artifact.plan.plan_sha256:
+            raise ValueError("provider-history source plan differs from its dataset")
+        if self.dataset.runtime_sha256 != self.source_artifact.plan.runtime_sha256:
+            raise ValueError("provider-history source runtime differs from its dataset")
+        if self.dataset.aggregate_sha256 != self.source_artifact.aggregate.aggregate_sha256:
+            raise ValueError("provider-history source aggregate differs from its dataset")
+        if len(self.observations) != self.dataset.row_count:
+            raise ValueError("provider-history source observation count differs from its dataset")
+
+
 def build_provider_history_dataset(
     source: ProviderHistorySource,
     *,

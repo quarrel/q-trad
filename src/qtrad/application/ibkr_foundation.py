@@ -1,12 +1,15 @@
 """Build and verify the source-specific IBKR historical foundation."""
 
+from __future__ import annotations
+
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid5
 
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
+from qtrad.application.provider_history import ProviderHistorySourceEvidence
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
@@ -24,6 +27,11 @@ from qtrad.domain.ibkr_foundation import (
     IBKRFoundationReadiness,
     IBKRFoundationReadinessCause,
     IBKRFoundationReadinessState,
+)
+from qtrad.domain.ibkr_historical import IbkrHistoricalRequest, IbkrHistoricalRequestKind
+from qtrad.domain.ibkr_results import (
+    IbkrHistoricalEvidenceDisposition,
+    IbkrHistoricalRequestResult,
 )
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.provider_history import (
@@ -51,12 +59,13 @@ class IBKRFoundationBuild:
 
 
 def build_ibkr_foundation(
-    provider_dataset: ProviderHistoricalDataset,
-    provider_rows: Sequence[ProviderHistoricalObservation],
+    source_evidence: ProviderHistorySourceEvidence,
     configuration: FoundationConfig,
 ) -> IBKRFoundationBuild:
     """Adapt verified provider history and replay foundation children."""
 
+    provider_dataset = source_evidence.dataset
+    provider_rows = source_evidence.observations
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
     observed_instruments = tuple(sorted({row.instrument_id for row in provider_rows}))
     ordered_instruments = tuple(
@@ -64,9 +73,7 @@ def build_ibkr_foundation(
     )
     roles = {
         instrument_id: (
-            InstrumentRole.TARGET
-            if instrument_id in candidate_names
-            else configuration.instrument_roles.get(instrument_id, InstrumentRole.CONTEXT)
+            InstrumentRole.TARGET if instrument_id in candidate_names else InstrumentRole.CONTEXT
         )
         for instrument_id in ordered_instruments
     }
@@ -93,7 +100,7 @@ def build_ibkr_foundation(
         "ordered_instruments": list(ordered_instruments),
         "interval_start": adapted_configuration.required_observation_start.isoformat(),
         "interval_end": adapted_configuration.required_observation_end.isoformat(),
-        "observed_interval_start": (source_start.isoformat() if provider_rows else None),
+        "observed_interval_start": source_start.isoformat() if provider_rows else None,
         "observed_interval_end": source_end.isoformat() if provider_rows else None,
         "grid_resolution_seconds": int(adapted_configuration.grid_resolution.total_seconds()),
         "availability_basis": adapted_configuration.availability_basis.value,
@@ -120,14 +127,14 @@ def build_ibkr_foundation(
         selection_policies={
             "source_class": "IBKR_HISTORICAL_RESEARCH",
             "availability_policy": provider_dataset.availability_policy.as_json_value(),
-            "correction_policy": ("FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE"),
+            "correction_policy": "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE",
         },
     )
     adapted_configuration = replace(
         adapted_configuration,
         observation_dataset_id=observations.dataset_id,
     )
-    active_intervals, provider_gaps = _provider_evidence(provider_rows)
+    active_intervals, provider_gaps = _provider_evidence(source_evidence)
     panel = build_asof_panel(
         observations,
         adapted_configuration,
@@ -149,12 +156,13 @@ def build_ibkr_foundation(
             foundation_configuration_id=adapted_configuration.configuration_id,
         )
     readiness = evaluate_ibkr_foundation_readiness(
-        provider_rows,
+        source_evidence,
         targets,
         source_start=source_start,
         source_end=source_end,
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,
+        primary_horizon=adapted_configuration.primary_vertical_horizon,
         fold_count=len(folds.folds),
     )
     return IBKRFoundationBuild(
@@ -171,18 +179,34 @@ def build_ibkr_foundation(
 
 
 def evaluate_ibkr_foundation_readiness(
-    provider_rows: Sequence[ProviderHistoricalObservation],
+    source_evidence: ProviderHistorySourceEvidence,
     targets: TargetDataset,
     *,
     source_start: datetime,
     source_end: datetime,
     active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]] | None = None,
     provider_gaps: Sequence[Mapping[str, JsonValue]] = (),
+    primary_horizon: timedelta,
     fold_count: int = 0,
 ) -> IBKRFoundationReadiness:
-    """Replay fixed history gates without registering or reading an R2 experiment."""
+    """Replay fixed history gates from the verified Stage 6/7 evidence."""
 
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
+    provider_rows = source_evidence.observations
+    source_artifact = source_evidence.source_artifact
+    plan = source_artifact.plan
+    aggregate = source_artifact.aggregate
+    results_by_hash = {result.request_sha256: result for result in source_artifact.request_results}
+    requests_by_instrument: dict[
+        str,
+        list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]],
+    ] = {}
+    for request in plan.requests:
+        result = results_by_hash.get(request.request_sha256)
+        if result is None:
+            raise ValueError("IBKR source evidence is missing a planned request result")
+        requests_by_instrument.setdefault(str(request.instrument_id), []).append((request, result))
+
     rows_by_candidate = {
         candidate: sum(1 for row in provider_rows if row.instrument_id == candidate)
         for candidate in sorted(candidate_names)
@@ -191,39 +215,106 @@ def evaluate_ibkr_foundation_readiness(
         candidate: {
             row.decision_time
             for row in targets.rows
-            if row.instrument_id == candidate and row.return_disposition.value == "VALID"
+            if (
+                row.instrument_id == candidate
+                and row.horizon == primary_horizon
+                and row.return_disposition.value == "VALID"
+            )
         }
         for candidate in sorted(candidate_names)
     }
     common_times: set[datetime] = set()
-    if valid_target_times:
-        first_candidate = next(iter(valid_target_times))
-        common_times = set(valid_target_times[first_candidate])
-        for candidate_times in valid_target_times.values():
-            common_times.intersection_update(candidate_times)
+    first_times = True
+    for candidate in sorted(candidate_names):
+        if first_times:
+            common_times = set(valid_target_times[candidate])
+            first_times = False
+        else:
+            common_times.intersection_update(valid_target_times[candidate])
+
+    raw_eligible = aggregate.entitlement_summary["provider_history_eligible_instruments"]
+    if not isinstance(raw_eligible, list) or any(
+        not isinstance(item, str) or not item for item in raw_eligible
+    ):
+        raise ValueError("IBKR aggregate provider-history eligibility summary is invalid")
+    eligible_instruments = frozenset(raw_eligible)
+    if len(eligible_instruments) != len(raw_eligible):
+        raise ValueError("IBKR aggregate provider-history eligibility summary is not unique")
+
     causes: set[IBKRFoundationReadinessCause] = set()
     active_intervals = active_intervals or {}
-    provider_instruments = {row.instrument_id for row in provider_rows}
-    if not provider_instruments:
-        causes.add(IBKRFoundationReadinessCause.ENTITLEMENT_UNAVAILABLE)
-    if any(candidate not in provider_instruments for candidate in candidate_names):
-        causes.add(IBKRFoundationReadinessCause.ENTITLEMENT_UNAVAILABLE)
+    request_evidence: dict[str, JsonValue] = {}
+    for candidate in sorted(candidate_names):
+        candidate_requests = requests_by_instrument.get(candidate, [])
+        bar_results = [
+            result
+            for request, result in candidate_requests
+            if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS
+        ]
+        schedule_results = [
+            result
+            for request, result in candidate_requests
+            if request.kind is IbkrHistoricalRequestKind.SCHEDULE
+        ]
+        dispositions = [result.evidence_disposition.value for result in bar_results]
+        schedule_dispositions = [result.evidence_disposition.value for result in schedule_results]
+        planned_contract = next(
+            (
+                contract
+                for contract in plan.eligible_contracts
+                if str(contract.instrument_id) == candidate
+            ),
+            None,
+        )
+        contract_ids: list[JsonValue] = (
+            [] if planned_contract is None else [planned_contract.fingerprint.con_id]
+        )
+        request_evidence[candidate] = cast(
+            dict[str, JsonValue],
+            {
+                "planned": bool(candidate_requests),
+                "bar_dispositions": dispositions,
+                "schedule_dispositions": schedule_dispositions,
+                "eligible": candidate in eligible_instruments,
+                "contract_ids": contract_ids,
+                "bar_row_count": sum(len(result.accepted_rows) for result in bar_results),
+                "schedule_session_count": sum(len(result.sessions) for result in schedule_results),
+            },
+        )
 
-    contract_ids_by_instrument: dict[str, set[str]] = {}
-    for row in provider_rows:
-        contract_id = row.schedule_evidence.get("contract_id")
-        if isinstance(contract_id, str):
-            contract_ids_by_instrument.setdefault(row.instrument_id, set()).add(contract_id)
-    if any(len(contract_ids) > 1 for contract_ids in contract_ids_by_instrument.values()):
-        causes.add(IBKRFoundationReadinessCause.CONTRACT_IDENTITY_CHANGED)
+        if (
+            planned_contract is None
+            or not bar_results
+            or not any(
+                result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
+                and result.accepted_rows
+                for result in bar_results
+            )
+        ):
+            causes.add(IBKRFoundationReadinessCause.MISSING_CONFIRMATORY_TARGET)
+        if any(
+            result.evidence_disposition
+            is IbkrHistoricalEvidenceDisposition.CONTRACT_IDENTITY_CHANGED
+            for _, result in candidate_requests
+        ):
+            causes.add(IBKRFoundationReadinessCause.CONTRACT_IDENTITY_CHANGED)
+        if any(
+            result.evidence_disposition is IbkrHistoricalEvidenceDisposition.ENTITLEMENT_UNAVAILABLE
+            for _, result in candidate_requests
+        ):
+            causes.add(IBKRFoundationReadinessCause.ENTITLEMENT_UNAVAILABLE)
+        if (
+            not schedule_results
+            or candidate not in active_intervals
+            or any(
+                result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED
+                or not result.sessions
+                for result in schedule_results
+            )
+        ):
+            causes.add(IBKRFoundationReadinessCause.SESSION_EVIDENCE_UNAVAILABLE)
 
-    if any(
-        not isinstance(row.schedule_evidence.get("sessions"), list)
-        or not row.schedule_evidence["sessions"]
-        for row in provider_rows
-    ) or any(candidate not in active_intervals for candidate in candidate_names):
-        causes.add(IBKRFoundationReadinessCause.SESSION_EVIDENCE_UNAVAILABLE)
-    if any(not times for times in valid_target_times.values()):
+    if not common_times:
         causes.add(IBKRFoundationReadinessCause.MISSING_CONFIRMATORY_TARGET)
     if len(common_times) < IBKR_MINIMUM_COMMON_SUPPORT_ROWS:
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT)
@@ -236,7 +327,7 @@ def evaluate_ibkr_foundation_readiness(
         for candidate in sorted(candidate_names)
     ):
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_ROWS)
-    if provider_gaps:
+    if provider_gaps or fold_count == 0:
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT)
 
     ordered_causes = tuple(cause for cause in IBKRFoundationReadinessCause if cause in causes)
@@ -256,6 +347,14 @@ def evaluate_ibkr_foundation_readiness(
             "provider_gap_count": len(provider_gaps),
             "target_row_count": len(targets.rows),
             "fold_count": fold_count,
+            "primary_horizon_seconds": primary_horizon.total_seconds(),
+            "source_contract_selection_sha256": plan.contract_selection_sha256,
+            "source_plan_sha256": plan.plan_sha256,
+            "source_runtime_sha256": plan.runtime_sha256,
+            "source_aggregate_sha256": aggregate.aggregate_sha256,
+            "source_coverage_summary": aggregate.coverage_summary,
+            "source_entitlement_summary": aggregate.entitlement_summary,
+            "request_evidence": request_evidence,
         },
     )
 
@@ -265,66 +364,109 @@ def _adapt_observation(
     source_dataset_id: str,
     position: int,
 ) -> ObservationRow:
+    provider_row = row
     event_id = uuid5(
         _PROVIDER_EVENT_NAMESPACE,
-        f"{source_dataset_id}:{row.observation_sha256}",
+        f"{source_dataset_id}:{provider_row.observation_sha256}",
     )
     return ObservationRow(
         event_id=event_id,
-        stream_id=f"market-bar:{row.instrument_id}:{PriceBasis.MID}",
+        stream_id=f"market-bar:{provider_row.instrument_id}:{PriceBasis.MID}",
         stream_version=position,
         event_type="MarketBarClosed",
-        event_time=row.interval_end,
-        received_at=row.available_at,
-        persisted_at=row.available_at,
+        event_time=provider_row.interval_end,
+        received_at=provider_row.available_at,
+        persisted_at=provider_row.available_at,
         global_position=position,
-        instrument_id=row.instrument_id,
+        instrument_id=provider_row.instrument_id,
         basis=PriceBasis.MID,
-        interval_start=row.interval_start,
-        interval_end=row.interval_end,
-        open=row.open,
-        high=row.high,
-        low=row.low,
-        close=row.close,
-        sample_count=max(row.count or 1, 1),
+        interval_start=provider_row.interval_start,
+        interval_end=provider_row.interval_end,
+        open=provider_row.open,
+        high=provider_row.high,
+        low=provider_row.low,
+        close=provider_row.close,
+        sample_count=max(provider_row.count or 1, 1),
         revision=1,
         provenance=BarProvenance.IBKR_HISTORICAL,
         quality=DataQuality.HEALTHY,
-        source_provider=row.provider,
-        source_environment=row.environment,
-        source_external_id=row.observation_sha256,
+        source_provider=provider_row.provider,
+        source_environment=provider_row.environment,
+        source_external_id=provider_row.observation_sha256,
     )
 
 
 def _provider_evidence(
-    rows: Sequence[ProviderHistoricalObservation],
+    source_evidence: ProviderHistorySourceEvidence,
 ) -> tuple[
     dict[str, tuple[tuple[datetime, datetime], ...]],
     tuple[Mapping[str, JsonValue], ...],
 ]:
+    source = source_evidence.source_artifact
+    requests_by_hash = {request.request_sha256: request for request in source.plan.requests}
     intervals: dict[str, set[tuple[datetime, datetime]]] = {}
     gaps: list[Mapping[str, JsonValue]] = []
-    for row in rows:
-        evidence = row.schedule_evidence
-        raw_sessions = evidence.get("sessions")
-        if isinstance(raw_sessions, list):
-            for session in raw_sessions:
-                if not isinstance(session, Mapping):
-                    continue
-                session_mapping = cast(Mapping[str, JsonValue], session)
-                start = _session_time(session_mapping, "start")
-                end = _session_time(session_mapping, "end")
-                if start is not None and end is not None and end > start:
-                    intervals.setdefault(row.instrument_id, set()).add((start, end))
-        disposition = row.gap_disposition
-        if disposition not in {"NO_GAP", "ACCEPTED", "BAR_ACCEPTED"}:
+    for result in source.request_results:
+        request = requests_by_hash.get(result.request_sha256)
+        if request is None:
+            raise ValueError("IBKR source result request is absent from the verified plan")
+        instrument_id = str(request.instrument_id)
+        if request.kind is IbkrHistoricalRequestKind.SCHEDULE:
+            if result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED:
+                for raw_session in result.sessions:
+                    session = cast(Mapping[str, object], raw_session)
+                    if session.get("active") is not True:
+                        continue
+                    start = _session_time(session, "start")
+                    end = _session_time(session, "end")
+                    if start is not None and end is not None and end > start:
+                        intervals.setdefault(instrument_id, set()).add((start, end))
+            continue
+        if request.kind is not IbkrHistoricalRequestKind.MIDPOINT_BARS:
+            continue
+        if result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED:
             gaps.append(
                 {
-                    "instrument_id": row.instrument_id,
-                    "interval_start": row.interval_start.isoformat(),
-                    "interval_end": row.interval_end.isoformat(),
-                    "disposition": disposition,
+                    "instrument_id": instrument_id,
+                    "interval_start": request.interval_start.isoformat(),
+                    "interval_end": request.interval_end.isoformat(),
+                    "disposition": result.evidence_disposition.value,
+                    "request_sha256": request.request_sha256,
+                    "result_sha256": result.result_sha256,
                 }
+            )
+            continue
+        accepted_starts = {
+            _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
+            for raw in result.accepted_rows
+        }
+        missing_start: datetime | None = None
+        cursor = request.interval_start
+        while cursor < request.interval_end:
+            if cursor not in accepted_starts:
+                if missing_start is None:
+                    missing_start = cursor
+            elif missing_start is not None:
+                gaps.append(
+                    _gap(
+                        instrument_id,
+                        missing_start,
+                        cursor,
+                        request.request_sha256,
+                        result.result_sha256,
+                    )
+                )
+                missing_start = None
+            cursor += timedelta(minutes=1)
+        if missing_start is not None:
+            gaps.append(
+                _gap(
+                    instrument_id,
+                    missing_start,
+                    request.interval_end,
+                    request.request_sha256,
+                    result.result_sha256,
+                )
             )
     return (
         {instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())},
@@ -332,11 +474,35 @@ def _provider_evidence(
     )
 
 
+def _gap(
+    instrument_id: str,
+    start: datetime,
+    end: datetime,
+    request_sha256: str,
+    result_sha256: str,
+) -> Mapping[str, JsonValue]:
+    return {
+        "instrument_id": instrument_id,
+        "interval_start": start.isoformat(),
+        "interval_end": end.isoformat(),
+        "disposition": "MISSING_BAR",
+        "request_sha256": request_sha256,
+        "result_sha256": result_sha256,
+    }
+
+
 def _session_time(session: Mapping[str, object], name: str) -> datetime | None:
-    for key in (name, f"{name}_time", f"session_{name}"):
+    for key in (f"{name}DateTime", name, f"{name}_time", f"interval_{name}", f"session_{name}"):
         value = session.get(key)
         if isinstance(value, str):
-            parsed = datetime.fromisoformat(value)
-            if parsed.tzinfo is not None:
-                return parsed.astimezone(UTC)
+            return _evidence_time(value, f"session {name}")
     return None
+
+
+def _evidence_time(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise TypeError(f"IBKR {field} must be a UTC timestamp")
+    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    if parsed.tzinfo is None:
+        raise ValueError(f"IBKR {field} must be timezone-aware")
+    return parsed.astimezone(UTC)
