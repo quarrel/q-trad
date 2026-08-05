@@ -719,10 +719,34 @@ def _completion_payload(values: tuple[object, ...]) -> dict[str, JsonValue]:
         raise IbkrHistoricalIncomplete("IBKR historical completion callback shape is invalid")
     payload: dict[str, JsonValue] = {}
     if values[0] != "":
-        payload["start"] = _safe_text(values[0])
+        payload["start"] = _completion_time(values[0])
     if values[1] != "":
-        payload["end"] = _safe_text(values[1])
+        payload["end"] = _completion_time(values[1])
     return payload
+
+
+def _completion_time(value: object) -> str:
+    if isinstance(value, datetime):
+        parsed = value
+    else:
+        text = _safe_text(value)
+        parsed = _parse_completion_text(text)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise IbkrHistoricalIncomplete("IBKR historical completion timestamp has no timezone")
+    return parsed.astimezone(UTC).isoformat().replace("+00:00", "Z")
+
+
+def _parse_completion_text(value: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None and parsed.tzinfo is not None and parsed.utcoffset() is not None:
+        return parsed
+    parts = value.rsplit(maxsplit=1)
+    if len(parts) != 2:
+        raise IbkrHistoricalIncomplete("IBKR historical completion timestamp is not parseable")
+    return _parse_schedule_text(parts[0], parts[1])
 
 
 def _error_payload(item: _Callback) -> dict[str, JsonValue]:

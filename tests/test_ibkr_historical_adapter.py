@@ -181,7 +181,13 @@ class _HistoricalClient:
                     ),
                 )
             )
-            self._callbacks.put(capability._Callback("historical_data_end", request_id, ("", "")))
+            self._callbacks.put(
+                capability._Callback(
+                    "historical_data_end",
+                    request_id,
+                    ("20260131 19:00:00 US/Eastern", "20260131 21:00:00 US/Eastern"),
+                )
+            )
 
     def cancelHistoricalData(self, request_id: int) -> None:
         self.cancelled.append(request_id)
@@ -223,6 +229,10 @@ async def test_historical_adapter_correlates_bars_and_schedule(
     assert bars[0].payload["date"] == int((_START + timedelta(minutes=1)).timestamp())
     assert bars[0].payload["open"] == "1.1"
     assert received[-1].kind is IbkrHistoricalCallbackKind.COMPLETION
+    assert received[-1].payload == {
+        "start": "2026-02-01T00:00:00Z",
+        "end": "2026-02-01T02:00:00Z",
+    }
     first_call = created[0].historical_calls[0][1]
     assert isinstance(first_call[0], SimpleNamespace)
     assert first_call[1:] == (
@@ -325,3 +335,28 @@ async def test_historical_adapter_reauthenticates_and_retains_sanitized_error(
 
 async def _immediate_sleep() -> None:
     return None
+
+
+@pytest.mark.parametrize(
+    ("values", "expected"),
+    (
+        (
+            ("20260804 00:00:00 US/Eastern", "20260805 00:00:00 US/Eastern"),
+            {
+                "start": "2026-08-04T04:00:00Z",
+                "end": "2026-08-05T04:00:00Z",
+            },
+        ),
+        (
+            ("2026-08-04T00:00:00Z", "2026-08-05T00:00:00+00:00"),
+            {
+                "start": "2026-08-04T00:00:00Z",
+                "end": "2026-08-05T00:00:00Z",
+            },
+        ),
+    ),
+)
+def test_completion_payload_normalizes_timezone_forms(
+    values: tuple[str, str], expected: dict[str, str]
+) -> None:
+    assert historical._completion_payload(values) == expected

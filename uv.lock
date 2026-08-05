@@ -806,6 +806,7 @@ dependencies = [
     { name = "scikit-learn" },
     { name = "sqlalchemy" },
     { name = "trading-ig" },
+    { name = "tzdata" },
     { name = "uvicorn" },
 ]
 
@@ -834,6 +835,7 @@ requires-dist = [
     { name = "scikit-learn", specifier = "==1.7.1" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "trading-ig", specifier = ">=0.0.24,<0.1" },
+    { name = "tzdata", specifier = ">=2026.2,<2027" },
     { name = "uvicorn", specifier = ">=0.35,<1" },
 ]
 
