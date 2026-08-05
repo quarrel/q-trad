@@ -756,6 +756,10 @@ Four-week chunks may be selected if demonstrated reliable. They are not assumed 
 
 **Form:** operational run, not a new feature pull request.
 
+**Software status:** Immutable plan registration, durable execution, result publication and independent
+verification are implemented on `main`. The account-gated operational run of the full acquisition and
+its provider evidence remain pending; this implementation does not claim a completed historical run.
+
 Generate the final immutable plan using:
 
 * the frozen contract selection;
@@ -809,6 +813,10 @@ After later permission changes, create a new plan referencing the original contr
 
 **Form:** research-input pull request.
 
+**Software status:** Provider-history observation construction and file-only verification are implemented
+on `main`, including declared availability and source/lineage separation. A verified Stage 6 aggregate
+and result artifact are still required; no provider-history dataset is claimed by this software status.
+
 Implement:
 
 ```text
@@ -861,6 +869,11 @@ Unknown selectors and mixed native/provider inputs fail closed.
 ## Stage 8 — Source-specific foundation and readiness
 
 **Form:** foundation integration pull request.
+
+**Software status:** The source-specific foundation builder and readiness verifier are implemented on
+`main`, with independent replay, fixed six-candidate enforcement, session-aware gaps and bounded child
+Parquet persistence. They consume verified Stage 7 evidence; no qualifying readiness disposition or
+downstream R2 artifact has been created.
 
 Extend foundation build and verification with mutually exclusive inputs:
 

@@ -1,8 +1,8 @@
 # Current status
 
-**Updated:** 2026-08-03
+**Updated:** 2026-08-05
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
-**Parallel track:** IBKR Stages 1–4 immutable contracts, planner, durable execution state machine and result verifier implemented; Stage 5 adapter and canary software implemented locally, while account-gated capability review, host deployment and request-profile canary evidence remain pending
+**Parallel track:** IBKR Stages 1–8 software contracts, verifiers and CLI paths are implemented on `main`; account-gated capability review, host deployment, request-profile canary and full acquisition remain pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -140,12 +140,17 @@ remains offline/replay.
   restart recovery and publication state, with fake-port transition and crash-injection coverage.
   Stage 4 adds bounded request/aggregate result builders from durable state, create-only result
   manifests/children and a file-only verifier that reconstructs each accepted closure and rejects
-  missing, altered, additional or orphaned files. Stage 5 now adds the official direct TWS historical
+  missing, altered, additional or orphaned files. Stage 5 adds the official direct TWS historical
   adapter, generation-fenced contract reauthentication, MIDPOINT/SCHEDULE callback normalization,
   sanitized error evidence, bounded cancellation/timeout handling, immutable canary evidence and
-  file-only canary/profile operations. It remains inert until an account-gated capability review,
-  exact operator selection, host deployment and request-profile canary evidence are available; no
-  historical dataset, entitlement evidence or research result has been created. IBKR history stays
+  file-only canary/profile operations. It remains inert until account-gated capability review, host
+  deployment and request-profile canary evidence are available.
+  Stages 6–8 are now implemented on `main`: Stage 6 provides immutable full-acquisition registration,
+  durable execution and result closure; Stage 7 builds and verifies provenance-distinct provider-history
+  observations with declared availability; Stage 8 builds and independently replays the fixed-six,
+  three-group source-specific foundation with session-aware gaps and bounded Parquet children.
+  This is implementation evidence only: account-gated deployment, a full acquisition, verified
+  provider-history data and a qualifying readiness disposition remain pending. IBKR history stays
   provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
@@ -172,21 +177,22 @@ remains offline/replay.
   become paper-tradable without a separate economics/role decision. Bitcoin needs a future review
   while its exact listing is available before it can be promoted.
 - R0's 2026-07-22 bounded historical-data decision remains retained evidence. ADR 0028 subsequently
-  approved an independently governed IBKR paper-market-data track, but its exact contracts, account
-  entitlements, timestamp/session semantics and historical availability remain unqualified. Any future
+  approved an independently governed IBKR paper-market-data track. Stages 6–8 are implemented, but
+  exact contracts, account entitlements, timestamp/session semantics and historical availability remain
+  unqualified; no full IBKR acquisition or qualifying provider-history foundation is retained. Any future
   IBKR history stays provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 
 ## Next actions
 
 1. Run the bounded IBKR account-gated exact-contract capability review, then deploy the
-  matched read-only runtime and execute the Stage 5 representative canary; do not ingest or infer
-  mappings.
-2. Complete representative source-specific integration and the corresponding R2.H software-verification
+   matched read-only runtime and execute the Stage 5 representative canary; do not ingest or infer
+   mappings.
+2. After the canary, register and execute the full Stage 6 plan, then independently build and verify the
+   Stage 7 provider-history observations and Stage 8 source-specific foundation/readiness disposition.
+3. Complete representative source-specific integration and the corresponding R2.H software-verification
    bundle for the implemented R2.F1 evaluation/selection core while the IBKR data track proceeds and
    native IG history accumulates.
-3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-4. Build and independently verify each source-specific foundation only when its configured evidence,
-   availability and product-role gates pass; do not weaken durations or combine sources.
+4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 

@@ -49,8 +49,12 @@ work and records only the milestone sequence needed to reach the next trustworth
   Stage 3 durable execution state-machine artefacts and Stage 4 create-only result publication/file-only
   verification artefacts are implemented. Stage 5 adapter, callback normalization, immutable canary
   evidence and file-only canary/profile operations are implemented locally; account-gated review, host
-  deployment and request-profile canary evidence remain pending, and IBKR evidence cannot substantiate
-  an IG-native conclusion.
+  deployment and request-profile canary evidence remain pending.
+  Stages 6–8 are now implemented on `main`: Stage 6 immutable acquisition registration/execution,
+  Stage 7 verified provider-history observation construction, and Stage 8 source-specific
+  foundation/readiness with independent replay and bounded child persistence. This is implementation
+  evidence only: account-gated deployment, a full acquisition and a qualifying readiness disposition
+  remain pending, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
@@ -137,10 +141,14 @@ chronology ambiguity before those contracts are fixed.
 - Normative historical-acquisition plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`; durable boundaries:
   `docs/adr/0028-independent-ibkr-market-data-source.md` and
   `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`.
-- First qualify account-visible exact contracts, entitlements, timestamps, sessions and historical
-  capabilities without ingesting or inferring provider mappings.
-- Then implement immutable one-minute historical acquisition and a separate provider-history
-  observation/foundation path. Historical results retain explicit availability/revision assumptions.
+- The software path through Stage 8 is implemented on `main`: immutable planning, execution and
+  result closure; provider-history observations with declared availability; and the source-specific
+  foundation/readiness verifier. It remains dependent on independently verified lower-stage evidence.
+- Operational work remains: qualify account-visible exact contracts, entitlements, timestamps, sessions
+  and historical capabilities; deploy the matched read-only runtime; execute the Stage 5 canary; then
+  register and run the full Stage 6 acquisition before building Stage 7/8 evidence.
+- No qualifying IBKR readiness disposition or downstream R2 artifact has been created; keep
+  `R2-IBKR-HISTORICAL` source-specific and do not combine its evidence with IG-native data.
 - Add live IBKR top-of-book capture only as an independent runtime and canonical store with
   operator-authenticated Gateway lifecycle, truthful health, recovery, backups and restore evidence.
 - The adapter remains market-data-only. Account access, acquisition, deployment and publication are
