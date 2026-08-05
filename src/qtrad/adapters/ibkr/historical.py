@@ -216,7 +216,7 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
                     client.reqHistoricalData(
                         request_id,
                         api_contract,
-                        request.end_date_time,
+                        _provider_end_date_time(request.end_date_time),
                         request.duration,
                         cast(str, request.bar_size),
                         cast(str, request.what_to_show),
@@ -235,7 +235,7 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
                     client.reqHistoricalData(
                         request_id,
                         api_contract,
-                        request.end_date_time,
+                        _provider_end_date_time(request.end_date_time),
                         request.duration,
                         cast(str, request.bar_size),
                         cast(str, request.what_to_show),
@@ -502,6 +502,11 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
     def _require_client(self) -> Any:
         client = super()._require_client()
         return client
+
+
+def _provider_end_date_time(value: str) -> str:
+    """Render the canonical UTC request timestamp in IBKR's wire format."""
+    return value.removesuffix(" UTC")
 
 
 def _api_contract(fingerprint: IbkrContractFingerprint) -> object:

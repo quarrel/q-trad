@@ -226,7 +226,7 @@ async def test_historical_adapter_correlates_bars_and_schedule(
     first_call = created[0].historical_calls[0][1]
     assert isinstance(first_call[0], SimpleNamespace)
     assert first_call[1:] == (
-        ibkr_end_date_time(_START + timedelta(hours=2)),
+        ibkr_end_date_time(_START + timedelta(hours=2)).removesuffix(" UTC"),
         "1 D",
         "1 min",
         "MIDPOINT",
@@ -255,7 +255,7 @@ async def test_historical_adapter_correlates_bars_and_schedule(
     schedule_call = created[0].historical_calls[1][1]
     assert isinstance(schedule_call[0], SimpleNamespace)
     assert schedule_call[1:] == (
-        ibkr_end_date_time(_START + timedelta(hours=2)),
+        ibkr_end_date_time(_START + timedelta(hours=2)).removesuffix(" UTC"),
         "1 D",
         "1 day",
         "SCHEDULE",
