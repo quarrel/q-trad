@@ -194,8 +194,11 @@ def write_ibkr_foundation(
     if build.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
         raise ValueError("provider history changed during foundation construction")
 
+    child_root_created = False
+    output_created = False
     try:
         child_root.mkdir()
+        child_root_created = True
         children = _write_children(
             child_root,
             output.parent,
@@ -214,11 +217,12 @@ def write_ibkr_foundation(
         if len(encoded) > _MAX_MANIFEST_BYTES:
             raise ValueError("IBKR foundation manifest exceeds the 4 MiB limit")
         with output.open("xb") as handle:
+            output_created = True
             handle.write(encoded)
     except BaseException:
-        if child_root.exists():
+        if child_root_created:
             shutil.rmtree(child_root)
-        if output.exists():
+        if output_created:
             output.unlink()
         raise
     return build
@@ -456,6 +460,10 @@ def _verify_children(
                 raise ValueError("IBKR foundation child manifest has unknown or missing fields")
             if manifest_bytes != _json_bytes(manifest) + b"\n":
                 raise ValueError("IBKR foundation child manifest bytes are not canonical")
+            if manifest["contract"] != _FOUNDATION_CHILD_CONTRACT:
+                raise ValueError("IBKR foundation child contract is unsupported")
+            if manifest["schema_version"] != _FOUNDATION_CHILD_SCHEMA_VERSION:
+                raise ValueError("IBKR foundation child schema is unsupported")
             identity = dict(manifest)
             manifest_hash = _text(identity.pop("manifest_sha256"), "child manifest hash")
             if manifest_hash != _sha(identity):

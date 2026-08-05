@@ -411,47 +411,59 @@ def _provider_evidence(
 ]:
     source = source_evidence.source_artifact
     requests_by_hash = {request.request_sha256: request for request in source.plan.requests}
-    intervals: dict[str, set[tuple[datetime, datetime]]] = {}
-    gaps: list[Mapping[str, JsonValue]] = []
+    resolved_results: list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]] = []
     for result in source.request_results:
         request = requests_by_hash.get(result.request_sha256)
         if request is None:
             raise ValueError("IBKR source result request is absent from the verified plan")
+        resolved_results.append((request, result))
+
+    intervals: dict[str, set[tuple[datetime, datetime]]] = {}
+    for request, result in resolved_results:
         instrument_id = str(request.instrument_id)
-        if request.kind is IbkrHistoricalRequestKind.SCHEDULE:
-            if result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED:
-                for raw_session in result.sessions:
-                    session = cast(Mapping[str, object], raw_session)
-                    if session.get("active") is not True:
-                        continue
-                    start = _session_time(session, "start")
-                    end = _session_time(session, "end")
-                    if start is not None and end is not None and end > start:
-                        intervals.setdefault(instrument_id, set()).add((start, end))
+        if request.kind is not IbkrHistoricalRequestKind.SCHEDULE:
             continue
+        if result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED:
+            for raw_session in result.sessions:
+                session = cast(Mapping[str, object], raw_session)
+                if session.get("active") is not True:
+                    continue
+                start = _session_time(session, "start")
+                end = _session_time(session, "end")
+                if start is not None and end is not None and end > start:
+                    intervals.setdefault(instrument_id, set()).add((start, end))
+
+    gaps: list[Mapping[str, JsonValue]] = []
+    for request, result in resolved_results:
+        instrument_id = str(request.instrument_id)
         if request.kind is not IbkrHistoricalRequestKind.MIDPOINT_BARS:
             continue
-        if result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED:
-            gaps.append(
-                {
-                    "instrument_id": instrument_id,
-                    "interval_start": request.interval_start.isoformat(),
-                    "interval_end": request.interval_end.isoformat(),
-                    "disposition": result.evidence_disposition.value,
-                    "request_sha256": request.request_sha256,
-                    "result_sha256": result.result_sha256,
-                }
+        expected_intervals = tuple(
+            (
+                max(active_start, request.interval_start),
+                min(active_end, request.interval_end),
             )
+            for active_start, active_end in sorted(intervals.get(instrument_id, ()))
+            if max(active_start, request.interval_start) < min(active_end, request.interval_end)
+        )
+        if result.evidence_disposition is not IbkrHistoricalEvidenceDisposition.SUCCEEDED:
+            for expected_start, expected_end in expected_intervals:
+                gaps.append(
+                    _gap(
+                        instrument_id,
+                        expected_start,
+                        expected_end,
+                        request.request_sha256,
+                        result.result_sha256,
+                        disposition=result.evidence_disposition.value,
+                    )
+                )
             continue
         accepted_starts = {
             _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
             for raw in result.accepted_rows
         }
-        for active_start, active_end in intervals.get(instrument_id, ()):
-            expected_start = max(active_start, request.interval_start)
-            expected_end = min(active_end, request.interval_end)
-            if expected_start >= expected_end:
-                continue
+        for expected_start, expected_end in expected_intervals:
             missing_start: datetime | None = None
             cursor = expected_start
             while cursor < expected_end:
@@ -492,12 +504,14 @@ def _gap(
     end: datetime,
     request_sha256: str,
     result_sha256: str,
+    *,
+    disposition: str = "MISSING_BAR",
 ) -> Mapping[str, JsonValue]:
     return {
         "instrument_id": instrument_id,
         "interval_start": start.isoformat(),
         "interval_end": end.isoformat(),
-        "disposition": "MISSING_BAR",
+        "disposition": disposition,
         "request_sha256": request_sha256,
         "result_sha256": result_sha256,
     }

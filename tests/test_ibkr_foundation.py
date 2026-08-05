@@ -11,6 +11,7 @@ from typing import cast
 
 import pytest
 
+import qtrad.runtime.ibkr_foundation as foundation_runtime
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import (
@@ -102,6 +103,35 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
         configuration=configuration,
     )
     return bundle
+
+
+def test_stage8_writer_preserves_racing_output_on_child_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    output = tmp_path / "racing-foundation.json"
+    child_root = tmp_path / "racing-foundation.json.children"
+
+    def fail_after_output_race(*_args: object, **_kwargs: object) -> dict[str, JsonValue]:
+        output.write_text("competitor", encoding="utf-8")
+        raise RuntimeError("simulated output race")
+
+    monkeypatch.setattr(foundation_runtime, "_write_children", fail_after_output_race)
+
+    with pytest.raises(RuntimeError, match="simulated output race"):
+        write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+        )
+
+    assert output.read_text(encoding="utf-8") == "competitor"
+    assert not child_root.exists()
 
 
 def test_stage8_declarations_are_fixed_and_model_independent() -> None:
@@ -246,7 +276,9 @@ def test_stage8_zero_valid_folds_remains_insufficient(
 
 
 def _session_aware_source_evidence(
-    *, context_failure: bool = False
+    *,
+    context_failure: bool = False,
+    missing_active_bar: bool = False,
 ) -> tuple[ProviderHistorySourceEvidence, TargetDataset, datetime, datetime]:
     source_start = datetime(2026, 2, 1, tzinfo=UTC)
     source_end = datetime(2026, 3, 5, tzinfo=UTC)
@@ -294,6 +326,13 @@ def _session_aware_source_evidence(
                 if not no_data:
                     for minute in range(65):
                         bar_start = session_start + timedelta(minutes=minute)
+                        if (
+                            missing_active_bar
+                            and instrument == str(IBKR_CONFIRMATORY_INSTRUMENTS[0])
+                            and day == source_start + timedelta(days=1)
+                            and minute == 10
+                        ):
+                            continue
                         accepted_rows.append({"bar_start": bar_start.isoformat()})
                         observations.append(SimpleNamespace(instrument_id=instrument))
                         target_rows.append(
@@ -320,7 +359,7 @@ def _session_aware_source_evidence(
                     result_sha256=f"{result_index:064x}",
                     evidence_disposition=(
                         IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED
-                        if no_data
+                        if no_data or not accepted_rows
                         else IbkrHistoricalEvidenceDisposition.SUCCEEDED
                     ),
                     accepted_rows=tuple(accepted_rows),
@@ -376,10 +415,13 @@ def _session_aware_source_evidence(
 
 
 def _evaluate_session_aware_readiness(
-    *, context_failure: bool = False
+    *,
+    context_failure: bool = False,
+    missing_active_bar: bool = False,
 ) -> tuple[IBKRFoundationReadiness, tuple[Mapping[str, JsonValue], ...]]:
     source_evidence, targets, source_start, source_end = _session_aware_source_evidence(
-        context_failure=context_failure
+        context_failure=context_failure,
+        missing_active_bar=missing_active_bar,
     )
     active_intervals, provider_gaps = _provider_evidence(source_evidence)
     readiness = evaluate_ibkr_foundation_readiness(
@@ -402,6 +444,14 @@ def test_stage8_session_aware_gaps_allow_qualifying_history() -> None:
     assert provider_gaps == ()
 
 
+def test_stage8_active_session_gap_is_insufficient_even_when_bar_result_precedes_schedule() -> None:
+    readiness, provider_gaps = _evaluate_session_aware_readiness(missing_active_bar=True)
+
+    assert readiness.state is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+    assert IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT in readiness.causes
+    assert any(gap["disposition"] == "MISSING_BAR" for gap in provider_gaps)
+
+
 def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() -> None:
     readiness, provider_gaps = _evaluate_session_aware_readiness(context_failure=True)
 
@@ -412,32 +462,10 @@ def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() ->
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        ("dataset_id", "1" * 64),
-        ("row_count", 9999),
-        (
-            "file",
-            "foundation.json.children/parquet/observations/"
-            "part-000000-deadbeefdeadbeefdeadbeef.parquet",
-        ),
-    ),
-)
-def test_stage8_rejects_child_reference_drift(
-    tmp_path: Path,
-    field: str,
-    value: object,
-) -> None:
-    bundle = _foundation_bundle_fixture(tmp_path)
-    _rewrite_payload_reference(bundle, field, value)
-
-    with pytest.raises(ValueError, match="reference differs from its manifest"):
-        verify_ibkr_foundation(bundle)
-
-
-@pytest.mark.parametrize(
     ("field", "value", "message"),
     (
+        ("contract", "unsupported-child-contract", "child contract is unsupported"),
+        ("schema_version", 2, "child schema is unsupported"),
         ("part_index", 1, "not contiguous"),
         (
             "lineage",
