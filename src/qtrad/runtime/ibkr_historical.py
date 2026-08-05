@@ -40,7 +40,7 @@ from qtrad.runtime.ibkr_capability import ibkr_capability_probe_spec_from_docume
 from qtrad.runtime.universe import capture_candidates_from_document
 
 # Stage 5 retains complete callback evidence across the planned four-week windows.
-_MAX_ARTIFACT_BYTES = 64 * 1024 * 1024
+_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024
 _SELECTION_KEYS = {
     "contract",
     "schema_version",
