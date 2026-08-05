@@ -17,8 +17,8 @@ env:
   IBKR_API_URL: https://interactivebrokers.github.io/downloads/twsapi_macunix.1049.02.zip
   IBKR_API_SHA256: d1878128eb725bf744ab796f0ad518b915f2fce0f2c4ab3b9476f8a7fcf7649a
   IBKR_API_VERSION: "10.49"
-  IBKR_GATEWAY_VERSION: "10.49"
-  IBKR_GATEWAY_ARCHIVE_SHA256: 261421ac5967c53bbc8f97b7a25c894c7303de7c6da0c04c81ef5360886c6d33
+  IBKR_GATEWAY_EXPECTED_VERSION: "10.49"
+  IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256: 261421ac5967c53bbc8f97b7a25c894c7303de7c6da0c04c81ef5360886c6d33
 
 jobs:
   publish:
@@ -64,18 +64,18 @@ jobs:
           APPLICATION_COMMIT: ${{ github.sha }}
         run: |
           set -euo pipefail
-          install -d -m 0755 .ibkr-api-build/api-source
+          install -d -m 0755 "$RUNNER_TEMP/ibkr-api-build/api-source"
           curl --fail --location --retry 3 \
-            --output .ibkr-api-build/ibkr-api.zip \
+            --output "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
             "$IBKR_API_URL"
           printf '%s  %s\n' \
-            "$IBKR_API_SHA256" .ibkr-api-build/ibkr-api.zip \
+            "$IBKR_API_SHA256" "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
             | sha256sum --check --strict
-          unzip -q .ibkr-api-build/ibkr-api.zip \
+          unzip -q "$RUNNER_TEMP/ibkr-api-build/ibkr-api.zip" \
             'IBJts/source/pythonclient/*' \
-            -d .ibkr-api-build/api-source
+            -d "$RUNNER_TEMP/ibkr-api-build/api-source"
           api_source_fingerprint="$(bash ops/ibkr/source-manifest-fingerprint.sh \
-            .ibkr-api-build/api-source/IBJts/source/pythonclient)"
+            "$RUNNER_TEMP/ibkr-api-build/api-source/IBJts/source/pythonclient")"
           source_digest="$(git archive --format=tar "$APPLICATION_COMMIT" | sha256sum | cut -d ' ' -f 1)"
           source_epoch="$(git show -s --format=%ct "$APPLICATION_COMMIT")"
           build_time="$(date -u -d "@$source_epoch" +%Y-%m-%dT%H:%M:%SZ)"
@@ -93,7 +93,7 @@ jobs:
           context: .
           file: Dockerfile.ibkr
           build-contexts: |
-            ibkr-api=.ibkr-api-build
+            ibkr-api=${{ runner.temp }}/ibkr-api-build
           platforms: linux/arm64
           push: true
           tags: ${{ env.OCI_IBKR_IMAGE }}:${{ github.sha }}
@@ -102,8 +102,8 @@ jobs:
             IBKR_API_SHA256=${{ env.IBKR_API_SHA256 }}
             IBKR_API_SOURCE_MANIFEST_SHA256=${{ steps.ibkr_identity.outputs.api_source_fingerprint }}
             IBKR_API_VERSION=${{ env.IBKR_API_VERSION }}
-            IBKR_GATEWAY_VERSION=${{ env.IBKR_GATEWAY_VERSION }}
-            IBKR_GATEWAY_ARCHIVE_SHA256=${{ env.IBKR_GATEWAY_ARCHIVE_SHA256 }}
+            IBKR_GATEWAY_EXPECTED_VERSION=${{ env.IBKR_GATEWAY_EXPECTED_VERSION }}
+            IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256=${{ env.IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256 }}
             QTRAD_SOURCE_DIGEST=${{ steps.ibkr_identity.outputs.source_digest }}
             QTRAD_APP_COMMIT=${{ github.sha }}
             QTRAD_BUILD_TIME=${{ steps.ibkr_identity.outputs.build_time }}

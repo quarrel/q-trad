@@ -107,7 +107,7 @@ def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:
     assert "QTRAD_IBKR_API_PACKAGE_FINGERPRINT" in host
     assert "QTRAD_IBKR_GATEWAY_MANIFEST" in host
     assert "org.qtrad.ibkr.api.source-manifest.sha256" in host
-    assert "org.qtrad.ibkr.gateway.archive.sha256" in host
+    assert "org.qtrad.ibkr.gateway.expected.archive.sha256" in host
     assert "checkpoint_root" in host
     assert "StartLimitIntervalSec=1h" in ingest
     assert "StartLimitBurst=3" in ingest
@@ -132,8 +132,15 @@ def test_ibkr_build_and_health_controls_are_durable() -> None:
     assert "if ((restart_count >= max_gateway_restarts)); then" in health
     assert "SOURCE_DATE_EPOCH" in build
     dockerfile = (REPOSITORY_ROOT / "Dockerfile.ibkr").read_text()
+    workflow = (REPOSITORY_ROOT / ".github" / "workflows" / "publish-image.yml").read_text()
     assert "_verify_official_api_distribution" in dockerfile
     assert "org.qtrad.ibkr.api.source-manifest.sha256" in dockerfile
+    assert "org.qtrad.ibkr.gateway.expected.archive.sha256" in dockerfile
+    assert "RUN --mount=type=bind,from=ibkr-api" in dockerfile
+    assert "COPY --from=ibkr-api" not in dockerfile
+    assert "$RUNNER_TEMP/ibkr-api-build" in workflow
+    assert "ibkr-api=${{ runner.temp }}/ibkr-api-build" in workflow
+    assert ".ibkr-api-build" not in workflow
 
 
 def test_ibkr_gateway_identity_is_required_by_runtime_templates() -> None:

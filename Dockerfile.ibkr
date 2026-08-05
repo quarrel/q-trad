@@ -4,16 +4,16 @@ FROM ${QTRAD_BASE_IMAGE}
 ARG IBKR_API_SHA256
 ARG IBKR_API_SOURCE_MANIFEST_SHA256
 ARG IBKR_API_VERSION=10.49
-ARG IBKR_GATEWAY_VERSION=10.49
-ARG IBKR_GATEWAY_ARCHIVE_SHA256
+ARG IBKR_GATEWAY_EXPECTED_VERSION=10.49
+ARG IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256
 ARG QTRAD_SOURCE_DIGEST
 ARG QTRAD_APP_COMMIT
 ARG QTRAD_BUILD_TIME
 ARG SOURCE_DATE_EPOCH
 
 USER root
-COPY --from=ibkr-api ibkr-api.zip /tmp/ibkr-api.zip
-RUN test -n "${IBKR_API_SHA256}" \
+RUN --mount=type=bind,from=ibkr-api,source=ibkr-api.zip,target=/tmp/ibkr-api.zip,ro \
+    test -n "${IBKR_API_SHA256}" \
     && echo "${IBKR_API_SHA256}  /tmp/ibkr-api.zip" | sha256sum --check --status \
     && mkdir -p /tmp/ibkr-api \
     && python -c 'import zipfile; zipfile.ZipFile("/tmp/ibkr-api.zip").extractall("/tmp/ibkr-api")' \
@@ -21,14 +21,14 @@ RUN test -n "${IBKR_API_SHA256}" \
     && IBKR_API_SOURCE_MANIFEST_SHA256="${IBKR_API_SOURCE_MANIFEST_SHA256}" \
        IBKR_API_VERSION="${IBKR_API_VERSION}" \
        /app/.venv/bin/python -c 'import os; from qtrad.adapters.ibkr.capability import IbkrApiIdentity, _verify_official_api_distribution; _verify_official_api_distribution(IbkrApiIdentity(package_fingerprint=os.environ["IBKR_API_SOURCE_MANIFEST_SHA256"], version=os.environ["IBKR_API_VERSION"]))' \
-    && rm -rf /tmp/ibkr-api /tmp/ibkr-api.zip
+    && rm -rf /tmp/ibkr-api
 
 LABEL org.opencontainers.image.title="q-trad IBKR capture" \
     org.qtrad.ibkr.api.version="${IBKR_API_VERSION}" \
-    org.qtrad.ibkr.gateway.version="${IBKR_GATEWAY_VERSION}" \
+    org.qtrad.ibkr.gateway.expected.version="${IBKR_GATEWAY_EXPECTED_VERSION}" \
     org.qtrad.ibkr.api.archive.sha256="${IBKR_API_SHA256}" \
     org.qtrad.ibkr.api.source-manifest.sha256="${IBKR_API_SOURCE_MANIFEST_SHA256}" \
-    org.qtrad.ibkr.gateway.archive.sha256="${IBKR_GATEWAY_ARCHIVE_SHA256}" \
+    org.qtrad.ibkr.gateway.expected.archive.sha256="${IBKR_GATEWAY_EXPECTED_ARCHIVE_SHA256}" \
     org.qtrad.source.digest="${QTRAD_SOURCE_DIGEST}" \
     org.opencontainers.image.revision="${QTRAD_APP_COMMIT}" \
     org.opencontainers.image.created="${QTRAD_BUILD_TIME}"
