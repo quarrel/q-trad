@@ -743,6 +743,38 @@ qtrad-ibkr-historical-request-profile-v1
 
 Four-week chunks may be selected if demonstrated reliable. They are not assumed in advance.
 
+### Supported canary execution
+
+On the authorised paper-account host, after the runtime lock and contract selection have been
+independently verified, run `ops/ibkr/verify-host.sh` first. Set
+`QTRAD_IMAGE_DIGEST` to the exact immutable IBKR image reference verified by that command, then
+execute the canary from that same image:
+
+~~~bash
+export QTRAD_IMAGE_DIGEST="${QTRAD_IBKR_IMAGE:?set the verified qtrad-ibkr@sha256 image reference}"
+ops/ibkr/verify-host.sh
+docker run --rm --network host \
+  --env-file /srv/qtrad/ibkr/runtime.env \
+  --env QTRAD_IMAGE_DIGEST="$QTRAD_IMAGE_DIGEST" \
+  --volume /srv/qtrad/ibkr:/srv/qtrad/ibkr \
+  "$QTRAD_IMAGE_DIGEST" \
+  qtrad historical ibkr canary-run \
+    --runtime-lock /srv/qtrad/ibkr/runtime-lock.json \
+    --contract-selection /srv/qtrad/ibkr/contract-selection.json \
+    --fx-representative-id fx:eur-usd \
+    --index-representative-id index:australia-200 \
+    --commodity-representative-id commodity:spot-gold \
+    --anchor-end 2026-08-05T00:00:00Z \
+    --output /srv/qtrad/ibkr/evidence/canary-2026-08-05.json \
+    --execute-account-canary
+~~~
+
+The output is create-only qtrad-ibkr-historical-canary-v1 evidence. Full acquisition cannot begin
+until the resulting evidence independently verifies; this command does not deploy the Gateway,
+freeze a request profile, register a plan or start full acquisition. The required operational order
+is: merge this change; publish the resulting main-commit qtrad-ibkr image; freeze the runtime lock
+using that image digest; verify the host; then run the canary from that exact image.
+
 ### Exit criteria
 
 * Contract reauthentication succeeds or produces immutable mismatch evidence.

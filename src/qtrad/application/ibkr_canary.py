@@ -611,6 +611,81 @@ def freeze_ibkr_request_profile_from_canary(
     )
 
 
+def ibkr_historical_selection_asset_classes(
+    selection: IbkrContractSelection,
+) -> dict[InstrumentId, AssetClass]:
+    """Resolve the bounded asset-class identity carried by a frozen selection."""
+
+    asset_class_by_instrument: dict[InstrumentId, AssetClass] = {}
+    for decision in selection.decisions:
+        raw_asset_class = decision.descriptive_metadata.get("asset_class")
+        if raw_asset_class is None:
+            raw_asset_class = decision.instrument_id.value.partition(":")[0]
+        if not isinstance(raw_asset_class, str):
+            raise ValueError(f"IBKR selection asset class is missing for {decision.instrument_id}")
+        try:
+            asset_class = AssetClass(raw_asset_class.upper())
+        except ValueError as error:
+            raise ValueError(
+                f"IBKR selection asset class is unsupported for {decision.instrument_id}"
+            ) from error
+        asset_class_by_instrument[decision.instrument_id] = asset_class
+    return asset_class_by_instrument
+
+
+def validate_ibkr_historical_canary_representatives(
+    selection: IbkrContractSelection,
+    *,
+    representatives: Mapping[AssetClass, InstrumentId],
+) -> dict[AssetClass, tuple[InstrumentId, IbkrContractFingerprint]]:
+    """Validate selected, eligible representatives before any provider connection."""
+
+    asset_class_by_instrument = ibkr_historical_selection_asset_classes(selection)
+    required_groups = set(IBKR_CANARY_GROUPS)
+    provided_groups = set(representatives)
+    if provided_groups != required_groups:
+        missing = sorted(group.value for group in required_groups - provided_groups)
+        unexpected = sorted(str(group) for group in provided_groups - required_groups)
+        raise ValueError(
+            "IBKR canary representatives must cover exactly FX, INDEX and COMMODITY"
+            f" (missing={missing}, unexpected={unexpected})"
+        )
+    if len(set(representatives.values())) != len(representatives):
+        raise ValueError("IBKR canary representatives must identify three distinct contracts")
+
+    validate_ibkr_historical_index_selection(
+        selection, asset_class_by_instrument=asset_class_by_instrument
+    )
+    decisions_by_instrument = {item.instrument_id: item for item in selection.decisions}
+    validated: dict[AssetClass, tuple[InstrumentId, IbkrContractFingerprint]] = {}
+    for group in IBKR_CANARY_GROUPS:
+        instrument_id = representatives[group]
+        if asset_class_by_instrument.get(instrument_id) is not group:
+            raise ValueError(
+                f"IBKR canary representative {instrument_id} does not match the {group.value} group"
+            )
+        decision = decisions_by_instrument.get(instrument_id)
+        if decision is None:
+            raise ValueError(
+                f"IBKR canary representative {instrument_id} is not present in the selection"
+            )
+        if (
+            decision.decision is not IbkrContractDecision.ACCEPTED_EXACT_CONTRACT
+            or not decision.acquisition_eligible
+            or decision.fingerprint is None
+        ):
+            raise ValueError(
+                f"IBKR canary representative {instrument_id} is not an eligible selected contract"
+            )
+        if (
+            group is AssetClass.INDEX
+            and decision.fingerprint.security_type not in IBKR_CANARY_MIDPOINT_INDEX_SECURITY_TYPES
+        ):
+            raise ValueError("IBKR index representative must be a CFD")
+        validated[group] = (instrument_id, decision.fingerprint)
+    return validated
+
+
 def validate_ibkr_historical_canary_selection(
     evidence: IbkrHistoricalCanaryEvidence,
     *,

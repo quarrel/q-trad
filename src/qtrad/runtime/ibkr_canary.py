@@ -78,11 +78,19 @@ _MAX_DIAGNOSTIC_LENGTH = 2_000
 
 
 def write_ibkr_historical_canary_evidence(
-    path: Path, evidence: IbkrHistoricalCanaryEvidence
+    path: Path,
+    evidence: IbkrHistoricalCanaryEvidence,
+    *,
+    reservation: runtime.CreateOnlyOutputReservation | None = None,
 ) -> None:
     """Write immutable canary evidence using the shared bounded JSON boundary."""
-
-    runtime._write_create_only(path, evidence.as_json_value(), "IBKR historical canary evidence")
+    payload = evidence.as_json_value()
+    if reservation is None:
+        runtime._write_create_only(path, payload, "IBKR historical canary evidence")
+        return
+    if reservation.path != path:
+        raise ValueError("IBKR canary evidence reservation path does not match output path")
+    reservation.publish(payload, "IBKR historical canary evidence")
 
 
 def load_ibkr_historical_canary_evidence(

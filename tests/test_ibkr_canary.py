@@ -37,6 +37,7 @@ from qtrad.domain.ibkr_execution import (
 )
 from qtrad.domain.ibkr_historical import (
     IbkrContractFingerprint,
+    IbkrContractSelection,
     IbkrHistoricalPacingPolicy,
     IbkrHistoricalRequest,
     sha256_json,
@@ -48,6 +49,7 @@ from qtrad.ports.ibkr_historical import (
     IbkrContractReauthentication,
     IbkrHistoricalCallbackSink,
 )
+from qtrad.runtime import ibkr_historical as ibkr_runtime
 from qtrad.runtime.ibkr_canary import (
     load_ibkr_historical_canary_evidence,
     verify_ibkr_historical_canary_evidence,
@@ -912,6 +914,24 @@ def test_canary_evidence_rejects_tampered_hash(tmp_path: Path) -> None:
         load_ibkr_historical_canary_evidence(output)
 
 
+def test_canary_output_reservation_is_create_only_and_symlink_safe(tmp_path: Path) -> None:
+    output = tmp_path / "canary.json"
+    with ibkr_runtime.reserve_create_only_output(output, "canary evidence") as reservation:
+        assert output.exists()
+        reservation.publish({"status": "published"}, "canary evidence")
+
+    assert json.loads(output.read_text(encoding="utf-8")) == {"status": "published"}
+    with pytest.raises(FileExistsError, match="already exists"):
+        ibkr_runtime.reserve_create_only_output(output, "canary evidence")
+
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked_root = tmp_path / "linked"
+    linked_root.symlink_to(outside, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        ibkr_runtime.reserve_create_only_output(linked_root / "canary.json", "canary evidence")
+
+
 def test_canary_cli_exposes_file_only_verification_and_profile_freeze() -> None:
     from qtrad.__main__ import build_parser
 
@@ -947,3 +967,88 @@ def test_canary_cli_exposes_file_only_verification_and_profile_freeze() -> None:
     assert verify_args.expected_runtime_sha256 == "a" * 64
     assert freeze_args.historical_ibkr_command == "profile-freeze"
     assert freeze_args.maximum_in_flight_requests == 1
+
+
+def _selection_for_representatives(
+    *,
+    index_security_type: str = "CFD",
+    include_extra_fx: bool = False,
+) -> IbkrContractSelection:
+    from types import SimpleNamespace
+
+    entries = [
+        (InstrumentId("fx:eur-usd"), AssetClass.FX, _fingerprint(11, "EUR")),
+        (
+            InstrumentId("index:spx"),
+            AssetClass.INDEX,
+            _fingerprint(22, "SPX", security_type=index_security_type),
+        ),
+        (InstrumentId("commodity:gold"), AssetClass.COMMODITY, _fingerprint(33, "GOLD")),
+    ]
+    if include_extra_fx:
+        entries.append((InstrumentId("fx:gbp-usd"), AssetClass.FX, _fingerprint(44, "GBP")))
+    decisions = tuple(
+        SimpleNamespace(
+            instrument_id=instrument_id,
+            decision=ibkr_canary.IbkrContractDecision.ACCEPTED_EXACT_CONTRACT,
+            acquisition_eligible=True,
+            fingerprint=fingerprint,
+            descriptive_metadata={"asset_class": group.value},
+        )
+        for instrument_id, group, fingerprint in entries
+    )
+    return cast(IbkrContractSelection, SimpleNamespace(decisions=decisions))
+
+
+def _representative_ids() -> dict[AssetClass, InstrumentId]:
+    return {
+        AssetClass.FX: InstrumentId("fx:eur-usd"),
+        AssetClass.INDEX: InstrumentId("index:spx"),
+        AssetClass.COMMODITY: InstrumentId("commodity:gold"),
+    }
+
+
+def test_canary_representatives_require_exact_groups_and_selected_contracts() -> None:
+    selection = _selection_for_representatives()
+    representatives = _representative_ids()
+
+    with pytest.raises(ValueError, match="cover exactly"):
+        ibkr_canary.validate_ibkr_historical_canary_representatives(
+            selection, representatives={AssetClass.FX: representatives[AssetClass.FX]}
+        )
+    with pytest.raises(ValueError, match="distinct"):
+        ibkr_canary.validate_ibkr_historical_canary_representatives(
+            selection,
+            representatives={
+                AssetClass.FX: representatives[AssetClass.FX],
+                AssetClass.INDEX: representatives[AssetClass.FX],
+                AssetClass.COMMODITY: representatives[AssetClass.COMMODITY],
+            },
+        )
+    with pytest.raises(ValueError, match="does not match"):
+        ibkr_canary.validate_ibkr_historical_canary_representatives(
+            selection,
+            representatives={
+                **representatives,
+                AssetClass.COMMODITY: InstrumentId("commodity:silver"),
+            },
+        )
+
+
+def test_canary_representatives_reject_wrong_group_and_non_cfd_index() -> None:
+    wrong_group_selection = _selection_for_representatives(include_extra_fx=True)
+    with pytest.raises(ValueError, match="does not match"):
+        ibkr_canary.validate_ibkr_historical_canary_representatives(
+            wrong_group_selection,
+            representatives={
+                AssetClass.FX: InstrumentId("fx:eur-usd"),
+                AssetClass.INDEX: InstrumentId("fx:gbp-usd"),
+                AssetClass.COMMODITY: InstrumentId("commodity:gold"),
+            },
+        )
+
+    with pytest.raises(ValueError, match="CFD"):
+        ibkr_canary.validate_ibkr_historical_canary_representatives(
+            _selection_for_representatives(index_security_type="STK"),
+            representatives=_representative_ids(),
+        )

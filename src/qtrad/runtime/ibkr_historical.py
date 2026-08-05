@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import tomllib
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import cast
+from typing import BinaryIO, cast
 
 from qtrad.application import ibkr_historical as ibkr_application
 from qtrad.application.ibkr_historical import (
@@ -1021,13 +1022,91 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _write_create_only(path: Path, payload: Mapping[str, JsonValue], label: str) -> None:
-    _require_output_path(path, label)
+def _encode_bounded_json(payload: Mapping[str, JsonValue], label: str) -> bytes:
     encoded = (json.dumps(payload, sort_keys=True, indent=2, ensure_ascii=True) + "\n").encode(
         "utf-8"
     )
     if len(encoded) > _MAX_ARTIFACT_BYTES:
         raise ValueError(f"{label} exceeds its bounded size")
+    return encoded
+
+
+@dataclass(slots=True)
+class CreateOnlyOutputReservation:
+    """Own a create-only artifact path until bounded JSON is published or aborted."""
+
+    path: Path
+    _output: BinaryIO
+    _device: int
+    _inode: int
+    _published: bool = False
+
+    @property
+    def published(self) -> bool:
+        return self._published
+
+    def __enter__(self) -> CreateOnlyOutputReservation:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        if not self._published:
+            self.abort()
+
+    def publish(self, payload: Mapping[str, JsonValue], label: str) -> None:
+        if self._published:
+            raise RuntimeError(f"{label} output was already published: {self.path}")
+        _require_output_path(self.path, label)
+        self._require_ownership(label)
+        encoded = _encode_bounded_json(payload, label)
+        self._output.seek(0)
+        self._output.write(encoded)
+        self._output.flush()
+        self._output.close()
+        self._published = True
+
+    def abort(self) -> None:
+        if not self._output.closed:
+            self._output.close()
+        if self._published:
+            return
+        try:
+            current = self.path.stat()
+        except FileNotFoundError:
+            return
+        if current.st_dev == self._device and current.st_ino == self._inode:
+            self.path.unlink()
+
+    def _require_ownership(self, label: str) -> None:
+        if self.path.is_symlink():
+            raise ValueError(f"{label} output cannot be a symlink: {self.path}")
+        try:
+            current = self.path.stat()
+        except FileNotFoundError as error:
+            raise FileNotFoundError(
+                f"{label} output reservation is missing: {self.path}"
+            ) from error
+        if current.st_dev != self._device or current.st_ino != self._inode:
+            raise RuntimeError(f"{label} output reservation is no longer owned: {self.path}")
+
+
+def reserve_create_only_output(path: Path, label: str) -> CreateOnlyOutputReservation:
+    _require_output_path(path, label)
+    try:
+        output = path.open("x+b")
+    except FileExistsError as error:
+        raise FileExistsError(f"{label} output already exists: {path}") from error
+    identity = os.fstat(output.fileno())
+    return CreateOnlyOutputReservation(
+        path=path,
+        _output=output,
+        _device=identity.st_dev,
+        _inode=identity.st_ino,
+    )
+
+
+def _write_create_only(path: Path, payload: Mapping[str, JsonValue], label: str) -> None:
+    _require_output_path(path, label)
+    encoded = _encode_bounded_json(payload, label)
     try:
         with path.open("xb") as output:
             output.write(encoded)
