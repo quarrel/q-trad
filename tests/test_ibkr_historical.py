@@ -28,6 +28,7 @@ from qtrad.domain.ibkr_historical import (
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.instruments import AssetClass
 from qtrad.ports.ibkr_capability import IbkrContractQuery
+from qtrad.runtime import ibkr_historical as ibkr_runtime
 from qtrad.runtime.ibkr_historical import (
     build_ibkr_historical_plan_from_files,
     load_ibkr_contract_selection,
@@ -723,7 +724,7 @@ def test_contract_selection_rejects_symlinked_and_oversized_canonical_inputs(
             probe_spec_path=probe,
         )
     oversized_probe = tmp_path / "oversized-probe.toml"
-    oversized_probe.write_bytes(b"#" * (8 * 1024 * 1024 + 1))
+    oversized_probe.write_bytes(b"#" * (ibkr_runtime._MAX_ARTIFACT_BYTES + 1))
     with pytest.raises(ValueError, match="bounded size"):
         verify_ibkr_contract_selection(
             selection_path,
