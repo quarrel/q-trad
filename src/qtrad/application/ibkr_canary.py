@@ -1073,13 +1073,14 @@ def _verify_schedule(
     if schedule_end <= schedule_start:
         raise ValueError("canary schedule range is invalid")
     if request is not None and (
-        schedule_start < request.interval_start or schedule_end > request.interval_end
+        schedule_end <= request.interval_start or schedule_start >= request.interval_end
     ):
-        raise ValueError("canary schedule range is outside request interval")
+        raise ValueError("canary schedule range does not overlap request interval")
     sessions = payload.get("sessions")
     if not isinstance(sessions, list):
         raise ValueError("canary schedule has no structural sessions array")
     intervals: list[tuple[datetime, datetime, bool]] = []
+    has_request_overlap = False
     for value in sessions:
         if not isinstance(value, dict):
             raise ValueError("canary schedule session is not an object")
@@ -1090,9 +1091,11 @@ def _verify_schedule(
             raise ValueError("canary schedule session interval is invalid")
         if start < schedule_start or end > schedule_end:
             raise ValueError("canary schedule session is outside schedule range")
-        if request is not None and (start < request.interval_start or end > request.interval_end):
-            raise ValueError("canary schedule session is outside request interval")
+        if request is not None and start < request.interval_end and end > request.interval_start:
+            has_request_overlap = True
         intervals.append((start, end, active))
+    if request is not None and not has_request_overlap:
+        raise ValueError("canary schedule has no session overlapping request interval")
     for index, (start, end, active) in enumerate(intervals):
         for other_start, other_end, other_active in intervals[index + 1 :]:
             if other_start < end and other_end > start and other_active != active:
