@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
+
 mountpoint -q /srv/qtrad/postgres || {
     echo "/srv/qtrad/postgres is not mounted" >&2
     exit 1
@@ -25,9 +27,10 @@ if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' | grep -Ev '(^127[.]0[.]0[.
     exit 1
 fi
 if firewall-cmd --query-port=4002/tcp; then
-    echo "firewalld exposes Gateway API port 4002" >&2
+    echo "Gateway API is exposed by firewalld" >&2
     exit 1
 fi
+
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE to an immutable digest}"
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || {
     echo "QTRAD_IBKR_IMAGE must be an immutable digest" >&2
@@ -52,14 +55,25 @@ jq -e --arg version "$gateway_version" --arg archive_sha "$gateway_archive_sha" 
     echo "Gateway identity manifest does not match the configured installation" >&2
     exit 1
 }
+
+config_check="${QTRAD_IBKR_GATEWAY_CONFIG_CHECK:-$script_dir/gateway-config-check.sh}"
+[[ "$config_check" == /* && -x "$config_check" ]] || {
+    echo "Gateway configuration checker is missing or not executable: $config_check" >&2
+    exit 1
+}
+"$config_check"
+
 docker image inspect "$image" >/dev/null
 labels="$(docker image inspect "$image" --format '{{json .Config.Labels}}')"
-jq -e     --arg api "${QTRAD_IBKR_API_VERSION:-10.49}"     --arg gateway "$gateway_version"     '."org.qtrad.ibkr.api.version" == $api
+jq -e \
+    --arg api "${QTRAD_IBKR_API_VERSION:-10.49}" \
+    --arg gateway "$gateway_version" \
+    '."org.qtrad.ibkr.api.version" == $api
      and ."org.qtrad.ibkr.gateway.expected.version" == $gateway
      and (.["org.qtrad.ibkr.api.archive.sha256"] | test("^[0-9a-f]{64}$"))
      and (.["org.qtrad.source.digest"] | test("^[0-9a-f]{64}$"))
      and (.["org.opencontainers.image.revision"] | test("^[0-9a-f]{40,64}$"))
-     and (.["org.opencontainers.image.created"] | length > 0)' <<<"$labels" >/dev/null
+     and (."org.opencontainers.image.created" | length > 0)' <<<"$labels" >/dev/null
 
 evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
 checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT to a persistent host path}"

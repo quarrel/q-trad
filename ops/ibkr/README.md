@@ -11,45 +11,76 @@ and never starts a Gateway, ingest or health service. The bounded capability pro
 canary/profile verifiers are the only executable IBKR operations until the Stage 5 deployment runbook is
 explicitly authorised.
 
-Before running the bounded probe:
+## Before running the bounded probe
 
 1. Attach and mount the OCI block device at `/srv/qtrad/postgres`; `verify-host.sh` fails closed if
    the mount is absent.
 2. Install the official matched 10.49 Gateway/API pair (retain 10.45 archives for rollback) and IBC
    3.24.1 outside the repository. Record the Gateway archive SHA-256 in the private host deployment
-   manifest ("ibkr-gateway.identity.example.json" documents the non-secret shape); the manifest must be
+   manifest (`ibkr-gateway.identity.example.json` documents the non-secret shape); the manifest must be
    installed privately at `/etc/qtrad/ibkr-gateway-manifest.json`.
-3. Build the application from the exact API ZIP; build-image.sh verifies its SHA-256, computes the
+3. Install `ops/ibkr/gateway-config-check.sh` at the private path named by
+   `QTRAD_IBKR_GATEWAY_CONFIG_CHECK`. Set `QTRAD_IBKR_GATEWAY_SETTINGS` to the active Gateway settings
+   directory. The checker reads its `config.ini` for `TradingMode=paper`, `ReadOnlyApi=yes/true` and an
+   explicit `AutoRestartTime` matching `QTRAD_IBKR_AUTO_RESTART_TIME`; it also requires
+   `[IBGateway]/ApiOnly=true/yes` and `[IBGateway]/TrustedIPs=127.0.0.1` in `jts.ini`.
+4. Build the application from the exact API ZIP; build-image.sh verifies its SHA-256, computes the
    runtime source-manifest fingerprint, extracts IBJts/source/pythonclient, and installs that official
    subtree. Set OCI labels for API/Gateway versions and archive identities, source digest, application
    commit and build time; use only an immutable image digest; build-image.sh requires
-   QTRAD_IBKR_PUSH=1, tags the matched build, and prints both the source fingerprint and pushed digest.
-4. Set QTRAD_IBKR_CHECKPOINT_ROOT to a writable absolute path on the PostgreSQL volume,
+   `QTRAD_IBKR_PUSH=1`, tags the matched build, and prints both the source fingerprint and pushed digest.
+5. Set QTRAD_IBKR_CHECKPOINT_ROOT to a writable absolute path on the PostgreSQL volume,
    QTRAD_IBKR_API_PACKAGE_FINGERPRINT to the source fingerprint printed by the build, and
    QTRAD_IBKR_GATEWAY_MANIFEST/QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256 to the private installation
    identity. Host verification requires these values to match the image labels. The wrapper mounts the
    checkpoint directory and runs the image as UID 10001, so a container restart preserves evidence.
-5. Run deploy.sh only as the invariant check; it pulls the immutable image digest before local
+6. Authenticate Docker to OCIR before running `deploy.sh`:
+   `docker login syd.ocir.io`; the registry token must remain outside Git and shell history. The
+   publishing principal needs repository-scoped `manage repos` permission for the IBKR repository;
+   `read repos` or `use repos` alone is insufficient for Buildx manifest, SBOM and provenance publication.
+   The policy shape is:
+   ~~~text
+   Allow group id <group-ocid> to read repos in compartment id <compartment-ocid> where target.repo.name = 'qtrad/qtrad-ibkr'
+   Allow group id <group-ocid> to manage repos in compartment id <compartment-ocid> where all {target.repo.name = 'qtrad/qtrad-ibkr', request.permission = 'REPOSITORY_UPDATE'}
+   ~~~
+7. Run `deploy.sh` only as the invariant check; it pulls the immutable image digest before local
    inspection. It does not enable services while continuous ingest is absent. Run the explicit bounded
    command:
    `qtrad instruments review --provider ibkr --environment paper --execute-account-probe`.
-6. Use the example `qtrad-ibkr-postgres.service` as the required readiness dependency when the
-   future continuous adapter is introduced. It must provide the host's PostgreSQL start, readiness,
-   and stop wrappers.
 
-The API port remains inaccessible from outside the host. Tailscale/approved IPv6 access reaches the
-operator API only after a future API service is installed; the Gateway socket remains localhost-only.
-Weekly authentication/2FA expiry remains an operator action.
+## OCIR repository setup
+
+OCIR Sydney currently rejects `--is-immutable true`/repository-level immutability. Create the private
+repository without that flag, publish each release once under its full commit-SHA tag, and deploy only
+the returned `@sha256:` digest. Never publish `latest` or reuse a tag.
+
+When filtering repository listings, JMESPath keys containing hyphens must be quoted. This is a safe
+shell form:
+
+~~~bash
+oci artifacts container repository list \
+  --compartment-id "$COMPARTMENT_OCID" \
+  --all \
+  --query "data[?\"display-name\"=='qtrad/qtrad-ibkr']" \
+  --region "$OCI_REGION"
+~~~
+
+An empty result is the expected answer before the repository is created; it is not a query failure.
+Keep the repository private and verify the resulting name/namespace before the first login.
 
 ## Host maintenance
 
-The health script is retained as a future control-plane hook. Its restart history must live under
-`QTRAD_IBKR_RESTART_HISTORY_PATH` on persistent host storage, not `/run`, so a service restart cannot
-reset the three-per-hour Gateway budget. It must only be enabled alongside a real continuous adapter
-and API service. `OPERATOR` is logged once per cooldown and is not crash-looped.
+The first Gateway start may briefly scan large JARs and show high CPU from `unzip` helper processes.
+Do not launch multiple Gateway instances or repeatedly restart it while it is completing startup. Confirm
+the effective paper/read-only settings and inspect `systemctl show qtrad-ibgateway-10.49.service -p NRestarts`
+before diagnosing a restart loop.
 
-Install `journald.conf.example` as a drop-in and run `systemctl restart systemd-journald`. The disk
-timer checks both `/` and `/srv/qtrad/postgres`; backup files and checksums remain on the 100G
-volume. The weekly restore-verification timer validates the newest dump through the PostgreSQL
-container without modifying the live database. Timer failures are visible in journald/Beszel and
-must be investigated rather than retried in a crash loop.
+Retain the current image digest, runtime lock, evidence and approved rollback material. Review
+`docker system df`, exited probe containers and historical qtrad-app/qtrad-ibkr-probe image tags
+before any cleanup; remove only targeted, unreferenced feasibility artefacts after their evidence is
+preserved. Never use a broad `docker system prune` on this host.
+
+PostgreSQL dumps and checksums belong under `/srv/qtrad/postgres/backups`; the backup script rejects
+other locations. Rollout rollback archives must have an explicit retention/location decision rather than
+accumulating under the 25G root filesystem. The disk timer checks both `/` and `/srv/qtrad/postgres`;
+timer failures are visible in journald/Beszel and must be investigated rather than retried in a crash loop.
