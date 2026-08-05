@@ -22,10 +22,17 @@ for unit in pmcd.service pmlogger.service pmie.service; do
         exit 1
     fi
 done
-if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' >/dev/null; then
-    echo "IB Gateway API is not restricted to localhost" >&2
+# The official Gateway listener may bind to wildcard addresses. Effective localhost-only
+# access is enforced by TrustedIPs=127.0.0.1 (gateway-config-check.sh) and firewalld
+# denying 4002/tcp; retain a listener check so a stopped Gateway cannot pass silently.
+api_listeners="$(ss -H -ltn '( sport = :4002 )')" || {
+    echo "could not inspect Gateway API listener" >&2
     exit 1
-fi
+}
+[[ -n "$api_listeners" ]] || {
+    echo "Gateway API is not listening on port 4002" >&2
+    exit 1
+}
 if firewall-cmd --query-port=4002/tcp; then
     echo "Gateway API is exposed by firewalld" >&2
     exit 1
