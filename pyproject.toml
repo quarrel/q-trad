@@ -17,6 +17,7 @@ dependencies = [
     "scikit-learn==1.7.1",
     "sqlalchemy>=2.0,<3",
     "trading-ig>=0.0.24,<0.1",
+    "tzdata>=2026.2,<2027",
     "uvicorn>=0.35,<1",
 ]
 
