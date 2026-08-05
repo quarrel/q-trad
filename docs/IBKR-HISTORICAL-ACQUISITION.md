@@ -698,7 +698,7 @@ On `q-trad-2`:
 1. Back up the existing Gateway installation, probe image and capability evidence.
 2. Install the exact archives named in the runtime lock.
 3. Build the matching q-trad image.
-4. Verify localhost-only API access and paper-account identity.
+4. Verify effective localhost-only API access (TrustedIPs plus firewall) and paper-account identity.
 5. Prove server time and current-generation handshake.
 6. Reauthenticate all 20 contract fingerprints.
 7. Run PostgreSQL migrations.
