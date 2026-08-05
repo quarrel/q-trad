@@ -46,6 +46,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalExecutionSnapshot,
     IbkrHistoricalPlanSnapshot,
     IbkrHistoricalRequestSnapshot,
+    IbkrHistoricalResultArtifact,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -80,9 +81,14 @@ _FINGERPRINT = IbkrContractFingerprint(
 )
 
 
-def _published_provider_history(tmp_path: Path):
-    plan, snapshot = _build_fixture()
-    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+def _published_provider_history(
+    tmp_path: Path,
+    *,
+    artifact: IbkrHistoricalResultArtifact | None = None,
+):
+    if artifact is None:
+        plan, snapshot = _build_fixture()
+        artifact = build_ibkr_historical_result_artifact(plan, snapshot)
     result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
     dataset = build_provider_history_dataset(
         artifact,
@@ -212,8 +218,10 @@ def _build_stage6_artifact(
     *,
     day_count: int,
     no_data_bar_days: frozenset[int] = frozenset(),
+    no_data_instruments: frozenset[InstrumentId] = frozenset(),
     minute_span: bool = False,
     bars_per_request: int = 1,
+    session_weekdays_only: bool = False,
     instruments: tuple[tuple[InstrumentId, IbkrContractFingerprint], ...] = (
         (_INSTRUMENT, _FINGERPRINT),
     ),
@@ -280,7 +288,10 @@ def _build_stage6_artifact(
         "planner_qtrad_image_digest": "sha256:" + "f" * 64,
         "start": utc_text(_START),
         "end": utc_text(_START + day_count * span),
-        "eligible_contracts": [contract.as_json_value() for contract in eligible],
+        "eligible_contracts": [
+            contract.as_json_value()
+            for contract in sorted(eligible, key=lambda value: str(value.instrument_id))
+        ],
         "requests": [
             request.as_json_value()
             for request in sorted(
@@ -322,7 +333,7 @@ def _build_stage6_artifact(
         attempts.append(attempt)
         day = (request.interval_start - _START) // span
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            if day in no_data_bar_days:
+            if request.instrument_id in no_data_instruments or day in no_data_bar_days:
                 bar_times = (request.interval_end,)
             elif minute_span:
                 bar_times = (request.interval_start,)
@@ -370,13 +381,28 @@ def _build_stage6_artifact(
                 )
             )
         else:
+            session_values: list[JsonValue] = []
+            if session_weekdays_only:
+                session_day = request.interval_start
+                while session_day < request.interval_end:
+                    if session_day.weekday() < 5:
+                        session_values.append(
+                            {
+                                "start": int((session_day - timedelta(hours=1)).timestamp()),
+                                "end": int(
+                                    (session_day + timedelta(hours=1, minutes=1)).timestamp()
+                                ),
+                                "active": True,
+                            }
+                        )
+                    session_day += timedelta(days=1)
             callbacks.append(
                 _callback(
                     callback_id=ordinal * (bars_per_request + 2) + 1,
                     attempt=attempt,
                     sequence=1,
                     kind=IbkrHistoricalCallbackKind.SCHEDULE,
-                    payload={"sessions": []},
+                    payload={"sessions": session_values},
                 )
             )
             callbacks.append(

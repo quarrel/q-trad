@@ -17,6 +17,7 @@ import polars as pl
 
 from qtrad.application.provider_history import (
     ProviderHistorySource,
+    ProviderHistorySourceEvidence,
     build_provider_history_dataset,
     iter_provider_history_partitions,
     provider_history_partition_row_bounds,
@@ -45,6 +46,7 @@ from qtrad.domain.provider_history import (
     sha256_json,
 )
 from qtrad.runtime.ibkr_results import (
+    verify_ibkr_historical_result,
     verify_ibkr_historical_result_stream,
 )
 
@@ -811,3 +813,74 @@ def _sha256_json(value: object) -> str:
     if not isinstance(converted, dict):
         raise TypeError("provider-history identity must be an object")
     return sha256_json(converted)
+
+
+def read_provider_history_observations(
+    path: Path,
+) -> tuple[ProviderHistoricalDataset, tuple[ProviderHistoricalObservation, ...]]:
+    """Verify a provider-history closure, then decode every canonical Parquet row."""
+
+    dataset = verify_provider_history(path)
+    return dataset, _read_provider_history_rows(path, dataset)
+
+
+def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEvidence:
+    """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
+
+    dataset = verify_provider_history(path)
+    manifest_path = _require_file(path, "provider-history manifest")
+    source_path = _safe_child(
+        manifest_path.parent,
+        _SOURCE_MANIFEST_PATH,
+        "embedded IBKR result manifest",
+    )
+    source_artifact = verify_ibkr_historical_result(source_path)
+    return ProviderHistorySourceEvidence(
+        dataset=dataset,
+        observations=_read_provider_history_rows(path, dataset),
+        source_artifact=source_artifact,
+    )
+
+
+def _read_provider_history_rows(
+    path: Path,
+    dataset: ProviderHistoricalDataset,
+) -> tuple[ProviderHistoricalObservation, ...]:
+    manifest_path = _require_file(path, "provider-history manifest")
+    document = _mapping(
+        _parse_json(
+            _read_bounded(manifest_path, "provider-history manifest"),
+            "provider-history manifest",
+        ),
+        "provider-history manifest",
+    )
+    raw_files = document["files"]
+    if not isinstance(raw_files, list):
+        raise ValueError("provider-history files are invalid")
+    rows: list[ProviderHistoricalObservation] = []
+    root = manifest_path.parent
+    for item in raw_files:
+        reference = _file_reference(item)
+        partition = _read_parquet_rows(
+            _safe_child(
+                root,
+                _string(reference["path"], "provider-history partition path"),
+                "provider-history partition",
+            ),
+            expected_row_count=_int(reference["row_count"], "provider-history partition row count"),
+            row_upper_bound=_int(reference["row_upper_bound"], "provider-history row upper bound"),
+        )
+        rows.extend(partition.rows)
+    ordered = tuple(
+        sorted(
+            rows,
+            key=lambda row: (
+                row.instrument_id,
+                row.interval_start,
+                row.request_sha256,
+            ),
+        )
+    )
+    if len(ordered) != dataset.row_count:
+        raise ValueError("provider-history row reader count differs from verified dataset")
+    return ordered

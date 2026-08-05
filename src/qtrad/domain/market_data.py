@@ -27,6 +27,7 @@ class DataQuality(StrEnum):
 class BarProvenance(StrEnum):
     QUOTE_DERIVED = "QUOTE_DERIVED"
     IG_HISTORICAL = "IG_HISTORICAL"
+    IBKR_HISTORICAL = "IBKR_HISTORICAL"
 
 
 @dataclass(frozen=True, slots=True)
