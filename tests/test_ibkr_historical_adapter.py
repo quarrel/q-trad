@@ -148,7 +148,6 @@ class _HistoricalClient:
                 startDateTime="20260201-00:00:00",
                 endDateTime="20260201-02:00:00",
                 refDate="20260201",
-                isOpen=True,
             )
             self._callbacks.put(
                 capability._Callback(

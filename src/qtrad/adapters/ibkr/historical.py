@@ -580,11 +580,15 @@ def _schedule_payload(values: tuple[object, ...]) -> dict[str, JsonValue]:
         session = cast(Any, value)
         raw_start = _member(session, "startDateTime")
         raw_end = _member(session, "endDateTime")
-        raw_open = _member(session, "isOpen")
+        raw_open = _optional_member(session, "isOpen")
+        # TWS API 10.49 HistoricalSession objects expose only open-session
+        # bounds and refDate; preserve explicit isOpen fields from compatible
+        # clients while treating returned sessions as active by definition.
+        active = True if raw_open is None else _bool_value(raw_open, "IBKR schedule isOpen")
         entry: dict[str, JsonValue] = {
             "start": _schedule_time(raw_start, zone_name),
             "end": _schedule_time(raw_end, zone_name),
-            "active": _bool_value(raw_open, "IBKR schedule isOpen"),
+            "active": active,
         }
         ref_date = _optional_member(session, "refDate")
         if ref_date is not None:
