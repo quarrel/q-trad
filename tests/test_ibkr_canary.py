@@ -866,9 +866,17 @@ def test_file_verifier_rejects_rehashed_out_of_window_schedule(tmp_path: Path) -
     write_ibkr_historical_canary_evidence(output, evidence)
     document = json.loads(output.read_text())
     schedule = document["cases"][0]["requests"][1]["callbacks"][0]["payload"]
-    schedule["start"] = utc_text(evidence.cases[0].case.interval_start - timedelta(minutes=1))
+    outside_start = evidence.cases[0].case.interval_end + timedelta(minutes=1)
+    outside_end = outside_start + timedelta(hours=1)
+    schedule["start"] = utc_text(outside_start)
+    schedule["end"] = utc_text(outside_end)
+    schedule["sessions"][0]["start"] = utc_text(outside_start)
+    schedule["sessions"][0]["end"] = utc_text(outside_end)
+    completion = document["cases"][0]["requests"][1]["callbacks"][1]["payload"]
+    completion["start"] = utc_text(outside_start)
+    completion["end"] = utc_text(outside_end)
     _rewrite_rehashed_document(output, document)
-    with pytest.raises(ValueError, match="outside request interval"):
+    with pytest.raises(ValueError, match="does not overlap request interval"):
         verify_ibkr_historical_canary_evidence(output)
 
 
@@ -1098,3 +1106,23 @@ def test_completion_range_rejects_bar_before_start() -> None:
             {"start": utc_text(case.interval_start), "end": utc_text(case.interval_end)},
             bars=(bar,),
         )
+
+
+def test_file_verifier_accepts_schedule_extending_past_request(
+    tmp_path: Path,
+) -> None:
+    evidence = _evidence()
+    output = tmp_path / "schedule-extension.json"
+    write_ibkr_historical_canary_evidence(output, evidence)
+    document = json.loads(output.read_text())
+    request_end = evidence.cases[0].case.interval_end
+    extended_end = request_end + timedelta(hours=1)
+    schedule = document["cases"][0]["requests"][1]["callbacks"][0]["payload"]
+    schedule["end"] = utc_text(extended_end)
+    schedule["sessions"][0]["end"] = utc_text(extended_end)
+    completion = document["cases"][0]["requests"][1]["callbacks"][1]["payload"]
+    completion["end"] = utc_text(extended_end)
+    _rewrite_rehashed_document(output, document)
+
+    loaded = verify_ibkr_historical_canary_evidence(output)
+    assert loaded.cases[0].requests[1].status == "SUCCESS"
