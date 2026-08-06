@@ -21,7 +21,10 @@ RUN --mount=type=bind,from=ibkr-api,source=ibkr-api.zip,target=/tmp/ibkr-api.zip
     && IBKR_API_SOURCE_MANIFEST_SHA256="${IBKR_API_SOURCE_MANIFEST_SHA256}" \
        IBKR_API_VERSION="${IBKR_API_VERSION}" \
        /app/.venv/bin/python -c 'import os; from qtrad.adapters.ibkr.capability import IbkrApiIdentity, _verify_official_api_distribution; _verify_official_api_distribution(IbkrApiIdentity(package_fingerprint=os.environ["IBKR_API_SOURCE_MANIFEST_SHA256"], version=os.environ["IBKR_API_VERSION"]))' \
-    && rm -rf /tmp/ibkr-api
+    && rm -rf /tmp/ibkr-api \
+    && test -n "${QTRAD_APP_COMMIT}" \
+    && printf '%s\\n' "${QTRAD_APP_COMMIT}" > /app/.qtrad-commit \
+    && chmod 0444 /app/.qtrad-commit
 
 LABEL org.opencontainers.image.title="q-trad IBKR capture" \
     org.qtrad.ibkr.api.version="${IBKR_API_VERSION}" \

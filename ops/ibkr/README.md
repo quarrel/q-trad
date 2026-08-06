@@ -5,11 +5,11 @@ licensed Gateway/API archives, IBC configuration, passwords, 2FA material or ren
 files into Git.
 
 The continuous IBKR adapter and its operator API are not implemented. The direct official TWS
-historical adapter and bounded request-profile canary now exist in the application. Host deployment and
-account-gated qualification are still intentionally gated: the host entry point remains verification-only
-and never starts a Gateway, ingest or health service. The bounded capability probe and file-only
-canary/profile verifiers are the only executable IBKR operations until the Stage 5 deployment runbook is
-explicitly authorised.
+historical adapter, bounded request-profile canary, and one-shot historical executor now exist. Host
+service deployment remains deliberately gated: the executor must be launched explicitly, uses a
+PostgreSQL-held single-execution lock, and never starts orders, continuous ingest, or a health service.
+The bounded capability probe, canary/profile verifiers, and independently verified execution/result
+artifacts are the required evidence boundaries.
 
 ## Before running the bounded probe
 
@@ -29,6 +29,8 @@ explicitly authorised.
    subtree. Set OCI labels for API/Gateway versions and archive identities, source digest, application
    commit and build time; use only an immutable image digest; build-image.sh requires
    `QTRAD_IBKR_PUSH=1`, tags the matched build, and prints both the source fingerprint and pushed digest.
+   The IBKR image also embeds the commit in `/app/.qtrad-commit`, so runtime closure verification does
+   not depend on Git being installed in the published image.
 5. Set QTRAD_IBKR_CHECKPOINT_ROOT to a writable absolute path on the PostgreSQL volume,
    QTRAD_IBKR_API_PACKAGE_FINGERPRINT to the source fingerprint printed by the build, and
    QTRAD_IBKR_GATEWAY_MANIFEST/QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256 to the private installation
@@ -75,8 +77,13 @@ Do not launch multiple Gateway instances or repeatedly restart it while it is co
 the effective paper/read-only settings and inspect `systemctl show qtrad-ibgateway-10.49.service -p NRestarts`
 before diagnosing a restart loop.
 
+Run at most one historical executor at a time. The executor takes a PostgreSQL advisory lock and fails
+closed when another run is active; preserve the failed container and its logs for diagnosis rather than
+starting a second run. `QTRAD_IMAGE_DIGEST` may be a full immutable `qtrad-ibkr@sha256:` reference for
+canary binding; execution closure verification normalizes it to the locked bare `sha256:` digest.
+
 Retain the current image digest, runtime lock, evidence and approved rollback material. Review
-`docker system df`, exited probe containers and historical qtrad-app/qtrad-ibkr-probe image tags
+after `docker system df`, exited probe containers and historical qtrad-app/qtrad-ibkr-probe image tags
 before any cleanup; remove only targeted, unreferenced feasibility artefacts after their evidence is
 preserved. Never use a broad `docker system prune` on this host.
 

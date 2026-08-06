@@ -19,8 +19,9 @@ import uvicorn
 from alembic import command
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from sqlalchemy import text
 from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from qtrad import __version__
 from qtrad.adapters.clock import SystemClock
@@ -53,6 +54,7 @@ from qtrad.application.ibkr_capability import (
 )
 from qtrad.application.ibkr_historical import (
     configured_image_digest,
+    configured_image_reference,
     derive_qtrad_commit,
 )
 from qtrad.application.ibkr_results import (
@@ -3049,6 +3051,37 @@ async def _register_ibkr_historical_plan(
     )
 
 
+_IBKR_EXECUTION_LOCK_KEY = "qtrad.ibkr.historical.execute"
+
+
+async def _acquire_ibkr_historical_execution_lock(engine: AsyncEngine) -> AsyncConnection:
+    connection = await engine.connect()
+    try:
+        acquired = bool(
+            await connection.scalar(
+                text("SELECT pg_try_advisory_lock(hashtext(:lock_key))"),
+                {"lock_key": _IBKR_EXECUTION_LOCK_KEY},
+            )
+        )
+    except BaseException:
+        await connection.close()
+        raise
+    if not acquired:
+        await connection.close()
+        raise RuntimeError("another IBKR historical execution is already active")
+    return connection
+
+
+async def _release_ibkr_historical_execution_lock(connection: AsyncConnection) -> None:
+    try:
+        await connection.scalar(
+            text("SELECT pg_advisory_unlock(hashtext(:lock_key))"),
+            {"lock_key": _IBKR_EXECUTION_LOCK_KEY},
+        )
+    finally:
+        await connection.close()
+
+
 async def _execute_ibkr_historical_plan(
     settings: Settings,
     clock: Clock,
@@ -3081,9 +3114,14 @@ async def _execute_ibkr_historical_plan(
     expected_end: datetime,
 ) -> None:
     _require_sha256_argument(plan_id, "IBKR historical plan ID")
-    await _require_database_at_migration_head(settings)
     engine = _engine(settings)
     try:
+        execution_lock = await _acquire_ibkr_historical_execution_lock(engine)
+    except BaseException:
+        await engine.dispose()
+        raise
+    try:
+        await _require_database_at_migration_head(settings)
         store = PostgresIbkrHistoricalExecutionStore(engine)
         snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan_id)
         plan = load_ibkr_historical_plan_bytes(snapshot.plan.plan_bytes)
@@ -3203,7 +3241,10 @@ async def _execute_ibkr_historical_plan(
             recovered_outcomes=recovered,
         )
     finally:
-        await engine.dispose()
+        try:
+            await _release_ibkr_historical_execution_lock(execution_lock)
+        finally:
+            await engine.dispose()
     status_counts: dict[str, int] = {}
     for outcome in summary.outcomes:
         status = outcome.request_status.value
@@ -3288,7 +3329,7 @@ _IBKR_IMAGE_REPOSITORY = "qtrad-ibkr"
 
 
 def _require_ibkr_image_binding(runtime: IbkrAcquisitionRuntime) -> None:
-    image_reference = configured_image_digest()
+    image_reference = configured_image_reference()
     repository, at_separator, digest = image_reference.rpartition("@")
     algorithm, digest_separator, image_digest = digest.partition(":")
     if (

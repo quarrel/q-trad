@@ -822,10 +822,22 @@ def _installed_library_versions() -> dict[str, str]:
     return versions
 
 
-def derive_qtrad_commit(*, require_clean: bool = True) -> str:
-    """Derive a source commit without accepting a caller-supplied mutable label."""
+def _read_build_commit(repository: Path) -> str | None:
+    """Read the immutable commit metadata embedded in a published image."""
 
-    repository = Path(__file__).resolve().parents[2]
+    path = repository / ".qtrad-commit"
+    try:
+        commit = path.read_text(encoding="ascii").strip()
+    except FileNotFoundError:
+        return None
+    except OSError as error:
+        raise RuntimeError("cannot read embedded q-trad commit identity") from error
+    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+        raise RuntimeError("embedded q-trad commit identity is not a lowercase SHA-1")
+    return commit
+
+
+def _derive_qtrad_commit(repository: Path, *, require_clean: bool) -> str:
     try:
         commit = subprocess.run(
             ("git", "-C", str(repository), "rev-parse", "HEAD"),
@@ -843,15 +855,47 @@ def derive_qtrad_commit(*, require_clean: bool = True) -> str:
             if status:
                 raise RuntimeError("q-trad runtime lock requires a clean source tree")
     except (OSError, subprocess.CalledProcessError) as error:
+        embedded = _read_build_commit(repository)
+        if embedded is not None:
+            return embedded
         raise RuntimeError("cannot derive q-trad commit identity") from error
     return commit
 
 
-def configured_image_digest(value: str | None = None) -> str:
+def derive_qtrad_commit(*, require_clean: bool = True) -> str:
+    """Derive the source commit from Git or immutable published-image metadata."""
+
+    repository = Path(__file__).resolve().parents[2]
+    return _derive_qtrad_commit(repository, require_clean=require_clean)
+
+
+def configured_image_reference(value: str | None = None) -> str:
     candidate = value or os.environ.get("QTRAD_IMAGE_DIGEST")
-    if candidate is None:
-        raise RuntimeError("an immutable q-trad image digest is required; set QTRAD_IMAGE_DIGEST")
+    if candidate is None or not candidate:
+        raise RuntimeError(
+            "an immutable q-trad image reference is required; set QTRAD_IMAGE_DIGEST"
+        )
     return candidate
+
+
+def configured_image_digest(value: str | None = None) -> str:
+    reference = configured_image_reference(value)
+    candidate = reference
+    if "@" in reference:
+        _, separator, candidate = reference.rpartition("@")
+        if separator != "@":
+            raise RuntimeError("QTRAD_IMAGE_DIGEST must contain a sha256 digest")
+    algorithm, separator, digest = candidate.partition(":")
+    if (
+        algorithm != "sha256"
+        or separator != ":"
+        or len(digest) != 64
+        or any(character not in "0123456789abcdef" for character in digest)
+    ):
+        raise RuntimeError(
+            "QTRAD_IMAGE_DIGEST must be a sha256 digest or an image@sha256 reference"
+        )
+    return f"sha256:{digest}"
 
 
 def _mapping(value: Mapping[str, object], field: str) -> Mapping[str, object]:

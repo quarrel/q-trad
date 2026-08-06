@@ -1803,7 +1803,7 @@ def test_canary_run_rejects_mismatched_ibkr_image_before_database_or_provider_io
 
     monkeypatch.setattr(cli, "load_ibkr_runtime_lock", load_runtime)
     monkeypatch.setattr(cli, "load_ibkr_contract_selection", load_selection)
-    monkeypatch.setattr(cli, "configured_image_digest", lambda: image_reference)
+    monkeypatch.setattr(cli, "configured_image_reference", lambda: image_reference)
     monkeypatch.setattr(cli, "_require_database_at_migration_head", database_gate)
     monkeypatch.setattr(cli, "_engine", engine_factory)
     monkeypatch.setattr(cli, "_ibkr_historical_canary_adapter", adapter_factory)
@@ -1914,7 +1914,7 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
     monkeypatch.setattr(cli, "load_ibkr_runtime_lock", lambda path: runtime)
     monkeypatch.setattr(
         cli,
-        "configured_image_digest",
+        "configured_image_reference",
         lambda: "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-ibkr@sha256:" + "e" * 64,
     )
     monkeypatch.setattr(cli, "load_ibkr_contract_selection", lambda path: selection)
@@ -2008,7 +2008,7 @@ async def test_canary_run_composition_failure_writes_no_evidence(
     monkeypatch.setattr(cli, "load_ibkr_runtime_lock", lambda path: runtime)
     monkeypatch.setattr(
         cli,
-        "configured_image_digest",
+        "configured_image_reference",
         lambda: "syd.ocir.io/sdctwkrifhgw/qtrad/qtrad-ibkr@sha256:" + "e" * 64,
     )
     monkeypatch.setattr(cli, "load_ibkr_contract_selection", lambda path: selection)
