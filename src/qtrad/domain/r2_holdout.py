@@ -30,6 +30,7 @@ R2_HOLDOUT_FORECAST_SEAL_CONTRACT = "qtrad-r2-holdout-forecast-seal-v1"
 R2_HOLDOUT_OPENED_CONTRACT = "qtrad-r2-holdout-opened-v1"
 R2_HOLDOUT_CONSUMED_CONTRACT = "qtrad-r2-holdout-consumed-v1"
 R2_HOLDOUT_EVALUATION_CONTRACT = "qtrad-r2-holdout-evaluation-v1"
+R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT = "qtrad-r2-holdout-outcome-evidence-v1"
 R2_HOLDOUT_BUNDLE_CONTRACT = "qtrad-r2-holdout-bundle-v1"
 
 HOLDOUT_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_THIS_IRREVERSIBLY_CONSUMES_THE_FROZEN_HOLDOUT"
@@ -1813,11 +1814,75 @@ class R2HoldoutQuestionResult:
 
 
 @dataclass(frozen=True, slots=True)
+class R2HoldoutOutcomeEvidence:
+    """Authenticated post-open outcomes; never constructed during preparation."""
+
+    selection_manifest_id: str
+    seal_id: str
+    opened_marker_id: str
+    outcomes: tuple[tuple[str, float], ...]
+    source_class: MarketDataSourceClass
+    evidence_class: EvidenceClass
+    holdout_scope: HoldoutScope
+    outcome_evidence_id: str
+
+    CONTRACT: ClassVar[str] = R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.selection_manifest_id, "outcome selection ID"),
+            (self.seal_id, "outcome seal ID"),
+            (self.opened_marker_id, "outcome opened marker ID"),
+            (self.outcome_evidence_id, "outcome evidence ID"),
+        ):
+            _require_id(value, field)
+        if tuple(sorted(set(self.outcomes))) != self.outcomes:
+            raise ValueError("holdout outcomes must be deterministically ordered and unique")
+        for target_id, outcome in self.outcomes:
+            _require_id(target_id, "holdout outcome target ID")
+            _finite(outcome, "holdout outcome")
+        if self.holdout_scope is HoldoutScope.DISPOSABLE_FIXTURE and (
+            self.evidence_class is not EvidenceClass.IMPLEMENTATION
+        ):
+            raise ValueError("disposable outcome evidence requires implementation evidence")
+        if self.outcome_evidence_id != _semantic_id(self.semantic_json()):
+            raise ValueError("outcome evidence ID does not authenticate its content")
+
+    @classmethod
+    def create(cls, **values: object) -> R2HoldoutOutcomeEvidence:
+        raw = dict(values)
+        raw.pop("outcome_evidence_id", None)
+        raw["outcomes"] = tuple(sorted(cast(Sequence[tuple[str, float]], raw["outcomes"])))
+        semantic: dict[str, JsonValue] = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            **{key: _contract_json(value) for key, value in raw.items()},
+        }
+        constructor = cast(Callable[..., R2HoldoutOutcomeEvidence], cls)
+        return constructor(**raw, outcome_evidence_id=_semantic_id(semantic))
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "selection_manifest_id": self.selection_manifest_id,
+            "seal_id": self.seal_id,
+            "opened_marker_id": self.opened_marker_id,
+            "outcomes": [[target_id, outcome] for target_id, outcome in self.outcomes],
+            "source_class": self.source_class.value,
+            "evidence_class": self.evidence_class.value,
+            "holdout_scope": self.holdout_scope.value,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "outcome_evidence_id": self.outcome_evidence_id}
+
+@dataclass(frozen=True, slots=True)
 class R2HoldoutEvaluation:
     selection_manifest_id: str
     seal_id: str
     opened_marker_id: str
-    consumed_marker_id: str
     questions: tuple[R2HoldoutQuestionResult, ...]
     source_class: MarketDataSourceClass
     evidence_class: EvidenceClass
@@ -1833,7 +1898,6 @@ class R2HoldoutEvaluation:
             (self.selection_manifest_id, "evaluation selection ID"),
             (self.seal_id, "evaluation seal ID"),
             (self.opened_marker_id, "evaluation opened marker ID"),
-            (self.consumed_marker_id, "evaluation consumed marker ID"),
             (self.evaluation_id, "holdout evaluation ID"),
         ):
             _require_id(value, field)
@@ -1867,7 +1931,6 @@ class R2HoldoutEvaluation:
             "selection_manifest_id": self.selection_manifest_id,
             "seal_id": self.seal_id,
             "opened_marker_id": self.opened_marker_id,
-            "consumed_marker_id": self.consumed_marker_id,
             "questions": [item.as_json() for item in self.questions],
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,

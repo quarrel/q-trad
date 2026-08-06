@@ -190,11 +190,14 @@ from qtrad.runtime.r2_holdout import (
     load_holdout_policy,
     load_holdout_questions,
     load_prior_selection_manifest,
+    prepare_holdout_from_files,
+    recover_holdout_consumption,
     reveal_holdout_from_files,
     verify_holdout_evaluation,
     verify_holdout_markers,
     verify_holdout_preparation,
     verify_holdout_selection,
+    write_built_holdout_bundle,
     write_holdout_selection,
 )
 from qtrad.runtime.r2_ibkr_verification import (
@@ -363,21 +366,33 @@ def _load_holdout_cli_object(path: Path) -> dict[str, JsonValue]:
 def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     from qtrad.domain.r2_evaluation import SelectionManifest
     from qtrad.domain.r2_holdout import HoldoutScope
-    from qtrad.domain.r2_readiness import EvidenceClass
 
+    if args.oof_bundle is None:
+        raise ValueError(
+            "--oof-bundle is required so selection freeze can replay verified OOF evidence"
+        )
     prior = cast(SelectionManifest, load_prior_selection_manifest(args.prior_selection))
+    verified_oof = verify_oof_bundle(args.oof_bundle)
     policy = load_holdout_policy(args.final_fitting_policy)
     questions = load_holdout_questions(args.questions)
-    metric_policy = _load_holdout_cli_object(args.metric_policy)
-    threshold_policy = _load_holdout_cli_object(args.threshold_policy)
-    runtime_identities = _load_holdout_cli_object(args.runtime_identities)
-    frozen_metadata = _load_holdout_cli_object(args.frozen_metadata)
+    metric_policy = (
+        {} if args.metric_policy is None else _load_holdout_cli_object(args.metric_policy)
+    )
+    threshold_policy = (
+        {} if args.threshold_policy is None else _load_holdout_cli_object(args.threshold_policy)
+    )
+    runtime_identities = (
+        {} if args.runtime_identities is None else _load_holdout_cli_object(args.runtime_identities)
+    )
+    frozen_metadata = (
+        {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
+    )
     manifest = freeze_holdout_selection(
         prior_selection=prior,
-        foundation_bundle_id=args.foundation_bundle_id,
-        oof_bundle_id=args.oof_bundle_id,
-        source_class=MarketDataSourceClass(args.source_class),
-        evidence_class=EvidenceClass(args.evidence_class),
+        foundation_bundle_id=verified_oof.foundation_bundle_id,
+        oof_bundle_id=verified_oof.bundle_id,
+        source_class=verified_oof.source_class,
+        evidence_class=verified_oof.evidence_class,
         holdout_scope=HoldoutScope(args.holdout_scope),
         final_fitting_policy=policy,
         questions=questions,
@@ -385,12 +400,53 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         threshold_policy=threshold_policy,
         runtime_identities=runtime_identities,
         frozen_metadata=frozen_metadata,
-        frozen_at=args.frozen_at,
+        frozen_at=args.frozen_at or datetime.now(UTC),
         frozen_by=args.frozen_by,
         control_configuration_ids=args.control_configuration_id,
+        verified_oof_bundle=verified_oof,
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+
+
+def _holdout_prepare_cli(args: argparse.Namespace) -> None:
+    source = args.source
+    if source is None:
+        raise ValueError("holdout-prepare requires a source preparation")
+    expected_selection_id = None
+    if args.holdout_selection is not None:
+        expected_selection_id = verify_holdout_selection(args.holdout_selection).manifest_id
+    seal = prepare_holdout_from_files(
+        source,
+        args.output,
+        expected_selection_manifest_id=expected_selection_id,
+    )
+    print(
+        json.dumps({"seal": seal.seal_id, "root": str(args.output)}, sort_keys=True)
+    )
+
+
+def _holdout_recover_cli(args: argparse.Namespace) -> None:
+    recovery_kwargs: dict[str, object] = {
+        "expected_selection_manifest_id": args.expected_selection_id,
+        "expected_seal_id": args.expected_seal_id,
+        "consumed_by": args.consumed_by,
+        "consumed_at": args.consumed_at,
+    }
+    if args.evaluation_id is not None:
+        recovery_kwargs["evaluation_id"] = args.evaluation_id
+    marker = recover_holdout_consumption(args.root, **recovery_kwargs)
+    print(json.dumps({"consumed": marker.marker_id}, sort_keys=True))
+
+
+def _holdout_bundle_cli(args: argparse.Namespace) -> None:
+    bundle = write_built_holdout_bundle(args.root, args.output)
+    print(
+        json.dumps(
+            {"bundle": bundle.bundle_id, "manifest": str(args.output / "manifest.json")},
+            sort_keys=True,
+        )
+    )
 
 
 def _holdout_reveal_cli(args: argparse.Namespace) -> None:
@@ -818,10 +874,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--prior-selection", "--selection", dest="prior_selection", type=Path, required=True
     )
     baselines_holdout_selection.add_argument(
-        "--foundation-bundle-id", "--foundation-id", dest="foundation_bundle_id", required=True
+        "--foundation-bundle-id", "--foundation-id", dest="foundation_bundle_id", required=False
     )
     baselines_holdout_selection.add_argument(
-        "--oof-bundle-id", "--oof-id", dest="oof_bundle_id", required=True
+        "--oof-bundle", dest="oof_bundle", type=Path, required=False
+    )
+    baselines_holdout_selection.add_argument(
+        "--oof-bundle-id", "--oof-id", dest="oof_bundle_id", required=False
     )
     baselines_holdout_selection.add_argument(
         "--source-class",
@@ -838,16 +897,46 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
     baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
-    baselines_holdout_selection.add_argument("--metric-policy", type=Path, required=True)
-    baselines_holdout_selection.add_argument("--threshold-policy", type=Path, required=True)
-    baselines_holdout_selection.add_argument("--runtime-identities", type=Path, required=True)
-    baselines_holdout_selection.add_argument("--frozen-metadata", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--metric-policy", type=Path)
+    baselines_holdout_selection.add_argument("--threshold-policy", type=Path)
+    baselines_holdout_selection.add_argument("--runtime-identities", type=Path)
+    baselines_holdout_selection.add_argument("--frozen-metadata", type=Path)
     baselines_holdout_selection.add_argument("--control-configuration-id", action="append")
     baselines_holdout_selection.add_argument(
-        "--frozen-at", type=_utc_timestamp_argument, required=True
+        "--frozen-at", type=_utc_timestamp_argument, required=False
     )
     baselines_holdout_selection.add_argument("--frozen-by", required=True)
     baselines_holdout_selection.add_argument("--output", type=Path, required=True)
+
+    baselines_holdout_prepare = baselines_sub.add_parser(
+        "holdout-prepare", help="copy and verify an outcome-blind disposable holdout preparation"
+    )
+    baselines_holdout_prepare_source = (
+        baselines_holdout_prepare.add_mutually_exclusive_group(required=True)
+    )
+    baselines_holdout_prepare_source.add_argument("--source", type=Path)
+    baselines_holdout_prepare_source.add_argument("--foundation", type=Path, dest="source")
+    baselines_holdout_prepare.add_argument("--holdout-selection", type=Path)
+    baselines_holdout_prepare.add_argument("--output", type=Path, required=True)
+
+    baselines_holdout_recover = baselines_sub.add_parser(
+        "holdout-recover",
+        help="recover a missing irreversible consumed marker without reopening outcomes",
+    )
+    baselines_holdout_recover.add_argument("--root", type=Path, required=True)
+    baselines_holdout_recover.add_argument("--expected-selection-id", required=True)
+    baselines_holdout_recover.add_argument("--expected-seal-id", required=True)
+    baselines_holdout_recover.add_argument("--consumed-by", required=True)
+    baselines_holdout_recover.add_argument(
+        "--consumed-at", type=_utc_timestamp_argument, required=True
+    )
+    baselines_holdout_recover.add_argument("--evaluation-id")
+
+    baselines_holdout_bundle = baselines_sub.add_parser(
+        "holdout-bundle", help="build and independently verify the disposable holdout bundle"
+    )
+    baselines_holdout_bundle.add_argument("--root", type=Path, required=True)
+    baselines_holdout_bundle.add_argument("--output", type=Path, required=True)
 
     baselines_holdout_reveal = baselines_sub.add_parser(
         "holdout-reveal", help="irreversibly open and consume one prepared disposable holdout"
@@ -1498,6 +1587,24 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.baselines_command == "holdout-selection-freeze"
     ):
         _holdout_selection_freeze_cli(args)
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-prepare"
+    ):
+        _holdout_prepare_cli(args)
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-recover"
+    ):
+        _holdout_recover_cli(args)
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-bundle"
+    ):
+        _holdout_bundle_cli(args)
     elif (
         args.command == "research"
         and args.research_command == "baselines"

@@ -37,8 +37,10 @@ from qtrad.domain.r2_holdout import (
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.runtime.r2_holdout import (
     reveal_holdout,
+    verify_holdout_bundle,
     verify_holdout_markers,
     verify_holdout_preparation,
+    write_built_holdout_bundle,
     write_holdout_preparation,
 )
 
@@ -284,6 +286,41 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     assert opened.seal_id == seal.seal_id
     assert replayed_consumed.marker_id == consumed.marker_id
     assert evaluation.questions[0].conclusion in tuple(HoldoutConclusion)
+
+
+def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> None:
+    selection, opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
+
+    def evaluator(outcomes, opened):
+        return evaluate_holdout(
+            selection=selection,
+            seal=seal,
+            opened_marker=opened,
+            forecast_datasets=forecasts,
+            coverage_datasets=coverage,
+            outcomes=outcomes,
+        )
+
+    evaluation, consumed = reveal_holdout(
+        tmp_path,
+        expected_selection_manifest_id=selection.manifest_id,
+        expected_seal_id=seal.seal_id,
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        opened_by="test",
+        consumed_by="test",
+        opened_at=NOW,
+        consumed_at=NOW + timedelta(seconds=1),
+        outcome_loader=lambda: {
+            opportunities[0].target_id: 0.1,
+            opportunities[1].target_id: 0.2,
+        },
+        evaluator=evaluator,
+    )
+    output = tmp_path / "bundle"
+    bundle = write_built_holdout_bundle(tmp_path, output)
+    assert bundle.bundle_id == verify_holdout_bundle(output).bundle_id
+    assert bundle.evaluation.semantic_id == evaluation.evaluation_id
+    assert consumed.evaluation_id == evaluation.evaluation_id
 
 
 def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path) -> None:
