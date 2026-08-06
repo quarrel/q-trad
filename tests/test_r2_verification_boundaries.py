@@ -14,6 +14,7 @@ import pytest
 import qtrad.runtime.r2_verification as verification
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
+from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import _verify_replay_inputs
 from qtrad.runtime.r2_verification import (
@@ -25,15 +26,42 @@ from qtrad.runtime.r2_verification import (
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
     _validate_representative_fold_layout,
+    require_ibkr_adapter_runtime_identity,
     runtime_identities,
     verify_oof_bundle,
 )
+from tests.test_ibkr_foundation import _foundation_bundle_fixture
 
 
 def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("QTRAD_IMAGE_DIGEST", "sha256:" + "f" * 64)
     identities = runtime_identities()
     assert "image:sha256:" + "0" * 64 in identities["application_identity"]
+
+
+def test_persisted_ibkr_adapter_identity_matches_current_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = {
+        "application_identity": "qtrad-test-application",
+        "image_identity": "sha256:" + "1" * 64,
+    }
+    adapter = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id="a" * 64,
+        application_identity=runtime["application_identity"],
+        image_identity=runtime["image_identity"],
+    )
+    monkeypatch.setattr(verification, "runtime_identities", lambda: runtime)
+    require_ibkr_adapter_runtime_identity(adapter)
+
+    for field in ("application_identity", "image_identity"):
+        drifted = dict(runtime)
+        drifted[field] = "runtime-drift"
+        monkeypatch.setattr(
+            verification, "runtime_identities", lambda identities=drifted: identities
+        )
+        with pytest.raises(ValueError, match=field):
+            require_ibkr_adapter_runtime_identity(adapter)
 
 
 def test_image_identity_manifest_digest_is_authenticated(
@@ -198,3 +226,46 @@ def test_replay_staging_rejects_ancestor_symlinks(tmp_path: Path) -> None:
             research_root=research,
             paths={"experiment": experiment, **paths},
         )
+
+
+def test_stage8_foundation_replay_closure_is_file_complete(tmp_path: Path) -> None:
+    research_root = tmp_path / "research"
+    research_root.mkdir()
+    foundation = _foundation_bundle_fixture(research_root)
+    experiment = tmp_path / "experiment.json"
+    experiment.write_text("{}", encoding="utf-8")
+    features: dict[str, Path] = {}
+    for name in ("L0", "L1", "P0", "P1"):
+        feature = research_root / f"{name}.json"
+        feature.write_text("{}", encoding="utf-8")
+        features[name] = feature
+
+    output = tmp_path / "staged"
+    replay_inputs = _stage_replay_inputs(
+        output=output,
+        research_root=research_root,
+        paths={"foundation": foundation, "experiment": experiment, **features},
+    )
+    _verify_replay_inputs(output, {"replay_inputs": replay_inputs}, set())
+
+    children = cast(dict[str, object], replay_inputs["children"])
+    foundation_child = cast(dict[str, object], children["foundation"])
+    files = cast(list[object], foundation_child["files"])
+    staged_paths = {cast(dict[str, object], item)["path"] for item in files}
+    document = cast(dict[str, object], json.loads(foundation.read_bytes()))
+    payload = cast(dict[str, object], document["payload"])
+    provider_path = cast(str, document["provider_history_manifest"])
+    expected_source_paths = {provider_path}
+    stage8_children = cast(dict[str, object], payload["children"])
+    for raw_parts in stage8_children.values():
+        for raw_part in cast(list[object], raw_parts):
+            part = cast(dict[str, object], raw_part)
+            expected_source_paths.update(
+                {cast(str, part["manifest_path"]), cast(str, part["file"])}
+            )
+
+    for source_path in expected_source_paths:
+        staged_path = f"replay-inputs/research/{source_path}"
+        assert staged_path in staged_paths
+        assert (output / staged_path).is_file()
+    assert any(cast(str, path).endswith(".parquet") for path in staged_paths)

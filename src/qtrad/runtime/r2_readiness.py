@@ -6,6 +6,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import cast
 
+from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import InstrumentRole
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import (
@@ -18,6 +19,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
     R2ReadinessReport,
 )
+from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 
 _MAX_BYTES = 4 * 1024 * 1024
 _KEYS = frozenset(
@@ -80,7 +82,7 @@ def load_r2_experiment(path: Path) -> R2ExperimentConfig:
 
 
 def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
-    if set(payload) != _KEYS:
+    if set(payload) not in {_KEYS, _KEYS | {"source_adapter_identity"}}:
         raise ValueError("R2 experiment has unknown or missing fields")
     if payload["contract"] != R2ExperimentConfig.CONTRACT:
         raise ValueError("R2 experiment contract is unsupported")
@@ -156,10 +158,20 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
         numeric_replay_absolute_tolerance=_float(payload["numeric_replay_absolute_tolerance"]),
         evidence_class=EvidenceClass(_text(payload["evidence_class"])),
         market_data_source_class=MarketDataSourceClass(_text(payload["market_data_source_class"])),
+        source_adapter_identity=(
+            cast(dict[str, JsonValue], _mapping(payload["source_adapter_identity"]))
+            if "source_adapter_identity" in payload
+            else None
+        ),
         model_families=tuple(
             ModelFamily(_text(item)) for item in _sequence(payload["model_families"])
         ),
     )
+
+
+def write_r2_experiment(path: Path, experiment: R2ExperimentConfig) -> None:
+    """Persist one canonical, create-only experiment configuration."""
+    atomic_create(path, canonical_bytes(experiment.as_json()))
 
 
 def write_r2_readiness(path: Path, report: R2ReadinessReport) -> None:

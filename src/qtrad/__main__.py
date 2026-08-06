@@ -13,6 +13,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from typing import cast
 from uuid import uuid4
 
 import uvicorn
@@ -71,7 +72,15 @@ from qtrad.application.r2_features import (
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
-from qtrad.application.r2_readiness import evaluate_r2_readiness
+from qtrad.application.r2_ibkr_historical import (
+    build_ibkr_historical_experiment,
+    build_ibkr_r2_foundation_inputs,
+)
+from qtrad.application.r2_readiness import (
+    R1FoundationBindings,
+    VerifiedFoundation,
+    evaluate_r2_readiness,
+)
 from qtrad.application.replay import semantic_bar_hash
 from qtrad.application.research_observations import (
     build_observation_dataset,
@@ -98,6 +107,13 @@ from qtrad.domain.market_data import (
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.r2_features import feature_set_id
+from qtrad.domain.r2_ibkr_historical import (
+    IBKR_HISTORICAL_PROFILE,
+    IBKR_HISTORICAL_PROFILE_ARGUMENT,
+    IBKR_HISTORICAL_SOURCE,
+    IBKRHistoricalAdapterIdentity,
+)
+from qtrad.domain.r2_readiness import R2ExperimentConfig
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
@@ -121,6 +137,7 @@ from qtrad.runtime.ibkr_canary import (
 )
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
+    load_ibkr_foundation_with_identity,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -167,11 +184,21 @@ from qtrad.runtime.qualification_gap_plan_set import (
     write_qualification_gap_plan_set,
 )
 from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
-from qtrad.runtime.r2_readiness import load_r2_experiment, write_r2_readiness
+from qtrad.runtime.r2_ibkr_verification import (
+    build_ibkr_software_bundle,
+    verify_ibkr_software_bundle,
+)
+from qtrad.runtime.r2_readiness import (
+    load_r2_experiment,
+    write_r2_experiment,
+    write_r2_readiness,
+)
 from qtrad.runtime.r2_verification import (
     build_oof_bundle,
     build_software_bundle,
     load_experiment_and_feature_paths,
+    require_ibkr_adapter_runtime_identity,
+    runtime_identities,
     selection_freeze,
     verify_oof_bundle,
     verify_software_bundle,
@@ -639,6 +666,14 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_build.add_argument("--output", type=Path, required=True)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
     baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
+    baselines_experiment_build = baselines_sub.add_parser(
+        "experiment-build", help="build an R2 experiment from a verified Stage 8 foundation"
+    )
+    baselines_experiment_build.add_argument("--foundation", type=Path, required=True)
+    baselines_experiment_build.add_argument(
+        "--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,), required=True
+    )
+    baselines_experiment_build.add_argument("--output", type=Path, required=True)
     baselines_readiness = baselines_sub.add_parser(
         "readiness", help="verify R2 experiment bindings and report independent readiness gates"
     )
@@ -685,11 +720,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_software_build.add_argument("--representative-oof-bundle", type=Path, required=True)
     baselines_software_build.add_argument("--representative-selection", type=Path, required=True)
+    baselines_software_build.add_argument("--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,))
     baselines_software_build.add_argument("--output", type=Path, required=True)
     baselines_software_verify = baselines_sub.add_parser(
         "software-verify", help="independently replay the R2 software bundle"
     )
     baselines_software_verify.add_argument("--bundle", type=Path, required=True)
+    baselines_software_verify.add_argument("--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,))
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
 
@@ -1244,6 +1281,16 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "baselines"
+        and args.baselines_command == "experiment-build"
+    ):
+        _build_ibkr_historical_experiment_cli(
+            profile=args.profile,
+            foundation_path=args.foundation,
+            output_path=args.output,
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
         and args.baselines_command == "readiness"
     ):
         asyncio.run(
@@ -1294,18 +1341,32 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "software-build"
     ):
-        build_software_bundle(
-            representative_oof_bundle_path=args.representative_oof_bundle,
-            representative_selection_path=args.representative_selection,
-            output=args.output,
-        )
+        if args.profile is None:
+            build_software_bundle(
+                representative_oof_bundle_path=args.representative_oof_bundle,
+                representative_selection_path=args.representative_selection,
+                output=args.output,
+            )
+        else:
+            if args.profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
+                raise ValueError("unsupported software verification profile")
+            build_ibkr_software_bundle(
+                representative_oof_bundle_path=args.representative_oof_bundle,
+                representative_selection_path=args.representative_selection,
+                output=args.output,
+            )
         print(json.dumps({"software_bundle": str(args.output / "manifest.json")}, sort_keys=True))
     elif (
         args.command == "research"
         and args.research_command == "baselines"
         and args.baselines_command == "software-verify"
     ):
-        bundle = verify_software_bundle(args.bundle)
+        if args.profile is None:
+            bundle = verify_software_bundle(args.bundle)
+        else:
+            if args.profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
+                raise ValueError("unsupported software verification profile")
+            bundle = verify_ibkr_software_bundle(args.bundle)
         print(json.dumps(bundle.as_json(), sort_keys=True))
     elif (
         args.command == "research"
@@ -1387,6 +1448,30 @@ def main(argv: Sequence[str] | None = None) -> None:
         raise RuntimeError("unhandled command")
 
 
+def _build_ibkr_historical_experiment_cli(
+    *,
+    profile: str,
+    foundation_path: Path,
+    output_path: Path,
+) -> None:
+    if profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
+        raise ValueError("experiment-build supports only the fixed IBKR historical profile")
+    foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(foundation_path)
+    identities = runtime_identities()
+    adapter_identity = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id=foundation_bundle_id,
+        application_identity=identities["application_identity"],
+        image_identity=identities["image_identity"],
+    )
+    experiment = build_ibkr_historical_experiment(
+        foundation,
+        foundation_bundle_id=foundation_bundle_id,
+        adapter_identity=adapter_identity,
+    )
+    write_r2_experiment(output_path, experiment)
+    print(json.dumps({"experiment": str(output_path)}, sort_keys=True))
+
+
 async def _report_r2_readiness(
     settings: Settings,
     clock: Clock,
@@ -1396,15 +1481,19 @@ async def _report_r2_readiness(
     software_bundle_path: Path | None,
     output_path: Path,
 ) -> None:
-    verified = await verify_foundation_bundle(
-        root=settings.research_root,
-        bundle_path=foundation_bundle_path,
-        clock=clock,
-    )
     experiment = load_r2_experiment(experiment_path)
+    verified = await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        experiment=experiment,
+    )
     software_verified = False
     if software_bundle_path is not None:
-        software = await verify_software_bundle_async(software_bundle_path)
+        if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE:
+            software = verify_ibkr_software_bundle(software_bundle_path)
+        else:
+            software = await verify_software_bundle_async(software_bundle_path)
         representative = verify_r2_oof_bundle(
             software_bundle_path.parent / software.representative_oof_bundle.path
         )
@@ -1416,9 +1505,50 @@ async def _report_r2_readiness(
         )
         if not software_verified:
             raise ValueError("software bundle does not bind the exact foundation and experiment")
-    report = evaluate_r2_readiness(verified, experiment, software_verified=software_verified)
+    report = evaluate_r2_readiness(
+        cast(VerifiedFoundation, verified), experiment, software_verified=software_verified
+    )
     write_r2_readiness(output_path, report)
     print(json.dumps(report.as_json(), sort_keys=True))
+
+
+async def _load_r2_foundation_inputs(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    experiment: R2ExperimentConfig,
+) -> VerifiedFoundation | R2FoundationInputs:
+    if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
+        return await verify_foundation_bundle(
+            root=settings.research_root,
+            bundle_path=foundation_bundle_path,
+            clock=clock,
+        )
+
+    stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
+        foundation_bundle_path
+    )
+    if experiment.r1_bundle_id != foundation_bundle_id:
+        raise ValueError("IBKR experiment does not bind the verified Stage 8 foundation")
+    if experiment.source_adapter_identity is None:
+        raise ValueError("IBKR experiment is missing its persisted IBKR adapter identity")
+    adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
+    if adapter_identity.foundation_bundle_id != foundation_bundle_id:
+        raise ValueError("IBKR adapter identity does not bind the verified Stage 8 foundation")
+    expected = build_ibkr_historical_experiment(
+        stage8_foundation,
+        foundation_bundle_id=foundation_bundle_id,
+        adapter_identity=adapter_identity,
+    )
+    if expected.as_json() != experiment.as_json():
+        raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
+    require_ibkr_adapter_runtime_identity(adapter_identity)
+    return build_ibkr_r2_foundation_inputs(
+        stage8_foundation,
+        foundation_bundle_id=foundation_bundle_id,
+        adapter_identity=adapter_identity,
+    )
 
 
 async def _build_r2_oof(
@@ -1430,22 +1560,28 @@ async def _build_r2_oof(
     feature_arguments: list[str],
     output_path: Path,
 ) -> None:
-    verified = await verify_foundation_bundle(
-        root=settings.research_root,
-        bundle_path=foundation_bundle_path,
-        clock=clock,
-    )
     experiment, feature_paths = load_experiment_and_feature_paths(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
+    verified = await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        experiment=experiment,
+    )
     manifest = build_oof_bundle(
-        verified=verified,
+        verified=cast(R1FoundationBindings, verified),
         experiment=experiment,
         feature_manifest_paths=feature_paths,
         research_root=settings.research_root,
         clock=clock,
         output=output_path,
+        representative_profile=(
+            IBKR_HISTORICAL_PROFILE
+            if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
+            else None
+        ),
         replay_inputs={
             "foundation": foundation_bundle_path,
             "experiment": experiment_path,
@@ -1464,21 +1600,14 @@ async def _materialise_r2_features(
     feature_set_name: str,
     output_path: Path,
 ) -> None:
-    verified = await verify_foundation_bundle(
-        root=settings.research_root,
-        bundle_path=foundation_bundle_path,
-        clock=clock,
-    )
     experiment = load_r2_experiment(experiment_path)
-    foundation = R2FoundationInputs(
-        bundle=verified.bundle,
-        configuration=verified.configuration,
-        observations=verified.observations,
-        panel=verified.panel,
-        targets=verified.targets,
-        folds=verified.folds,
-        availability_evidence=verified.availability_evidence,
+    verified = await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        experiment=experiment,
     )
+    foundation = cast(R2FoundationInputs, verified)
     schema = feature_schema_for_set(experiment, feature_set_name)
     set_identity = feature_set_id(
         experiment.configuration_id,
@@ -1533,21 +1662,14 @@ async def _verify_persisted_r2_features(
     feature_set_name: str,
     manifest_path: Path,
 ) -> None:
-    verified = await verify_foundation_bundle(
-        root=settings.research_root,
-        bundle_path=foundation_bundle_path,
-        clock=clock,
-    )
     experiment = load_r2_experiment(experiment_path)
-    foundation = R2FoundationInputs(
-        bundle=verified.bundle,
-        configuration=verified.configuration,
-        observations=verified.observations,
-        panel=verified.panel,
-        targets=verified.targets,
-        folds=verified.folds,
-        availability_evidence=verified.availability_evidence,
+    verified = await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        experiment=experiment,
     )
+    foundation = cast(R2FoundationInputs, verified)
     store = ParquetR2FeatureStore(settings.research_root, clock)
     manifest = store.read_manifest(manifest_path)
     verify_raw_feature_manifest_bindings(

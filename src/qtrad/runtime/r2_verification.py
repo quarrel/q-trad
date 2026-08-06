@@ -38,6 +38,10 @@ from qtrad.application.r2_features import (
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
+from qtrad.application.r2_ibkr_historical import (
+    build_ibkr_historical_experiment,
+    build_ibkr_r2_foundation_inputs,
+)
 from qtrad.application.r2_pooled import build_pooled_ridge_oof
 from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
@@ -56,6 +60,7 @@ from qtrad.domain.foundation import (
     TargetDataset,
     TargetRow,
 )
+from qtrad.domain.ibkr_foundation import IBKR_FOUNDATION_CONTRACT
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
@@ -80,6 +85,13 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
+from qtrad.domain.r2_ibkr_historical import (
+    IBKR_HISTORICAL_GROUPS,
+    IBKR_HISTORICAL_PROFILE,
+    IBKR_HISTORICAL_TARGETS,
+    IBKRHistoricalAdapterIdentity,
+    validate_ibkr_historical_profile,
+)
 from qtrad.domain.r2_models import PreprocessingFeatureKind, derive_r2_preprocessing_schema
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
@@ -92,6 +104,7 @@ from qtrad.domain.r2_readiness import (
 )
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import verify_foundation_bundle
+from qtrad.runtime.ibkr_foundation import load_ibkr_foundation_with_identity
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     atomic_create,
@@ -216,10 +229,21 @@ def runtime_identities() -> dict[str, str]:
     application = f"qtrad-{__version__}+git:{commit}+image:{image_digest}"
     return {
         "application_identity": application,
+        "image_identity": image_digest,
         "python_identity": sys.version.split()[0],
         "numpy_identity": numpy.__version__,
         "sklearn_identity": sklearn.__version__,
     }
+
+
+def require_ibkr_adapter_runtime_identity(
+    adapter_identity: IBKRHistoricalAdapterIdentity,
+) -> None:
+    """Require the persisted adapter identities to match the running environment."""
+    identities = runtime_identities()
+    for field in ("application_identity", "image_identity"):
+        if getattr(adapter_identity, field) != identities[field]:
+            raise ValueError(f"IBKR adapter {field} differs from the running environment")
 
 
 def parse_feature_manifest_arguments(arguments: list[str]) -> dict[str, Path]:
@@ -290,6 +314,7 @@ def _descriptor_payload(
     feature_names: tuple[str, ...],
     run_kind: str,
     identities: dict[str, str],
+    representative_profile: str | None = None,
 ) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": OOF_DESCRIPTOR_CONTRACT,
@@ -310,8 +335,53 @@ def _descriptor_payload(
         "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
     }
+    if representative_profile is not None:
+        semantic["representative_profile"] = representative_profile
     descriptor_id = sha256(canonical_bytes(semantic)).hexdigest()
     return {**semantic, "descriptor_id": descriptor_id}
+
+
+def _validate_representative_ibkr_historical_v1(
+    verified: R1FoundationBindings, experiment: R2ExperimentConfig
+) -> None:
+    """Admit only the fixed source-specific IBKR implementation profile."""
+
+    validate_ibkr_historical_profile(experiment)
+    if experiment.market_data_source_class is not MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
+        raise ValueError("IBKR historical representative run has the wrong source class")
+    if tuple(verified.bundle.ordered_instruments) != experiment.ordered_instruments:
+        raise ValueError("IBKR historical foundation universe differs from the experiment")
+    start = verified.bundle.range_start
+    end = verified.bundle.range_end
+    total_seconds = (end - start).total_seconds()
+    if total_seconds <= 0 or experiment.holdout_range[1] != end:
+        raise ValueError(
+            "IBKR historical representative holdout is not the final foundation interval"
+        )
+    expected_holdout_start = start + timedelta(seconds=total_seconds * 0.8)
+    if experiment.holdout_range[0] != expected_holdout_start:
+        raise ValueError("IBKR historical representative holdout must be the final 20 percent")
+    folds = verified.folds.folds
+    if len(folds) != 3:
+        raise ValueError("IBKR historical representative run must contain exactly three folds")
+    expected_folds = build_expanding_folds(
+        verified.targets,
+        verified.configuration,
+        horizon=experiment.primary_horizon,
+        validation_duration=folds[0].validation_end - folds[0].validation_start,
+    )
+    if expected_folds.folds != folds:
+        raise ValueError("IBKR historical representative folds do not replay from the foundation")
+    targets_by_id = {row.target_id: row for row in verified.targets.rows}
+    for fold in folds:
+        for target_id in fold.validation_target_ids:
+            target = targets_by_id[target_id]
+            if (
+                target.target_end_time > experiment.holdout_range[0]
+                or target.target_freeze_at > experiment.holdout_range[0]
+                or target.target_available_at > experiment.holdout_range[0]
+            ):
+                raise ValueError("IBKR historical validation dependency reaches the holdout")
 
 
 def _validate_representative_capture_v4(
@@ -522,6 +592,21 @@ def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Pa
     initial = _validated_replay_file(path, source_root)
     pending: list[tuple[Path, str]] = [(initial, name)]
     seen: set[Path] = set()
+
+    def add_tree(directory: Path) -> None:
+        resolved = directory.resolve()
+        root = source_root.resolve()
+        if directory.is_symlink() or not resolved.is_dir() or not resolved.is_relative_to(root):
+            raise ValueError(f"replay closure directory is unsafe or unavailable: {directory}")
+        for candidate in sorted(resolved.rglob("*")):
+            if candidate.is_symlink():
+                raise ValueError(f"replay closure contains a symlink: {candidate}")
+            if candidate.is_dir():
+                continue
+            if not candidate.is_file():
+                raise ValueError(f"replay closure contains a non-file: {candidate}")
+            seen.add(candidate)
+
     while pending:
         current, role = pending.pop()
         if current in seen:
@@ -535,7 +620,34 @@ def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Pa
             raise ValueError(f"replay manifest is not valid JSON: {current.name}") from exc
         if not isinstance(payload, dict):
             raise ValueError(f"replay manifest must be a JSON object: {current.name}")
-        if role == "foundation":
+        if role == "foundation" and payload.get("contract") == IBKR_FOUNDATION_CONTRACT:
+            stage8_payload = payload.get("payload")
+            if not isinstance(stage8_payload, dict):
+                raise ValueError("IBKR foundation replay payload is malformed")
+            provider_path = _declared_replay_path(
+                payload.get("provider_history_manifest"),
+                base=current.parent,
+                source_root=source_root,
+                field="provider_history_manifest",
+            )
+            add_tree(provider_path.parent)
+            children = stage8_payload.get("children")
+            if not isinstance(children, dict):
+                raise ValueError("IBKR foundation replay children are malformed")
+            for raw_parts in children.values():
+                if not isinstance(raw_parts, list) or not raw_parts:
+                    raise ValueError("IBKR foundation replay child parts are malformed")
+                for child in raw_parts:
+                    if not isinstance(child, dict):
+                        raise ValueError("IBKR foundation replay child part is malformed")
+                    child_path = _declared_replay_path(
+                        child.get("manifest_path"),
+                        base=current.parent,
+                        source_root=source_root,
+                        field="manifest_path",
+                    )
+                    pending.append((child_path, "foundation-child"))
+        elif role == "foundation":
             children = payload.get("children")
             if isinstance(children, dict):
                 for child_name, child in children.items():
@@ -849,7 +961,16 @@ def _model_forecasts(
     )
 
 
-def _synthetic_pipeline_inputs() -> tuple[
+def _synthetic_pipeline_inputs(
+    *,
+    target_names: tuple[str, ...] = ("index:synthetic-a", "index:synthetic-b"),
+    context_name: str = "index:volatility",
+    fixture_name: str = "r2-synthetic",
+    market_groups: Mapping[str, str] | None = None,
+    application_identity: str = "synthetic",
+    image_identity: str = "qtrad@sha256:" + "1" * 64,
+    adapter_identity: IBKRHistoricalAdapterIdentity | None = None,
+) -> tuple[
     R1FoundationBindings,
     R2ExperimentConfig,
     dict[str, R2FeatureDataset],
@@ -858,13 +979,11 @@ def _synthetic_pipeline_inputs() -> tuple[
     start = datetime(2026, 1, 1, tzinfo=UTC)
     horizon = timedelta(minutes=15)
     holdout = (start + timedelta(hours=6), start + timedelta(hours=24))
-    target_names = ("index:synthetic-a", "index:synthetic-b")
-    context_name = "index:volatility"
     ordered = (*target_names, context_name)
-    r1_id = sha256(b"r2-synthetic-r1").hexdigest()
-    observation_id = sha256(b"r2-synthetic-observations").hexdigest()
-    foundation_id = sha256(b"r2-synthetic-foundation-config").hexdigest()
-    panel_id = sha256(b"r2-synthetic-panel").hexdigest()
+    r1_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
+    observation_id = sha256(f"{fixture_name}-observations".encode()).hexdigest()
+    foundation_id = sha256(f"{fixture_name}-foundation-config".encode()).hexdigest()
+    panel_id = sha256(f"{fixture_name}-panel".encode()).hexdigest()
 
     def eligibility(subject: str, state: FeatureEligibility) -> EligibilityDecision:
         return EligibilityDecision.create(
@@ -877,6 +996,10 @@ def _synthetic_pipeline_inputs() -> tuple[
 
     roles = {name: InstrumentRole.TARGET for name in target_names}
     roles[context_name] = InstrumentRole.CONTEXT
+    resolved_market_groups = market_groups or {
+        target_names[0]: "synthetic-0",
+        target_names[1]: "synthetic-1",
+    }
     feature_eligibility = {
         family: eligibility(
             family.value,
@@ -892,7 +1015,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         FeatureFamily.LOCAL_VOLATILITY_RANGE,
     )
     experiment = R2ExperimentConfig(
-        name="r2-software-verification-synthetic",
+        name=fixture_name,
         schema_version=2,
         r1_bundle_id=r1_id,
         observation_dataset_id=observation_id,
@@ -900,8 +1023,8 @@ def _synthetic_pipeline_inputs() -> tuple[
         panel_dataset_id=panel_id,
         target_dataset_id="a" * 64,
         fold_dataset_id="b" * 64,
-        r1_application_version="synthetic",
-        r1_image_identity="qtrad@sha256:" + "1" * 64,
+        r1_application_version=application_identity,
+        r1_image_identity=image_identity,
         ordered_instruments=ordered,
         instrument_roles=roles,
         target_instrument_eligibility={
@@ -909,7 +1032,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         },
         target_instruments=target_names,
         confirmatory_target_instruments=target_names,
-        market_groups={target_names[0]: "synthetic-0", target_names[1]: "synthetic-1"},
+        market_groups=resolved_market_groups,
         horizons=(horizon,),
         primary_horizon=horizon,
         feature_sets=(
@@ -948,6 +1071,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         numeric_replay_absolute_tolerance=1e-12,
         evidence_class=EvidenceClass.IMPLEMENTATION,
         market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        source_adapter_identity=adapter_identity.as_json() if adapter_identity else None,
         model_families=tuple(ModelFamily),
     )
     targets_rows: list[TargetRow] = []
@@ -1090,8 +1214,8 @@ def _synthetic_pipeline_inputs() -> tuple[
                 targets=SimpleNamespace(dataset_id=targets.dataset_id),
                 folds=SimpleNamespace(dataset_id=folds.dataset_id),
                 build_summary={
-                    "application_version": "synthetic",
-                    "image_identity": "qtrad@sha256:" + "1" * 64,
+                    "application_version": application_identity,
+                    "image_identity": image_identity,
                 },
             ),
             configuration=SimpleNamespace(
@@ -1161,6 +1285,47 @@ def _materialise_synthetic_feature_manifests(
     return paths
 
 
+def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
+    """Build an independent deterministic IBKR synthetic OOF child."""
+    fixture_name = "r2-ibkr-historical-synthetic"
+    identities = runtime_identities()
+    application_identity = identities["application_identity"]
+    image_identity = identities["image_identity"]
+    foundation_bundle_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
+    adapter_identity = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id=foundation_bundle_id,
+        application_identity=application_identity,
+        image_identity=image_identity,
+    )
+    verified, experiment, datasets = _synthetic_pipeline_inputs(
+        target_names=tuple(sorted(IBKR_HISTORICAL_TARGETS)),
+        context_name="index:synthetic-volatility",
+        fixture_name=fixture_name,
+        market_groups=IBKR_HISTORICAL_GROUPS,
+        application_identity=application_identity,
+        image_identity=image_identity,
+        adapter_identity=adapter_identity,
+    )
+    validate_ibkr_historical_profile(experiment)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    clock = cast(Clock, SimpleNamespace(now=lambda: created_at))
+    with TemporaryDirectory() as temporary:
+        research_root = Path(temporary)
+        feature_paths = _materialise_synthetic_feature_manifests(
+            research_root, experiment, datasets
+        )
+        return build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_paths,
+            research_root=research_root,
+            clock=clock,
+            output=output,
+            run_kind="SYNTHETIC",
+            representative_profile=IBKR_HISTORICAL_PROFILE,
+        )
+
+
 def _build_synthetic_oof(output: Path) -> Path:
     verified, experiment, datasets = _synthetic_pipeline_inputs()
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
@@ -1191,8 +1356,15 @@ def build_oof_bundle(
     output: Path,
     run_kind: str = "REPRESENTATIVE",
     replay_inputs: Mapping[str, Path] | None = None,
+    representative_profile: str | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
+    if run_kind == "REPRESENTATIVE":
+        if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
+            if representative_profile != IBKR_HISTORICAL_PROFILE:
+                raise ValueError("IBKR historical representative run requires IBKR_HISTORICAL_V1")
+        elif representative_profile is not None:
+            raise ValueError("representative profile is only valid for IBKR historical runs")
     foundation_source = getattr(verified.bundle, "market_data_source_class", None)
     if foundation_source is not experiment.market_data_source_class:
         raise ValueError("R2 experiment source class differs from the R1 foundation")
@@ -1510,6 +1682,7 @@ def build_oof_bundle(
         feature_names=tuple(sorted(datasets)),
         run_kind=run_kind,
         identities=identities,
+        representative_profile=representative_profile,
     )
     descriptor.update(
         {
@@ -1929,13 +2102,43 @@ async def _replay_representative_oof_async(path: Path) -> None:
     research_root = roots["foundation"]
     if any(roots[name] != research_root for name in _REQUIRED_FEATURE_SETS):
         raise ValueError("representative feature inputs do not share the foundation root")
-    verified = await verify_foundation_bundle(
-        root=research_root,
-        bundle_path=paths["foundation"],
-        clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
-    )
     experiment = load_r2_experiment(paths["experiment"])
-    _validate_representative_capture_v4(verified, experiment)
+    representative_profile = descriptor.get("representative_profile")
+    if representative_profile == IBKR_HISTORICAL_PROFILE:
+        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
+            paths["foundation"]
+        )
+        if foundation_bundle_id != experiment.r1_bundle_id:
+            raise ValueError("IBKR replay foundation differs from the experiment")
+        adapter_payload = experiment.source_adapter_identity
+        if not isinstance(adapter_payload, Mapping):
+            raise ValueError("IBKR replay experiment has no persisted adapter identity")
+        adapter_identity = IBKRHistoricalAdapterIdentity.from_json(adapter_payload)
+        if adapter_identity.foundation_bundle_id != foundation_bundle_id:
+            raise ValueError("IBKR adapter identity differs from the experiment foundation")
+        expected_experiment = build_ibkr_historical_experiment(
+            stage8_foundation,
+            foundation_bundle_id=foundation_bundle_id,
+            adapter_identity=adapter_identity,
+        )
+        if expected_experiment.as_json() != experiment.as_json():
+            raise ValueError("IBKR experiment is not authenticated")
+        require_ibkr_adapter_runtime_identity(adapter_identity)
+        verified = build_ibkr_r2_foundation_inputs(
+            stage8_foundation,
+            foundation_bundle_id=foundation_bundle_id,
+            adapter_identity=adapter_identity,
+        )
+        _validate_representative_ibkr_historical_v1(verified, experiment)
+    elif representative_profile is not None:
+        raise ValueError("representative OOF descriptor has an unsupported profile")
+    else:
+        verified = await verify_foundation_bundle(
+            root=research_root,
+            bundle_path=paths["foundation"],
+            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+        )
+        _validate_representative_capture_v4(verified, experiment)
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
@@ -1946,6 +2149,9 @@ async def _replay_representative_oof_async(path: Path) -> None:
             research_root=research_root,
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
             output=expected_root,
+            representative_profile=(
+                representative_profile if isinstance(representative_profile, str) else None
+            ),
             run_kind="REPRESENTATIVE",
             replay_inputs=paths,
         )
@@ -1966,7 +2172,10 @@ def _replay_synthetic_oof(path: Path) -> None:
         return
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
-        _build_synthetic_oof(expected_root)
+        if descriptor.get("representative_profile") == IBKR_HISTORICAL_PROFILE:
+            _build_ibkr_synthetic_oof_from_fixture(expected_root)
+        else:
+            _build_synthetic_oof(expected_root)
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError("synthetic OOF bundle does not replay to the authenticated pipeline")
 

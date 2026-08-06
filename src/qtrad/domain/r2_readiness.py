@@ -168,6 +168,7 @@ class R2ExperimentConfig:
     evidence_class: EvidenceClass
     model_families: tuple[ModelFamily, ...]
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
+    source_adapter_identity: Mapping[str, JsonValue] | None = None
 
     CONTRACT: ClassVar[str] = R2_EXPERIMENT_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 2
@@ -337,7 +338,7 @@ class R2ExperimentConfig:
         return _hash_json(self.as_json())
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {
+        payload: dict[str, JsonValue] = {
             "contract": self.CONTRACT,
             "schema_version": self.schema_version,
             "name": self.name,
@@ -393,6 +394,9 @@ class R2ExperimentConfig:
             "market_data_source_class": self.market_data_source_class.value,
             "model_families": [item.value for item in self.model_families],
         }
+        if self.source_adapter_identity is not None:
+            payload["source_adapter_identity"] = dict(self.source_adapter_identity)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

@@ -236,6 +236,11 @@ def verify_exact_r1_bindings(
     targets = verified.targets
     folds = verified.folds
     build_summary = bundle.build_summary
+    availability_basis = (
+        observations.selection_policies["availability_basis"]
+        if "availability_basis" in observations.selection_policies
+        else observations.configuration["availability_basis"]
+    )
     expected = {
         "r1_bundle_id": (experiment.r1_bundle_id, bundle.bundle_id),
         "observation_dataset_id": (experiment.observation_dataset_id, observations.dataset_id),
@@ -258,7 +263,7 @@ def verify_exact_r1_bindings(
             bundle.ordered_instruments,
         ),
         "availability_basis": (
-            verified.observations.selection_policies["availability_basis"],
+            availability_basis,
             verified.configuration.availability_basis.value,
         ),
         "horizons": (experiment.horizons, config.target_horizons),
