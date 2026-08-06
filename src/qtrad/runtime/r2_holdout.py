@@ -380,8 +380,14 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         training_rows=rows,
         policy=selection.final_fitting_policy,
         training_cutoff=datetime.fromisoformat(str(payload["training_cutoff"])),
-        minimum_training_rows=int(preprocessing.get("minimum_training_rows", 2)),
-        minimum_inner_validation_rows=int(preprocessing.get("minimum_inner_validation_rows", 1)),
+        minimum_training_rows=_int_value(
+            preprocessing.get("minimum_training_rows", 2),
+            "minimum_training_rows",
+        ),
+        minimum_inner_validation_rows=_int_value(
+            preprocessing.get("minimum_inner_validation_rows", 1),
+            "minimum_inner_validation_rows",
+        ),
         purged_target_ids=tuple(
             str(item) for item in cast(list[object], payload["purged_target_ids"])
         ),
