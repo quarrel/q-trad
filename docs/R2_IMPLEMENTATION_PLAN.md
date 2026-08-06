@@ -1863,6 +1863,10 @@ Software implementation may be considered complete after R2.F1 and the correspon
 - locked holdout evaluation;
 - consumed-holdout record.
 
+The disposable G2 mechanics and replay tests may establish software completeness with
+IMPLEMENTATION_EVIDENCE_ONLY and DISPOSABLE_FIXTURE artefacts. They do not create a qualifying
+holdout, confirmatory selection, real outcome evidence or an effectiveness conclusion.
+
 #### Correctness requirements
 
 - permit only frozen configurations;

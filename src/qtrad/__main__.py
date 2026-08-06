@@ -72,6 +72,7 @@ from qtrad.application.r2_features import (
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
+from qtrad.application.r2_holdout import freeze_holdout_selection
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_historical_experiment,
     build_ibkr_r2_foundation_inputs,
@@ -103,6 +104,7 @@ from qtrad.domain.market_data import (
     DataGap,
     DataQuality,
     MarketBar,
+    MarketDataSourceClass,
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
@@ -184,6 +186,17 @@ from qtrad.runtime.qualification_gap_plan_set import (
     write_qualification_gap_plan_set,
 )
 from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
+from qtrad.runtime.r2_holdout import (
+    load_holdout_policy,
+    load_holdout_questions,
+    load_prior_selection_manifest,
+    reveal_holdout_from_files,
+    verify_holdout_evaluation,
+    verify_holdout_markers,
+    verify_holdout_preparation,
+    verify_holdout_selection,
+    write_holdout_selection,
+)
 from qtrad.runtime.r2_ibkr_verification import (
     build_ibkr_software_bundle,
     verify_ibkr_software_bundle,
@@ -336,6 +349,90 @@ def _add_ibkr_historical_closure_arguments(
     parser.add_argument("--end", type=_utc_minute_argument, required=True)
     if include_planner_image:
         parser.add_argument("--planner-image-digest", required=True)
+
+
+def _load_holdout_cli_object(path: Path) -> dict[str, JsonValue]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"holdout CLI input must be a regular file: {path}")
+    value = json.loads(path.read_bytes())
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError(f"holdout CLI input must be a JSON object: {path}")
+    return cast(dict[str, JsonValue], value)
+
+
+def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
+    from qtrad.domain.r2_evaluation import SelectionManifest
+    from qtrad.domain.r2_holdout import HoldoutScope
+    from qtrad.domain.r2_readiness import EvidenceClass
+
+    prior = cast(SelectionManifest, load_prior_selection_manifest(args.prior_selection))
+    policy = load_holdout_policy(args.final_fitting_policy)
+    questions = load_holdout_questions(args.questions)
+    metric_policy = _load_holdout_cli_object(args.metric_policy)
+    threshold_policy = _load_holdout_cli_object(args.threshold_policy)
+    runtime_identities = _load_holdout_cli_object(args.runtime_identities)
+    frozen_metadata = _load_holdout_cli_object(args.frozen_metadata)
+    manifest = freeze_holdout_selection(
+        prior_selection=prior,
+        foundation_bundle_id=args.foundation_bundle_id,
+        oof_bundle_id=args.oof_bundle_id,
+        source_class=MarketDataSourceClass(args.source_class),
+        evidence_class=EvidenceClass(args.evidence_class),
+        holdout_scope=HoldoutScope(args.holdout_scope),
+        final_fitting_policy=policy,
+        questions=questions,
+        metric_policy=metric_policy,
+        threshold_policy=threshold_policy,
+        runtime_identities=runtime_identities,
+        frozen_metadata=frozen_metadata,
+        frozen_at=args.frozen_at,
+        frozen_by=args.frozen_by,
+        control_configuration_ids=args.control_configuration_id,
+    )
+    write_holdout_selection(args.output, manifest)
+    print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+
+
+def _holdout_reveal_cli(args: argparse.Namespace) -> None:
+    from qtrad.domain.r2_holdout import HOLDOUT_ACKNOWLEDGEMENT
+
+    evaluation, consumed = reveal_holdout_from_files(
+        args.root,
+        outcomes_path=args.outcomes,
+        expected_selection_manifest_id=args.expected_selection_id,
+        expected_seal_id=args.expected_seal_id,
+        acknowledgement=args.acknowledgement,
+        opened_by=args.opened_by,
+        consumed_by=args.consumed_by,
+        opened_at=args.opened_at,
+        consumed_at=args.consumed_at,
+    )
+    if evaluation is None:
+        raise RuntimeError("holdout reveal did not produce an evaluation")
+    print(
+        json.dumps(
+            {
+                "evaluation": evaluation.evaluation_id,
+                "consumed": consumed.marker_id,
+                "acknowledgement_required": HOLDOUT_ACKNOWLEDGEMENT,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _holdout_verify_cli(args: argparse.Namespace) -> None:
+    seal = verify_holdout_preparation(args.root)
+    result: dict[str, object] = {"seal": seal.as_json()}
+    if (args.root / "selection.json").exists():
+        result["selection"] = verify_holdout_selection(args.root / "selection.json").as_json()
+    if (args.root / "opened.json").exists() and (args.root / "consumed.json").exists():
+        opened, consumed = verify_holdout_markers(args.root)
+        result["opened"] = opened.as_json()
+        result["consumed"] = consumed.as_json()
+    if (args.root / "evaluation.json").exists():
+        result["evaluation"] = verify_holdout_evaluation(args.root).as_json()
+    print(json.dumps(result, sort_keys=True))
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -714,6 +811,65 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_selection_freeze.add_argument("--oof-bundle", type=Path, required=True)
     baselines_selection_freeze.add_argument("--frozen-by", required=True)
     baselines_selection_freeze.add_argument("--output", type=Path, required=True)
+    baselines_holdout_selection = baselines_sub.add_parser(
+        "holdout-selection-freeze", help="freeze a disposable R2.G2 selection and questions"
+    )
+    baselines_holdout_selection.add_argument(
+        "--prior-selection", "--selection", dest="prior_selection", type=Path, required=True
+    )
+    baselines_holdout_selection.add_argument(
+        "--foundation-bundle-id", "--foundation-id", dest="foundation_bundle_id", required=True
+    )
+    baselines_holdout_selection.add_argument(
+        "--oof-bundle-id", "--oof-id", dest="oof_bundle_id", required=True
+    )
+    baselines_holdout_selection.add_argument(
+        "--source-class",
+        choices=tuple(item.value for item in MarketDataSourceClass),
+        default=MarketDataSourceClass.IG_NATIVE_CAPTURE.value,
+    )
+    baselines_holdout_selection.add_argument(
+        "--evidence-class",
+        choices=("IMPLEMENTATION_EVIDENCE_ONLY",),
+        default="IMPLEMENTATION_EVIDENCE_ONLY",
+    )
+    baselines_holdout_selection.add_argument(
+        "--holdout-scope", choices=("DISPOSABLE_FIXTURE",), default="DISPOSABLE_FIXTURE"
+    )
+    baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--metric-policy", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--threshold-policy", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--runtime-identities", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--frozen-metadata", type=Path, required=True)
+    baselines_holdout_selection.add_argument("--control-configuration-id", action="append")
+    baselines_holdout_selection.add_argument(
+        "--frozen-at", type=_utc_timestamp_argument, required=True
+    )
+    baselines_holdout_selection.add_argument("--frozen-by", required=True)
+    baselines_holdout_selection.add_argument("--output", type=Path, required=True)
+
+    baselines_holdout_reveal = baselines_sub.add_parser(
+        "holdout-reveal", help="irreversibly open and consume one prepared disposable holdout"
+    )
+    baselines_holdout_reveal.add_argument("--root", type=Path, required=True)
+    baselines_holdout_reveal.add_argument("--outcomes", type=Path, required=True)
+    baselines_holdout_reveal.add_argument("--expected-selection-id", required=True)
+    baselines_holdout_reveal.add_argument("--expected-seal-id", required=True)
+    baselines_holdout_reveal.add_argument("--acknowledgement", required=True)
+    baselines_holdout_reveal.add_argument("--opened-by", required=True)
+    baselines_holdout_reveal.add_argument("--consumed-by", required=True)
+    baselines_holdout_reveal.add_argument(
+        "--opened-at", type=_utc_timestamp_argument, required=True
+    )
+    baselines_holdout_reveal.add_argument(
+        "--consumed-at", type=_utc_timestamp_argument, required=True
+    )
+
+    baselines_holdout_verify = baselines_sub.add_parser(
+        "holdout-verify", help="independently replay a prepared or consumed disposable holdout"
+    )
+    baselines_holdout_verify.add_argument("--root", type=Path, required=True)
 
     baselines_software_build = baselines_sub.add_parser(
         "software-build", help="build the R2 synthetic and representative verification bundle"
@@ -1336,6 +1492,24 @@ def main(argv: Sequence[str] | None = None) -> None:
             output=args.output,
         )
         print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-selection-freeze"
+    ):
+        _holdout_selection_freeze_cli(args)
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-reveal"
+    ):
+        _holdout_reveal_cli(args)
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-verify"
+    ):
+        _holdout_verify_cli(args)
     elif (
         args.command == "research"
         and args.research_command == "baselines"
