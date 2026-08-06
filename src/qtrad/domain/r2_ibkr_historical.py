@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import json
+from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import timedelta
+from hashlib import sha256
+from typing import cast
 
+from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import InstrumentRole
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import (
@@ -19,8 +25,10 @@ IBKR_HISTORICAL_PROFILE = "IBKR_HISTORICAL_V1"
 IBKR_HISTORICAL_PROFILE_ARGUMENT = "ibkr-historical-v1"
 IBKR_HISTORICAL_SOURCE = MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
 IBKR_HISTORICAL_EVIDENCE = EvidenceClass.IMPLEMENTATION
+IBKR_HISTORICAL_ADAPTER_IDENTITY_CONTRACT = "qtrad-ibkr-historical-adapter-identity-v1"
+IBKR_HISTORICAL_ADAPTER_IDENTITY_SCHEMA_VERSION = 1
 
-IBKR_HISTORICAL_UNIVERSE: tuple[str, ...] = (
+IBKR_HISTORICAL_TARGETS: tuple[str, ...] = (
     "fx:aud-usd",
     "fx:eur-usd",
     "index:australia-200",
@@ -37,6 +45,92 @@ IBKR_HISTORICAL_GROUPS: dict[str, str] = {
     "commodity:spot-gold": "COMMODITY",
     "commodity:us-crude": "COMMODITY",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class IBKRHistoricalAdapterIdentity:
+    """Persisted source-specific identity used to adapt a verified Stage 8 bundle."""
+
+    foundation_bundle_id: str
+    application_identity: str
+    image_identity: str
+    adapter_identity_id: str
+
+    CONTRACT = IBKR_HISTORICAL_ADAPTER_IDENTITY_CONTRACT
+    SCHEMA_VERSION = IBKR_HISTORICAL_ADAPTER_IDENTITY_SCHEMA_VERSION
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        foundation_bundle_id: str,
+        application_identity: str,
+        image_identity: str,
+    ) -> IBKRHistoricalAdapterIdentity:
+        payload = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            "foundation_bundle_id": foundation_bundle_id,
+            "application_identity": application_identity,
+            "image_identity": image_identity,
+        }
+        return cls(
+            foundation_bundle_id=_required_text(foundation_bundle_id, "foundation bundle ID"),
+            application_identity=_required_text(application_identity, "application identity"),
+            image_identity=_required_text(image_identity, "image identity"),
+            adapter_identity_id=_semantic_id(payload),
+        )
+
+    @classmethod
+    def from_json(cls, value: object) -> IBKRHistoricalAdapterIdentity:
+        if not isinstance(value, Mapping):
+            raise ValueError("IBKR adapter identity must be an object")
+        raw = cast(Mapping[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "foundation_bundle_id",
+            "application_identity",
+            "image_identity",
+            "adapter_identity_id",
+        }
+        if set(raw) != expected:
+            raise ValueError("IBKR adapter identity has unknown or missing fields")
+        identity = cls.create(
+            foundation_bundle_id=_required_text(
+                raw["foundation_bundle_id"], "foundation bundle ID"
+            ),
+            application_identity=_required_text(
+                raw["application_identity"], "application identity"
+            ),
+            image_identity=_required_text(raw["image_identity"], "image identity"),
+        )
+        if raw["contract"] != cls.CONTRACT or raw["schema_version"] != cls.SCHEMA_VERSION:
+            raise ValueError("IBKR adapter identity contract is unsupported")
+        if raw["adapter_identity_id"] != identity.adapter_identity_id:
+            raise ValueError("IBKR adapter identity does not authenticate its content")
+        return identity
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "application_identity": self.application_identity,
+            "image_identity": self.image_identity,
+            "adapter_identity_id": self.adapter_identity_id,
+        }
+
+
+def _required_text(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"IBKR adapter {field} must be non-empty")
+    return value
+
+
+def _semantic_id(value: object) -> str:
+    return sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
 
 IBKR_HISTORICAL_FEATURE_SETS: tuple[FeatureSet, ...] = (
     FeatureSet("L0", (FeatureFamily.LOCAL_RETURNS, FeatureFamily.TIME_AVAILABILITY)),
@@ -82,14 +176,39 @@ def validate_ibkr_historical_profile(experiment: R2ExperimentConfig) -> None:
         raise ValueError("IBKR historical profile requires IBKR_HISTORICAL_RESEARCH")
     if experiment.evidence_class is not IBKR_HISTORICAL_EVIDENCE:
         raise ValueError("IBKR historical profile requires implementation-only evidence")
-    if experiment.ordered_instruments != IBKR_HISTORICAL_UNIVERSE:
-        raise ValueError("IBKR historical profile has the wrong ordered six-instrument universe")
-    expected_roles = {instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_UNIVERSE}
-    if dict(experiment.instrument_roles) != expected_roles:
-        raise ValueError("IBKR historical profile requires every fixed instrument to be a TARGET")
-    if experiment.target_instruments != IBKR_HISTORICAL_UNIVERSE:
-        raise ValueError("IBKR historical profile target universe is not the fixed six")
-    if experiment.confirmatory_target_instruments != IBKR_HISTORICAL_UNIVERSE:
+    if experiment.source_adapter_identity is None:
+        raise ValueError("IBKR historical profile requires a persisted adapter identity")
+    adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
+    if adapter_identity.foundation_bundle_id != experiment.r1_bundle_id:
+        raise ValueError("IBKR adapter identity differs from the R1 foundation")
+    if adapter_identity.application_identity != experiment.r1_application_version:
+        raise ValueError("IBKR adapter identity differs from the R1 application")
+    if adapter_identity.image_identity != experiment.r1_image_identity:
+        raise ValueError("IBKR adapter identity differs from the R1 image")
+
+    ordered = experiment.ordered_instruments
+    roles = {
+        instrument: InstrumentRole(experiment.instrument_roles[instrument])
+        for instrument in ordered
+    }
+    target_instruments = tuple(
+        instrument for instrument in ordered if roles[instrument] is InstrumentRole.TARGET
+    )
+    if set(target_instruments) != set(IBKR_HISTORICAL_TARGETS):
+        raise ValueError("IBKR historical profile target subset is not the fixed six")
+    if any(
+        role is not InstrumentRole.CONTEXT
+        for instrument, role in roles.items()
+        if instrument not in IBKR_HISTORICAL_TARGETS
+    ):
+        raise ValueError(
+            "IBKR historical profile requires non-target instruments to remain CONTEXT"
+        )
+    if experiment.target_instruments != target_instruments:
+        raise ValueError(
+            "IBKR historical profile target order does not retain the foundation order"
+        )
+    if set(experiment.confirmatory_target_instruments) != set(IBKR_HISTORICAL_TARGETS):
         raise ValueError("IBKR historical profile confirmatory universe is not the fixed six")
     if dict(experiment.market_groups) != IBKR_HISTORICAL_GROUPS:
         raise ValueError("IBKR historical profile group assignments differ from the fixed pairs")
@@ -141,6 +260,8 @@ def validate_ibkr_historical_profile(experiment: R2ExperimentConfig) -> None:
 
 
 __all__ = [
+    "IBKR_HISTORICAL_ADAPTER_IDENTITY_CONTRACT",
+    "IBKR_HISTORICAL_ADAPTER_IDENTITY_SCHEMA_VERSION",
     "IBKR_HISTORICAL_ALPHA_GRID",
     "IBKR_HISTORICAL_EVIDENCE",
     "IBKR_HISTORICAL_FEATURE_SETS",
@@ -153,6 +274,7 @@ __all__ = [
     "IBKR_HISTORICAL_PROFILE",
     "IBKR_HISTORICAL_PROFILE_ARGUMENT",
     "IBKR_HISTORICAL_SOURCE",
-    "IBKR_HISTORICAL_UNIVERSE",
+    "IBKR_HISTORICAL_TARGETS",
+    "IBKRHistoricalAdapterIdentity",
     "validate_ibkr_historical_profile",
 ]

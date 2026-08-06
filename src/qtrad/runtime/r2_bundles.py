@@ -471,6 +471,12 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
         raise ValueError(f"R2 bundle child semantic identity mismatch: {reference.path}")
 
 
+def verify_r2_reference(root: Path, reference: ArtifactReference) -> None:
+    """Verify one R2 child using its complete path, byte, contract and identity boundary."""
+
+    _verify_reference(root, reference)
+
+
 def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> None:
     """Reject source/evidence claims that disagree with the authenticated OOF envelope."""
     candidates = [payload]

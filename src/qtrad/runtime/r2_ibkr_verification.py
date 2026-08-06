@@ -4,23 +4,27 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from hashlib import sha256
 from pathlib import Path
 from typing import cast
 
 from qtrad.domain.market_data import MarketDataSourceClass
-from qtrad.domain.r2_bundles import ArtifactReference, R2OofBundle
+from qtrad.domain.r2_bundles import R2OofBundle
 from qtrad.domain.r2_evaluation import R2_EVALUATION_CONTRACT, R2_SELECTION_CONTRACT
 from qtrad.domain.r2_ibkr_bundles import R2IbkrHistoricalSoftwareVerificationBundle
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_PROFILE,
-    IBKR_HISTORICAL_UNIVERSE,
+    IBKR_HISTORICAL_TARGETS,
 )
 from qtrad.domain.r2_readiness import EvidenceClass
-from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes, reference_for_json
+from qtrad.runtime.r2_bundles import (
+    atomic_create,
+    canonical_bytes,
+    reference_for_json,
+    verify_r2_reference,
+)
 from qtrad.runtime.r2_verification import (
     OOF_DESCRIPTOR_CONTRACT,
-    _build_ibkr_synthetic_oof_from_representative,
+    _build_ibkr_synthetic_oof_from_fixture,
     _copy_file,
     _copy_tree,
     _load_selection,
@@ -63,10 +67,7 @@ def build_ibkr_software_bundle(
         output / "representative" / "selection.json",
     )
 
-    synthetic_oof_path = _build_ibkr_synthetic_oof_from_representative(
-        representative_oof_bundle_path,
-        output / "synthetic" / "oof",
-    )
+    synthetic_oof_path = _build_ibkr_synthetic_oof_from_fixture(output / "synthetic" / "oof")
 
     synthetic_selection_path = output / "synthetic" / "selection.json"
     selection_freeze(
@@ -132,7 +133,7 @@ def write_ibkr_software_bundle(
         bundle.synthetic_selection,
         bundle.representative_selection,
     ):
-        _verify_reference(output, reference)
+        verify_r2_reference(output, reference)
     manifest = output / "manifest.json"
     atomic_create(manifest, canonical_bytes(bundle.as_json()))
     return manifest
@@ -168,7 +169,7 @@ def verify_ibkr_software_bundle(path: Path) -> R2IbkrHistoricalSoftwareVerificat
         bundle.synthetic_selection,
         bundle.representative_selection,
     ):
-        _verify_reference(root, reference)
+        verify_r2_reference(root, reference)
 
     synthetic_path = root / bundle.synthetic_oof_bundle.path
     representative_path = root / bundle.representative_oof_bundle.path
@@ -197,14 +198,14 @@ def verify_ibkr_software_bundle(path: Path) -> R2IbkrHistoricalSoftwareVerificat
         raise ValueError("IBKR software synthetic child has the wrong feature closure")
     if representative_descriptor.get("feature_sets") != ["L0", "L1", "P0", "P1"]:
         raise ValueError("IBKR software representative child has the wrong feature closure")
-    if synthetic_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_UNIVERSE):
+    if synthetic_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
         raise ValueError("IBKR software synthetic child has the wrong target universe")
-    if representative_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_UNIVERSE):
+    if representative_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
         raise ValueError("IBKR software representative child has the wrong target universe")
-    if synthetic.foundation_bundle_id != representative.foundation_bundle_id:
-        raise ValueError("IBKR software children bind different foundation bundles")
-    if synthetic.experiment_configuration_id != representative.experiment_configuration_id:
-        raise ValueError("IBKR software children bind different experiment configurations")
+    if synthetic.foundation_bundle_id == representative.foundation_bundle_id:
+        raise ValueError("IBKR software children must bind independent foundation bundles")
+    if synthetic.experiment_configuration_id == representative.experiment_configuration_id:
+        raise ValueError("IBKR software children must bind independent experiment configurations")
     for name, descriptor in (
         ("synthetic", synthetic_descriptor),
         ("representative", representative_descriptor),
@@ -301,16 +302,8 @@ def _require_ibkr_representative(
         raise ValueError("IBKR software representative child has the wrong profile")
     if descriptor.get("feature_sets") != ["L0", "L1", "P0", "P1"]:
         raise ValueError("IBKR software representative child has the wrong feature closure")
-    if descriptor.get("target_instruments") != list(IBKR_HISTORICAL_UNIVERSE):
+    if descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
         raise ValueError("IBKR software representative child has the wrong target universe")
-
-
-def _verify_reference(root: Path, reference: ArtifactReference) -> None:
-    candidate = root / reference.path
-    if candidate.is_symlink() or not candidate.is_file():
-        raise ValueError(f"IBKR software child is unavailable: {reference.path}")
-    if sha256(candidate.read_bytes()).hexdigest() != reference.sha256:
-        raise ValueError(f"IBKR software child digest mismatch: {reference.path}")
 
 
 __all__ = [

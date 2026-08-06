@@ -1,4 +1,4 @@
-"""Focused contracts and adapter tests for the IBKR historical R2 profile."""
+"""Contracts and adapter tests for the IBKR historical R2 profile."""
 
 from __future__ import annotations
 
@@ -27,7 +27,8 @@ from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_HORIZON,
     IBKR_HISTORICAL_PROFILE,
     IBKR_HISTORICAL_SOURCE,
-    IBKR_HISTORICAL_UNIVERSE,
+    IBKR_HISTORICAL_TARGETS,
+    IBKRHistoricalAdapterIdentity,
     validate_ibkr_historical_profile,
 )
 from qtrad.domain.r2_readiness import (
@@ -43,7 +44,14 @@ from qtrad.runtime.r2_bundles import canonical_bytes
 START = datetime(2026, 1, 1, tzinfo=UTC)
 END = datetime(2026, 1, 31, tzinfo=UTC)
 HOLDOUT = (datetime(2026, 1, 25, tzinfo=UTC), END)
-SHA = "a" * 64
+FOUNDATION_ID = "a" * 64
+CONTEXT_INSTRUMENT = "index:volatility"
+ORDERED_UNIVERSE = (*IBKR_HISTORICAL_TARGETS, CONTEXT_INSTRUMENT)
+ADAPTER = IBKRHistoricalAdapterIdentity.create(
+    foundation_bundle_id=FOUNDATION_ID,
+    application_identity="qtrad-test+git:" + "1" * 40,
+    image_identity="sha256:" + "2" * 64,
+)
 
 
 def _decision(subject: str, state: FeatureEligibility) -> EligibilityDecision:
@@ -71,24 +79,25 @@ def _experiment() -> R2ExperimentConfig:
     return R2ExperimentConfig(
         name="r2-ibkr-historical-fixture",
         schema_version=2,
-        r1_bundle_id=SHA,
+        r1_bundle_id=FOUNDATION_ID,
         observation_dataset_id="b" * 64,
         foundation_configuration_id="c" * 64,
         panel_dataset_id="d" * 64,
         target_dataset_id="e" * 64,
         fold_dataset_id="f" * 64,
-        r1_application_version="qtrad-test+git:" + "1" * 40,
-        r1_image_identity="sha256:" + "2" * 64,
-        ordered_instruments=IBKR_HISTORICAL_UNIVERSE,
+        r1_application_version=ADAPTER.application_identity,
+        r1_image_identity=ADAPTER.image_identity,
+        ordered_instruments=ORDERED_UNIVERSE,
         instrument_roles={
-            instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_UNIVERSE
+            **{instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_TARGETS},
+            CONTEXT_INSTRUMENT: InstrumentRole.CONTEXT,
         },
         target_instrument_eligibility={
             instrument: _decision(instrument, FeatureEligibility.ELIGIBLE)
-            for instrument in IBKR_HISTORICAL_UNIVERSE
+            for instrument in IBKR_HISTORICAL_TARGETS
         },
-        target_instruments=IBKR_HISTORICAL_UNIVERSE,
-        confirmatory_target_instruments=IBKR_HISTORICAL_UNIVERSE,
+        target_instruments=IBKR_HISTORICAL_TARGETS,
+        confirmatory_target_instruments=IBKR_HISTORICAL_TARGETS,
         market_groups=IBKR_HISTORICAL_GROUPS,
         horizons=(IBKR_HISTORICAL_HORIZON,),
         primary_horizon=IBKR_HISTORICAL_HORIZON,
@@ -117,14 +126,16 @@ def _experiment() -> R2ExperimentConfig:
         evidence_class=EvidenceClass.IMPLEMENTATION,
         model_families=tuple(ModelFamily),
         market_data_source_class=IBKR_HISTORICAL_SOURCE,
+        source_adapter_identity=ADAPTER.as_json(),
     )
 
 
 def _foundation() -> SimpleNamespace:
     configuration = SimpleNamespace(
-        ordered_instruments=IBKR_HISTORICAL_UNIVERSE,
+        ordered_instruments=ORDERED_UNIVERSE,
         instrument_roles={
-            instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_UNIVERSE
+            **{instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_TARGETS},
+            CONTEXT_INSTRUMENT: InstrumentRole.CONTEXT,
         },
         target_horizons=(IBKR_HISTORICAL_HORIZON,),
         holdout_range=HOLDOUT,
@@ -146,7 +157,7 @@ def _foundation() -> SimpleNamespace:
         targets=SimpleNamespace(dataset_id="e" * 64),
         folds=folds,
         provider_history=SimpleNamespace(dataset_sha256="9" * 64),
-        active_intervals={instrument: ((START, END),) for instrument in IBKR_HISTORICAL_UNIVERSE},
+        active_intervals={instrument: ((START, END),) for instrument in ORDERED_UNIVERSE},
         provider_gaps=(),
     )
 
@@ -178,9 +189,68 @@ def _software_bundle() -> R2IbkrHistoricalSoftwareVerificationBundle:
     )
 
 
-def test_ibkr_profile_is_strictly_source_and_policy_bound() -> None:
+def test_ibkr_profile_preserves_stage8_universe_and_fixed_target_subset() -> None:
     experiment = _experiment()
     validate_ibkr_historical_profile(experiment)
+
+    assert experiment.ordered_instruments == ORDERED_UNIVERSE
+    assert experiment.instrument_roles[CONTEXT_INSTRUMENT] is InstrumentRole.CONTEXT
+    assert experiment.target_instruments == IBKR_HISTORICAL_TARGETS
+    assert experiment.confirmatory_target_instruments == IBKR_HISTORICAL_TARGETS
+
+
+def test_ibkr_profile_authenticates_the_persisted_adapter_identity() -> None:
+    experiment = _experiment()
+    validate_ibkr_historical_profile(experiment)
+
+    identity = dict(cast(dict[str, object], experiment.source_adapter_identity))
+    identity["application_identity"] = "tampered"
+    with pytest.raises(ValueError, match=r"authenticate|differs"):
+        validate_ibkr_historical_profile(replace(experiment, source_adapter_identity=identity))
+
+
+def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
+    foundation = cast(IBKRFoundationBuild, _foundation())
+    experiment = build_ibkr_historical_experiment(
+        foundation,
+        foundation_bundle_id=FOUNDATION_ID,
+        adapter_identity=ADAPTER,
+    )
+    assert experiment.r1_bundle_id == FOUNDATION_ID
+    assert experiment.ordered_instruments == ORDERED_UNIVERSE
+    assert experiment.instrument_roles[CONTEXT_INSTRUMENT] is InstrumentRole.CONTEXT
+    assert experiment.target_instruments == IBKR_HISTORICAL_TARGETS
+    assert experiment.source_adapter_identity == ADAPTER.as_json()
+
+    inputs = build_ibkr_r2_foundation_inputs(
+        foundation,
+        foundation_bundle_id=FOUNDATION_ID,
+        adapter_identity=ADAPTER,
+    )
+    assert inputs.bundle.bundle_id == FOUNDATION_ID
+    assert inputs.bundle.market_data_source_class is IBKR_HISTORICAL_SOURCE
+    assert inputs.bundle.ordered_instruments == ORDERED_UNIVERSE
+    assert inputs.bundle.build_summary["source_adapter_identity"] == ADAPTER.as_json()
+    assert set(
+        cast(dict[str, object], inputs.availability_evidence["source_active_intervals"])
+    ) == set(ORDERED_UNIVERSE)
+
+
+def test_ibkr_builder_rejects_non_fixed_foundation_targets() -> None:
+    foundation = cast(IBKRFoundationBuild, _foundation())
+    cast(SimpleNamespace, foundation.configuration).instrument_roles[CONTEXT_INSTRUMENT] = (
+        InstrumentRole.TARGET
+    )
+    with pytest.raises(ValueError, match=r"fixed six|CONTEXT"):
+        build_ibkr_historical_experiment(
+            foundation,
+            foundation_bundle_id=FOUNDATION_ID,
+            adapter_identity=ADAPTER,
+        )
+
+
+def test_ibkr_profile_is_strictly_source_and_policy_bound() -> None:
+    experiment = _experiment()
 
     with pytest.raises(ValueError, match="IBKR_HISTORICAL_RESEARCH"):
         validate_ibkr_historical_profile(
@@ -193,45 +263,6 @@ def test_ibkr_profile_is_strictly_source_and_policy_bound() -> None:
     with pytest.raises(ValueError, match="group assignments"):
         validate_ibkr_historical_profile(
             replace(experiment, market_groups={**IBKR_HISTORICAL_GROUPS, "fx:aud-usd": "INDEX"})
-        )
-
-
-def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
-    foundation = cast(IBKRFoundationBuild, _foundation())
-    experiment = build_ibkr_historical_experiment(
-        foundation,
-        foundation_bundle_id=SHA,
-        application_identity="qtrad-test-application",
-        image_identity="sha256:" + "2" * 64,
-    )
-    assert experiment.r1_bundle_id == SHA
-    assert experiment.ordered_instruments == IBKR_HISTORICAL_UNIVERSE
-    assert experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
-
-    inputs = build_ibkr_r2_foundation_inputs(
-        foundation,
-        foundation_bundle_id=SHA,
-        application_identity="qtrad-test-application",
-        image_identity="sha256:" + "2" * 64,
-    )
-    assert inputs.bundle.bundle_id == SHA
-    assert inputs.bundle.market_data_source_class is IBKR_HISTORICAL_SOURCE
-    assert set(
-        cast(dict[str, object], inputs.availability_evidence["source_active_intervals"])
-    ) == set(IBKR_HISTORICAL_UNIVERSE)
-
-
-def test_ibkr_builder_rejects_non_fixed_foundation() -> None:
-    foundation = cast(IBKRFoundationBuild, _foundation())
-    cast(SimpleNamespace, foundation.configuration).ordered_instruments = IBKR_HISTORICAL_UNIVERSE[
-        :-1
-    ]
-    with pytest.raises(ValueError, match="fixed six"):
-        build_ibkr_historical_experiment(
-            foundation,
-            foundation_bundle_id=SHA,
-            application_identity="application",
-            image_identity="image",
         )
 
 

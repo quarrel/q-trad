@@ -25,7 +25,8 @@ from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_MINIMUM_OUTER_VALIDATION_ROWS,
     IBKR_HISTORICAL_MINIMUM_TRAINING_ROWS,
     IBKR_HISTORICAL_SOURCE,
-    IBKR_HISTORICAL_UNIVERSE,
+    IBKR_HISTORICAL_TARGETS,
+    IBKRHistoricalAdapterIdentity,
     validate_ibkr_historical_profile,
 )
 from qtrad.domain.r2_readiness import (
@@ -44,20 +45,26 @@ def build_ibkr_historical_experiment(
     foundation: IBKRFoundationBuild,
     *,
     foundation_bundle_id: str,
-    application_identity: str,
-    image_identity: str,
+    adapter_identity: IBKRHistoricalAdapterIdentity,
 ) -> R2ExperimentConfig:
-    """Build the profile from a verified Stage 8 foundation and runtime identities."""
+    """Build the profile from a verified Stage 8 foundation and persisted adapter identity."""
 
     configuration = foundation.configuration
-    if configuration.ordered_instruments != IBKR_HISTORICAL_UNIVERSE:
-        raise ValueError(
-            "verified IBKR foundation does not contain exactly the fixed six instruments"
-        )
-    if dict(configuration.instrument_roles) != {
-        instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_UNIVERSE
-    }:
-        raise ValueError("verified IBKR foundation roles differ from the fixed six target profile")
+    if adapter_identity.foundation_bundle_id != foundation_bundle_id:
+        raise ValueError("IBKR adapter identity does not bind the verified foundation")
+    target_instruments = tuple(
+        instrument
+        for instrument in configuration.ordered_instruments
+        if InstrumentRole(configuration.instrument_roles[instrument]) is InstrumentRole.TARGET
+    )
+    if set(target_instruments) != set(IBKR_HISTORICAL_TARGETS):
+        raise ValueError("verified IBKR foundation target subset is not the fixed six")
+    if any(
+        InstrumentRole(configuration.instrument_roles[instrument]) is not InstrumentRole.CONTEXT
+        for instrument in configuration.ordered_instruments
+        if instrument not in IBKR_HISTORICAL_TARGETS
+    ):
+        raise ValueError("verified IBKR foundation non-target instruments must remain CONTEXT")
     if IBKR_HISTORICAL_HORIZON not in configuration.target_horizons:
         raise ValueError("verified IBKR foundation does not configure the 15-minute horizon")
     total_range = configuration.range_end - configuration.range_start
@@ -71,8 +78,8 @@ def build_ibkr_historical_experiment(
         raise ValueError("verified IBKR foundation must contain exactly three chronological folds")
     require_utc(configuration.holdout_range[0], "IBKR historical holdout start")
     require_utc(configuration.holdout_range[1], "IBKR historical holdout end")
-    if not foundation_bundle_id or not application_identity or not image_identity:
-        raise ValueError("verified foundation and runtime identities are required")
+    if not foundation_bundle_id:
+        raise ValueError("verified foundation identity is required")
 
     evidence_start = configuration.range_start - timedelta(days=1)
     evidence_end = configuration.holdout_range[0] - timedelta(microseconds=1)
@@ -89,15 +96,17 @@ def build_ibkr_historical_experiment(
     feature_eligibility = {
         family: eligibility(
             family.value,
-            FeatureEligibility.NOT_ELIGIBLE
-            if family in {FeatureFamily.SPREAD, FeatureFamily.QUOTE_IMBALANCE}
-            else FeatureEligibility.ELIGIBLE,
+            (
+                FeatureEligibility.NOT_ELIGIBLE
+                if family in {FeatureFamily.SPREAD, FeatureFamily.QUOTE_IMBALANCE}
+                else FeatureEligibility.ELIGIBLE
+            ),
         )
         for family in FeatureFamily
     }
     target_eligibility = {
         instrument: eligibility(instrument, FeatureEligibility.ELIGIBLE)
-        for instrument in IBKR_HISTORICAL_UNIVERSE
+        for instrument in target_instruments
     }
     experiment = R2ExperimentConfig(
         name="r2-ibkr-historical-v1",
@@ -108,16 +117,15 @@ def build_ibkr_historical_experiment(
         panel_dataset_id=foundation.panel.dataset_id,
         target_dataset_id=foundation.targets.dataset_id,
         fold_dataset_id=foundation.folds.dataset_id,
-        r1_application_version=application_identity,
-        r1_image_identity=image_identity,
-        ordered_instruments=IBKR_HISTORICAL_UNIVERSE,
-        instrument_roles={
-            instrument: InstrumentRole.TARGET for instrument in IBKR_HISTORICAL_UNIVERSE
-        },
+        r1_application_version=adapter_identity.application_identity,
+        r1_image_identity=adapter_identity.image_identity,
+        ordered_instruments=configuration.ordered_instruments,
+        instrument_roles=dict(configuration.instrument_roles),
         target_instrument_eligibility=target_eligibility,
-        target_instruments=IBKR_HISTORICAL_UNIVERSE,
-        confirmatory_target_instruments=IBKR_HISTORICAL_UNIVERSE,
+        target_instruments=target_instruments,
+        confirmatory_target_instruments=target_instruments,
         market_groups=IBKR_HISTORICAL_GROUPS,
+        source_adapter_identity=adapter_identity.as_json(),
         horizons=(IBKR_HISTORICAL_HORIZON,),
         primary_horizon=IBKR_HISTORICAL_HORIZON,
         feature_sets=IBKR_HISTORICAL_FEATURE_SETS,
@@ -205,16 +213,14 @@ def build_ibkr_r2_foundation_inputs(
     foundation: IBKRFoundationBuild,
     *,
     foundation_bundle_id: str,
-    application_identity: str,
-    image_identity: str,
+    adapter_identity: IBKRHistoricalAdapterIdentity,
 ) -> R2FoundationInputs:
     """Adapt verified Stage 8 children to the existing R2 feature/OOF pipeline."""
 
     build_ibkr_historical_experiment(
         foundation,
         foundation_bundle_id=foundation_bundle_id,
-        application_identity=application_identity,
-        image_identity=image_identity,
+        adapter_identity=adapter_identity,
     )
     evidence = ibkr_availability_evidence(foundation)
     availability_id = _availability_dataset_id(foundation.observations.dataset_id, evidence)
@@ -230,8 +236,9 @@ def build_ibkr_r2_foundation_inputs(
         range_start=configuration.range_start,
         range_end=configuration.range_end,
         build_summary={
-            "application_version": application_identity,
-            "image_identity": image_identity,
+            "application_version": adapter_identity.application_identity,
+            "image_identity": adapter_identity.image_identity,
+            "source_adapter_identity": adapter_identity.as_json(),
         },
         configuration=child(configuration.configuration_id),
         observations=child(foundation.observations.dataset_id),

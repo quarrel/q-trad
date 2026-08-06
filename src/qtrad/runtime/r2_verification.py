@@ -86,7 +86,10 @@ from qtrad.domain.r2_features import (
     feature_set_id,
 )
 from qtrad.domain.r2_ibkr_historical import (
+    IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
+    IBKR_HISTORICAL_TARGETS,
+    IBKRHistoricalAdapterIdentity,
     validate_ibkr_historical_profile,
 )
 from qtrad.domain.r2_models import PreprocessingFeatureKind, derive_r2_preprocessing_schema
@@ -612,7 +615,7 @@ def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Pa
             if not isinstance(stage8_payload, dict):
                 raise ValueError("IBKR foundation replay payload is malformed")
             provider_path = _declared_replay_path(
-                stage8_payload.get("provider_history_manifest"),
+                payload.get("provider_history_manifest"),
                 base=current.parent,
                 source_root=source_root,
                 field="provider_history_manifest",
@@ -621,17 +624,19 @@ def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Pa
             children = stage8_payload.get("children")
             if not isinstance(children, dict):
                 raise ValueError("IBKR foundation replay children are malformed")
-            for child in children.values():
-                if not isinstance(child, dict):
-                    raise ValueError("IBKR foundation replay child is malformed")
-                child_path = _declared_replay_path(
-                    child.get("manifest_path"),
-                    base=current.parent,
-                    source_root=source_root,
-                    field="manifest_path",
-                )
-                add_tree(child_path.parent)
-                pending.append((child_path, "ibkr-foundation-child"))
+            for raw_parts in children.values():
+                if not isinstance(raw_parts, list) or not raw_parts:
+                    raise ValueError("IBKR foundation replay child parts are malformed")
+                for child in raw_parts:
+                    if not isinstance(child, dict):
+                        raise ValueError("IBKR foundation replay child part is malformed")
+                    child_path = _declared_replay_path(
+                        child.get("manifest_path"),
+                        base=current.parent,
+                        source_root=source_root,
+                        field="manifest_path",
+                    )
+                    pending.append((child_path, "foundation-child"))
         elif role == "foundation":
             children = payload.get("children")
             if isinstance(children, dict):
@@ -946,7 +951,16 @@ def _model_forecasts(
     )
 
 
-def _synthetic_pipeline_inputs() -> tuple[
+def _synthetic_pipeline_inputs(
+    *,
+    target_names: tuple[str, ...] = ("index:synthetic-a", "index:synthetic-b"),
+    context_name: str = "index:volatility",
+    fixture_name: str = "r2-synthetic",
+    market_groups: Mapping[str, str] | None = None,
+    application_identity: str = "synthetic",
+    image_identity: str = "qtrad@sha256:" + "1" * 64,
+    adapter_identity: IBKRHistoricalAdapterIdentity | None = None,
+) -> tuple[
     R1FoundationBindings,
     R2ExperimentConfig,
     dict[str, R2FeatureDataset],
@@ -955,13 +969,11 @@ def _synthetic_pipeline_inputs() -> tuple[
     start = datetime(2026, 1, 1, tzinfo=UTC)
     horizon = timedelta(minutes=15)
     holdout = (start + timedelta(hours=6), start + timedelta(hours=24))
-    target_names = ("index:synthetic-a", "index:synthetic-b")
-    context_name = "index:volatility"
     ordered = (*target_names, context_name)
-    r1_id = sha256(b"r2-synthetic-r1").hexdigest()
-    observation_id = sha256(b"r2-synthetic-observations").hexdigest()
-    foundation_id = sha256(b"r2-synthetic-foundation-config").hexdigest()
-    panel_id = sha256(b"r2-synthetic-panel").hexdigest()
+    r1_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
+    observation_id = sha256(f"{fixture_name}-observations".encode()).hexdigest()
+    foundation_id = sha256(f"{fixture_name}-foundation-config".encode()).hexdigest()
+    panel_id = sha256(f"{fixture_name}-panel".encode()).hexdigest()
 
     def eligibility(subject: str, state: FeatureEligibility) -> EligibilityDecision:
         return EligibilityDecision.create(
@@ -974,6 +986,10 @@ def _synthetic_pipeline_inputs() -> tuple[
 
     roles = {name: InstrumentRole.TARGET for name in target_names}
     roles[context_name] = InstrumentRole.CONTEXT
+    resolved_market_groups = market_groups or {
+        target_names[0]: "synthetic-0",
+        target_names[1]: "synthetic-1",
+    }
     feature_eligibility = {
         family: eligibility(
             family.value,
@@ -989,7 +1005,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         FeatureFamily.LOCAL_VOLATILITY_RANGE,
     )
     experiment = R2ExperimentConfig(
-        name="r2-software-verification-synthetic",
+        name=fixture_name,
         schema_version=2,
         r1_bundle_id=r1_id,
         observation_dataset_id=observation_id,
@@ -997,8 +1013,8 @@ def _synthetic_pipeline_inputs() -> tuple[
         panel_dataset_id=panel_id,
         target_dataset_id="a" * 64,
         fold_dataset_id="b" * 64,
-        r1_application_version="synthetic",
-        r1_image_identity="qtrad@sha256:" + "1" * 64,
+        r1_application_version=application_identity,
+        r1_image_identity=image_identity,
         ordered_instruments=ordered,
         instrument_roles=roles,
         target_instrument_eligibility={
@@ -1006,7 +1022,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         },
         target_instruments=target_names,
         confirmatory_target_instruments=target_names,
-        market_groups={target_names[0]: "synthetic-0", target_names[1]: "synthetic-1"},
+        market_groups=resolved_market_groups,
         horizons=(horizon,),
         primary_horizon=horizon,
         feature_sets=(
@@ -1045,6 +1061,7 @@ def _synthetic_pipeline_inputs() -> tuple[
         numeric_replay_absolute_tolerance=1e-12,
         evidence_class=EvidenceClass.IMPLEMENTATION,
         market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        source_adapter_identity=adapter_identity.as_json() if adapter_identity else None,
         model_families=tuple(ModelFamily),
     )
     targets_rows: list[TargetRow] = []
@@ -1187,8 +1204,8 @@ def _synthetic_pipeline_inputs() -> tuple[
                 targets=SimpleNamespace(dataset_id=targets.dataset_id),
                 folds=SimpleNamespace(dataset_id=folds.dataset_id),
                 build_summary={
-                    "application_version": "synthetic",
-                    "image_identity": "qtrad@sha256:" + "1" * 64,
+                    "application_version": application_identity,
+                    "image_identity": image_identity,
                 },
             ),
             configuration=SimpleNamespace(
@@ -1258,72 +1275,44 @@ def _materialise_synthetic_feature_manifests(
     return paths
 
 
-def _build_ibkr_synthetic_oof_from_representative(representative_path: Path, output: Path) -> Path:
-    """Rebuild an IBKR synthetic child from the representative file closure."""
-    bundle = verify_r2_oof_bundle(representative_path)
-    descriptor = _oof_child_payload(representative_path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    if descriptor.get("representative_profile") != IBKR_HISTORICAL_PROFILE:
-        raise ValueError("IBKR synthetic replay requires the fixed representative profile")
-    replay_inputs = descriptor.get("replay_inputs")
-    if not isinstance(replay_inputs, dict):
-        raise ValueError("IBKR representative descriptor replay inputs are malformed")
-    children = replay_inputs.get("children")
-    if not isinstance(children, dict):
-        raise ValueError("IBKR representative descriptor replay children are malformed")
-    expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
-    children = cast(dict[str, object], children)
-    if set(children) != expected_names:
-        raise ValueError("IBKR representative replay children are incomplete")
-    source_root = representative_path.parent.resolve()
-    paths: dict[str, Path] = {}
-    for name in sorted(expected_names):
-        child = children[name]
-        if not isinstance(child, dict):
-            raise ValueError("IBKR representative replay child identity is malformed")
-        child = cast(dict[str, object], child)
-        if not isinstance(child.get("path"), str) or not isinstance(child.get("sha256"), str):
-            raise ValueError("IBKR representative replay child identity is malformed")
-        paths[name] = _validated_replay_file(
-            source_root / cast(str, child["path"]),
-            source_root,
+def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
+    """Build an independent deterministic IBKR synthetic OOF child."""
+    fixture_name = "r2-ibkr-historical-synthetic"
+    application_identity = "ibkr-historical-synthetic"
+    image_identity = "qtrad-ibkr-synthetic@sha256:" + "2" * 64
+    foundation_bundle_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
+    adapter_identity = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id=foundation_bundle_id,
+        application_identity=application_identity,
+        image_identity=image_identity,
+    )
+    verified, experiment, datasets = _synthetic_pipeline_inputs(
+        target_names=IBKR_HISTORICAL_TARGETS,
+        context_name="index:synthetic-volatility",
+        fixture_name=fixture_name,
+        market_groups=IBKR_HISTORICAL_GROUPS,
+        application_identity=application_identity,
+        image_identity=image_identity,
+        adapter_identity=adapter_identity,
+    )
+    validate_ibkr_historical_profile(experiment)
+    created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    clock = cast(Clock, SimpleNamespace(now=lambda: created_at))
+    with TemporaryDirectory() as temporary:
+        research_root = Path(temporary)
+        feature_paths = _materialise_synthetic_feature_manifests(
+            research_root, experiment, datasets
         )
-        if sha256(paths[name].read_bytes()).hexdigest() != cast(str, child["sha256"]):
-            raise ValueError(f"IBKR representative replay child changed: {name}")
-    experiment = load_r2_experiment(paths["experiment"])
-    stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-        paths["foundation"]
-    )
-    if foundation_bundle_id != experiment.r1_bundle_id:
-        raise ValueError("IBKR representative replay foundation differs from the experiment")
-    expected_experiment = build_ibkr_historical_experiment(
-        stage8_foundation,
-        foundation_bundle_id=foundation_bundle_id,
-        application_identity=experiment.r1_application_version,
-        image_identity=experiment.r1_image_identity,
-    )
-    if expected_experiment.as_json() != experiment.as_json():
-        raise ValueError("IBKR representative replay experiment is not authenticated")
-    verified = build_ibkr_r2_foundation_inputs(
-        stage8_foundation,
-        foundation_bundle_id=foundation_bundle_id,
-        application_identity=experiment.r1_application_version,
-        image_identity=experiment.r1_image_identity,
-    )
-    clock = cast(
-        Clock,
-        SimpleNamespace(now=lambda: datetime(2026, 1, 1, tzinfo=UTC)),
-    )
-    return build_oof_bundle(
-        verified=verified,
-        experiment=experiment,
-        feature_manifest_paths={name: paths[name] for name in _REQUIRED_FEATURE_SETS},
-        research_root=source_root,
-        clock=clock,
-        output=output,
-        run_kind="SYNTHETIC",
-        representative_profile=IBKR_HISTORICAL_PROFILE,
-        replay_inputs=paths,
-    )
+        return build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_paths,
+            research_root=research_root,
+            clock=clock,
+            output=output,
+            run_kind="SYNTHETIC",
+            representative_profile=IBKR_HISTORICAL_PROFILE,
+        )
 
 
 def _build_synthetic_oof(output: Path) -> Path:
@@ -2110,19 +2099,23 @@ async def _replay_representative_oof_async(path: Path) -> None:
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
             raise ValueError("IBKR replay foundation differs from the experiment")
+        adapter_payload = experiment.source_adapter_identity
+        if not isinstance(adapter_payload, Mapping):
+            raise ValueError("IBKR replay experiment has no persisted adapter identity")
+        adapter_identity = IBKRHistoricalAdapterIdentity.from_json(adapter_payload)
+        if adapter_identity.foundation_bundle_id != foundation_bundle_id:
+            raise ValueError("IBKR adapter identity differs from the experiment foundation")
         expected_experiment = build_ibkr_historical_experiment(
             stage8_foundation,
             foundation_bundle_id=foundation_bundle_id,
-            application_identity=experiment.r1_application_version,
-            image_identity=experiment.r1_image_identity,
+            adapter_identity=adapter_identity,
         )
         if expected_experiment.as_json() != experiment.as_json():
-            raise ValueError("IBKR replay experiment is not authenticated")
+            raise ValueError("IBKR experiment is not authenticated")
         verified = build_ibkr_r2_foundation_inputs(
             stage8_foundation,
             foundation_bundle_id=foundation_bundle_id,
-            application_identity=experiment.r1_application_version,
-            image_identity=experiment.r1_image_identity,
+            adapter_identity=adapter_identity,
         )
         _validate_representative_ibkr_historical_v1(verified, experiment)
     elif representative_profile is not None:
@@ -2168,7 +2161,7 @@ def _replay_synthetic_oof(path: Path) -> None:
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
         if descriptor.get("representative_profile") == IBKR_HISTORICAL_PROFILE:
-            _build_ibkr_synthetic_oof_from_representative(path, expected_root)
+            _build_ibkr_synthetic_oof_from_fixture(expected_root)
         else:
             _build_synthetic_oof(expected_root)
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):

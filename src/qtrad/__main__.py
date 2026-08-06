@@ -111,6 +111,7 @@ from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_PROFILE,
     IBKR_HISTORICAL_PROFILE_ARGUMENT,
     IBKR_HISTORICAL_SOURCE,
+    IBKRHistoricalAdapterIdentity,
 )
 from qtrad.domain.r2_readiness import R2ExperimentConfig
 from qtrad.ports.capture_feed import CaptureFeedIdentity
@@ -1456,11 +1457,15 @@ def _build_ibkr_historical_experiment_cli(
         raise ValueError("experiment-build supports only the fixed IBKR historical profile")
     foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(foundation_path)
     identities = runtime_identities()
-    experiment = build_ibkr_historical_experiment(
-        foundation,
+    adapter_identity = IBKRHistoricalAdapterIdentity.create(
         foundation_bundle_id=foundation_bundle_id,
         application_identity=identities["application_identity"],
         image_identity=identities["image_identity"],
+    )
+    experiment = build_ibkr_historical_experiment(
+        foundation,
+        foundation_bundle_id=foundation_bundle_id,
+        adapter_identity=adapter_identity,
     )
     write_r2_experiment(output_path, experiment)
     print(json.dumps({"experiment": str(output_path)}, sort_keys=True))
@@ -1523,26 +1528,24 @@ async def _load_r2_foundation_inputs(
     stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
         foundation_bundle_path
     )
-    identities = runtime_identities()
     if experiment.r1_bundle_id != foundation_bundle_id:
         raise ValueError("IBKR experiment does not bind the verified Stage 8 foundation")
-    if experiment.r1_application_version != identities["application_identity"]:
-        raise ValueError("IBKR experiment application identity differs from the running source")
-    if experiment.r1_image_identity != identities["image_identity"]:
-        raise ValueError("IBKR experiment image identity differs from the running image")
+    if experiment.source_adapter_identity is None:
+        raise ValueError("IBKR experiment is missing its persisted IBKR adapter identity")
+    adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
+    if adapter_identity.foundation_bundle_id != foundation_bundle_id:
+        raise ValueError("IBKR adapter identity does not bind the verified Stage 8 foundation")
     expected = build_ibkr_historical_experiment(
         stage8_foundation,
         foundation_bundle_id=foundation_bundle_id,
-        application_identity=identities["application_identity"],
-        image_identity=identities["image_identity"],
+        adapter_identity=adapter_identity,
     )
     if expected.as_json() != experiment.as_json():
         raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
     return build_ibkr_r2_foundation_inputs(
         stage8_foundation,
         foundation_bundle_id=foundation_bundle_id,
-        application_identity=identities["application_identity"],
-        image_identity=identities["image_identity"],
+        adapter_identity=adapter_identity,
     )
 
 

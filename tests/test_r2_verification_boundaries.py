@@ -28,6 +28,7 @@ from qtrad.runtime.r2_verification import (
     runtime_identities,
     verify_oof_bundle,
 )
+from tests.test_ibkr_foundation import _foundation_bundle_fixture
 
 
 def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -198,3 +199,46 @@ def test_replay_staging_rejects_ancestor_symlinks(tmp_path: Path) -> None:
             research_root=research,
             paths={"experiment": experiment, **paths},
         )
+
+
+def test_stage8_foundation_replay_closure_is_file_complete(tmp_path: Path) -> None:
+    research_root = tmp_path / "research"
+    research_root.mkdir()
+    foundation = _foundation_bundle_fixture(research_root)
+    experiment = tmp_path / "experiment.json"
+    experiment.write_text("{}", encoding="utf-8")
+    features: dict[str, Path] = {}
+    for name in ("L0", "L1", "P0", "P1"):
+        feature = research_root / f"{name}.json"
+        feature.write_text("{}", encoding="utf-8")
+        features[name] = feature
+
+    output = tmp_path / "staged"
+    replay_inputs = _stage_replay_inputs(
+        output=output,
+        research_root=research_root,
+        paths={"foundation": foundation, "experiment": experiment, **features},
+    )
+    _verify_replay_inputs(output, {"replay_inputs": replay_inputs}, set())
+
+    children = cast(dict[str, object], replay_inputs["children"])
+    foundation_child = cast(dict[str, object], children["foundation"])
+    files = cast(list[object], foundation_child["files"])
+    staged_paths = {cast(dict[str, object], item)["path"] for item in files}
+    document = cast(dict[str, object], json.loads(foundation.read_bytes()))
+    payload = cast(dict[str, object], document["payload"])
+    provider_path = cast(str, document["provider_history_manifest"])
+    expected_source_paths = {provider_path}
+    stage8_children = cast(dict[str, object], payload["children"])
+    for raw_parts in stage8_children.values():
+        for raw_part in cast(list[object], raw_parts):
+            part = cast(dict[str, object], raw_part)
+            expected_source_paths.update(
+                {cast(str, part["manifest_path"]), cast(str, part["file"])}
+            )
+
+    for source_path in expected_source_paths:
+        staged_path = f"replay-inputs/research/{source_path}"
+        assert staged_path in staged_paths
+        assert (output / staged_path).is_file()
+    assert any(cast(str, path).endswith(".parquet") for path in staged_paths)
