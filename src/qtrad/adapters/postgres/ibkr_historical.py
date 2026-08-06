@@ -311,10 +311,15 @@ class PostgresIbkrHistoricalExecutionStore(IbkrHistoricalExecutionStore):
                 (
                     "callback",
                     """
-                        SELECT COUNT(*)
-                        FROM ops.ibkr_historical_callbacks AS c
-                        JOIN ops.ibkr_historical_attempts AS a ON a.attempt_id = c.attempt_id
-                        WHERE a.plan_sha256 = :plan_sha256
+                        SELECT COALESCE(MAX(callback_count), 0)
+                        FROM (
+                            SELECT a.attempt_id, COUNT(*) AS callback_count
+                            FROM ops.ibkr_historical_callbacks AS c
+                            JOIN ops.ibkr_historical_attempts AS a
+                              ON a.attempt_id = c.attempt_id
+                            WHERE a.plan_sha256 = :plan_sha256
+                            GROUP BY a.attempt_id
+                        ) AS attempt_callbacks
                         """,
                     MAX_IBKR_RESULT_CALLBACKS,
                 ),
