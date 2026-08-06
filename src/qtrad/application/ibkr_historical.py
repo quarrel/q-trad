@@ -825,16 +825,17 @@ def _installed_library_versions() -> dict[str, str]:
 def _read_build_commit(repository: Path) -> str | None:
     """Read the immutable commit metadata embedded in a published image."""
 
-    path = repository / ".qtrad-commit"
-    try:
-        commit = path.read_text(encoding="ascii").strip()
-    except FileNotFoundError:
-        return None
-    except OSError as error:
-        raise RuntimeError("cannot read embedded q-trad commit identity") from error
-    if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
-        raise RuntimeError("embedded q-trad commit identity is not a lowercase SHA-1")
-    return commit
+    for path in (repository / ".qtrad-commit", repository.parent / ".qtrad-commit"):
+        try:
+            commit = path.read_text(encoding="ascii").strip()
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise RuntimeError("cannot read embedded q-trad commit identity") from error
+        if len(commit) != 40 or any(character not in "0123456789abcdef" for character in commit):
+            raise RuntimeError("embedded q-trad commit identity is not a lowercase SHA-1")
+        return commit
+    return None
 
 
 def _derive_qtrad_commit(repository: Path, *, require_clean: bool) -> str:
