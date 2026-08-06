@@ -18,6 +18,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
     R2ReadinessReport,
 )
+from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 
 _MAX_BYTES = 4 * 1024 * 1024
 _KEYS = frozenset(
@@ -160,6 +161,11 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
             ModelFamily(_text(item)) for item in _sequence(payload["model_families"])
         ),
     )
+
+
+def write_r2_experiment(path: Path, experiment: R2ExperimentConfig) -> None:
+    """Persist one canonical, create-only experiment configuration."""
+    atomic_create(path, canonical_bytes(experiment.as_json()))
 
 
 def write_r2_readiness(path: Path, report: R2ReadinessReport) -> None:

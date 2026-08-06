@@ -309,6 +309,20 @@ def load_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
     return verify_ibkr_foundation(path)
 
 
+def load_ibkr_foundation_with_identity(path: Path) -> tuple[IBKRFoundationBuild, str]:
+    """Load a verified foundation and return its authenticated build identity."""
+
+    build = verify_ibkr_foundation(path)
+    manifest_path = _regular_file(path, "IBKR foundation manifest")
+    document = _mapping(
+        _parse_json(
+            _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest"),
+            "IBKR foundation manifest",
+        )
+    )
+    return build, _text(document["build_sha256"], "IBKR foundation build hash")
+
+
 def _child_lineage(
     build: IBKRFoundationBuild,
     source_evidence: ProviderHistorySourceEvidence,

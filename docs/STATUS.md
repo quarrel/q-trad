@@ -1,7 +1,7 @@
 # Current status
 
 **Updated:** 2026-08-06
-**Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
+**Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** IBKR Stages 1–8 software contracts, verifiers and CLI paths are implemented on `main`; capability review, host deployment and the Stage 5 canary are complete, and the registered full acquisition is executing
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -124,9 +124,10 @@ remains offline/replay.
   external state; trusted absence verification is explicitly PENDING_R2_H_INTEGRATION. Rehashed semantic
   mutation and child mutation tests pass. The source/evidence-bound forecast-manifest, OOF-bundle and
   software-verification contracts now have create-only persistence, orphan/symlink/path-escape rejection,
-  independent child authentication and CLI round-trip coverage. The synthetic software path is verified
-  locally, but no fresh representative capture-v4 snapshot is available in this workspace; therefore
-  representative integration readiness is not asserted and R2.F1/R2.H remain pending. No confirmatory
+  independent child authentication and CLI round-trip coverage. The generic synthetic software path is
+  verified locally. The source-specific IBKR path now adds the fixed six-instrument profile, verified Stage 8
+  file-only adaptation, profile-bound OOF replay and an implementation-only v2 R2.H envelope verifier; no
+  fresh representative execution or qualifying bundle exists, so R2.F1/R2.H remain pending. No confirmatory
   model-selection or effectiveness claim is made.
 - ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
   market-data-only IBKR paper source and its historical evidence boundaries. Stage 1 provides typed
@@ -188,9 +189,9 @@ remains offline/replay.
 1. Complete the registered Stage 6 acquisition and independently build and verify its result closure.
 2. Build and independently verify the Stage 7 provider-history observations, then produce the Stage 8
    source-specific foundation/readiness disposition.
-3. Complete representative source-specific integration and the corresponding R2.H software-verification
-   bundle for the implemented R2.F1 evaluation/selection core while the IBKR data track proceeds and
-   native IG history accumulates.
+3. Use the source-specific file-only IBKR path to build and independently verify the implementation-only
+   R2.H bundle once an independently verified Stage 8 foundation and representative feature children exist;
+   keep confirmatory and locked-holdout evidence pending.
 4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.

@@ -1,7 +1,7 @@
 # q-trad multi-asset paper-research plan
 
 **Status:** ACTIVE
-**Current milestone:** R2 — local and pooled baselines (R2.F1 core and software-verification machinery implemented; fresh representative integration pending)
+**Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** independent IBKR paper-market-data qualification and historical acquisition
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
@@ -40,8 +40,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   product-role qualification support it.
 - R2.A through R2.E are software-complete implementation evidence. The R2.F1 core and its source/evidence-bound
   replay machinery are implemented, including create-only forecast, OOF, selection and software-verification
-  contracts plus CLI operations and mutation-tested independent authentication. A fresh representative
-  source-specific integration and its R2.H software bundle remain before the R2.F1 exit is complete; R2.F2
+  contracts plus CLI operations and mutation-tested independent authentication. The source-specific IBKR
+  representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
+  replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
   and the locked holdout remain gated on a frozen qualifying foundation.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
@@ -63,7 +64,7 @@ work and records only the milestone sequence needed to reach the next trustworth
 | ------------------------------------------- | ----------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | R0 — alignment, coverage and data readiness | COMPLETE    | active docs agree; China/Korea review is resolved; native/aligned coverage, historical-source decisions and an independent restore verification are recorded                                                                            |
 | R1 — causal multi-asset research foundation | COMPLETE    | deterministic aligned panels, multi-horizon targets, chronological folds, out-of-fold artefacts and independently verified bundle infrastructure pass causality/replay checks                                                           |
-| R2 — local and pooled baselines             | IN PROGRESS | R2.A–R2.E software is complete and the R2.F1 core is implemented; representative integration and the R2.H software-verification bundle remain before a qualifying frozen foundation drives confirmatory OOF and locked-holdout evidence |
+| R2 — local and pooled baselines             | IN PROGRESS | R2.A–R2.E software, the R2.F1 core and source-specific IBKR representative/R2.H verification paths are implemented; qualifying representative execution, confirmatory OOF and locked-holdout evidence remain pending |
 | R3 — cost and portfolio baseline            | NOT STARTED | costs, shrinkage risk, horizon positions, global netting and constrained targets reconcile deterministically                                                                                                                            |
 | R4 — residual structural graph experiment   | NOT STARTED | local, pooled, fixed, learned and shuffled graph controls measure incremental graph value                                                                                                                                               |
 | R5 — integrated offline MVP                 | NOT STARTED | chronological forecast, economic and portfolio gates report the full ablation set                                                                                                                                                       |
@@ -144,7 +145,9 @@ chronology ambiguity before those contracts are fixed.
   `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`.
 - The software path through Stage 8 is implemented on `main`: immutable planning, execution and
   result closure; provider-history observations with declared availability; and the source-specific
-  foundation/readiness verifier. It remains dependent on independently verified lower-stage evidence.
+  foundation/readiness verifier. The R2-IBKR-HISTORICAL file-only experiment, profile-bound OOF and
+  implementation-only R2.H envelope paths are implemented separately and remain dependent on
+  independently verified lower-stage evidence.
 - The account-gated exact-contract capability review, matched read-only host deployment and Stage 5
   canary are complete. The canary passed all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases,
   and the 300-second request profile is frozen.
