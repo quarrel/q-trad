@@ -371,3 +371,39 @@ def test_completion_payload_normalizes_timezone_forms(
     values: tuple[str, str], expected: dict[str, str]
 ) -> None:
     assert historical._completion_payload(values) == expected
+
+
+@pytest.mark.asyncio
+async def test_historical_adapter_drops_stale_callbacks_between_serial_requests(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(historical, "_contract", lambda query: SimpleNamespace())
+
+    def factory(callbacks: Queue[capability._Callback]) -> _HistoricalClient:
+        return _HistoricalClient(callbacks)
+
+    adapter = historical.OfficialIbkrHistoricalAdapter(
+        capability.IbkrGatewayEndpoint("127.0.0.1", 4002, 71),
+        request_timeout_seconds=0.2,
+        historical_timeout_seconds=0.2,
+        client_factory=factory,
+        sleep=lambda _: _immediate_sleep(),
+    )
+    connection = await adapter.connect()
+    await adapter.request_historical(
+        _request(IbkrHistoricalRequestKind.MIDPOINT_BARS),
+        request_id=10,
+        connection_session_id=connection.connection_session_id,
+        connection_generation=connection.connection_generation,
+        callback=lambda item: _immediate_sleep(),
+    )
+    adapter._deferred_callbacks.append(capability._Callback("historical_data", 999, ()))
+    await adapter.request_historical(
+        _request(IbkrHistoricalRequestKind.SCHEDULE),
+        request_id=11,
+        connection_session_id=connection.connection_session_id,
+        connection_generation=connection.connection_generation,
+        callback=lambda item: _immediate_sleep(),
+    )
+    assert not adapter._deferred_callbacks
+    await adapter.disconnect()
