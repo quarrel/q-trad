@@ -36,6 +36,13 @@ artifacts are the required evidence boundaries.
    QTRAD_IBKR_GATEWAY_MANIFEST/QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256 to the private installation
    identity. Host verification requires these values to match the image labels. The wrapper mounts the
    checkpoint directory and runs the image as UID 10001, so a container restart preserves evidence.
+   The reference environment uses
+   `/srv/qtrad/postgres/qtrad-ibkr-checkpoints`; do not put acquisition checkpoints on the 25G root
+   filesystem. When explicit historical CLI commands verify the private archive inputs, keep those files
+   root-owned and grant UID 10001 only traverse/read ACLs on the named directory/files; never make the
+   licensed archives world-readable. For example:
+   `sudo setfacl -m u:10001:x /srv/qtrad/ibkr/artifacts`
+   and `sudo setfacl -m u:10001:r-- /srv/qtrad/ibkr/artifacts/{ibgateway-10.49.1d-standalone-linux-arm.sh,twsapi_macunix.1049.02.zip,IBCLinux-3.24.1.zip}`.
 6. Authenticate Docker to OCIR before running `deploy.sh`:
    `docker login syd.ocir.io`; the registry token must remain outside Git and shell history. The
    publishing principal needs repository-scoped `manage repos` permission for the IBKR repository;
@@ -49,6 +56,24 @@ artifacts are the required evidence boundaries.
    inspection. It does not enable services while continuous ingest is absent. Run the explicit bounded
    command:
    `qtrad instruments review --provider ibkr --environment paper --execute-account-probe`.
+
+## Running explicit historical CLI commands
+
+The published IBKR image has an `uv` entrypoint. To invoke a q-trad subcommand, override that
+entrypoint and retain the frozen dependency flags:
+
+```bash
+docker run --rm --network host --user 10001:10001 --entrypoint uv \
+  --env-file /etc/qtrad/ibkr.env \
+  --volume /srv/qtrad/ibkr:/data \
+  --volume /srv/qtrad/postgres/qtrad-ibkr-checkpoints:/srv/qtrad/postgres/qtrad-ibkr-checkpoints \
+  "$QTRAD_IBKR_IMAGE" run --frozen --no-dev --no-sync \
+  python -m qtrad historical ibkr <command> ...
+```
+
+Appending `historical` directly to the image without `--entrypoint uv` asks `uv` to execute
+the wrong program and fails before q-trad starts. Use the explicit bounded CLI only; the continuous
+ingest wrapper remains deliberately gated.
 
 ## OCIR repository setup
 
