@@ -34,6 +34,8 @@ from qtrad.domain.ibkr_historical import (
     utc_text,
 )
 from qtrad.domain.ibkr_results import (
+    MAX_IBKR_RESULT_BYTES,
+    MAX_IBKR_RESULT_REQUEST_BYTES,
     IbkrHistoricalAggregateResult,
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
@@ -635,6 +637,36 @@ def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path)
     )
     with pytest.raises(FileExistsError):
         publish_ibkr_historical_result(output, artifact)
+
+
+def test_result_publisher_allows_realistic_large_request_child(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result = artifact.request_results[0]
+    padding = "x" * (9 * 1024 * 1024)
+    padded_callbacks = tuple(
+        replace(
+            callback,
+            payload={**callback.payload, "padding": padding},
+        )
+        if callback.callback_id == result.callbacks[0].callback_id
+        else callback
+        for callback in result.callbacks
+    )
+    padded_result = _rehash_result(result, callbacks=padded_callbacks)
+    request_results = tuple(
+        padded_result if item.request_sha256 == result.request_sha256 else item
+        for item in artifact.request_results
+    )
+    aggregate = _rehash_aggregate(artifact.aggregate, request_results)
+    large_artifact = replace(artifact, request_results=request_results, aggregate=aggregate)
+    child_bytes = canonical_json_bytes(padded_result.as_json_value())
+    assert len(child_bytes) > MAX_IBKR_RESULT_BYTES
+    assert len(child_bytes) <= MAX_IBKR_RESULT_REQUEST_BYTES
+
+    manifest = publish_ibkr_historical_result(tmp_path / "large-child", large_artifact)
+    verified = verify_ibkr_historical_result(manifest)
+    assert verified.aggregate.aggregate_sha256 == aggregate.aggregate_sha256
 
 
 def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
