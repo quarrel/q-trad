@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from queue import Queue
 from types import SimpleNamespace
@@ -190,6 +191,17 @@ class _HistoricalClient:
 
     def cancelHistoricalData(self, request_id: int) -> None:
         self.cancelled.append(request_id)
+
+
+def test_historical_deferred_callback_budget_matches_api_queue() -> None:
+    adapter = object.__new__(historical.OfficialIbkrHistoricalAdapter)
+    adapter._deferred_callbacks = deque()
+    item = capability._Callback("historical_data", 1, ())
+
+    for _ in range(2_001):
+        adapter._defer_callback(item)
+
+    assert len(adapter._deferred_callbacks) == 2_001
 
 
 @pytest.mark.asyncio
