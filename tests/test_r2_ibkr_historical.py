@@ -200,6 +200,7 @@ def test_ibkr_profile_preserves_stage8_universe_and_fixed_target_subset() -> Non
     assert experiment.target_instruments == ORDERED_TARGETS
     assert experiment.confirmatory_target_instruments == IBKR_HISTORICAL_TARGETS
 
+
 def test_ibkr_software_representative_accepts_stage8_target_order() -> None:
     _require_ibkr_representative(
         {

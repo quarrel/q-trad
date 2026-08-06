@@ -234,6 +234,8 @@ def runtime_identities() -> dict[str, str]:
         "numpy_identity": numpy.__version__,
         "sklearn_identity": sklearn.__version__,
     }
+
+
 def require_ibkr_adapter_runtime_identity(
     adapter_identity: IBKRHistoricalAdapterIdentity,
 ) -> None:

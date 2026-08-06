@@ -35,6 +35,7 @@ from qtrad.runtime.r2_verification import (
     verify_oof_bundle,
 )
 
+
 def _has_ibkr_target_universe(value: object) -> bool:
     return (
         isinstance(value, list)

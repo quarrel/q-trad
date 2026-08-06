@@ -38,6 +38,7 @@ def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.Monke
     identities = runtime_identities()
     assert "image:sha256:" + "0" * 64 in identities["application_identity"]
 
+
 def test_persisted_ibkr_adapter_identity_matches_current_runtime(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -56,7 +57,9 @@ def test_persisted_ibkr_adapter_identity_matches_current_runtime(
     for field in ("application_identity", "image_identity"):
         drifted = dict(runtime)
         drifted[field] = "runtime-drift"
-        monkeypatch.setattr(verification, "runtime_identities", lambda: drifted)
+        monkeypatch.setattr(
+            verification, "runtime_identities", lambda identities=drifted: identities
+        )
         with pytest.raises(ValueError, match=field):
             require_ibkr_adapter_runtime_identity(adapter)
 
