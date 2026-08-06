@@ -537,3 +537,39 @@ def test_callback_queue_accepts_historical_reader_burst() -> None:
 
     assert callbacks.qsize() == 2_001
     assert callbacks.overflowed.is_set() is False
+
+
+def test_official_client_accepts_legacy_error_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FakeWrapper:
+        pass
+
+    class FakeClient:
+        def __init__(self, wrapper: object) -> None:
+            self.wrapper = wrapper
+
+    modules = {
+        "ibapi.client": SimpleNamespace(EClient=FakeClient),
+        "ibapi.wrapper": SimpleNamespace(EWrapper=FakeWrapper),
+    }
+    monkeypatch.setattr(
+        capability,
+        "_verify_official_api_distribution",
+        lambda identity: None,
+    )
+    monkeypatch.setattr(
+        capability.importlib,
+        "import_module",
+        lambda name: modules[name],
+    )
+    callbacks: Queue[capability._Callback] = Queue()
+    client = capability._official_client(
+        callbacks,
+        capability.IbkrApiIdentity("0" * 64),
+    )
+
+    client.error(7, 1_770_000_000, 162, "legacy error")
+    callback = callbacks.get_nowait()
+    assert callback.kind == "error"
+    assert callback.request_id == 7

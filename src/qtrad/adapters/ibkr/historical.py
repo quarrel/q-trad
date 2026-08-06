@@ -378,26 +378,19 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
         finally:
             self._end_correlated_callbacks(callbacks)
 
-    async def _begin_correlated_callbacks(self) -> list[_Callback]:
-        pending = list(self._deferred_callbacks)
-        self._deferred_callbacks.clear()
-        return pending
-
-    def _end_correlated_callbacks(self, pending: list[_Callback]) -> None:
-        for item in pending:
-            self._defer_callback(item)
-
-    def _defer_callback(self, item: _Callback) -> None:
-        if len(self._deferred_callbacks) >= IBKR_CALLBACK_QUEUE_MAXSIZE:
-            raise IbkrHistoricalRetryableError("IBKR historical callback buffer exhausted")
-        self._deferred_callbacks.append(item)
-
     async def _next_correlated_callback(
         self,
         request_id: int,
         deadline: float,
         pending: list[_Callback],
     ) -> _Callback:
+        """Consume callbacks for one serialized request and drop stale responses.
+
+        Historical requests are serialized by the request lock. A callback for
+        another request therefore belongs to a completed or cancelled provider
+        request and cannot be reused safely; dropping it prevents a timed-out
+        burst from starving the next request.
+        """
         while True:
             if pending:
                 item = pending.pop(0)
@@ -412,9 +405,21 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
                     raise IbkrHistoricalDisconnected(str(error)) from error
                 continue
             if item.request_id != request_id:
-                self._defer_callback(item)
                 continue
             return item
+
+    async def _begin_correlated_callbacks(self) -> list[_Callback]:
+        pending = list(self._deferred_callbacks)
+        self._deferred_callbacks.clear()
+        return pending
+
+    def _end_correlated_callbacks(self, pending: list[_Callback]) -> None:
+        pending.clear()
+
+    def _defer_callback(self, item: _Callback) -> None:
+        if len(self._deferred_callbacks) >= IBKR_CALLBACK_QUEUE_MAXSIZE:
+            raise IbkrHistoricalRetryableError("IBKR historical callback buffer exhausted")
+        self._deferred_callbacks.append(item)
 
     async def _collect_raw(
         self,

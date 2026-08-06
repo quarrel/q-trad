@@ -935,7 +935,7 @@ def _official_client(
             errorTime: int,
             errorCode: int,
             errorString: str,
-            advancedOrderRejectJson: str,
+            advancedOrderRejectJson: str | None = None,
         ) -> None:
             classification = _error_classification(errorCode)
             _emit(
