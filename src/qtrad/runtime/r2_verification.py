@@ -234,6 +234,14 @@ def runtime_identities() -> dict[str, str]:
         "numpy_identity": numpy.__version__,
         "sklearn_identity": sklearn.__version__,
     }
+def require_ibkr_adapter_runtime_identity(
+    adapter_identity: IBKRHistoricalAdapterIdentity,
+) -> None:
+    """Require the persisted adapter identities to match the running environment."""
+    identities = runtime_identities()
+    for field in ("application_identity", "image_identity"):
+        if getattr(adapter_identity, field) != identities[field]:
+            raise ValueError(f"IBKR adapter {field} differs from the running environment")
 
 
 def parse_feature_manifest_arguments(arguments: list[str]) -> dict[str, Path]:
@@ -1278,8 +1286,9 @@ def _materialise_synthetic_feature_manifests(
 def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
     """Build an independent deterministic IBKR synthetic OOF child."""
     fixture_name = "r2-ibkr-historical-synthetic"
-    application_identity = "ibkr-historical-synthetic"
-    image_identity = "qtrad-ibkr-synthetic@sha256:" + "2" * 64
+    identities = runtime_identities()
+    application_identity = identities["application_identity"]
+    image_identity = identities["image_identity"]
     foundation_bundle_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
     adapter_identity = IBKRHistoricalAdapterIdentity.create(
         foundation_bundle_id=foundation_bundle_id,
@@ -1287,7 +1296,7 @@ def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
         image_identity=image_identity,
     )
     verified, experiment, datasets = _synthetic_pipeline_inputs(
-        target_names=IBKR_HISTORICAL_TARGETS,
+        target_names=tuple(sorted(IBKR_HISTORICAL_TARGETS)),
         context_name="index:synthetic-volatility",
         fixture_name=fixture_name,
         market_groups=IBKR_HISTORICAL_GROUPS,
@@ -2112,6 +2121,7 @@ async def _replay_representative_oof_async(path: Path) -> None:
         )
         if expected_experiment.as_json() != experiment.as_json():
             raise ValueError("IBKR experiment is not authenticated")
+        require_ibkr_adapter_runtime_identity(adapter_identity)
         verified = build_ibkr_r2_foundation_inputs(
             stage8_foundation,
             foundation_bundle_id=foundation_bundle_id,

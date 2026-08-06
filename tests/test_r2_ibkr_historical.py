@@ -40,13 +40,15 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.runtime.r2_bundles import canonical_bytes
+from qtrad.runtime.r2_ibkr_verification import _require_ibkr_representative
 
 START = datetime(2026, 1, 1, tzinfo=UTC)
 END = datetime(2026, 1, 31, tzinfo=UTC)
 HOLDOUT = (datetime(2026, 1, 25, tzinfo=UTC), END)
 FOUNDATION_ID = "a" * 64
 CONTEXT_INSTRUMENT = "index:volatility"
-ORDERED_UNIVERSE = (*IBKR_HISTORICAL_TARGETS, CONTEXT_INSTRUMENT)
+ORDERED_TARGETS = tuple(sorted(IBKR_HISTORICAL_TARGETS))
+ORDERED_UNIVERSE = (*ORDERED_TARGETS, CONTEXT_INSTRUMENT)
 ADAPTER = IBKRHistoricalAdapterIdentity.create(
     foundation_bundle_id=FOUNDATION_ID,
     application_identity="qtrad-test+git:" + "1" * 40,
@@ -96,7 +98,7 @@ def _experiment() -> R2ExperimentConfig:
             instrument: _decision(instrument, FeatureEligibility.ELIGIBLE)
             for instrument in IBKR_HISTORICAL_TARGETS
         },
-        target_instruments=IBKR_HISTORICAL_TARGETS,
+        target_instruments=ORDERED_TARGETS,
         confirmatory_target_instruments=IBKR_HISTORICAL_TARGETS,
         market_groups=IBKR_HISTORICAL_GROUPS,
         horizons=(IBKR_HISTORICAL_HORIZON,),
@@ -195,8 +197,19 @@ def test_ibkr_profile_preserves_stage8_universe_and_fixed_target_subset() -> Non
 
     assert experiment.ordered_instruments == ORDERED_UNIVERSE
     assert experiment.instrument_roles[CONTEXT_INSTRUMENT] is InstrumentRole.CONTEXT
-    assert experiment.target_instruments == IBKR_HISTORICAL_TARGETS
+    assert experiment.target_instruments == ORDERED_TARGETS
     assert experiment.confirmatory_target_instruments == IBKR_HISTORICAL_TARGETS
+
+def test_ibkr_software_representative_accepts_stage8_target_order() -> None:
+    _require_ibkr_representative(
+        {
+            "run_kind": "REPRESENTATIVE",
+            "representative_profile": IBKR_HISTORICAL_PROFILE,
+            "feature_sets": ["L0", "L1", "P0", "P1"],
+            "target_instruments": list(ORDERED_TARGETS),
+        },
+        IBKR_HISTORICAL_SOURCE,
+    )
 
 
 def test_ibkr_profile_authenticates_the_persisted_adapter_identity() -> None:
@@ -219,7 +232,7 @@ def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
     assert experiment.r1_bundle_id == FOUNDATION_ID
     assert experiment.ordered_instruments == ORDERED_UNIVERSE
     assert experiment.instrument_roles[CONTEXT_INSTRUMENT] is InstrumentRole.CONTEXT
-    assert experiment.target_instruments == IBKR_HISTORICAL_TARGETS
+    assert experiment.target_instruments == ORDERED_TARGETS
     assert experiment.source_adapter_identity == ADAPTER.as_json()
 
     inputs = build_ibkr_r2_foundation_inputs(

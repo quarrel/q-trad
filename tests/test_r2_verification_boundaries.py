@@ -14,6 +14,7 @@ import pytest
 import qtrad.runtime.r2_verification as verification
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
+from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import _verify_replay_inputs
 from qtrad.runtime.r2_verification import (
@@ -25,6 +26,7 @@ from qtrad.runtime.r2_verification import (
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
     _validate_representative_fold_layout,
+    require_ibkr_adapter_runtime_identity,
     runtime_identities,
     verify_oof_bundle,
 )
@@ -35,6 +37,28 @@ def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.Monke
     monkeypatch.setenv("QTRAD_IMAGE_DIGEST", "sha256:" + "f" * 64)
     identities = runtime_identities()
     assert "image:sha256:" + "0" * 64 in identities["application_identity"]
+
+def test_persisted_ibkr_adapter_identity_matches_current_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = {
+        "application_identity": "qtrad-test-application",
+        "image_identity": "sha256:" + "1" * 64,
+    }
+    adapter = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id="a" * 64,
+        application_identity=runtime["application_identity"],
+        image_identity=runtime["image_identity"],
+    )
+    monkeypatch.setattr(verification, "runtime_identities", lambda: runtime)
+    require_ibkr_adapter_runtime_identity(adapter)
+
+    for field in ("application_identity", "image_identity"):
+        drifted = dict(runtime)
+        drifted[field] = "runtime-drift"
+        monkeypatch.setattr(verification, "runtime_identities", lambda: drifted)
+        with pytest.raises(ValueError, match=field):
+            require_ibkr_adapter_runtime_identity(adapter)
 
 
 def test_image_identity_manifest_digest_is_authenticated(

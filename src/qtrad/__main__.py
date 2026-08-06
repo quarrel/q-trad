@@ -197,6 +197,7 @@ from qtrad.runtime.r2_verification import (
     build_oof_bundle,
     build_software_bundle,
     load_experiment_and_feature_paths,
+    require_ibkr_adapter_runtime_identity,
     runtime_identities,
     selection_freeze,
     verify_oof_bundle,
@@ -1542,6 +1543,7 @@ async def _load_r2_foundation_inputs(
     )
     if expected.as_json() != experiment.as_json():
         raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
+    require_ibkr_adapter_runtime_identity(adapter_identity)
     return build_ibkr_r2_foundation_inputs(
         stage8_foundation,
         foundation_bundle_id=foundation_bundle_id,

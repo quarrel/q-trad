@@ -174,6 +174,11 @@ def test_provider_history_foundation_round_trips_and_replays_children(
     assert build.observations.rows[0].source_external_id
     assert len(build.panel.rows) > 0
     assert len(build.targets.rows) > 0
+    assert tuple(
+        instrument_id
+        for instrument_id in build.configuration.ordered_instruments
+        if build.configuration.instrument_roles[instrument_id] is InstrumentRole.TARGET
+    ) == tuple(sorted(str(instrument) for instrument in IBKR_CONFIRMATORY_INSTRUMENTS))
 
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(

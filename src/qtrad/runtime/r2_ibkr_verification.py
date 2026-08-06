@@ -35,6 +35,14 @@ from qtrad.runtime.r2_verification import (
     verify_oof_bundle,
 )
 
+def _has_ibkr_target_universe(value: object) -> bool:
+    return (
+        isinstance(value, list)
+        and len(value) == len(IBKR_HISTORICAL_TARGETS)
+        and all(isinstance(item, str) for item in value)
+        and set(value) == set(IBKR_HISTORICAL_TARGETS)
+    )
+
 
 def build_ibkr_software_bundle(
     *,
@@ -198,9 +206,9 @@ def verify_ibkr_software_bundle(path: Path) -> R2IbkrHistoricalSoftwareVerificat
         raise ValueError("IBKR software synthetic child has the wrong feature closure")
     if representative_descriptor.get("feature_sets") != ["L0", "L1", "P0", "P1"]:
         raise ValueError("IBKR software representative child has the wrong feature closure")
-    if synthetic_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
+    if not _has_ibkr_target_universe(synthetic_descriptor.get("target_instruments")):
         raise ValueError("IBKR software synthetic child has the wrong target universe")
-    if representative_descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
+    if not _has_ibkr_target_universe(representative_descriptor.get("target_instruments")):
         raise ValueError("IBKR software representative child has the wrong target universe")
     if synthetic.foundation_bundle_id == representative.foundation_bundle_id:
         raise ValueError("IBKR software children must bind independent foundation bundles")
@@ -302,7 +310,7 @@ def _require_ibkr_representative(
         raise ValueError("IBKR software representative child has the wrong profile")
     if descriptor.get("feature_sets") != ["L0", "L1", "P0", "P1"]:
         raise ValueError("IBKR software representative child has the wrong feature closure")
-    if descriptor.get("target_instruments") != list(IBKR_HISTORICAL_TARGETS):
+    if not _has_ibkr_target_universe(descriptor.get("target_instruments")):
         raise ValueError("IBKR software representative child has the wrong target universe")
 
 
