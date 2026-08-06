@@ -1878,6 +1878,7 @@ class R2HoldoutOutcomeEvidence:
     def as_json(self) -> dict[str, JsonValue]:
         return {**self.semantic_json(), "outcome_evidence_id": self.outcome_evidence_id}
 
+
 @dataclass(frozen=True, slots=True)
 class R2HoldoutEvaluation:
     selection_manifest_id: str
