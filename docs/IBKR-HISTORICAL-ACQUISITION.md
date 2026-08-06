@@ -624,7 +624,7 @@ Normalize historical bars as follows:
 * provider request transport identities (connection_session_id, connection_generation, provider_request_id) are unique across all attempts;
 * callbacks from incomplete or superseded generations remain evidence but cannot become accepted rows.
 
-For boundary callbacks returned by adjacent requests, the planned half-open interval determines ownership. Identical duplicates outside the owning interval remain raw evidence and are not merged into accepted observations.
+For provider midpoint callbacks returned outside an owning adjacent request, the planned half-open interval determines ownership: those callbacks remain raw boundary evidence and are not accepted rows. Completion ranges may span a request boundary, but must overlap the request and contain every retained in-range bar.
 
 Treat `SCHEDULE` as **provider-declared session evidence**, not proof that quotes must exist throughout every session.
 
