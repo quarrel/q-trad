@@ -856,7 +856,7 @@ def test_file_verifier_rejects_rehashed_out_of_window_bar(tmp_path: Path) -> Non
         evidence.cases[0].case.interval_end.timestamp()
     )
     _rewrite_rehashed_document(output, document)
-    with pytest.raises(ValueError, match="outside request interval"):
+    with pytest.raises(ValueError, match="not replayable"):
         verify_ibkr_historical_canary_evidence(output)
 
 
@@ -1126,3 +1126,61 @@ def test_file_verifier_accepts_schedule_extending_past_request(
 
     loaded = verify_ibkr_historical_canary_evidence(output)
     assert loaded.cases[0].requests[1].status == "SUCCESS"
+
+
+def test_canary_accepts_provider_backfill_but_counts_only_in_window() -> None:
+    case = _cases()[0]
+    request = ibkr_canary._request_for_case(
+        case, ibkr_canary.IbkrHistoricalRequestKind.MIDPOINT_BARS
+    )
+    session_id = UUID("11111111-1111-4111-8111-111111111111")
+    completion_payload: dict[str, JsonValue] = {
+        "start": utc_text(case.interval_start),
+        "end": utc_text(case.interval_end),
+    }
+
+    def callback(
+        kind: IbkrHistoricalCallbackKind,
+        payload: dict[str, JsonValue],
+    ) -> IbkrHistoricalCallback:
+        return IbkrHistoricalCallback(
+            connection_session_id=session_id,
+            provider_request_id=123,
+            connection_generation=1,
+            kind=kind,
+            received_at=_START,
+            payload=payload,
+        )
+
+    def bar(timestamp: datetime) -> dict[str, JsonValue]:
+        return {
+            "date": int(timestamp.timestamp()),
+            "open": "1.0",
+            "high": "1.1",
+            "low": "0.9",
+            "close": "1.05",
+        }
+
+    outside = callback(
+        IbkrHistoricalCallbackKind.MIDPOINT_BAR,
+        bar(case.interval_start - timedelta(hours=1)),
+    )
+    inside = callback(
+        IbkrHistoricalCallbackKind.MIDPOINT_BAR,
+        bar(case.interval_start),
+    )
+    completion = callback(IbkrHistoricalCallbackKind.COMPLETION, completion_payload)
+
+    result = ibkr_canary._verify_request_callbacks(request, (outside, inside, completion))
+    assert result.status == "SUCCESS"
+    assert result.bar_count == 1
+    assert result.callback_count == 3
+    assert result.detail == (
+        "provider returned 1 midpoint bars outside request interval; "
+        "they were retained as boundary evidence"
+    )
+
+    no_data = ibkr_canary._verify_request_callbacks(request, (outside, completion))
+    assert no_data.status == "NO_DATA"
+    assert no_data.stop_reason == "NO_DATA_RETURNED"
+    assert no_data.bar_count == 0

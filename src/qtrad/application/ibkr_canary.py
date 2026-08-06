@@ -959,13 +959,27 @@ def _verify_request_callbacks(
         bars = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR]
         try:
             for item in bars:
-                _verify_bar(item.payload, request)
-            _verify_completion_payload(request, completion.payload, bars=bars)
+                _verify_bar(item.payload, request, enforce_interval=False)
+            retained_bars = [
+                item for item in bars if _is_bar_in_request_interval(item.payload, request)
+            ]
+            _verify_completion_payload(request, completion.payload, bars=retained_bars)
         except ValueError as error:
             return finish("INVALID", str(error), "DETERMINISTIC_RESULT_VERIFY_FAILURE")
-        if not bars:
-            return finish("NO_DATA", "one-day canary returned no midpoint bars", "NO_DATA_RETURNED")
-        return finish("SUCCESS", None, None, bar_count=len(bars))
+        outside_count = len(bars) - len(retained_bars)
+        detail = (
+            f"provider returned {outside_count} midpoint bars outside request interval; "
+            "they were retained as boundary evidence"
+            if outside_count
+            else None
+        )
+        if not retained_bars:
+            return finish(
+                "NO_DATA",
+                detail or "canary returned no midpoint bars in request interval",
+                "NO_DATA_RETURNED",
+            )
+        return finish("SUCCESS", detail, None, bar_count=len(retained_bars))
     if any(item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR for item in callbacks):
         return finish(
             "INVALID",
@@ -1029,6 +1043,8 @@ def _callback_identity_error(
 def _verify_bar(
     payload: Mapping[str, JsonValue],
     request: IbkrHistoricalRequest | None = None,
+    *,
+    enforce_interval: bool = True,
 ) -> None:
     required = ("date", "open", "high", "low", "close")
     if any(key not in payload for key in required):
@@ -1036,11 +1052,12 @@ def _verify_bar(
     timestamp = payload["date"]
     if isinstance(timestamp, bool) or not isinstance(timestamp, int):
         raise ValueError("canary midpoint bar date is not an epoch")
-    if request is not None:
-        interval_start = int(request.interval_start.timestamp())
-        interval_end = int(request.interval_end.timestamp())
-        if not interval_start <= timestamp < interval_end:
-            raise ValueError("canary midpoint bar date is outside request interval")
+    if (
+        request is not None
+        and enforce_interval
+        and not _is_bar_in_request_interval(payload, request)
+    ):
+        raise ValueError("canary midpoint bar date is outside request interval")
     values: dict[str, Decimal] = {}
     for key in ("open", "high", "low", "close"):
         value = payload[key]
@@ -1060,6 +1077,20 @@ def _verify_bar(
         or values["close"] > values["high"]
     ):
         raise ValueError("canary midpoint bar contains invalid OHLC")
+
+
+def _is_bar_in_request_interval(
+    payload: Mapping[str, JsonValue],
+    request: IbkrHistoricalRequest,
+) -> bool:
+    timestamp = payload.get("date")
+    return (
+        not isinstance(timestamp, bool)
+        and isinstance(timestamp, int)
+        and int(request.interval_start.timestamp())
+        <= timestamp
+        < int(request.interval_end.timestamp())
+    )
 
 
 def _verify_schedule(
@@ -1122,8 +1153,8 @@ def _verify_completion_payload(
         end = _canary_datetime(payload.get("end"), "canary completion end")
         if end <= start:
             raise ValueError("canary completion range is invalid")
-        if start < request.interval_start or end > request.interval_end:
-            raise ValueError("canary completion range is outside request interval")
+        if end <= request.interval_start or start >= request.interval_end:
+            raise ValueError("canary completion range does not overlap request interval")
         if bars:
             bar_timestamps = [cast(int, item.payload["date"]) for item in bars]
             first_bar_timestamp = min(bar_timestamps)
@@ -1212,7 +1243,11 @@ def _exception_result(
             }
         )
     )
-    bar_count = sum(item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR for item in callbacks)
+    bar_count = sum(
+        item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR
+        and _is_bar_in_request_interval(item.payload, request)
+        for item in callbacks
+    )
     schedule_session_count = 0
     schedules = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.SCHEDULE]
     if len(schedules) == 1:
@@ -1707,8 +1742,9 @@ def _replay_callback_counts(
             raise ValueError("IBKR canary midpoint callback set contains a schedule")
         bars = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR]
         for item in bars:
-            _verify_bar(item.payload, request)
-        return len(bars), 0, tuple(sorted(error_codes))
+            _verify_bar(item.payload, request, enforce_interval=False)
+        retained_bars = sum(_is_bar_in_request_interval(item.payload, request) for item in bars)
+        return retained_bars, 0, tuple(sorted(error_codes))
     if any(item.kind is IbkrHistoricalCallbackKind.MIDPOINT_BAR for item in callbacks):
         raise ValueError("IBKR canary schedule callback set contains a midpoint bar")
     schedules = [item for item in callbacks if item.kind is IbkrHistoricalCallbackKind.SCHEDULE]
