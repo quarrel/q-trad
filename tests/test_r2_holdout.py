@@ -316,6 +316,7 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         },
         evaluator=evaluator,
     )
+    assert evaluation is not None
     output = tmp_path / "bundle"
     bundle = write_built_holdout_bundle(tmp_path, output)
     assert bundle.bundle_id == verify_holdout_bundle(output).bundle_id

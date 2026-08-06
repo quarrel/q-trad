@@ -12,7 +12,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime
 from math import isfinite, sqrt
-from typing import cast
+from typing import Any, cast
 
 import numpy as np
 
@@ -43,7 +43,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
 )
-from qtrad.domain.r2_models import PreprocessingFit
+from qtrad.domain.r2_models import PreprocessingFit, R2PreprocessingSchema
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.domain.time import require_utc
 
@@ -158,8 +158,6 @@ def freeze_holdout_selection(
             "oof_bundle_id": oof_bundle_id,
             "final_fitting_policy_id": final_fitting_policy.policy_id,
         }
-    elif foundation_bundle_id is None or oof_bundle_id is None:
-        raise ValueError("selection freeze requires verified OOF lineage or explicit legacy IDs")
 
     evaluated = _selection_values(prior_selection)
     selected = tuple(sorted(prior_selection.selected_configuration_ids))
@@ -297,14 +295,18 @@ def _failed_final_fit(
     candidate_scores: Sequence[R2AlphaCandidateScore] | None = None,
     preprocessing: Mapping[str, JsonValue] | None = None,
 ) -> R2FinalFit:
-    scores = tuple(candidate_scores) if candidate_scores is not None else tuple(
-        R2AlphaCandidateScore(
-            alpha=alpha,
-            validation_loss=None,
-            disposition=disposition,
-            failure_reason=reason,
+    scores = (
+        tuple(candidate_scores)
+        if candidate_scores is not None
+        else tuple(
+            R2AlphaCandidateScore(
+                alpha=alpha,
+                validation_loss=None,
+                disposition=disposition,
+                failure_reason=reason,
+            )
+            for alpha in policy.alpha_grid
         )
-        for alpha in policy.alpha_grid
     )
     fit_preprocessing = dict(
         preprocessing or {"feature_count": feature_count, "policy_id": policy.policy_id}
@@ -357,12 +359,8 @@ def _final_disposition(value: object) -> FinalFitDisposition:
         return FinalFitDisposition.NUMERICAL_FAILURE
 
 
-def _holdout_schema(feature_count: int):
-    from qtrad.domain.r2_models import (
-        PreprocessingFeatureDefinition,
-        PreprocessingFeatureKind,
-        R2PreprocessingSchema,
-    )
+def _holdout_schema(feature_count: int) -> R2PreprocessingSchema:
+    from qtrad.domain.r2_models import PreprocessingFeatureDefinition, PreprocessingFeatureKind
 
     return R2PreprocessingSchema.create(
         tuple(
@@ -394,9 +392,9 @@ def _policy_value(policy: R2FinalFittingPolicy, key: str, aliases: Mapping[str, 
 def _preprocessing_payload(
     *,
     policy: R2FinalFittingPolicy,
-    schema: object,
-    inner: object | None,
-    outer: object | None,
+    schema: R2PreprocessingSchema,
+    inner: PreprocessingFit | None,
+    outer: PreprocessingFit | None,
     rows: Sequence[FinalTrainingRow],
     identity_order: Sequence[str],
     solver: str,
@@ -407,9 +405,9 @@ def _preprocessing_payload(
 ) -> dict[str, JsonValue]:
     return {
         "policy_id": policy.policy_id,
-        "schema": cast(object, schema).as_json(),
-        "inner": cast(object, inner).as_json() if inner is not None else None,
-        "outer": cast(object, outer).as_json() if outer is not None else None,
+        "schema": schema.as_json(),
+        "inner": inner.as_json() if inner is not None else None,
+        "outer": outer.as_json() if outer is not None else None,
         "training_rows": [_training_row_json(row) for row in rows],
         "instrument_identity_order": list(identity_order),
         "ridge_solver": solver,
@@ -465,22 +463,38 @@ def fit_final_ridge(
     inner_validation_ids: tuple[str, ...] = ()
     if forced_disposition is not None:
         return _failed_final_fit(
-            selection=selection, configuration_id=configuration_id, model_family=model_family,
-            feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-            training_cutoff=cutoff, training_ids=training_ids, purged_ids=purged,
-            inner_fit_ids=inner_fit_ids, inner_validation_ids=inner_validation_ids,
-            policy=policy, disposition=forced_disposition,
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=training_ids,
+            purged_ids=purged,
+            inner_fit_ids=inner_fit_ids,
+            inner_validation_ids=inner_validation_ids,
+            policy=policy,
+            disposition=forced_disposition,
             reason=forced_failure_reason or "forced fixture failure disposition",
-            feature_count=feature_count, training_evidence=ordered,
+            feature_count=feature_count,
+            training_evidence=ordered,
         )
     if not ordered:
         return _failed_final_fit(
-            selection=selection, configuration_id=configuration_id, model_family=model_family,
-            feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-            training_cutoff=cutoff, training_ids=(), purged_ids=purged,
-            inner_fit_ids=(), inner_validation_ids=(), policy=policy,
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=(),
+            purged_ids=purged,
+            inner_fit_ids=(),
+            inner_validation_ids=(),
+            policy=policy,
             disposition=FinalFitDisposition.INSUFFICIENT_TRAINING,
-            reason="pre-holdout training membership is empty", feature_count=feature_count,
+            reason="pre-holdout training membership is empty",
+            feature_count=feature_count,
             training_evidence=ordered,
         )
     schema = _holdout_schema(feature_count)
@@ -528,35 +542,54 @@ def fit_final_ridge(
             minimum_training_rows=minimum_training_rows,
             minimum_inner_validation_rows=minimum_inner_validation_rows,
             ridge_solver=solver,
-            ridge_tolerance=float(policy.solver_identity.get("tolerance", 1e-8)),
-            ridge_max_iterations=int(policy.solver_identity.get("max_iterations", 1000)),
+            ridge_tolerance=float(
+                cast(float | int | str, policy.solver_identity.get("tolerance", 1e-8))
+            ),
+            ridge_max_iterations=int(
+                cast(float | int | str, policy.solver_identity.get("max_iterations", 1000))
+            ),
             loss_policy=loss_policy,
             pooled_weighting_policy=weighting_policy,
             instrument_identity_order=identity_order,
         )
     except (ArithmeticError, TypeError, ValueError) as error:
         return _failed_final_fit(
-            selection=selection, configuration_id=configuration_id, model_family=model_family,
-            feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-            training_cutoff=cutoff, training_ids=training_ids, purged_ids=purged,
-            inner_fit_ids=(), inner_validation_ids=(), policy=policy,
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=training_ids,
+            purged_ids=purged,
+            inner_fit_ids=(),
+            inner_validation_ids=(),
+            policy=policy,
             disposition=FinalFitDisposition.NUMERICAL_FAILURE,
             reason=f"R2 preprocessing selection failed: {type(error).__name__}: {error}",
-            feature_count=feature_count, training_evidence=ordered,
+            feature_count=feature_count,
+            training_evidence=ordered,
         )
     inner_fit_ids = tuple(selected.inner_fit_target_ids)
     inner_validation_ids = tuple(selected.inner_validation_target_ids)
     scores = tuple(
         R2AlphaCandidateScore(
-            alpha=item.alpha, validation_loss=item.loss,
-            disposition=_final_disposition(item.disposition), failure_reason=item.failure,
+            alpha=item.alpha,
+            validation_loss=item.loss,
+            disposition=_final_disposition(item.disposition),
+            failure_reason=item.failure,
         )
         for item in selected.candidate_scores
     )
     preprocessing = _preprocessing_payload(
-        policy=policy, schema=schema, inner=selected.inner_preprocessing,
-        outer=selected.outer_preprocessing, rows=ordered, identity_order=identity_order,
-        solver=solver, weighting_policy=weighting_policy,
+        policy=policy,
+        schema=schema,
+        inner=selected.inner_preprocessing,
+        outer=selected.outer_preprocessing,
+        rows=ordered,
+        identity_order=identity_order,
+        solver=solver,
+        weighting_policy=weighting_policy,
         fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
         minimum_training_rows=minimum_training_rows,
         minimum_inner_validation_rows=minimum_inner_validation_rows,
@@ -567,32 +600,46 @@ def fit_final_ridge(
         or selected.outer_preprocessing is None
     ):
         return _failed_final_fit(
-            selection=selection, configuration_id=configuration_id, model_family=model_family,
-            feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-            training_cutoff=cutoff, training_ids=training_ids, purged_ids=purged,
-            inner_fit_ids=inner_fit_ids, inner_validation_ids=inner_validation_ids, policy=policy,
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=training_ids,
+            purged_ids=purged,
+            inner_fit_ids=inner_fit_ids,
+            inner_validation_ids=inner_validation_ids,
+            policy=policy,
             disposition=_final_disposition(selected.disposition),
             reason=f"R2 preprocessing selection disposition {selected.disposition.value}",
-            feature_count=feature_count, training_evidence=ordered,
-            candidate_scores=scores or None, preprocessing=preprocessing,
+            feature_count=feature_count,
+            training_evidence=ordered,
+            candidate_scores=scores or None,
+            preprocessing=preprocessing,
         )
     outer = selected.outer_preprocessing
     matrix = add_instrument_identity(transform(r2_rows, outer), r2_rows, identity_order)
     targets = np.asarray([row.target for row in r2_rows], dtype=np.float64)
-    if (
-        matrix.shape[1] == 0
-        or not np.isfinite(matrix).all()
-        or not np.isfinite(targets).all()
-    ):
+    if matrix.shape[1] == 0 or not np.isfinite(matrix).all() or not np.isfinite(targets).all():
         return _failed_final_fit(
-            selection=selection, configuration_id=configuration_id, model_family=model_family,
-            feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-            training_cutoff=cutoff, training_ids=training_ids, purged_ids=purged,
-            inner_fit_ids=inner_fit_ids, inner_validation_ids=inner_validation_ids, policy=policy,
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=training_ids,
+            purged_ids=purged,
+            inner_fit_ids=inner_fit_ids,
+            inner_validation_ids=inner_validation_ids,
+            policy=policy,
             disposition=FinalFitDisposition.DEGENERATE_FEATURE_MATRIX,
             reason="final transformed feature matrix is empty or non-finite",
             feature_count=feature_count,
-            training_evidence=ordered, candidate_scores=scores or None, preprocessing=preprocessing,
+            training_evidence=ordered,
+            candidate_scores=scores or None,
+            preprocessing=preprocessing,
         )
     alpha = selected.selected_alpha
     if model_family is ModelFamily.ZERO_RETURN:
@@ -600,12 +647,15 @@ def fit_final_ridge(
         intercept = 0.0
     else:
         try:
-            from sklearn.linear_model import Ridge
-            model = Ridge(
+            from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
+
+            model: Any = Ridge(
                 alpha=alpha,
                 solver=solver,
-                tol=float(policy.solver_identity.get("tolerance", 1e-8)),
-                max_iter=int(policy.solver_identity.get("max_iterations", 1000)),
+                tol=float(cast(float | int | str, policy.solver_identity.get("tolerance", 1e-8))),
+                max_iter=int(
+                    cast(float | int | str, policy.solver_identity.get("max_iterations", 1000))
+                ),
                 fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
             )
             with warnings.catch_warnings(record=True) as caught:
@@ -621,16 +671,23 @@ def fit_final_ridge(
             intercept = float(np.asarray(model.intercept_, dtype=np.float64).reshape(-1)[0])
         except (ArithmeticError, TypeError, ValueError) as error:
             return _failed_final_fit(
-                selection=selection, configuration_id=configuration_id, model_family=model_family,
-                feature_dataset_id=feature_dataset_id, feature_schema_id=feature_schema_id,
-                training_cutoff=cutoff, training_ids=training_ids, purged_ids=purged,
+                selection=selection,
+                configuration_id=configuration_id,
+                model_family=model_family,
+                feature_dataset_id=feature_dataset_id,
+                feature_schema_id=feature_schema_id,
+                training_cutoff=cutoff,
+                training_ids=training_ids,
+                purged_ids=purged,
                 inner_fit_ids=inner_fit_ids,
                 inner_validation_ids=inner_validation_ids,
                 policy=policy,
                 disposition=FinalFitDisposition.NUMERICAL_FAILURE,
                 reason=f"final Ridge fit failed: {type(error).__name__}: {error}",
-                feature_count=feature_count, training_evidence=ordered,
-                candidate_scores=scores or None, preprocessing=preprocessing,
+                feature_count=feature_count,
+                training_evidence=ordered,
+                candidate_scores=scores or None,
+                preprocessing=preprocessing,
             )
     replay = matrix @ coefficients + intercept
     if replay.shape != targets.shape or not np.isfinite(replay).all():
@@ -640,23 +697,36 @@ def fit_final_ridge(
         for row, weight in zip(ordered, outer.sample_weights, strict=True)
     )
     return R2FinalFit.create(
-        selection_manifest_id=selection.manifest_id, configuration_id=configuration_id,
-        model_family=model_family, feature_dataset_id=feature_dataset_id,
-        feature_schema_id=feature_schema_id, training_cutoff=cutoff,
-        training_target_ids=training_ids, purged_target_ids=purged,
-        inner_fit_target_ids=inner_fit_ids, inner_validation_target_ids=inner_validation_ids,
-        preprocessing=preprocessing, alpha_candidate_scores=scores, selected_alpha=alpha,
-        sample_weights=weights, coefficients=tuple(float(value) for value in coefficients),
-        intercept=intercept, disposition=FinalFitDisposition.READY, failure_reason=None,
+        selection_manifest_id=selection.manifest_id,
+        configuration_id=configuration_id,
+        model_family=model_family,
+        feature_dataset_id=feature_dataset_id,
+        feature_schema_id=feature_schema_id,
+        training_cutoff=cutoff,
+        training_target_ids=training_ids,
+        purged_target_ids=purged,
+        inner_fit_target_ids=inner_fit_ids,
+        inner_validation_target_ids=inner_validation_ids,
+        preprocessing=preprocessing,
+        alpha_candidate_scores=scores,
+        selected_alpha=alpha,
+        sample_weights=weights,
+        coefficients=tuple(float(value) for value in coefficients),
+        intercept=intercept,
+        disposition=FinalFitDisposition.READY,
+        failure_reason=None,
         diagnostics={
-            "training_count": len(ordered), "inner_fit_count": len(inner_fit_ids),
+            "training_count": len(ordered),
+            "inner_fit_count": len(inner_fit_ids),
             "inner_validation_count": len(inner_validation_ids),
             "selected_validation_loss": next(
                 item.validation_loss for item in scores if item.alpha == alpha
             ),
-            "solver": solver, "larger_alpha_tie_break": True,
+            "solver": solver,
+            "larger_alpha_tie_break": True,
         },
-        runtime_identities=policy.runtime_identities, evidence_class=selection.evidence_class,
+        runtime_identities=policy.runtime_identities,
+        evidence_class=selection.evidence_class,
         holdout_scope=selection.holdout_scope,
     )
 
@@ -674,15 +744,15 @@ def _preprocessing_fit_from_payload(value: object) -> PreprocessingFit:
             str(item) for item in cast(Sequence[object], raw["indicator_feature_names"])
         ),
         medians=tuple(
-            None if item is None else float(item)
+            None if item is None else float(cast(float | int | str, item))
             for item in cast(Sequence[object], raw["medians"])
         ),
         means=tuple(
-            None if item is None else float(item)
+            None if item is None else float(cast(float | int | str, item))
             for item in cast(Sequence[object], raw["means"])
         ),
         scales=tuple(
-            None if item is None else float(item)
+            None if item is None else float(cast(float | int | str, item))
             for item in cast(Sequence[object], raw["scales"])
         ),
         active_feature_names=tuple(
@@ -700,7 +770,10 @@ def _preprocessing_fit_from_payload(value: object) -> PreprocessingFit:
         training_target_ids=tuple(
             str(item) for item in cast(Sequence[object], raw["training_target_ids"])
         ),
-        sample_weights=tuple(float(item) for item in cast(Sequence[object], raw["sample_weights"])),
+        sample_weights=tuple(
+            float(cast(float | int | str, item))
+            for item in cast(Sequence[object], raw["sample_weights"])
+        ),
     )
 
 
@@ -724,7 +797,12 @@ def build_holdout_forecasts(
         if fit.disposition is FinalFitDisposition.READY:
             from types import SimpleNamespace
 
-            from qtrad.application.r2_preprocessing import add_instrument_identity, transform
+            from qtrad.application.r2_preprocessing import (
+                FeatureVector,
+                InstrumentFeatureVector,
+                add_instrument_identity,
+                transform,
+            )
 
             preprocessing = _preprocessing_fit_from_payload(fit.preprocessing["outer"])
             vectors = tuple(
@@ -732,8 +810,8 @@ def build_holdout_forecasts(
                 for feature in feature_dataset.rows
             )
             matrix = add_instrument_identity(
-                transform(vectors, preprocessing),
-                vectors,
+                transform(cast(Sequence[FeatureVector], vectors), preprocessing),
+                cast(Sequence[InstrumentFeatureVector], vectors),
                 tuple(
                     str(item)
                     for item in cast(
@@ -746,6 +824,8 @@ def build_holdout_forecasts(
                 raise ValueError(
                     "final-fit coefficient length differs from replayed feature matrix"
                 )
+            if fit.intercept is None:
+                raise ValueError("ready final fit is missing an intercept")
             intercept = float(fit.intercept)
             for feature, values in zip(
                 feature_dataset.rows,

@@ -363,10 +363,10 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
             decision_time=datetime.fromisoformat(str(raw["decision_time"])),
             target_available_at=datetime.fromisoformat(str(raw["target_available_at"])),
             features=tuple(
-                None if value is None else float(value)
+                None if value is None else float(cast(float | int | str, value))
                 for value in cast(list[object], raw["features"])
             ),
-            target=float(raw["target"]),
+            target=float(cast(float | int | str, raw["target"])),
             target_end_time=datetime.fromisoformat(str(raw["target_end_time"])),
         )
         for raw in (cast(Mapping[str, object], item) for item in raw_rows)
@@ -381,9 +381,7 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         policy=selection.final_fitting_policy,
         training_cutoff=datetime.fromisoformat(str(payload["training_cutoff"])),
         minimum_training_rows=int(preprocessing.get("minimum_training_rows", 2)),
-        minimum_inner_validation_rows=int(
-            preprocessing.get("minimum_inner_validation_rows", 1)
-        ),
+        minimum_inner_validation_rows=int(preprocessing.get("minimum_inner_validation_rows", 1)),
         purged_target_ids=tuple(
             str(item) for item in cast(list[object], payload["purged_target_ids"])
         ),
@@ -895,8 +893,7 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
             reason=str(item["reason"]),
         )
         for item in (
-            _object_dict(raw, "holdout evaluation question result")
-            for raw in question_values
+            _object_dict(raw, "holdout evaluation question result") for raw in question_values
         )
     )
     evaluation = R2HoldoutEvaluation(
@@ -960,32 +957,49 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
     evaluation = verify_holdout_evaluation(root)
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(
-        root, "selection.json", "selection.json",
-        contract=R2_HOLDOUT_SELECTION_CONTRACT, identity_key="manifest_id",
+        root,
+        "selection.json",
+        "selection.json",
+        contract=R2_HOLDOUT_SELECTION_CONTRACT,
+        identity_key="manifest_id",
     )
     seal_ref, seal_payload = _artifact_reference(
-        root, "manifest.json", "forecast-seal.json",
-        contract=R2_HOLDOUT_FORECAST_SEAL_CONTRACT, identity_key="seal_id",
+        root,
+        "manifest.json",
+        "forecast-seal.json",
+        contract=R2_HOLDOUT_FORECAST_SEAL_CONTRACT,
+        identity_key="seal_id",
     )
     opened_ref, opened_payload = _artifact_reference(
-        root, "opened.json", "opened.json",
-        contract=R2_HOLDOUT_OPENED_CONTRACT, identity_key="marker_id",
+        root,
+        "opened.json",
+        "opened.json",
+        contract=R2_HOLDOUT_OPENED_CONTRACT,
+        identity_key="marker_id",
     )
     consumed_ref, consumed_payload = _artifact_reference(
-        root, "consumed.json", "consumed.json",
-        contract=R2_HOLDOUT_CONSUMED_CONTRACT, identity_key="marker_id",
+        root,
+        "consumed.json",
+        "consumed.json",
+        contract=R2_HOLDOUT_CONSUMED_CONTRACT,
+        identity_key="marker_id",
     )
     evaluation_ref, evaluation_payload = _artifact_reference(
-        root, "evaluation.json", "evaluation.json",
-        contract=R2_HOLDOUT_EVALUATION_CONTRACT, identity_key="evaluation_id",
+        root,
+        "evaluation.json",
+        "evaluation.json",
+        contract=R2_HOLDOUT_EVALUATION_CONTRACT,
+        identity_key="evaluation_id",
     )
-    children.update({
-        "selection.json": selection_payload,
-        "forecast-seal.json": seal_payload,
-        "opened.json": opened_payload,
-        "consumed.json": consumed_payload,
-        "evaluation.json": evaluation_payload,
-    })
+    children.update(
+        {
+            "selection.json": selection_payload,
+            "forecast-seal.json": seal_payload,
+            "opened.json": opened_payload,
+            "consumed.json": consumed_payload,
+            "evaluation.json": evaluation_payload,
+        }
+    )
     replay_specs: list[tuple[str, str, str, str]] = [
         ("features.json", "features.json", R2_HOLDOUT_FEATURES_CONTRACT, "dataset_id"),
         *[
@@ -1012,14 +1026,22 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
         ],
     ]
     if (root / "outcome-evidence.json").is_file():
-        replay_specs.append((
-            "outcome-evidence.json", "outcome-evidence.json",
-            R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT, "outcome_evidence_id",
-        ))
+        replay_specs.append(
+            (
+                "outcome-evidence.json",
+                "outcome-evidence.json",
+                R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT,
+                "outcome_evidence_id",
+            )
+        )
     replay_refs: list[ArtifactReference] = []
     for source_path, bundle_path, contract, identity_key in replay_specs:
         reference, payload = _artifact_reference(
-            root, source_path, bundle_path, contract=contract, identity_key=identity_key,
+            root,
+            source_path,
+            bundle_path,
+            contract=contract,
+            identity_key=identity_key,
         )
         replay_refs.append(reference)
         children[bundle_path] = payload
@@ -1073,9 +1095,7 @@ def _verify_bundle_replay(path: Path, refs: Sequence[ArtifactReference]) -> None
         replay_root = Path(temporary)
         for reference in refs:
             source = _safe_child(path, reference.path)
-            relative = (
-                "manifest.json" if reference.path == "forecast-seal.json" else reference.path
-            )
+            relative = "manifest.json" if reference.path == "forecast-seal.json" else reference.path
             target = replay_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(source.read_bytes())
@@ -1156,8 +1176,6 @@ def write_built_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
         children[reference.path] = _load_object(root / source_name)
     write_holdout_bundle(output, bundle, children)
     return verify_holdout_bundle(output)
-
-
 
 
 def load_prior_selection_manifest(path: Path) -> object:

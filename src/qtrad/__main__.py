@@ -421,20 +421,18 @@ def _holdout_prepare_cli(args: argparse.Namespace) -> None:
         args.output,
         expected_selection_manifest_id=expected_selection_id,
     )
-    print(
-        json.dumps({"seal": seal.seal_id, "root": str(args.output)}, sort_keys=True)
-    )
+    print(json.dumps({"seal": seal.seal_id, "root": str(args.output)}, sort_keys=True))
 
 
 def _holdout_recover_cli(args: argparse.Namespace) -> None:
-    recovery_kwargs: dict[str, object] = {
-        "expected_selection_manifest_id": args.expected_selection_id,
-        "expected_seal_id": args.expected_seal_id,
-        "consumed_by": args.consumed_by,
-        "consumed_at": args.consumed_at,
+    recovery_kwargs: dict[str, str] = {
+        "expected_selection_manifest_id": str(args.expected_selection_id),
+        "expected_seal_id": str(args.expected_seal_id),
+        "consumed_by": str(args.consumed_by),
+        "consumed_at": str(args.consumed_at),
     }
     if args.evaluation_id is not None:
-        recovery_kwargs["evaluation_id"] = args.evaluation_id
+        recovery_kwargs["evaluation_id"] = str(args.evaluation_id)
     marker = recover_holdout_consumption(args.root, **recovery_kwargs)
     print(json.dumps({"consumed": marker.marker_id}, sort_keys=True))
 
@@ -911,8 +909,8 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_holdout_prepare = baselines_sub.add_parser(
         "holdout-prepare", help="copy and verify an outcome-blind disposable holdout preparation"
     )
-    baselines_holdout_prepare_source = (
-        baselines_holdout_prepare.add_mutually_exclusive_group(required=True)
+    baselines_holdout_prepare_source = baselines_holdout_prepare.add_mutually_exclusive_group(
+        required=True
     )
     baselines_holdout_prepare_source.add_argument("--source", type=Path)
     baselines_holdout_prepare_source.add_argument("--foundation", type=Path, dest="source")
