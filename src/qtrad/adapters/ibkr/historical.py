@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from qtrad.adapters.ibkr.capability import (
+    IBKR_CALLBACK_QUEUE_MAXSIZE,
     IbkrApiIdentity,
     IbkrConnectionIntegrityError,
     IbkrGatewayEndpoint,
@@ -387,7 +388,7 @@ class OfficialIbkrHistoricalAdapter(OfficialIbkrCapabilityAdapter, IbkrHistorica
             self._defer_callback(item)
 
     def _defer_callback(self, item: _Callback) -> None:
-        if len(self._deferred_callbacks) >= 2000:
+        if len(self._deferred_callbacks) >= IBKR_CALLBACK_QUEUE_MAXSIZE:
             raise IbkrHistoricalRetryableError("IBKR historical callback buffer exhausted")
         self._deferred_callbacks.append(item)
 
