@@ -1200,9 +1200,7 @@ async def test_postgres_result_snapshot_bounds_callbacks_per_attempt(
         )
         await IbkrHistoricalExecutor(
             store,
-            FakeHistoricalDataPort(
-                {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
-            ),
+            FakeHistoricalDataPort({kind.value: ["success"] for kind in IbkrHistoricalRequestKind}),
             FakePacer(profile.profile_sha256),
             clock=lambda: _NOW,
         ).execute(plan, profile)
