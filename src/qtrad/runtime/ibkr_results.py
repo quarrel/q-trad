@@ -28,6 +28,7 @@ from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
     MAX_IBKR_RESULT_BYTES,
     MAX_IBKR_RESULT_CHILDREN,
+    MAX_IBKR_RESULT_REQUEST_BYTES,
     REQUEST_RESULT_CONTRACT,
     IbkrHistoricalAggregateResult,
     IbkrHistoricalAttemptEvidence,
@@ -68,7 +69,16 @@ def write_ibkr_historical_result(
     }
     if len(files) > MAX_IBKR_RESULT_CHILDREN:
         raise ValueError("IBKR result file closure exceeds its bound")
-    if any(not payload or len(payload) > MAX_IBKR_RESULT_BYTES for payload in files.values()):
+    if any(
+        not payload
+        or len(payload)
+        > (
+            MAX_IBKR_RESULT_REQUEST_BYTES
+            if relative_path.startswith(f"{_REQUEST_DIRECTORY}/")
+            else MAX_IBKR_RESULT_BYTES
+        )
+        for relative_path, payload in files.items()
+    ):
         raise ValueError("IBKR result file exceeds its bounded size")
     total_bytes = sum(len(payload) for payload in files.values())
     if total_bytes > MAX_IBKR_RESULT_CHILDREN * MAX_IBKR_RESULT_BYTES:
@@ -145,7 +155,9 @@ class IbkrHistoricalResultStream:
             relative_path = f"{_REQUEST_DIRECTORY}/{request.request_sha256}.json"
             reference = self._references_by_path[relative_path]
             child_path = _safe_child(self.source_root, relative_path, "IBKR request-result child")
-            child_bytes = _read_bytes(child_path, "IBKR request-result child")
+            child_bytes = _read_bytes(
+                child_path, "IBKR request-result child", maximum=MAX_IBKR_RESULT_REQUEST_BYTES
+            )
             if sha256_bytes(child_bytes) != reference.bytes_sha256:
                 raise ValueError(
                     "IBKR request-result child bytes digest does not match its manifest"
@@ -555,10 +567,10 @@ def _require_file(path: Path, field: str) -> Path:
     return current
 
 
-def _read_bytes(path: Path, field: str) -> bytes:
+def _read_bytes(path: Path, field: str, *, maximum: int = MAX_IBKR_RESULT_BYTES) -> bytes:
     path = _require_file(path, field)
     size = path.stat().st_size
-    if size <= 0 or size > MAX_IBKR_RESULT_BYTES:
+    if size <= 0 or size > maximum:
         raise ValueError(f"{field} exceeds its bounded size")
     payload = path.read_bytes()
     if len(payload) != size:
