@@ -1182,6 +1182,46 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
 )
 @pytest.mark.asyncio
+async def test_postgres_result_snapshot_bounds_callbacks_per_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    assert database_url is not None
+    engine = create_async_engine(database_url)
+    try:
+        audit_store = PostgresAuditStore(engine)
+        await audit_store.seed_instruments()
+        store = PostgresIbkrHistoricalExecutionStore(engine)
+        plan, profile = _unique_plan()
+        await store.register_ibkr_historical_plan(
+            plan,
+            plan_bytes=ibkr_historical_plan_bytes(plan),
+            registered_at=_NOW,
+        )
+        await IbkrHistoricalExecutor(
+            store,
+            FakeHistoricalDataPort(
+                {kind.value: ["success"] for kind in IbkrHistoricalRequestKind}
+            ),
+            FakePacer(profile.profile_sha256),
+            clock=lambda: _NOW,
+        ).execute(plan, profile)
+
+        monkeypatch.setattr(
+            "qtrad.adapters.postgres.ibkr_historical.MAX_IBKR_RESULT_CALLBACKS",
+            2,
+        )
+        snapshot = await store.read_ibkr_historical_execution(plan_sha256=plan.plan_sha256)
+        assert len(snapshot.callbacks) == 4
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.skipif(
+    not os.getenv("QTRAD_TEST_DATABASE_URL"),
+    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+)
+@pytest.mark.asyncio
 async def test_cli_postgres_execution_recovers_before_provider_construction(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
