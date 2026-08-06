@@ -43,3 +43,18 @@ def test_configured_image_digest_rejects_tag(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("QTRAD_IMAGE_DIGEST", "syd.ocir.io/example/qtrad-ibkr:latest")
     with pytest.raises(RuntimeError, match="sha256 digest"):
         historical.configured_image_digest()
+
+
+def test_commit_metadata_is_used_from_image_root_when_source_tree_is_nested(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    commit = "b" * 40
+    source_root = tmp_path / "app" / "src"
+    source_root.mkdir(parents=True)
+    (tmp_path / "app" / ".qtrad-commit").write_text(f"{commit}\n", encoding="ascii")
+
+    def unavailable(*_args: object, **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("git is not installed")
+
+    monkeypatch.setattr(historical.subprocess, "run", unavailable)
+    assert historical._derive_qtrad_commit(source_root, require_clean=True) == commit
