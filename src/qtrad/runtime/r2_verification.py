@@ -1868,7 +1868,7 @@ def holdout_configuration_registry(
         if feature_dataset_id is not None and not isinstance(feature_dataset_id, str):
             raise ValueError("OOF evaluated-model feature-dataset ID is invalid")
         manifests[manifest_id] = (
-            ModelFamily(str(raw_model["model_family"])),
+            ModelFamily(str(raw_model.get("model_family"))),
             feature_set_id,
             feature_dataset_id,
         )
