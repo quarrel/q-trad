@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -42,14 +43,17 @@ from qtrad.domain.r2_holdout import (
     FinalFitDisposition,
     HoldoutConclusion,
     HoldoutDirection,
+    HoldoutOpportunityDisposition,
     HoldoutScope,
     HoldoutTargetOpportunity,
     R2FinalFit,
     R2FinalFittingPolicy,
     R2HoldoutFeatureRow,
     R2HoldoutOpenedMarker,
+    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
+    R2HoldoutTargetProjection,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_holdout import (
@@ -118,7 +122,7 @@ def _training_feature_set_id() -> str:
 
 
 def _selection(
-    *, bind_target_dataset: bool = True
+    *, bind_target_dataset: bool = True, include_noneligible: bool = False
 ) -> tuple[R2HoldoutSelectionManifest, R2HoldoutQuestion, tuple[str, str]]:
     zero = _id("zero")
     local = _id("local")
@@ -169,15 +173,17 @@ def _selection(
     )
     from qtrad.application.r2_holdout import freeze_holdout_selection
 
-    pre_holdout_target = TargetDataset.create(
-        tuple(
-            row
-            for row in _target_dataset().rows
-            if row.decision_time < NOW + timedelta(days=1)
-            and row.target_available_at <= NOW + timedelta(days=1)
-        ),
-        observation_dataset_id=_id("observations"),
-        foundation_configuration_id=_id("foundation"),
+    source_target_dataset = _target_dataset(include_noneligible=include_noneligible)
+    pre_holdout_projection = R2HoldoutTargetProjection.create_from_source(
+        source_target_dataset,
+        holdout_start=NOW + timedelta(days=1),
+        primary_horizon_seconds=900,
+    )
+    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(
+        source_target_dataset,
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        opportunities=_opportunities(include_noneligible=include_noneligible),
     )
     selection = freeze_holdout_selection(
         prior_selection=prior,
@@ -194,8 +200,9 @@ def _selection(
         frozen_metadata={"fixture": True},
         frozen_at=NOW,
         frozen_by="test",
-        holdout_opportunities=_opportunities(),
-        pre_holdout_target_dataset=pre_holdout_target,
+        source_target_dataset=source_target_dataset,
+        holdout_opportunity_registry=opportunity_registry,
+        pre_holdout_projection=pre_holdout_projection,
         configuration_registry=tuple(
             sorted(
                 (
@@ -204,7 +211,9 @@ def _selection(
                         local,
                         ModelFamily.LOCAL_RIDGE,
                         _training_feature_set_id(),
-                        _training_feature_dataset().dataset_id,
+                        _training_feature_dataset(
+                            include_noneligible=include_noneligible
+                        ).dataset_id,
                         None,
                     ),
                 ),
@@ -212,9 +221,13 @@ def _selection(
             )
         ),
         evaluation_policy={
-            "target_dataset_id": (_target_dataset().dataset_id if bind_target_dataset else None),
+            "target_dataset_id": (
+                source_target_dataset.dataset_id if bind_target_dataset else None
+            ),
             "primary_horizon_seconds": 900,
-            "pre_holdout_target_dataset_id": pre_holdout_target.dataset_id,
+            "pre_holdout_target_dataset_id": (
+                pre_holdout_projection.projected_target_dataset.dataset_id
+            ),
             "observation_dataset_id": _id("observations"),
             "panel_dataset_id": _id("panel"),
             "minimum_training_rows": 2,
@@ -232,7 +245,7 @@ def _selection(
     return selection, question, (zero, local)
 
 
-def _opportunities() -> tuple[HoldoutTargetOpportunity, ...]:
+def _opportunities(*, include_noneligible: bool = False) -> tuple[HoldoutTargetOpportunity, ...]:
     result = []
     for index in range(2):
         decision = NOW + timedelta(days=1, hours=index)
@@ -254,11 +267,32 @@ def _opportunities() -> tuple[HoldoutTargetOpportunity, ...]:
                 dependency_end=decision + timedelta(minutes=15),
             )
         )
+    if include_noneligible:
+        decision = NOW + timedelta(days=1, hours=2)
+        result.append(
+            HoldoutTargetOpportunity.create(
+                target_id=target_identity(
+                    instrument_id="INSTRUMENT_2",
+                    decision_time=decision,
+                    horizon=timedelta(seconds=900),
+                    target_basis=PriceBasis.MID,
+                    target_revision_policy="FIXTURE_V1",
+                ),
+                instrument_id="INSTRUMENT_2",
+                decision_time=decision,
+                target_horizon_seconds=900,
+                feature_data_asof=decision - timedelta(minutes=1),
+                latest_feature_bar_end=decision - timedelta(minutes=1),
+                dependency_start=decision - timedelta(minutes=15),
+                dependency_end=decision + timedelta(minutes=15),
+                disposition=HoldoutOpportunityDisposition.GAP,
+            )
+        )
     return tuple(result)
 
 
-def _target_dataset() -> TargetDataset:
-    opportunities = _opportunities()
+def _target_dataset(*, include_noneligible: bool = False) -> TargetDataset:
+    opportunities = _opportunities(include_noneligible=include_noneligible)
     rows = tuple(
         TargetRow(
             instrument_id=opportunity.instrument_id,
@@ -275,8 +309,16 @@ def _target_dataset() -> TargetDataset:
             + timedelta(seconds=opportunity.target_horizon_seconds),
             label_start_close=None,
             label_end_close=None,
-            log_return=0.1 + index * 0.1,
-            return_disposition=ReturnDisposition.VALID,
+            log_return=(
+                None
+                if opportunity.disposition is HoldoutOpportunityDisposition.GAP
+                else 0.1 + index * 0.1
+            ),
+            return_disposition=(
+                ReturnDisposition.UNAVAILABLE_BY_FREEZE
+                if opportunity.disposition is HoldoutOpportunityDisposition.GAP
+                else ReturnDisposition.VALID
+            ),
             start_event_id=None,
             end_event_id=None,
             upper_log_excursion=None,
@@ -316,7 +358,7 @@ def _target_dataset() -> TargetDataset:
     )
 
 
-def _training_feature_dataset() -> R2FeatureDataset:
+def _training_feature_dataset(*, include_noneligible: bool = False) -> R2FeatureDataset:
     schema, feature_name, training_feature_set_id = _training_feature_spec()
     experiment_id = _id("experiment")
     rows = tuple(
@@ -341,7 +383,7 @@ def _training_feature_dataset() -> R2FeatureDataset:
         feature_set_id=training_feature_set_id,
         observation_dataset_id=_id("observations"),
         panel_dataset_id=_id("panel"),
-        target_dataset_id=_target_dataset().dataset_id,
+        target_dataset_id=_target_dataset(include_noneligible=include_noneligible).dataset_id,
         fold_dataset_id=_id("fold"),
         experiment_configuration_id=experiment_id,
         evidence_class=EvidenceClass.IMPLEMENTATION,
@@ -355,11 +397,17 @@ def _prepared(
     forced_failure_configuration: str | None = None,
     bind_target_dataset: bool = True,
     unavailable_opportunity_id: str | None = None,
+    include_noneligible: bool = False,
 ):
-    selection, _question, configurations = _selection(bind_target_dataset=bind_target_dataset)
-    opportunities = _opportunities()
-    feature_schema_id = _training_feature_dataset().raw_feature_schema_id
-    target_dataset = _target_dataset()
+    selection, _question, configurations = _selection(
+        bind_target_dataset=bind_target_dataset,
+        include_noneligible=include_noneligible,
+    )
+    opportunities = _opportunities(include_noneligible=include_noneligible)
+    feature_schema_id = _training_feature_dataset(
+        include_noneligible=include_noneligible
+    ).raw_feature_schema_id
+    target_dataset = _target_dataset(include_noneligible=include_noneligible)
     features = materialise_r2_holdout_features(
         selection=selection,
         opportunities=opportunities,
@@ -383,7 +431,7 @@ def _prepared(
             )
         ),
     )
-    training_features = _training_feature_dataset()
+    training_features = _training_feature_dataset(include_noneligible=include_noneligible)
     training_targets = target_dataset
     fits = tuple(
         fit_final_ridge(
@@ -489,6 +537,92 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     assert opened.seal_id == seal.seal_id
     assert replayed_consumed.marker_id == consumed.marker_id
     assert evaluation.questions[0].conclusion in tuple(HoldoutConclusion)
+
+
+def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
+    tmp_path: Path,
+) -> None:
+    selection, opportunities, _fits, forecasts, coverage, seal = _prepared(
+        tmp_path,
+        include_noneligible=True,
+    )
+    target_dataset = _target_dataset(include_noneligible=True)
+
+    def evaluator(outcomes, opened):
+        return evaluate_holdout(
+            selection=selection,
+            seal=seal,
+            opened_marker=opened,
+            forecast_datasets=forecasts,
+            coverage_datasets=coverage,
+            outcomes=outcomes,
+        )
+
+    evaluation, consumed = reveal_holdout(
+        tmp_path,
+        expected_selection_manifest_id=selection.manifest_id,
+        expected_seal_id=seal.seal_id,
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        opened_by="test",
+        consumed_by="test",
+        opened_at=NOW,
+        consumed_at=NOW + timedelta(seconds=1),
+        outcome_loader=lambda: target_dataset,
+        evaluator=evaluator,
+    )
+
+    assert evaluation is not None
+    assert consumed.outcome_accessed is True
+    gap = next(
+        item for item in opportunities if item.disposition is HoldoutOpportunityDisposition.GAP
+    )
+    assert any(row.opportunity_id == gap.opportunity_id for row in coverage[0].rows)
+    assert all(row.target_id != gap.target_id for forecast in forecasts for row in forecast.rows)
+
+
+def test_target_projection_rejects_a_different_source_dataset() -> None:
+    source = _target_dataset()
+    projection = R2HoldoutTargetProjection.create_from_source(
+        source,
+        holdout_start=NOW + timedelta(days=1),
+        primary_horizon_seconds=900,
+    )
+    altered_rows = tuple(
+        replace(row, log_return=0.95) if row.target_id == _opportunities()[0].target_id else row
+        for row in source.rows
+    )
+    altered_source = TargetDataset.create(
+        altered_rows,
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+    )
+
+    with pytest.raises(ValueError, match="source"):
+        projection.verify_source(altered_source)
+
+
+def test_opportunity_registry_requires_complete_source_coverage_and_round_trips() -> None:
+    source = _target_dataset()
+    opportunities = _opportunities()
+    with pytest.raises(ValueError, match="exactly cover"):
+        R2HoldoutOpportunityRegistry.create_from_source(
+            source,
+            holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+            primary_horizon_seconds=900,
+            opportunities=opportunities[:1],
+        )
+
+    registry = R2HoldoutOpportunityRegistry.create_from_source(
+        source,
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        opportunities=opportunities,
+    )
+    restored = R2HoldoutOpportunityRegistry.from_json(registry.as_json())
+    assert restored == registry
+    assert restored.opportunities == tuple(
+        sorted(opportunities, key=lambda item: item.opportunity_id)
+    )
 
 
 def test_zero_threshold_exact_tie_is_inconclusive(tmp_path: Path) -> None:

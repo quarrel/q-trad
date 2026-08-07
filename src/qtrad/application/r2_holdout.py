@@ -41,9 +41,11 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutForecastRow,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
+    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
+    R2HoldoutTargetProjection,
 )
 from qtrad.domain.r2_models import (
     PreprocessingFit,
@@ -361,8 +363,9 @@ def freeze_holdout_selection(
     configuration_registry: Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]]
     | None = None,
     evaluation_policy: Mapping[str, JsonValue] | None = None,
-    holdout_opportunities: Sequence[HoldoutTargetOpportunity] | None = None,
-    pre_holdout_target_dataset: TargetDataset | None = None,
+    source_target_dataset: TargetDataset,
+    holdout_opportunity_registry: R2HoldoutOpportunityRegistry,
+    pre_holdout_projection: R2HoldoutTargetProjection,
 ) -> R2HoldoutSelectionManifest:
     """Create PR A from an independently verified, still-pending R2.F1 selection."""
     evaluated = _selection_values(prior_selection)
@@ -528,65 +531,54 @@ def freeze_holdout_selection(
         frozen_evaluation_policy["primary_horizon_seconds"] = primary_horizon
     if not isinstance(primary_horizon, int) or primary_horizon <= 0:
         raise ValueError("holdout selection must freeze the primary target horizon")
-    if pre_holdout_target_dataset is not None:
-        if verified_experiment is not None and (
-            pre_holdout_target_dataset.observation_dataset_id
-            != verified_experiment.observation_dataset_id
-            or pre_holdout_target_dataset.foundation_configuration_id
-            != verified_experiment.foundation_configuration_id
-        ):
-            raise ValueError("pre-holdout target differs from the verified experiment sources")
-        if any(
-            row.horizon.total_seconds() != primary_horizon
-            or row.decision_time >= prior_selection.holdout_range[0]
-            or row.target_available_at > prior_selection.holdout_range[0]
-            for row in pre_holdout_target_dataset.rows
-        ):
-            raise ValueError("pre-holdout target contains a post-freeze or non-primary row")
-        frozen_evaluation_policy["pre_holdout_target_dataset_id"] = (
-            pre_holdout_target_dataset.dataset_id
+    expected_source = frozen_evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_source, str) or source_target_dataset.dataset_id != expected_source:
+        raise ValueError("source target differs from the frozen target dataset")
+    if verified_experiment is not None and (
+        source_target_dataset.dataset_id != verified_experiment.target_dataset_id
+        or source_target_dataset.observation_dataset_id
+        != verified_experiment.observation_dataset_id
+        or source_target_dataset.foundation_configuration_id
+        != verified_experiment.foundation_configuration_id
+    ):
+        raise ValueError("source target differs from the verified experiment")
+    if pre_holdout_projection.primary_horizon_seconds != primary_horizon:
+        raise ValueError("target projection differs from the frozen primary horizon")
+    if pre_holdout_projection.holdout_start != prior_selection.holdout_range[0]:
+        raise ValueError("target projection differs from the frozen holdout boundary")
+    pre_holdout_projection.verify_source(source_target_dataset)
+    if (
+        holdout_opportunity_registry.primary_horizon_seconds != primary_horizon
+        or holdout_opportunity_registry.holdout_range != prior_selection.holdout_range
+    ):
+        raise ValueError("opportunity registry differs from the frozen holdout policy")
+    holdout_opportunity_registry.verify_source(source_target_dataset)
+    frozen_opportunity_registry = tuple(
+        (
+            item.opportunity_id,
+            item.target_id,
+            item.instrument_id,
+            item.decision_time,
+            item.target_horizon_seconds,
+            item.disposition,
         )
-        frozen_evaluation_policy["pre_holdout_target_dataset"] = _target_dataset_payload(
-            pre_holdout_target_dataset
-        )
-    if not isinstance(frozen_evaluation_policy.get("pre_holdout_target_dataset_id"), str):
-        raise ValueError("holdout selection must freeze the pre-holdout target dataset")
-    if holdout_opportunities is None:
-        raw_registry = frozen_evaluation_policy.get("holdout_opportunity_registry")
-        if not isinstance(raw_registry, list):
-            raise ValueError("holdout selection requires its authenticated opportunity registry")
-        frozen_opportunity_registry = tuple(
-            (
-                str(item[0]),
-                str(item[1]),
-                str(item[2]),
-                datetime.fromisoformat(str(item[3])),
-                int(cast(float | int | str, item[4])),
-                HoldoutOpportunityDisposition(str(item[5])),
-            )
-            for item in raw_registry
-            if isinstance(item, list) and len(item) == 6
-        )
-        if len(frozen_opportunity_registry) != len(raw_registry):
-            raise ValueError("holdout opportunity registry entry is invalid")
-    else:
-        frozen_opportunity_registry = tuple(
-            sorted(
-                (
-                    item.opportunity_id,
-                    item.target_id,
-                    item.instrument_id,
-                    item.decision_time,
-                    item.target_horizon_seconds,
-                    item.disposition,
-                )
-                for item in holdout_opportunities
-            )
-        )
-    if not frozen_opportunity_registry:
-        raise ValueError("holdout selection requires expected opportunities")
-    if any(item[4] != primary_horizon for item in frozen_opportunity_registry):
-        raise ValueError("holdout opportunity registry differs from the primary horizon")
+        for item in holdout_opportunity_registry.opportunities
+    )
+    frozen_evaluation_policy["target_dataset_id"] = source_target_dataset.dataset_id
+    frozen_evaluation_policy["pre_holdout_target_dataset_id"] = (
+        pre_holdout_projection.projected_target_dataset.dataset_id
+    )
+    frozen_evaluation_policy["pre_holdout_target_dataset"] = _target_dataset_payload(
+        pre_holdout_projection.projected_target_dataset
+    )
+    frozen_evaluation_policy["pre_holdout_projection_id"] = pre_holdout_projection.projection_id
+    frozen_evaluation_policy["pre_holdout_projection"] = pre_holdout_projection.as_json()
+    frozen_evaluation_policy["holdout_opportunity_registry_id"] = (
+        holdout_opportunity_registry.registry_id
+    )
+    frozen_evaluation_policy["holdout_opportunity_registry_artifact"] = (
+        holdout_opportunity_registry.as_json()
+    )
     frozen_evaluation_policy["holdout_opportunity_registry"] = [
         [
             opportunity_id,

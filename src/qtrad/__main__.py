@@ -368,9 +368,9 @@ def _load_holdout_cli_object(path: Path) -> dict[str, JsonValue]:
 def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     from qtrad.domain.r2_evaluation import SelectionManifest
     from qtrad.domain.r2_holdout import (
-        HoldoutOpportunityDisposition,
         HoldoutScope,
-        HoldoutTargetOpportunity,
+        R2HoldoutOpportunityRegistry,
+        R2HoldoutTargetProjection,
     )
     from qtrad.runtime.r2_holdout import _target_dataset_from_payload
 
@@ -395,32 +395,15 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     frozen_metadata = (
         {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
     )
-    opportunities_payload = json.loads(args.holdout_opportunities.read_bytes())
-    if not isinstance(opportunities_payload, list):
-        raise ValueError("--holdout-opportunities must contain a JSON array")
-    opportunity_items = tuple(
-        cast(dict[str, object], item) for item in opportunities_payload if isinstance(item, dict)
+    source_target = _target_dataset_from_payload(
+        _load_holdout_cli_object(args.source_target_dataset),
+        field="source target dataset",
     )
-    if len(opportunity_items) != len(opportunities_payload):
-        raise ValueError("--holdout-opportunities entries must be JSON objects")
-    holdout_opportunities = tuple(
-        HoldoutTargetOpportunity(
-            target_id=str(item["target_id"]),
-            instrument_id=str(item["instrument_id"]),
-            decision_time=datetime.fromisoformat(str(item["decision_time"])),
-            target_horizon_seconds=int(cast(float | int | str, item["target_horizon_seconds"])),
-            feature_data_asof=datetime.fromisoformat(str(item["feature_data_asof"])),
-            latest_feature_bar_end=datetime.fromisoformat(str(item["latest_feature_bar_end"])),
-            dependency_start=datetime.fromisoformat(str(item["dependency_start"])),
-            dependency_end=datetime.fromisoformat(str(item["dependency_end"])),
-            disposition=HoldoutOpportunityDisposition(str(item["disposition"])),
-            opportunity_id=str(item["opportunity_id"]),
-        )
-        for item in opportunity_items
+    pre_holdout_projection = R2HoldoutTargetProjection.from_json(
+        _load_holdout_cli_object(args.pre_holdout_projection)
     )
-    pre_holdout_target = _target_dataset_from_payload(
-        _load_holdout_cli_object(args.pre_holdout_target),
-        field="pre-holdout target",
+    opportunity_registry = R2HoldoutOpportunityRegistry.from_json(
+        _load_holdout_cli_object(args.holdout_opportunity_registry)
     )
     manifest = freeze_holdout_selection(
         prior_selection=prior,
@@ -452,8 +435,9 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
             verified_oof,
             expected_evaluation_report_id=prior.evaluation_report_id,
         ),
-        holdout_opportunities=holdout_opportunities,
-        pre_holdout_target_dataset=pre_holdout_target,
+        source_target_dataset=source_target,
+        holdout_opportunity_registry=opportunity_registry,
+        pre_holdout_projection=pre_holdout_projection,
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))
@@ -952,16 +936,26 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
     baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
     baselines_holdout_selection.add_argument(
-        "--holdout-opportunities",
+        "--source-target-dataset",
         type=Path,
         required=True,
-        help="authenticated outcome-blind holdout opportunity registry JSON",
+        help="authenticated source target dataset JSON",
     )
     baselines_holdout_selection.add_argument(
-        "--pre-holdout-target",
+        "--holdout-opportunity-registry",
+        "--holdout-opportunities",
+        dest="holdout_opportunity_registry",
         type=Path,
         required=True,
-        help="canonical authenticated pre-holdout target dataset JSON",
+        help="authenticated source-derived outcome-blind opportunity registry JSON",
+    )
+    baselines_holdout_selection.add_argument(
+        "--pre-holdout-projection",
+        "--pre-holdout-target",
+        dest="pre_holdout_projection",
+        type=Path,
+        required=True,
+        help="authenticated source-to-pre-holdout target projection JSON",
     )
     baselines_holdout_selection.add_argument("--metric-policy", type=Path)
     baselines_holdout_selection.add_argument("--threshold-policy", type=Path)

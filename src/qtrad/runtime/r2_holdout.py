@@ -50,9 +50,11 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutFeatureRow,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
+    R2HoldoutOpportunityRegistry,
     R2HoldoutOutcomeEvidence,
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
+    R2HoldoutTargetProjection,
 )
 from qtrad.domain.r2_readiness import FeatureFamily
 from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
@@ -349,6 +351,54 @@ def _target_dataset_from_payload(
     return dataset
 
 
+def _target_projection_from_selection(
+    selection: R2HoldoutSelectionManifest,
+) -> R2HoldoutTargetProjection:
+    raw = _object_dict(
+        selection.evaluation_policy.get("pre_holdout_projection"),
+        "selection pre-holdout target projection",
+    )
+    try:
+        projection = R2HoldoutTargetProjection.from_json(raw)
+    except (TypeError, KeyError, ValueError) as error:
+        raise ValueError("selection pre-holdout target projection is invalid") from error
+    expected_id = selection.evaluation_policy.get("pre_holdout_projection_id")
+    if projection.projection_id != expected_id:
+        raise ValueError("selection pre-holdout target projection ID differs")
+    if projection.projected_target_dataset_id != selection.evaluation_policy.get(
+        "pre_holdout_target_dataset_id"
+    ):
+        raise ValueError("selection pre-holdout target projection child differs")
+    return projection
+
+
+def _opportunity_registry_from_selection(
+    selection: R2HoldoutSelectionManifest,
+) -> R2HoldoutOpportunityRegistry:
+    raw = _object_dict(
+        selection.evaluation_policy.get("holdout_opportunity_registry_artifact"),
+        "selection holdout opportunity registry",
+    )
+    registry = R2HoldoutOpportunityRegistry.from_json(raw)
+    expected_id = selection.evaluation_policy.get("holdout_opportunity_registry_id")
+    if registry.registry_id != expected_id:
+        raise ValueError("selection opportunity registry ID differs")
+    expected = tuple(
+        (
+            item.opportunity_id,
+            item.target_id,
+            item.instrument_id,
+            item.decision_time,
+            item.target_horizon_seconds,
+            item.disposition,
+        )
+        for item in registry.opportunities
+    )
+    if expected != selection.holdout_opportunity_registry:
+        raise ValueError("selection opportunity registry artifact differs")
+    return registry
+
+
 def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> TargetDataset:
     if set(payload) != _TRAINING_TARGET_FIELDS:
         raise ValueError("training target child has unknown or missing fields")
@@ -486,13 +536,10 @@ def _load_training_children(
     expected_pre_holdout = selection.evaluation_policy.get("pre_holdout_target_dataset_id")
     if not isinstance(expected_pre_holdout, str):
         raise ValueError("selection is missing the authenticated pre-holdout target")
-    frozen_pre_payload = selection.evaluation_policy.get("pre_holdout_target_dataset")
-    if not isinstance(frozen_pre_payload, dict):
-        raise ValueError("selection is missing the frozen pre-holdout target evidence")
-    frozen_pre = _target_dataset_from_payload(
-        cast(Mapping[str, object], frozen_pre_payload),
-        field="selection pre-holdout target",
-    )
+    projection = _target_projection_from_selection(selection)
+    if projection.source_target_dataset_id != expected_source:
+        raise ValueError("selection target projection source differs from the frozen target")
+    frozen_pre = projection.projected_target_dataset
     if frozen_pre.dataset_id != expected_pre_holdout:
         raise ValueError("selection pre-holdout target evidence has the wrong identity")
     targets: dict[str, TargetDataset] = {}
@@ -1197,24 +1244,8 @@ def _replay_holdout_outputs(
         )
         if payload_expected != expected_opportunities:
             raise ValueError("holdout coverage replay differs from the shared opportunity registry")
-    opportunities = tuple(
-        SimpleNamespace(
-            opportunity_id=opportunity_id,
-            target_id=target_id,
-            instrument_id=instrument_id,
-            decision_time=decision_time,
-            target_horizon_seconds=horizon_seconds,
-            disposition=disposition,
-        )
-        for (
-            opportunity_id,
-            target_id,
-            instrument_id,
-            decision_time,
-            horizon_seconds,
-            disposition,
-        ) in selection.holdout_opportunity_registry
-    )
+    opportunity_registry = _opportunity_registry_from_selection(selection)
+    opportunities = opportunity_registry.opportunities
     actual_forecasts = build_holdout_forecasts(
         selection=selection,
         feature_datasets=cast(Any, feature_datasets_by_configuration),
@@ -1837,6 +1868,8 @@ def _reject_orphans(root: Path, allowed: set[str]) -> None:
 
 def _outcome_binding_from_feature_payload(
     feature_payload: Mapping[str, object],
+    *,
+    selection: R2HoldoutSelectionManifest,
 ) -> dict[str, object]:
     raw_range = _object_list(feature_payload["holdout_range"], "feature holdout range")
     if len(raw_range) != 2:
@@ -1858,25 +1891,47 @@ def _outcome_binding_from_feature_payload(
         feature_payload.get("opportunity_target_ids", []),
         "feature opportunity target bindings",
     )
-    bindings = tuple(
-        (str(cast(list[object], item)[0]), str(cast(list[object], item)[1]))
-        for item in raw_bindings
-    )
-    if bindings:
-        expected_target_ids = tuple(sorted(target_id for _opportunity_id, target_id in bindings))
-        row_by_target = {
-            str(cast(Mapping[str, object], raw)["target_id"]): str(
-                cast(Mapping[str, object], raw)["row_id"]
+    bindings: list[tuple[str, str]] = []
+    for item in raw_bindings:
+        if not isinstance(item, list) or len(item) != 2:
+            raise ValueError(
+                "feature opportunity target bindings must be [opportunity_id, target_id]"
             )
-            for raw in raw_rows
-        }
-        source_row_ids = [
-            (target_id, row_by_target.get(target_id, target_id))
-            for target_id in expected_target_ids
-        ]
-    else:
-        source_row_ids = sorted(source_row_ids)
-        expected_target_ids = tuple(target_id for target_id, _ in source_row_ids)
+        bindings.append((str(item[0]), str(item[1])))
+    registry = tuple(
+        sorted(
+            (opportunity_id, target_id, disposition)
+            for (
+                opportunity_id,
+                target_id,
+                _instrument_id,
+                _decision_time,
+                _horizon_seconds,
+                disposition,
+            ) in selection.holdout_opportunity_registry
+        )
+    )
+    expected_bindings = tuple(
+        (opportunity_id, target_id) for opportunity_id, target_id, _ in registry
+    )
+    if tuple(sorted(bindings)) != expected_bindings:
+        raise ValueError("feature opportunity target bindings differ from the frozen registry")
+    expected_target_ids = tuple(
+        sorted(
+            target_id
+            for _opportunity_id, target_id, disposition in registry
+            if disposition.value == "ELIGIBLE"
+        )
+    )
+    row_by_target = {
+        str(cast(Mapping[str, object], raw)["target_id"]): str(
+            cast(Mapping[str, object], raw)["row_id"]
+        )
+        for raw in raw_rows
+    }
+    source_row_ids = [
+        (target_id, row_by_target.get(target_id, target_id)) for target_id in expected_target_ids
+    ]
     if feature_payload.get("target_dataset_id") is not None:
         source_row_ids = [(target_id, target_id) for target_id in expected_target_ids]
     return {
@@ -1988,14 +2043,14 @@ def _validate_target_rows_against_selection(
     expected_target_ids: Sequence[str],
 ) -> None:
     registry = {
-        target_id: (instrument_id, decision_time, horizon_seconds)
+        target_id: (instrument_id, decision_time, horizon_seconds, disposition)
         for (
             _opportunity_id,
             target_id,
             instrument_id,
             decision_time,
             horizon_seconds,
-            _disposition,
+            disposition,
         ) in selection.holdout_opportunity_registry
     }
     primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
@@ -2008,11 +2063,20 @@ def _validate_target_rows_against_selection(
         if row.target_id in rows_by_target:
             raise ValueError("target dataset repeats a primary target identity")
         rows_by_target[row.target_id] = row
-    if set(expected_target_ids) != set(registry):
-        raise ValueError("outcome targets differ from the frozen opportunity registry")
-    for target_id in expected_target_ids:
+    eligible_target_ids = {
+        target_id
+        for target_id, (
+            _instrument_id,
+            _decision_time,
+            _horizon_seconds,
+            disposition,
+        ) in registry.items()
+        if disposition.value == "ELIGIBLE"
+    }
+    if set(expected_target_ids) != eligible_target_ids:
+        raise ValueError("outcome targets differ from the frozen eligible opportunity set")
+    for target_id, expected in registry.items():
         row = rows_by_target.get(target_id)
-        expected = registry.get(target_id)
         if row is None or expected is None:
             raise ValueError("outcome target is absent from the frozen opportunity registry")
         if (
@@ -2152,7 +2216,7 @@ def reveal_holdout(
     error: BaseException | None = None
     try:
         feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
-        binding = _outcome_binding_from_feature_payload(feature_payload)
+        binding = _outcome_binding_from_feature_payload(feature_payload, selection=selection)
         expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
         target_dataset_id = cast(str | None, binding["target_dataset_id"])
         raw_outcomes = outcome_loader()
@@ -2361,7 +2425,7 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
     ):
         raise ValueError("holdout outcome evidence does not bind the exact opened seal")
     feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
-    binding = _outcome_binding_from_feature_payload(feature_payload)
+    binding = _outcome_binding_from_feature_payload(feature_payload, selection=selection)
     expected_target_dataset_id = selection.evaluation_policy.get("target_dataset_id")
     if (
         expected_target_dataset_id is not None
