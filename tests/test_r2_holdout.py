@@ -662,6 +662,77 @@ def test_opportunity_registry_requires_complete_source_coverage_and_round_trips(
         mutated_registry.verify_source(target_source)
 
 
+def test_target_source_preserves_verified_instrument_order() -> None:
+    source = R2HoldoutTargetSource.create_from_target_dataset(
+        _target_dataset(),
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_1", "INSTRUMENT_0"),
+        opportunities=_opportunities(),
+    )
+
+    assert source.target_instruments == ("INSTRUMENT_1", "INSTRUMENT_0")
+    assert R2HoldoutTargetSource.from_json(source.as_json()).target_instruments == (
+        "INSTRUMENT_1",
+        "INSTRUMENT_0",
+    )
+
+
+def test_target_source_rejects_configuration_specific_dispositions() -> None:
+    opportunity = _opportunities()[0]
+    unavailable = HoldoutTargetOpportunity.create(
+        target_id=opportunity.target_id,
+        instrument_id=opportunity.instrument_id,
+        decision_time=opportunity.decision_time,
+        target_horizon_seconds=opportunity.target_horizon_seconds,
+        feature_data_asof=opportunity.feature_data_asof,
+        latest_feature_bar_end=opportunity.latest_feature_bar_end,
+        dependency_start=opportunity.dependency_start,
+        dependency_end=opportunity.dependency_end,
+        disposition=HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE,
+    )
+
+    with pytest.raises(ValueError, match="configuration-specific"):
+        R2HoldoutTargetSource.create_from_target_dataset(
+            _target_dataset(),
+            holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+            primary_horizon_seconds=900,
+            target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+            opportunities=(unavailable, _opportunities()[1]),
+        )
+
+
+def test_holdout_feature_timing_must_match_the_frozen_opportunity() -> None:
+    selection, _question, _configurations = _selection()
+    opportunities = _opportunities()
+    bad = opportunities[0]
+
+    def projection(item: HoldoutTargetOpportunity) -> R2HoldoutFeatureRow:
+        return R2HoldoutFeatureRow.create(
+            opportunity_id=item.opportunity_id,
+            target_id=item.target_id,
+            instrument_id=item.instrument_id,
+            decision_time=item.decision_time,
+            feature_cutoff=item.feature_data_asof + timedelta(seconds=1),
+            latest_feature_bar_end=item.latest_feature_bar_end,
+            feature_schema_id=_id("fixture-schema"),
+            values=(1.0,),
+        )
+
+    with pytest.raises(ValueError, match="timing"):
+        materialise_r2_holdout_features(
+            selection=selection,
+            opportunities=(bad, *opportunities[1:]),
+            feature_schema_id=_id("fixture-schema"),
+            feature_set_id=_training_feature_set_id(),
+            observation_dataset_id=_id("observations"),
+            panel_dataset_id=_id("panel"),
+            target_dataset_id=_target_dataset().dataset_id,
+            projection=projection,
+            allow_disposable_projection=True,
+        )
+
+
 def test_zero_threshold_exact_tie_is_inconclusive(tmp_path: Path) -> None:
     selection, _opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path)
     local = next(

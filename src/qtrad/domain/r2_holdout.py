@@ -1292,7 +1292,7 @@ class R2HoldoutTargetSource:
         _positive_range(self.holdout_range, "holdout target source holdout range")
         if self.primary_horizon_seconds <= 0:
             raise ValueError("holdout target source horizon must be positive")
-        if not self.target_instruments or tuple(sorted(set(self.target_instruments))) != (
+        if not self.target_instruments or len(set(self.target_instruments)) != len(
             self.target_instruments
         ):
             raise ValueError("holdout target source instruments must be unique and ordered")
@@ -1332,6 +1332,13 @@ class R2HoldoutTargetSource:
         if actual_holdout_ids != expected_holdout_ids:
             raise ValueError("holdout target source opportunities are not complete")
         for opportunity in self.opportunities:
+            if opportunity.disposition in {
+                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE,
+                HoldoutOpportunityDisposition.FAILED_CONFIGURATION,
+            }:
+                raise ValueError(
+                    "holdout target source cannot contain configuration-specific dispositions"
+                )
             identity = target_by_id.get(opportunity.target_id)
             if identity is None or not (
                 identity.instrument_id == opportunity.instrument_id
@@ -1370,7 +1377,7 @@ class R2HoldoutTargetSource:
             foundation_configuration_id=source_target_dataset.foundation_configuration_id,
             holdout_range=holdout_range,
             primary_horizon_seconds=primary_horizon_seconds,
-            target_instruments=tuple(sorted(set(target_instruments))),
+            target_instruments=tuple(target_instruments),
             targets=identities,
             pre_holdout_target_dataset=pre_holdout,
             opportunities=tuple(opportunities),
@@ -1380,7 +1387,7 @@ class R2HoldoutTargetSource:
     def create(cls, **values: object) -> R2HoldoutTargetSource:
         raw = dict(values)
         raw.pop("source_id", None)
-        raw["target_instruments"] = tuple(sorted(cast(Sequence[str], raw["target_instruments"])))
+        raw["target_instruments"] = tuple(cast(Sequence[str], raw["target_instruments"]))
         raw["targets"] = tuple(
             sorted(
                 cast(Sequence[R2HoldoutTargetIdentity], raw["targets"]),
@@ -1692,6 +1699,13 @@ class R2HoldoutOpportunityRegistry:
         if len({item.target_id for item in ordered}) != len(ordered):
             raise ValueError("opportunity registry target IDs must be unique")
         for item in ordered:
+            if item.disposition in {
+                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE,
+                HoldoutOpportunityDisposition.FAILED_CONFIGURATION,
+            }:
+                raise ValueError(
+                    "opportunity registry cannot contain configuration-specific dispositions"
+                )
             if item.target_horizon_seconds != self.primary_horizon_seconds:
                 raise ValueError("opportunity registry differs from the primary horizon")
             if not self.holdout_range[0] <= item.decision_time < self.holdout_range[1]:

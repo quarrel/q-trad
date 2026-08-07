@@ -85,6 +85,7 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
@@ -897,6 +898,7 @@ def _payload_identity(payload: Mapping[str, object]) -> str:
         "descriptor_id",
         "scenario_id",
         "ablation_id",
+        "source_id",
     ):
         value = payload.get(key)
         if isinstance(value, str):
@@ -1357,6 +1359,7 @@ def build_oof_bundle(
     run_kind: str = "REPRESENTATIVE",
     replay_inputs: Mapping[str, Path] | None = None,
     representative_profile: str | None = None,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     if run_kind == "REPRESENTATIVE":
@@ -1376,6 +1379,8 @@ def build_oof_bundle(
         clock=clock,
         recompute_rows=run_kind != "SYNTHETIC",
     )
+    if holdout_target_source is not None:
+        holdout_target_source.verify_target_dataset(verified.targets)
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     identities = runtime_identities()
@@ -1705,6 +1710,12 @@ def build_oof_bundle(
     evaluation_refs.append(
         _descriptor_reference(output=output, relative_path=descriptor_path, payload=descriptor)
     )
+    holdout_source_ref: ArtifactReference | None = None
+    if holdout_target_source is not None:
+        source_path = "holdout/target-source.json"
+        source_payload = cast(dict[str, object], holdout_target_source.as_json())
+        children[source_path] = source_payload
+        holdout_source_ref = _child_reference(source_path, source_payload)
     bundle = R2OofBundle.create(
         foundation_bundle_id=verified.bundle.bundle_id,
         experiment_configuration_id=experiment.configuration_id,
@@ -1716,6 +1727,7 @@ def build_oof_bundle(
         forecast_manifests=tuple(forecast_manifest_refs),
         coverage_children=tuple(coverage_refs),
         evaluation_children=tuple(evaluation_refs),
+        holdout_target_source=holdout_source_ref,
     )
     return write_r2_oof_bundle(output, bundle, children)
 

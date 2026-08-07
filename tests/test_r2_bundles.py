@@ -106,6 +106,43 @@ def test_reordered_reference_arrays_replay_to_the_same_identity(tmp_path: Path) 
     assert verify_r2_oof_bundle(manifest_path) == bundle
 
 
+def test_oof_bundle_binds_the_holdout_target_source_child(tmp_path: Path) -> None:
+    base, children = _bundle_and_children()
+    source_id = hashlib.sha256(b"holdout-source").hexdigest()
+    source_contract = "qtrad-r2-holdout-target-source-v1"
+    source_payload: dict[str, object] = {
+        "contract": source_contract,
+        "schema_version": 1,
+        "source_id": source_id,
+    }
+    source_path = "holdout/target-source.json"
+    source_reference = ArtifactReference(
+        source_contract,
+        source_id,
+        source_path,
+        hashlib.sha256(canonical_bytes(source_payload)).hexdigest(),
+    )
+    bundle = R2OofBundle.create(
+        foundation_bundle_id=base.foundation_bundle_id,
+        experiment_configuration_id=base.experiment_configuration_id,
+        source_class=base.source_class,
+        evidence_class=base.evidence_class,
+        feature_children=base.feature_children,
+        preprocessing_children=base.preprocessing_children,
+        fit_children=base.fit_children,
+        forecast_manifests=base.forecast_manifests,
+        coverage_children=base.coverage_children,
+        evaluation_children=base.evaluation_children,
+        holdout_target_source=source_reference,
+    )
+    children[source_path] = source_payload
+
+    manifest_path = write_r2_oof_bundle(tmp_path, bundle, children)
+    verified = verify_r2_oof_bundle(manifest_path)
+
+    assert verified.holdout_target_source == source_reference
+
+
 def test_bundle_rejects_unsafe_paths_and_duplicate_cross_category_children() -> None:
     with pytest.raises(ValueError, match="unsafe path"):
         ArtifactReference("child-v1", "a" * 64, "../child.json", "b" * 64)

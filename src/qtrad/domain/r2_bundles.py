@@ -12,7 +12,7 @@ from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_readiness import EvidenceClass
 
 R2_FORECAST_MANIFEST_CONTRACT = "qtrad-r2-forecast-manifest-v1"
-R2_OOF_BUNDLE_CONTRACT = "qtrad-r2-oof-bundle-v1"
+R2_OOF_BUNDLE_CONTRACT = "qtrad-r2-oof-bundle-v2"
 R2_SOFTWARE_VERIFICATION_CONTRACT = "qtrad-r2-software-verification-v1"
 
 
@@ -194,9 +194,10 @@ class R2OofBundle:
     coverage_children: tuple[ArtifactReference, ...]
     evaluation_children: tuple[ArtifactReference, ...]
     bundle_id: str
+    holdout_target_source: ArtifactReference | None = None
 
     CONTRACT: ClassVar[str] = R2_OOF_BUNDLE_CONTRACT
-    SCHEMA_VERSION: ClassVar[int] = 1
+    SCHEMA_VERSION: ClassVar[int] = 2
 
     def __post_init__(self) -> None:
         for value, field in (
@@ -212,6 +213,7 @@ class R2OofBundle:
             *self.forecast_manifests,
             *self.coverage_children,
             *self.evaluation_children,
+            *((self.holdout_target_source,) if self.holdout_target_source is not None else ()),
         )
         for refs in (
             self.feature_children,
@@ -229,6 +231,10 @@ class R2OofBundle:
             raise ValueError("OOF bundle children must not contain duplicate identities")
         if len({item.path for item in references}) != len(references):
             raise ValueError("OOF bundle children must not contain duplicate paths")
+        if self.holdout_target_source is not None and self.holdout_target_source.contract != (
+            "qtrad-r2-holdout-target-source-v1"
+        ):
+            raise ValueError("OOF holdout target source has an unexpected contract")
         if self.bundle_id != _semantic_id(self.semantic_json()):
             raise ValueError("OOF bundle ID does not authenticate its content")
 
@@ -246,7 +252,7 @@ class R2OofBundle:
             "coverage_children",
             "evaluation_children",
         }
-        if set(values) != expected:
+        if not set(values) <= expected | {"holdout_target_source"} or not expected <= set(values):
             raise ValueError("R2 OOF bundle create arguments are incomplete or unexpected")
         refs: dict[str, tuple[ArtifactReference, ...]] = {
             key: _ordered_refs(tuple(value))
@@ -260,6 +266,11 @@ class R2OofBundle:
             "experiment_configuration_id": values["experiment_configuration_id"],
             "source_class": values["source_class"].value,
             "evidence_class": values["evidence_class"].value,
+            "holdout_target_source": (
+                None
+                if values.get("holdout_target_source") is None
+                else values["holdout_target_source"].as_json()
+            ),
             **{key: [item.as_json() for item in value] for key, value in refs.items()},
         }
         return cls(
@@ -273,6 +284,7 @@ class R2OofBundle:
             forecast_manifests=refs["forecast_manifests"],
             coverage_children=refs["coverage_children"],
             evaluation_children=refs["evaluation_children"],
+            holdout_target_source=values.get("holdout_target_source"),
             bundle_id=_semantic_id(semantic),
         )
 
@@ -294,6 +306,7 @@ class R2OofBundle:
             "forecast_manifests",
             "coverage_children",
             "evaluation_children",
+            "holdout_target_source",
             "bundle_id",
         }
         if set(raw) != expected:
@@ -320,6 +333,11 @@ class R2OofBundle:
             forecast_manifests=references("forecast_manifests"),
             coverage_children=references("coverage_children"),
             evaluation_children=references("evaluation_children"),
+            holdout_target_source=(
+                None
+                if raw["holdout_target_source"] is None
+                else ArtifactReference.from_json(raw["holdout_target_source"])
+            ),
             bundle_id=_string(raw["bundle_id"]),
         )
 
@@ -337,6 +355,9 @@ class R2OofBundle:
             "forecast_manifests": [item.as_json() for item in self.forecast_manifests],
             "coverage_children": [item.as_json() for item in self.coverage_children],
             "evaluation_children": [item.as_json() for item in self.evaluation_children],
+            "holdout_target_source": (
+                None if self.holdout_target_source is None else self.holdout_target_source.as_json()
+            ),
         }
 
     def as_json(self) -> dict[str, JsonValue]:

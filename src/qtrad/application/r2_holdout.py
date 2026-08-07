@@ -370,6 +370,15 @@ def freeze_holdout_selection(
             raise ValueError("foundation ID differs from the verified OOF bundle")
         if oof_bundle_id != verified_oof_bundle.bundle_id:
             raise ValueError("OOF ID differs from the verified OOF bundle")
+        source_reference = verified_oof_bundle.holdout_target_source
+        if (
+            source_reference is None
+            or source_reference.contract != R2HoldoutTargetSource.CONTRACT
+            or source_reference.semantic_id != holdout_target_source.source_id
+        ):
+            raise ValueError(
+                "holdout target source is not the independently authenticated OOF child"
+            )
         if (
             prior_selection.foundation_bundle_id is not None
             and prior_selection.foundation_bundle_id != verified_oof_bundle.foundation_bundle_id
@@ -680,6 +689,11 @@ def _authenticated_holdout_rows(
         if raw is None or any(item.value is None for item in raw.values):
             result[opportunity.opportunity_id] = None
             continue
+        if (
+            raw.feature_data_asof != opportunity.feature_data_asof
+            or raw.latest_feature_bar_end != opportunity.latest_feature_bar_end
+        ):
+            raise ValueError("authenticated feature timing differs from the holdout opportunity")
         result[opportunity.opportunity_id] = R2HoldoutFeatureRow.create(
             opportunity_id=opportunity.opportunity_id,
             target_id=target.target_id,
@@ -791,6 +805,11 @@ def materialise_r2_holdout_features(
             or row.decision_time != opportunity.decision_time
         ):
             raise ValueError("outcome-blind feature projection changed opportunity identity")
+        if (
+            row.feature_cutoff != opportunity.feature_data_asof
+            or row.latest_feature_bar_end != opportunity.latest_feature_bar_end
+        ):
+            raise ValueError("feature timing differs from the holdout opportunity")
         if row.feature_schema_id != feature_schema_id:
             raise ValueError("feature projection returned an unexpected schema")
         rows.append(row)

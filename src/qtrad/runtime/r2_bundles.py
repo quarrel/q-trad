@@ -195,10 +195,14 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         "forecast_manifests",
         "coverage_children",
         "evaluation_children",
+        "holdout_target_source",
         "bundle_id",
     }:
         raise ValueError("R2 OOF bundle has unknown or missing fields")
-    if payload["contract"] != R2OofBundle.CONTRACT or payload["schema_version"] != 1:
+    if (
+        payload["contract"] != R2OofBundle.CONTRACT
+        or payload["schema_version"] != R2OofBundle.SCHEMA_VERSION
+    ):
         raise ValueError("R2 OOF bundle contract is unsupported")
     refs = {
         key: _references(payload[key])
@@ -218,9 +222,18 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         evidence_class=_evidence(payload["evidence_class"]),
         **refs,
         bundle_id=_text(payload["bundle_id"]),
+        holdout_target_source=(
+            None
+            if payload["holdout_target_source"] is None
+            else ArtifactReference.from_json(payload["holdout_target_source"])
+        ),
     )
     all_refs = _all_oof_references(bundle)
-    canonical = any(reference.contract.startswith("qtrad-r2-") for reference in all_refs)
+    canonical = any(
+        reference.contract.startswith("qtrad-r2-")
+        and reference.contract != "qtrad-r2-holdout-target-source-v1"
+        for reference in all_refs
+    )
     register_refs = [
         reference
         for reference in bundle.evaluation_children
@@ -364,6 +377,7 @@ def _all_oof_references(bundle: R2OofBundle) -> tuple[ArtifactReference, ...]:
         *bundle.forecast_manifests,
         *bundle.coverage_children,
         *bundle.evaluation_children,
+        *((bundle.holdout_target_source,) if bundle.holdout_target_source is not None else ()),
     )
 
 
@@ -462,6 +476,7 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
                 "descriptor_id",
                 "scenario_id",
                 "ablation_id",
+                "source_id",
             )
             if key in payload
         ),
@@ -492,6 +507,7 @@ def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> 
         if (
             isinstance(contract, str)
             and contract.startswith("qtrad-r2-")
+            and contract != "qtrad-r2-holdout-target-source-v1"
             and (source is None or evidence is None)
         ):
             raise ValueError("R2 child must declare source and evidence class")

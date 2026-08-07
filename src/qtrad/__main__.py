@@ -886,6 +886,12 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_oof_build.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_oof_build.add_argument("--experiment", type=Path, required=True)
     baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
+    baselines_oof_build.add_argument(
+        "--holdout-target-source",
+        type=Path,
+        required=False,
+        help="authenticated outcome-blind target source to bind into the OOF closure",
+    )
     baselines_oof_build.add_argument("--output", type=Path, required=True)
     baselines_oof_verify = baselines_sub.add_parser(
         "oof-verify", help="independently verify an R2 OOF bundle"
@@ -1622,6 +1628,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 experiment_path=args.experiment,
                 feature_arguments=args.feature_manifest,
                 output_path=args.output,
+                holdout_target_source_path=args.holdout_target_source,
             )
         )
     elif (
@@ -1901,7 +1908,10 @@ async def _build_r2_oof(
     experiment_path: Path,
     feature_arguments: list[str],
     output_path: Path,
+    holdout_target_source_path: Path | None,
 ) -> None:
+    from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+
     experiment, feature_paths = load_experiment_and_feature_paths(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
@@ -1911,6 +1921,11 @@ async def _build_r2_oof(
         clock,
         foundation_bundle_path=foundation_bundle_path,
         experiment=experiment,
+    )
+    holdout_target_source = (
+        None
+        if holdout_target_source_path is None
+        else R2HoldoutTargetSource.from_json(_load_holdout_cli_object(holdout_target_source_path))
     )
     manifest = build_oof_bundle(
         verified=cast(R1FoundationBindings, verified),
@@ -1929,6 +1944,7 @@ async def _build_r2_oof(
             "experiment": experiment_path,
             **feature_paths,
         },
+        holdout_target_source=holdout_target_source,
     )
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))
 
