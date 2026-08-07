@@ -927,7 +927,13 @@ def fit_final_ridge(
                 training_feature_dataset_id,
                 manifest,
             )
-            for configuration, family, feature_set, training_feature_dataset_id, manifest in selection.configuration_registry
+            for (
+                configuration,
+                family,
+                feature_set,
+                training_feature_dataset_id,
+                manifest,
+            ) in selection.configuration_registry
             if configuration == configuration_id
         ),
         None,
@@ -1359,7 +1365,13 @@ def _feature_dataset_by_configuration(
     registry_entries = selection.configuration_registry
     registry = {
         configuration_id: (model_family, feature_set_id)
-        for configuration_id, model_family, feature_set_id, _feature_dataset_id, _manifest_id in registry_entries
+        for (
+            configuration_id,
+            model_family,
+            feature_set_id,
+            _feature_dataset_id,
+            _manifest_id,
+        ) in registry_entries
     }
     configurations = tuple(
         selection.holdout_configuration_ids
