@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import shutil
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -36,6 +38,7 @@ from qtrad.domain.r2_holdout import (
 )
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
 from qtrad.runtime.r2_holdout import (
+    prepare_holdout_from_files,
     reveal_holdout,
     verify_holdout_bundle,
     verify_holdout_markers,
@@ -162,7 +165,11 @@ def _opportunities() -> tuple[HoldoutTargetOpportunity, ...]:
     return tuple(result)
 
 
-def _prepared(tmp_path: Path):
+def _prepared(
+    tmp_path: Path,
+    *,
+    forced_failure_configuration: str | None = None,
+):
     selection, _question, configurations = _selection()
     opportunities = _opportunities()
     feature_schema_id = _id("feature-schema")
@@ -192,6 +199,7 @@ def _prepared(tmp_path: Path):
             target_available_at=NOW - timedelta(days=1),
             features=(float(index), 1.0),
             target=float(index) / 10,
+            target_end_time=NOW - timedelta(days=1),
         )
         for index in range(4)
     )
@@ -204,6 +212,16 @@ def _prepared(tmp_path: Path):
             feature_schema_id=feature_schema_id,
             training_rows=training_rows,
             policy=selection.final_fitting_policy,
+            forced_disposition=(
+                FinalFitDisposition.NUMERICAL_FAILURE
+                if forced_failure_configuration == configuration_id
+                else None
+            ),
+            forced_failure_reason=(
+                "fixture forced replay failure"
+                if forced_failure_configuration == configuration_id
+                else None
+            ),
         )
         for configuration_id, model_family in (
             (configurations[0], ModelFamily.ZERO_RETURN),
@@ -324,6 +342,17 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
     assert consumed.evaluation_id == evaluation.evaluation_id
 
 
+def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> None:
+    _prepared(tmp_path / "source")
+    first = tmp_path / "first"
+    second = tmp_path / "second"
+    prepare_holdout_from_files(tmp_path / "source", first)
+    with pytest.raises(FileExistsError, match="claimed"):
+        prepare_holdout_from_files(tmp_path / "source", second)
+    with pytest.raises(FileExistsError, match="claimed"):
+        prepare_holdout_from_files(first, second)
+
+
 def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path) -> None:
     selection, _, _, _, _, seal = _prepared(tmp_path)
     with pytest.raises(RuntimeError, match="fixture outcome failure"):
@@ -354,6 +383,130 @@ def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path)
             outcome_loader=lambda: {},
             evaluator=lambda outcomes, opened: _unexpected_evaluator("second reveal must not load"),
         )
+
+
+def test_preparation_replays_a_forced_failed_fit(tmp_path: Path) -> None:
+    _selection_value, _opportunities_value, fits, _forecasts, _coverage, _seal = _prepared(
+        tmp_path,
+        forced_failure_configuration=_id("local"),
+    )
+    assert any(item.disposition is FinalFitDisposition.NUMERICAL_FAILURE for item in fits)
+    assert verify_holdout_preparation(tmp_path).state.value == "PREPARED_UNOPENED"
+
+
+def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path) -> None:
+    selection, _opportunities_value, fits, forecasts, coverage, _seal = _prepared(tmp_path)
+    with pytest.raises(ValueError, match="exactly cover frozen configurations"):
+        seal_holdout_forecasts(
+            selection=selection,
+            feature_dataset=materialise_r2_holdout_features(
+                selection=selection,
+                opportunities=_opportunities(),
+                feature_schema_id=_id("feature-schema"),
+                feature_set_id=_id("feature-set"),
+                observation_dataset_id=_id("observations"),
+                panel_dataset_id=_id("panel"),
+                projection=lambda item: R2HoldoutFeatureRow.create(
+                    opportunity_id=item.opportunity_id,
+                    target_id=item.target_id,
+                    instrument_id=item.instrument_id,
+                    decision_time=item.decision_time,
+                    feature_cutoff=item.feature_data_asof,
+                    latest_feature_bar_end=item.latest_feature_bar_end,
+                    feature_schema_id=_id("feature-schema"),
+                    values=(1.0, 0.5),
+                ),
+            ),
+            final_fits=fits[:1],
+            forecast_datasets=forecasts[:1],
+            coverage_datasets=coverage[:1],
+            metric_policy={"metric": "MSE"},
+            comparison_support={"rule": "COMMON_ELIGIBLE"},
+            forecast_buckets={"source": "TRAINING_ONLY"},
+            state_buckets={"source": "TRAINING_ONLY"},
+            coverage_rules={"minimum": 1.0},
+            prepared_at=NOW,
+            prepared_by="test",
+        )
+
+
+def test_mutated_training_evidence_is_rejected(tmp_path: Path) -> None:
+    (
+        _selection_value,
+        _opportunities_value,
+        _fits,
+        _forecasts,
+        _coverage,
+        _seal,
+    ) = _prepared(tmp_path)
+    fit_path = next((tmp_path / "fits").iterdir())
+    payload = json.loads(fit_path.read_text())
+    payload["preprocessing"]["training_rows"][0]["target"] = 99.0
+    fit_path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="identity"):
+        verify_holdout_preparation(tmp_path)
+
+
+def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
+    tmp_path: Path,
+) -> None:
+    selection, _opportunities, _fits, _forecasts, _coverage, seal = _prepared(tmp_path / "source")
+    first = tmp_path / "first"
+    prepare_holdout_from_files(tmp_path / "source", first)
+    with pytest.raises(RuntimeError, match="stop"):
+        reveal_holdout(
+            first,
+            expected_selection_manifest_id=selection.manifest_id,
+            expected_seal_id=seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="test",
+            consumed_by="test",
+            opened_at=NOW,
+            consumed_at=NOW + timedelta(seconds=1),
+            outcome_loader=lambda: (_ for _ in ()).throw(RuntimeError("stop")),
+            evaluator=lambda outcomes, opened: _unexpected_evaluator("must not evaluate"),
+        )
+    stripped = tmp_path / "stripped"
+    stripped.mkdir()
+    lifecycle_files = {
+        ".preparation-source-claim.json",
+        "opened.json",
+        "consumed.json",
+        "outcome-evidence.json",
+        "evaluation.json",
+    }
+    for child in first.iterdir():
+        if child.name in lifecycle_files:
+            continue
+        target = stripped / child.name
+        if child.is_dir():
+            shutil.copytree(child, target)
+        else:
+            shutil.copy2(child, target)
+    with pytest.raises(FileExistsError, match="claimed"):
+        prepare_holdout_from_files(stripped, tmp_path / "reopened")
+
+
+def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None:
+    selection, opportunities, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
+    with pytest.raises(ValueError, match="duplicate"):
+        reveal_holdout(
+            tmp_path,
+            expected_selection_manifest_id=selection.manifest_id,
+            expected_seal_id=seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="test",
+            consumed_by="test",
+            opened_at=NOW,
+            consumed_at=NOW + timedelta(seconds=1),
+            outcome_loader=lambda: [
+                (opportunities[0].target_id, 0.1),
+                (opportunities[0].target_id, 0.2),
+                (opportunities[1].target_id, 0.3),
+            ],
+            evaluator=lambda outcomes, opened: _unexpected_evaluator("must not evaluate"),
+        )
+    assert (tmp_path / "consumed.json").is_file()
 
 
 def test_failed_configuration_and_unavailable_feature_remain_explicit() -> None:

@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Callable, Mapping, Sequence
 from datetime import datetime
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import cast
+from typing import Any, cast
 
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import ArtifactReference
@@ -31,6 +32,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutConsumedMarker,
     R2HoldoutEvaluation,
     R2HoldoutFeatureDataset,
+    R2HoldoutFeatureRow,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
     R2HoldoutOutcomeEvidence,
@@ -138,6 +140,14 @@ def _int_value(value: object, field: str) -> int:
 
 def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     atomic_create(path, canonical_bytes(payload))
+
+
+def _replace_json(path: Path, payload: Mapping[str, object]) -> None:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"expected a regular claim file: {path}")
+    temporary = path.with_name(f".{path.name}.next")
+    _write_json(temporary, payload)
+    os.replace(temporary, path)
 
 
 _SELECTION_FIELDS = {
@@ -304,6 +314,12 @@ _OUTCOME_EVIDENCE_FIELDS = {
     "selection_manifest_id",
     "seal_id",
     "opened_marker_id",
+    "experiment_configuration_id",
+    "foundation_bundle_id",
+    "feature_dataset_id",
+    "holdout_range",
+    "expected_target_ids",
+    "source_row_ids",
     "outcomes",
     "source_class",
     "evidence_class",
@@ -322,6 +338,28 @@ _EVALUATION_FIELDS = {
     "holdout_scope",
     "holdout_outcomes_accessed",
     "evaluation_id",
+}
+
+_PREPARATION_CLAIM_FILE = ".preparation-claim.json"
+_PREPARATION_USAGE_FILE = ".preparation-source-claim.json"
+_PREPARATION_CLAIM_CONTRACT = "qtrad-r2-holdout-preparation-claim-v1"
+_PREPARATION_USAGE_CONTRACT = "qtrad-r2-holdout-preparation-usage-v1"
+
+_PREPARATION_CLAIM_FIELDS = {
+    "contract",
+    "schema_version",
+    "selection_manifest_id",
+    "seal_id",
+    "state",
+    "claim_id",
+}
+_PREPARATION_USAGE_FIELDS = {
+    "contract",
+    "schema_version",
+    "selection_manifest_id",
+    "seal_id",
+    "claim_id",
+    "usage_id",
 }
 
 
@@ -344,18 +382,94 @@ def verify_holdout_selection(path: Path) -> R2HoldoutSelectionManifest:
     return R2HoldoutSelectionManifest.from_json(payload)
 
 
+def _preparation_claim(
+    selection_manifest_id: str,
+    seal_id: str,
+    *,
+    state: str = "AVAILABLE",
+) -> dict[str, object]:
+    semantic = {
+        "contract": _PREPARATION_CLAIM_CONTRACT,
+        "schema_version": 1,
+        "selection_manifest_id": selection_manifest_id,
+        "seal_id": seal_id,
+        "state": state,
+    }
+    return {
+        **semantic,
+        "claim_id": _semantic_id(semantic, "claim_id"),
+    }
+
+
+def _preparation_usage(
+    selection_manifest_id: str,
+    seal_id: str,
+    claim_id: str,
+) -> dict[str, object]:
+    semantic = {
+        "contract": _PREPARATION_USAGE_CONTRACT,
+        "schema_version": 1,
+        "selection_manifest_id": selection_manifest_id,
+        "seal_id": seal_id,
+        "claim_id": claim_id,
+    }
+    return {
+        **semantic,
+        "usage_id": _semantic_id(semantic, "usage_id"),
+    }
+
+
+def _claim_preparation(
+    root: Path,
+    selection_manifest_id: str,
+    seal_id: str,
+) -> None:
+    claim_path = root / _PREPARATION_CLAIM_FILE
+    current = _load_object(claim_path)
+    available = _preparation_claim(
+        selection_manifest_id,
+        seal_id,
+        state="AVAILABLE",
+    )
+    claimed = _preparation_claim(
+        selection_manifest_id,
+        seal_id,
+        state="CLAIMED",
+    )
+    if current == available:
+        _replace_json(claim_path, claimed)
+    elif current != claimed:
+        raise ValueError("preparation claim does not bind the exact seal")
+
+
 def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[str, object]) -> None:
-    if payload.get("disposition") != "READY":
-        return
     from qtrad.application.r2_holdout import FinalTrainingRow, fit_final_ridge
+    from qtrad.domain.r2_holdout import FinalFitDisposition
     from qtrad.domain.r2_readiness import ModelFamily
 
+    disposition = str(payload.get("disposition"))
+    try:
+        FinalFitDisposition(disposition)
+    except ValueError as exc:
+        raise ValueError("final fit has an unsupported disposition") from exc
     preprocessing = payload.get("preprocessing")
     if not isinstance(preprocessing, Mapping):
-        raise ValueError("ready final fit preprocessing evidence must be an object")
+        raise ValueError("final fit preprocessing evidence must be an object")
+    expected_lineage = {
+        "selection_manifest_id": selection.manifest_id,
+        "experiment_configuration_id": selection.experiment_configuration_id,
+        "foundation_bundle_id": selection.foundation_bundle_id,
+        "configuration_id": str(payload["configuration_id"]),
+        "model_family": str(payload["model_family"]),
+        "feature_dataset_id": str(payload["feature_dataset_id"]),
+        "feature_schema_id": str(payload["feature_schema_id"]),
+    }
+    for key, expected in expected_lineage.items():
+        if preprocessing.get(key) != expected:
+            raise ValueError(f"final fit training evidence is not bound to {key}")
     raw_rows = preprocessing.get("training_rows")
     if not isinstance(raw_rows, list):
-        raise ValueError("ready final fit is missing persisted training-row evidence")
+        raise ValueError("final fit is missing persisted training-row evidence")
     rows = tuple(
         FinalTrainingRow(
             target_id=str(raw["target_id"]),
@@ -371,6 +485,12 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         )
         for raw in (cast(Mapping[str, object], item) for item in raw_rows)
     )
+    failure_mode = preprocessing.get("failure_mode")
+    forced_fit_disposition: FinalFitDisposition | None = None
+    if failure_mode is not None:
+        if failure_mode != "FORCED_FIXTURE":
+            raise ValueError("final fit has an unsupported failure mode")
+        forced_fit_disposition = FinalFitDisposition(disposition)
     replayed = fit_final_ridge(
         selection=selection,
         configuration_id=str(payload["configuration_id"]),
@@ -391,9 +511,230 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         purged_target_ids=tuple(
             str(item) for item in cast(list[object], payload["purged_target_ids"])
         ),
+        forced_disposition=forced_fit_disposition,
+        forced_failure_reason=(
+            str(payload["failure_reason"]) if forced_fit_disposition is not None else None
+        ),
     )
     if replayed.as_json() != dict(payload):
         raise ValueError("final fit does not replay from its authenticated training evidence")
+
+
+def _feature_dataset_from_payload(payload: Mapping[str, object]) -> R2HoldoutFeatureDataset:
+    raw_range = cast(list[object], payload["holdout_range"])
+    if len(raw_range) != 2:
+        raise ValueError("holdout feature range must contain exactly two timestamps")
+    raw_rows = _object_list(payload["rows"], "holdout feature rows")
+    rows = tuple(
+        R2HoldoutFeatureRow(
+            opportunity_id=str(raw["opportunity_id"]),
+            target_id=str(raw["target_id"]),
+            instrument_id=str(raw["instrument_id"]),
+            decision_time=datetime.fromisoformat(str(raw["decision_time"])),
+            feature_cutoff=datetime.fromisoformat(str(raw["feature_cutoff"])),
+            latest_feature_bar_end=datetime.fromisoformat(str(raw["latest_feature_bar_end"])),
+            feature_schema_id=str(raw["feature_schema_id"]),
+            values=tuple(
+                float(cast(float | int | str, item)) for item in cast(list[object], raw["values"])
+            ),
+            row_id=str(raw["row_id"]),
+        )
+        for raw in (cast(Mapping[str, object], item) for item in raw_rows)
+    )
+    return R2HoldoutFeatureDataset(
+        selection_manifest_id=str(payload["selection_manifest_id"]),
+        experiment_configuration_id=str(payload["experiment_configuration_id"]),
+        foundation_bundle_id=str(payload["foundation_bundle_id"]),
+        observation_dataset_id=str(payload["observation_dataset_id"]),
+        panel_dataset_id=str(payload["panel_dataset_id"]),
+        feature_schema_id=str(payload["feature_schema_id"]),
+        feature_set_id=str(payload["feature_set_id"]),
+        source_class=MarketDataSourceClass(str(payload["source_class"])),
+        evidence_class=EvidenceClass(str(payload["evidence_class"])),
+        holdout_scope=HoldoutScope(str(payload["holdout_scope"])),
+        holdout_range=(
+            datetime.fromisoformat(str(raw_range[0])),
+            datetime.fromisoformat(str(raw_range[1])),
+        ),
+        expected_opportunity_ids=tuple(
+            str(item) for item in cast(list[object], payload["expected_opportunity_ids"])
+        ),
+        unavailable_opportunity_ids=tuple(
+            str(item) for item in cast(list[object], payload["unavailable_opportunity_ids"])
+        ),
+        rows=rows,
+        outcome_blind_projection=str(payload["outcome_blind_projection"]),
+        holdout_outcomes_accessed=payload["holdout_outcomes_accessed"] is True,
+        dataset_id=str(payload["dataset_id"]),
+    )
+
+
+def _replay_holdout_outputs(
+    selection: R2HoldoutSelectionManifest,
+    feature_payload: Mapping[str, object],
+    fit_payloads: Sequence[Mapping[str, object]],
+    forecast_payloads: Sequence[Mapping[str, object]],
+    coverage_payloads: Sequence[Mapping[str, object]],
+) -> None:
+    from types import SimpleNamespace
+
+    from qtrad.application.r2_holdout import (
+        build_holdout_coverage,
+        build_holdout_forecasts,
+    )
+    from qtrad.domain.r2_holdout import (
+        FinalFitDisposition,
+        HoldoutOpportunityDisposition,
+    )
+    from qtrad.domain.r2_readiness import ModelFamily
+
+    feature_dataset = _feature_dataset_from_payload(feature_payload)
+    fits = tuple(
+        SimpleNamespace(
+            selection_manifest_id=str(item["selection_manifest_id"]),
+            configuration_id=str(item["configuration_id"]),
+            model_family=ModelFamily(str(item["model_family"])),
+            feature_dataset_id=str(item["feature_dataset_id"]),
+            fit_id=str(item["fit_id"]),
+            disposition=FinalFitDisposition(str(item["disposition"])),
+            preprocessing=cast(Mapping[str, object], item["preprocessing"]),
+            coefficients=(
+                None
+                if item.get("coefficients") is None
+                else tuple(
+                    float(cast(float | int | str, value))
+                    for value in cast(list[object], item["coefficients"])
+                )
+            ),
+            intercept=(
+                None
+                if item.get("intercept") is None
+                else float(cast(float | int | str, item["intercept"]))
+            ),
+        )
+        for item in fit_payloads
+    )
+    actual_forecasts = build_holdout_forecasts(
+        selection=selection,
+        feature_dataset=cast(Any, feature_dataset),
+        final_fits=cast(Any, fits),
+    )
+    forecasts_by_id = {item.dataset_id: item for item in actual_forecasts}
+    for payload in forecast_payloads:
+        dataset_id = str(payload["dataset_id"])
+        actual = forecasts_by_id.get(dataset_id)
+        if actual is None or actual.as_json() != dict(payload):
+            raise ValueError(f"holdout forecast does not replay: {dataset_id}")
+    if set(forecasts_by_id) != {str(item["dataset_id"]) for item in forecast_payloads}:
+        raise ValueError("holdout forecast replay set differs from persisted children")
+
+    unavailable = set(feature_dataset.unavailable_opportunity_ids)
+    opportunities = tuple(
+        SimpleNamespace(
+            opportunity_id=opportunity_id,
+            disposition=(
+                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
+                if opportunity_id in unavailable
+                else HoldoutOpportunityDisposition.ELIGIBLE
+            ),
+        )
+        for opportunity_id in feature_dataset.expected_opportunity_ids
+    )
+    forecasts_by_configuration = {item.configuration_id: item for item in actual_forecasts}
+    actual_coverage = {
+        item.coverage_id: item
+        for item in (
+            build_holdout_coverage(
+                selection=selection,
+                feature_dataset=cast(Any, feature_dataset),
+                final_fit=cast(Any, fit),
+                forecast_dataset=forecasts_by_configuration[fit.configuration_id],
+                opportunities=cast(Any, opportunities),
+            )
+            for fit in fits
+        )
+    }
+    for payload in coverage_payloads:
+        coverage_id = str(payload["coverage_id"])
+        actual = actual_coverage.get(coverage_id)
+        if actual is None or actual.as_json() != dict(payload):
+            raise ValueError(f"holdout coverage does not replay: {coverage_id}")
+    if set(actual_coverage) != {str(item["coverage_id"]) for item in coverage_payloads}:
+        raise ValueError("holdout coverage replay set differs from persisted children")
+
+
+def _verify_seal_registry(
+    selection: R2HoldoutSelectionManifest,
+    seal: R2HoldoutForecastSeal,
+    fit_payloads: Sequence[Mapping[str, object]],
+    forecast_payloads: Sequence[Mapping[str, object]],
+    coverage_payloads: Sequence[Mapping[str, object]],
+) -> None:
+    expected_configurations = set(selection.holdout_configuration_ids)
+    declared_families = {
+        getattr(family, "value", str(family)) for family in selection.comparator_families
+    }
+    expected_pairs = tuple(
+        sorted(
+            (question.candidate_configuration_id, question.comparator_configuration_id)
+            for question in selection.questions
+        )
+    )
+    if tuple(sorted(seal.configuration_pairs)) != expected_pairs or len(
+        seal.configuration_pairs
+    ) != len(set(seal.configuration_pairs)):
+        raise ValueError("holdout configuration-pair registry differs from selection questions")
+    fits_by_configuration: dict[str, Mapping[str, object]] = {}
+    for payload in fit_payloads:
+        configuration_id = str(payload["configuration_id"])
+        if configuration_id in fits_by_configuration:
+            raise ValueError("holdout seal contains duplicate final-fit configurations")
+        if (
+            payload["selection_manifest_id"] != seal.selection_manifest_id
+            or payload["feature_dataset_id"] != seal.feature_dataset_id
+            or configuration_id not in expected_configurations
+            or str(payload["model_family"]) not in declared_families
+        ):
+            raise ValueError("final-fit registry does not reconcile to the frozen selection")
+        fits_by_configuration[configuration_id] = payload
+    forecasts_by_configuration: dict[str, Mapping[str, object]] = {}
+    for payload in forecast_payloads:
+        configuration_id = str(payload["configuration_id"])
+        if configuration_id in forecasts_by_configuration:
+            raise ValueError("holdout seal contains duplicate forecast configurations")
+        fit = fits_by_configuration.get(configuration_id)
+        if (
+            fit is None
+            or payload["selection_manifest_id"] != seal.selection_manifest_id
+            or payload["feature_dataset_id"] != seal.feature_dataset_id
+            or payload["final_fit_id"] != fit["fit_id"]
+        ):
+            raise ValueError("forecast registry does not reconcile to the final-fit registry")
+        raw_rows = _object_list(payload["rows"], "holdout forecast rows")
+        for raw_row in raw_rows:
+            row = _object_dict(raw_row, "holdout forecast row")
+            if row.get("model_family") != fit["model_family"]:
+                raise ValueError("forecast row model family differs from its final fit")
+        forecasts_by_configuration[configuration_id] = payload
+    coverage_by_configuration: dict[str, Mapping[str, object]] = {}
+    for payload in coverage_payloads:
+        configuration_id = str(payload["configuration_id"])
+        if configuration_id in coverage_by_configuration:
+            raise ValueError("holdout seal contains duplicate coverage configurations")
+        if (
+            configuration_id not in fits_by_configuration
+            or payload["selection_manifest_id"] != seal.selection_manifest_id
+            or payload["feature_dataset_id"] != seal.feature_dataset_id
+        ):
+            raise ValueError("coverage registry does not reconcile to the final-fit registry")
+        coverage_by_configuration[configuration_id] = payload
+    for registry, name in (
+        (fits_by_configuration, "final-fit"),
+        (forecasts_by_configuration, "forecast"),
+        (coverage_by_configuration, "coverage"),
+    ):
+        if set(registry) != expected_configurations:
+            raise ValueError(f"{name} registry does not exactly cover frozen configurations")
 
 
 def _verify_prepare_children(
@@ -414,6 +755,9 @@ def _verify_prepare_children(
     expected_fits: set[str] = set()
     expected_forecasts: set[str] = set()
     expected_coverage: set[str] = set()
+    fit_payloads: list[Mapping[str, object]] = []
+    forecast_payloads: list[Mapping[str, object]] = []
+    coverage_payloads: list[Mapping[str, object]] = []
     for fit_id in seal.final_fit_ids:
         payload = _verify_child(
             root,
@@ -424,6 +768,7 @@ def _verify_prepare_children(
             expected_id=fit_id,
         )
         expected_fits.add(str(payload["fit_id"]))
+        fit_payloads.append(payload)
         _replay_final_fit(selection, payload)
         if payload["selection_manifest_id"] != seal.selection_manifest_id:
             raise ValueError("final fit is bound to a different selection")
@@ -437,6 +782,7 @@ def _verify_prepare_children(
             expected_id=dataset_id,
         )
         expected_forecasts.add(str(payload["dataset_id"]))
+        forecast_payloads.append(payload)
         if (
             payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != seal.feature_dataset_id
@@ -452,11 +798,26 @@ def _verify_prepare_children(
             expected_id=coverage_id,
         )
         expected_coverage.add(str(payload["coverage_id"]))
+        coverage_payloads.append(payload)
         if (
             payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != seal.feature_dataset_id
         ):
             raise ValueError("holdout coverage lineage differs from its seal")
+    _verify_seal_registry(
+        selection,
+        seal,
+        fit_payloads,
+        forecast_payloads,
+        coverage_payloads,
+    )
+    _replay_holdout_outputs(
+        selection,
+        feature,
+        fit_payloads,
+        forecast_payloads,
+        coverage_payloads,
+    )
     if expected_fits != set(seal.final_fit_ids):
         raise ValueError("holdout final-fit children do not reconcile to the seal")
     if expected_forecasts != set(seal.forecast_dataset_ids):
@@ -488,6 +849,14 @@ def write_holdout_preparation(
         raise ValueError("forecast arguments do not exactly match the seal")
     if set(coverage) != set(seal.coverage_ids):
         raise ValueError("coverage arguments do not exactly match the seal")
+    _write_json(
+        output / _PREPARATION_CLAIM_FILE,
+        _preparation_claim(
+            selection.manifest_id,
+            seal.seal_id,
+            state="AVAILABLE",
+        ),
+    )
     selection_path = output / "selection.json"
     if selection_path.exists() or selection_path.is_symlink():
         existing = verify_holdout_selection(selection_path)
@@ -529,7 +898,46 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     seal = R2HoldoutForecastSeal.from_json(seal_payload)
     selection = verify_holdout_selection(path / "selection.json")
     _verify_prepare_children(path, seal, selection)
-    allowed = {"manifest.json", "selection.json", "features.json"}
+    claim_payload = _verify_child(
+        path,
+        _PREPARATION_CLAIM_FILE,
+        contract=_PREPARATION_CLAIM_CONTRACT,
+        identity_key="claim_id",
+        expected_fields=_PREPARATION_CLAIM_FIELDS,
+    )
+    if (
+        claim_payload.get("selection_manifest_id") != selection.manifest_id
+        or claim_payload.get("seal_id") != seal.seal_id
+    ):
+        raise ValueError("preparation claim does not bind the exact seal")
+    claim_state = claim_payload.get("state")
+    if claim_state not in {"AVAILABLE", "CLAIMED"}:
+        raise ValueError("preparation claim has an unsupported state")
+    allowed = {
+        "manifest.json",
+        "selection.json",
+        "features.json",
+        _PREPARATION_CLAIM_FILE,
+    }
+    usage_path = path / _PREPARATION_USAGE_FILE
+    if usage_path.is_file():
+        usage_payload = _verify_child(
+            path,
+            _PREPARATION_USAGE_FILE,
+            contract=_PREPARATION_USAGE_CONTRACT,
+            identity_key="usage_id",
+            expected_fields=_PREPARATION_USAGE_FIELDS,
+        )
+        expected_usage = _preparation_usage(
+            selection.manifest_id,
+            seal.seal_id,
+            str(claim_payload["claim_id"]),
+        )
+        if claim_state != "CLAIMED" or usage_payload != expected_usage:
+            raise ValueError("preparation usage does not bind the claimed source")
+        allowed.add(_PREPARATION_USAGE_FILE)
+    elif usage_path.exists() or usage_path.is_symlink():
+        raise ValueError("preparation usage must be a regular file")
     allowed.update(f"fits/{fit_id}.json" for fit_id in seal.final_fit_ids)
     allowed.update(f"forecasts/{dataset_id}.json" for dataset_id in seal.forecast_dataset_ids)
     allowed.update(f"coverage/{coverage_id}.json" for coverage_id in seal.coverage_ids)
@@ -551,7 +959,7 @@ def prepare_holdout_from_files(
     *,
     expected_selection_manifest_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
-    """Copy and independently verify an outcome-blind preparation into a new root."""
+    """Copy one disposable preparation exactly once into a fresh root."""
     source_seal = verify_holdout_preparation(source)
     source_selection = verify_holdout_selection(source / "selection.json")
     if (
@@ -561,7 +969,42 @@ def prepare_holdout_from_files(
         raise ValueError("source preparation selection differs from the expected selection")
     if source_selection.manifest_id != source_seal.selection_manifest_id:
         raise ValueError("source preparation selection differs from its seal")
+    for lifecycle_name in (
+        "opened.json",
+        "consumed.json",
+        "outcome-evidence.json",
+        "evaluation.json",
+    ):
+        lifecycle_path = source / lifecycle_name
+        if lifecycle_path.exists() or lifecycle_path.is_symlink():
+            raise ValueError("cannot prepare from a holdout with lifecycle evidence")
+    if output.exists() or output.is_symlink():
+        raise FileExistsError("holdout preparation output already exists")
+    claim_path = source / _PREPARATION_CLAIM_FILE
+    claim = _preparation_claim(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        state="AVAILABLE",
+    )
+    existing_claim = _load_object(claim_path)
+    if existing_claim != claim:
+        if existing_claim.get("state") == "CLAIMED":
+            raise FileExistsError("holdout preparation has already been claimed")
+        raise ValueError("source preparation claim differs from its authenticated seal")
+    claimed = _preparation_claim(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        state="CLAIMED",
+    )
+    _replace_json(claim_path, claimed)
+    usage = _preparation_usage(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        str(claimed["claim_id"]),
+    )
+    _write_json(source / _PREPARATION_USAGE_FILE, usage)
     paths = [
+        _PREPARATION_CLAIM_FILE,
         "selection.json",
         "features.json",
         "manifest.json",
@@ -571,6 +1014,7 @@ def prepare_holdout_from_files(
     ]
     for relative in paths:
         _write_json(output / relative, _load_object(source / relative))
+    _write_json(output / _PREPARATION_USAGE_FILE, usage)
     return verify_holdout_preparation(output)
 
 
@@ -589,7 +1033,49 @@ def _reject_orphans(root: Path, allowed: set[str]) -> None:
         raise ValueError(f"holdout bundle file closure differs; extra={extra}, missing={missing}")
 
 
+def _outcome_binding_from_feature_payload(
+    feature_payload: Mapping[str, object],
+) -> dict[str, object]:
+    raw_range = _object_list(feature_payload["holdout_range"], "feature holdout range")
+    if len(raw_range) != 2:
+        raise ValueError("feature holdout range must contain exactly two timestamps")
+    raw_rows = _object_list(feature_payload["rows"], "feature rows")
+    source_row_ids: list[tuple[str, str]] = []
+    for raw in raw_rows:
+        if not isinstance(raw, Mapping):
+            raise ValueError("feature rows must be objects")
+        row = cast(Mapping[str, object], raw)
+        source_row_ids.append((str(row["target_id"]), str(row["row_id"])))
+    source_row_ids.sort()
+    target_ids = tuple(target_id for target_id, _ in source_row_ids)
+    if len(set(target_ids)) != len(target_ids):
+        raise ValueError("feature preparation must contain one row per target")
+    if len({row_id for _, row_id in source_row_ids}) != len(source_row_ids):
+        raise ValueError("feature preparation source rows must be unique")
+    return {
+        "experiment_configuration_id": str(feature_payload["experiment_configuration_id"]),
+        "foundation_bundle_id": str(feature_payload["foundation_bundle_id"]),
+        "feature_dataset_id": str(feature_payload["dataset_id"]),
+        "holdout_range": (
+            datetime.fromisoformat(str(raw_range[0])),
+            datetime.fromisoformat(str(raw_range[1])),
+        ),
+        "expected_target_ids": target_ids,
+        "source_row_ids": tuple(source_row_ids),
+    }
+
+
 def _outcome_evidence_from_payload(payload: Mapping[str, object]) -> R2HoldoutOutcomeEvidence:
+    raw_range = _object_list(payload["holdout_range"], "outcome holdout range")
+    if len(raw_range) != 2:
+        raise ValueError("outcome holdout range must contain exactly two timestamps")
+    raw_expected = _object_list(payload["expected_target_ids"], "outcome expected targets")
+    raw_sources = _object_list(payload["source_row_ids"], "outcome source rows")
+    source_row_ids: list[tuple[str, str]] = []
+    for raw in raw_sources:
+        if not isinstance(raw, list) or len(raw) != 2:
+            raise ValueError("outcome source rows must be [target_id, row_id]")
+        source_row_ids.append((str(raw[0]), str(raw[1])))
     raw_outcomes = _object_list(payload["outcomes"], "holdout outcome evidence outcomes")
     outcomes: list[tuple[str, float]] = []
     for raw in raw_outcomes:
@@ -600,12 +1086,41 @@ def _outcome_evidence_from_payload(payload: Mapping[str, object]) -> R2HoldoutOu
         selection_manifest_id=str(payload["selection_manifest_id"]),
         seal_id=str(payload["seal_id"]),
         opened_marker_id=str(payload["opened_marker_id"]),
+        experiment_configuration_id=str(payload["experiment_configuration_id"]),
+        foundation_bundle_id=str(payload["foundation_bundle_id"]),
+        feature_dataset_id=str(payload["feature_dataset_id"]),
+        holdout_range=(
+            datetime.fromisoformat(str(raw_range[0])),
+            datetime.fromisoformat(str(raw_range[1])),
+        ),
+        expected_target_ids=tuple(str(item) for item in raw_expected),
+        source_row_ids=tuple(source_row_ids),
         outcomes=tuple(outcomes),
         source_class=MarketDataSourceClass(str(payload["source_class"])),
         evidence_class=EvidenceClass(str(payload["evidence_class"])),
         holdout_scope=HoldoutScope(str(payload["holdout_scope"])),
         outcome_evidence_id=str(payload["outcome_evidence_id"]),
     )
+
+
+def _outcome_items(value: object) -> tuple[tuple[str, float], ...]:
+    if isinstance(value, Mapping):
+        raw_items = tuple(value.items())
+    elif isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+        raw_items = tuple(value)
+    else:
+        raise TypeError("holdout outcomes must be a mapping or pair sequence")
+    items: list[tuple[str, float]] = []
+    seen: set[str] = set()
+    for raw in raw_items:
+        if not isinstance(raw, (list, tuple)) or len(raw) != 2:
+            raise ValueError("holdout outcomes must contain [target_id, outcome] pairs")
+        target_id = str(raw[0])
+        if target_id in seen:
+            raise ValueError("duplicate outcome target IDs are not permitted")
+        seen.add(target_id)
+        items.append((target_id, _float_value(raw[1], "holdout outcome")))
+    return tuple(items)
 
 
 def _opened_from_payload(payload: Mapping[str, object]) -> R2HoldoutOpenedMarker:
@@ -685,7 +1200,7 @@ def reveal_holdout(
     consumed_by: str,
     opened_at: object,
     consumed_at: object,
-    outcome_loader: Callable[[], Mapping[str, float]],
+    outcome_loader: Callable[[], Mapping[str, float] | Sequence[tuple[str, float]]],
     evaluator: Callable[[Mapping[str, float], R2HoldoutOpenedMarker], R2HoldoutEvaluation],
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
@@ -707,6 +1222,11 @@ def reveal_holdout(
             raise ValueError("selection child differs from expected reveal selection")
     else:
         raise FileNotFoundError("prepared holdout root must contain selection.json")
+    _claim_preparation(
+        root,
+        selection.manifest_id,
+        seal.seal_id,
+    )
     if root.joinpath("consumed.json").exists() or root.joinpath("consumed.json").is_symlink():
         raise FileExistsError("holdout has already been consumed")
     marker = _write_opened_marker(
@@ -723,21 +1243,34 @@ def reveal_holdout(
     evaluation_id = _FAILURE_EVALUATION_ID
     error: BaseException | None = None
     try:
-        outcomes = outcome_loader()
+        raw_outcomes = outcome_loader()
+        outcome_items = _outcome_items(raw_outcomes)
+        outcome_mapping = dict(outcome_items)
+        feature_payload = _verify_child(
+            root,
+            "features.json",
+            contract=R2_HOLDOUT_FEATURES_CONTRACT,
+            identity_key="dataset_id",
+            expected_fields=_FEATURE_FIELDS,
+            expected_id=seal.feature_dataset_id,
+        )
+        binding = _outcome_binding_from_feature_payload(feature_payload)
+        if tuple(sorted(target_id for target_id, _ in outcome_items)) != tuple(
+            cast(tuple[str, ...], binding["expected_target_ids"])
+        ):
+            raise ValueError("holdout outcomes must exactly cover prepared targets")
         outcome_evidence = R2HoldoutOutcomeEvidence.create(
             selection_manifest_id=selection.manifest_id,
             seal_id=seal.seal_id,
             opened_marker_id=marker.marker_id,
-            outcomes=tuple(
-                (str(target_id), _float_value(value, "holdout outcome"))
-                for target_id, value in outcomes.items()
-            ),
+            **binding,
+            outcomes=outcome_items,
             source_class=selection.source_class,
             evidence_class=selection.evidence_class,
             holdout_scope=selection.holdout_scope,
         )
         _write_json(root / "outcome-evidence.json", outcome_evidence.as_json())
-        evaluation = evaluator(outcomes, marker)
+        evaluation = evaluator(outcome_mapping, marker)
         if (
             evaluation.selection_manifest_id != selection.manifest_id
             or evaluation.seal_id != seal.seal_id
@@ -783,6 +1316,11 @@ def recover_holdout_consumption(
         or seal.seal_id != expected_seal_id
     ):
         raise ValueError("recovery requires the exact original seal IDs")
+    _claim_preparation(
+        root,
+        expected_selection_manifest_id,
+        expected_seal_id,
+    )
     opened_payload = _verify_child(
         root,
         "opened.json",
@@ -875,8 +1413,29 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
         outcome_evidence.selection_manifest_id != selection.manifest_id
         or outcome_evidence.seal_id != seal.seal_id
         or outcome_evidence.opened_marker_id != opened.marker_id
+        or outcome_evidence.experiment_configuration_id != selection.experiment_configuration_id
     ):
         raise ValueError("holdout outcome evidence does not bind the exact opened seal")
+    feature_payload = _verify_child(
+        root,
+        "features.json",
+        contract=R2_HOLDOUT_FEATURES_CONTRACT,
+        identity_key="dataset_id",
+        expected_fields=_FEATURE_FIELDS,
+        expected_id=seal.feature_dataset_id,
+    )
+    binding = _outcome_binding_from_feature_payload(feature_payload)
+    if (
+        outcome_evidence.experiment_configuration_id != str(binding["experiment_configuration_id"])
+        or outcome_evidence.foundation_bundle_id != str(binding["foundation_bundle_id"])
+        or outcome_evidence.feature_dataset_id != str(binding["feature_dataset_id"])
+        or outcome_evidence.holdout_range != binding["holdout_range"]
+        or outcome_evidence.expected_target_ids
+        != cast(tuple[str, ...], binding["expected_target_ids"])
+        or outcome_evidence.source_row_ids
+        != cast(tuple[tuple[str, str], ...], binding["source_row_ids"])
+    ):
+        raise ValueError("holdout outcome evidence does not bind the prepared target lineage")
     forecast_datasets = tuple(
         _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
         for dataset_id in seal.forecast_dataset_ids
@@ -955,6 +1514,31 @@ def _artifact_reference(
     return reference, payload
 
 
+def _verify_artifact_reference_payload(
+    reference: ArtifactReference, payload: Mapping[str, object]
+) -> None:
+    identity_key_by_contract = {
+        R2_HOLDOUT_SELECTION_CONTRACT: "manifest_id",
+        R2_HOLDOUT_FORECAST_SEAL_CONTRACT: "seal_id",
+        R2_HOLDOUT_OPENED_CONTRACT: "marker_id",
+        R2_HOLDOUT_CONSUMED_CONTRACT: "marker_id",
+        R2_HOLDOUT_EVALUATION_CONTRACT: "evaluation_id",
+        R2_HOLDOUT_FEATURES_CONTRACT: "dataset_id",
+        "qtrad-r2-final-fit-v1": "fit_id",
+        R2_HOLDOUT_FORECAST_CONTRACT: "dataset_id",
+        R2_HOLDOUT_COVERAGE_CONTRACT: "coverage_id",
+        R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT: "outcome_evidence_id",
+        _PREPARATION_CLAIM_CONTRACT: "claim_id",
+    }
+    identity_key = identity_key_by_contract.get(reference.contract)
+    if identity_key is None:
+        raise ValueError(f"holdout bundle has an unsupported child contract: {reference.contract}")
+    if payload.get("contract") != reference.contract:
+        raise ValueError(f"holdout bundle child contract differs: {reference.path}")
+    if str(payload.get(identity_key)) != reference.semantic_id:
+        raise ValueError(f"holdout bundle child identity differs: {reference.path}")
+
+
 def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
     seal = verify_holdout_preparation(root)
@@ -1007,6 +1591,12 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
         }
     )
     replay_specs: list[tuple[str, str, str, str]] = [
+        (
+            _PREPARATION_CLAIM_FILE,
+            _PREPARATION_CLAIM_FILE,
+            _PREPARATION_CLAIM_CONTRACT,
+            "claim_id",
+        ),
         ("features.json", "features.json", R2_HOLDOUT_FEATURES_CONTRACT, "dataset_id"),
         *[
             (f"fits/{fit_id}.json", f"fits/{fit_id}.json", "qtrad-r2-final-fit-v1", "fit_id")
@@ -1089,6 +1679,7 @@ def write_holdout_bundle(
         if ref.path == "manifest.json":
             raise ValueError("holdout bundle manifest path is reserved")
         payload = children[ref.path]
+        _verify_artifact_reference_payload(ref, payload)
         if sha256(canonical_bytes(payload)).hexdigest() != ref.sha256:
             raise ValueError(f"holdout child digest differs from its reference: {ref.path}")
         _write_json(output / ref.path, payload)
@@ -1142,8 +1733,8 @@ def verify_holdout_bundle(path: Path) -> R2HoldoutBundle:
             raise ValueError(f"holdout bundle child is unavailable: {ref.path}")
         if sha256(child.read_bytes()).hexdigest() != ref.sha256:
             raise ValueError(f"holdout bundle child changed: {ref.path}")
-        if _load_object(child).get("contract") != ref.contract:
-            raise ValueError(f"holdout bundle child contract differs: {ref.path}")
+        child_payload = _load_object(child)
+        _verify_artifact_reference_payload(ref, child_payload)
     _reject_orphans(path, {"manifest.json", *(ref.path for ref in refs)})
     semantic = {key: value for key, value in payload.items() if key != "bundle_id"}
     expected_id = sha256(
@@ -1389,8 +1980,21 @@ def reveal_holdout_from_files(
         payload = _load_object(outcomes_path)
         if set(payload) != {"outcomes"}:
             raise ValueError("holdout outcomes file must contain only an outcomes object")
-        raw = _object_dict(payload["outcomes"], "holdout outcomes")
-        return {str(key): _float_value(value, "holdout outcome") for key, value in raw.items()}
+        raw_value = payload["outcomes"]
+        if isinstance(raw_value, Mapping):
+            pairs = [(str(key), value) for key, value in raw_value.items()]
+        elif isinstance(raw_value, list):
+            pairs = []
+            for item in raw_value:
+                if not isinstance(item, list) or len(item) != 2:
+                    raise ValueError("holdout outcome entries must be [target_id, outcome]")
+                pairs.append((str(item[0]), item[1]))
+        else:
+            raise ValueError("holdout outcomes must be an object or pair list")
+        target_ids = [target_id for target_id, _ in pairs]
+        if len(set(target_ids)) != len(target_ids):
+            raise ValueError("holdout outcomes contain duplicate target IDs")
+        return {target_id: _float_value(value, "holdout outcome") for target_id, value in pairs}
 
     def evaluate(
         outcomes: Mapping[str, float], opened: R2HoldoutOpenedMarker

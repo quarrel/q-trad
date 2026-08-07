@@ -44,7 +44,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
 )
 from qtrad.domain.r2_models import PreprocessingFit, R2PreprocessingSchema
-from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
+from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
 
 
@@ -99,6 +99,83 @@ def _selection_values(prior_selection: SelectionManifest) -> tuple[str, ...]:
     return prior_selection.evaluated_configuration_ids
 
 
+def _final_fit_lineage(
+    selection: R2HoldoutSelectionManifest,
+    *,
+    configuration_id: str,
+    model_family: ModelFamily,
+    feature_dataset_id: str,
+    feature_schema_id: str,
+) -> dict[str, JsonValue]:
+    return {
+        "selection_manifest_id": selection.manifest_id,
+        "experiment_configuration_id": selection.experiment_configuration_id,
+        "foundation_bundle_id": selection.foundation_bundle_id,
+        "configuration_id": configuration_id,
+        "model_family": model_family.value,
+        "feature_dataset_id": feature_dataset_id,
+        "feature_schema_id": feature_schema_id,
+    }
+
+
+def _verify_final_policy_against_experiment(
+    *,
+    policy: R2FinalFittingPolicy,
+    experiment: R2ExperimentConfig,
+    verified_oof_bundle: R2OofBundle,
+    prior_selection: SelectionManifest,
+    foundation_bundle_id: str,
+    source_class: MarketDataSourceClass,
+    evidence_class: EvidenceClass,
+) -> None:
+    if (
+        experiment.r1_bundle_id != foundation_bundle_id
+        or experiment.holdout_range != prior_selection.holdout_range
+        or experiment.market_data_source_class is not source_class
+        or experiment.evidence_class is not evidence_class
+    ):
+        raise ValueError("verified experiment lineage differs from the OOF selection inputs")
+    if tuple(policy.alpha_grid) != tuple(experiment.alpha_grid):
+        raise ValueError("final-fitting alpha grid differs from the verified experiment")
+    if policy.inner_validation_policy != experiment.inner_validation_policy:
+        raise ValueError("final-fitting validation policy differs from the verified experiment")
+    if (
+        _policy_value(
+            policy,
+            "preprocessing_policy",
+            {"TRAINING_MEDIAN_STANDARDISE": "TRAINING_MEDIAN_STANDARDISE_V1"},
+        )
+        != experiment.preprocessing_policy
+    ):
+        raise ValueError("final-fitting preprocessing differs from the verified experiment")
+    if (
+        _policy_value(
+            policy,
+            "pooled_weighting_policy",
+            {"EQUAL_INSTRUMENT": "EQUAL_INSTRUMENT_TOTAL_WEIGHT_MEAN_ONE"},
+        )
+        != experiment.pooled_weighting_policy
+    ):
+        raise ValueError("final-fitting weighting differs from the verified experiment")
+    solver_name = str(policy.solver_identity.get("name", ""))
+    solver_name = {"numpy-ridge": "lsqr"}.get(solver_name, solver_name)
+    if solver_name != experiment.ridge_solver:
+        raise ValueError("final-fitting solver differs from the verified experiment")
+    tolerance = float(cast(float | int | str, policy.solver_identity.get("tolerance", 1e-8)))
+    max_iterations = int(
+        cast(float | int | str, policy.solver_identity.get("max_iterations", 1000))
+    )
+    if tolerance != experiment.ridge_tolerance or max_iterations != experiment.ridge_max_iterations:
+        raise ValueError("final-fitting solver controls differ from the verified experiment")
+    if policy.alpha_tie_break_policy not in {"LOSS_THEN_LARGER_ALPHA"}:
+        raise ValueError("verified final fitting requires the larger-alpha tie break")
+    if (
+        verified_oof_bundle.experiment_configuration_id
+        != prior_selection.experiment_configuration_id
+    ):
+        raise ValueError("verified OOF bundle differs from the prior experiment configuration")
+
+
 def freeze_holdout_selection(
     *,
     prior_selection: SelectionManifest,
@@ -117,6 +194,7 @@ def freeze_holdout_selection(
     frozen_by: str,
     control_configuration_ids: Sequence[str] | None = None,
     verified_oof_bundle: R2OofBundle | None = None,
+    verified_experiment: R2ExperimentConfig | None = None,
 ) -> R2HoldoutSelectionManifest:
     """Create PR A from an independently verified, still-pending R2.F1 selection."""
     if verified_oof_bundle is not None:
@@ -143,6 +221,17 @@ def freeze_holdout_selection(
             raise ValueError("verified OOF ID differs from the prior selection")
         foundation_bundle_id = verified_oof_bundle.foundation_bundle_id
         oof_bundle_id = verified_oof_bundle.bundle_id
+        if verified_experiment is None:
+            raise ValueError("verified OOF selection freeze requires the verified experiment")
+        _verify_final_policy_against_experiment(
+            policy=final_fitting_policy,
+            experiment=verified_experiment,
+            verified_oof_bundle=verified_oof_bundle,
+            prior_selection=prior_selection,
+            foundation_bundle_id=foundation_bundle_id,
+            source_class=source_class,
+            evidence_class=evidence_class,
+        )
         metric_policy = {
             "primary_metric": prior_selection.primary_metric,
             "secondary_metrics": list(prior_selection.secondary_metrics),
@@ -179,6 +268,14 @@ def freeze_holdout_selection(
         raise ValueError("G2 source class differs from the prior selection")
     if prior_selection.evidence_class is not evidence_class:
         raise ValueError("G2 evidence class differs from the prior selection")
+    for question in questions:
+        if (
+            question.candidate_configuration_id not in selected
+            or question.comparator_configuration_id not in controls
+        ):
+            raise ValueError(
+                "holdout question references a configuration outside the frozen registry"
+            )
     if tuple(sorted(selected + controls)) != tuple(
         sorted(prior_selection.holdout_comparator_configuration_ids)
     ):
@@ -294,6 +391,7 @@ def _failed_final_fit(
     training_evidence: Sequence[FinalTrainingRow] = (),
     candidate_scores: Sequence[R2AlphaCandidateScore] | None = None,
     preprocessing: Mapping[str, JsonValue] | None = None,
+    forced_failure: bool = False,
 ) -> R2FinalFit:
     scores = (
         tuple(candidate_scores)
@@ -314,6 +412,17 @@ def _failed_final_fit(
     fit_preprocessing.setdefault(
         "training_rows", [_training_row_json(row) for row in training_evidence]
     )
+    fit_preprocessing.update(
+        _final_fit_lineage(
+            selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+        )
+    )
+    if forced_failure:
+        fit_preprocessing["failure_mode"] = "FORCED_FIXTURE"
     return R2FinalFit.create(
         selection_manifest_id=selection.manifest_id,
         configuration_id=configuration_id,
@@ -478,6 +587,7 @@ def fit_final_ridge(
             reason=forced_failure_reason or "forced fixture failure disposition",
             feature_count=feature_count,
             training_evidence=ordered,
+            forced_failure=True,
         )
     if not ordered:
         return _failed_final_fit(
@@ -593,6 +703,15 @@ def fit_final_ridge(
         fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
         minimum_training_rows=minimum_training_rows,
         minimum_inner_validation_rows=minimum_inner_validation_rows,
+    )
+    preprocessing.update(
+        _final_fit_lineage(
+            selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+        )
     )
     if (
         selected.disposition.value != "READY"
@@ -943,8 +1062,57 @@ def seal_holdout_forecasts(
     coverage = tuple(sorted(coverage_datasets, key=lambda item: item.coverage_id))
     if not fits or len(fits) != len(forecasts) or len(fits) != len(coverage):
         raise ValueError("seal requires one forecast and coverage child per final fit")
-    if any(item.selection_manifest_id != selection.manifest_id for item in forecasts + coverage):
-        raise ValueError("seal child selection lineage differs")
+
+    expected_configurations = set(selection.holdout_configuration_ids)
+    declared_families = set(selection.comparator_families)
+    fit_by_configuration: dict[str, R2FinalFit] = {}
+    for fit in fits:
+        if fit.selection_manifest_id != selection.manifest_id:
+            raise ValueError("seal final-fit selection lineage differs")
+        if fit.feature_dataset_id != feature_dataset.dataset_id:
+            raise ValueError("seal final fit is not bound to the prepared features")
+        if fit.configuration_id not in expected_configurations:
+            raise ValueError("seal final fit is not in the frozen configuration registry")
+        if fit.model_family not in declared_families:
+            raise ValueError("seal final fit model family is not predeclared")
+        if fit.configuration_id in fit_by_configuration:
+            raise ValueError("seal has duplicate final-fit configuration IDs")
+        fit_by_configuration[fit.configuration_id] = fit
+    if set(fit_by_configuration) != expected_configurations:
+        raise ValueError("seal final fits do not exactly cover frozen configurations")
+
+    forecast_by_configuration: dict[str, R2HoldoutForecastDataset] = {}
+    for forecast in forecasts:
+        fit = fit_by_configuration.get(forecast.configuration_id)
+        if (
+            forecast.selection_manifest_id != selection.manifest_id
+            or forecast.feature_dataset_id != feature_dataset.dataset_id
+            or fit is None
+            or forecast.final_fit_id != fit.fit_id
+        ):
+            raise ValueError("seal forecast does not reconcile to its final fit registry")
+        if forecast.configuration_id in forecast_by_configuration:
+            raise ValueError("seal has duplicate forecast configuration IDs")
+        if any(row.model_family is not fit.model_family for row in forecast.rows):
+            raise ValueError("seal forecast row model families differ from its final fit")
+        forecast_by_configuration[forecast.configuration_id] = forecast
+    if set(forecast_by_configuration) != expected_configurations:
+        raise ValueError("seal forecasts do not exactly cover frozen configurations")
+
+    coverage_by_configuration: dict[str, R2HoldoutCoverageDataset] = {}
+    for item in coverage:
+        fit = fit_by_configuration.get(item.configuration_id)
+        if (
+            item.selection_manifest_id != selection.manifest_id
+            or item.feature_dataset_id != feature_dataset.dataset_id
+            or fit is None
+            or item.configuration_id in coverage_by_configuration
+        ):
+            raise ValueError("seal coverage does not reconcile to its final-fit registry")
+        coverage_by_configuration[item.configuration_id] = item
+    if set(coverage_by_configuration) != expected_configurations:
+        raise ValueError("seal coverage does not exactly cover frozen configurations")
+
     pairs = tuple(
         sorted(
             (question.candidate_configuration_id, question.comparator_configuration_id)
@@ -953,6 +1121,8 @@ def seal_holdout_forecasts(
     )
     if not pairs:
         raise ValueError("selection question register has no configuration pairs")
+    if len(pairs) != len(set(pairs)):
+        raise ValueError("selection question register has duplicate configuration pairs")
     return R2HoldoutForecastSeal.create(
         selection_manifest_id=selection.manifest_id,
         feature_dataset_id=feature_dataset.dataset_id,
@@ -991,6 +1161,26 @@ def _metric(
     raise ValueError(f"unsupported frozen holdout metric: {metric}")
 
 
+def _validate_frozen_evaluation_policies(seal: R2HoldoutForecastSeal) -> float:
+    if seal.comparison_support != {"rule": "COMMON_ELIGIBLE"}:
+        raise ValueError("unsupported frozen comparison-support policy")
+    if seal.forecast_buckets != {"source": "TRAINING_ONLY"}:
+        raise ValueError("unsupported frozen forecast-bucket policy")
+    if seal.state_buckets != {"source": "TRAINING_ONLY"}:
+        raise ValueError("unsupported frozen state-bucket policy")
+    if set(seal.coverage_rules) != {"minimum"}:
+        raise ValueError("unsupported frozen coverage policy")
+    coverage_minimum = seal.coverage_rules["minimum"]
+    if not isinstance(coverage_minimum, (int, float)) or not 0.0 <= coverage_minimum <= 1.0:
+        raise ValueError("frozen coverage minimum must be between zero and one")
+    for question in seal.questions:
+        if question.support_policy != "COMMON_ELIGIBLE":
+            raise ValueError("unsupported frozen question support policy")
+        if question.conclusion_policy != "THRESHOLD_OR_INCONCLUSIVE":
+            raise ValueError("unsupported frozen question conclusion policy")
+    return float(coverage_minimum)
+
+
 def evaluate_holdout(
     *,
     selection: R2HoldoutSelectionManifest,
@@ -1001,6 +1191,7 @@ def evaluate_holdout(
     outcomes: Mapping[str, float],
 ) -> R2HoldoutEvaluation:
     """Evaluate every frozen question; this is the only outcome-consuming function."""
+    coverage_minimum = _validate_frozen_evaluation_policies(seal)
 
     if opened_marker.seal_id != seal.seal_id:
         raise ValueError("holdout evaluation requires the exact opened seal")
@@ -1082,7 +1273,9 @@ def evaluate_holdout(
             )
         support_count = len(supported_targets)
         coverage = support_count / len(expected) if expected else 0.0
-        if support_count < question.minimum_support or coverage < question.minimum_coverage:
+        if support_count < question.minimum_support or coverage < max(
+            question.minimum_coverage, coverage_minimum
+        ):
             results.append(
                 R2HoldoutQuestionResult(
                     question_id=question.question_id,

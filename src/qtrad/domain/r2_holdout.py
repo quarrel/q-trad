@@ -1820,6 +1820,12 @@ class R2HoldoutOutcomeEvidence:
     selection_manifest_id: str
     seal_id: str
     opened_marker_id: str
+    experiment_configuration_id: str
+    foundation_bundle_id: str
+    feature_dataset_id: str
+    holdout_range: tuple[datetime, datetime]
+    expected_target_ids: tuple[str, ...]
+    source_row_ids: tuple[tuple[str, str], ...]
     outcomes: tuple[tuple[str, float], ...]
     source_class: MarketDataSourceClass
     evidence_class: EvidenceClass
@@ -1834,11 +1840,32 @@ class R2HoldoutOutcomeEvidence:
             (self.selection_manifest_id, "outcome selection ID"),
             (self.seal_id, "outcome seal ID"),
             (self.opened_marker_id, "outcome opened marker ID"),
+            (self.experiment_configuration_id, "outcome experiment ID"),
+            (self.foundation_bundle_id, "outcome foundation ID"),
+            (self.feature_dataset_id, "outcome feature dataset ID"),
             (self.outcome_evidence_id, "outcome evidence ID"),
         ):
             _require_id(value, field)
-        if tuple(sorted(set(self.outcomes))) != self.outcomes:
-            raise ValueError("holdout outcomes must be deterministically ordered and unique")
+        _positive_range(self.holdout_range, "outcome holdout range")
+        if tuple(sorted(self.expected_target_ids)) != self.expected_target_ids:
+            raise ValueError("outcome expected target IDs must be ordered")
+        expected_sources = tuple(sorted(self.source_row_ids))
+        if expected_sources != self.source_row_ids:
+            raise ValueError("outcome source rows must be deterministically ordered")
+        if tuple(target_id for target_id, _ in expected_sources) != self.expected_target_ids:
+            raise ValueError("outcome source rows must cover every expected target")
+        if len({row_id for _, row_id in expected_sources}) != len(expected_sources):
+            raise ValueError("outcome source rows must be unique")
+        for target_id, row_id in expected_sources:
+            _require_id(target_id, "outcome source target ID")
+            _require_id(row_id, "outcome source row ID")
+        outcome_target_ids = tuple(target_id for target_id, _ in self.outcomes)
+        if (
+            tuple(sorted(self.outcomes)) != self.outcomes
+            or len(set(outcome_target_ids)) != len(outcome_target_ids)
+            or outcome_target_ids != self.expected_target_ids
+        ):
+            raise ValueError("holdout outcomes must exactly cover unique expected targets")
         for target_id, outcome in self.outcomes:
             _require_id(target_id, "holdout outcome target ID")
             _finite(outcome, "holdout outcome")
@@ -1853,6 +1880,10 @@ class R2HoldoutOutcomeEvidence:
     def create(cls, **values: object) -> R2HoldoutOutcomeEvidence:
         raw = dict(values)
         raw.pop("outcome_evidence_id", None)
+        raw["expected_target_ids"] = tuple(sorted(cast(Sequence[str], raw["expected_target_ids"])))
+        raw["source_row_ids"] = tuple(
+            sorted(cast(Sequence[tuple[str, str]], raw["source_row_ids"]))
+        )
         raw["outcomes"] = tuple(sorted(cast(Sequence[tuple[str, float]], raw["outcomes"])))
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
@@ -1869,6 +1900,12 @@ class R2HoldoutOutcomeEvidence:
             "selection_manifest_id": self.selection_manifest_id,
             "seal_id": self.seal_id,
             "opened_marker_id": self.opened_marker_id,
+            "experiment_configuration_id": self.experiment_configuration_id,
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "feature_dataset_id": self.feature_dataset_id,
+            "holdout_range": [item.isoformat() for item in self.holdout_range],
+            "expected_target_ids": list(self.expected_target_ids),
+            "source_row_ids": [[target_id, row_id] for target_id, row_id in self.source_row_ids],
             "outcomes": [[target_id, outcome] for target_id, outcome in self.outcomes],
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,

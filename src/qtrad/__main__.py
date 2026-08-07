@@ -373,6 +373,7 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         )
     prior = cast(SelectionManifest, load_prior_selection_manifest(args.prior_selection))
     verified_oof = verify_oof_bundle(args.oof_bundle)
+    verified_experiment = load_r2_experiment(args.experiment)
     policy = load_holdout_policy(args.final_fitting_policy)
     questions = load_holdout_questions(args.questions)
     metric_policy = (
@@ -404,6 +405,7 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         frozen_by=args.frozen_by,
         control_configuration_ids=args.control_configuration_id,
         verified_oof_bundle=verified_oof,
+        verified_experiment=verified_experiment,
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))
@@ -870,6 +872,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_selection.add_argument(
         "--prior-selection", "--selection", dest="prior_selection", type=Path, required=True
+    )
+    baselines_holdout_selection.add_argument(
+        "--experiment",
+        type=Path,
+        required=True,
+        help="authenticated R2 experiment declaration for policy/lineage reconciliation",
     )
     baselines_holdout_selection.add_argument(
         "--foundation-bundle-id", "--foundation-id", dest="foundation_bundle_id", required=False
