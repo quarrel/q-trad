@@ -38,6 +38,8 @@ from qtrad.domain.ibkr_historical import (
     utc_text,
 )
 from qtrad.domain.ibkr_results import (
+    MAX_IBKR_RESULT_BYTES,
+    MAX_IBKR_RESULT_REQUEST_BYTES,
     REQUEST_RESULT_CONTRACT,
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
@@ -854,3 +856,22 @@ def test_provider_history_accepts_maximum_stage6_child_bound() -> None:
     digests = provider_history_runtime._source_file_digests(source, b"manifest")
 
     assert len(digests) == 20_002
+
+
+def test_provider_history_copies_request_child_at_request_result_bound(tmp_path: Path) -> None:
+    payload = b"x" * (MAX_IBKR_RESULT_BYTES + 1)
+    assert len(payload) < MAX_IBKR_RESULT_REQUEST_BYTES
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    child_path = source_root / "requests" / "child.json"
+    child_path.parent.mkdir(parents=True)
+    child_path.write_bytes(payload)
+
+    provider_history_runtime._copy_source_file(
+        source_root,
+        destination_root,
+        "requests/child.json",
+        expected_digest=sha256_bytes(payload),
+    )
+
+    assert (destination_root / "requests" / "child.json").read_bytes() == payload

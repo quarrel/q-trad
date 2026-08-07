@@ -28,6 +28,7 @@ from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
     MAX_IBKR_RESULT_BYTES,
     MAX_IBKR_RESULT_CHILDREN,
+    MAX_IBKR_RESULT_REQUEST_BYTES,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -704,7 +705,12 @@ def _copy_source_file(
     if source_path.is_symlink() or not source_path.is_file():
         raise ValueError(f"source result child is not a regular file: {relative_path}")
     size = source_path.stat().st_size
-    if size <= 0 or size > MAX_IBKR_RESULT_BYTES:
+    maximum = (
+        MAX_IBKR_RESULT_REQUEST_BYTES
+        if Path(relative_path).parts[:1] == ("requests",)
+        else MAX_IBKR_RESULT_BYTES
+    )
+    if size <= 0 or size > maximum:
         raise ValueError(f"source result child exceeds its bounded size: {relative_path}")
     target = destination_root / relative_path
     target.parent.mkdir(parents=True, exist_ok=True)
