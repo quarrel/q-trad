@@ -213,6 +213,23 @@ async def test_exact_mapping_and_one_sided_callbacks_are_identity_bearing(
 
 
 @pytest.mark.asyncio
+async def test_non_top_of_book_size_is_retained_as_unsupported_tick(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    client.on_market_data.append(("tick_size", 1, (5, 99)))
+    adapter = _adapter(monkeypatch, client)
+
+    await _connect_and_subscribe(adapter, _listing())
+    record = (await _take(adapter.records(), 1))[0]
+
+    assert record.error_code == "IBKR_UNSUPPORTED_MARKET_DATA_TICK"
+    assert record.error_detail == "tick_size:5"
+    assert record.raw_payload["tick_type"] == 5
+    assert record.raw_payload["raw_value"] == 99
+
+
+@pytest.mark.asyncio
 async def test_callback_receive_time_is_frozen_before_consumer_processing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -594,7 +611,7 @@ async def test_health_allows_inactive_historical_and_quiet_optional_security_far
         )
     )
     client.callbacks.put(capability._Callback("error", -1, (1_785_000_000, 2104, "CONNECTED")))
-    client.callbacks.put(capability._Callback("error", -1, (1_785_000_001, 2108, "INACTIVE")))
+    client.callbacks.put(capability._Callback("error", -1, (1_785_000_001, 2107, "INACTIVE")))
     client.callbacks.put(capability._Callback("error", -1, (1_785_000_002, 2157, "DISCONNECTED")))
     adapter = _adapter(monkeypatch, client)
     await _connect_and_subscribe(adapter, _listing())

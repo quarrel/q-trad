@@ -581,8 +581,12 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 callback, binding, received, tick_type
             )
         elif callback.kind == "tick_size":
-            error_code = "IBKR_TOP_OF_BOOK_SIZE_EVIDENCE"
-            error_detail = "bid/ask size is not trade volume"
+            if tick_type in _LIVE_SIZE_TICKS | _DELAYED_SIZE_TICKS:
+                error_code = "IBKR_TOP_OF_BOOK_SIZE_EVIDENCE"
+                error_detail = "bid/ask size is not trade volume"
+            else:
+                error_code = "IBKR_UNSUPPORTED_MARKET_DATA_TICK"
+                error_detail = f"tick_size:{tick_type}"
         else:
             error_code = "IBKR_UNSUPPORTED_MARKET_DATA_CALLBACK"
             error_detail = callback.kind
