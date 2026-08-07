@@ -5,15 +5,29 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime
+from datetime import datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
+from uuid import UUID
 
-from qtrad.domain.foundation import TargetDataset
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.foundation import (
+    TARGET_DATASET_CONTRACT,
+    ExcursionDisposition,
+    ReturnDisposition,
+    TargetDataset,
+    TargetRow,
+)
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import ArtifactReference
+from qtrad.domain.r2_features import (
+    FeatureDefinition,
+    R2FeatureDataset,
+    RawFeatureRow,
+    RawFeatureValue,
+)
 from qtrad.domain.r2_holdout import (
     R2_HOLDOUT_BUNDLE_CONTRACT,
     R2_HOLDOUT_CONSUMED_CONTRACT,
@@ -40,6 +54,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
 )
+from qtrad.domain.r2_readiness import FeatureFamily
 from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 
 _MAX_BYTES = 64 * 1024 * 1024
@@ -121,6 +136,298 @@ def _object_list(value: object, field: str) -> list[object]:
     return cast(list[object], value)
 
 
+def _text_value(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise ValueError(f"{field} must be a non-empty string")
+    return value
+
+
+def _utc_value(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO-8601 string")
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from error
+
+
+def _training_feature_dataset_from_payload(
+    payload: Mapping[str, object],
+) -> R2FeatureDataset:
+    if set(payload) != _TRAINING_FEATURE_FIELDS:
+        raise ValueError("training feature child has unknown or missing fields")
+    if payload.get("contract") != "qtrad-r2-features-v2" or payload.get("schema_version") != 2:
+        raise ValueError("training feature child contract is unsupported")
+    schema: list[FeatureDefinition] = []
+    for raw_definition in _object_list(payload["feature_schema"], "feature_schema"):
+        definition = _object_dict(raw_definition, "feature_schema item")
+        if set(definition) != {"name", "family", "availability_indicator"}:
+            raise ValueError("training feature schema item has unknown or missing fields")
+        availability = definition["availability_indicator"]
+        if not isinstance(availability, bool):
+            raise ValueError("training feature availability indicator must be boolean")
+        schema.append(
+            FeatureDefinition(
+                name=_text_value(definition["name"], "feature name"),
+                family=FeatureFamily(_text_value(definition["family"], "feature family")),
+                availability_indicator=availability,
+            )
+        )
+    rows: list[RawFeatureRow] = []
+    for raw_row in _object_list(payload["rows"], "training feature rows"):
+        row = _object_dict(raw_row, "training feature row")
+        expected_fields = {
+            "target_instrument_id",
+            "decision_time",
+            "feature_data_asof",
+            "latest_feature_bar_end",
+            "feature_set_id",
+            "values",
+        }
+        if set(row) != expected_fields:
+            raise ValueError("training feature row has unknown or missing fields")
+        values: list[RawFeatureValue] = []
+        for raw_value in _object_list(row["values"], "training feature values"):
+            item = _object_dict(raw_value, "training feature value")
+            if set(item) != {"name", "value", "source_event_ids"}:
+                raise ValueError("training feature value has unknown or missing fields")
+            source_events = _object_list(item["source_event_ids"], "feature source events")
+            values.append(
+                RawFeatureValue(
+                    name=_text_value(item["name"], "feature value name"),
+                    value=_optional_float(item["value"], "feature value"),
+                    source_event_ids=tuple(
+                        _text_value(event, "feature source event") for event in source_events
+                    ),
+                )
+            )
+        rows.append(
+            RawFeatureRow(
+                target_instrument_id=_text_value(row["target_instrument_id"], "feature instrument"),
+                decision_time=_utc_value(row["decision_time"], "feature decision time"),
+                feature_data_asof=_utc_value(row["feature_data_asof"], "feature data cutoff"),
+                latest_feature_bar_end=_utc_value(
+                    row["latest_feature_bar_end"], "latest feature bar"
+                ),
+                feature_set_id=_text_value(row["feature_set_id"], "feature set ID"),
+                values=tuple(values),
+            )
+        )
+    dataset = R2FeatureDataset(
+        rows=tuple(rows),
+        feature_schema=tuple(schema),
+        feature_set_name=_text_value(payload["feature_set_name"], "feature set name"),
+        feature_set_id=_text_value(payload["feature_set_id"], "feature set ID"),
+        raw_feature_schema_id=_text_value(
+            payload["raw_feature_schema_id"], "raw feature schema ID"
+        ),
+        observation_dataset_id=_text_value(
+            payload["observation_dataset_id"], "feature observations"
+        ),
+        panel_dataset_id=_text_value(payload["panel_dataset_id"], "feature panel"),
+        target_dataset_id=_text_value(payload["target_dataset_id"], "feature targets"),
+        fold_dataset_id=_text_value(payload["fold_dataset_id"], "feature folds"),
+        experiment_configuration_id=_text_value(
+            payload["experiment_configuration_id"], "feature experiment"
+        ),
+        evidence_class=EvidenceClass(
+            _text_value(payload["evidence_class"], "feature evidence class")
+        ),
+        holdout_excluded=payload["holdout_excluded"] is True,
+        market_data_source_class=MarketDataSourceClass(
+            _text_value(payload["market_data_source_class"], "feature source class")
+        ),
+        dataset_id=_text_value(payload["dataset_id"], "feature dataset ID"),
+    )
+    if payload["row_count"] != len(dataset.rows):
+        raise ValueError("training feature row count does not authenticate")
+    return dataset
+
+
+def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> TargetDataset:
+    if set(payload) != _TRAINING_TARGET_FIELDS:
+        raise ValueError("training target child has unknown or missing fields")
+    if payload.get("contract") != TARGET_DATASET_CONTRACT or payload.get("schema_version") != 1:
+        raise ValueError("training target child contract is unsupported")
+    rows: list[TargetRow] = []
+    expected_fields = {
+        "instrument_id",
+        "decision_time",
+        "horizon_seconds",
+        "target_basis",
+        "target_revision_policy",
+        "target_start_time",
+        "target_end_time",
+        "target_freeze_at",
+        "target_available_at",
+        "label_start_close",
+        "label_end_close",
+        "log_return",
+        "return_disposition",
+        "start_event_id",
+        "end_event_id",
+        "upper_log_excursion",
+        "lower_log_excursion",
+        "excursion_disposition",
+    }
+    for raw_row in _object_list(payload["rows"], "training target rows"):
+        row = _object_dict(raw_row, "training target row")
+        if set(row) != expected_fields:
+            raise ValueError("training target row has unknown or missing fields")
+        start_event = row["start_event_id"]
+        end_event = row["end_event_id"]
+        rows.append(
+            TargetRow(
+                instrument_id=_text_value(row["instrument_id"], "target instrument"),
+                decision_time=_utc_value(row["decision_time"], "target decision time"),
+                horizon=timedelta(seconds=_float_value(row["horizon_seconds"], "target horizon")),
+                target_basis=PriceBasis(_text_value(row["target_basis"], "target basis")),
+                target_revision_policy=_text_value(
+                    row["target_revision_policy"], "target revision policy"
+                ),
+                target_start_time=_utc_value(row["target_start_time"], "target start"),
+                target_end_time=_utc_value(row["target_end_time"], "target end"),
+                target_freeze_at=_utc_value(row["target_freeze_at"], "target freeze"),
+                target_available_at=_utc_value(row["target_available_at"], "target availability"),
+                label_start_close=(
+                    Decimal(str(row["label_start_close"]))
+                    if row["label_start_close"] is not None
+                    else None
+                ),
+                label_end_close=(
+                    Decimal(str(row["label_end_close"]))
+                    if row["label_end_close"] is not None
+                    else None
+                ),
+                log_return=_optional_float(row["log_return"], "target return"),
+                return_disposition=ReturnDisposition(
+                    _text_value(row["return_disposition"], "target return disposition")
+                ),
+                start_event_id=UUID(_text_value(start_event, "target start event"))
+                if start_event is not None
+                else None,
+                end_event_id=UUID(_text_value(end_event, "target end event"))
+                if end_event is not None
+                else None,
+                upper_log_excursion=_optional_float(
+                    row["upper_log_excursion"], "target upper excursion"
+                ),
+                lower_log_excursion=_optional_float(
+                    row["lower_log_excursion"], "target lower excursion"
+                ),
+                excursion_disposition=ExcursionDisposition(
+                    _text_value(row["excursion_disposition"], "target excursion disposition")
+                ),
+            )
+        )
+    dataset = TargetDataset.create(
+        rows,
+        observation_dataset_id=_text_value(
+            payload["observation_dataset_id"], "target observations"
+        ),
+        foundation_configuration_id=_text_value(
+            payload["foundation_configuration_id"], "target foundation"
+        ),
+    )
+    if dataset.dataset_id != _text_value(payload["dataset_id"], "target dataset ID"):
+        raise ValueError("training target dataset ID does not authenticate its rows")
+    return dataset
+
+
+def _training_feature_payload(dataset: R2FeatureDataset) -> dict[str, object]:
+    return {
+        **dataset.manifest_json(),
+        "rows": [row.as_json() for row in dataset.rows],
+    }
+
+
+def _training_target_payload(dataset: TargetDataset) -> dict[str, object]:
+    return {
+        "contract": TARGET_DATASET_CONTRACT,
+        "schema_version": 1,
+        "dataset_id": dataset.dataset_id,
+        "observation_dataset_id": dataset.observation_dataset_id,
+        "foundation_configuration_id": dataset.foundation_configuration_id,
+        "rows": [row.as_json() for row in dataset.rows],
+    }
+
+
+def _training_child_ids_from_fit(payload: Mapping[str, object]) -> tuple[str, str]:
+    preprocessing = _object_dict(payload["preprocessing"], "final fit preprocessing")
+    return (
+        _text_value(
+            preprocessing.get("training_feature_dataset_id"),
+            "training feature dataset ID",
+        ),
+        _text_value(
+            preprocessing.get("training_target_dataset_id"),
+            "training target dataset ID",
+        ),
+    )
+
+
+def _training_dataset_paths(
+    fit_payloads: Sequence[Mapping[str, object]],
+) -> tuple[str, ...]:
+    feature_ids: set[str] = set()
+    target_ids: set[str] = set()
+    for payload in fit_payloads:
+        feature_id, target_id = _training_child_ids_from_fit(payload)
+        feature_ids.add(feature_id)
+        target_ids.add(target_id)
+    return tuple(
+        sorted(
+            [f"training/features/{dataset_id}.json" for dataset_id in feature_ids]
+            + [f"training/targets/{dataset_id}.json" for dataset_id in target_ids]
+        )
+    )
+
+
+def _training_paths_for_seal(
+    root: Path,
+    seal: R2HoldoutForecastSeal,
+) -> tuple[str, ...]:
+    fit_payloads = tuple(
+        _verify_child(
+            root,
+            f"fits/{fit_id}.json",
+            contract="qtrad-r2-final-fit-v1",
+            identity_key="fit_id",
+            expected_fields=_FINAL_FIT_FIELDS,
+            expected_id=fit_id,
+        )
+        for fit_id in seal.final_fit_ids
+    )
+    return _training_dataset_paths(fit_payloads)
+
+
+def _load_training_children(
+    root: Path,
+    fit_payloads: Sequence[Mapping[str, object]],
+) -> tuple[dict[str, R2FeatureDataset], dict[str, TargetDataset]]:
+    feature_ids: set[str] = set()
+    target_ids: set[str] = set()
+    for payload in fit_payloads:
+        feature_id, target_id = _training_child_ids_from_fit(payload)
+        feature_ids.add(feature_id)
+        target_ids.add(target_id)
+    features: dict[str, R2FeatureDataset] = {}
+    for dataset_id in sorted(feature_ids):
+        payload = _load_object(_safe_child(root, f"training/features/{dataset_id}.json"))
+        dataset = _training_feature_dataset_from_payload(payload)
+        if dataset.dataset_id != dataset_id:
+            raise ValueError("training feature child differs from fit lineage")
+        features[dataset_id] = dataset
+    targets: dict[str, TargetDataset] = {}
+    for dataset_id in sorted(target_ids):
+        payload = _load_object(_safe_child(root, f"training/targets/{dataset_id}.json"))
+        dataset = _training_target_dataset_from_payload(payload)
+        if dataset.dataset_id != dataset_id:
+            raise ValueError("training target child differs from fit lineage")
+        targets[dataset_id] = dataset
+    return features, targets
+
+
 def _float_value(value: object, field: str) -> float:
     if isinstance(value, bool) or not isinstance(value, (int, float)):
         raise ValueError(f"{field} must be numeric")
@@ -150,6 +457,34 @@ def _replace_json(path: Path, payload: Mapping[str, object]) -> None:
     _write_json(temporary, payload)
     os.replace(temporary, path)
 
+
+_TRAINING_FEATURE_FIELDS = {
+    "contract",
+    "schema_version",
+    "dataset_id",
+    "feature_set_name",
+    "feature_set_id",
+    "raw_feature_schema_id",
+    "feature_schema",
+    "observation_dataset_id",
+    "panel_dataset_id",
+    "target_dataset_id",
+    "fold_dataset_id",
+    "experiment_configuration_id",
+    "evidence_class",
+    "market_data_source_class",
+    "holdout_excluded",
+    "row_count",
+    "rows",
+}
+_TRAINING_TARGET_FIELDS = {
+    "contract",
+    "schema_version",
+    "dataset_id",
+    "observation_dataset_id",
+    "foundation_configuration_id",
+    "rows",
+}
 
 _SELECTION_FIELDS = {
     "contract",
@@ -501,8 +836,14 @@ def _claim_preparation(
         raise ValueError("holdout preparation is not owned by this root")
 
 
-def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[str, object]) -> None:
-    from qtrad.application.r2_holdout import FinalTrainingRow, fit_final_ridge
+def _replay_final_fit(
+    selection: R2HoldoutSelectionManifest,
+    payload: Mapping[str, object],
+    *,
+    training_feature_dataset: R2FeatureDataset,
+    training_target_dataset: TargetDataset,
+) -> None:
+    from qtrad.application.r2_holdout import fit_final_ridge
     from qtrad.domain.r2_holdout import FinalFitDisposition
     from qtrad.domain.r2_readiness import ModelFamily
 
@@ -522,28 +863,12 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         "model_family": str(payload["model_family"]),
         "feature_dataset_id": str(payload["feature_dataset_id"]),
         "feature_schema_id": str(payload["feature_schema_id"]),
+        "training_feature_dataset_id": training_feature_dataset.dataset_id,
+        "training_target_dataset_id": training_target_dataset.dataset_id,
     }
     for key, expected in expected_lineage.items():
         if preprocessing.get(key) != expected:
             raise ValueError(f"final fit training evidence is not bound to {key}")
-    raw_rows = preprocessing.get("training_rows")
-    if not isinstance(raw_rows, list):
-        raise ValueError("final fit is missing persisted training-row evidence")
-    rows = tuple(
-        FinalTrainingRow(
-            target_id=str(raw["target_id"]),
-            instrument_id=str(raw["instrument_id"]),
-            decision_time=datetime.fromisoformat(str(raw["decision_time"])),
-            target_available_at=datetime.fromisoformat(str(raw["target_available_at"])),
-            features=tuple(
-                None if value is None else float(cast(float | int | str, value))
-                for value in cast(list[object], raw["features"])
-            ),
-            target=float(cast(float | int | str, raw["target"])),
-            target_end_time=datetime.fromisoformat(str(raw["target_end_time"])),
-        )
-        for raw in (cast(Mapping[str, object], item) for item in raw_rows)
-    )
     failure_mode = preprocessing.get("failure_mode")
     forced_fit_disposition: FinalFitDisposition | None = None
     if failure_mode is not None:
@@ -556,9 +881,10 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         model_family=ModelFamily(str(payload["model_family"])),
         feature_dataset_id=str(payload["feature_dataset_id"]),
         feature_schema_id=str(payload["feature_schema_id"]),
-        training_rows=rows,
+        training_feature_dataset=training_feature_dataset,
+        training_target_dataset=training_target_dataset,
         policy=selection.final_fitting_policy,
-        training_cutoff=datetime.fromisoformat(str(payload["training_cutoff"])),
+        training_cutoff=_utc_value(payload["training_cutoff"], "final fit cutoff"),
         purged_target_ids=tuple(
             str(item) for item in cast(list[object], payload["purged_target_ids"])
         ),
@@ -568,10 +894,12 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         ),
     )
     if replayed.as_json() != dict(payload):
-        raise ValueError("final fit does not replay from its authenticated training evidence")
+        raise ValueError("final fit does not replay from its authenticated training children")
 
 
-def _feature_dataset_from_payload(payload: Mapping[str, object]) -> R2HoldoutFeatureDataset:
+def _feature_dataset_from_payload(
+    payload: Mapping[str, object],
+) -> R2HoldoutFeatureDataset:
     raw_range = cast(list[object], payload["holdout_range"])
     if len(raw_range) != 2:
         raise ValueError("holdout feature range must contain exactly two timestamps")
@@ -914,12 +1242,20 @@ def _verify_prepare_children(
         )
         expected_fits.add(str(payload["fit_id"]))
         fit_payloads.append(payload)
-        _replay_final_fit(selection, payload)
         configuration_id = str(payload["configuration_id"])
         if payload["selection_manifest_id"] != seal.selection_manifest_id or payload[
             "feature_dataset_id"
         ] != feature_by_configuration.get(configuration_id):
             raise ValueError("final fit lineage differs from its seal")
+    training_features, training_targets = _load_training_children(root, fit_payloads)
+    for payload in fit_payloads:
+        feature_id, target_id = _training_child_ids_from_fit(payload)
+        _replay_final_fit(
+            selection,
+            payload,
+            training_feature_dataset=training_features[feature_id],
+            training_target_dataset=training_targets[target_id],
+        )
     for dataset_id in seal.forecast_dataset_ids:
         payload = _verify_child(
             root,
@@ -986,6 +1322,8 @@ def write_holdout_preparation(
     forecasts: Mapping[str, object],
     coverage: Mapping[str, object],
     seal: R2HoldoutForecastSeal,
+    training_feature_datasets: Mapping[str, object] | None = None,
+    training_target_datasets: Mapping[str, object] | None = None,
 ) -> Path:
     """Persist all PR B children and the seal without overwriting any path."""
     if seal.holdout_scope is HoldoutScope.CONFIRMATORY:
@@ -1014,6 +1352,32 @@ def write_holdout_preparation(
         raise ValueError("forecast arguments do not exactly match the seal")
     if set(coverage) != set(seal.coverage_ids):
         raise ValueError("coverage arguments do not exactly match the seal")
+    fit_payloads = tuple(_as_json(final_fits[fit_id]) for fit_id in seal.final_fit_ids)
+    training_feature_children = {
+        child.dataset_id: child
+        for child in (training_feature_datasets or {}).values()
+        if isinstance(child, R2FeatureDataset)
+    }
+    training_target_children = {
+        child.dataset_id: child
+        for child in (training_target_datasets or {}).values()
+        if isinstance(child, TargetDataset)
+    }
+    if any(
+        not isinstance(child, R2FeatureDataset)
+        for child in (training_feature_datasets or {}).values()
+    ):
+        raise TypeError("training_feature_datasets must contain R2FeatureDataset values")
+    if any(
+        not isinstance(child, TargetDataset) for child in (training_target_datasets or {}).values()
+    ):
+        raise TypeError("training_target_datasets must contain TargetDataset values")
+    training_feature_ids = {_training_child_ids_from_fit(payload)[0] for payload in fit_payloads}
+    training_target_ids = {_training_child_ids_from_fit(payload)[1] for payload in fit_payloads}
+    if set(training_feature_children) != training_feature_ids:
+        raise ValueError("training feature arguments do not match final-fit lineage")
+    if set(training_target_children) != training_target_ids:
+        raise ValueError("training target arguments do not match final-fit lineage")
     _write_json(
         output / _PREPARATION_CLAIM_FILE,
         _preparation_claim(
@@ -1031,6 +1395,16 @@ def write_holdout_preparation(
         _write_json(selection_path, selection.as_json())
     for dataset_id, relative in _feature_dataset_paths(seal):
         _write_json(output / relative, feature_children[dataset_id].as_json())
+    for dataset_id, child in training_feature_children.items():
+        _write_json(
+            output / f"training/features/{dataset_id}.json",
+            _training_feature_payload(child),
+        )
+    for dataset_id, child in training_target_children.items():
+        _write_json(
+            output / f"training/targets/{dataset_id}.json",
+            _training_target_payload(child),
+        )
     for fit_id in seal.final_fit_ids:
         _write_json(output / "fits" / f"{fit_id}.json", _as_json(final_fits[fit_id]))
     for dataset_id in seal.forecast_dataset_ids:
@@ -1148,6 +1522,7 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
         raise ValueError("transferred preparation requires a usage claim")
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
+    allowed.update(_training_paths_for_seal(path, seal))
     allowed.update(f"fits/{fit_id}.json" for fit_id in seal.final_fit_ids)
     allowed.update(f"forecasts/{dataset_id}.json" for dataset_id in seal.forecast_dataset_ids)
     allowed.update(f"coverage/{coverage_id}.json" for coverage_id in seal.coverage_ids)
@@ -1238,6 +1613,7 @@ def prepare_holdout_from_files(
         "selection.json",
         "manifest.json",
         *(_relative for _dataset_id, _relative in _feature_dataset_paths(source_seal)),
+        *_training_paths_for_seal(source, source_seal),
         *(f"fits/{fit_id}.json" for fit_id in source_seal.final_fit_ids),
         *(f"forecasts/{dataset_id}.json" for dataset_id in source_seal.forecast_dataset_ids),
         *(f"coverage/{coverage_id}.json" for coverage_id in source_seal.coverage_ids),
@@ -1820,6 +2196,8 @@ def _verify_artifact_reference_payload(
         R2_HOLDOUT_CONSUMED_CONTRACT: "marker_id",
         R2_HOLDOUT_EVALUATION_CONTRACT: "evaluation_id",
         R2_HOLDOUT_FEATURES_CONTRACT: "dataset_id",
+        "qtrad-r2-features-v2": "dataset_id",
+        TARGET_DATASET_CONTRACT: "dataset_id",
         "qtrad-r2-final-fit-v1": "fit_id",
         R2_HOLDOUT_FORECAST_CONTRACT: "dataset_id",
         R2_HOLDOUT_COVERAGE_CONTRACT: "coverage_id",
@@ -1893,7 +2271,20 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
             _PREPARATION_CLAIM_CONTRACT,
             "claim_id",
         ),
-        ("features.json", "features.json", R2_HOLDOUT_FEATURES_CONTRACT, "dataset_id"),
+        *[
+            (relative, relative, R2_HOLDOUT_FEATURES_CONTRACT, "dataset_id")
+            for _dataset_id, relative in _feature_dataset_paths(seal)
+        ],
+        *[
+            (relative, relative, "qtrad-r2-features-v2", "dataset_id")
+            for relative in _training_paths_for_seal(root, seal)
+            if relative.startswith("training/features/")
+        ],
+        *[
+            (relative, relative, TARGET_DATASET_CONTRACT, "dataset_id")
+            for relative in _training_paths_for_seal(root, seal)
+            if relative.startswith("training/targets/")
+        ],
         *[
             (f"fits/{fit_id}.json", f"fits/{fit_id}.json", "qtrad-r2-final-fit-v1", "fit_id")
             for fit_id in seal.final_fit_ids

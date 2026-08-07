@@ -10,7 +10,6 @@ from typing import NoReturn
 import pytest
 
 from qtrad.application.r2_holdout import (
-    FinalTrainingRow,
     build_holdout_coverage,
     build_holdout_forecasts,
     evaluate_holdout,
@@ -31,6 +30,13 @@ from qtrad.domain.r2_evaluation import (
     SelectionDecision,
     SelectionManifest,
 )
+from qtrad.domain.r2_features import (
+    FeatureDefinition,
+    R2FeatureDataset,
+    RawFeatureRow,
+    RawFeatureValue,
+    feature_set_id,
+)
 from qtrad.domain.r2_holdout import (
     HOLDOUT_ACKNOWLEDGEMENT,
     FinalFitDisposition,
@@ -43,7 +49,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
 )
-from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
+from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_holdout import (
     prepare_holdout_from_files,
     reveal_holdout,
@@ -232,10 +238,75 @@ def _target_dataset() -> TargetDataset:
         )
         for index, opportunity in enumerate(opportunities)
     )
+    training_rows = tuple(
+        TargetRow(
+            instrument_id="INSTRUMENT_0",
+            decision_time=NOW - timedelta(days=2, hours=index),
+            horizon=timedelta(seconds=900),
+            target_basis=PriceBasis.MID,
+            target_revision_policy="FIXTURE_V1",
+            target_start_time=NOW - timedelta(days=2, hours=index),
+            target_end_time=NOW - timedelta(days=2, hours=index) + timedelta(seconds=900),
+            target_freeze_at=NOW - timedelta(days=2, hours=index) + timedelta(seconds=900),
+            target_available_at=NOW - timedelta(days=2, hours=index) + timedelta(seconds=900),
+            label_start_close=None,
+            label_end_close=None,
+            log_return=index / 10,
+            return_disposition=ReturnDisposition.VALID,
+            start_event_id=None,
+            end_event_id=None,
+            upper_log_excursion=None,
+            lower_log_excursion=None,
+            excursion_disposition=ExcursionDisposition.INCOMPLETE_PATH,
+        )
+        for index in range(4)
+    )
     return TargetDataset.create(
-        rows,
+        (*rows, *training_rows),
         observation_dataset_id=_id("observations"),
         foundation_configuration_id=_id("foundation"),
+    )
+
+
+def _training_feature_dataset() -> R2FeatureDataset:
+    schema = (
+        FeatureDefinition("training_return", FeatureFamily.LOCAL_RETURNS),
+        FeatureDefinition("training_volatility", FeatureFamily.LOCAL_VOLATILITY_RANGE),
+    )
+    experiment_id = _id("experiment")
+    feature_name = "fixture-training-features"
+    training_feature_set_id = feature_set_id(
+        experiment_id,
+        feature_name,
+        schema,
+        MarketDataSourceClass.IG_NATIVE_CAPTURE,
+    )
+    rows = tuple(
+        RawFeatureRow(
+            target_instrument_id="INSTRUMENT_0",
+            decision_time=NOW - timedelta(days=2, hours=index),
+            feature_data_asof=NOW - timedelta(days=2, hours=index) - timedelta(minutes=1),
+            latest_feature_bar_end=NOW - timedelta(days=2, hours=index) - timedelta(minutes=1),
+            feature_set_id=training_feature_set_id,
+            values=(
+                RawFeatureValue("training_return", float(index)),
+                RawFeatureValue("training_volatility", 1.0),
+            ),
+        )
+        for index in range(4)
+    )
+    return R2FeatureDataset.create(
+        rows,
+        feature_schema=schema,
+        feature_set_name=feature_name,
+        feature_set_id=training_feature_set_id,
+        observation_dataset_id=_id("observations"),
+        panel_dataset_id=_id("panel"),
+        target_dataset_id=_target_dataset().dataset_id,
+        fold_dataset_id=_id("fold"),
+        experiment_configuration_id=experiment_id,
+        evidence_class=EvidenceClass.IMPLEMENTATION,
+        market_data_source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
     )
 
 
@@ -267,18 +338,8 @@ def _prepared(
             values=(1.0, 0.5),
         ),
     )
-    training_rows = tuple(
-        FinalTrainingRow(
-            target_id=_id(f"training-{index}"),
-            instrument_id="INSTRUMENT_0",
-            decision_time=NOW - timedelta(days=2, hours=index),
-            target_available_at=NOW - timedelta(days=1),
-            features=(float(index), 1.0),
-            target=float(index) / 10,
-            target_end_time=NOW - timedelta(days=1),
-        )
-        for index in range(4)
-    )
+    training_features = _training_feature_dataset()
+    training_targets = _target_dataset()
     fits = tuple(
         fit_final_ridge(
             selection=selection,
@@ -286,7 +347,8 @@ def _prepared(
             model_family=ModelFamily.LOCAL_RIDGE,
             feature_dataset_id=features.dataset_id,
             feature_schema_id=feature_schema_id,
-            training_rows=training_rows,
+            training_feature_dataset=training_features,
+            training_target_dataset=training_targets,
             policy=selection.final_fitting_policy,
             forced_disposition=(
                 FinalFitDisposition.NUMERICAL_FAILURE
@@ -335,6 +397,8 @@ def _prepared(
         forecasts={item.dataset_id: item for item in forecasts},
         coverage={item.coverage_id: item for item in coverage},
         seal=seal,
+        training_feature_datasets={training_features.dataset_id: training_features},
+        training_target_datasets={training_targets.dataset_id: training_targets},
     )
     return selection, opportunities, fits, forecasts, coverage, seal
 
@@ -501,11 +565,11 @@ def test_mutated_training_evidence_is_rejected(tmp_path: Path) -> None:
         _coverage,
         _seal,
     ) = _prepared(tmp_path)
-    fit_path = next((tmp_path / "fits").iterdir())
-    payload = json.loads(fit_path.read_text())
-    payload["preprocessing"]["training_rows"][0]["target"] = 99.0
-    fit_path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="identity"):
+    feature_path = next((tmp_path / "training/features").iterdir())
+    payload = json.loads(feature_path.read_text())
+    payload["rows"][0]["values"][0]["value"] = 99.0
+    feature_path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="dataset ID"):
         verify_holdout_preparation(tmp_path)
 
 

@@ -77,6 +77,66 @@ class FinalTrainingRow:
             raise ValueError("final-training target must be finite")
 
 
+def _authenticated_final_training_rows(
+    selection: R2HoldoutSelectionManifest,
+    *,
+    feature_dataset: R2FeatureDataset,
+    target_dataset: TargetDataset,
+) -> tuple[FinalTrainingRow, ...]:
+    if not feature_dataset.holdout_excluded:
+        raise ValueError("final-fit feature evidence must exclude the holdout")
+    if feature_dataset.experiment_configuration_id != selection.experiment_configuration_id:
+        raise ValueError("final-fit feature evidence differs from the frozen experiment")
+    if feature_dataset.target_dataset_id != target_dataset.dataset_id:
+        raise ValueError("final-fit feature evidence differs from the target dataset")
+    if feature_dataset.observation_dataset_id != target_dataset.observation_dataset_id:
+        raise ValueError("final-fit feature and target observations differ")
+    if feature_dataset.evidence_class is not selection.evidence_class:
+        raise ValueError("final-fit feature evidence differs from the frozen evidence class")
+    expected_target = selection.evaluation_policy.get("target_dataset_id")
+    if expected_target is not None and expected_target != target_dataset.dataset_id:
+        raise ValueError("final-fit target evidence differs from the frozen target dataset")
+    expected_observation = selection.evaluation_policy.get("observation_dataset_id")
+    if (
+        expected_observation is not None
+        and expected_observation != target_dataset.observation_dataset_id
+    ):
+        raise ValueError("final-fit target evidence differs from the frozen observations")
+    expected_foundation = selection.evaluation_policy.get("foundation_configuration_id")
+    if (
+        expected_foundation is not None
+        and expected_foundation != target_dataset.foundation_configuration_id
+    ):
+        raise ValueError("final-fit target evidence differs from the frozen foundation")
+
+    targets = {(row.instrument_id, row.decision_time): row for row in target_dataset.rows}
+    rows: list[FinalTrainingRow] = []
+    seen_target_ids: set[str] = set()
+    for raw_row in feature_dataset.rows:
+        target = targets.get((raw_row.target_instrument_id, raw_row.decision_time))
+        if target is None:
+            raise ValueError("final-fit feature evidence has no authenticated target row")
+        if target.return_disposition.value != "VALID" or target.log_return is None:
+            continue
+        if target.target_id in seen_target_ids:
+            raise ValueError("final-fit feature evidence repeats a target")
+        seen_target_ids.add(target.target_id)
+        rows.append(
+            FinalTrainingRow(
+                target_id=target.target_id,
+                instrument_id=target.instrument_id,
+                decision_time=target.decision_time,
+                target_available_at=target.target_available_at,
+                features=tuple(item.value for item in raw_row.values),
+                target=target.log_return,
+                target_end_time=target.target_end_time,
+            )
+        )
+    if not rows:
+        raise ValueError("final-fit authenticated training evidence is empty")
+    return tuple(rows)
+
+
 def _ensure_selection_lineage(
     selection: R2HoldoutSelectionManifest,
     *,
@@ -604,6 +664,8 @@ def _failed_final_fit(
     reason: str,
     feature_count: int,
     training_evidence: Sequence[FinalTrainingRow] = (),
+    training_feature_dataset_id: str | None = None,
+    training_target_dataset_id: str | None = None,
     candidate_scores: Sequence[R2AlphaCandidateScore] | None = None,
     preprocessing: Mapping[str, JsonValue] | None = None,
     forced_failure: bool = False,
@@ -626,6 +688,14 @@ def _failed_final_fit(
     )
     fit_preprocessing.setdefault(
         "training_rows", [_training_row_json(row) for row in training_evidence]
+    )
+    if training_feature_dataset_id is None or training_target_dataset_id is None:
+        raise ValueError("final fit is missing authenticated training child IDs")
+    fit_preprocessing.update(
+        {
+            "training_feature_dataset_id": training_feature_dataset_id,
+            "training_target_dataset_id": training_target_dataset_id,
+        }
     )
     fit_preprocessing.update(
         _final_fit_lineage(
@@ -726,6 +796,8 @@ def _preprocessing_payload(
     fit_intercept: bool,
     minimum_training_rows: int,
     minimum_inner_validation_rows: int,
+    training_feature_dataset_id: str,
+    training_target_dataset_id: str,
 ) -> dict[str, JsonValue]:
     return {
         "policy_id": policy.policy_id,
@@ -733,6 +805,8 @@ def _preprocessing_payload(
         "inner": inner.as_json() if inner is not None else None,
         "outer": outer.as_json() if outer is not None else None,
         "training_rows": [_training_row_json(row) for row in rows],
+        "training_feature_dataset_id": training_feature_dataset_id,
+        "training_target_dataset_id": training_target_dataset_id,
         "instrument_identity_order": list(identity_order),
         "ridge_solver": solver,
         "ridge_tolerance": policy.solver_identity.get("tolerance", 1e-8),
@@ -751,7 +825,8 @@ def fit_final_ridge(
     model_family: ModelFamily,
     feature_dataset_id: str,
     feature_schema_id: str,
-    training_rows: Sequence[FinalTrainingRow],
+    training_feature_dataset: R2FeatureDataset,
+    training_target_dataset: TargetDataset,
     policy: R2FinalFittingPolicy,
     training_cutoff: datetime | None = None,
     purged_target_ids: Sequence[str] = (),
@@ -771,6 +846,11 @@ def fit_final_ridge(
             "confirmatory final fits require independently verified pre-holdout "
             "feature and target children"
         )
+    training_rows = _authenticated_final_training_rows(
+        selection,
+        feature_dataset=training_feature_dataset,
+        target_dataset=training_target_dataset,
+    )
     if policy.policy_id != selection.final_fitting_policy.policy_id:
         raise ValueError("final fitting policy differs from the frozen selection")
     frozen_policy_values = {
@@ -859,6 +939,8 @@ def fit_final_ridge(
             disposition=forced_disposition,
             reason=forced_failure_reason or "forced fixture failure disposition",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
             forced_failure=True,
         )
@@ -878,6 +960,8 @@ def fit_final_ridge(
             disposition=FinalFitDisposition.INSUFFICIENT_TRAINING,
             reason="pre-holdout training membership is empty",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
         )
     schema = _holdout_schema(feature_count)
@@ -969,6 +1053,8 @@ def fit_final_ridge(
             disposition=FinalFitDisposition.NUMERICAL_FAILURE,
             reason=f"R2 preprocessing selection failed: {type(error).__name__}: {error}",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
         )
     inner_fit_ids = tuple(selected.inner_fit_target_ids)
@@ -994,6 +1080,8 @@ def fit_final_ridge(
         fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
         minimum_training_rows=minimum_training_rows,
         minimum_inner_validation_rows=minimum_inner_validation_rows,
+        training_feature_dataset_id=training_feature_dataset.dataset_id,
+        training_target_dataset_id=training_target_dataset.dataset_id,
     )
     preprocessing.update(
         _final_fit_lineage(
@@ -1024,6 +1112,8 @@ def fit_final_ridge(
             disposition=_final_disposition(selected.disposition),
             reason=f"R2 preprocessing selection disposition {selected.disposition.value}",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
@@ -1047,6 +1137,8 @@ def fit_final_ridge(
             disposition=FinalFitDisposition.DEGENERATE_FEATURE_MATRIX,
             reason="final transformed feature matrix is empty or non-finite",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
@@ -1091,6 +1183,8 @@ def fit_final_ridge(
             disposition=FinalFitDisposition.NUMERICAL_FAILURE,
             reason=f"final Ridge fit failed: {type(error).__name__}: {error}",
             feature_count=feature_count,
+            training_feature_dataset_id=training_feature_dataset.dataset_id,
+            training_target_dataset_id=training_target_dataset.dataset_id,
             training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
