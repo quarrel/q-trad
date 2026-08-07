@@ -712,6 +712,7 @@ def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> No
     target_path = next((tmp_path / "training/targets").iterdir())
     payload = json.loads(target_path.read_text())
     assert len(payload["rows"]) == 8
+    assert payload["source_target_dataset_id"] == payload["dataset_id"]
     assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in payload["rows"])
 
 

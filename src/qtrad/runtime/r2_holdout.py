@@ -249,7 +249,9 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
         raise ValueError("training target child has unknown or missing fields")
     if payload.get("contract") != TARGET_DATASET_CONTRACT or payload.get("schema_version") != 1:
         raise ValueError("training target child contract is unsupported")
-    _text_value(payload["source_target_dataset_id"], "training target source dataset ID")
+    source_id = _text_value(
+        payload["source_target_dataset_id"], "training target source dataset ID"
+    )
     rows: list[TargetRow] = []
     expected_fields = {
         "instrument_id",
@@ -332,6 +334,8 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
     )
     if dataset.dataset_id != _text_value(payload["dataset_id"], "target dataset ID"):
         raise ValueError("training target dataset ID does not authenticate its rows")
+    if source_id != dataset.dataset_id:
+        raise ValueError("training target source does not authenticate its child")
     return dataset
 
 
@@ -892,9 +896,8 @@ def _replay_final_fit(
     preprocessing = payload.get("preprocessing")
     if not isinstance(preprocessing, Mapping):
         raise ValueError("final fit preprocessing evidence must be an object")
-    expected_source = selection.evaluation_policy.get("target_dataset_id")
-    if not isinstance(expected_source, str) or training_target_source_dataset_id != expected_source:
-        raise ValueError("final fit target source differs from the frozen target dataset")
+    if training_target_source_dataset_id != training_target_dataset.dataset_id:
+        raise ValueError("final fit target source differs from its authenticated child")
     expected_lineage = {
         "selection_manifest_id": selection.manifest_id,
         "experiment_configuration_id": selection.experiment_configuration_id,
@@ -1447,9 +1450,6 @@ def write_holdout_preparation(
     if set(coverage) != set(seal.coverage_ids):
         raise ValueError("coverage arguments do not exactly match the seal")
     fit_payloads = tuple(_as_json(final_fits[fit_id]) for fit_id in seal.final_fit_ids)
-    expected_target = selection.evaluation_policy.get("target_dataset_id")
-    if not isinstance(expected_target, str):
-        raise ValueError("preparation is missing the authenticated target source")
     training_target_sources: dict[str, str] = {}
     for payload in fit_payloads:
         _feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1458,8 +1458,8 @@ def write_holdout_preparation(
             preprocessing.get("training_target_source_dataset_id"),
             "final fit target source dataset ID",
         )
-        if source_id != expected_target:
-            raise ValueError("final fit target source differs from the frozen target dataset")
+        if source_id != target_id:
+            raise ValueError("final fit target source differs from its training child")
         previous = training_target_sources.setdefault(target_id, source_id)
         if previous != source_id:
             raise ValueError("training target child has inconsistent source lineage")

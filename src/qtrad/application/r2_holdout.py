@@ -719,14 +719,11 @@ def _failed_final_fit(
     )
     if training_feature_dataset_id is None or training_target_dataset_id is None:
         raise ValueError("final fit is missing authenticated training child IDs")
-    expected_source = selection.evaluation_policy.get("target_dataset_id")
-    if not isinstance(expected_source, str):
-        raise ValueError("final fit is missing the authenticated target source")
     fit_preprocessing.update(
         {
             "training_feature_dataset_id": training_feature_dataset_id,
             "training_target_dataset_id": training_target_dataset_id,
-            "training_target_source_dataset_id": expected_source,
+            "training_target_source_dataset_id": training_target_dataset_id,
         }
     )
     fit_preprocessing.update(
@@ -873,14 +870,13 @@ def fit_final_ridge(
             "feature and target children"
         )
     expected_target = selection.evaluation_policy.get("target_dataset_id")
-    source_target = training_target_source_dataset_id or training_target_dataset.dataset_id
-    if not isinstance(expected_target, str) or source_target != expected_target:
-        raise ValueError("final-fit target evidence differs from the frozen target dataset")
-    if (
-        training_target_source_dataset_id is None
-        and training_target_dataset.dataset_id != expected_target
-    ):
-        raise ValueError("final-fit target evidence differs from the frozen target dataset")
+    if not isinstance(expected_target, str):
+        raise ValueError("final fit is missing the authenticated target source")
+    if training_target_source_dataset_id is None:
+        if training_target_dataset.dataset_id != expected_target:
+            raise ValueError("final-fit target evidence differs from the frozen target dataset")
+    elif training_target_dataset.dataset_id != training_target_source_dataset_id:
+        raise ValueError("final-fit target child differs from its authenticated source")
     training_target_dataset = _pre_holdout_target_dataset(selection, training_target_dataset)
     training_rows = _authenticated_final_training_rows(
         selection,
@@ -1132,7 +1128,7 @@ def fit_final_ridge(
         minimum_inner_validation_rows=minimum_inner_validation_rows,
         training_feature_dataset_id=training_feature_dataset.dataset_id,
         training_target_dataset_id=training_target_dataset.dataset_id,
-        training_target_source_dataset_id=expected_target,
+        training_target_source_dataset_id=training_target_dataset.dataset_id,
     )
     preprocessing.update(
         _final_fit_lineage(
