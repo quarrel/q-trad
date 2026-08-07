@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from queue import Empty, Queue
 from types import SimpleNamespace
@@ -66,6 +66,8 @@ class _FakeClient:
         self.market_data_types: list[int] = []
         self.cancelled: list[int] = []
         self.on_market_data: deque[tuple[str, int, tuple[object, ...]]] = deque()
+        self.callback_received_times: deque[datetime | None] = deque()
+        self.emit_current_time = True
 
     def connect(self, host: str, port: int, *, clientId: int) -> None:
         assert (host, port, clientId) == ("127.0.0.1", 4002, 71)
@@ -77,7 +79,8 @@ class _FakeClient:
         self.disconnected = True
 
     def reqCurrentTime(self) -> None:
-        self.callbacks.put(capability._Callback("current_time", -1, (0,)))
+        if self.emit_current_time:
+            self.callbacks.put(capability._Callback("current_time", -1, (0,)))
 
     def reqMarketDataType(self, market_data_type: int) -> None:
         self.market_data_types.append(market_data_type)
@@ -95,7 +98,17 @@ class _FakeClient:
         self.market_data_requests.append((request_id, contract))
         while self.on_market_data:
             kind, callback_request_id, values = self.on_market_data.popleft()
-            self.callbacks.put(capability._Callback(kind, callback_request_id, values))
+            received_time = (
+                self.callback_received_times.popleft() if self.callback_received_times else None
+            )
+            self.callbacks.put(
+                capability._Callback(
+                    kind,
+                    callback_request_id,
+                    values,
+                    received_time=received_time,
+                )
+            )
 
     def cancelMktData(self, request_id: int) -> None:
         self.cancelled.append(request_id)
@@ -105,6 +118,7 @@ def _adapter(
     monkeypatch: pytest.MonkeyPatch,
     client: _FakeClient,
     listings: tuple[ProviderListing, ...] = (_listing(),),
+    **adapter_kwargs: Any,
 ) -> native.IbkrNativeMarketDataAdapter:
     evidence = {
         listing.listing_id: _evidence(index + 100) for index, listing in enumerate(listings)
@@ -129,6 +143,7 @@ def _adapter(
         contract_evidence=evidence,
         client_factory=lambda callbacks: _attach_callbacks(client, callbacks),
         clock=lambda: _NOW,
+        **adapter_kwargs,
     )
 
 
@@ -198,6 +213,57 @@ async def test_exact_mapping_and_one_sided_callbacks_are_identity_bearing(
 
 
 @pytest.mark.asyncio
+async def test_callback_receive_time_is_frozen_before_consumer_processing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    client.on_market_data.extend(
+        (
+            ("tick_price", 1, (1, 1.1)),
+            ("tick_price", 1, (2, 1.2)),
+        )
+    )
+    bid_received = _NOW + timedelta(seconds=1)
+    ask_received = _NOW + timedelta(seconds=2)
+    client.callback_received_times.extend((bid_received, ask_received))
+    adapter = _adapter(monkeypatch, client)
+    await _connect_and_subscribe(adapter, _listing())
+
+    adapter._clock = lambda: _NOW + timedelta(days=1)
+    records = await _take(adapter.records(), 2)
+
+    assert [record.received_time for record in records] == [bid_received, ask_received]
+    assert [record.raw_payload["received_time"] for record in records] == [
+        bid_received.isoformat().replace("+00:00", "Z"),
+        ask_received.isoformat().replace("+00:00", "Z"),
+    ]
+    assert records[0].quote is not None
+    assert records[0].quote.received_time == bid_received
+    assert records[0].quote.bid_time == bid_received
+    assert records[1].quote is not None
+    assert records[1].quote.received_time == ask_received
+    assert records[1].quote.ask_time == ask_received
+
+
+def test_official_callback_emission_captures_receive_time_at_emission_boundary() -> None:
+    callbacks: Queue[capability._Callback] = Queue()
+    before = datetime.now(UTC)
+    capability._emit(
+        callbacks,
+        capability._Callback("tick_price", 1, (1, 1.1)),
+        generation=4,
+        arrival_sequence=9,
+    )
+    after = datetime.now(UTC)
+
+    callback = callbacks.get_nowait()
+    assert callback.received_time is not None
+    assert before <= callback.received_time <= after
+    assert callback.generation == 4
+    assert callback.arrival_sequence == 9
+
+
+@pytest.mark.asyncio
 async def test_payload_equal_callbacks_keep_distinct_request_and_contract_identity(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -244,6 +310,41 @@ async def test_superseded_generation_is_rejected_without_cross_generation_state(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("trailing_cancelled_request", (False, True))
+async def test_current_generation_unknown_request_callbacks_are_retained(
+    monkeypatch: pytest.MonkeyPatch, trailing_cancelled_request: bool
+) -> None:
+    client = _FakeClient(Queue())
+    adapter = _adapter(monkeypatch, client)
+    listing = _listing()
+    await _connect_and_subscribe(adapter, listing)
+    if trailing_cancelled_request:
+        await adapter.subscribe((listing,))
+        request_id = 1
+    else:
+        request_id = 999
+    client.callbacks.put(
+        capability._Callback(
+            "tick_price",
+            request_id,
+            (1, 1.1),
+            received_time=_NOW,
+        )
+    )
+
+    record = await anext(adapter.records())
+    health = await adapter.health()
+    assert record.error_code == "IBKR_UNKNOWN_REQUEST_ID"
+    assert record.subscription == "IBKR:UNKNOWN_REQUEST"
+    assert record.raw_payload["request_id"] == request_id
+    assert record.raw_payload["listing_id"] is None
+    assert record.raw_payload["con_id"] is None
+    assert "UNKNOWN_REQUEST_ID" in health.reason_codes
+    assert ("unknown_request_callbacks", "1") in health.attributes
+    assert ("superseded_callbacks", "0") in health.attributes
+
+
+@pytest.mark.asyncio
 async def test_recovery_transitions_use_one_session_epoch_and_exact_resubscription(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -285,6 +386,66 @@ async def test_recovery_transitions_use_one_session_epoch_and_exact_resubscripti
     assert maintained.raw_payload["error_code"] == 1102
     assert len(client.market_data_requests) == 2
     assert adapter._session.snapshot().recovery_epoch == 1
+
+
+@pytest.mark.asyncio
+async def test_recovery_timeout_retains_intervening_callbacks_in_arrival_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        request_timeout_seconds=0.001,
+        upstream_recovery_timeout_seconds=0.001,
+    )
+    await _connect_and_subscribe(adapter, _listing())
+    stream = adapter.records()
+    client.callbacks.put(
+        capability._Callback("error", -1, (1_785_000_000, 1100, "CONNECTION_LOST"))
+    )
+    client.callbacks.put(capability._Callback("tick_price", 1, (1, 1.1), received_time=_NOW))
+    client.callbacks.put(capability._Callback("tick_price", 1, (2, 1.2), received_time=_NOW))
+
+    records = [await anext(stream) for _ in range(3)]
+    assert [record.raw_payload["callback_type"] for record in records] == [
+        "error",
+        "tick_price",
+        "tick_price",
+    ]
+    assert [record.arrival_sequence for record in records] == [3, 4, 5]
+    assert [record.raw_payload["raw_value"] for record in records[1:]] == [1.1, 1.2]
+    with pytest.raises(capability.IbkrConnectionIntegrityError, match="bounded recovery"):
+        await anext(stream)
+
+
+@pytest.mark.asyncio
+async def test_server_time_recovery_timeout_retains_intervening_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        request_timeout_seconds=0.001,
+        server_time_timeout_seconds=0.001,
+    )
+    await _connect_and_subscribe(adapter, _listing())
+    client.emit_current_time = False
+    stream = adapter.records()
+    client.callbacks.put(
+        capability._Callback("error", -1, (1_785_000_000, 1102, "CONNECTION_RESTORED"))
+    )
+    client.callbacks.put(capability._Callback("tick_price", 1, (1, 1.1), received_time=_NOW))
+
+    records = [await anext(stream) for _ in range(2)]
+    assert [record.raw_payload["callback_type"] for record in records] == [
+        "error",
+        "tick_price",
+    ]
+    assert [record.arrival_sequence for record in records] == [3, 4]
+    with pytest.raises(capability.IbkrConnectionIntegrityError, match="revalidation timed out"):
+        await anext(stream)
 
 
 @pytest.mark.asyncio
@@ -338,6 +499,31 @@ async def test_live_health_requires_farms_live_type_and_both_sides(
     assert health.recovery_action.value == "NONE"
     assert health.reason_codes == ()
     assert health.environment is BrokerEnvironment.IBKR_PAPER
+
+
+@pytest.mark.asyncio
+async def test_health_allows_inactive_historical_and_quiet_optional_security_farm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    client.on_market_data.extend(
+        (
+            ("market_data_type", 1, (1,)),
+            ("tick_price", 1, (1, 1.1)),
+            ("tick_price", 1, (2, 1.2)),
+        )
+    )
+    client.callbacks.put(capability._Callback("error", -1, (1_785_000_000, 2104, "CONNECTED")))
+    client.callbacks.put(capability._Callback("error", -1, (1_785_000_001, 2108, "INACTIVE")))
+    client.callbacks.put(capability._Callback("error", -1, (1_785_000_002, 2157, "DISCONNECTED")))
+    adapter = _adapter(monkeypatch, client)
+    await _connect_and_subscribe(adapter, _listing())
+    await _take(adapter.records(), 3)
+
+    health = await adapter.health()
+    assert health.status is native.HealthStatus.HEALTHY
+    assert "IBKR_REQUIRED_FARM_NOT_READY" not in health.reason_codes
+    assert "security_definition=DISCONNECTED" in dict(health.attributes)["farms"]
 
 
 @pytest.mark.asyncio

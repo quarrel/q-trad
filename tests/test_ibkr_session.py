@@ -121,6 +121,7 @@ def test_farm_disconnect_recovers_and_inactive_is_not_failure() -> None:
     session = _connected_session()
 
     disconnected = session.on_system_message(IbkrSystemCode.SECURITY_DEFINITION_FARM_DISCONNECTED)
+    assert session.snapshot().state == IbkrSessionState.CONNECTED
     inactive = session.on_system_message(IbkrSystemCode.HISTORICAL_FARM_INACTIVE)
     recovered = session.on_system_message(IbkrSystemCode.SECURITY_DEFINITION_FARM_CONNECTED)
 

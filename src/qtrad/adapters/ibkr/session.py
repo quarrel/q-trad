@@ -69,6 +69,7 @@ _FARM_INACTIVE: Final[frozenset[IbkrSystemCode]] = frozenset(
         IbkrSystemCode.HISTORICAL_FARM_INACTIVE,
     }
 )
+_REQUIRED_FARMS: Final[tuple[str, ...]] = ("market_data", "historical")
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,7 +239,7 @@ class IbkrSession:
             return
         if (
             self._upstream_lost_at is not None
-            or any(value == "DISCONNECTED" for value in self._farms.values())
+            or any(self._farms[name] == "DISCONNECTED" for name in _REQUIRED_FARMS)
             or "IBKR_TWS_SERVER_DISCONNECTED" in self._reason_codes
             or any(reason.startswith("UNKNOWN_GLOBAL_CODE_") for reason in self._reason_codes)
         ):
@@ -378,7 +379,10 @@ class IbkrSession:
         if system_code in _FARM_DOWN:
             farm = _FARM_DOWN[system_code]
             self._farms[farm] = "DISCONNECTED"
-            self._mark_degraded()
+            if farm in _REQUIRED_FARMS:
+                self._mark_degraded()
+            else:
+                self._refresh_state()
             reason = f"{farm.upper()}_FARM_DISCONNECTED"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)

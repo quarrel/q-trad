@@ -84,6 +84,12 @@ class _SubscriptionBinding:
     subscription: IbkrSubscription
 
 
+class _RecoveryFailure(IbkrConnectionIntegrityError):
+    def __init__(self, message: str, callbacks: Sequence[_Callback]) -> None:
+        super().__init__(message)
+        self.callbacks = tuple(callbacks)
+
+
 class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapter):
     """Capture exact, pre-reviewed IBKR contracts through the shared API boundary.
 
@@ -153,6 +159,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._connected_once = False
         self._terminal_error: IbkrConnectionIntegrityError | None = None
         self._superseded_callbacks = 0
+        self._unknown_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
 
     async def connect(self) -> None:
@@ -214,10 +221,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if self._client is None:
             raise RuntimeError("IBKR native capture is not connected")
         while True:
-            self._raise_if_terminal()
             if self._pending_records:
                 yield self._pending_records.popleft()
                 continue
+            self._raise_if_terminal()
             try:
                 callback = await self._next_callback(monotonic() + self._request_timeout_seconds)
             except IbkrConnectionIntegrityError as error:
@@ -228,7 +235,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             if not self._session.accept_callback(callback.generation):
                 self._superseded_callbacks += 1
                 continue
-            self._last_message_at = self._received_time()
+            self._last_message_at = self._callback_received_time(callback)
             if callback.kind == "current_time":
                 if self._session.state is IbkrSessionState.WAITING_SERVER_TIME:
                     self._session.mark_server_time()
@@ -240,7 +247,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 continue
             binding = self._current_bindings.get(callback.request_id)
             if binding is None:
-                self._superseded_callbacks += 1
+                yield self._normalise_unknown_request_callback(callback)
                 continue
             if callback.kind == "error":
                 yield self._normalise_error_callback(callback, binding)
@@ -260,6 +267,8 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             reasons.add("CALLBACK_QUEUE_OVERFLOW")
         if self._terminal_error is not None:
             reasons.add("CONNECTION_INTEGRITY_FAILED")
+        if self._unknown_request_callbacks:
+            reasons.add("UNKNOWN_REQUEST_ID")
         if self._client is None:
             reasons.add("IBKR_SOCKET_NOT_CONNECTED")
         if snapshot.state in {
@@ -273,8 +282,12 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             reasons.add("NO_ACTIVE_SUBSCRIPTIONS")
         if snapshot.active_subscriptions != snapshot.desired_subscriptions:
             reasons.add("SUBSCRIPTIONS_INCOMPLETE")
-        if any(value != "CONNECTED" for _, value in snapshot.farms):
-            reasons.add("IBKR_FARM_NOT_HEALTHY")
+        farms = dict(snapshot.farms)
+        if any(
+            farms.get(name) not in {"CONNECTED", "INACTIVE"}
+            for name in ("market_data", "historical")
+        ):
+            reasons.add("IBKR_REQUIRED_FARM_NOT_READY")
         if any(
             self._market_data_types.get(request_id) != "LIVE"
             for request_id in self._current_bindings
@@ -323,6 +336,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("active_subscriptions", str(snapshot.active_subscriptions)),
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(self._superseded_callbacks)),
+            ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
             ("market_data_types", _market_data_type_summary(self._market_data_types)),
             ("farms", ",".join(f"{name}={value}" for name, value in snapshot.farms)),
         )
@@ -385,15 +399,27 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             generation=callback.generation,
         )
         if error_code == int(IbkrSystemCode.UPSTREAM_DISCONNECTED):
-            callbacks, resubscribe_at = await self._await_native_upstream_recovery()
-            self._pending_records.extend(
-                await self._process_recovery_callbacks(callbacks, resubscribe_at=resubscribe_at)
-            )
+            try:
+                callbacks, resubscribe_at = await self._await_native_upstream_recovery()
+                self._pending_records.extend(
+                    await self._process_recovery_callbacks(callbacks, resubscribe_at=resubscribe_at)
+                )
+            except _RecoveryFailure as error:
+                self._pending_records.extend(
+                    await self._process_recovery_callbacks(error.callbacks)
+                )
+                self._terminal_error = error
         elif error_code == int(IbkrSystemCode.UPSTREAM_RESTORED_DATA_LOST) and decision.resubscribe:
             await self._issue_subscriptions(tuple(self._current_binding_values()), resubscribe=True)
         elif decision.revalidate_server_time:
-            callbacks = await self._await_server_time_revalidation()
-            self._pending_records.extend(await self._process_recovery_callbacks(callbacks))
+            try:
+                callbacks = await self._await_server_time_revalidation()
+                self._pending_records.extend(await self._process_recovery_callbacks(callbacks))
+            except _RecoveryFailure as error:
+                self._pending_records.extend(
+                    await self._process_recovery_callbacks(error.callbacks)
+                )
+                self._terminal_error = error
         elif decision.action in {
             IbkrRecoveryAction.RESTART_ADAPTER,
             IbkrRecoveryAction.RESTART_GATEWAY,
@@ -414,8 +440,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             try:
                 callback = await self._next_callback(deadline)
             except TimeoutError as error:
-                raise IbkrConnectionIntegrityError(
-                    "IBKR upstream did not recover within the bounded recovery window"
+                raise _RecoveryFailure(
+                    "IBKR upstream did not recover within the bounded recovery window",
+                    callbacks,
                 ) from error
             if not self._session.accept_callback(callback.generation):
                 self._superseded_callbacks += 1
@@ -434,15 +461,20 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 return tuple(callbacks), resubscribe_at
             if error_code == int(IbkrSystemCode.UPSTREAM_RESTORED_DATA_MAINTAINED):
                 if decision.revalidate_server_time:
-                    callbacks.extend(await self._await_server_time_revalidation())
+                    try:
+                        callbacks.extend(await self._await_server_time_revalidation())
+                    except _RecoveryFailure as error:
+                        raise _RecoveryFailure(
+                            str(error), (*callbacks, *error.callbacks)
+                        ) from error
                 return tuple(callbacks), resubscribe_at
             if error_code == int(IbkrSystemCode.UPSTREAM_DISCONNECTED):
                 continue
             if decision.action is not IbkrRecoveryAction.NONE:
-                self._terminal_error = IbkrConnectionIntegrityError(
-                    f"IBKR native capture recovery failed after {error_code}"
+                raise _RecoveryFailure(
+                    f"IBKR native capture recovery failed after {error_code}",
+                    callbacks,
                 )
-                raise self._terminal_error
 
     async def _await_server_time_revalidation(self) -> tuple[_Callback, ...]:
         client = self._client
@@ -455,8 +487,8 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             try:
                 callback = await self._next_callback(deadline)
             except TimeoutError as error:
-                raise IbkrConnectionIntegrityError(
-                    "IBKR server-time revalidation timed out"
+                raise _RecoveryFailure(
+                    "IBKR server-time revalidation timed out", callbacks
                 ) from error
             if not self._session.accept_callback(callback.generation):
                 self._superseded_callbacks += 1
@@ -473,10 +505,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 generation=callback.generation,
             )
             if decision.action is not IbkrRecoveryAction.NONE:
-                self._terminal_error = IbkrConnectionIntegrityError(
-                    f"IBKR server-time revalidation failed after {error_code}"
+                raise _RecoveryFailure(
+                    f"IBKR server-time revalidation failed after {error_code}",
+                    callbacks,
                 )
-                raise self._terminal_error
 
     async def _process_recovery_callbacks(
         self,
@@ -497,7 +529,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 continue
             binding = self._current_bindings.get(callback.request_id)
             if binding is None:
-                self._superseded_callbacks += 1
+                records.append(self._normalise_unknown_request_callback(callback))
                 continue
             records.append(self._normalise_level1_callback(callback, binding))
         return tuple(records)
@@ -508,7 +540,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._session.mark_subscription_active(
             str(binding.listing.listing_id), generation=callback.generation
         )
-        received = self._received_time()
+        received = self._callback_received_time(callback)
         self._last_message_at = received
         tick_type = (
             _int_value(callback.values[0]) if callback.kind in {"tick_price", "tick_size"} else None
@@ -615,10 +647,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
     def _normalise_error_callback(
         self, callback: _Callback, binding: _SubscriptionBinding | None = None
     ) -> MarketDataRecord:
-        received = self._received_time()
+        if binding is None and callback.request_id >= 0:
+            return self._normalise_unknown_request_callback(callback)
+        received = self._callback_received_time(callback)
         self._last_message_at = received
-        if binding is None:
-            binding = self._current_bindings.get(callback.request_id)
         raw = {
             "callback_type": callback.kind,
             "request_id": callback.request_id,
@@ -644,6 +676,28 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             error_detail=callback.diagnostic or _error_disposition(callback),
         )
 
+    def _normalise_unknown_request_callback(self, callback: _Callback) -> MarketDataRecord:
+        self._unknown_request_callbacks += 1
+        received = self._callback_received_time(callback)
+        self._last_message_at = received
+        tick_type = (
+            _int_value(callback.values[0]) if callback.kind in {"tick_price", "tick_size"} else None
+        )
+        raw = self._raw_payload(callback, None, received, tick_type=tick_type)
+        return self._record(
+            callback=callback,
+            binding=None,
+            received=received,
+            raw=raw,
+            quote=None,
+            error_code="IBKR_UNKNOWN_REQUEST_ID",
+            error_detail=(
+                f"request_id={callback.request_id}"
+                if callback.kind != "error"
+                else (f"request_id={callback.request_id};provider_error={_error_code(callback)}")
+            ),
+        )
+
     def _record(
         self,
         *,
@@ -666,7 +720,13 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             provider="ibkr",
             environment=self._environment.value,
             subscription=(
-                str(binding.listing.listing_id) if binding is not None else "IBKR:SYSTEM"
+                str(binding.listing.listing_id)
+                if binding is not None
+                else (
+                    "IBKR:UNKNOWN_REQUEST"
+                    if error_code == "IBKR_UNKNOWN_REQUEST_ID"
+                    else "IBKR:SYSTEM"
+                )
             ),
             deduplication_key=f"{identity}:{digest}",
             received_time=received,
@@ -682,12 +742,12 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
     def _raw_payload(
         self,
         callback: _Callback,
-        binding: _SubscriptionBinding,
+        binding: _SubscriptionBinding | None,
         received: datetime,
         *,
         tick_type: int | None,
     ) -> dict[str, JsonValue]:
-        evidence = binding.evidence
+        evidence = binding.evidence if binding is not None else None
         return cast(
             dict[str, JsonValue],
             to_json_value(
@@ -696,14 +756,16 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                     "request_id": callback.request_id,
                     "connection_generation": callback.generation,
                     "arrival_sequence": callback.arrival_sequence,
-                    "listing_id": str(binding.listing.listing_id),
-                    "con_id": evidence.con_id,
-                    "symbol": evidence.symbol,
-                    "local_symbol": evidence.local_symbol,
-                    "security_type": evidence.security_type,
-                    "exchange": evidence.exchange,
-                    "currency": evidence.currency,
-                    "trading_class": evidence.trading_class,
+                    "listing_id": (
+                        str(binding.listing.listing_id) if binding is not None else None
+                    ),
+                    "con_id": evidence.con_id if evidence is not None else None,
+                    "symbol": evidence.symbol if evidence is not None else None,
+                    "local_symbol": evidence.local_symbol if evidence is not None else None,
+                    "security_type": evidence.security_type if evidence is not None else None,
+                    "exchange": evidence.exchange if evidence is not None else None,
+                    "currency": evidence.currency if evidence is not None else None,
+                    "trading_class": evidence.trading_class if evidence is not None else None,
                     "tick_type": tick_type,
                     "raw_value": callback.values[1] if len(callback.values) > 1 else None,
                     "callback_values": callback.values,
@@ -744,6 +806,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._last_message_at = None
         self._terminal_error = None
         self._superseded_callbacks = 0
+        self._unknown_request_callbacks = 0
         self._pending_records.clear()
 
     def _reset_subscription_evidence(self) -> None:
@@ -752,8 +815,13 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._ask_seen.clear()
         self._last_prices.clear()
 
-    def _received_time(self) -> datetime:
+    def _callback_received_time(self, callback: _Callback) -> datetime:
+        if callback.received_time is not None:
+            return require_utc(callback.received_time, "IBKR native callback receive time")
         return require_utc(self._clock(), "IBKR native callback receive time")
+
+    def _received_time(self) -> datetime:
+        return require_utc(self._clock(), "IBKR native observation time")
 
     def _raise_if_terminal(self) -> None:
         if self._terminal_error is not None:
@@ -794,6 +862,7 @@ def _health_reason_blocks(reason: str) -> bool:
     return reason not in {
         "IBKR_UPSTREAM_RESTORED_DATA_LOST",
         "SUPERSEDED_GENERATION",
+        "SECURITY_DEFINITION_FARM_DISCONNECTED",
     } and not reason.endswith("_FARM_CONNECTED")
 
 
