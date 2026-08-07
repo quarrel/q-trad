@@ -371,8 +371,8 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         HoldoutScope,
         R2HoldoutOpportunityRegistry,
         R2HoldoutTargetProjection,
+        R2HoldoutTargetSource,
     )
-    from qtrad.runtime.r2_holdout import _target_dataset_from_payload
 
     if args.oof_bundle is None:
         raise ValueError(
@@ -395,9 +395,8 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     frozen_metadata = (
         {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
     )
-    source_target = _target_dataset_from_payload(
-        _load_holdout_cli_object(args.source_target_dataset),
-        field="source target dataset",
+    holdout_target_source = R2HoldoutTargetSource.from_json(
+        _load_holdout_cli_object(args.holdout_target_source)
     )
     pre_holdout_projection = R2HoldoutTargetProjection.from_json(
         _load_holdout_cli_object(args.pre_holdout_projection)
@@ -435,7 +434,7 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
             verified_oof,
             expected_evaluation_report_id=prior.evaluation_report_id,
         ),
-        source_target_dataset=source_target,
+        holdout_target_source=holdout_target_source,
         holdout_opportunity_registry=opportunity_registry,
         pre_holdout_projection=pre_holdout_projection,
     )
@@ -936,10 +935,12 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
     baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
     baselines_holdout_selection.add_argument(
+        "--holdout-target-source",
         "--source-target-dataset",
+        dest="holdout_target_source",
         type=Path,
         required=True,
-        help="authenticated source target dataset JSON",
+        help="authenticated outcome-blind target source evidence JSON",
     )
     baselines_holdout_selection.add_argument(
         "--holdout-opportunity-registry",

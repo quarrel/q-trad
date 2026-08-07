@@ -20,10 +20,12 @@ from uuid import UUID
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import (
+    TARGET_DATASET_CONTRACT,
     ExcursionDisposition,
     ReturnDisposition,
     TargetDataset,
     TargetRow,
+    target_identity,
 )
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import ArtifactReference
@@ -41,8 +43,9 @@ R2_HOLDOUT_CONSUMED_CONTRACT = "qtrad-r2-holdout-consumed-v1"
 R2_HOLDOUT_EVALUATION_CONTRACT = "qtrad-r2-holdout-evaluation-v1"
 R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT = "qtrad-r2-holdout-outcome-evidence-v1"
 R2_HOLDOUT_BUNDLE_CONTRACT = "qtrad-r2-holdout-bundle-v1"
-R2_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-holdout-target-projection-v1"
-R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT = "qtrad-r2-holdout-opportunity-registry-v1"
+R2_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-holdout-target-projection-v2"
+R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT = "qtrad-r2-holdout-opportunity-registry-v2"
+R2_HOLDOUT_TARGET_SOURCE_CONTRACT = "qtrad-r2-holdout-target-source-v1"
 
 HOLDOUT_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_THIS_IRREVERSIBLY_CONSUMES_THE_FROZEN_HOLDOUT"
 
@@ -544,12 +547,18 @@ class R2HoldoutSelectionManifest:
         _require_id(pre_holdout_target_id, "pre-holdout target dataset ID")
         pre_holdout_projection_id = self.evaluation_policy.get("pre_holdout_projection_id")
         opportunity_registry_id = self.evaluation_policy.get("holdout_opportunity_registry_id")
+        target_source_id = self.evaluation_policy.get("holdout_target_source_id")
         if not isinstance(pre_holdout_projection_id, str):
             raise ValueError("selection must bind the pre-holdout target projection")
         if not isinstance(opportunity_registry_id, str):
             raise ValueError("selection must bind the holdout opportunity registry")
+        if not isinstance(target_source_id, str):
+            raise ValueError("selection must bind the outcome-blind target source")
         _require_id(pre_holdout_projection_id, "pre-holdout target projection ID")
         _require_id(opportunity_registry_id, "holdout opportunity registry ID")
+        _require_id(target_source_id, "outcome-blind target source ID")
+        if not isinstance(self.evaluation_policy.get("holdout_target_source_artifact"), Mapping):
+            raise ValueError("selection must retain the outcome-blind target source artifact")
         if not isinstance(self.evaluation_policy.get("pre_holdout_projection"), Mapping):
             raise ValueError("selection must retain the pre-holdout target projection")
         if not isinstance(
@@ -1022,11 +1031,14 @@ def _project_pre_holdout_target(
     *,
     holdout_start: datetime,
     primary_horizon_seconds: int,
+    target_instruments: Sequence[str] | None = None,
 ) -> TargetDataset:
+    allowed_instruments = None if target_instruments is None else set(target_instruments)
     rows = tuple(
         row
         for row in source.rows
         if row.horizon.total_seconds() == primary_horizon_seconds
+        and (allowed_instruments is None or row.instrument_id in allowed_instruments)
         and row.decision_time < holdout_start
         and row.target_available_at <= holdout_start
     )
@@ -1037,11 +1049,474 @@ def _project_pre_holdout_target(
     )
 
 
+def _target_dataset_from_json(value: Mapping[str, object]) -> TargetDataset:
+    expected_fields = {
+        "contract",
+        "schema_version",
+        "dataset_id",
+        "observation_dataset_id",
+        "foundation_configuration_id",
+        "rows",
+    }
+    if set(value) != expected_fields:
+        raise ValueError("target dataset has unknown or missing fields")
+    if value["contract"] != TARGET_DATASET_CONTRACT or value["schema_version"] != 1:
+        raise ValueError("target dataset contract is unsupported")
+    raw_rows = value["rows"]
+    if not isinstance(raw_rows, list):
+        raise ValueError("target dataset rows must be a list")
+    rows: list[TargetRow] = []
+    row_fields = {
+        "instrument_id",
+        "decision_time",
+        "horizon_seconds",
+        "target_basis",
+        "target_revision_policy",
+        "target_start_time",
+        "target_end_time",
+        "target_freeze_at",
+        "target_available_at",
+        "label_start_close",
+        "label_end_close",
+        "log_return",
+        "return_disposition",
+        "start_event_id",
+        "end_event_id",
+        "upper_log_excursion",
+        "lower_log_excursion",
+        "excursion_disposition",
+    }
+    for raw_row in cast(list[object], raw_rows):
+        if not isinstance(raw_row, Mapping):
+            raise ValueError("target dataset row must be an object")
+        row = cast(Mapping[str, object], raw_row)
+        if set(row) != row_fields:
+            raise ValueError("target dataset row has unknown or missing fields")
+        start_event = row["start_event_id"]
+        end_event = row["end_event_id"]
+        rows.append(
+            TargetRow(
+                instrument_id=str(row["instrument_id"]),
+                decision_time=datetime.fromisoformat(str(row["decision_time"])),
+                horizon=timedelta(seconds=float(cast(float | int | str, row["horizon_seconds"]))),
+                target_basis=PriceBasis(str(row["target_basis"])),
+                target_revision_policy=str(row["target_revision_policy"]),
+                target_start_time=datetime.fromisoformat(str(row["target_start_time"])),
+                target_end_time=datetime.fromisoformat(str(row["target_end_time"])),
+                target_freeze_at=datetime.fromisoformat(str(row["target_freeze_at"])),
+                target_available_at=datetime.fromisoformat(str(row["target_available_at"])),
+                label_start_close=(
+                    Decimal(str(row["label_start_close"]))
+                    if row["label_start_close"] is not None
+                    else None
+                ),
+                label_end_close=(
+                    Decimal(str(row["label_end_close"]))
+                    if row["label_end_close"] is not None
+                    else None
+                ),
+                log_return=(
+                    float(cast(float | int | str, row["log_return"]))
+                    if row["log_return"] is not None
+                    else None
+                ),
+                return_disposition=ReturnDisposition(str(row["return_disposition"])),
+                start_event_id=UUID(str(start_event)) if start_event is not None else None,
+                end_event_id=UUID(str(end_event)) if end_event is not None else None,
+                upper_log_excursion=(
+                    float(cast(float | int | str, row["upper_log_excursion"]))
+                    if row["upper_log_excursion"] is not None
+                    else None
+                ),
+                lower_log_excursion=(
+                    float(cast(float | int | str, row["lower_log_excursion"]))
+                    if row["lower_log_excursion"] is not None
+                    else None
+                ),
+                excursion_disposition=ExcursionDisposition(str(row["excursion_disposition"])),
+            )
+        )
+    dataset = TargetDataset.create(
+        rows,
+        observation_dataset_id=str(value["observation_dataset_id"]),
+        foundation_configuration_id=str(value["foundation_configuration_id"]),
+    )
+    if dataset.dataset_id != str(value["dataset_id"]):
+        raise ValueError("target dataset ID does not authenticate its rows")
+    return dataset
+
+
+@dataclass(frozen=True, slots=True)
+class R2HoldoutTargetIdentity:
+    """Outcome-blind identity and causal availability metadata for one target row."""
+
+    target_id: str
+    instrument_id: str
+    decision_time: datetime
+    target_horizon_seconds: int
+    target_basis: PriceBasis
+    target_revision_policy: str
+    target_start_time: datetime
+    target_end_time: datetime
+    target_freeze_at: datetime
+    target_available_at: datetime
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-holdout-target-identity-v1"
+
+    def __post_init__(self) -> None:
+        _require_id(self.target_id, "holdout target identity")
+        _require_text(self.instrument_id, "holdout target instrument")
+        _require_text(self.target_revision_policy, "holdout target revision policy")
+        for value, field in (
+            (self.decision_time, "holdout target decision time"),
+            (self.target_start_time, "holdout target start time"),
+            (self.target_end_time, "holdout target end time"),
+            (self.target_freeze_at, "holdout target freeze time"),
+            (self.target_available_at, "holdout target availability time"),
+        ):
+            require_utc(value, field)
+        if self.target_horizon_seconds <= 0:
+            raise ValueError("holdout target identity horizon must be positive")
+        horizon = timedelta(seconds=self.target_horizon_seconds)
+        if self.target_end_time != self.target_start_time + horizon:
+            raise ValueError("holdout target identity interval differs from its horizon")
+        if self.target_available_at != self.target_freeze_at:
+            raise ValueError("holdout target identity availability differs from its freeze time")
+        expected = target_identity(
+            instrument_id=self.instrument_id,
+            decision_time=self.decision_time,
+            horizon=horizon,
+            target_basis=self.target_basis,
+            target_revision_policy=self.target_revision_policy,
+        )
+        if self.target_id != expected:
+            raise ValueError("holdout target identity does not authenticate its target key")
+
+    @classmethod
+    def from_row(cls, row: TargetRow) -> R2HoldoutTargetIdentity:
+        return cls(
+            target_id=row.target_id,
+            instrument_id=row.instrument_id,
+            decision_time=row.decision_time,
+            target_horizon_seconds=int(row.horizon.total_seconds()),
+            target_basis=row.target_basis,
+            target_revision_policy=row.target_revision_policy,
+            target_start_time=row.target_start_time,
+            target_end_time=row.target_end_time,
+            target_freeze_at=row.target_freeze_at,
+            target_available_at=row.target_available_at,
+        )
+
+    def matches_row(self, row: TargetRow) -> bool:
+        return self == self.from_row(row)
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": 1,
+            "target_id": self.target_id,
+            "instrument_id": self.instrument_id,
+            "decision_time": self.decision_time.isoformat(),
+            "target_horizon_seconds": self.target_horizon_seconds,
+            "target_basis": self.target_basis.value,
+            "target_revision_policy": self.target_revision_policy,
+            "target_start_time": self.target_start_time.isoformat(),
+            "target_end_time": self.target_end_time.isoformat(),
+            "target_freeze_at": self.target_freeze_at.isoformat(),
+            "target_available_at": self.target_available_at.isoformat(),
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> R2HoldoutTargetIdentity:
+        if not isinstance(value, Mapping):
+            raise ValueError("holdout target identity must be an object")
+        raw = cast(Mapping[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "target_id",
+            "instrument_id",
+            "decision_time",
+            "target_horizon_seconds",
+            "target_basis",
+            "target_revision_policy",
+            "target_start_time",
+            "target_end_time",
+            "target_freeze_at",
+            "target_available_at",
+        }
+        if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
+            raise ValueError("holdout target identity has unknown or unsupported fields")
+        return cls(
+            target_id=str(raw["target_id"]),
+            instrument_id=str(raw["instrument_id"]),
+            decision_time=datetime.fromisoformat(str(raw["decision_time"])),
+            target_horizon_seconds=int(cast(float | int | str, raw["target_horizon_seconds"])),
+            target_basis=PriceBasis(str(raw["target_basis"])),
+            target_revision_policy=str(raw["target_revision_policy"]),
+            target_start_time=datetime.fromisoformat(str(raw["target_start_time"])),
+            target_end_time=datetime.fromisoformat(str(raw["target_end_time"])),
+            target_freeze_at=datetime.fromisoformat(str(raw["target_freeze_at"])),
+            target_available_at=datetime.fromisoformat(str(raw["target_available_at"])),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2HoldoutTargetSource:
+    """Authenticated outcome-blind source evidence used before holdout opening.
+
+    The target identities contain no realised values.  The nested target dataset is
+    restricted to mature pre-holdout training rows; it is the independently persisted
+    child used by final fitting and never contains locked-holdout outcomes.
+    """
+
+    source_target_dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    holdout_range: tuple[datetime, datetime]
+    primary_horizon_seconds: int
+    target_instruments: tuple[str, ...]
+    targets: tuple[R2HoldoutTargetIdentity, ...]
+    pre_holdout_target_dataset: TargetDataset
+    opportunities: tuple[HoldoutTargetOpportunity, ...]
+    source_id: str
+
+    CONTRACT: ClassVar[str] = R2_HOLDOUT_TARGET_SOURCE_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        _require_id(self.source_target_dataset_id, "holdout target source dataset ID")
+        _require_id(self.observation_dataset_id, "holdout target source observation ID")
+        _require_id(self.foundation_configuration_id, "holdout target source foundation ID")
+        _require_id(self.source_id, "holdout target source ID")
+        _positive_range(self.holdout_range, "holdout target source holdout range")
+        if self.primary_horizon_seconds <= 0:
+            raise ValueError("holdout target source horizon must be positive")
+        if not self.target_instruments or tuple(sorted(set(self.target_instruments))) != (
+            self.target_instruments
+        ):
+            raise ValueError("holdout target source instruments must be unique and ordered")
+        if (
+            self.pre_holdout_target_dataset.observation_dataset_id != self.observation_dataset_id
+            or self.pre_holdout_target_dataset.foundation_configuration_id
+            != self.foundation_configuration_id
+        ):
+            raise ValueError("pre-holdout target source lineage differs from its source")
+        if any(
+            row.horizon.total_seconds() != self.primary_horizon_seconds
+            or row.decision_time >= self.holdout_range[0]
+            or row.target_available_at > self.holdout_range[0]
+            or row.instrument_id not in self.target_instruments
+            for row in self.pre_holdout_target_dataset.rows
+        ):
+            raise ValueError("pre-holdout target source contains a non-training row")
+        ordered_targets = tuple(sorted(self.targets, key=lambda item: item.target_id))
+        if ordered_targets != self.targets:
+            raise ValueError("holdout target source identities must be ordered")
+        if len({item.target_id for item in self.targets}) != len(self.targets):
+            raise ValueError("holdout target source identities must be unique")
+        ordered_opportunities = tuple(
+            sorted(self.opportunities, key=lambda item: item.opportunity_id)
+        )
+        if ordered_opportunities != self.opportunities:
+            raise ValueError("holdout target source opportunities must be ordered")
+        target_by_id = {item.target_id: item for item in self.targets}
+        expected_holdout_ids = {
+            item.target_id
+            for item in self.targets
+            if item.target_horizon_seconds == self.primary_horizon_seconds
+            and item.instrument_id in self.target_instruments
+            and self.holdout_range[0] <= item.decision_time < self.holdout_range[1]
+        }
+        actual_holdout_ids = {item.target_id for item in self.opportunities}
+        if actual_holdout_ids != expected_holdout_ids:
+            raise ValueError("holdout target source opportunities are not complete")
+        for opportunity in self.opportunities:
+            identity = target_by_id.get(opportunity.target_id)
+            if identity is None or not (
+                identity.instrument_id == opportunity.instrument_id
+                and identity.decision_time == opportunity.decision_time
+                and identity.target_horizon_seconds == opportunity.target_horizon_seconds
+            ):
+                raise ValueError("holdout opportunity is not derived from target source identity")
+        if self.source_id != _semantic_id(self.semantic_json()):
+            raise ValueError("holdout target source ID does not authenticate its content")
+
+    @classmethod
+    def create_from_target_dataset(
+        cls,
+        source_target_dataset: TargetDataset,
+        *,
+        holdout_range: tuple[datetime, datetime],
+        primary_horizon_seconds: int,
+        target_instruments: Sequence[str],
+        opportunities: Sequence[HoldoutTargetOpportunity],
+    ) -> R2HoldoutTargetSource:
+        identities = tuple(
+            sorted(
+                (R2HoldoutTargetIdentity.from_row(row) for row in source_target_dataset.rows),
+                key=lambda item: item.target_id,
+            )
+        )
+        pre_holdout = _project_pre_holdout_target(
+            source_target_dataset,
+            holdout_start=holdout_range[0],
+            primary_horizon_seconds=primary_horizon_seconds,
+            target_instruments=target_instruments,
+        )
+        return cls.create(
+            source_target_dataset_id=source_target_dataset.dataset_id,
+            observation_dataset_id=source_target_dataset.observation_dataset_id,
+            foundation_configuration_id=source_target_dataset.foundation_configuration_id,
+            holdout_range=holdout_range,
+            primary_horizon_seconds=primary_horizon_seconds,
+            target_instruments=tuple(sorted(set(target_instruments))),
+            targets=identities,
+            pre_holdout_target_dataset=pre_holdout,
+            opportunities=tuple(opportunities),
+        )
+
+    @classmethod
+    def create(cls, **values: object) -> R2HoldoutTargetSource:
+        raw = dict(values)
+        raw.pop("source_id", None)
+        raw["target_instruments"] = tuple(sorted(cast(Sequence[str], raw["target_instruments"])))
+        raw["targets"] = tuple(
+            sorted(
+                cast(Sequence[R2HoldoutTargetIdentity], raw["targets"]),
+                key=lambda item: item.target_id,
+            )
+        )
+        raw["opportunities"] = tuple(
+            sorted(
+                cast(Sequence[HoldoutTargetOpportunity], raw["opportunities"]),
+                key=lambda item: item.opportunity_id,
+            )
+        )
+        semantic = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            **{key: _contract_json(value) for key, value in raw.items()},
+        }
+        constructor = cast(Callable[..., R2HoldoutTargetSource], cls)
+        return constructor(**raw, source_id=_semantic_id(semantic))
+
+    def verify_target_dataset(self, target_dataset: TargetDataset) -> None:
+        if (
+            target_dataset.dataset_id != self.source_target_dataset_id
+            or target_dataset.observation_dataset_id != self.observation_dataset_id
+            or target_dataset.foundation_configuration_id != self.foundation_configuration_id
+        ):
+            raise ValueError("holdout target source differs from the retained target dataset")
+        actual_targets = tuple(
+            sorted(
+                (R2HoldoutTargetIdentity.from_row(row) for row in target_dataset.rows),
+                key=lambda item: item.target_id,
+            )
+        )
+        if actual_targets != self.targets:
+            raise ValueError("holdout target source identities differ from the retained target")
+        expected_pre = _project_pre_holdout_target(
+            target_dataset,
+            holdout_start=self.holdout_range[0],
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            target_instruments=self.target_instruments,
+        )
+        if expected_pre != self.pre_holdout_target_dataset:
+            raise ValueError("holdout target source pre-holdout child is not source-derived")
+        expected_source = self.create_from_target_dataset(
+            target_dataset,
+            holdout_range=self.holdout_range,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            target_instruments=self.target_instruments,
+            opportunities=self.opportunities,
+        )
+        if expected_source.source_id != self.source_id:
+            raise ValueError("holdout target source does not authenticate the retained target")
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "source_target_dataset_id": self.source_target_dataset_id,
+            "observation_dataset_id": self.observation_dataset_id,
+            "foundation_configuration_id": self.foundation_configuration_id,
+            "holdout_range": [item.isoformat() for item in self.holdout_range],
+            "primary_horizon_seconds": self.primary_horizon_seconds,
+            "target_instruments": list(self.target_instruments),
+            "targets": [item.as_json() for item in self.targets],
+            "pre_holdout_target_dataset": self.pre_holdout_target_dataset.as_json(),
+            "opportunities": [item.as_json() for item in self.opportunities],
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "source_id": self.source_id}
+
+    @classmethod
+    def from_json(cls, value: object) -> R2HoldoutTargetSource:
+        if not isinstance(value, Mapping):
+            raise ValueError("holdout target source must be an object")
+        raw = cast(Mapping[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "source_target_dataset_id",
+            "observation_dataset_id",
+            "foundation_configuration_id",
+            "holdout_range",
+            "primary_horizon_seconds",
+            "target_instruments",
+            "targets",
+            "pre_holdout_target_dataset",
+            "opportunities",
+            "source_id",
+        }
+        if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
+            raise ValueError("holdout target source has unknown or unsupported fields")
+        raw_range_value = raw["holdout_range"]
+        if not isinstance(raw_range_value, list):
+            raise ValueError("holdout target source holdout range is invalid")
+        raw_range = cast(list[object], raw_range_value)
+        if len(raw_range) != 2:
+            raise ValueError("holdout target source holdout range is invalid")
+        raw_instruments = raw["target_instruments"]
+        raw_targets = raw["targets"]
+        raw_opportunities = raw["opportunities"]
+        if not all(
+            isinstance(item, list) for item in (raw_instruments, raw_targets, raw_opportunities)
+        ):
+            raise ValueError("holdout target source arrays are invalid")
+        raw_instruments = cast(list[object], raw_instruments)
+        raw_targets = cast(list[object], raw_targets)
+        raw_opportunities = cast(list[object], raw_opportunities)
+        pre = raw["pre_holdout_target_dataset"]
+        if not isinstance(pre, Mapping):
+            raise ValueError("holdout target source pre-holdout child is invalid")
+        return cls(
+            source_target_dataset_id=str(raw["source_target_dataset_id"]),
+            observation_dataset_id=str(raw["observation_dataset_id"]),
+            foundation_configuration_id=str(raw["foundation_configuration_id"]),
+            holdout_range=(
+                datetime.fromisoformat(str(raw_range[0])),
+                datetime.fromisoformat(str(raw_range[1])),
+            ),
+            primary_horizon_seconds=int(cast(float | int | str, raw["primary_horizon_seconds"])),
+            target_instruments=tuple(str(item) for item in raw_instruments),
+            targets=tuple(R2HoldoutTargetIdentity.from_json(item) for item in raw_targets),
+            pre_holdout_target_dataset=_target_dataset_from_json(cast(Mapping[str, object], pre)),
+            opportunities=tuple(
+                HoldoutTargetOpportunity.from_json(item) for item in raw_opportunities
+            ),
+            source_id=str(raw["source_id"]),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class R2HoldoutTargetProjection:
     """Authenticated source-to-pre-holdout target projection evidence."""
 
     source_target_dataset_id: str
+    source_evidence_id: str
     observation_dataset_id: str
     foundation_configuration_id: str
     holdout_start: datetime
@@ -1057,6 +1532,7 @@ class R2HoldoutTargetProjection:
 
     def __post_init__(self) -> None:
         _require_id(self.source_target_dataset_id, "projection source target dataset ID")
+        _require_id(self.source_evidence_id, "projection source evidence ID")
         _require_id(self.projected_target_dataset.dataset_id, "projected target dataset ID")
         _require_id(self.projected_target_dataset_id, "projected target dataset ID")
         if self.projected_target_dataset_id != self.projected_target_dataset.dataset_id:
@@ -1079,52 +1555,46 @@ class R2HoldoutTargetProjection:
     @classmethod
     def create_from_source(
         cls,
-        source_target_dataset: TargetDataset,
-        *,
-        holdout_start: datetime,
-        primary_horizon_seconds: int,
+        source: R2HoldoutTargetSource,
     ) -> R2HoldoutTargetProjection:
-        projected = _project_pre_holdout_target(
-            source_target_dataset,
-            holdout_start=holdout_start,
-            primary_horizon_seconds=primary_horizon_seconds,
-        )
+        projected = source.pre_holdout_target_dataset
         semantic = {
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
-            "source_target_dataset_id": source_target_dataset.dataset_id,
-            "observation_dataset_id": source_target_dataset.observation_dataset_id,
-            "foundation_configuration_id": source_target_dataset.foundation_configuration_id,
-            "holdout_start": holdout_start.isoformat(),
-            "primary_horizon_seconds": primary_horizon_seconds,
+            "source_target_dataset_id": source.source_target_dataset_id,
+            "source_evidence_id": source.source_id,
+            "observation_dataset_id": source.observation_dataset_id,
+            "foundation_configuration_id": source.foundation_configuration_id,
+            "holdout_start": source.holdout_range[0].isoformat(),
+            "primary_horizon_seconds": source.primary_horizon_seconds,
             "projection_policy": cls.POLICY,
             "projected_target_dataset": projected.as_json(),
             "projected_target_dataset_id": projected.dataset_id,
         }
         return cls(
-            source_target_dataset_id=source_target_dataset.dataset_id,
-            observation_dataset_id=source_target_dataset.observation_dataset_id,
-            foundation_configuration_id=source_target_dataset.foundation_configuration_id,
-            holdout_start=holdout_start,
-            primary_horizon_seconds=primary_horizon_seconds,
+            source_target_dataset_id=source.source_target_dataset_id,
+            source_evidence_id=source.source_id,
+            observation_dataset_id=source.observation_dataset_id,
+            foundation_configuration_id=source.foundation_configuration_id,
+            holdout_start=source.holdout_range[0],
+            primary_horizon_seconds=source.primary_horizon_seconds,
             projection_policy=cls.POLICY,
             projected_target_dataset=projected,
             projected_target_dataset_id=projected.dataset_id,
             projection_id=_semantic_id(semantic),
         )
 
-    def verify_source(self, source_target_dataset: TargetDataset) -> None:
+    def verify_source(self, source: R2HoldoutTargetSource) -> None:
         if (
-            source_target_dataset.dataset_id != self.source_target_dataset_id
-            or source_target_dataset.observation_dataset_id != self.observation_dataset_id
-            or source_target_dataset.foundation_configuration_id != self.foundation_configuration_id
+            source.source_target_dataset_id != self.source_target_dataset_id
+            or source.source_id != self.source_evidence_id
+            or source.observation_dataset_id != self.observation_dataset_id
+            or source.foundation_configuration_id != self.foundation_configuration_id
+            or source.holdout_range[0] != self.holdout_start
+            or source.primary_horizon_seconds != self.primary_horizon_seconds
         ):
-            raise ValueError("target projection source differs from the frozen target dataset")
-        expected = self.create_from_source(
-            source_target_dataset,
-            holdout_start=self.holdout_start,
-            primary_horizon_seconds=self.primary_horizon_seconds,
-        )
+            raise ValueError("target projection source differs from the frozen source evidence")
+        expected = self.create_from_source(source)
         if expected.projected_target_dataset != self.projected_target_dataset:
             raise ValueError("target projection child is not derived from its source dataset")
         if expected.projection_id != self.projection_id:
@@ -1135,6 +1605,7 @@ class R2HoldoutTargetProjection:
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "source_target_dataset_id": self.source_target_dataset_id,
+            "source_evidence_id": self.source_evidence_id,
             "observation_dataset_id": self.observation_dataset_id,
             "foundation_configuration_id": self.foundation_configuration_id,
             "holdout_start": self.holdout_start.isoformat(),
@@ -1156,6 +1627,7 @@ class R2HoldoutTargetProjection:
             "contract",
             "schema_version",
             "source_target_dataset_id",
+            "source_evidence_id",
             "observation_dataset_id",
             "foundation_configuration_id",
             "holdout_start",
@@ -1170,72 +1642,10 @@ class R2HoldoutTargetProjection:
         projected_raw = raw["projected_target_dataset"]
         if not isinstance(projected_raw, Mapping):
             raise ValueError("target projection child must be an object")
-        projected_raw = cast(Mapping[str, object], projected_raw)
-        projected_rows: list[TargetRow] = []
-        raw_rows = projected_raw.get("rows")
-        if not isinstance(raw_rows, list):
-            raise ValueError("target projection child rows must be an array")
-        for item in cast(list[object], raw_rows):
-            if not isinstance(item, Mapping):
-                raise ValueError("target projection child row must be an object")
-            row = cast(Mapping[str, object], item)
-            projected_rows.append(
-                TargetRow(
-                    instrument_id=str(row["instrument_id"]),
-                    decision_time=datetime.fromisoformat(str(row["decision_time"])),
-                    horizon=timedelta(
-                        seconds=float(cast(float | int | str, row["horizon_seconds"]))
-                    ),
-                    target_basis=PriceBasis(str(row["target_basis"])),
-                    target_revision_policy=str(row["target_revision_policy"]),
-                    target_start_time=datetime.fromisoformat(str(row["target_start_time"])),
-                    target_end_time=datetime.fromisoformat(str(row["target_end_time"])),
-                    target_freeze_at=datetime.fromisoformat(str(row["target_freeze_at"])),
-                    target_available_at=datetime.fromisoformat(str(row["target_available_at"])),
-                    label_start_close=(
-                        None
-                        if row["label_start_close"] is None
-                        else Decimal(str(row["label_start_close"]))
-                    ),
-                    label_end_close=(
-                        None
-                        if row["label_end_close"] is None
-                        else Decimal(str(row["label_end_close"]))
-                    ),
-                    log_return=(
-                        None
-                        if row["log_return"] is None
-                        else float(cast(float | int | str, row["log_return"]))
-                    ),
-                    return_disposition=ReturnDisposition(str(row["return_disposition"])),
-                    start_event_id=(
-                        None if row["start_event_id"] is None else UUID(str(row["start_event_id"]))
-                    ),
-                    end_event_id=(
-                        None if row["end_event_id"] is None else UUID(str(row["end_event_id"]))
-                    ),
-                    upper_log_excursion=(
-                        None
-                        if row["upper_log_excursion"] is None
-                        else float(cast(float | int | str, row["upper_log_excursion"]))
-                    ),
-                    lower_log_excursion=(
-                        None
-                        if row["lower_log_excursion"] is None
-                        else float(cast(float | int | str, row["lower_log_excursion"]))
-                    ),
-                    excursion_disposition=ExcursionDisposition(str(row["excursion_disposition"])),
-                )
-            )
-        projected = TargetDataset.create(
-            projected_rows,
-            observation_dataset_id=str(projected_raw["observation_dataset_id"]),
-            foundation_configuration_id=str(projected_raw["foundation_configuration_id"]),
-        )
-        if projected.dataset_id != str(projected_raw["dataset_id"]):
-            raise ValueError("target projection child ID does not authenticate its rows")
+        projected = _target_dataset_from_json(cast(Mapping[str, object], projected_raw))
         return cls(
             source_target_dataset_id=str(raw["source_target_dataset_id"]),
+            source_evidence_id=str(raw["source_evidence_id"]),
             observation_dataset_id=str(raw["observation_dataset_id"]),
             foundation_configuration_id=str(raw["foundation_configuration_id"]),
             holdout_start=datetime.fromisoformat(str(raw["holdout_start"])),
@@ -1252,6 +1662,7 @@ class R2HoldoutOpportunityRegistry:
     """Source-bound, outcome-blind holdout opportunity registry."""
 
     source_target_dataset_id: str
+    source_evidence_id: str
     observation_dataset_id: str
     foundation_configuration_id: str
     holdout_range: tuple[datetime, datetime]
@@ -1264,6 +1675,7 @@ class R2HoldoutOpportunityRegistry:
 
     def __post_init__(self) -> None:
         _require_id(self.source_target_dataset_id, "opportunity registry source target ID")
+        _require_id(self.source_evidence_id, "opportunity registry source evidence ID")
         _require_id(self.observation_dataset_id, "opportunity registry observation ID")
         _require_id(self.foundation_configuration_id, "opportunity registry foundation ID")
         _require_id(self.registry_id, "opportunity registry ID")
@@ -1290,44 +1702,16 @@ class R2HoldoutOpportunityRegistry:
     @classmethod
     def create_from_source(
         cls,
-        source_target_dataset: TargetDataset,
-        *,
-        holdout_range: tuple[datetime, datetime],
-        primary_horizon_seconds: int,
-        opportunities: Sequence[HoldoutTargetOpportunity],
+        source: R2HoldoutTargetSource,
     ) -> R2HoldoutOpportunityRegistry:
-        rows_by_target = {row.target_id: row for row in source_target_dataset.rows}
-        if len(rows_by_target) != len(source_target_dataset.rows):
-            raise ValueError("source target dataset has duplicate target identities")
-        for opportunity in opportunities:
-            row = rows_by_target.get(opportunity.target_id)
-            if (
-                row is None
-                or row.instrument_id != opportunity.instrument_id
-                or row.decision_time != opportunity.decision_time
-                or int(row.horizon.total_seconds()) != opportunity.target_horizon_seconds
-            ):
-                raise ValueError(
-                    "opportunity registry is not derived from the source target dataset"
-                )
-        expected_target_ids = {
-            row.target_id
-            for row in source_target_dataset.rows
-            if int(row.horizon.total_seconds()) == primary_horizon_seconds
-            and holdout_range[0] <= row.decision_time < holdout_range[1]
-        }
-        actual_target_ids = {item.target_id for item in opportunities}
-        if actual_target_ids != expected_target_ids:
-            raise ValueError(
-                "opportunity registry must exactly cover the source primary-horizon holdout rows"
-            )
         return cls.create(
-            source_target_dataset_id=source_target_dataset.dataset_id,
-            observation_dataset_id=source_target_dataset.observation_dataset_id,
-            foundation_configuration_id=source_target_dataset.foundation_configuration_id,
-            holdout_range=holdout_range,
-            primary_horizon_seconds=primary_horizon_seconds,
-            opportunities=opportunities,
+            source_target_dataset_id=source.source_target_dataset_id,
+            source_evidence_id=source.source_id,
+            observation_dataset_id=source.observation_dataset_id,
+            foundation_configuration_id=source.foundation_configuration_id,
+            holdout_range=source.holdout_range,
+            primary_horizon_seconds=source.primary_horizon_seconds,
+            opportunities=source.opportunities,
         )
 
     @classmethod
@@ -1348,13 +1732,17 @@ class R2HoldoutOpportunityRegistry:
         constructor = cast(Callable[..., R2HoldoutOpportunityRegistry], cls)
         return constructor(**raw, registry_id=_semantic_id(semantic))
 
-    def verify_source(self, source_target_dataset: TargetDataset) -> None:
-        expected = self.create_from_source(
-            source_target_dataset,
-            holdout_range=self.holdout_range,
-            primary_horizon_seconds=self.primary_horizon_seconds,
-            opportunities=self.opportunities,
-        )
+    def verify_source(self, source: R2HoldoutTargetSource) -> None:
+        if (
+            source.source_target_dataset_id != self.source_target_dataset_id
+            or source.source_id != self.source_evidence_id
+            or source.observation_dataset_id != self.observation_dataset_id
+            or source.foundation_configuration_id != self.foundation_configuration_id
+            or source.holdout_range != self.holdout_range
+            or source.primary_horizon_seconds != self.primary_horizon_seconds
+        ):
+            raise ValueError("opportunity registry source differs from frozen source evidence")
+        expected = self.create_from_source(source)
         if expected.registry_id != self.registry_id:
             raise ValueError("opportunity registry evidence does not authenticate its source")
 
@@ -1363,6 +1751,7 @@ class R2HoldoutOpportunityRegistry:
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "source_target_dataset_id": self.source_target_dataset_id,
+            "source_evidence_id": self.source_evidence_id,
             "observation_dataset_id": self.observation_dataset_id,
             "foundation_configuration_id": self.foundation_configuration_id,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
@@ -1382,6 +1771,7 @@ class R2HoldoutOpportunityRegistry:
             "contract",
             "schema_version",
             "source_target_dataset_id",
+            "source_evidence_id",
             "observation_dataset_id",
             "foundation_configuration_id",
             "holdout_range",
@@ -1402,6 +1792,7 @@ class R2HoldoutOpportunityRegistry:
             raise ValueError("opportunity registry opportunities must be an array")
         return cls(
             source_target_dataset_id=str(raw["source_target_dataset_id"]),
+            source_evidence_id=str(raw["source_evidence_id"]),
             observation_dataset_id=str(raw["observation_dataset_id"]),
             foundation_configuration_id=str(raw["foundation_configuration_id"]),
             holdout_range=(

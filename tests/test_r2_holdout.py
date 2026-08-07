@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
-from typing import NoReturn
+from typing import NoReturn, cast
 
 import pytest
 
@@ -54,6 +54,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
+    R2HoldoutTargetSource,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_holdout import (
@@ -174,16 +175,18 @@ def _selection(
     from qtrad.application.r2_holdout import freeze_holdout_selection
 
     source_target_dataset = _target_dataset(include_noneligible=include_noneligible)
-    pre_holdout_projection = R2HoldoutTargetProjection.create_from_source(
-        source_target_dataset,
-        holdout_start=NOW + timedelta(days=1),
-        primary_horizon_seconds=900,
-    )
-    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(
+    holdout_target_source = R2HoldoutTargetSource.create_from_target_dataset(
         source_target_dataset,
         holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
         primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
         opportunities=_opportunities(include_noneligible=include_noneligible),
+    )
+    pre_holdout_projection = R2HoldoutTargetProjection.create_from_source(
+        holdout_target_source,
+    )
+    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(
+        holdout_target_source,
     )
     selection = freeze_holdout_selection(
         prior_selection=prior,
@@ -200,7 +203,7 @@ def _selection(
         frozen_metadata={"fixture": True},
         frozen_at=NOW,
         frozen_by="test",
-        source_target_dataset=source_target_dataset,
+        holdout_target_source=holdout_target_source,
         holdout_opportunity_registry=opportunity_registry,
         pre_holdout_projection=pre_holdout_projection,
         configuration_registry=tuple(
@@ -272,13 +275,13 @@ def _opportunities(*, include_noneligible: bool = False) -> tuple[HoldoutTargetO
         result.append(
             HoldoutTargetOpportunity.create(
                 target_id=target_identity(
-                    instrument_id="INSTRUMENT_2",
+                    instrument_id="INSTRUMENT_0",
                     decision_time=decision,
                     horizon=timedelta(seconds=900),
                     target_basis=PriceBasis.MID,
                     target_revision_policy="FIXTURE_V1",
                 ),
-                instrument_id="INSTRUMENT_2",
+                instrument_id="INSTRUMENT_0",
                 decision_time=decision,
                 target_horizon_seconds=900,
                 feature_data_asof=decision - timedelta(minutes=1),
@@ -432,7 +435,10 @@ def _prepared(
         ),
     )
     training_features = _training_feature_dataset(include_noneligible=include_noneligible)
-    training_targets = target_dataset
+    target_source = R2HoldoutTargetSource.from_json(
+        selection.evaluation_policy["holdout_target_source_artifact"]
+    )
+    training_targets = target_source.pre_holdout_target_dataset
     fits = tuple(
         fit_final_ridge(
             selection=selection,
@@ -582,10 +588,15 @@ def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
 
 def test_target_projection_rejects_a_different_source_dataset() -> None:
     source = _target_dataset()
-    projection = R2HoldoutTargetProjection.create_from_source(
+    target_source = R2HoldoutTargetSource.create_from_target_dataset(
         source,
-        holdout_start=NOW + timedelta(days=1),
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
         primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+        opportunities=_opportunities(),
+    )
+    projection = R2HoldoutTargetProjection.create_from_source(
+        target_source,
     )
     altered_rows = tuple(
         replace(row, log_return=0.95) if row.target_id == _opportunities()[0].target_id else row
@@ -597,32 +608,58 @@ def test_target_projection_rejects_a_different_source_dataset() -> None:
         foundation_configuration_id=source.foundation_configuration_id,
     )
 
-    with pytest.raises(ValueError, match="source"):
-        projection.verify_source(altered_source)
+    with pytest.raises(ValueError, match="retained target"):
+        target_source.verify_target_dataset(altered_source)
+    projection.verify_source(target_source)
 
 
 def test_opportunity_registry_requires_complete_source_coverage_and_round_trips() -> None:
     source = _target_dataset()
     opportunities = _opportunities()
-    with pytest.raises(ValueError, match="exactly cover"):
-        R2HoldoutOpportunityRegistry.create_from_source(
+    with pytest.raises(ValueError, match="complete"):
+        R2HoldoutTargetSource.create_from_target_dataset(
             source,
             holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
             primary_horizon_seconds=900,
+            target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
             opportunities=opportunities[:1],
         )
-
-    registry = R2HoldoutOpportunityRegistry.create_from_source(
+    target_source = R2HoldoutTargetSource.create_from_target_dataset(
         source,
         holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
         primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
         opportunities=opportunities,
+    )
+    registry = R2HoldoutOpportunityRegistry.create_from_source(
+        target_source,
     )
     restored = R2HoldoutOpportunityRegistry.from_json(registry.as_json())
     assert restored == registry
     assert restored.opportunities == tuple(
         sorted(opportunities, key=lambda item: item.opportunity_id)
     )
+    mutated_opportunity = HoldoutTargetOpportunity.create(
+        target_id=opportunities[0].target_id,
+        instrument_id=opportunities[0].instrument_id,
+        decision_time=opportunities[0].decision_time,
+        target_horizon_seconds=opportunities[0].target_horizon_seconds,
+        feature_data_asof=opportunities[0].feature_data_asof,
+        latest_feature_bar_end=opportunities[0].latest_feature_bar_end,
+        dependency_start=opportunities[0].dependency_start,
+        dependency_end=opportunities[0].dependency_end,
+        disposition=HoldoutOpportunityDisposition.GAP,
+    )
+    mutated_source = R2HoldoutTargetSource.create_from_target_dataset(
+        source,
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+        opportunities=(mutated_opportunity, opportunities[1]),
+    )
+    mutated_registry = R2HoldoutOpportunityRegistry.create_from_source(mutated_source)
+    with pytest.raises(ValueError, match="source"):
+        mutated_registry.verify_source(target_source)
 
 
 def test_zero_threshold_exact_tie_is_inconclusive(tmp_path: Path) -> None:
@@ -912,6 +949,27 @@ def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> No
     assert len(child["rows"]) == 8
     assert child["dataset_id"] != payload["source_target_dataset_id"]
     assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in child["rows"])
+
+
+def test_selection_source_artifact_is_outcome_blind() -> None:
+    selection, _question, _configurations = _selection()
+    source = selection.evaluation_policy["holdout_target_source_artifact"]
+    assert isinstance(source, dict)
+    targets = source["targets"]
+    assert isinstance(targets, list)
+    assert targets
+    target_objects = cast(list[dict[str, object]], targets)
+    assert all("log_return" not in target for target in target_objects)
+    opportunities = source["opportunities"]
+    assert isinstance(opportunities, list)
+    opportunity_objects = cast(list[dict[str, object]], opportunities)
+    assert all("log_return" not in opportunity for opportunity in opportunity_objects)
+    pre_holdout = source["pre_holdout_target_dataset"]
+    assert isinstance(pre_holdout, dict)
+    rows = pre_holdout["rows"]
+    assert isinstance(rows, list)
+    row_objects = cast(list[dict[str, object]], rows)
+    assert all(datetime.fromisoformat(str(row["decision_time"])) < NOW for row in row_objects)
 
 
 def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:

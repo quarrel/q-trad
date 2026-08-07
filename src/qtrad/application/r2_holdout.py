@@ -46,6 +46,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
+    R2HoldoutTargetSource,
 )
 from qtrad.domain.r2_models import (
     PreprocessingFit,
@@ -81,31 +82,6 @@ class FinalTrainingRow:
             raise ValueError("final-training feature values must be finite and non-empty")
         if not isfinite(self.target):
             raise ValueError("final-training target must be finite")
-
-
-def _pre_holdout_target_dataset(
-    selection: R2HoldoutSelectionManifest,
-    target_dataset: TargetDataset,
-) -> TargetDataset:
-    """Return only the authenticated target rows available before the holdout."""
-    holdout_start = selection.holdout_range[0]
-    primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
-    if not isinstance(primary_horizon, int) or primary_horizon <= 0:
-        raise ValueError("selection is missing its primary target horizon")
-    rows = tuple(
-        row
-        for row in target_dataset.rows
-        if row.horizon.total_seconds() == primary_horizon
-        and row.decision_time < holdout_start
-        and row.target_available_at <= holdout_start
-    )
-    if len(rows) == len(target_dataset.rows):
-        return target_dataset
-    return TargetDataset.create(
-        rows,
-        observation_dataset_id=target_dataset.observation_dataset_id,
-        foundation_configuration_id=target_dataset.foundation_configuration_id,
-    )
 
 
 def _target_dataset_payload(dataset: TargetDataset) -> dict[str, JsonValue]:
@@ -363,7 +339,7 @@ def freeze_holdout_selection(
     configuration_registry: Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]]
     | None = None,
     evaluation_policy: Mapping[str, JsonValue] | None = None,
-    source_target_dataset: TargetDataset,
+    holdout_target_source: R2HoldoutTargetSource,
     holdout_opportunity_registry: R2HoldoutOpportunityRegistry,
     pre_holdout_projection: R2HoldoutTargetProjection,
 ) -> R2HoldoutSelectionManifest:
@@ -532,27 +508,31 @@ def freeze_holdout_selection(
     if not isinstance(primary_horizon, int) or primary_horizon <= 0:
         raise ValueError("holdout selection must freeze the primary target horizon")
     expected_source = frozen_evaluation_policy.get("target_dataset_id")
-    if not isinstance(expected_source, str) or source_target_dataset.dataset_id != expected_source:
+    if (
+        not isinstance(expected_source, str)
+        or holdout_target_source.source_target_dataset_id != expected_source
+    ):
         raise ValueError("source target differs from the frozen target dataset")
     if verified_experiment is not None and (
-        source_target_dataset.dataset_id != verified_experiment.target_dataset_id
-        or source_target_dataset.observation_dataset_id
+        holdout_target_source.source_target_dataset_id != verified_experiment.target_dataset_id
+        or holdout_target_source.observation_dataset_id
         != verified_experiment.observation_dataset_id
-        or source_target_dataset.foundation_configuration_id
+        or holdout_target_source.foundation_configuration_id
         != verified_experiment.foundation_configuration_id
+        or holdout_target_source.target_instruments != tuple(verified_experiment.target_instruments)
     ):
-        raise ValueError("source target differs from the verified experiment")
+        raise ValueError("outcome-blind target source differs from the verified experiment")
     if pre_holdout_projection.primary_horizon_seconds != primary_horizon:
         raise ValueError("target projection differs from the frozen primary horizon")
     if pre_holdout_projection.holdout_start != prior_selection.holdout_range[0]:
         raise ValueError("target projection differs from the frozen holdout boundary")
-    pre_holdout_projection.verify_source(source_target_dataset)
+    pre_holdout_projection.verify_source(holdout_target_source)
     if (
         holdout_opportunity_registry.primary_horizon_seconds != primary_horizon
         or holdout_opportunity_registry.holdout_range != prior_selection.holdout_range
     ):
         raise ValueError("opportunity registry differs from the frozen holdout policy")
-    holdout_opportunity_registry.verify_source(source_target_dataset)
+    holdout_opportunity_registry.verify_source(holdout_target_source)
     frozen_opportunity_registry = tuple(
         (
             item.opportunity_id,
@@ -564,7 +544,9 @@ def freeze_holdout_selection(
         )
         for item in holdout_opportunity_registry.opportunities
     )
-    frozen_evaluation_policy["target_dataset_id"] = source_target_dataset.dataset_id
+    frozen_evaluation_policy["target_dataset_id"] = holdout_target_source.source_target_dataset_id
+    frozen_evaluation_policy["holdout_target_source_id"] = holdout_target_source.source_id
+    frozen_evaluation_policy["holdout_target_source_artifact"] = holdout_target_source.as_json()
     frozen_evaluation_policy["pre_holdout_target_dataset_id"] = (
         pre_holdout_projection.projected_target_dataset.dataset_id
     )
@@ -1043,15 +1025,8 @@ def fit_final_ridge(
         raise ValueError("final fit must declare the frozen full target source")
     if training_target_source_dataset_id != expected_target:
         raise ValueError("final-fit target source differs from the frozen target dataset")
-    if training_target_dataset.dataset_id in {expected_target, expected_pre_holdout}:
-        projected_target_dataset = _pre_holdout_target_dataset(selection, training_target_dataset)
-    else:
-        raise ValueError(
-            "final-fit target child is not an authenticated target source or projection"
-        )
-    if projected_target_dataset.dataset_id != expected_pre_holdout:
-        raise ValueError("final-fit target child is not the deterministic pre-holdout projection")
-    training_target_dataset = projected_target_dataset
+    if training_target_dataset.dataset_id != expected_pre_holdout:
+        raise ValueError("final-fit target child is not the frozen pre-holdout projection")
     training_rows = _authenticated_final_training_rows(
         selection,
         feature_dataset=training_feature_dataset,
