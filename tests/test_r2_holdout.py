@@ -58,6 +58,7 @@ from qtrad.runtime.r2_holdout import (
     reveal_holdout,
     reveal_holdout_from_files,
     verify_holdout_bundle,
+    verify_holdout_evaluation,
     verify_holdout_markers,
     verify_holdout_preparation,
     write_built_holdout_bundle,
@@ -168,6 +169,16 @@ def _selection(
     )
     from qtrad.application.r2_holdout import freeze_holdout_selection
 
+    pre_holdout_target = TargetDataset.create(
+        tuple(
+            row
+            for row in _target_dataset().rows
+            if row.decision_time < NOW + timedelta(days=1)
+            and row.target_available_at <= NOW + timedelta(days=1)
+        ),
+        observation_dataset_id=_id("observations"),
+        foundation_configuration_id=_id("foundation"),
+    )
     selection = freeze_holdout_selection(
         prior_selection=prior,
         foundation_bundle_id=_id("foundation"),
@@ -183,6 +194,8 @@ def _selection(
         frozen_metadata={"fixture": True},
         frozen_at=NOW,
         frozen_by="test",
+        holdout_opportunities=_opportunities(),
+        pre_holdout_target_dataset=pre_holdout_target,
         configuration_registry=tuple(
             sorted(
                 (
@@ -200,6 +213,8 @@ def _selection(
         ),
         evaluation_policy={
             "target_dataset_id": (_target_dataset().dataset_id if bind_target_dataset else None),
+            "primary_horizon_seconds": 900,
+            "pre_holdout_target_dataset_id": pre_holdout_target.dataset_id,
             "observation_dataset_id": _id("observations"),
             "panel_dataset_id": _id("panel"),
             "minimum_training_rows": 2,
@@ -339,6 +354,7 @@ def _prepared(
     *,
     forced_failure_configuration: str | None = None,
     bind_target_dataset: bool = True,
+    unavailable_opportunity_id: str | None = None,
 ):
     selection, _question, configurations = _selection(bind_target_dataset=bind_target_dataset)
     opportunities = _opportunities()
@@ -352,15 +368,19 @@ def _prepared(
         observation_dataset_id=_id("observations"),
         panel_dataset_id=_id("panel"),
         target_dataset_id=(target_dataset.dataset_id if bind_target_dataset else None),
-        projection=lambda item: R2HoldoutFeatureRow.create(
-            opportunity_id=item.opportunity_id,
-            target_id=item.target_id,
-            instrument_id=item.instrument_id,
-            decision_time=item.decision_time,
-            feature_cutoff=item.feature_data_asof,
-            latest_feature_bar_end=item.latest_feature_bar_end,
-            feature_schema_id=feature_schema_id,
-            values=(1.0, 0.5),
+        projection=lambda item: (
+            None
+            if item.opportunity_id == unavailable_opportunity_id
+            else R2HoldoutFeatureRow.create(
+                opportunity_id=item.opportunity_id,
+                target_id=item.target_id,
+                instrument_id=item.instrument_id,
+                decision_time=item.decision_time,
+                feature_cutoff=item.feature_data_asof,
+                latest_feature_bar_end=item.latest_feature_bar_end,
+                feature_schema_id=feature_schema_id,
+                values=(1.0, 0.5),
+            )
         ),
     )
     training_features = _training_feature_dataset()
@@ -778,3 +798,39 @@ def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Pa
     assert evaluation is not None
     assert evaluation.evaluation_id
     assert consumed.outcome_accessed is True
+    target_payload = json.loads((tmp_path / "outcome-target.json").read_text())
+    target_payload["rows"][0]["log_return"] = 999.0
+    (tmp_path / "outcome-target.json").write_text(json.dumps(target_payload))
+    with pytest.raises(ValueError, match="identity does not authenticate"):
+        verify_holdout_evaluation(tmp_path)
+
+
+def test_zero_return_retains_shared_eligibility_when_model_features_are_missing(
+    tmp_path: Path,
+) -> None:
+    unavailable = _opportunities()[0].opportunity_id
+    selection, opportunities, _fits, forecasts, coverage, _seal = _prepared(
+        tmp_path,
+        unavailable_opportunity_id=unavailable,
+    )
+    zero_configuration = next(
+        configuration_id
+        for configuration_id, model_family, *_ in selection.configuration_registry
+        if model_family is ModelFamily.ZERO_RETURN
+    )
+    local_configuration = next(
+        configuration_id
+        for configuration_id, model_family, *_ in selection.configuration_registry
+        if model_family is ModelFamily.LOCAL_RIDGE
+    )
+    zero_forecast = next(item for item in forecasts if item.configuration_id == zero_configuration)
+    local_forecast = next(
+        item for item in forecasts if item.configuration_id == local_configuration
+    )
+    assert len(zero_forecast.rows) == len(opportunities)
+    assert len(local_forecast.rows) == len(opportunities) - 1
+    zero_coverage = next(item for item in coverage if item.configuration_id == zero_configuration)
+    local_coverage = next(item for item in coverage if item.configuration_id == local_configuration)
+    assert any(row.opportunity_id == unavailable for row in zero_coverage.rows)
+    assert any(row.opportunity_id == unavailable for row in local_coverage.rows)
+    assert verify_holdout_preparation(tmp_path).seal_id

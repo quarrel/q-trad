@@ -451,6 +451,9 @@ class R2HoldoutSelectionManifest:
     state: HoldoutSelectionState
     holdout_outcomes_accessed: bool
     manifest_id: str
+    holdout_opportunity_registry: tuple[
+        tuple[str, str, str, datetime, int, HoldoutOpportunityDisposition], ...
+    ] = ()
     configuration_registry: tuple[
         tuple[str, ModelFamily, str | None, str | None, str | None], ...
     ] = ()
@@ -495,6 +498,40 @@ class R2HoldoutSelectionManifest:
             self.comparator_families
         ):
             raise ValueError("comparator families must be unique and non-empty")
+        opportunity_registry = self.holdout_opportunity_registry
+        if not opportunity_registry:
+            raise ValueError("holdout opportunity registry must be non-empty")
+        if tuple(sorted(opportunity_registry)) != opportunity_registry:
+            raise ValueError("holdout opportunity registry must be ordered")
+        opportunity_ids = tuple(item[0] for item in opportunity_registry)
+        target_ids = tuple(item[1] for item in opportunity_registry)
+        if len(set(opportunity_ids)) != len(opportunity_ids):
+            raise ValueError("holdout opportunity registry IDs must be unique")
+        if len(set(target_ids)) != len(target_ids):
+            raise ValueError("holdout opportunity registry target IDs must be unique")
+        for (
+            opportunity_id,
+            target_id,
+            instrument_id,
+            decision_time,
+            horizon_seconds,
+            _disposition,
+        ) in opportunity_registry:
+            _require_id(opportunity_id, "holdout opportunity ID")
+            _require_id(target_id, "holdout opportunity target ID")
+            _require_text(instrument_id, "holdout opportunity instrument ID")
+            require_utc(decision_time, "holdout opportunity decision time")
+            if horizon_seconds <= 0:
+                raise ValueError("holdout opportunity horizon must be positive")
+        primary_horizon = self.evaluation_policy.get("primary_horizon_seconds")
+        if not isinstance(primary_horizon, int) or primary_horizon <= 0:
+            raise ValueError("selection must freeze the primary horizon")
+        if any(item[4] != primary_horizon for item in opportunity_registry):
+            raise ValueError("holdout opportunity registry differs from the primary horizon")
+        pre_holdout_target_id = self.evaluation_policy.get("pre_holdout_target_dataset_id")
+        if not isinstance(pre_holdout_target_id, str):
+            raise ValueError("selection must freeze the pre-holdout target dataset")
+        _require_id(pre_holdout_target_id, "pre-holdout target dataset ID")
         if self.configuration_registry:
             registry_ids = tuple(item[0] for item in self.configuration_registry)
             _ordered_ids(registry_ids, "configuration registry IDs")
@@ -536,6 +573,7 @@ class R2HoldoutSelectionManifest:
         raw.pop("manifest_id", None)
         raw.setdefault("state", HoldoutSelectionState.SEALED_UNOPENED)
         raw.setdefault("holdout_outcomes_accessed", False)
+        raw.setdefault("holdout_opportunity_registry", ())
         raw.setdefault("configuration_registry", ())
         raw.setdefault("evaluation_policy", {})
         raw["evaluated_configuration_ids"] = tuple(
@@ -551,6 +589,12 @@ class R2HoldoutSelectionManifest:
             sorted(cast(Sequence[str], raw["holdout_configuration_ids"]))
         )
         raw["comparator_families"] = tuple(cast(Sequence[ModelFamily], raw["comparator_families"]))
+        raw["holdout_opportunity_registry"] = tuple(
+            cast(
+                Sequence[tuple[str, str, str, datetime, int, HoldoutOpportunityDisposition]],
+                raw["holdout_opportunity_registry"],
+            )
+        )
         raw["configuration_registry"] = tuple(
             cast(
                 Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]],
@@ -583,6 +627,24 @@ class R2HoldoutSelectionManifest:
             "control_configuration_ids": list(self.control_configuration_ids),
             "holdout_configuration_ids": list(self.holdout_configuration_ids),
             "comparator_families": [item.value for item in self.comparator_families],
+            "holdout_opportunity_registry": [
+                [
+                    opportunity_id,
+                    target_id,
+                    instrument_id,
+                    decision_time.isoformat(),
+                    horizon_seconds,
+                    disposition.value,
+                ]
+                for (
+                    opportunity_id,
+                    target_id,
+                    instrument_id,
+                    decision_time,
+                    horizon_seconds,
+                    disposition,
+                ) in (self.holdout_opportunity_registry)
+            ],
             "configuration_registry": [
                 [
                     configuration_id,
@@ -638,6 +700,7 @@ class R2HoldoutSelectionManifest:
             "control_configuration_ids",
             "holdout_configuration_ids",
             "comparator_families",
+            "holdout_opportunity_registry",
             "configuration_registry",
             "metric_policy",
             "threshold_policy",
@@ -663,6 +726,26 @@ class R2HoldoutSelectionManifest:
             raise ValueError("holdout selection question register must be an array")
         if not isinstance(registry_values, list):
             raise ValueError("holdout configuration registry must be an array")
+        opportunity_values = raw["holdout_opportunity_registry"]
+        if not isinstance(opportunity_values, list):
+            raise ValueError("holdout opportunity registry must be an array")
+        opportunity_registry: list[
+            tuple[str, str, str, datetime, int, HoldoutOpportunityDisposition]
+        ] = []
+        for raw_item in cast(list[object], opportunity_values):
+            if not isinstance(raw_item, list) or len(cast(list[object], raw_item)) != 6:
+                raise ValueError("holdout opportunity registry entry is invalid")
+            item = cast(list[object], raw_item)
+            opportunity_registry.append(
+                (
+                    str(item[0]),
+                    str(item[1]),
+                    str(item[2]),
+                    datetime.fromisoformat(str(item[3])),
+                    int(cast(float | int | str, item[4])),
+                    HoldoutOpportunityDisposition(str(item[5])),
+                )
+            )
         registry: list[tuple[str, ModelFamily, str | None, str | None, str | None]] = []
         for raw_item in cast(list[object], registry_values):
             if not isinstance(raw_item, list):
@@ -703,6 +786,7 @@ class R2HoldoutSelectionManifest:
             comparator_families=tuple(
                 ModelFamily(str(item)) for item in cast(list[object], raw["comparator_families"])
             ),
+            holdout_opportunity_registry=tuple(opportunity_registry),
             configuration_registry=tuple(registry),
             metric_policy=cast(Mapping[str, JsonValue], raw["metric_policy"]),
             threshold_policy=cast(Mapping[str, JsonValue], raw["threshold_policy"]),
@@ -1025,8 +1109,12 @@ class R2HoldoutFeatureDataset:
             target_pairs
         ):
             raise ValueError("opportunity target bindings must be unique")
-        if not {opportunity_id for opportunity_id, _target_id in target_pairs} <= set(expected):
-            raise ValueError("opportunity target binding is not expected")
+        if {opportunity_id for opportunity_id, _target_id in target_pairs} != set(expected):
+            raise ValueError(
+                "opportunity target bindings must exactly cover expected opportunities"
+            )
+        if len({target_id for _opportunity_id, target_id in target_pairs}) != len(target_pairs):
+            raise ValueError("opportunity target bindings must have unique targets")
         rows = tuple(sorted(self.rows, key=lambda item: (item.decision_time, item.row_id)))
         if rows != self.rows:
             raise ValueError("holdout feature rows must be deterministically ordered")
@@ -1381,6 +1469,10 @@ class R2HoldoutForecastDataset:
         target_ids = tuple(item[1] for item in self.opportunity_target_ids)
         _ordered_ids(opportunity_ids, "forecast opportunity bindings")
         _ordered_ids(target_ids, "forecast target bindings")
+        if set(opportunity_ids) != set(self.expected_opportunity_ids):
+            raise ValueError(
+                "forecast opportunity bindings must exactly cover expected opportunities"
+            )
         if self.holdout_outcomes_accessed:
             raise ValueError("holdout forecast generation cannot access outcomes")
         rows = tuple(sorted(self.rows, key=lambda item: item.row_id))

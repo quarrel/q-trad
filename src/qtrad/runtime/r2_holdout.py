@@ -370,10 +370,15 @@ def _pre_holdout_target_dataset(
     dataset: TargetDataset,
 ) -> TargetDataset:
     holdout_start = selection.holdout_range[0]
+    primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
+    if not isinstance(primary_horizon, int) or primary_horizon <= 0:
+        raise ValueError("selection is missing its primary target horizon")
     rows = tuple(
         row
         for row in dataset.rows
-        if row.decision_time < holdout_start and row.target_available_at <= holdout_start
+        if row.horizon.total_seconds() == primary_horizon
+        and row.decision_time < holdout_start
+        and row.target_available_at <= holdout_start
     )
     if len(rows) == len(dataset.rows):
         return dataset
@@ -478,6 +483,18 @@ def _load_training_children(
     expected_source = selection.evaluation_policy.get("target_dataset_id")
     if not isinstance(expected_source, str):
         raise ValueError("selection is missing the authenticated target source")
+    expected_pre_holdout = selection.evaluation_policy.get("pre_holdout_target_dataset_id")
+    if not isinstance(expected_pre_holdout, str):
+        raise ValueError("selection is missing the authenticated pre-holdout target")
+    frozen_pre_payload = selection.evaluation_policy.get("pre_holdout_target_dataset")
+    if not isinstance(frozen_pre_payload, dict):
+        raise ValueError("selection is missing the frozen pre-holdout target evidence")
+    frozen_pre = _target_dataset_from_payload(
+        cast(Mapping[str, object], frozen_pre_payload),
+        field="selection pre-holdout target",
+    )
+    if frozen_pre.dataset_id != expected_pre_holdout:
+        raise ValueError("selection pre-holdout target evidence has the wrong identity")
     targets: dict[str, TargetDataset] = {}
     target_sources: dict[str, str] = {}
     for dataset_id in sorted(target_ids):
@@ -485,6 +502,10 @@ def _load_training_children(
         dataset = _training_target_dataset_from_payload(payload)
         if dataset.dataset_id != dataset_id:
             raise ValueError("training target child differs from fit lineage")
+        if dataset.dataset_id != expected_pre_holdout:
+            raise ValueError("training target child differs from the frozen pre-holdout target")
+        if dataset != frozen_pre:
+            raise ValueError("training target child differs from frozen target evidence")
         source_id = _training_target_source_id(payload)
         if source_id != expected_source:
             raise ValueError("training target source differs from the frozen target dataset")
@@ -574,6 +595,7 @@ _SELECTION_FIELDS = {
     "control_configuration_ids",
     "holdout_configuration_ids",
     "comparator_families",
+    "holdout_opportunity_registry",
     "configuration_registry",
     "metric_policy",
     "threshold_policy",
@@ -1098,7 +1120,6 @@ def _replay_holdout_outputs(
     )
     from qtrad.domain.r2_holdout import (
         FinalFitDisposition,
-        HoldoutOpportunityDisposition,
     )
     from qtrad.domain.r2_readiness import ModelFamily
 
@@ -1142,47 +1163,57 @@ def _replay_holdout_outputs(
         )
         for item in fit_payloads
     )
-    target_by_opportunity: dict[str, str] = {}
-    expected_opportunities: set[str] = set()
-    unavailable: set[str] = set()
-    instrument_by_opportunity: dict[str, str] = {}
+    expected_opportunities = tuple(
+        sorted(item[0] for item in selection.holdout_opportunity_registry)
+    )
+    expected_pairs = tuple(
+        sorted((item[0], item[1]) for item in selection.holdout_opportunity_registry)
+    )
     for dataset in feature_datasets_by_configuration.values():
         if dataset is None:
             continue
-        expected_opportunities.update(dataset.expected_opportunity_ids)
-        unavailable.update(dataset.unavailable_opportunity_ids)
-        target_by_opportunity.update(dict(dataset.opportunity_target_ids))
-        target_by_opportunity.update({row.opportunity_id: row.target_id for row in dataset.rows})
-        instrument_by_opportunity.update(
-            {row.opportunity_id: row.instrument_id for row in dataset.rows}
-        )
+        if (
+            dataset.expected_opportunity_ids != expected_opportunities
+            or dataset.opportunity_target_ids != expected_pairs
+        ):
+            raise ValueError("holdout feature replay differs from the shared opportunity registry")
     for payload in forecast_payloads:
-        expected_ids = cast(list[object], payload["expected_opportunity_ids"])
-        expected_opportunities.update(str(item) for item in expected_ids)
-        bindings = _object_list(payload["opportunity_target_ids"], "forecast opportunity bindings")
-        for raw_binding in bindings:
-            binding = cast(list[object], raw_binding)
-            target_by_opportunity[str(binding[0])] = str(binding[1])
-        for raw_row in _object_list(payload["rows"], "forecast rows"):
-            row = _object_dict(raw_row, "forecast row")
-            instrument_by_opportunity.setdefault(
-                str(row["target_id"]), str(row["target_instrument_id"])
+        payload_expected = tuple(
+            sorted(str(item) for item in cast(list[object], payload["expected_opportunity_ids"]))
+        )
+        payload_pairs = tuple(
+            sorted(
+                (str(cast(list[object], item)[0]), str(cast(list[object], item)[1]))
+                for item in _object_list(
+                    payload["opportunity_target_ids"], "forecast opportunity bindings"
+                )
             )
+        )
+        if payload_expected != expected_opportunities or payload_pairs != expected_pairs:
+            raise ValueError("holdout forecast replay differs from the shared opportunity registry")
     for payload in coverage_payloads:
-        expected_ids = cast(list[object], payload["expected_opportunity_ids"])
-        expected_opportunities.update(str(item) for item in expected_ids)
+        payload_expected = tuple(
+            sorted(str(item) for item in cast(list[object], payload["expected_opportunity_ids"]))
+        )
+        if payload_expected != expected_opportunities:
+            raise ValueError("holdout coverage replay differs from the shared opportunity registry")
     opportunities = tuple(
         SimpleNamespace(
             opportunity_id=opportunity_id,
-            target_id=target_by_opportunity.get(opportunity_id, opportunity_id),
-            instrument_id=instrument_by_opportunity.get(opportunity_id, ""),
-            disposition=(
-                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
-                if opportunity_id in unavailable
-                else HoldoutOpportunityDisposition.ELIGIBLE
-            ),
+            target_id=target_id,
+            instrument_id=instrument_id,
+            decision_time=decision_time,
+            target_horizon_seconds=horizon_seconds,
+            disposition=disposition,
         )
-        for opportunity_id in sorted(expected_opportunities)
+        for (
+            opportunity_id,
+            target_id,
+            instrument_id,
+            decision_time,
+            horizon_seconds,
+            disposition,
+        ) in selection.holdout_opportunity_registry
     )
     actual_forecasts = build_holdout_forecasts(
         selection=selection,
@@ -1489,6 +1520,9 @@ def write_holdout_preparation(
     expected_source = selection.evaluation_policy.get("target_dataset_id")
     if not isinstance(expected_source, str):
         raise ValueError("selection is missing the authenticated target source")
+    expected_pre_holdout = selection.evaluation_policy.get("pre_holdout_target_dataset_id")
+    if not isinstance(expected_pre_holdout, str):
+        raise ValueError("selection is missing the authenticated pre-holdout target")
     training_target_sources: dict[str, str] = {}
     for payload in fit_payloads:
         _feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1512,6 +1546,8 @@ def write_holdout_preparation(
         if not isinstance(child, TargetDataset):
             raise TypeError("training_target_datasets must contain TargetDataset values")
         prepared = _pre_holdout_target_dataset(selection, child)
+        if prepared.dataset_id != expected_pre_holdout:
+            raise ValueError("training target does not match the frozen pre-holdout target")
         training_target_children[prepared.dataset_id] = prepared
     if any(
         not isinstance(child, R2FeatureDataset)
@@ -1683,6 +1719,7 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
         "opened.json",
         "consumed.json",
         "outcome-evidence.json",
+        "outcome-target.json",
         "evaluation.json",
     ):
         if (path / lifecycle_name).is_file():
@@ -1711,6 +1748,7 @@ def prepare_holdout_from_files(
         "opened.json",
         "consumed.json",
         "outcome-evidence.json",
+        "outcome-target.json",
         "evaluation.json",
     ):
         lifecycle_path = source / lifecycle_name
@@ -1944,6 +1982,48 @@ def _outcome_items_from_source(
     return _outcome_items(value)
 
 
+def _validate_target_rows_against_selection(
+    selection: R2HoldoutSelectionManifest,
+    target_dataset: TargetDataset,
+    expected_target_ids: Sequence[str],
+) -> None:
+    registry = {
+        target_id: (instrument_id, decision_time, horizon_seconds)
+        for (
+            _opportunity_id,
+            target_id,
+            instrument_id,
+            decision_time,
+            horizon_seconds,
+            _disposition,
+        ) in selection.holdout_opportunity_registry
+    }
+    primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
+    if not isinstance(primary_horizon, int) or primary_horizon <= 0:
+        raise ValueError("selection is missing its primary target horizon")
+    rows_by_target: dict[str, TargetRow] = {}
+    for row in target_dataset.rows:
+        if int(row.horizon.total_seconds()) != primary_horizon:
+            continue
+        if row.target_id in rows_by_target:
+            raise ValueError("target dataset repeats a primary target identity")
+        rows_by_target[row.target_id] = row
+    if set(expected_target_ids) != set(registry):
+        raise ValueError("outcome targets differ from the frozen opportunity registry")
+    for target_id in expected_target_ids:
+        row = rows_by_target.get(target_id)
+        expected = registry.get(target_id)
+        if row is None or expected is None:
+            raise ValueError("outcome target is absent from the frozen opportunity registry")
+        if (
+            row.target_id != target_id
+            or row.instrument_id != expected[0]
+            or row.decision_time != expected[1]
+            or int(row.horizon.total_seconds()) != expected[2]
+        ):
+            raise ValueError("outcome target identity differs from the frozen opportunity")
+
+
 def _opened_from_payload(payload: Mapping[str, object]) -> R2HoldoutOpenedMarker:
     if set(payload) != _OPENED_FIELDS:
         raise ValueError("opened marker has unknown or missing fields")
@@ -2076,6 +2156,15 @@ def reveal_holdout(
         expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
         target_dataset_id = cast(str | None, binding["target_dataset_id"])
         raw_outcomes = outcome_loader()
+        if not isinstance(raw_outcomes, TargetDataset):
+            raise ValueError(
+                "holdout outcomes must be loaded from the authenticated target dataset"
+            )
+        expected_source = selection.evaluation_policy.get("target_dataset_id")
+        if raw_outcomes.dataset_id != expected_source:
+            raise ValueError("revealed target dataset differs from the frozen target source")
+        _validate_target_rows_against_selection(selection, raw_outcomes, expected_target_ids)
+        _write_json(root / "outcome-target.json", _target_dataset_payload(raw_outcomes))
         outcome_items = _outcome_items_from_source(
             raw_outcomes,
             expected_target_dataset_id=target_dataset_id,
@@ -2234,6 +2323,36 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
         expected_fields=_OUTCOME_EVIDENCE_FIELDS,
     )
     outcome_evidence = _outcome_evidence_from_payload(outcome_payload)
+    target_payload = _verify_child(
+        root,
+        "outcome-target.json",
+        contract=TARGET_DATASET_CONTRACT,
+        identity_key="dataset_id",
+        expected_fields=_TARGET_DATASET_FIELDS,
+    )
+    target_dataset = _target_dataset_from_payload(target_payload, field="outcome target dataset")
+    expected_source = selection.evaluation_policy.get("target_dataset_id")
+    primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
+    if target_dataset.dataset_id != expected_source or not isinstance(primary_horizon, int):
+        raise ValueError("outcome target dataset is not bound to the frozen target policy")
+    _validate_target_rows_against_selection(
+        selection,
+        target_dataset,
+        outcome_evidence.expected_target_ids,
+    )
+    target_rows_by_id: dict[str, TargetRow] = {}
+    for row in target_dataset.rows:
+        if int(row.horizon.total_seconds()) != primary_horizon:
+            continue
+        if row.target_id in target_rows_by_id:
+            raise ValueError("outcome target dataset has duplicate primary target IDs")
+        target_rows_by_id[row.target_id] = row
+    if any(
+        target_rows_by_id.get(target_id) is None
+        or target_rows_by_id[target_id].log_return != outcome
+        for target_id, outcome in outcome_evidence.outcomes
+    ):
+        raise ValueError("outcome evidence values differ from the retained target dataset")
     if (
         outcome_evidence.selection_manifest_id != selection.manifest_id
         or outcome_evidence.seal_id != seal.seal_id
@@ -2419,6 +2538,13 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
         contract=R2_HOLDOUT_EVALUATION_CONTRACT,
         identity_key="evaluation_id",
     )
+    _, outcome_target_payload = _artifact_reference(
+        root,
+        "outcome-target.json",
+        "outcome-target.json",
+        contract=TARGET_DATASET_CONTRACT,
+        identity_key="dataset_id",
+    )
     children.update(
         {
             "selection.json": selection_payload,
@@ -2426,6 +2552,7 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
             "opened.json": opened_payload,
             "consumed.json": consumed_payload,
             "evaluation.json": evaluation_payload,
+            "outcome-target.json": outcome_target_payload,
         }
     )
     replay_specs: list[tuple[str, str, str, str]] = [
@@ -2481,6 +2608,14 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
                 "outcome_evidence_id",
             )
         )
+    replay_specs.append(
+        (
+            "outcome-target.json",
+            "outcome-target.json",
+            TARGET_DATASET_CONTRACT,
+            "dataset_id",
+        )
+    )
     replay_refs: list[ArtifactReference] = []
     for source_path, bundle_path, contract, identity_key in replay_specs:
         reference, payload = _artifact_reference(
