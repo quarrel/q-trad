@@ -249,6 +249,7 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
         raise ValueError("training target child has unknown or missing fields")
     if payload.get("contract") != TARGET_DATASET_CONTRACT or payload.get("schema_version") != 1:
         raise ValueError("training target child contract is unsupported")
+    _text_value(payload["source_target_dataset_id"], "training target source dataset ID")
     rows: list[TargetRow] = []
     expected_fields = {
         "instrument_id",
@@ -334,6 +335,25 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
     return dataset
 
 
+def _pre_holdout_target_dataset(
+    selection: R2HoldoutSelectionManifest,
+    dataset: TargetDataset,
+) -> TargetDataset:
+    holdout_start = selection.holdout_range[0]
+    rows = tuple(
+        row
+        for row in dataset.rows
+        if row.decision_time < holdout_start and row.target_available_at <= holdout_start
+    )
+    if len(rows) == len(dataset.rows):
+        return dataset
+    return TargetDataset.create(
+        rows,
+        observation_dataset_id=dataset.observation_dataset_id,
+        foundation_configuration_id=dataset.foundation_configuration_id,
+    )
+
+
 def _training_feature_payload(dataset: R2FeatureDataset) -> dict[str, object]:
     return {
         **dataset.manifest_json(),
@@ -341,11 +361,16 @@ def _training_feature_payload(dataset: R2FeatureDataset) -> dict[str, object]:
     }
 
 
-def _training_target_payload(dataset: TargetDataset) -> dict[str, object]:
+def _training_target_payload(
+    dataset: TargetDataset,
+    *,
+    source_target_dataset_id: str | None = None,
+) -> dict[str, object]:
     return {
         "contract": TARGET_DATASET_CONTRACT,
         "schema_version": 1,
         "dataset_id": dataset.dataset_id,
+        "source_target_dataset_id": source_target_dataset_id or dataset.dataset_id,
         "observation_dataset_id": dataset.observation_dataset_id,
         "foundation_configuration_id": dataset.foundation_configuration_id,
         "rows": [row.as_json() for row in dataset.rows],
@@ -404,7 +429,11 @@ def _training_paths_for_seal(
 def _load_training_children(
     root: Path,
     fit_payloads: Sequence[Mapping[str, object]],
-) -> tuple[dict[str, R2FeatureDataset], dict[str, TargetDataset]]:
+) -> tuple[
+    dict[str, R2FeatureDataset],
+    dict[str, TargetDataset],
+    dict[str, str],
+]:
     feature_ids: set[str] = set()
     target_ids: set[str] = set()
     for payload in fit_payloads:
@@ -419,13 +448,17 @@ def _load_training_children(
             raise ValueError("training feature child differs from fit lineage")
         features[dataset_id] = dataset
     targets: dict[str, TargetDataset] = {}
+    target_sources: dict[str, str] = {}
     for dataset_id in sorted(target_ids):
         payload = _load_object(_safe_child(root, f"training/targets/{dataset_id}.json"))
         dataset = _training_target_dataset_from_payload(payload)
         if dataset.dataset_id != dataset_id:
             raise ValueError("training target child differs from fit lineage")
         targets[dataset_id] = dataset
-    return features, targets
+        target_sources[dataset_id] = _text_value(
+            payload["source_target_dataset_id"], "training target source dataset ID"
+        )
+    return features, targets, target_sources
 
 
 def _float_value(value: object, field: str) -> float:
@@ -481,6 +514,7 @@ _TRAINING_TARGET_FIELDS = {
     "contract",
     "schema_version",
     "dataset_id",
+    "source_target_dataset_id",
     "observation_dataset_id",
     "foundation_configuration_id",
     "rows",
@@ -547,6 +581,7 @@ _FINAL_FIT_FIELDS = {
     "selection_manifest_id",
     "configuration_id",
     "model_family",
+    "target_instrument_id",
     "feature_dataset_id",
     "feature_schema_id",
     "training_cutoff",
@@ -575,6 +610,7 @@ _FORECAST_FIELDS = {
     "feature_dataset_id",
     "configuration_id",
     "final_fit_id",
+    "final_fit_ids",
     "rows",
     "expected_opportunity_ids",
     "opportunity_target_ids",
@@ -842,6 +878,7 @@ def _replay_final_fit(
     *,
     training_feature_dataset: R2FeatureDataset,
     training_target_dataset: TargetDataset,
+    training_target_source_dataset_id: str,
 ) -> None:
     from qtrad.application.r2_holdout import fit_final_ridge
     from qtrad.domain.r2_holdout import FinalFitDisposition
@@ -855,6 +892,9 @@ def _replay_final_fit(
     preprocessing = payload.get("preprocessing")
     if not isinstance(preprocessing, Mapping):
         raise ValueError("final fit preprocessing evidence must be an object")
+    expected_source = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_source, str) or training_target_source_dataset_id != expected_source:
+        raise ValueError("final fit target source differs from the frozen target dataset")
     expected_lineage = {
         "selection_manifest_id": selection.manifest_id,
         "experiment_configuration_id": selection.experiment_configuration_id,
@@ -865,6 +905,7 @@ def _replay_final_fit(
         "feature_schema_id": str(payload["feature_schema_id"]),
         "training_feature_dataset_id": training_feature_dataset.dataset_id,
         "training_target_dataset_id": training_target_dataset.dataset_id,
+        "training_target_source_dataset_id": training_target_source_dataset_id,
     }
     for key, expected in expected_lineage.items():
         if preprocessing.get(key) != expected:
@@ -879,10 +920,16 @@ def _replay_final_fit(
         selection=selection,
         configuration_id=str(payload["configuration_id"]),
         model_family=ModelFamily(str(payload["model_family"])),
+        target_instrument_id=(
+            None
+            if payload.get("target_instrument_id") is None
+            else str(payload["target_instrument_id"])
+        ),
         feature_dataset_id=str(payload["feature_dataset_id"]),
         feature_schema_id=str(payload["feature_schema_id"]),
         training_feature_dataset=training_feature_dataset,
         training_target_dataset=training_target_dataset,
+        training_target_source_dataset_id=training_target_source_dataset_id,
         policy=selection.final_fitting_policy,
         training_cutoff=_utc_value(payload["training_cutoff"], "final fit cutoff"),
         purged_target_ids=tuple(
@@ -1031,7 +1078,13 @@ def _replay_holdout_outputs(
             selection_manifest_id=str(item["selection_manifest_id"]),
             configuration_id=str(item["configuration_id"]),
             model_family=ModelFamily(str(item["model_family"])),
+            target_instrument_id=(
+                None
+                if item.get("target_instrument_id") is None
+                else str(item["target_instrument_id"])
+            ),
             feature_dataset_id=str(item["feature_dataset_id"]),
+            feature_schema_id=str(item["feature_schema_id"]),
             fit_id=str(item["fit_id"]),
             disposition=FinalFitDisposition(str(item["disposition"])),
             preprocessing=cast(Mapping[str, object], item["preprocessing"]),
@@ -1054,6 +1107,7 @@ def _replay_holdout_outputs(
     target_by_opportunity: dict[str, str] = {}
     expected_opportunities: set[str] = set()
     unavailable: set[str] = set()
+    instrument_by_opportunity: dict[str, str] = {}
     for dataset in feature_datasets_by_configuration.values():
         if dataset is None:
             continue
@@ -1061,6 +1115,9 @@ def _replay_holdout_outputs(
         unavailable.update(dataset.unavailable_opportunity_ids)
         target_by_opportunity.update(dict(dataset.opportunity_target_ids))
         target_by_opportunity.update({row.opportunity_id: row.target_id for row in dataset.rows})
+        instrument_by_opportunity.update(
+            {row.opportunity_id: row.instrument_id for row in dataset.rows}
+        )
     for payload in forecast_payloads:
         expected_ids = cast(list[object], payload["expected_opportunity_ids"])
         expected_opportunities.update(str(item) for item in expected_ids)
@@ -1068,6 +1125,11 @@ def _replay_holdout_outputs(
         for raw_binding in bindings:
             binding = cast(list[object], raw_binding)
             target_by_opportunity[str(binding[0])] = str(binding[1])
+        for raw_row in _object_list(payload["rows"], "forecast rows"):
+            row = _object_dict(raw_row, "forecast row")
+            instrument_by_opportunity.setdefault(
+                str(row["target_id"]), str(row["target_instrument_id"])
+            )
     for payload in coverage_payloads:
         expected_ids = cast(list[object], payload["expected_opportunity_ids"])
         expected_opportunities.update(str(item) for item in expected_ids)
@@ -1075,6 +1137,7 @@ def _replay_holdout_outputs(
         SimpleNamespace(
             opportunity_id=opportunity_id,
             target_id=target_by_opportunity.get(opportunity_id, opportunity_id),
+            instrument_id=instrument_by_opportunity.get(opportunity_id, ""),
             disposition=(
                 HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
                 if opportunity_id in unavailable
@@ -1097,14 +1160,20 @@ def _replay_holdout_outputs(
             raise ValueError(f"holdout forecast does not replay: {dataset_id}")
     if set(forecasts_by_id) != {str(item["dataset_id"]) for item in forecast_payloads}:
         raise ValueError("holdout forecast replay set differs from persisted children")
-    fits_by_configuration = {fit.configuration_id: fit for fit in fits}
+    fits_by_configuration: dict[str, tuple[object, ...]] = {}
+    for fit in fits:
+        fits_by_configuration[fit.configuration_id] = (
+            *fits_by_configuration.get(fit.configuration_id, ()),
+            fit,
+        )
     actual_coverage = {
         item.coverage_id: item
         for item in (
             build_holdout_coverage(
                 selection=selection,
                 feature_datasets=cast(Any, feature_datasets_by_configuration),
-                final_fit=cast(Any, fits_by_configuration.get(forecast.configuration_id)),
+                final_fit=None,
+                final_fits=cast(Any, fits_by_configuration.get(forecast.configuration_id, ())),
                 forecast_dataset=forecast,
                 opportunities=cast(Any, opportunities),
             )
@@ -1156,13 +1225,12 @@ def _verify_seal_registry(
         seal.configuration_pairs
     ) != len(set(seal.configuration_pairs)):
         raise ValueError("holdout configuration-pair registry differs from selection questions")
-    fits_by_configuration: dict[str, Mapping[str, object]] = {}
+    fits_by_configuration: dict[str, tuple[Mapping[str, object], ...]] = {}
     for payload in fit_payloads:
         configuration_id = str(payload["configuration_id"])
         model_family = str(payload["model_family"])
         if (
-            configuration_id in fits_by_configuration
-            or configuration_id not in expected_fit_configurations
+            configuration_id not in expected_fit_configurations
             or model_family != registry_by_configuration.get(configuration_id)
             or payload["feature_dataset_id"] != feature_by_configuration.get(configuration_id)
             or payload["selection_manifest_id"] != seal.selection_manifest_id
@@ -1170,12 +1238,27 @@ def _verify_seal_registry(
             raise ValueError("final-fit registry does not reconcile to the frozen selection")
         if str(payload["feature_dataset_id"]) not in feature_payloads:
             raise ValueError("final-fit registry references an unverified feature child")
-        fits_by_configuration[configuration_id] = payload
+        fits_by_configuration[configuration_id] = (
+            *fits_by_configuration.get(configuration_id, ()),
+            payload,
+        )
+    for configuration_id in expected_fit_configurations:
+        configuration_fits = fits_by_configuration.get(configuration_id, ())
+        if not configuration_fits:
+            raise ValueError("final-fit registry does not exactly cover frozen configurations")
+        if registry_by_configuration[configuration_id] == "LOCAL_RIDGE":
+            expected_instruments = selection.evaluation_policy.get("target_instruments")
+            if not isinstance(expected_instruments, list) or {
+                fit.get("target_instrument_id") for fit in configuration_fits
+            } != {str(item) for item in expected_instruments}:
+                raise ValueError("final-fit registry does not cover frozen local instruments")
+        elif len(configuration_fits) != 1:
+            raise ValueError("final-fit registry has duplicate non-local fits")
     forecasts_by_configuration: dict[str, Mapping[str, object]] = {}
     for payload in forecast_payloads:
         configuration_id = str(payload["configuration_id"])
         expected_family = registry_by_configuration.get(configuration_id)
-        fit = fits_by_configuration.get(configuration_id)
+        configuration_fits = fits_by_configuration.get(configuration_id, ())
         if (
             configuration_id in forecasts_by_configuration
             or configuration_id not in expected_configurations
@@ -1184,9 +1267,15 @@ def _verify_seal_registry(
         ):
             raise ValueError("forecast registry does not reconcile to the frozen selection")
         if expected_family == "ZERO_RETURN":
-            if fit is not None or payload["final_fit_id"] is not None:
+            if (
+                configuration_fits
+                or payload["final_fit_id"] is not None
+                or payload["final_fit_ids"]
+            ):
                 raise ValueError("ZERO_RETURN forecast must be fitless")
-        elif fit is None or payload["final_fit_id"] != fit["fit_id"]:
+        elif set(cast(list[object], payload["final_fit_ids"])) != {
+            fit["fit_id"] for fit in configuration_fits
+        }:
             raise ValueError("forecast registry does not reconcile to the final-fit registry")
         for raw_row in _object_list(payload["rows"], "holdout forecast rows"):
             row = _object_dict(raw_row, "holdout forecast row")
@@ -1202,7 +1291,9 @@ def _verify_seal_registry(
             or configuration_id not in expected_configurations
             or payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != feature_by_configuration.get(configuration_id)
-            or (expected_family != "ZERO_RETURN" and configuration_id not in fits_by_configuration)
+            or (
+                expected_family != "ZERO_RETURN" and not fits_by_configuration.get(configuration_id)
+            )
         ):
             raise ValueError("coverage registry does not reconcile to the frozen selection")
         coverage_by_configuration[configuration_id] = payload
@@ -1247,7 +1338,9 @@ def _verify_prepare_children(
             "feature_dataset_id"
         ] != feature_by_configuration.get(configuration_id):
             raise ValueError("final fit lineage differs from its seal")
-    training_features, training_targets = _load_training_children(root, fit_payloads)
+    training_features, training_targets, training_target_sources = _load_training_children(
+        root, fit_payloads
+    )
     for payload in fit_payloads:
         feature_id, target_id = _training_child_ids_from_fit(payload)
         _replay_final_fit(
@@ -1255,6 +1348,7 @@ def _verify_prepare_children(
             payload,
             training_feature_dataset=training_features[feature_id],
             training_target_dataset=training_targets[target_id],
+            training_target_source_dataset_id=training_target_sources[target_id],
         )
     for dataset_id in seal.forecast_dataset_ids:
         payload = _verify_child(
@@ -1353,16 +1447,33 @@ def write_holdout_preparation(
     if set(coverage) != set(seal.coverage_ids):
         raise ValueError("coverage arguments do not exactly match the seal")
     fit_payloads = tuple(_as_json(final_fits[fit_id]) for fit_id in seal.final_fit_ids)
+    expected_target = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_target, str):
+        raise ValueError("preparation is missing the authenticated target source")
+    training_target_sources: dict[str, str] = {}
+    for payload in fit_payloads:
+        _feature_id, target_id = _training_child_ids_from_fit(payload)
+        preprocessing = _object_dict(payload["preprocessing"], "final fit preprocessing")
+        source_id = _text_value(
+            preprocessing.get("training_target_source_dataset_id"),
+            "final fit target source dataset ID",
+        )
+        if source_id != expected_target:
+            raise ValueError("final fit target source differs from the frozen target dataset")
+        previous = training_target_sources.setdefault(target_id, source_id)
+        if previous != source_id:
+            raise ValueError("training target child has inconsistent source lineage")
     training_feature_children = {
         child.dataset_id: child
         for child in (training_feature_datasets or {}).values()
         if isinstance(child, R2FeatureDataset)
     }
-    training_target_children = {
-        child.dataset_id: child
-        for child in (training_target_datasets or {}).values()
-        if isinstance(child, TargetDataset)
-    }
+    training_target_children: dict[str, TargetDataset] = {}
+    for child in (training_target_datasets or {}).values():
+        if not isinstance(child, TargetDataset):
+            raise TypeError("training_target_datasets must contain TargetDataset values")
+        prepared = _pre_holdout_target_dataset(selection, child)
+        training_target_children[prepared.dataset_id] = prepared
     if any(
         not isinstance(child, R2FeatureDataset)
         for child in (training_feature_datasets or {}).values()
@@ -1403,7 +1514,10 @@ def write_holdout_preparation(
     for dataset_id, child in training_target_children.items():
         _write_json(
             output / f"training/targets/{dataset_id}.json",
-            _training_target_payload(child),
+            _training_target_payload(
+                child,
+                source_target_dataset_id=training_target_sources[dataset_id],
+            ),
         )
     for fit_id in seal.final_fit_ids:
         _write_json(output / "fits" / f"{fit_id}.json", _as_json(final_fits[fit_id]))
@@ -2581,6 +2695,7 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
             R2HoldoutForecastRow(
                 configuration_id=str(item["configuration_id"]),
                 target_id=str(item["target_id"]),
+                target_instrument_id=str(item["target_instrument_id"]),
                 feature_row_id=(
                     None if item["feature_row_id"] is None else str(item["feature_row_id"])
                 ),
@@ -2596,6 +2711,11 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
         ),
         configuration_id=str(payload["configuration_id"]),
         final_fit_id=(None if payload["final_fit_id"] is None else str(payload["final_fit_id"])),
+        final_fit_ids=(
+            tuple(str(item) for item in cast(list[object], payload["final_fit_ids"]))
+            if "final_fit_ids" in payload
+            else ((str(payload["final_fit_id"]),) if payload["final_fit_id"] is not None else ())
+        ),
         rows=tuple(parsed_rows),
         expected_opportunity_ids=tuple(str(item) for item in expected),
         opportunity_target_ids=tuple(
@@ -2677,29 +2797,19 @@ def reveal_holdout_from_files(
         for coverage_id in seal.coverage_ids
     )
 
-    def load_outcomes() -> Mapping[str, float]:
-        payload = _load_object(outcomes_path)
-        if set(payload) != {"outcomes"}:
-            raise ValueError("holdout outcomes file must contain only an outcomes object")
-        raw_value = payload["outcomes"]
-        if isinstance(raw_value, Mapping):
-            pairs = [(str(key), value) for key, value in raw_value.items()]
-        elif isinstance(raw_value, list):
-            pairs = []
-            for item in raw_value:
-                if not isinstance(item, list) or len(item) != 2:
-                    raise ValueError("holdout outcome entries must be [target_id, outcome]")
-                pairs.append((str(item[0]), item[1]))
-        else:
-            raise ValueError("holdout outcomes must be an object or pair list")
-        target_ids = [target_id for target_id, _ in pairs]
-        if len(set(target_ids)) != len(target_ids):
-            raise ValueError("holdout outcomes contain duplicate target IDs")
-        return {target_id: _float_value(value, "holdout outcome") for target_id, value in pairs}
+    target_dataset: TargetDataset | None = None
+
+    def load_outcomes() -> TargetDataset:
+        nonlocal target_dataset
+        target_dataset = _training_target_dataset_from_payload(_load_object(outcomes_path))
+        return target_dataset
 
     def evaluate(
         outcomes: Mapping[str, float], opened: R2HoldoutOpenedMarker
     ) -> R2HoldoutEvaluation:
+        if target_dataset is None:
+            raise RuntimeError("canonical target dataset was not loaded")
+        target_instruments = {row.target_id: row.instrument_id for row in target_dataset.rows}
         return evaluate_holdout(
             selection=selection,
             seal=seal,
@@ -2707,6 +2817,7 @@ def reveal_holdout_from_files(
             forecast_datasets=forecast_datasets,
             coverage_datasets=coverage_datasets,
             outcomes=outcomes,
+            target_instruments=target_instruments,
         )
 
     return reveal_holdout(

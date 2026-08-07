@@ -1123,6 +1123,7 @@ class R2FinalFit:
     selection_manifest_id: str
     configuration_id: str
     model_family: ModelFamily
+    target_instrument_id: str | None
     feature_dataset_id: str
     feature_schema_id: str
     training_cutoff: datetime
@@ -1156,6 +1157,8 @@ class R2FinalFit:
             (self.fit_id, "final-fit ID"),
         ):
             _require_id(value, field)
+        if self.target_instrument_id is not None and not self.target_instrument_id.strip():
+            raise ValueError("final-fit target instrument cannot be blank")
         require_utc(self.training_cutoff, "final-fit training cutoff")
         for values, field in (
             (self.training_target_ids, "final-fit training target IDs"),
@@ -1232,6 +1235,7 @@ class R2FinalFit:
             "selection_manifest_id": self.selection_manifest_id,
             "configuration_id": self.configuration_id,
             "model_family": self.model_family.value,
+            "target_instrument_id": self.target_instrument_id,
             "feature_dataset_id": self.feature_dataset_id,
             "feature_schema_id": self.feature_schema_id,
             "training_cutoff": self.training_cutoff.isoformat(),
@@ -1261,6 +1265,7 @@ class R2FinalFit:
 class R2HoldoutForecastRow:
     configuration_id: str
     target_id: str
+    target_instrument_id: str
     feature_row_id: str | None
     forecast: float
     model_family: ModelFamily
@@ -1275,6 +1280,8 @@ class R2HoldoutForecastRow:
             (self.row_id, "forecast row ID"),
         ):
             _require_id(value, field)
+        if not self.target_instrument_id.strip():
+            raise ValueError("forecast target instrument cannot be blank")
         if self.feature_row_id is not None:
             _require_id(self.feature_row_id, "forecast feature row ID")
         _finite(self.forecast, "holdout forecast")
@@ -1287,6 +1294,7 @@ class R2HoldoutForecastRow:
         *,
         configuration_id: str,
         target_id: str,
+        target_instrument_id: str,
         feature_row_id: str | None,
         forecast: float,
         model_family: ModelFamily,
@@ -1296,6 +1304,7 @@ class R2HoldoutForecastRow:
             "schema_version": 1,
             "configuration_id": configuration_id,
             "target_id": target_id,
+            "target_instrument_id": target_instrument_id,
             "feature_row_id": feature_row_id,
             "forecast": forecast,
             "model_family": model_family.value,
@@ -1303,6 +1312,7 @@ class R2HoldoutForecastRow:
         return cls(
             configuration_id=configuration_id,
             target_id=target_id,
+            target_instrument_id=target_instrument_id,
             feature_row_id=feature_row_id,
             forecast=forecast,
             model_family=model_family,
@@ -1315,6 +1325,7 @@ class R2HoldoutForecastRow:
             "schema_version": 1,
             "configuration_id": self.configuration_id,
             "target_id": self.target_id,
+            "target_instrument_id": self.target_instrument_id,
             "feature_row_id": self.feature_row_id,
             "forecast": self.forecast,
             "model_family": self.model_family.value,
@@ -1338,6 +1349,7 @@ class R2HoldoutForecastDataset:
     holdout_scope: HoldoutScope
     holdout_outcomes_accessed: bool
     dataset_id: str
+    final_fit_ids: tuple[str, ...] = ()
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_FORECAST_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -1350,6 +1362,7 @@ class R2HoldoutForecastDataset:
         _require_id(self.dataset_id, "forecast dataset ID")
         if self.final_fit_id is not None:
             _require_id(self.final_fit_id, "forecast final-fit ID")
+        _ordered_ids(self.final_fit_ids, "forecast final-fit IDs")
         _ordered_ids(self.expected_opportunity_ids, "forecast expected opportunities")
         opportunity_ids = tuple(item[0] for item in self.opportunity_target_ids)
         target_ids = tuple(item[1] for item in self.opportunity_target_ids)
@@ -1380,6 +1393,11 @@ class R2HoldoutForecastDataset:
                 key=lambda item: item[0],
             )
         )
+        if "final_fit_ids" not in raw:
+            raw["final_fit_ids"] = (
+                (raw["final_fit_id"],) if raw.get("final_fit_id") is not None else ()
+            )
+        raw["final_fit_ids"] = tuple(sorted(cast(Sequence[str], raw["final_fit_ids"])))
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
             "schema_version": 1,
@@ -1396,6 +1414,7 @@ class R2HoldoutForecastDataset:
             "feature_dataset_id": self.feature_dataset_id,
             "configuration_id": self.configuration_id,
             "final_fit_id": self.final_fit_id,
+            "final_fit_ids": list(self.final_fit_ids),
             "rows": [item.as_json() for item in self.rows],
             "expected_opportunity_ids": list(self.expected_opportunity_ids),
             "opportunity_target_ids": [list(item) for item in self.opportunity_target_ids],

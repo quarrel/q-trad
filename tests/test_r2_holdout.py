@@ -44,6 +44,7 @@ from qtrad.domain.r2_holdout import (
     HoldoutDirection,
     HoldoutScope,
     HoldoutTargetOpportunity,
+    R2FinalFit,
     R2FinalFittingPolicy,
     R2HoldoutFeatureRow,
     R2HoldoutQuestion,
@@ -51,8 +52,10 @@ from qtrad.domain.r2_holdout import (
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_holdout import (
+    _training_target_payload,
     prepare_holdout_from_files,
     reveal_holdout,
+    reveal_holdout_from_files,
     verify_holdout_bundle,
     verify_holdout_markers,
     verify_holdout_preparation,
@@ -90,6 +93,28 @@ def _policy() -> R2FinalFittingPolicy:
     )
 
 
+def _training_feature_spec() -> tuple[tuple[FeatureDefinition, ...], str, str]:
+    schema = (
+        FeatureDefinition("training_return", FeatureFamily.LOCAL_RETURNS),
+        FeatureDefinition("training_volatility", FeatureFamily.LOCAL_VOLATILITY_RANGE),
+    )
+    feature_name = "fixture-training-features"
+    return (
+        schema,
+        feature_name,
+        feature_set_id(
+            _id("experiment"),
+            feature_name,
+            schema,
+            MarketDataSourceClass.IG_NATIVE_CAPTURE,
+        ),
+    )
+
+
+def _training_feature_set_id() -> str:
+    return _training_feature_spec()[2]
+
+
 def _selection(
     *, bind_target_dataset: bool = True
 ) -> tuple[R2HoldoutSelectionManifest, R2HoldoutQuestion, tuple[str, str]]:
@@ -116,7 +141,7 @@ def _selection(
         local_comparator_manifest_id=_id("local-comparator"),
         evaluated_configuration_ids=(zero, local),
         predeclared_comparators=(ModelFamily.ZERO_RETURN, ModelFamily.LOCAL_RIDGE),
-        primary_metric="MSE",
+        primary_metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
         secondary_metrics=("RMSE",),
         acceptance_thresholds=(("minimum_support", 1.0),),
         decisions=decisions,
@@ -132,7 +157,7 @@ def _selection(
         question="Does the selected candidate improve the zero control?",
         candidate_configuration_id=local,
         comparator_configuration_id=zero,
-        metric="MSE",
+        metric="INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE",
         support_policy="COMMON_ELIGIBLE",
         direction=HoldoutDirection.LOWER_IS_BETTER,
         threshold=0.0,
@@ -151,7 +176,7 @@ def _selection(
         holdout_scope=HoldoutScope.DISPOSABLE_FIXTURE,
         final_fitting_policy=_policy(),
         questions=(question,),
-        metric_policy={"metric": "MSE"},
+        metric_policy={"metric": "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"},
         threshold_policy={"threshold": 0.0},
         runtime_identities={"application": "fixture"},
         frozen_metadata={"fixture": True},
@@ -161,7 +186,7 @@ def _selection(
             sorted(
                 (
                     (zero, ModelFamily.ZERO_RETURN, None, None),
-                    (local, ModelFamily.LOCAL_RIDGE, _id("feature-set-local"), None),
+                    (local, ModelFamily.LOCAL_RIDGE, _training_feature_set_id(), None),
                 ),
                 key=lambda item: item[0],
             )
@@ -174,7 +199,7 @@ def _selection(
             "minimum_inner_validation_rows": 1,
             "target_instruments": ["INSTRUMENT_0", "INSTRUMENT_1"],
             "seal_policy": {
-                "metric_policy": {"metric": "MSE"},
+                "metric_policy": {"metric": "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"},
                 "comparison_support": {"rule": "COMMON_ELIGIBLE"},
                 "forecast_buckets": {"source": "TRAINING_ONLY"},
                 "state_buckets": {"source": "TRAINING_ONLY"},
@@ -240,7 +265,7 @@ def _target_dataset() -> TargetDataset:
     )
     training_rows = tuple(
         TargetRow(
-            instrument_id="INSTRUMENT_0",
+            instrument_id=f"INSTRUMENT_{instrument_index}",
             decision_time=NOW - timedelta(days=2, hours=index),
             horizon=timedelta(seconds=900),
             target_basis=PriceBasis.MID,
@@ -251,7 +276,7 @@ def _target_dataset() -> TargetDataset:
             target_available_at=NOW - timedelta(days=2, hours=index) + timedelta(seconds=900),
             label_start_close=None,
             label_end_close=None,
-            log_return=index / 10,
+            log_return=(index + instrument_index) / 10,
             return_disposition=ReturnDisposition.VALID,
             start_event_id=None,
             end_event_id=None,
@@ -259,6 +284,7 @@ def _target_dataset() -> TargetDataset:
             lower_log_excursion=None,
             excursion_disposition=ExcursionDisposition.INCOMPLETE_PATH,
         )
+        for instrument_index in range(2)
         for index in range(4)
     )
     return TargetDataset.create(
@@ -269,30 +295,21 @@ def _target_dataset() -> TargetDataset:
 
 
 def _training_feature_dataset() -> R2FeatureDataset:
-    schema = (
-        FeatureDefinition("training_return", FeatureFamily.LOCAL_RETURNS),
-        FeatureDefinition("training_volatility", FeatureFamily.LOCAL_VOLATILITY_RANGE),
-    )
+    schema, feature_name, training_feature_set_id = _training_feature_spec()
     experiment_id = _id("experiment")
-    feature_name = "fixture-training-features"
-    training_feature_set_id = feature_set_id(
-        experiment_id,
-        feature_name,
-        schema,
-        MarketDataSourceClass.IG_NATIVE_CAPTURE,
-    )
     rows = tuple(
         RawFeatureRow(
-            target_instrument_id="INSTRUMENT_0",
+            target_instrument_id=f"INSTRUMENT_{instrument_index}",
             decision_time=NOW - timedelta(days=2, hours=index),
             feature_data_asof=NOW - timedelta(days=2, hours=index) - timedelta(minutes=1),
             latest_feature_bar_end=NOW - timedelta(days=2, hours=index) - timedelta(minutes=1),
             feature_set_id=training_feature_set_id,
             values=(
-                RawFeatureValue("training_return", float(index)),
+                RawFeatureValue("training_return", float(index + instrument_index)),
                 RawFeatureValue("training_volatility", 1.0),
             ),
         )
+        for instrument_index in range(2)
         for index in range(4)
     )
     return R2FeatureDataset.create(
@@ -318,15 +335,16 @@ def _prepared(
 ):
     selection, _question, configurations = _selection(bind_target_dataset=bind_target_dataset)
     opportunities = _opportunities()
-    feature_schema_id = _id("feature-schema")
+    feature_schema_id = _training_feature_dataset().raw_feature_schema_id
+    target_dataset = _target_dataset()
     features = materialise_r2_holdout_features(
         selection=selection,
         opportunities=opportunities,
         feature_schema_id=feature_schema_id,
-        feature_set_id=_id("feature-set-local"),
+        feature_set_id=_training_feature_set_id(),
         observation_dataset_id=_id("observations"),
         panel_dataset_id=_id("panel"),
-        target_dataset_id=(_target_dataset().dataset_id if bind_target_dataset else None),
+        target_dataset_id=(target_dataset.dataset_id if bind_target_dataset else None),
         projection=lambda item: R2HoldoutFeatureRow.create(
             opportunity_id=item.opportunity_id,
             target_id=item.target_id,
@@ -339,12 +357,13 @@ def _prepared(
         ),
     )
     training_features = _training_feature_dataset()
-    training_targets = _target_dataset()
+    training_targets = target_dataset
     fits = tuple(
         fit_final_ridge(
             selection=selection,
-            configuration_id=configuration_id,
+            configuration_id=configurations[1],
             model_family=ModelFamily.LOCAL_RIDGE,
+            target_instrument_id=target_instrument_id,
             feature_dataset_id=features.dataset_id,
             feature_schema_id=feature_schema_id,
             training_feature_dataset=training_features,
@@ -352,16 +371,16 @@ def _prepared(
             policy=selection.final_fitting_policy,
             forced_disposition=(
                 FinalFitDisposition.NUMERICAL_FAILURE
-                if forced_failure_configuration == configuration_id
+                if forced_failure_configuration == configurations[1]
                 else None
             ),
             forced_failure_reason=(
                 "fixture forced replay failure"
-                if forced_failure_configuration == configuration_id
+                if forced_failure_configuration == configurations[1]
                 else None
             ),
         )
-        for configuration_id in (configurations[1],)
+        for target_instrument_id in ("INSTRUMENT_0", "INSTRUMENT_1")
     )
     forecasts = build_holdout_forecasts(
         selection=selection,
@@ -369,12 +388,18 @@ def _prepared(
         final_fits=fits,
         opportunities=opportunities,
     )
-    fits_by_configuration = {item.configuration_id: item for item in fits}
+    fits_by_configuration: dict[str, tuple[R2FinalFit, ...]] = {}
+    for fit in fits:
+        fits_by_configuration[fit.configuration_id] = (
+            *fits_by_configuration.get(fit.configuration_id, ()),
+            fit,
+        )
     coverage = tuple(
         build_holdout_coverage(
             selection=selection,
             feature_dataset=features,
-            final_fit=fits_by_configuration.get(forecast.configuration_id),
+            final_fit=None,
+            final_fits=fits_by_configuration.get(forecast.configuration_id, ()),
             forecast_dataset=forecast,
             opportunities=opportunities,
         )
@@ -526,14 +551,14 @@ def test_preparation_replays_a_forced_failed_fit(tmp_path: Path) -> None:
 
 def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path) -> None:
     selection, _opportunities_value, fits, forecasts, coverage, _seal = _prepared(tmp_path)
-    with pytest.raises(ValueError, match="exactly cover frozen configurations"):
+    with pytest.raises(ValueError, match="local final fits"):
         seal_holdout_forecasts(
             selection=selection,
             feature_dataset=materialise_r2_holdout_features(
                 selection=selection,
                 opportunities=_opportunities(),
-                feature_schema_id=_id("feature-schema"),
-                feature_set_id=_id("feature-set-local"),
+                feature_schema_id=_training_feature_dataset().raw_feature_schema_id,
+                feature_set_id=_training_feature_set_id(),
                 observation_dataset_id=_id("observations"),
                 panel_dataset_id=_id("panel"),
                 target_dataset_id=_target_dataset().dataset_id,
@@ -544,7 +569,7 @@ def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path
                     decision_time=item.decision_time,
                     feature_cutoff=item.feature_data_asof,
                     latest_feature_bar_end=item.latest_feature_bar_end,
-                    feature_schema_id=_id("feature-schema"),
+                    feature_schema_id=_training_feature_dataset().raw_feature_schema_id,
                     values=(1.0, 0.5),
                 ),
             ),
@@ -614,10 +639,8 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
 
 
 def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None:
-    selection, opportunities, _fits, _forecasts, _coverage, seal = _prepared(
-        tmp_path, bind_target_dataset=False
-    )
-    with pytest.raises(ValueError, match="duplicate"):
+    selection, opportunities, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
+    with pytest.raises(ValueError, match="authenticated target dataset"):
         reveal_holdout(
             tmp_path,
             expected_selection_manifest_id=selection.manifest_id,
@@ -682,3 +705,31 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
             evaluator=evaluator,
         )
     assert not (tmp_path / "source" / "opened.json").exists()
+
+
+def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> None:
+    _prepared(tmp_path)
+    target_path = next((tmp_path / "training/targets").iterdir())
+    payload = json.loads(target_path.read_text())
+    assert len(payload["rows"]) == 8
+    assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in payload["rows"])
+
+
+def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:
+    selection, _opportunities_value, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
+    outcomes_path = tmp_path.parent / "canonical-target.json"
+    outcomes_path.write_text(json.dumps(_training_target_payload(_target_dataset())))
+    evaluation, consumed = reveal_holdout_from_files(
+        tmp_path,
+        outcomes_path=outcomes_path,
+        expected_selection_manifest_id=selection.manifest_id,
+        expected_seal_id=seal.seal_id,
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        opened_by="test",
+        consumed_by="test",
+        opened_at=NOW,
+        consumed_at=NOW + timedelta(seconds=1),
+    )
+    assert evaluation is not None
+    assert evaluation.evaluation_id
+    assert consumed.outcome_accessed is True
