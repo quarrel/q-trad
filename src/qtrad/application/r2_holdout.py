@@ -17,9 +17,11 @@ from typing import Any, cast
 import numpy as np
 
 from qtrad.domain.events import JsonValue
+from qtrad.domain.foundation import TargetDataset
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import R2OofBundle
 from qtrad.domain.r2_evaluation import SelectionManifest
+from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_holdout import (
     FinalFitDisposition,
     HoldoutConclusion,
@@ -277,10 +279,16 @@ def freeze_holdout_selection(
             raise ValueError("OOF evaluation policies are not authenticated strings")
         if not isinstance(authenticated_minimum_rows, int) or authenticated_minimum_rows < 2:
             raise ValueError("OOF evaluation minimum support is invalid")
-        if verified_experiment.forecast_bucket_policy != "TRAINING_ONLY":
-            raise ValueError("holdout requires the supported training-only bucket policy")
-        if verified_experiment.state_bucket_policy != "TRAINING_ONLY":
-            raise ValueError("holdout requires the supported training-only state policy")
+        if verified_experiment.forecast_bucket_policy not in {
+            "TRAINING_ONLY",
+            "TRAINING_QUANTILES_V1",
+        }:
+            raise ValueError("holdout requires the canonical forecast bucket policy")
+        if verified_experiment.state_bucket_policy not in {
+            "TRAINING_ONLY",
+            "TRAINING_THRESHOLDS_V1",
+        }:
+            raise ValueError("holdout requires the canonical state bucket policy")
         frozen_evaluation_policy.update(
             {
                 "target_dataset_id": verified_experiment.target_dataset_id,
@@ -297,6 +305,7 @@ def freeze_holdout_selection(
                 "minimum_inner_validation_rows": verified_experiment.minimum_inner_validation_rows,
                 "minimum_outer_validation_rows": verified_experiment.minimum_outer_validation_rows,
                 "ordered_instruments": list(verified_experiment.ordered_instruments),
+                "target_instruments": list(verified_experiment.target_instruments),
                 "pre_holdout_membership_policy": final_fitting_policy.pre_holdout_membership_policy,
                 "maturity_purge_policy": final_fitting_policy.maturity_purge_policy,
                 "instrument_intercept_policy": final_fitting_policy.instrument_intercept_policy,
@@ -398,6 +407,56 @@ def freeze_holdout_selection(
     )
 
 
+def _authenticated_holdout_rows(
+    *,
+    selection: R2HoldoutSelectionManifest,
+    opportunities: Sequence[HoldoutTargetOpportunity],
+    feature_schema_id: str,
+    feature_set_id: str,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    raw_feature_dataset: R2FeatureDataset,
+    target_dataset: TargetDataset,
+) -> dict[str, R2HoldoutFeatureRow | None]:
+    if (
+        raw_feature_dataset.experiment_configuration_id != selection.experiment_configuration_id
+        or raw_feature_dataset.feature_set_id != feature_set_id
+        or raw_feature_dataset.raw_feature_schema_id != feature_schema_id
+        or raw_feature_dataset.observation_dataset_id != observation_dataset_id
+        or raw_feature_dataset.panel_dataset_id != panel_dataset_id
+        or raw_feature_dataset.target_dataset_id != target_dataset.dataset_id
+    ):
+        raise ValueError("authenticated R2.B feature child differs from the frozen feature sources")
+    target_by_identity = {
+        (row.instrument_id, row.decision_time): row for row in target_dataset.rows
+    }
+    raw_by_identity = {
+        (row.target_instrument_id, row.decision_time): row for row in raw_feature_dataset.rows
+    }
+    result: dict[str, R2HoldoutFeatureRow | None] = {}
+    for opportunity in opportunities:
+        target = target_by_identity.get((opportunity.instrument_id, opportunity.decision_time))
+        if target is None or target.target_id != opportunity.target_id:
+            raise ValueError(
+                "authenticated target child differs from the holdout opportunity identity"
+            )
+        raw = raw_by_identity.get((opportunity.instrument_id, opportunity.decision_time))
+        if raw is None or any(item.value is None for item in raw.values):
+            result[opportunity.opportunity_id] = None
+            continue
+        result[opportunity.opportunity_id] = R2HoldoutFeatureRow.create(
+            opportunity_id=opportunity.opportunity_id,
+            target_id=target.target_id,
+            instrument_id=opportunity.instrument_id,
+            decision_time=opportunity.decision_time,
+            feature_cutoff=raw.feature_data_asof,
+            latest_feature_bar_end=raw.latest_feature_bar_end,
+            feature_schema_id=feature_schema_id,
+            values=tuple(cast(float, item.value) for item in raw.values),
+        )
+    return result
+
+
 def materialise_r2_holdout_features(
     *,
     selection: R2HoldoutSelectionManifest,
@@ -407,9 +466,12 @@ def materialise_r2_holdout_features(
     observation_dataset_id: str,
     panel_dataset_id: str,
     target_dataset_id: str | None = None,
-    projection: Callable[[HoldoutTargetOpportunity], R2HoldoutFeatureRow | None],
+    projection: Callable[[HoldoutTargetOpportunity], R2HoldoutFeatureRow | None] | None = None,
+    raw_feature_dataset: R2FeatureDataset | None = None,
+    target_dataset: TargetDataset | None = None,
+    allow_disposable_projection: bool = False,
 ) -> R2HoldoutFeatureDataset:
-    """Materialise causal features from a projection that cannot receive outcomes."""
+    """Materialise R2.B features, with projection callbacks limited to disposable fixtures."""
 
     _ensure_selection_lineage(selection)
     if selection.configuration_registry:
@@ -417,21 +479,27 @@ def materialise_r2_holdout_features(
         frozen_observation_dataset_id = selection.evaluation_policy.get("observation_dataset_id")
         frozen_panel_dataset_id = selection.evaluation_policy.get("panel_dataset_id")
         if (
-            not isinstance(frozen_target_dataset_id, str)
-            or target_dataset_id != frozen_target_dataset_id
+            (
+                frozen_target_dataset_id is not None
+                and (
+                    not isinstance(frozen_target_dataset_id, str)
+                    or target_dataset_id != frozen_target_dataset_id
+                )
+            )
+            or (frozen_target_dataset_id is None and target_dataset_id is not None)
             or observation_dataset_id != frozen_observation_dataset_id
             or panel_dataset_id != frozen_panel_dataset_id
         ):
             raise ValueError("holdout feature datasets differ from the frozen experiment sources")
         registry_feature_sets = {
-            feature_set_id
+            registry_feature_set_id
             for (
                 _configuration_id,
                 _model_family,
-                feature_set_id,
+                registry_feature_set_id,
                 _manifest_id,
             ) in selection.configuration_registry
-            if feature_set_id is not None
+            if registry_feature_set_id is not None
         }
         if registry_feature_sets and feature_set_id not in registry_feature_sets:
             raise ValueError("holdout feature set is absent from the authenticated OOF registry")
@@ -439,6 +507,32 @@ def materialise_r2_holdout_features(
         raise ValueError(
             "confirmatory holdout features require an independently verified R2.B feature child"
         )
+    if raw_feature_dataset is not None:
+        if projection is not None or target_dataset is None:
+            raise ValueError(
+                "authenticated R2.B materialisation requires its feature and target children"
+            )
+        projected_rows = _authenticated_holdout_rows(
+            selection=selection,
+            opportunities=opportunities,
+            feature_schema_id=feature_schema_id,
+            feature_set_id=feature_set_id,
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            raw_feature_dataset=raw_feature_dataset,
+            target_dataset=target_dataset,
+        )
+    else:
+        if projection is None:
+            raise ValueError("holdout feature materialisation requires an authenticated R2.B child")
+        if (
+            not allow_disposable_projection
+            and selection.holdout_scope is not HoldoutScope.DISPOSABLE_FIXTURE
+        ):
+            raise ValueError(
+                "arbitrary feature projections are permitted only for explicit disposable fixtures"
+            )
+        projected_rows = {item.opportunity_id: projection(item) for item in opportunities}
     ordered = tuple(
         sorted(opportunities, key=lambda item: (item.decision_time, item.opportunity_id))
     )
@@ -456,7 +550,7 @@ def materialise_r2_holdout_features(
         if opportunity.disposition is not HoldoutOpportunityDisposition.ELIGIBLE:
             unavailable.append(opportunity.opportunity_id)
             continue
-        row = projection(opportunity)
+        row = projected_rows[opportunity.opportunity_id]
         if row is None:
             unavailable.append(opportunity.opportunity_id)
             continue
@@ -660,8 +754,6 @@ def fit_final_ridge(
     training_rows: Sequence[FinalTrainingRow],
     policy: R2FinalFittingPolicy,
     training_cutoff: datetime | None = None,
-    minimum_training_rows: int | None = None,
-    minimum_inner_validation_rows: int | None = None,
     purged_target_ids: Sequence[str] = (),
     forced_disposition: FinalFitDisposition | None = None,
     forced_failure_reason: str | None = None,
@@ -705,34 +797,27 @@ def fit_final_ridge(
         raise ValueError("final fit configuration is absent from the authenticated OOF registry")
     if registry_family is not None and registry_family is not model_family:
         raise ValueError("final fit model family differs from the authenticated OOF registry")
-    if registry_family is ModelFamily.ZERO_RETURN:
+    if model_family is ModelFamily.ZERO_RETURN:
         raise ValueError("ZERO_RETURN is a control and must not be fitted")
     frozen_minimum_training_rows = selection.evaluation_policy.get("minimum_training_rows")
-    if frozen_minimum_training_rows is not None:
-        if not isinstance(frozen_minimum_training_rows, int) or frozen_minimum_training_rows <= 0:
-            raise ValueError("selection frozen minimum training rows are invalid")
-        if (
-            minimum_training_rows is not None
-            and minimum_training_rows != frozen_minimum_training_rows
-        ):
-            raise ValueError("final fit minimum training rows differ from the frozen experiment")
-        minimum_training_rows = frozen_minimum_training_rows
-    else:
-        minimum_training_rows = 2 if minimum_training_rows is None else minimum_training_rows
     frozen_minimum_inner_rows = selection.evaluation_policy.get("minimum_inner_validation_rows")
-    if frozen_minimum_inner_rows is not None:
-        if not isinstance(frozen_minimum_inner_rows, int) or frozen_minimum_inner_rows <= 0:
-            raise ValueError("selection frozen minimum inner rows are invalid")
-        if (
-            minimum_inner_validation_rows is not None
-            and minimum_inner_validation_rows != frozen_minimum_inner_rows
-        ):
-            raise ValueError("final fit minimum inner rows differ from the frozen experiment")
-        minimum_inner_validation_rows = frozen_minimum_inner_rows
-    else:
-        minimum_inner_validation_rows = (
-            1 if minimum_inner_validation_rows is None else minimum_inner_validation_rows
-        )
+    if selection.configuration_registry and (
+        frozen_minimum_training_rows is None or frozen_minimum_inner_rows is None
+    ):
+        raise ValueError("verified final fit is missing authenticated row minima")
+    minimum_training_rows = (
+        frozen_minimum_training_rows if frozen_minimum_training_rows is not None else 2
+    )
+    minimum_inner_validation_rows = (
+        frozen_minimum_inner_rows if frozen_minimum_inner_rows is not None else 1
+    )
+    if (
+        not isinstance(minimum_training_rows, int)
+        or minimum_training_rows <= 0
+        or not isinstance(minimum_inner_validation_rows, int)
+        or minimum_inner_validation_rows <= 0
+    ):
+        raise ValueError("selection frozen row minima are invalid")
     cutoff = training_cutoff or selection.holdout_range[0]
     require_utc(cutoff, "final-fit training cutoff")
     if cutoff != selection.holdout_range[0]:
@@ -814,9 +899,14 @@ def fit_final_ridge(
         "inner_validation_policy",
         {"CHRONOLOGICAL_TAIL": "CHRONOLOGICAL_TAIL_PURGED_V1"},
     )
+    model_selection_policy = selection.evaluation_policy.get(
+        "model_selection_policy", "OOF_PRIMARY_MSE_V1"
+    )
+    if model_selection_policy != "OOF_PRIMARY_MSE_V1":
+        raise ValueError("final fit requires the frozen OOF model-selection policy")
     loss_policy_value = selection.evaluation_policy.get("loss_policy", "OOF_PRIMARY_MSE_V1")
-    if not isinstance(loss_policy_value, str):
-        raise ValueError("selection frozen loss policy is invalid")
+    if loss_policy_value != "OOF_PRIMARY_MSE_V1" or not isinstance(loss_policy_value, str):
+        raise ValueError("final fit requires the frozen OOF loss policy")
     loss_policy = loss_policy_value
     if (
         preprocessing_policy != "TRAINING_MEDIAN_STANDARDISE_V1"
@@ -825,7 +915,7 @@ def fit_final_ridge(
         raise ValueError("holdout final fit uses the established R2 preprocessing policies")
     if policy.alpha_tie_break_policy not in {"LOSS_THEN_ALPHA", "LOSS_THEN_LARGER_ALPHA"}:
         raise ValueError("holdout final fit requires the established larger-alpha tie break")
-    frozen_instruments = selection.evaluation_policy.get("ordered_instruments")
+    frozen_instruments = selection.evaluation_policy.get("target_instruments")
     identity_order = tuple(
         cast(Sequence[str], policy.runtime_identities.get("instrument_identity_order", ()))
     )
@@ -833,17 +923,17 @@ def fit_final_ridge(
         if not isinstance(frozen_instruments, list) or not all(
             isinstance(item, str) for item in frozen_instruments
         ):
-            raise ValueError("selection frozen instrument universe is invalid")
+            raise ValueError("selection frozen target instrument universe is invalid")
         frozen_order = tuple(cast(list[str], frozen_instruments))
         if identity_order and identity_order != frozen_order:
-            raise ValueError("final fit identity order differs from the frozen experiment universe")
+            raise ValueError("final fit identity order differs from the frozen target universe")
         identity_order = frozen_order
     if (
         model_family in (ModelFamily.POOLED_LOCAL_RIDGE, ModelFamily.POOLED_CROSS_ASSET_RIDGE)
         and not identity_order
     ):
-        identity_order = tuple(sorted({row.instrument_id for row in ordered}))
-    if model_family is ModelFamily.LOCAL_RIDGE or model_family is ModelFamily.ZERO_RETURN:
+        raise ValueError("pooled final fit requires the frozen target instrument universe")
+    if model_family is ModelFamily.LOCAL_RIDGE:
         identity_order = ()
     try:
         selected = select_chronological_alpha(
@@ -962,53 +1052,49 @@ def fit_final_ridge(
             preprocessing=preprocessing,
         )
     alpha = selected.selected_alpha
-    if model_family is ModelFamily.ZERO_RETURN:
-        coefficients = np.zeros(matrix.shape[1], dtype=np.float64)
-        intercept = 0.0
-    else:
-        try:
-            from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
+    try:
+        from sklearn.linear_model import Ridge  # type: ignore[reportMissingTypeStubs]
 
-            model: Any = Ridge(
-                alpha=alpha,
-                solver=solver,
-                tol=float(cast(float | int | str, policy.solver_identity.get("tolerance", 1e-8))),
-                max_iter=int(
-                    cast(float | int | str, policy.solver_identity.get("max_iterations", 1000))
-                ),
-                fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
+        model: Any = Ridge(
+            alpha=alpha,
+            solver=solver,
+            tol=float(cast(float | int | str, policy.solver_identity.get("tolerance", 1e-8))),
+            max_iter=int(
+                cast(float | int | str, policy.solver_identity.get("max_iterations", 1000))
+            ),
+            fit_intercept=model_family is ModelFamily.LOCAL_RIDGE,
+        )
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            model.fit(
+                matrix,
+                targets,
+                sample_weight=np.asarray(outer.sample_weights, dtype=float),
             )
-            with warnings.catch_warnings(record=True) as caught:
-                warnings.simplefilter("always")
-                model.fit(
-                    matrix,
-                    targets,
-                    sample_weight=np.asarray(outer.sample_weights, dtype=float),
-                )
-            if caught:
-                raise ArithmeticError("undeclared warning during final Ridge fit")
-            coefficients = np.asarray(model.coef_, dtype=np.float64).reshape(-1)
-            intercept = float(np.asarray(model.intercept_, dtype=np.float64).reshape(-1)[0])
-        except (ArithmeticError, TypeError, ValueError) as error:
-            return _failed_final_fit(
-                selection=selection,
-                configuration_id=configuration_id,
-                model_family=model_family,
-                feature_dataset_id=feature_dataset_id,
-                feature_schema_id=feature_schema_id,
-                training_cutoff=cutoff,
-                training_ids=training_ids,
-                purged_ids=purged,
-                inner_fit_ids=inner_fit_ids,
-                inner_validation_ids=inner_validation_ids,
-                policy=policy,
-                disposition=FinalFitDisposition.NUMERICAL_FAILURE,
-                reason=f"final Ridge fit failed: {type(error).__name__}: {error}",
-                feature_count=feature_count,
-                training_evidence=ordered,
-                candidate_scores=scores or None,
-                preprocessing=preprocessing,
-            )
+        if caught:
+            raise ArithmeticError("undeclared warning during final Ridge fit")
+        coefficients = np.asarray(model.coef_, dtype=np.float64).reshape(-1)
+        intercept = float(np.asarray(model.intercept_, dtype=np.float64).reshape(-1)[0])
+    except (ArithmeticError, TypeError, ValueError) as error:
+        return _failed_final_fit(
+            selection=selection,
+            configuration_id=configuration_id,
+            model_family=model_family,
+            feature_dataset_id=feature_dataset_id,
+            feature_schema_id=feature_schema_id,
+            training_cutoff=cutoff,
+            training_ids=training_ids,
+            purged_ids=purged,
+            inner_fit_ids=inner_fit_ids,
+            inner_validation_ids=inner_validation_ids,
+            policy=policy,
+            disposition=FinalFitDisposition.NUMERICAL_FAILURE,
+            reason=f"final Ridge fit failed: {type(error).__name__}: {error}",
+            feature_count=feature_count,
+            training_evidence=ordered,
+            candidate_scores=scores or None,
+            preprocessing=preprocessing,
+        )
     replay = matrix @ coefficients + intercept
     if replay.shape != targets.shape or not np.isfinite(replay).all():
         raise ValueError("final Ridge replay produced invalid predictions")
@@ -1097,16 +1183,69 @@ def _preprocessing_fit_from_payload(value: object) -> PreprocessingFit:
     )
 
 
+def _feature_dataset_by_configuration(
+    selection: R2HoldoutSelectionManifest,
+    *,
+    feature_dataset: R2HoldoutFeatureDataset | None,
+    feature_datasets: Mapping[str, R2HoldoutFeatureDataset] | None,
+) -> dict[str, R2HoldoutFeatureDataset | None]:
+    candidates = dict(feature_datasets or {})
+    registry_entries = selection.configuration_registry
+    registry = {
+        configuration_id: (model_family, feature_set_id)
+        for configuration_id, model_family, feature_set_id, _manifest_id in registry_entries
+    }
+    configurations = tuple(
+        selection.holdout_configuration_ids
+        or tuple(candidates)
+        or tuple(configuration_id for configuration_id, *_ in registry_entries)
+    )
+    result: dict[str, R2HoldoutFeatureDataset | None] = {}
+    for configuration_id in configurations:
+        model_family, feature_set_id = registry.get(configuration_id, (None, None))
+        if model_family is ModelFamily.ZERO_RETURN:
+            result[configuration_id] = None
+            continue
+        dataset = candidates.get(configuration_id)
+        if dataset is None and feature_set_id is not None:
+            dataset = next(
+                (
+                    item
+                    for key, item in candidates.items()
+                    if key == feature_set_id or item.feature_set_id == feature_set_id
+                ),
+                None,
+            )
+        if dataset is None:
+            dataset = feature_dataset
+        if dataset is not None and dataset.selection_manifest_id != selection.manifest_id:
+            raise ValueError("holdout feature dataset is not bound to selection")
+        if (
+            dataset is not None
+            and feature_set_id is not None
+            and dataset.feature_set_id != feature_set_id
+        ):
+            raise ValueError(
+                "holdout feature dataset differs from the authenticated configuration registry"
+            )
+        result[configuration_id] = dataset
+    return result
+
+
 def build_holdout_forecasts(
     *,
     selection: R2HoldoutSelectionManifest,
-    feature_dataset: R2HoldoutFeatureDataset,
+    feature_dataset: R2HoldoutFeatureDataset | None = None,
+    feature_datasets: Mapping[str, R2HoldoutFeatureDataset] | None = None,
     final_fits: Sequence[R2FinalFit],
     opportunities: Sequence[HoldoutTargetOpportunity] = (),
 ) -> tuple[R2HoldoutForecastDataset, ...]:
     _ensure_selection_lineage(selection)
-    if feature_dataset.selection_manifest_id != selection.manifest_id:
-        raise ValueError("holdout feature dataset is not bound to selection")
+    feature_by_configuration = _feature_dataset_by_configuration(
+        selection,
+        feature_dataset=feature_dataset,
+        feature_datasets=feature_datasets,
+    )
     result: list[R2HoldoutForecastDataset] = []
     fits_by_configuration = {fit.configuration_id: fit for fit in final_fits}
     registry = {
@@ -1122,40 +1261,60 @@ def build_holdout_forecasts(
         sorted(selection.holdout_configuration_ids if registry else fits_by_configuration)
     )
     for configuration_id in configurations:
+        feature_dataset = feature_by_configuration.get(configuration_id)
         fit = fits_by_configuration.get(configuration_id)
         model_family = registry.get(configuration_id)
         if model_family is ModelFamily.ZERO_RETURN and registry:
             if fit is not None:
                 raise ValueError("ZERO_RETURN control must not have a final-fit child")
-            feature_by_target = {row.target_id: row for row in feature_dataset.rows}
+            feature_by_target = (
+                {row.target_id: row for row in feature_dataset.rows}
+                if feature_dataset is not None
+                else {}
+            )
             zero_targets = {
                 opportunity.target_id
                 for opportunity in opportunities
                 if opportunity.disposition is HoldoutOpportunityDisposition.ELIGIBLE
             }
-            zero_targets.update(feature_by_target)
-            rows = [
-                R2HoldoutForecastRow.create(
-                    configuration_id=configuration_id,
-                    target_id=target_id,
-                    feature_row_id=(
-                        feature_by_target[target_id].row_id
-                        if target_id in feature_by_target
-                        else None
-                    ),
-                    forecast=0.0,
-                    model_family=ModelFamily.ZERO_RETURN,
-                )
-                for target_id in sorted(zero_targets)
-            ]
+            if not opportunities:
+                zero_targets.update(feature_by_target)
             result.append(
                 R2HoldoutForecastDataset.create(
                     selection_manifest_id=selection.manifest_id,
-                    feature_dataset_id=feature_dataset.dataset_id,
+                    feature_dataset_id=None,
                     configuration_id=configuration_id,
                     final_fit_id=None,
-                    rows=tuple(rows),
-                    expected_opportunity_ids=feature_dataset.expected_opportunity_ids,
+                    rows=tuple(
+                        R2HoldoutForecastRow.create(
+                            configuration_id=configuration_id,
+                            target_id=target_id,
+                            feature_row_id=None,
+                            forecast=0.0,
+                            model_family=ModelFamily.ZERO_RETURN,
+                        )
+                        for target_id in sorted(zero_targets)
+                    ),
+                    expected_opportunity_ids=(
+                        tuple(sorted(item.opportunity_id for item in opportunities))
+                        if opportunities
+                        else (
+                            feature_dataset.expected_opportunity_ids
+                            if feature_dataset is not None
+                            else tuple()
+                        )
+                    ),
+                    opportunity_target_ids=(
+                        tuple(
+                            sorted((item.opportunity_id, item.target_id) for item in opportunities)
+                        )
+                        if opportunities
+                        else (
+                            feature_dataset.opportunity_target_ids
+                            if feature_dataset is not None
+                            else ()
+                        )
+                    ),
                     source_class=selection.source_class,
                     evidence_class=selection.evidence_class,
                     holdout_scope=selection.holdout_scope,
@@ -1164,6 +1323,8 @@ def build_holdout_forecasts(
             continue
         if fit is None:
             raise ValueError("frozen fitted configuration has no final-fit child")
+        if feature_dataset is None:
+            raise ValueError("fitted configuration has no authenticated holdout feature dataset")
         if (
             fit.selection_manifest_id != selection.manifest_id
             or fit.feature_dataset_id != feature_dataset.dataset_id
@@ -1182,7 +1343,10 @@ def build_holdout_forecasts(
 
             preprocessing = _preprocessing_fit_from_payload(fit.preprocessing["outer"])
             vectors = tuple(
-                SimpleNamespace(features=feature.values, target_instrument_id=feature.instrument_id)
+                SimpleNamespace(
+                    features=feature.values,
+                    target_instrument_id=feature.instrument_id,
+                )
                 for feature in feature_dataset.rows
             )
             matrix = add_instrument_identity(
@@ -1203,7 +1367,7 @@ def build_holdout_forecasts(
             if fit.intercept is None:
                 raise ValueError("ready final fit is missing an intercept")
             intercept = float(fit.intercept)
-            for feature, values in zip(
+            for feature, value in zip(
                 feature_dataset.rows,
                 matrix @ coefficients + intercept,
                 strict=True,
@@ -1213,7 +1377,7 @@ def build_holdout_forecasts(
                         configuration_id=fit.configuration_id,
                         target_id=feature.target_id,
                         feature_row_id=feature.row_id,
-                        forecast=float(values),
+                        forecast=float(value),
                         model_family=fit.model_family,
                     )
                 )
@@ -1225,6 +1389,7 @@ def build_holdout_forecasts(
                 final_fit_id=fit.fit_id,
                 rows=tuple(rows),
                 expected_opportunity_ids=feature_dataset.expected_opportunity_ids,
+                opportunity_target_ids=feature_dataset.opportunity_target_ids,
                 source_class=selection.source_class,
                 evidence_class=selection.evidence_class,
                 holdout_scope=selection.holdout_scope,
@@ -1236,7 +1401,8 @@ def build_holdout_forecasts(
 def build_holdout_coverage(
     *,
     selection: R2HoldoutSelectionManifest,
-    feature_dataset: R2HoldoutFeatureDataset,
+    feature_dataset: R2HoldoutFeatureDataset | None = None,
+    feature_datasets: Mapping[str, R2HoldoutFeatureDataset] | None = None,
     final_fit: R2FinalFit | None,
     forecast_dataset: R2HoldoutForecastDataset,
     opportunities: Sequence[HoldoutTargetOpportunity],
@@ -1247,27 +1413,46 @@ def build_holdout_coverage(
     )
     if final_fit is not None and final_fit.configuration_id != forecast_dataset.configuration_id:
         raise ValueError("coverage fit and forecast configuration differ")
-    if final_fit is None:
-        registry_family = {
-            configuration_id: model_family
-            for (
-                configuration_id,
-                model_family,
-                _feature_set_id,
-                _manifest_id,
-            ) in selection.configuration_registry
-        }.get(resolved_configuration_id)
-        if registry_family is not ModelFamily.ZERO_RETURN:
-            raise ValueError("a fitless coverage child is only valid for ZERO_RETURN")
-    if forecast_dataset.feature_dataset_id != feature_dataset.dataset_id:
-        raise ValueError("coverage forecast is not bound to features")
+    feature_dataset = _feature_dataset_by_configuration(
+        selection,
+        feature_dataset=feature_dataset,
+        feature_datasets=feature_datasets,
+    ).get(resolved_configuration_id)
+    registry_family = {
+        configuration_id: model_family
+        for (
+            configuration_id,
+            model_family,
+            _feature_set_id,
+            _manifest_id,
+        ) in selection.configuration_registry
+    }.get(resolved_configuration_id)
+    if final_fit is None and registry_family is not ModelFamily.ZERO_RETURN:
+        raise ValueError("a fitless coverage child is only valid for ZERO_RETURN")
+    expected_feature_dataset_id = (
+        feature_dataset.dataset_id if feature_dataset is not None else None
+    )
+    if forecast_dataset.feature_dataset_id != expected_feature_dataset_id:
+        raise ValueError("coverage forecast is not bound to its configuration features")
     opportunity_map = {item.opportunity_id: item for item in opportunities}
-    if set(opportunity_map) != set(feature_dataset.expected_opportunity_ids):
+    expected_opportunity_ids = (
+        feature_dataset.expected_opportunity_ids
+        if feature_dataset is not None
+        else tuple(sorted(opportunity_map))
+    )
+    if set(opportunity_map) != set(expected_opportunity_ids):
         raise ValueError("coverage opportunities differ from feature preparation")
     forecast_by_target = {item.target_id: item for item in forecast_dataset.rows}
-    feature_by_opportunity = {item.opportunity_id: item for item in feature_dataset.rows}
+    feature_by_opportunity = (
+        {item.opportunity_id: item for item in feature_dataset.rows}
+        if feature_dataset is not None
+        else {}
+    )
+    unavailable: set[str] = set()
+    if feature_dataset is not None:
+        unavailable.update(feature_dataset.unavailable_opportunity_ids)
     rows: list[R2HoldoutCoverageRow] = []
-    for opportunity_id in feature_dataset.expected_opportunity_ids:
+    for opportunity_id in expected_opportunity_ids:
         opportunity = opportunity_map[opportunity_id]
         if final_fit is None:
             forecast = forecast_by_target.get(opportunity.target_id)
@@ -1281,7 +1466,7 @@ def build_holdout_coverage(
                 disposition = HoldoutOpportunityDisposition.ELIGIBLE
                 reason = "zero-return coverage is independent of feature availability"
             forecast_row_id = forecast.row_id if forecast is not None else None
-        elif opportunity_id in set(feature_dataset.unavailable_opportunity_ids):
+        elif opportunity_id in unavailable:
             disposition = (
                 opportunity.disposition
                 if opportunity.disposition is not HoldoutOpportunityDisposition.ELIGIBLE
@@ -1295,7 +1480,7 @@ def build_holdout_coverage(
             forecast_row_id = None
         else:
             feature = feature_by_opportunity.get(opportunity_id)
-            forecast = forecast_by_target.get(feature.target_id) if feature is not None else None
+            forecast = forecast_by_target.get(feature.target_id) if feature else None
             if forecast is None:
                 disposition = HoldoutOpportunityDisposition.GAP
                 reason = "eligible opportunity has no sealed forecast row"
@@ -1315,9 +1500,9 @@ def build_holdout_coverage(
         )
     return R2HoldoutCoverageDataset.create(
         selection_manifest_id=selection.manifest_id,
-        feature_dataset_id=feature_dataset.dataset_id,
+        feature_dataset_id=expected_feature_dataset_id,
         configuration_id=resolved_configuration_id,
-        expected_opportunity_ids=feature_dataset.expected_opportunity_ids,
+        expected_opportunity_ids=expected_opportunity_ids,
         rows=tuple(rows),
         source_class=selection.source_class,
         evidence_class=selection.evidence_class,
@@ -1328,59 +1513,45 @@ def build_holdout_coverage(
 def seal_holdout_forecasts(
     *,
     selection: R2HoldoutSelectionManifest,
-    feature_dataset: R2HoldoutFeatureDataset,
+    feature_dataset: R2HoldoutFeatureDataset | None = None,
+    feature_datasets: Mapping[str, R2HoldoutFeatureDataset] | None = None,
     final_fits: Sequence[R2FinalFit],
     forecast_datasets: Sequence[R2HoldoutForecastDataset],
     coverage_datasets: Sequence[R2HoldoutCoverageDataset],
-    metric_policy: Mapping[str, JsonValue] | None = None,
-    comparison_support: Mapping[str, JsonValue] | None = None,
-    forecast_buckets: Mapping[str, JsonValue] | None = None,
-    state_buckets: Mapping[str, JsonValue] | None = None,
-    coverage_rules: Mapping[str, JsonValue] | None = None,
     prepared_at: datetime,
     prepared_by: str,
 ) -> R2HoldoutForecastSeal:
     _ensure_selection_lineage(selection)
     inherited_seal_policy = selection.evaluation_policy.get("seal_policy")
-    if inherited_seal_policy is not None:
-        if not isinstance(inherited_seal_policy, dict):
-            raise ValueError("selection frozen seal policy is invalid")
-        supplied_seal_policy = {
-            "metric_policy": metric_policy,
-            "comparison_support": comparison_support,
-            "forecast_buckets": forecast_buckets,
-            "state_buckets": state_buckets,
-            "coverage_rules": coverage_rules,
-        }
-        for key, supplied in supplied_seal_policy.items():
-            if supplied is not None and supplied != inherited_seal_policy.get(key):
-                raise ValueError("seal policies must exactly inherit the selection freeze")
-        metric_policy = cast(Mapping[str, JsonValue], inherited_seal_policy["metric_policy"])
-        comparison_support = cast(
-            Mapping[str, JsonValue], inherited_seal_policy["comparison_support"]
-        )
-        forecast_buckets = cast(Mapping[str, JsonValue], inherited_seal_policy["forecast_buckets"])
-        state_buckets = cast(Mapping[str, JsonValue], inherited_seal_policy["state_buckets"])
-        coverage_rules = cast(Mapping[str, JsonValue], inherited_seal_policy["coverage_rules"])
-    elif any(
-        policy is None
-        for policy in (
-            metric_policy,
-            comparison_support,
-            forecast_buckets,
-            state_buckets,
-            coverage_rules,
-        )
+    if not isinstance(inherited_seal_policy, dict):
+        raise ValueError("selection must freeze the complete seal policy before preparation")
+    required_policy_keys = {
+        "metric_policy",
+        "comparison_support",
+        "forecast_buckets",
+        "state_buckets",
+        "coverage_rules",
+    }
+    if set(inherited_seal_policy) != required_policy_keys or any(
+        not isinstance(inherited_seal_policy[key], dict) for key in required_policy_keys
     ):
-        raise ValueError("direct holdout sealing requires every evaluation policy")
+        raise ValueError("selection frozen seal policy is incomplete")
+    metric_policy = cast(Mapping[str, JsonValue], inherited_seal_policy["metric_policy"])
+    comparison_support = cast(Mapping[str, JsonValue], inherited_seal_policy["comparison_support"])
+    forecast_buckets = cast(Mapping[str, JsonValue], inherited_seal_policy["forecast_buckets"])
+    state_buckets = cast(Mapping[str, JsonValue], inherited_seal_policy["state_buckets"])
+    coverage_rules = cast(Mapping[str, JsonValue], inherited_seal_policy["coverage_rules"])
+    feature_by_configuration = _feature_dataset_by_configuration(
+        selection,
+        feature_dataset=feature_dataset,
+        feature_datasets=feature_datasets,
+    )
     fits = tuple(sorted(final_fits, key=lambda item: item.fit_id))
     forecasts = tuple(sorted(forecast_datasets, key=lambda item: item.dataset_id))
     coverage = tuple(sorted(coverage_datasets, key=lambda item: item.coverage_id))
     if len(forecasts) != len(coverage):
         raise ValueError("seal requires one coverage child per forecast")
-
     expected_configurations = set(selection.holdout_configuration_ids)
-    declared_families = set(selection.comparator_families)
     registry_by_configuration = {
         configuration_id: model_family
         for (
@@ -1390,41 +1561,33 @@ def seal_holdout_forecasts(
             _manifest_id,
         ) in selection.configuration_registry
     }
-    if registry_by_configuration and set(registry_by_configuration) != set(
-        selection.evaluated_configuration_ids
-    ):
+    if set(registry_by_configuration) != set(selection.evaluated_configuration_ids):
         raise ValueError("selection configuration registry is not complete")
-    registry_feature_sets = {
-        feature_set_id
-        for (
-            _configuration_id,
-            _model_family,
-            feature_set_id,
-            _manifest_id,
-        ) in selection.configuration_registry
-        if feature_set_id is not None
-    }
-    if len(registry_feature_sets) > 1 or (
-        registry_feature_sets and feature_dataset.feature_set_id not in registry_feature_sets
-    ):
-        raise ValueError("seal feature dataset differs from the authenticated OOF registry")
+    if not expected_configurations.issubset(registry_by_configuration):
+        raise ValueError("selection holdout configurations are absent from the registry")
+    feature_mapping: list[tuple[str, str | None]] = []
+    for configuration_id in expected_configurations:
+        dataset = feature_by_configuration.get(configuration_id)
+        feature_mapping.append(
+            (configuration_id, dataset.dataset_id if dataset is not None else None)
+        )
+    expected_feature_mapping = tuple(sorted(feature_mapping))
     expected_fit_configurations = {
         configuration_id
         for configuration_id in expected_configurations
-        if registry_by_configuration.get(configuration_id) is not ModelFamily.ZERO_RETURN
+        if registry_by_configuration[configuration_id] is not ModelFamily.ZERO_RETURN
     }
     fit_by_configuration: dict[str, R2FinalFit] = {}
     for fit in fits:
         if fit.selection_manifest_id != selection.manifest_id:
             raise ValueError("seal final-fit selection lineage differs")
-        if fit.feature_dataset_id != feature_dataset.dataset_id:
-            raise ValueError("seal final fit is not bound to the prepared features")
         if fit.configuration_id not in expected_fit_configurations:
             raise ValueError("seal final fit is not in the frozen configuration registry")
-        if fit.model_family not in declared_families:
-            raise ValueError("seal final fit model family is not predeclared")
-        expected_family = registry_by_configuration.get(fit.configuration_id)
-        if expected_family is not None and fit.model_family is not expected_family:
+        expected_dataset = feature_by_configuration.get(fit.configuration_id)
+        if expected_dataset is None or fit.feature_dataset_id != expected_dataset.dataset_id:
+            raise ValueError("seal final fit is not bound to its configuration features")
+        expected_family = registry_by_configuration[fit.configuration_id]
+        if fit.model_family is not expected_family:
             raise ValueError(
                 "seal final fit model family differs from the authenticated OOF registry"
             )
@@ -1433,53 +1596,52 @@ def seal_holdout_forecasts(
         fit_by_configuration[fit.configuration_id] = fit
     if set(fit_by_configuration) != expected_fit_configurations:
         raise ValueError("seal final fits do not exactly cover frozen configurations")
-
     forecast_by_configuration: dict[str, R2HoldoutForecastDataset] = {}
     for forecast in forecasts:
-        if forecast.configuration_id not in expected_configurations:
+        configuration_id = forecast.configuration_id
+        if configuration_id not in expected_configurations:
             raise ValueError("seal forecast is not in the frozen configuration registry")
-        fit = fit_by_configuration.get(forecast.configuration_id)
-        expected_family = registry_by_configuration.get(forecast.configuration_id)
+        expected_family = registry_by_configuration[configuration_id]
+        expected_dataset = feature_by_configuration.get(configuration_id)
+        expected_dataset_id = expected_dataset.dataset_id if expected_dataset else None
+        fit = fit_by_configuration.get(configuration_id)
+        if (
+            forecast.selection_manifest_id != selection.manifest_id
+            or forecast.feature_dataset_id != expected_dataset_id
+        ):
+            raise ValueError("seal forecast is not bound to its configuration features")
         if expected_family is ModelFamily.ZERO_RETURN:
             if fit is not None or forecast.final_fit_id is not None:
                 raise ValueError("ZERO_RETURN forecast must not bind a final fit")
-        elif (
-            forecast.selection_manifest_id != selection.manifest_id
-            or forecast.feature_dataset_id != feature_dataset.dataset_id
-            or fit is None
-            or forecast.final_fit_id != fit.fit_id
-        ):
+        elif fit is None or forecast.final_fit_id != fit.fit_id:
             raise ValueError("seal forecast does not reconcile to its final fit registry")
-        if forecast.configuration_id in forecast_by_configuration:
+        if configuration_id in forecast_by_configuration:
             raise ValueError("seal has duplicate forecast configuration IDs")
-        row_family = (
-            expected_family
-            if expected_family is not None
-            else (fit.model_family if fit is not None else None)
-        )
-        if row_family is None or any(row.model_family is not row_family for row in forecast.rows):
+        if any(row.model_family is not expected_family for row in forecast.rows):
             raise ValueError("seal forecast row model families differ from its registry")
-        forecast_by_configuration[forecast.configuration_id] = forecast
+        forecast_by_configuration[configuration_id] = forecast
     if set(forecast_by_configuration) != expected_configurations:
         raise ValueError("seal forecasts do not exactly cover frozen configurations")
-
     coverage_by_configuration: dict[str, R2HoldoutCoverageDataset] = {}
     for item in coverage:
-        if item.configuration_id not in expected_configurations:
+        configuration_id = item.configuration_id
+        if configuration_id not in expected_configurations:
             raise ValueError("seal coverage is not in the frozen configuration registry")
-        fit = fit_by_configuration.get(item.configuration_id)
-        expected_family = registry_by_configuration.get(item.configuration_id)
+        expected_dataset = feature_by_configuration.get(configuration_id)
+        expected_dataset_id = expected_dataset.dataset_id if expected_dataset else None
         if (
             item.selection_manifest_id != selection.manifest_id
-            or item.feature_dataset_id != feature_dataset.dataset_id
-            or (expected_family is not ModelFamily.ZERO_RETURN and fit is None)
-            or item.configuration_id in coverage_by_configuration
+            or item.feature_dataset_id != expected_dataset_id
+            or (
+                registry_by_configuration[configuration_id] is not ModelFamily.ZERO_RETURN
+                and configuration_id not in fit_by_configuration
+            )
+            or configuration_id in coverage_by_configuration
         ):
             raise ValueError("seal coverage does not reconcile to its configuration registry")
-        coverage_by_configuration[item.configuration_id] = item
+        coverage_by_configuration[configuration_id] = item
     if set(coverage_by_configuration) != expected_configurations:
         raise ValueError("seal coverage does not exactly cover frozen configurations")
-
     pairs = tuple(
         sorted(
             (question.candidate_configuration_id, question.comparator_configuration_id)
@@ -1492,7 +1654,7 @@ def seal_holdout_forecasts(
         raise ValueError("selection question register has duplicate configuration pairs")
     return R2HoldoutForecastSeal.create(
         selection_manifest_id=selection.manifest_id,
-        feature_dataset_id=feature_dataset.dataset_id,
+        configuration_feature_dataset_ids=expected_feature_mapping,
         final_fit_ids=tuple(item.fit_id for item in fits),
         forecast_dataset_ids=tuple(item.dataset_id for item in forecasts),
         coverage_ids=tuple(item.coverage_id for item in coverage),

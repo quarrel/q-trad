@@ -242,6 +242,7 @@ _FORECAST_FIELDS = {
     "final_fit_id",
     "rows",
     "expected_opportunity_ids",
+    "opportunity_target_ids",
     "source_class",
     "evidence_class",
     "holdout_scope",
@@ -266,7 +267,7 @@ _SEAL_FIELDS = {
     "contract",
     "schema_version",
     "selection_manifest_id",
-    "feature_dataset_id",
+    "configuration_feature_dataset_ids",
     "final_fit_ids",
     "forecast_dataset_ids",
     "coverage_ids",
@@ -474,6 +475,8 @@ def _claim_preparation(
         return
     if current == initial_opened:
         return
+    if current.get("state") == "TRANSFERRED":
+        raise ValueError("transferred holdout preparation is not revealable from the source root")
     transfer_id = current.get("transfer_id")
     source_claim_id = current.get("source_claim_id")
     if not isinstance(transfer_id, str) or not isinstance(source_claim_id, str):
@@ -556,14 +559,6 @@ def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[st
         training_rows=rows,
         policy=selection.final_fitting_policy,
         training_cutoff=datetime.fromisoformat(str(payload["training_cutoff"])),
-        minimum_training_rows=_int_value(
-            preprocessing.get("minimum_training_rows", 2),
-            "minimum_training_rows",
-        ),
-        minimum_inner_validation_rows=_int_value(
-            preprocessing.get("minimum_inner_validation_rows", 1),
-            "minimum_inner_validation_rows",
-        ),
         purged_target_ids=tuple(
             str(item) for item in cast(list[object], payload["purged_target_ids"])
         ),
@@ -632,9 +627,52 @@ def _feature_dataset_from_payload(payload: Mapping[str, object]) -> R2HoldoutFea
     )
 
 
+def _feature_dataset_paths(
+    seal: R2HoldoutForecastSeal,
+) -> tuple[tuple[str, str], ...]:
+    dataset_ids = tuple(
+        sorted(
+            {
+                dataset_id
+                for _configuration_id, dataset_id in seal.configuration_feature_dataset_ids
+                if dataset_id is not None
+            }
+        )
+    )
+    if len(dataset_ids) <= 1:
+        return tuple((dataset_id, "features.json") for dataset_id in dataset_ids)
+    return tuple((dataset_id, f"features/{dataset_id}.json") for dataset_id in dataset_ids)
+
+
+def _load_feature_payloads(
+    root: Path,
+    seal: R2HoldoutForecastSeal,
+) -> dict[str, Mapping[str, object]]:
+    payloads: dict[str, Mapping[str, object]] = {}
+    for dataset_id, relative in _feature_dataset_paths(seal):
+        payloads[dataset_id] = _verify_child(
+            root,
+            relative,
+            contract=R2_HOLDOUT_FEATURES_CONTRACT,
+            identity_key="dataset_id",
+            expected_fields=_FEATURE_FIELDS,
+            expected_id=dataset_id,
+        )
+    return payloads
+
+
+def _primary_feature_payload(
+    payloads: Mapping[str, Mapping[str, object]],
+) -> Mapping[str, object]:
+    if not payloads:
+        raise ValueError("holdout requires a feature child for outcome binding")
+    return payloads[sorted(payloads)[0]]
+
+
 def _replay_holdout_outputs(
     selection: R2HoldoutSelectionManifest,
-    feature_payload: Mapping[str, object],
+    seal: R2HoldoutForecastSeal,
+    feature_payloads: Mapping[str, Mapping[str, object]],
     fit_payloads: Sequence[Mapping[str, object]],
     forecast_payloads: Sequence[Mapping[str, object]],
     coverage_payloads: Sequence[Mapping[str, object]],
@@ -651,7 +689,15 @@ def _replay_holdout_outputs(
     )
     from qtrad.domain.r2_readiness import ModelFamily
 
-    feature_dataset = _feature_dataset_from_payload(feature_payload)
+    feature_datasets_by_configuration: dict[str, R2HoldoutFeatureDataset | None] = {}
+    for configuration_id, dataset_id in seal.configuration_feature_dataset_ids:
+        if dataset_id is not None:
+            payload = feature_payloads.get(dataset_id)
+            if payload is None:
+                raise ValueError("seal feature lineage is missing a referenced child")
+            feature_datasets_by_configuration[configuration_id] = _feature_dataset_from_payload(
+                payload
+            )
     fits = tuple(
         SimpleNamespace(
             selection_manifest_id=str(item["selection_manifest_id"]),
@@ -677,26 +723,41 @@ def _replay_holdout_outputs(
         )
         for item in fit_payloads
     )
-    unavailable = set(feature_dataset.unavailable_opportunity_ids)
-    target_by_opportunity = dict(feature_dataset.opportunity_target_ids)
-    row_target_by_opportunity = {row.opportunity_id: row.target_id for row in feature_dataset.rows}
+    target_by_opportunity: dict[str, str] = {}
+    expected_opportunities: set[str] = set()
+    unavailable: set[str] = set()
+    for dataset in feature_datasets_by_configuration.values():
+        if dataset is None:
+            continue
+        expected_opportunities.update(dataset.expected_opportunity_ids)
+        unavailable.update(dataset.unavailable_opportunity_ids)
+        target_by_opportunity.update(dict(dataset.opportunity_target_ids))
+        target_by_opportunity.update({row.opportunity_id: row.target_id for row in dataset.rows})
+    for payload in forecast_payloads:
+        expected_ids = cast(list[object], payload["expected_opportunity_ids"])
+        expected_opportunities.update(str(item) for item in expected_ids)
+        bindings = _object_list(payload["opportunity_target_ids"], "forecast opportunity bindings")
+        for raw_binding in bindings:
+            binding = cast(list[object], raw_binding)
+            target_by_opportunity[str(binding[0])] = str(binding[1])
+    for payload in coverage_payloads:
+        expected_ids = cast(list[object], payload["expected_opportunity_ids"])
+        expected_opportunities.update(str(item) for item in expected_ids)
     opportunities = tuple(
         SimpleNamespace(
             opportunity_id=opportunity_id,
-            target_id=target_by_opportunity.get(
-                opportunity_id, row_target_by_opportunity.get(opportunity_id, opportunity_id)
-            ),
+            target_id=target_by_opportunity.get(opportunity_id, opportunity_id),
             disposition=(
                 HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
                 if opportunity_id in unavailable
                 else HoldoutOpportunityDisposition.ELIGIBLE
             ),
         )
-        for opportunity_id in feature_dataset.expected_opportunity_ids
+        for opportunity_id in sorted(expected_opportunities)
     )
     actual_forecasts = build_holdout_forecasts(
         selection=selection,
-        feature_dataset=cast(Any, feature_dataset),
+        feature_datasets=cast(Any, feature_datasets_by_configuration),
         final_fits=cast(Any, fits),
         opportunities=cast(Any, opportunities),
     )
@@ -714,7 +775,7 @@ def _replay_holdout_outputs(
         for item in (
             build_holdout_coverage(
                 selection=selection,
-                feature_dataset=cast(Any, feature_dataset),
+                feature_datasets=cast(Any, feature_datasets_by_configuration),
                 final_fit=cast(Any, fits_by_configuration.get(forecast.configuration_id)),
                 forecast_dataset=forecast,
                 opportunities=cast(Any, opportunities),
@@ -734,12 +795,15 @@ def _replay_holdout_outputs(
 def _verify_seal_registry(
     selection: R2HoldoutSelectionManifest,
     seal: R2HoldoutForecastSeal,
-    feature_payload: Mapping[str, object],
+    feature_payloads: Mapping[str, Mapping[str, object]],
     fit_payloads: Sequence[Mapping[str, object]],
     forecast_payloads: Sequence[Mapping[str, object]],
     coverage_payloads: Sequence[Mapping[str, object]],
 ) -> None:
     expected_configurations = set(selection.holdout_configuration_ids)
+    feature_by_configuration = dict(seal.configuration_feature_dataset_ids)
+    if set(feature_by_configuration) != expected_configurations:
+        raise ValueError("seal feature registry does not exactly cover frozen configurations")
     registry_by_configuration = {
         configuration_id: model_family.value
         for (
@@ -749,28 +813,10 @@ def _verify_seal_registry(
             _manifest_id,
         ) in selection.configuration_registry
     }
-    registry_feature_sets = {
-        feature_set_id
-        for (
-            _configuration_id,
-            _model_family,
-            feature_set_id,
-            _manifest_id,
-        ) in selection.configuration_registry
-        if feature_set_id is not None
-    }
-    if len(registry_feature_sets) > 1 or (
-        registry_feature_sets
-        and str(feature_payload["feature_set_id"]) not in registry_feature_sets
-    ):
-        raise ValueError("holdout feature dataset differs from the authenticated OOF registry")
     expected_fit_configurations = {
         configuration_id
         for configuration_id in expected_configurations
         if registry_by_configuration.get(configuration_id) != "ZERO_RETURN"
-    }
-    declared_families = {
-        getattr(family, "value", str(family)) for family in selection.comparator_families
     }
     expected_pairs = tuple(
         sorted(
@@ -789,18 +835,13 @@ def _verify_seal_registry(
         if (
             configuration_id in fits_by_configuration
             or configuration_id not in expected_fit_configurations
-            or model_family not in declared_families
-            or (
-                configuration_id in registry_by_configuration
-                and model_family != registry_by_configuration[configuration_id]
-            )
+            or model_family != registry_by_configuration.get(configuration_id)
+            or payload["feature_dataset_id"] != feature_by_configuration.get(configuration_id)
+            or payload["selection_manifest_id"] != seal.selection_manifest_id
         ):
             raise ValueError("final-fit registry does not reconcile to the frozen selection")
-        if (
-            payload["selection_manifest_id"] != seal.selection_manifest_id
-            or payload["feature_dataset_id"] != seal.feature_dataset_id
-        ):
-            raise ValueError("final-fit registry lineage differs from the frozen seal")
+        if str(payload["feature_dataset_id"]) not in feature_payloads:
+            raise ValueError("final-fit registry references an unverified feature child")
         fits_by_configuration[configuration_id] = payload
     forecasts_by_configuration: dict[str, Mapping[str, object]] = {}
     for payload in forecast_payloads:
@@ -811,7 +852,7 @@ def _verify_seal_registry(
             configuration_id in forecasts_by_configuration
             or configuration_id not in expected_configurations
             or payload["selection_manifest_id"] != seal.selection_manifest_id
-            or payload["feature_dataset_id"] != seal.feature_dataset_id
+            or payload["feature_dataset_id"] != feature_by_configuration.get(configuration_id)
         ):
             raise ValueError("forecast registry does not reconcile to the frozen selection")
         if expected_family == "ZERO_RETURN":
@@ -819,11 +860,9 @@ def _verify_seal_registry(
                 raise ValueError("ZERO_RETURN forecast must be fitless")
         elif fit is None or payload["final_fit_id"] != fit["fit_id"]:
             raise ValueError("forecast registry does not reconcile to the final-fit registry")
-        raw_rows = _object_list(payload["rows"], "holdout forecast rows")
-        for raw_row in raw_rows:
+        for raw_row in _object_list(payload["rows"], "holdout forecast rows"):
             row = _object_dict(raw_row, "holdout forecast row")
-            row_family = expected_family or (str(fit["model_family"]) if fit is not None else "")
-            if row.get("model_family") != row_family:
+            if row.get("model_family") != expected_family:
                 raise ValueError("forecast row model family differs from its registry")
         forecasts_by_configuration[configuration_id] = payload
     coverage_by_configuration: dict[str, Mapping[str, object]] = {}
@@ -834,7 +873,7 @@ def _verify_seal_registry(
             configuration_id in coverage_by_configuration
             or configuration_id not in expected_configurations
             or payload["selection_manifest_id"] != seal.selection_manifest_id
-            or payload["feature_dataset_id"] != seal.feature_dataset_id
+            or payload["feature_dataset_id"] != feature_by_configuration.get(configuration_id)
             or (expected_family != "ZERO_RETURN" and configuration_id not in fits_by_configuration)
         ):
             raise ValueError("coverage registry does not reconcile to the frozen selection")
@@ -853,16 +892,11 @@ def _verify_prepare_children(
     seal: R2HoldoutForecastSeal,
     selection: R2HoldoutSelectionManifest,
 ) -> None:
-    feature = _verify_child(
-        root,
-        "features.json",
-        contract=R2_HOLDOUT_FEATURES_CONTRACT,
-        identity_key="dataset_id",
-        expected_fields=_FEATURE_FIELDS,
-        expected_id=seal.feature_dataset_id,
-    )
-    if feature["selection_manifest_id"] != seal.selection_manifest_id:
-        raise ValueError("holdout features are bound to a different selection")
+    feature_payloads = _load_feature_payloads(root, seal)
+    for payload in feature_payloads.values():
+        if payload["selection_manifest_id"] != seal.selection_manifest_id:
+            raise ValueError("holdout features are bound to a different selection")
+    feature_by_configuration = dict(seal.configuration_feature_dataset_ids)
     expected_fits: set[str] = set()
     expected_forecasts: set[str] = set()
     expected_coverage: set[str] = set()
@@ -881,8 +915,11 @@ def _verify_prepare_children(
         expected_fits.add(str(payload["fit_id"]))
         fit_payloads.append(payload)
         _replay_final_fit(selection, payload)
-        if payload["selection_manifest_id"] != seal.selection_manifest_id:
-            raise ValueError("final fit is bound to a different selection")
+        configuration_id = str(payload["configuration_id"])
+        if payload["selection_manifest_id"] != seal.selection_manifest_id or payload[
+            "feature_dataset_id"
+        ] != feature_by_configuration.get(configuration_id):
+            raise ValueError("final fit lineage differs from its seal")
     for dataset_id in seal.forecast_dataset_ids:
         payload = _verify_child(
             root,
@@ -894,10 +931,10 @@ def _verify_prepare_children(
         )
         expected_forecasts.add(str(payload["dataset_id"]))
         forecast_payloads.append(payload)
-        if (
-            payload["selection_manifest_id"] != seal.selection_manifest_id
-            or payload["feature_dataset_id"] != seal.feature_dataset_id
-        ):
+        configuration_id = str(payload["configuration_id"])
+        if payload["selection_manifest_id"] != seal.selection_manifest_id or payload[
+            "feature_dataset_id"
+        ] != feature_by_configuration.get(configuration_id):
             raise ValueError("holdout forecast lineage differs from its seal")
     for coverage_id in seal.coverage_ids:
         payload = _verify_child(
@@ -910,22 +947,23 @@ def _verify_prepare_children(
         )
         expected_coverage.add(str(payload["coverage_id"]))
         coverage_payloads.append(payload)
-        if (
-            payload["selection_manifest_id"] != seal.selection_manifest_id
-            or payload["feature_dataset_id"] != seal.feature_dataset_id
-        ):
+        configuration_id = str(payload["configuration_id"])
+        if payload["selection_manifest_id"] != seal.selection_manifest_id or payload[
+            "feature_dataset_id"
+        ] != feature_by_configuration.get(configuration_id):
             raise ValueError("holdout coverage lineage differs from its seal")
     _verify_seal_registry(
         selection,
         seal,
-        feature,
+        feature_payloads,
         fit_payloads,
         forecast_payloads,
         coverage_payloads,
     )
     _replay_holdout_outputs(
         selection,
-        feature,
+        seal,
+        feature_payloads,
         fit_payloads,
         forecast_payloads,
         coverage_payloads,
@@ -942,7 +980,8 @@ def write_holdout_preparation(
     output: Path,
     *,
     selection: R2HoldoutSelectionManifest,
-    feature_dataset: object,
+    feature_dataset: object | None = None,
+    feature_datasets: Mapping[str, object] | None = None,
     final_fits: Mapping[str, object],
     forecasts: Mapping[str, object],
     coverage: Mapping[str, object],
@@ -953,8 +992,22 @@ def write_holdout_preparation(
         raise ValueError("G2 preparation is restricted to disposable fixtures")
     if selection.manifest_id != seal.selection_manifest_id:
         raise ValueError("selection and seal lineage differs")
-    if not isinstance(feature_dataset, R2HoldoutFeatureDataset):
+    feature_children: dict[str, R2HoldoutFeatureDataset] = {}
+    if isinstance(feature_dataset, R2HoldoutFeatureDataset):
+        feature_children[feature_dataset.dataset_id] = feature_dataset
+    elif feature_dataset is not None:
         raise TypeError("feature_dataset must be an R2HoldoutFeatureDataset")
+    for child in (feature_datasets or {}).values():
+        if not isinstance(child, R2HoldoutFeatureDataset):
+            raise TypeError("feature_datasets must contain R2HoldoutFeatureDataset values")
+        feature_children[child.dataset_id] = child
+    expected_feature_ids = {
+        dataset_id
+        for _configuration_id, dataset_id in seal.configuration_feature_dataset_ids
+        if dataset_id is not None
+    }
+    if set(feature_children) != expected_feature_ids:
+        raise ValueError("feature arguments do not exactly match the seal lineage")
     if set(final_fits) != set(seal.final_fit_ids):
         raise ValueError("final-fit arguments do not exactly match the seal")
     if set(forecasts) != set(seal.forecast_dataset_ids):
@@ -976,24 +1029,19 @@ def write_holdout_preparation(
             raise ValueError("existing selection child differs from preparation selection")
     else:
         _write_json(selection_path, selection.as_json())
-    _write_json(output / "features.json", feature_dataset.as_json())
+    for dataset_id, relative in _feature_dataset_paths(seal):
+        _write_json(output / relative, feature_children[dataset_id].as_json())
     for fit_id in seal.final_fit_ids:
-        child = final_fits[fit_id]
-        payload = _as_json(child)
-        _write_json(output / "fits" / f"{fit_id}.json", payload)
+        _write_json(output / "fits" / f"{fit_id}.json", _as_json(final_fits[fit_id]))
     for dataset_id in seal.forecast_dataset_ids:
-        child = forecasts[dataset_id]
-        payload = _as_json(child)
         _write_json(
             output / "forecasts" / f"{dataset_id}.json",
-            payload,
+            _as_json(forecasts[dataset_id]),
         )
     for coverage_id in seal.coverage_ids:
-        child = coverage[coverage_id]
-        payload = _as_json(child)
         _write_json(
             output / "coverage" / f"{coverage_id}.json",
-            payload,
+            _as_json(coverage[coverage_id]),
         )
     _write_json(output / "manifest.json", seal.as_json())
     return output / "manifest.json"
@@ -1059,9 +1107,9 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     allowed = {
         "manifest.json",
         "selection.json",
-        "features.json",
         _PREPARATION_CLAIM_FILE,
     }
+    allowed.update(relative for _dataset_id, relative in _feature_dataset_paths(seal))
     usage_path = path / _PREPARATION_USAGE_FILE
     has_transfer_lineage = isinstance(claim_payload.get("transfer_id"), str) and isinstance(
         claim_payload.get("source_claim_id"), str
@@ -1188,8 +1236,8 @@ def prepare_holdout_from_files(
     paths = [
         _PREPARATION_CLAIM_FILE,
         "selection.json",
-        "features.json",
         "manifest.json",
+        *(_relative for _dataset_id, _relative in _feature_dataset_paths(source_seal)),
         *(f"fits/{fit_id}.json" for fit_id in source_seal.final_fit_ids),
         *(f"forecasts/{dataset_id}.json" for dataset_id in source_seal.forecast_dataset_ids),
         *(f"coverage/{coverage_id}.json" for coverage_id in source_seal.coverage_ids),
@@ -1262,6 +1310,8 @@ def _outcome_binding_from_feature_payload(
     else:
         source_row_ids = sorted(source_row_ids)
         expected_target_ids = tuple(target_id for target_id, _ in source_row_ids)
+    if feature_payload.get("target_dataset_id") is not None:
+        source_row_ids = [(target_id, target_id) for target_id in expected_target_ids]
     return {
         "experiment_configuration_id": str(feature_payload["experiment_configuration_id"]),
         "foundation_bundle_id": str(feature_payload["foundation_bundle_id"]),
@@ -1492,14 +1542,7 @@ def reveal_holdout(
     evaluation_id = _FAILURE_EVALUATION_ID
     error: BaseException | None = None
     try:
-        feature_payload = _verify_child(
-            root,
-            "features.json",
-            contract=R2_HOLDOUT_FEATURES_CONTRACT,
-            identity_key="dataset_id",
-            expected_fields=_FEATURE_FIELDS,
-            expected_id=seal.feature_dataset_id,
-        )
+        feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
         binding = _outcome_binding_from_feature_payload(feature_payload)
         expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
         target_dataset_id = cast(str | None, binding["target_dataset_id"])
@@ -1669,14 +1712,7 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
         or outcome_evidence.experiment_configuration_id != selection.experiment_configuration_id
     ):
         raise ValueError("holdout outcome evidence does not bind the exact opened seal")
-    feature_payload = _verify_child(
-        root,
-        "features.json",
-        contract=R2_HOLDOUT_FEATURES_CONTRACT,
-        identity_key="dataset_id",
-        expected_fields=_FEATURE_FIELDS,
-        expected_id=seal.feature_dataset_id,
-    )
+    feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
     binding = _outcome_binding_from_feature_payload(feature_payload)
     expected_target_dataset_id = selection.evaluation_policy.get("target_dataset_id")
     if (
@@ -2146,6 +2182,7 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
 
     rows = _object_list(payload["rows"], "holdout forecast rows")
     expected = _object_list(payload["expected_opportunity_ids"], "forecast opportunities")
+    bindings = _object_list(payload["opportunity_target_ids"], "forecast opportunity bindings")
     parsed_rows = []
     for raw_item in rows:
         item = _object_dict(raw_item, "holdout forecast row")
@@ -2163,11 +2200,20 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
         )
     return R2HoldoutForecastDataset(
         selection_manifest_id=str(payload["selection_manifest_id"]),
-        feature_dataset_id=str(payload["feature_dataset_id"]),
+        feature_dataset_id=(
+            None if payload["feature_dataset_id"] is None else str(payload["feature_dataset_id"])
+        ),
         configuration_id=str(payload["configuration_id"]),
         final_fit_id=(None if payload["final_fit_id"] is None else str(payload["final_fit_id"])),
         rows=tuple(parsed_rows),
         expected_opportunity_ids=tuple(str(item) for item in expected),
+        opportunity_target_ids=tuple(
+            (
+                str(cast(list[object], item)[0]),
+                str(cast(list[object], item)[1]),
+            )
+            for item in bindings
+        ),
         source_class=MarketDataSourceClass(str(payload["source_class"])),
         evidence_class=EvidenceClass(str(payload["evidence_class"])),
         holdout_scope=HoldoutScope(str(payload["holdout_scope"])),
@@ -2200,7 +2246,9 @@ def _coverage_dataset_from_payload(payload: Mapping[str, object]):
         )
     return R2HoldoutCoverageDataset(
         selection_manifest_id=str(payload["selection_manifest_id"]),
-        feature_dataset_id=str(payload["feature_dataset_id"]),
+        feature_dataset_id=(
+            None if payload["feature_dataset_id"] is None else str(payload["feature_dataset_id"])
+        ),
         configuration_id=str(payload["configuration_id"]),
         expected_opportunity_ids=tuple(str(item) for item in expected),
         rows=tuple(parsed_rows),

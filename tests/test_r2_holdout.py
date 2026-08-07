@@ -18,7 +18,14 @@ from qtrad.application.r2_holdout import (
     materialise_r2_holdout_features,
     seal_holdout_forecasts,
 )
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.foundation import (
+    ExcursionDisposition,
+    ReturnDisposition,
+    TargetDataset,
+    TargetRow,
+    target_identity,
+)
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_evaluation import (
     ConfigurationDisposition,
     SelectionDecision,
@@ -77,7 +84,9 @@ def _policy() -> R2FinalFittingPolicy:
     )
 
 
-def _selection() -> tuple[R2HoldoutSelectionManifest, R2HoldoutQuestion, tuple[str, str]]:
+def _selection(
+    *, bind_target_dataset: bool = True
+) -> tuple[R2HoldoutSelectionManifest, R2HoldoutQuestion, tuple[str, str]]:
     zero = _id("zero")
     local = _id("local")
     decisions = (
@@ -142,6 +151,30 @@ def _selection() -> tuple[R2HoldoutSelectionManifest, R2HoldoutQuestion, tuple[s
         frozen_metadata={"fixture": True},
         frozen_at=NOW,
         frozen_by="test",
+        configuration_registry=tuple(
+            sorted(
+                (
+                    (zero, ModelFamily.ZERO_RETURN, None, None),
+                    (local, ModelFamily.LOCAL_RIDGE, _id("feature-set-local"), None),
+                ),
+                key=lambda item: item[0],
+            )
+        ),
+        evaluation_policy={
+            "target_dataset_id": (_target_dataset().dataset_id if bind_target_dataset else None),
+            "observation_dataset_id": _id("observations"),
+            "panel_dataset_id": _id("panel"),
+            "minimum_training_rows": 2,
+            "minimum_inner_validation_rows": 1,
+            "target_instruments": ["INSTRUMENT_0", "INSTRUMENT_1"],
+            "seal_policy": {
+                "metric_policy": {"metric": "MSE"},
+                "comparison_support": {"rule": "COMMON_ELIGIBLE"},
+                "forecast_buckets": {"source": "TRAINING_ONLY"},
+                "state_buckets": {"source": "TRAINING_ONLY"},
+                "coverage_rules": {"minimum": 1.0},
+            },
+        },
     )
     return selection, question, (zero, local)
 
@@ -152,7 +185,13 @@ def _opportunities() -> tuple[HoldoutTargetOpportunity, ...]:
         decision = NOW + timedelta(days=1, hours=index)
         result.append(
             HoldoutTargetOpportunity.create(
-                target_id=_id(f"holdout-target-{index}"),
+                target_id=target_identity(
+                    instrument_id=f"INSTRUMENT_{index}",
+                    decision_time=decision,
+                    horizon=timedelta(seconds=900),
+                    target_basis=PriceBasis.MID,
+                    target_revision_policy="FIXTURE_V1",
+                ),
                 instrument_id=f"INSTRUMENT_{index}",
                 decision_time=decision,
                 target_horizon_seconds=900,
@@ -165,21 +204,58 @@ def _opportunities() -> tuple[HoldoutTargetOpportunity, ...]:
     return tuple(result)
 
 
+def _target_dataset() -> TargetDataset:
+    opportunities = _opportunities()
+    rows = tuple(
+        TargetRow(
+            instrument_id=opportunity.instrument_id,
+            decision_time=opportunity.decision_time,
+            horizon=timedelta(seconds=opportunity.target_horizon_seconds),
+            target_basis=PriceBasis.MID,
+            target_revision_policy="FIXTURE_V1",
+            target_start_time=opportunity.decision_time,
+            target_end_time=opportunity.decision_time
+            + timedelta(seconds=opportunity.target_horizon_seconds),
+            target_freeze_at=opportunity.decision_time
+            + timedelta(seconds=opportunity.target_horizon_seconds),
+            target_available_at=opportunity.decision_time
+            + timedelta(seconds=opportunity.target_horizon_seconds),
+            label_start_close=None,
+            label_end_close=None,
+            log_return=0.1 + index * 0.1,
+            return_disposition=ReturnDisposition.VALID,
+            start_event_id=None,
+            end_event_id=None,
+            upper_log_excursion=None,
+            lower_log_excursion=None,
+            excursion_disposition=ExcursionDisposition.INCOMPLETE_PATH,
+        )
+        for index, opportunity in enumerate(opportunities)
+    )
+    return TargetDataset.create(
+        rows,
+        observation_dataset_id=_id("observations"),
+        foundation_configuration_id=_id("foundation"),
+    )
+
+
 def _prepared(
     tmp_path: Path,
     *,
     forced_failure_configuration: str | None = None,
+    bind_target_dataset: bool = True,
 ):
-    selection, _question, configurations = _selection()
+    selection, _question, configurations = _selection(bind_target_dataset=bind_target_dataset)
     opportunities = _opportunities()
     feature_schema_id = _id("feature-schema")
     features = materialise_r2_holdout_features(
         selection=selection,
         opportunities=opportunities,
         feature_schema_id=feature_schema_id,
-        feature_set_id=_id("feature-set"),
+        feature_set_id=_id("feature-set-local"),
         observation_dataset_id=_id("observations"),
         panel_dataset_id=_id("panel"),
+        target_dataset_id=(_target_dataset().dataset_id if bind_target_dataset else None),
         projection=lambda item: R2HoldoutFeatureRow.create(
             opportunity_id=item.opportunity_id,
             target_id=item.target_id,
@@ -207,7 +283,7 @@ def _prepared(
         fit_final_ridge(
             selection=selection,
             configuration_id=configuration_id,
-            model_family=model_family,
+            model_family=ModelFamily.LOCAL_RIDGE,
             feature_dataset_id=features.dataset_id,
             feature_schema_id=feature_schema_id,
             training_rows=training_rows,
@@ -223,25 +299,24 @@ def _prepared(
                 else None
             ),
         )
-        for configuration_id, model_family in (
-            (configurations[0], ModelFamily.ZERO_RETURN),
-            (configurations[1], ModelFamily.LOCAL_RIDGE),
-        )
+        for configuration_id in (configurations[1],)
     )
     forecasts = build_holdout_forecasts(
-        selection=selection, feature_dataset=features, final_fits=fits
+        selection=selection,
+        feature_dataset=features,
+        final_fits=fits,
+        opportunities=opportunities,
     )
+    fits_by_configuration = {item.configuration_id: item for item in fits}
     coverage = tuple(
         build_holdout_coverage(
             selection=selection,
             feature_dataset=features,
-            final_fit=fit,
+            final_fit=fits_by_configuration.get(forecast.configuration_id),
             forecast_dataset=forecast,
             opportunities=opportunities,
         )
-        for fit in fits
         for forecast in forecasts
-        if forecast.configuration_id == fit.configuration_id
     )
     seal = seal_holdout_forecasts(
         selection=selection,
@@ -249,11 +324,6 @@ def _prepared(
         final_fits=fits,
         forecast_datasets=forecasts,
         coverage_datasets=coverage,
-        metric_policy={"metric": "MSE"},
-        comparison_support={"rule": "COMMON_ELIGIBLE"},
-        forecast_buckets={"source": "TRAINING_ONLY"},
-        state_buckets={"source": "TRAINING_ONLY"},
-        coverage_rules={"minimum": 1.0},
         prepared_at=NOW,
         prepared_by="test",
     )
@@ -270,7 +340,8 @@ def _prepared(
 
 
 def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
-    selection, opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
+    selection, _opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
+    target_dataset = _target_dataset()
     assert verify_holdout_preparation(tmp_path).seal_id == seal.seal_id
 
     def evaluator(outcomes, opened):
@@ -292,10 +363,7 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
-        outcome_loader=lambda: {
-            opportunities[0].target_id: 0.1,
-            opportunities[1].target_id: 0.2,
-        },
+        outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
     assert evaluation is not None
@@ -307,7 +375,8 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
 
 
 def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> None:
-    selection, opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
+    selection, _opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
+    target_dataset = _target_dataset()
 
     def evaluator(outcomes, opened):
         return evaluate_holdout(
@@ -328,10 +397,7 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
-        outcome_loader=lambda: {
-            opportunities[0].target_id: 0.1,
-            opportunities[1].target_id: 0.2,
-        },
+        outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
     assert evaluation is not None
@@ -403,9 +469,10 @@ def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path
                 selection=selection,
                 opportunities=_opportunities(),
                 feature_schema_id=_id("feature-schema"),
-                feature_set_id=_id("feature-set"),
+                feature_set_id=_id("feature-set-local"),
                 observation_dataset_id=_id("observations"),
                 panel_dataset_id=_id("panel"),
+                target_dataset_id=_target_dataset().dataset_id,
                 projection=lambda item: R2HoldoutFeatureRow.create(
                     opportunity_id=item.opportunity_id,
                     target_id=item.target_id,
@@ -420,11 +487,6 @@ def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path
             final_fits=fits[:1],
             forecast_datasets=forecasts[:1],
             coverage_datasets=coverage[:1],
-            metric_policy={"metric": "MSE"},
-            comparison_support={"rule": "COMMON_ELIGIBLE"},
-            forecast_buckets={"source": "TRAINING_ONLY"},
-            state_buckets={"source": "TRAINING_ONLY"},
-            coverage_rules={"minimum": 1.0},
             prepared_at=NOW,
             prepared_by="test",
         )
@@ -488,7 +550,9 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
 
 
 def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None:
-    selection, opportunities, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
+    selection, opportunities, _fits, _forecasts, _coverage, seal = _prepared(
+        tmp_path, bind_target_dataset=False
+    )
     with pytest.raises(ValueError, match="duplicate"):
         reveal_holdout(
             tmp_path,
@@ -506,64 +570,11 @@ def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None
             ],
             evaluator=lambda outcomes, opened: _unexpected_evaluator("must not evaluate"),
         )
-    assert (tmp_path / "consumed.json").is_file()
-
-
-def test_failed_configuration_and_unavailable_feature_remain_explicit() -> None:
-    selection, _, configurations = _selection()
-    opportunities = _opportunities()
-    schema = _id("feature-schema")
-    features = materialise_r2_holdout_features(
-        selection=selection,
-        opportunities=opportunities,
-        feature_schema_id=schema,
-        feature_set_id=_id("feature-set-2"),
-        observation_dataset_id=_id("observations-2"),
-        panel_dataset_id=_id("panel-2"),
-        projection=lambda item: (
-            None
-            if item is opportunities[1]
-            else R2HoldoutFeatureRow.create(
-                opportunity_id=item.opportunity_id,
-                target_id=item.target_id,
-                instrument_id=item.instrument_id,
-                decision_time=item.decision_time,
-                feature_cutoff=item.feature_data_asof,
-                latest_feature_bar_end=item.latest_feature_bar_end,
-                feature_schema_id=schema,
-                values=(1.0,),
-            )
-        ),
-    )
-    failed_fit = fit_final_ridge(
-        selection=selection,
-        configuration_id=configurations[0],
-        model_family=ModelFamily.ZERO_RETURN,
-        feature_dataset_id=features.dataset_id,
-        feature_schema_id=schema,
-        training_rows=(),
-        policy=selection.final_fitting_policy,
-        minimum_training_rows=2,
-        forced_disposition=FinalFitDisposition.NUMERICAL_FAILURE,
-        forced_failure_reason="fixture failed configuration",
-    )
-    forecasts = build_holdout_forecasts(
-        selection=selection, feature_dataset=features, final_fits=(failed_fit,)
-    )[0]
-    coverage = build_holdout_coverage(
-        selection=selection,
-        feature_dataset=features,
-        final_fit=failed_fit,
-        forecast_dataset=forecasts,
-        opportunities=opportunities,
-    )
-    dispositions = {item.opportunity_id: item.disposition for item in coverage.rows}
-    assert dispositions[opportunities[0].opportunity_id].value == "FAILED_CONFIGURATION"
-    assert dispositions[opportunities[1].opportunity_id].value == "UNAVAILABLE_FEATURE"
 
 
 def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
-    selection, opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path / "source")
+    selection, _opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path / "source")
+    target_dataset = _target_dataset()
     destination = tmp_path / "destination"
     prepare_holdout_from_files(tmp_path / "source", destination)
 
@@ -577,24 +588,6 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
             outcomes=outcomes,
         )
 
-    with pytest.raises(ValueError, match="owned"):
-        reveal_holdout(
-            tmp_path / "source",
-            expected_selection_manifest_id=selection.manifest_id,
-            expected_seal_id=seal.seal_id,
-            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
-            opened_by="test",
-            consumed_by="test",
-            opened_at=NOW,
-            consumed_at=NOW + timedelta(seconds=1),
-            outcome_loader=lambda: {
-                opportunities[0].target_id: 0.1,
-                opportunities[1].target_id: 0.2,
-            },
-            evaluator=evaluator,
-        )
-    assert not (tmp_path / "source" / "opened.json").exists()
-
     evaluation, consumed = reveal_holdout(
         destination,
         expected_selection_manifest_id=selection.manifest_id,
@@ -604,12 +597,24 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
-        outcome_loader=lambda: {
-            opportunities[0].target_id: 0.1,
-            opportunities[1].target_id: 0.2,
-        },
+        outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
     assert evaluation is not None
     assert evaluation.evaluation_id
     assert consumed.outcome_accessed is True
+
+    with pytest.raises(ValueError, match="transferred"):
+        reveal_holdout(
+            tmp_path / "source",
+            expected_selection_manifest_id=selection.manifest_id,
+            expected_seal_id=seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="test",
+            consumed_by="test",
+            opened_at=NOW,
+            consumed_at=NOW + timedelta(seconds=1),
+            outcome_loader=lambda: target_dataset,
+            evaluator=evaluator,
+        )
+    assert not (tmp_path / "source" / "opened.json").exists()

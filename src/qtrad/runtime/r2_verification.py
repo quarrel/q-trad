@@ -1737,6 +1737,19 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
         payload = _load_selection(bundle_path.parent / reference.path)
         if contract == R2_EVALUATION_CONTRACT and "report_id" not in payload:
             continue
+        authenticated = reference_for_json(
+            path=reference.path,
+            contract=contract,
+            semantic_id=_payload_identity(payload),
+            content=payload,
+        )
+        if (
+            authenticated.semantic_id != reference.semantic_id
+            or authenticated.sha256 != reference.sha256
+        ):
+            raise ValueError(
+                "OOF child bytes or semantic identity differ from its bundle reference"
+            )
         matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
@@ -1774,6 +1787,14 @@ def holdout_configuration_registry(
     expected_holdout_configuration_ids: Sequence[str] | None = None,
 ) -> tuple[tuple[str, ModelFamily, str | None, str | None], ...]:
     """Return the authenticated OOF configuration registry for holdout freezing."""
+    if expected_evaluation_report_id is not None:
+        evaluation_reference_ids = {
+            reference.semantic_id
+            for reference in bundle.evaluation_children
+            if reference.contract == R2_EVALUATION_CONTRACT
+        }
+        if expected_evaluation_report_id not in evaluation_reference_ids:
+            raise ValueError("prior selection report is not an authenticated OOF evaluation child")
     evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
     if (
         expected_evaluation_report_id is not None
@@ -1802,7 +1823,11 @@ def holdout_configuration_registry(
         holdout_ids = tuple(
             item.configuration_id
             for item in decisions
-            if item.disposition is ConfigurationDisposition.RETAINED_CONTROL
+            if item.disposition
+            in (
+                ConfigurationDisposition.RETAINED_CONTROL,
+                ConfigurationDisposition.SELECTED_CANDIDATE,
+            )
         )
         stored_selected = register.get("selection_selected_configuration_ids")
         stored_holdout = register.get("selection_holdout_comparator_configuration_ids")

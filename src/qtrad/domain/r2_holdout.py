@@ -1327,11 +1327,12 @@ class R2HoldoutForecastRow:
 @dataclass(frozen=True, slots=True)
 class R2HoldoutForecastDataset:
     selection_manifest_id: str
-    feature_dataset_id: str
+    feature_dataset_id: str | None
     configuration_id: str
     final_fit_id: str | None
     rows: tuple[R2HoldoutForecastRow, ...]
     expected_opportunity_ids: tuple[str, ...]
+    opportunity_target_ids: tuple[tuple[str, str], ...]
     source_class: MarketDataSourceClass
     evidence_class: EvidenceClass
     holdout_scope: HoldoutScope
@@ -1342,16 +1343,18 @@ class R2HoldoutForecastDataset:
     SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
-        for value, field in (
-            (self.selection_manifest_id, "forecast selection ID"),
-            (self.feature_dataset_id, "forecast feature dataset ID"),
-            (self.configuration_id, "forecast configuration ID"),
-            (self.dataset_id, "forecast dataset ID"),
-        ):
-            _require_id(value, field)
+        _require_id(self.selection_manifest_id, "forecast selection ID")
+        if self.feature_dataset_id is not None:
+            _require_id(self.feature_dataset_id, "forecast feature dataset ID")
+        _require_id(self.configuration_id, "forecast configuration ID")
+        _require_id(self.dataset_id, "forecast dataset ID")
         if self.final_fit_id is not None:
             _require_id(self.final_fit_id, "forecast final-fit ID")
         _ordered_ids(self.expected_opportunity_ids, "forecast expected opportunities")
+        opportunity_ids = tuple(item[0] for item in self.opportunity_target_ids)
+        target_ids = tuple(item[1] for item in self.opportunity_target_ids)
+        _ordered_ids(opportunity_ids, "forecast opportunity bindings")
+        _ordered_ids(target_ids, "forecast target bindings")
         if self.holdout_outcomes_accessed:
             raise ValueError("holdout forecast generation cannot access outcomes")
         rows = tuple(sorted(self.rows, key=lambda item: item.row_id))
@@ -1371,6 +1374,12 @@ class R2HoldoutForecastDataset:
         raw["expected_opportunity_ids"] = tuple(
             sorted(cast(Sequence[str], raw["expected_opportunity_ids"]))
         )
+        raw["opportunity_target_ids"] = tuple(
+            sorted(
+                cast(Sequence[tuple[str, str]], raw["opportunity_target_ids"]),
+                key=lambda item: item[0],
+            )
+        )
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
             "schema_version": 1,
@@ -1389,6 +1398,7 @@ class R2HoldoutForecastDataset:
             "final_fit_id": self.final_fit_id,
             "rows": [item.as_json() for item in self.rows],
             "expected_opportunity_ids": list(self.expected_opportunity_ids),
+            "opportunity_target_ids": [list(item) for item in self.opportunity_target_ids],
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,
             "holdout_scope": self.holdout_scope.value,
@@ -1427,7 +1437,7 @@ class R2HoldoutCoverageRow:
 @dataclass(frozen=True, slots=True)
 class R2HoldoutCoverageDataset:
     selection_manifest_id: str
-    feature_dataset_id: str
+    feature_dataset_id: str | None
     configuration_id: str
     expected_opportunity_ids: tuple[str, ...]
     rows: tuple[R2HoldoutCoverageRow, ...]
@@ -1441,13 +1451,11 @@ class R2HoldoutCoverageDataset:
     SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
-        for value, field in (
-            (self.selection_manifest_id, "coverage selection ID"),
-            (self.feature_dataset_id, "coverage feature dataset ID"),
-            (self.configuration_id, "coverage configuration ID"),
-            (self.coverage_id, "coverage ID"),
-        ):
-            _require_id(value, field)
+        _require_id(self.selection_manifest_id, "coverage selection ID")
+        if self.feature_dataset_id is not None:
+            _require_id(self.feature_dataset_id, "coverage feature dataset ID")
+        _require_id(self.configuration_id, "coverage configuration ID")
+        _require_id(self.coverage_id, "coverage ID")
         expected = _ordered_ids(self.expected_opportunity_ids, "coverage expected opportunities")
         if self.holdout_outcomes_accessed:
             raise ValueError("coverage generation cannot access outcomes")
@@ -1505,7 +1513,7 @@ class R2HoldoutCoverageDataset:
 @dataclass(frozen=True, slots=True)
 class R2HoldoutForecastSeal:
     selection_manifest_id: str
-    feature_dataset_id: str
+    configuration_feature_dataset_ids: tuple[tuple[str, str | None], ...]
     final_fit_ids: tuple[str, ...]
     forecast_dataset_ids: tuple[str, ...]
     coverage_ids: tuple[str, ...]
@@ -1530,12 +1538,20 @@ class R2HoldoutForecastSeal:
     SCHEMA_VERSION: ClassVar[int] = 1
 
     def __post_init__(self) -> None:
-        for value, field in (
-            (self.selection_manifest_id, "seal selection ID"),
-            (self.feature_dataset_id, "seal feature dataset ID"),
-            (self.seal_id, "holdout forecast seal ID"),
+        _require_id(self.selection_manifest_id, "seal selection ID")
+        _require_id(self.seal_id, "holdout forecast seal ID")
+        mapping_keys = [
+            configuration_id for configuration_id, _ in self.configuration_feature_dataset_ids
+        ]
+        if any(not configuration_id for configuration_id in mapping_keys):
+            raise ValueError("seal configuration feature mapping has an empty configuration ID")
+        if tuple(sorted(mapping_keys)) != tuple(mapping_keys) or len(set(mapping_keys)) != len(
+            mapping_keys
         ):
-            _require_id(value, field)
+            raise ValueError("seal configuration feature mapping must be ordered and unique")
+        for configuration_id, feature_dataset_id in self.configuration_feature_dataset_ids:
+            if feature_dataset_id is not None:
+                _require_id(feature_dataset_id, f"seal feature dataset for {configuration_id}")
         for values, field in (
             (self.final_fit_ids, "seal final-fit IDs"),
             (self.forecast_dataset_ids, "seal forecast IDs"),
@@ -1569,6 +1585,18 @@ class R2HoldoutForecastSeal:
         raw.pop("seal_id", None)
         raw.setdefault("state", HoldoutPreparationState.PREPARED_UNOPENED)
         raw.setdefault("holdout_outcomes_accessed", False)
+        raw["configuration_feature_dataset_ids"] = tuple(
+            sorted(
+                (
+                    str(configuration_id),
+                    None if feature_dataset_id is None else str(feature_dataset_id),
+                )
+                for configuration_id, feature_dataset_id in cast(
+                    Sequence[tuple[str, str | None]],
+                    raw["configuration_feature_dataset_ids"],
+                )
+            )
+        )
         for key in ("final_fit_ids", "forecast_dataset_ids", "coverage_ids"):
             raw[key] = tuple(sorted(cast(Sequence[str], raw[key])))
         raw["questions"] = tuple(cast(Sequence[R2HoldoutQuestion], raw["questions"]))
@@ -1585,7 +1613,10 @@ class R2HoldoutForecastSeal:
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "selection_manifest_id": self.selection_manifest_id,
-            "feature_dataset_id": self.feature_dataset_id,
+            "configuration_feature_dataset_ids": [
+                [configuration_id, feature_dataset_id]
+                for configuration_id, feature_dataset_id in self.configuration_feature_dataset_ids
+            ],
             "final_fit_ids": list(self.final_fit_ids),
             "forecast_dataset_ids": list(self.forecast_dataset_ids),
             "coverage_ids": list(self.coverage_ids),
@@ -1618,7 +1649,7 @@ class R2HoldoutForecastSeal:
             "contract",
             "schema_version",
             "selection_manifest_id",
-            "feature_dataset_id",
+            "configuration_feature_dataset_ids",
             "final_fit_ids",
             "forecast_dataset_ids",
             "coverage_ids",
@@ -1641,15 +1672,27 @@ class R2HoldoutForecastSeal:
         }
         if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
             raise ValueError("holdout forecast seal has unknown or unsupported fields")
+        feature_mapping_value = raw["configuration_feature_dataset_ids"]
+        if not isinstance(feature_mapping_value, list):
+            raise ValueError("seal configuration feature mapping must be an array")
+        feature_mapping = cast(list[object], feature_mapping_value)
         pairs = raw["configuration_pairs"]
         if not isinstance(pairs, list):
             raise ValueError("seal configuration pairs must be an array")
         questions = raw["questions"]
         if not isinstance(questions, list):
             raise ValueError("seal questions must be an array")
+        mapping: list[tuple[str, str | None]] = []
+        for raw_item in feature_mapping:
+            if not isinstance(raw_item, list):
+                raise ValueError("seal configuration feature mapping entries must be pairs")
+            item = cast(list[object], raw_item)
+            if len(item) != 2:
+                raise ValueError("seal configuration feature mapping entries must be pairs")
+            mapping.append((str(item[0]), None if item[1] is None else str(item[1])))
         return cls(
             selection_manifest_id=str(raw["selection_manifest_id"]),
-            feature_dataset_id=str(raw["feature_dataset_id"]),
+            configuration_feature_dataset_ids=tuple(mapping),
             final_fit_ids=tuple(str(item) for item in cast(list[object], raw["final_fit_ids"])),
             forecast_dataset_ids=tuple(
                 str(item) for item in cast(list[object], raw["forecast_dataset_ids"])
