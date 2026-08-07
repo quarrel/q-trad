@@ -65,7 +65,6 @@ from qtrad.application.ibkr_results import (
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
 from qtrad.application.persistence import BoundedPersistenceWorker
-from qtrad.application.provider_history import build_provider_history_dataset
 from qtrad.application.r2_features import (
     R2FoundationInputs,
     feature_schema_for_set,
@@ -2448,19 +2447,13 @@ def _build_provider_history(
     source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
     for _ in source_artifact.iter_request_results():
         pass
-    dataset = build_provider_history_dataset(
-        source_artifact,
-        availability_delay=availability_delay,
-    )
     manifest_path = publish_provider_history(
         output_path,
         source_manifest=historical_result_path,
         source_artifact=source_artifact,
-        dataset=dataset,
+        availability_delay=availability_delay,
     )
     verified = verify_provider_history(manifest_path)
-    if verified.dataset_sha256 != dataset.dataset_sha256:
-        raise RuntimeError("provider-history changed between publication and verification")
     print(
         json.dumps(
             {

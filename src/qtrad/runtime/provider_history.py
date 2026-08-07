@@ -9,7 +9,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -34,7 +34,9 @@ from qtrad.domain.ibkr_results import (
 from qtrad.domain.provider_history import (
     PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
     PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
+    PROVIDER_HISTORY_DECLARED_DELAY,
     PROVIDER_HISTORY_ENVIRONMENT,
+    PROVIDER_HISTORY_POLICY,
     PROVIDER_HISTORY_PROVIDER,
     PROVIDER_HISTORY_SCHEMA_VERSION,
     PROVIDER_HISTORY_SOURCE_CLASS,
@@ -103,9 +105,23 @@ def publish_provider_history(
     *,
     source_manifest: Path,
     source_artifact: ProviderHistorySource,
-    dataset: ProviderHistoricalDataset,
+    dataset: ProviderHistoricalDataset | None = None,
+    availability_delay: timedelta | None = None,
 ) -> Path:
     """Stage, verify, and atomically create one provider-history closure."""
+    if dataset is None:
+        if availability_delay is None:
+            raise ValueError("availability delay is required when dataset is not supplied")
+        policy = ProviderHistoricalAvailabilityPolicy(
+            selector=PROVIDER_HISTORY_DECLARED_DELAY,
+            policy=PROVIDER_HISTORY_POLICY,
+            delay=availability_delay,
+        )
+    else:
+        if availability_delay is not None:
+            raise ValueError("availability delay cannot accompany a dataset")
+        policy = dataset.availability_policy
+
     destination = _absolute_output_path(output_directory)
     _require_new_output_directory(destination)
     source_root = _require_file(source_manifest, "IBKR historical result manifest").parent
@@ -116,14 +132,15 @@ def publish_provider_history(
         )
     )
     try:
-        staged_manifest = write_provider_history(
+        staged_manifest, built_dataset = _write_provider_history_closure(
             staging,
             source_root=source_root,
             source_artifact=source_artifact,
             dataset=dataset,
+            availability_policy=policy,
         )
         verified = verify_provider_history(staged_manifest)
-        if verified.dataset_sha256 != dataset.dataset_sha256:
+        if verified.dataset_sha256 != built_dataset.dataset_sha256:
             raise RuntimeError("provider-history changed between staging and verification")
         if destination.exists():
             raise FileExistsError(f"provider-history output already exists: {destination}")
@@ -143,6 +160,25 @@ def write_provider_history(
     dataset: ProviderHistoricalDataset,
 ) -> Path:
     """Write one bounded provider-history closure without replacing any bytes."""
+    manifest_path, _ = _write_provider_history_closure(
+        output_directory,
+        source_root=source_root,
+        source_artifact=source_artifact,
+        dataset=dataset,
+        availability_policy=dataset.availability_policy,
+    )
+    return manifest_path
+
+
+def _write_provider_history_closure(
+    output_directory: Path,
+    *,
+    source_root: Path,
+    source_artifact: ProviderHistorySource,
+    dataset: ProviderHistoricalDataset | None,
+    availability_policy: ProviderHistoricalAvailabilityPolicy,
+) -> tuple[Path, ProviderHistoricalDataset]:
+    """Write one closure, deriving its dataset while streaming when requested."""
     _prepare_output_directory(output_directory)
     source_files = _source_files(source_root)
     source_manifest_bytes = _read_bounded(
@@ -154,31 +190,35 @@ def write_provider_history(
         raise ValueError("source result closure differs from its manifest")
     partition_bounds = provider_history_partition_row_bounds(source_artifact)
     source_plan_row_bound = sum(partition_bounds.values())
-    if dataset.row_count > source_plan_row_bound:
+    if dataset is not None and dataset.row_count > source_plan_row_bound:
         raise ValueError("provider-history rows exceed source-plan capacity")
 
     root = _absolute_output_path(output_directory)
     partition_references: list[dict[str, object]] = []
+    partition_identities: list[ProviderHistoricalPartitionReference] = []
     partition_paths: set[str] = set()
-    expected_partitions = iter(dataset.partitions)
+    expected_partitions = iter(dataset.partitions) if dataset is not None else None
+    expected_partition: ProviderHistoricalPartitionReference | None = None
     for partition in iter_provider_history_partitions(
         source_artifact,
-        policy=dataset.availability_policy,
+        policy=availability_policy,
     ):
         row_upper_bound = partition_bounds.get(partition.key)
         if row_upper_bound is None:
             raise ValueError("provider-history partition is absent from the source plan")
         if partition.row_count > row_upper_bound:
             raise ValueError("provider-history partition rows exceed source-plan capacity")
-        try:
-            expected_partition = next(expected_partitions)
-        except StopIteration as error:
-            raise ValueError(
-                "provider-history source replay produced an unexpected partition"
-            ) from error
+        if expected_partitions is not None:
+            try:
+                expected_partition = next(expected_partitions)
+            except StopIteration as error:
+                raise ValueError(
+                    "provider-history source replay produced an unexpected partition"
+                ) from error
         actual_partition = ProviderHistoricalPartitionReference.from_partition(partition)
-        if actual_partition != expected_partition:
+        if expected_partition is not None and actual_partition != expected_partition:
             raise ValueError("provider-history dataset differs from source replay")
+        partition_identities.append(actual_partition)
         parquet_bytes = _parquet_bytes(partition.rows)
         if not parquet_bytes or len(parquet_bytes) > _MAX_FILE_BYTES:
             raise ValueError("provider-history Parquet partition exceeds its bound")
@@ -196,12 +236,29 @@ def write_provider_history(
                 "row_upper_bound": row_upper_bound,
             }
         )
-    try:
-        next(expected_partitions)
-    except StopIteration:
-        pass
+    if expected_partitions is not None:
+        try:
+            next(expected_partitions)
+        except StopIteration:
+            pass
+        else:
+            raise ValueError(
+                "provider-history dataset contains a partition absent from source replay"
+            )
+
+    if dataset is None:
+        built_dataset = ProviderHistoricalDataset.create(
+            partitions=tuple(partition_identities),
+            contract_selection_sha256=source_artifact.plan.contract_selection_sha256,
+            plan_sha256=source_artifact.plan.plan_sha256,
+            runtime_sha256=source_artifact.plan.runtime_sha256,
+            aggregate_sha256=source_artifact.aggregate.aggregate_sha256,
+            availability_policy=availability_policy,
+        )
     else:
-        raise ValueError("provider-history dataset contains a partition absent from source replay")
+        built_dataset = dataset
+    if built_dataset.row_count > source_plan_row_bound:
+        raise ValueError("provider-history rows exceed source-plan capacity")
 
     partition_references.sort(key=lambda item: str(item["path"]))
     if len(source_files) + len(partition_references) + 1 > _MAX_CLOSURE_FILES:
@@ -217,8 +274,8 @@ def write_provider_history(
         "contract": PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
         "schema_version": PROVIDER_HISTORY_SCHEMA_VERSION,
         "selector_contract": PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
-        "dataset": dataset.as_json_value(),
-        "availability_policy": dataset.availability_policy.as_json_value(),
+        "dataset": built_dataset.as_json_value(),
+        "availability_policy": built_dataset.availability_policy.as_json_value(),
         "source_result": source_reference,
         "source_plan_row_bound": source_plan_row_bound,
         "files": partition_references,
@@ -238,7 +295,7 @@ def write_provider_history(
         root / _MANIFEST_NAME,
         canonical_json_bytes(cast(Mapping[str, JsonValue], manifest_document)),
     )
-    return root / _MANIFEST_NAME
+    return root / _MANIFEST_NAME, built_dataset
 
 
 def _partition_path(key: tuple[str, date]) -> str:

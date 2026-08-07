@@ -723,6 +723,23 @@ def test_provider_history_streams_one_result_and_partition_at_a_time(
     assert max_partition_live == 1
 
 
+def test_provider_history_publishes_without_prebuilt_dataset(tmp_path: Path) -> None:
+    artifact = _build_stage6_artifact(day_count=2)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    source_artifact = verify_ibkr_historical_result_stream(result_manifest)
+
+    manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=source_artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+    verified = verify_provider_history(manifest)
+
+    assert verified.row_count == 2
+    assert manifest.exists()
+
+
 def test_provider_history_replays_source_before_parquet_decoding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
