@@ -408,6 +408,8 @@ class IbkrSession:
                 else "historical"
             )
             self._farms[farm] = "INACTIVE"
+            self._reason_codes.discard(f"{farm.upper()}_FARM_DISCONNECTED")
+            self._refresh_state()
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
                 f"{farm.upper()}_FARM_INACTIVE",

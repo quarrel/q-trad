@@ -162,6 +162,38 @@ def test_inactive_farm_codes_identify_the_exact_farm(
     assert dict(session.snapshot().farms)[expected_farm] == "INACTIVE"
 
 
+@pytest.mark.parametrize(
+    ("disconnected", "inactive", "farm"),
+    (
+        (
+            IbkrSystemCode.HISTORICAL_FARM_DISCONNECTED,
+            IbkrSystemCode.HISTORICAL_FARM_INACTIVE,
+            "historical",
+        ),
+        (
+            IbkrSystemCode.MARKET_DATA_FARM_DISCONNECTED,
+            IbkrSystemCode.MARKET_DATA_FARM_INACTIVE,
+            "market_data",
+        ),
+    ),
+)
+def test_required_farm_inactive_clears_prior_disconnect(
+    disconnected: IbkrSystemCode, inactive: IbkrSystemCode, farm: str
+) -> None:
+    session = _connected_session()
+
+    session.on_system_message(disconnected)
+    assert session.snapshot().state == IbkrSessionState.DEGRADED
+
+    decision = session.on_system_message(inactive)
+    snapshot = session.snapshot()
+
+    assert decision.action == IbkrRecoveryAction.NONE
+    assert dict(snapshot.farms)[farm] == "INACTIVE"
+    assert snapshot.state == IbkrSessionState.CONNECTED
+    assert f"{farm.upper()}_FARM_DISCONNECTED" not in snapshot.reason_codes
+
+
 def test_upstream_loss_is_not_masked_by_farm_connected_notice() -> None:
     session = _connected_session()
 
