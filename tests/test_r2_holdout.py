@@ -47,12 +47,13 @@ from qtrad.domain.r2_holdout import (
     R2FinalFit,
     R2FinalFittingPolicy,
     R2HoldoutFeatureRow,
+    R2HoldoutOpenedMarker,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_holdout import (
-    _training_target_payload,
+    _target_dataset_payload,
     prepare_holdout_from_files,
     reveal_holdout,
     reveal_holdout_from_files,
@@ -185,8 +186,14 @@ def _selection(
         configuration_registry=tuple(
             sorted(
                 (
-                    (zero, ModelFamily.ZERO_RETURN, None, None),
-                    (local, ModelFamily.LOCAL_RIDGE, _training_feature_set_id(), None),
+                    (zero, ModelFamily.ZERO_RETURN, None, None, None),
+                    (
+                        local,
+                        ModelFamily.LOCAL_RIDGE,
+                        _training_feature_set_id(),
+                        _training_feature_dataset().dataset_id,
+                        None,
+                    ),
                 ),
                 key=lambda item: item[0],
             )
@@ -368,6 +375,7 @@ def _prepared(
             feature_schema_id=feature_schema_id,
             training_feature_dataset=training_features,
             training_target_dataset=training_targets,
+            training_target_source_dataset_id=target_dataset.dataset_id,
             policy=selection.final_fitting_policy,
             forced_disposition=(
                 FinalFitDisposition.NUMERICAL_FAILURE
@@ -461,6 +469,37 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     assert opened.seal_id == seal.seal_id
     assert replayed_consumed.marker_id == consumed.marker_id
     assert evaluation.questions[0].conclusion in tuple(HoldoutConclusion)
+
+
+def test_zero_threshold_exact_tie_is_inconclusive(tmp_path: Path) -> None:
+    selection, _opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path)
+    local = next(
+        item
+        for item in forecasts
+        if item.configuration_id == selection.selected_configuration_ids[0]
+    )
+    outcomes = {row.target_id: row.forecast / 2.0 for row in local.rows}
+
+    opened = R2HoldoutOpenedMarker.create(
+        selection_manifest_id=selection.manifest_id,
+        seal_id=seal.seal_id,
+        opened_at=NOW,
+        opened_by="test",
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        expected_selection_manifest_id=selection.manifest_id,
+        expected_seal_id=seal.seal_id,
+    )
+    evaluation = evaluate_holdout(
+        selection=selection,
+        seal=seal,
+        opened_marker=opened,
+        forecast_datasets=forecasts,
+        coverage_datasets=coverage,
+        outcomes=outcomes,
+    )
+    result = evaluation.questions[0]
+    assert result.candidate_value == pytest.approx(result.comparator_value)
+    assert result.conclusion is HoldoutConclusion.INCONCLUSIVE
 
 
 def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> None:
@@ -711,15 +750,24 @@ def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> No
     _prepared(tmp_path)
     target_path = next((tmp_path / "training/targets").iterdir())
     payload = json.loads(target_path.read_text())
-    assert len(payload["rows"]) == 8
-    assert payload["source_target_dataset_id"] == payload["dataset_id"]
-    assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in payload["rows"])
+    assert payload["contract"] == "qtrad-r2-target-projection-v1"
+    assert payload["schema_version"] == 1
+    assert payload["source_target_dataset_id"] == _target_dataset().dataset_id
+    child = payload["target_dataset"]
+    assert isinstance(child, dict)
+    assert len(child["rows"]) == 8
+    assert child["dataset_id"] != payload["source_target_dataset_id"]
+    assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in child["rows"])
+
+
+
+
 
 
 def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:
     selection, _opportunities_value, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
     outcomes_path = tmp_path.parent / "canonical-target.json"
-    outcomes_path.write_text(json.dumps(_training_target_payload(_target_dataset())))
+    outcomes_path.write_text(json.dumps(_target_dataset_payload(_target_dataset())))
     evaluation, consumed = reveal_holdout_from_files(
         tmp_path,
         outcomes_path=outcomes_path,

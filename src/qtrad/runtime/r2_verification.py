@@ -1785,7 +1785,7 @@ def holdout_configuration_registry(
     expected_evaluation_report_id: str | None = None,
     expected_selected_configuration_ids: Sequence[str] | None = None,
     expected_holdout_configuration_ids: Sequence[str] | None = None,
-) -> tuple[tuple[str, ModelFamily, str | None, str | None], ...]:
+) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
     """Return the authenticated OOF configuration registry for holdout freezing."""
     if expected_evaluation_report_id is not None:
         evaluation_reference_ids = {
@@ -1849,6 +1849,29 @@ def holdout_configuration_registry(
             and tuple(sorted(expected_holdout_configuration_ids)) != holdout_ids
         ):
             raise ValueError("OOF holdout decisions differ from prior selection")
+    evaluated_models = evaluation.get("evaluated_models")
+    if not isinstance(evaluated_models, list) or not evaluated_models:
+        raise ValueError("OOF evaluation has no authenticated evaluated-model registry")
+    manifests: dict[str, tuple[ModelFamily, str | None, str | None]] = {}
+    for raw_model in evaluated_models:
+        if not isinstance(raw_model, dict):
+            raise ValueError("OOF evaluated-model manifest must be an object")
+        manifest_id = raw_model.get("manifest_id")
+        if not isinstance(manifest_id, str):
+            raise ValueError("OOF evaluated-model manifest has no authenticated ID")
+        if manifest_id in manifests:
+            raise ValueError("OOF evaluated-model manifest IDs are not unique")
+        feature_set_id = raw_model.get("feature_set_id")
+        feature_dataset_id = raw_model.get("feature_dataset_id")
+        if feature_set_id is not None and not isinstance(feature_set_id, str):
+            raise ValueError("OOF evaluated-model feature-set ID is invalid")
+        if feature_dataset_id is not None and not isinstance(feature_dataset_id, str):
+            raise ValueError("OOF evaluated-model feature-dataset ID is invalid")
+        manifests[manifest_id] = (
+            ModelFamily(str(raw_model["model_family"])),
+            feature_set_id,
+            feature_dataset_id,
+        )
     configurations = evaluation.get("configurations")
     if not isinstance(configurations, list) or not configurations:
         raise ValueError("OOF evaluation has no authenticated configuration registry")
@@ -1856,15 +1879,29 @@ def holdout_configuration_registry(
     ordered = tuple(sorted(records, key=lambda item: item.configuration_id))
     if ordered != records or len({item.configuration_id for item in records}) != len(records):
         raise ValueError("OOF evaluation configuration registry is not ordered and unique")
-    return tuple(
-        (
-            item.configuration_id,
-            item.model_family,
-            item.feature_set_id,
-            item.evaluated_model_manifest_id,
+    registry: list[tuple[str, ModelFamily, str | None, str | None, str | None]] = []
+    for item in records:
+        manifest_id = item.evaluated_model_manifest_id
+        if manifest_id is None or manifest_id not in manifests:
+            raise ValueError(
+                "OOF configuration does not reference an authenticated evaluated model"
+            )
+        manifest_family, manifest_feature_set_id, feature_dataset_id = manifests[manifest_id]
+        if (
+            item.model_family is not manifest_family
+            or item.feature_set_id != manifest_feature_set_id
+        ):
+            raise ValueError("OOF configuration differs from its authenticated evaluated model")
+        registry.append(
+            (
+                item.configuration_id,
+                item.model_family,
+                item.feature_set_id,
+                feature_dataset_id,
+                manifest_id,
+            )
         )
-        for item in records
-    )
+    return tuple(registry)
 
 
 def holdout_evaluation_policy(

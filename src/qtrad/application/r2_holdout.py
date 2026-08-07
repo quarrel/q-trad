@@ -283,7 +283,9 @@ def freeze_holdout_selection(
     control_configuration_ids: Sequence[str] | None = None,
     verified_oof_bundle: R2OofBundle | None = None,
     verified_experiment: R2ExperimentConfig | None = None,
-    configuration_registry: Sequence[tuple[str, ModelFamily, str | None, str | None]] | None = None,
+    configuration_registry: Sequence[
+        tuple[str, ModelFamily, str | None, str | None, str | None]
+    ] | None = None,
     evaluation_policy: Mapping[str, JsonValue] | None = None,
 ) -> R2HoldoutSelectionManifest:
     """Create PR A from an independently verified, still-pending R2.F1 selection."""
@@ -584,6 +586,7 @@ def materialise_r2_holdout_features(
                 _configuration_id,
                 _model_family,
                 registry_feature_set_id,
+                _feature_dataset_id,
                 _manifest_id,
             ) in selection.configuration_registry
             if registry_feature_set_id is not None
@@ -719,11 +722,14 @@ def _failed_final_fit(
     )
     if training_feature_dataset_id is None or training_target_dataset_id is None:
         raise ValueError("final fit is missing authenticated training child IDs")
+    expected_target = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_target, str):
+        raise ValueError("failed final fit is missing the authenticated target source")
     fit_preprocessing.update(
         {
             "training_feature_dataset_id": training_feature_dataset_id,
             "training_target_dataset_id": training_target_dataset_id,
-            "training_target_source_dataset_id": training_target_dataset_id,
+            "training_target_source_dataset_id": expected_target,
         }
     )
     fit_preprocessing.update(
@@ -875,9 +881,15 @@ def fit_final_ridge(
     if training_target_source_dataset_id is None:
         if training_target_dataset.dataset_id != expected_target:
             raise ValueError("final-fit target evidence differs from the frozen target dataset")
-    elif training_target_dataset.dataset_id != training_target_source_dataset_id:
-        raise ValueError("final-fit target child differs from its authenticated source")
-    training_target_dataset = _pre_holdout_target_dataset(selection, training_target_dataset)
+    elif training_target_source_dataset_id != expected_target:
+        raise ValueError("final-fit target source differs from the frozen target dataset")
+    projected_target_dataset = _pre_holdout_target_dataset(selection, training_target_dataset)
+    if (
+        training_target_dataset.dataset_id != expected_target
+        and projected_target_dataset.dataset_id != training_target_dataset.dataset_id
+    ):
+        raise ValueError("final-fit target child is not the deterministic pre-holdout projection")
+    training_target_dataset = projected_target_dataset
     training_rows = _authenticated_final_training_rows(
         selection,
         feature_dataset=training_feature_dataset,
@@ -909,8 +921,15 @@ def fit_final_ridge(
             raise ValueError(f"final fit {key} differs from the frozen selection")
     registry_entry = next(
         (
-            (configuration, family, feature_set, manifest)
-            for configuration, family, feature_set, manifest in selection.configuration_registry
+            (
+                configuration,
+                family,
+                feature_set,
+                training_feature_dataset_id,
+                manifest,
+            )
+            for configuration, family, feature_set, training_feature_dataset_id, manifest
+            in selection.configuration_registry
             if configuration == configuration_id
         ),
         None,
@@ -922,6 +941,10 @@ def fit_final_ridge(
         raise ValueError("final fit model family differs from the authenticated OOF registry")
     if registry_entry is not None and training_feature_dataset.feature_set_id != registry_entry[2]:
         raise ValueError("final fit training features differ from the selected feature set")
+    if registry_entry is not None and training_feature_dataset.dataset_id != registry_entry[3]:
+        raise ValueError(
+            "final fit training features differ from the authenticated OOF feature dataset"
+        )
     if feature_schema_id != training_feature_dataset.raw_feature_schema_id:
         raise ValueError("final fit feature schema differs from the authenticated training schema")
     if model_family is ModelFamily.ZERO_RETURN:
@@ -1128,7 +1151,7 @@ def fit_final_ridge(
         minimum_inner_validation_rows=minimum_inner_validation_rows,
         training_feature_dataset_id=training_feature_dataset.dataset_id,
         training_target_dataset_id=training_target_dataset.dataset_id,
-        training_target_source_dataset_id=training_target_dataset.dataset_id,
+        training_target_source_dataset_id=expected_target,
     )
     preprocessing.update(
         _final_fit_lineage(
@@ -1338,7 +1361,8 @@ def _feature_dataset_by_configuration(
     registry_entries = selection.configuration_registry
     registry = {
         configuration_id: (model_family, feature_set_id)
-        for configuration_id, model_family, feature_set_id, _manifest_id in registry_entries
+        for configuration_id, model_family, feature_set_id, _feature_dataset_id, _manifest_id
+        in registry_entries
     }
     configurations = tuple(
         selection.holdout_configuration_ids
@@ -1404,6 +1428,7 @@ def build_holdout_forecasts(
             configuration_id,
             model_family,
             _feature_set_id,
+            _feature_dataset_id,
             _manifest_id,
         ) in selection.configuration_registry
     }
@@ -1590,6 +1615,7 @@ def build_holdout_coverage(
             configuration_id,
             model_family,
             _feature_set_id,
+            _feature_dataset_id,
             _manifest_id,
         ) in selection.configuration_registry
     }.get(resolved_configuration_id)
@@ -1738,6 +1764,7 @@ def seal_holdout_forecasts(
             configuration_id,
             model_family,
             _feature_set_id,
+            _feature_dataset_id,
             _manifest_id,
         ) in selection.configuration_registry
     }
@@ -2076,7 +2103,14 @@ def evaluate_holdout(
         candidate_metric = _metric(question.metric, candidate_values, target_values, instruments)
         comparator_metric = _metric(question.metric, comparator_values, target_values, instruments)
         delta = candidate_metric - comparator_metric
-        if question.direction is HoldoutDirection.HIGHER_IS_BETTER:
+        if question.threshold == 0.0:
+            if question.direction is HoldoutDirection.HIGHER_IS_BETTER:
+                positive = delta > 0.0
+                negative = delta < 0.0
+            else:
+                positive = delta < 0.0
+                negative = delta > 0.0
+        elif question.direction is HoldoutDirection.HIGHER_IS_BETTER:
             positive = delta >= question.threshold
             negative = delta <= -question.threshold
         else:

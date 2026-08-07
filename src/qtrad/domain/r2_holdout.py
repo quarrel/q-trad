@@ -451,7 +451,9 @@ class R2HoldoutSelectionManifest:
     state: HoldoutSelectionState
     holdout_outcomes_accessed: bool
     manifest_id: str
-    configuration_registry: tuple[tuple[str, ModelFamily, str | None, str | None], ...] = ()
+    configuration_registry: tuple[
+        tuple[str, ModelFamily, str | None, str | None, str | None], ...
+    ] = ()
     evaluation_policy: Mapping[str, JsonValue] = dataclass_field(
         default_factory=lambda: cast(dict[str, JsonValue], {})
     )
@@ -502,11 +504,14 @@ class R2HoldoutSelectionManifest:
                 configuration_id,
                 _model_family,
                 feature_set_id,
+                feature_dataset_id,
                 manifest_id,
             ) in self.configuration_registry:
                 _require_id(configuration_id, "configuration registry configuration ID")
                 if feature_set_id is not None:
                     _require_id(feature_set_id, "configuration registry feature-set ID")
+                if feature_dataset_id is not None:
+                    _require_id(feature_dataset_id, "configuration registry feature-dataset ID")
                 if manifest_id is not None:
                     _require_id(manifest_id, "configuration registry model manifest ID")
         if not self.questions or len({item.question_id for item in self.questions}) != len(
@@ -548,7 +553,7 @@ class R2HoldoutSelectionManifest:
         raw["comparator_families"] = tuple(cast(Sequence[ModelFamily], raw["comparator_families"]))
         raw["configuration_registry"] = tuple(
             cast(
-                Sequence[tuple[str, ModelFamily, str | None, str | None]],
+                Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]],
                 raw["configuration_registry"],
             )
         )
@@ -579,11 +584,18 @@ class R2HoldoutSelectionManifest:
             "holdout_configuration_ids": list(self.holdout_configuration_ids),
             "comparator_families": [item.value for item in self.comparator_families],
             "configuration_registry": [
-                [configuration_id, model_family.value, feature_set_id, manifest_id]
+                [
+                    configuration_id,
+                    model_family.value,
+                    feature_set_id,
+                    feature_dataset_id,
+                    manifest_id,
+                ]
                 for (
                     configuration_id,
                     model_family,
                     feature_set_id,
+                    feature_dataset_id,
                     manifest_id,
                 ) in self.configuration_registry
             ],
@@ -651,12 +663,12 @@ class R2HoldoutSelectionManifest:
             raise ValueError("holdout selection question register must be an array")
         if not isinstance(registry_values, list):
             raise ValueError("holdout configuration registry must be an array")
-        registry: list[tuple[str, ModelFamily, str | None, str | None]] = []
+        registry: list[tuple[str, ModelFamily, str | None, str | None, str | None]] = []
         for raw_item in cast(list[object], registry_values):
             if not isinstance(raw_item, list):
                 raise ValueError("holdout configuration registry entry is invalid")
             item = cast(list[object], raw_item)
-            if len(item) != 4:
+            if len(item) != 5:
                 raise ValueError("holdout configuration registry entry is invalid")
             registry.append(
                 (
@@ -664,6 +676,7 @@ class R2HoldoutSelectionManifest:
                     ModelFamily(str(item[1])),
                     None if item[2] is None else str(item[2]),
                     None if item[3] is None else str(item[3]),
+                    None if item[4] is None else str(item[4]),
                 )
             )
         return cls(

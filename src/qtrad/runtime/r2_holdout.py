@@ -244,14 +244,26 @@ def _training_feature_dataset_from_payload(
     return dataset
 
 
-def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> TargetDataset:
-    if set(payload) != _TRAINING_TARGET_FIELDS:
-        raise ValueError("training target child has unknown or missing fields")
+def _target_dataset_payload(dataset: TargetDataset) -> dict[str, object]:
+    return {
+        "contract": TARGET_DATASET_CONTRACT,
+        "schema_version": 1,
+        "dataset_id": dataset.dataset_id,
+        "observation_dataset_id": dataset.observation_dataset_id,
+        "foundation_configuration_id": dataset.foundation_configuration_id,
+        "rows": [row.as_json() for row in dataset.rows],
+    }
+
+
+def _target_dataset_from_payload(
+    payload: Mapping[str, object],
+    *,
+    field: str,
+) -> TargetDataset:
+    if set(payload) != _TARGET_DATASET_FIELDS:
+        raise ValueError(f"{field} has unknown or missing fields")
     if payload.get("contract") != TARGET_DATASET_CONTRACT or payload.get("schema_version") != 1:
-        raise ValueError("training target child contract is unsupported")
-    source_id = _text_value(
-        payload["source_target_dataset_id"], "training target source dataset ID"
-    )
+        raise ValueError(f"{field} contract is unsupported")
     rows: list[TargetRow] = []
     expected_fields = {
         "instrument_id",
@@ -273,10 +285,10 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
         "lower_log_excursion",
         "excursion_disposition",
     }
-    for raw_row in _object_list(payload["rows"], "training target rows"):
-        row = _object_dict(raw_row, "training target row")
+    for raw_row in _object_list(payload["rows"], f"{field} rows"):
+        row = _object_dict(raw_row, f"{field} row")
         if set(row) != expected_fields:
-            raise ValueError("training target row has unknown or missing fields")
+            raise ValueError(f"{field} row has unknown or missing fields")
         start_event = row["start_event_id"]
         end_event = row["end_event_id"]
         rows.append(
@@ -333,10 +345,24 @@ def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> Targ
         ),
     )
     if dataset.dataset_id != _text_value(payload["dataset_id"], "target dataset ID"):
-        raise ValueError("training target dataset ID does not authenticate its rows")
-    if source_id != dataset.dataset_id:
-        raise ValueError("training target source does not authenticate its child")
+        raise ValueError(f"{field} ID does not authenticate its rows")
     return dataset
+
+
+def _training_target_dataset_from_payload(payload: Mapping[str, object]) -> TargetDataset:
+    if set(payload) != _TRAINING_TARGET_FIELDS:
+        raise ValueError("training target child has unknown or missing fields")
+    if (
+        payload.get("contract") != _TRAINING_TARGET_PROJECTION_CONTRACT
+        or payload.get("schema_version") != 1
+    ):
+        raise ValueError("training target child contract is unsupported")
+    nested = _object_dict(payload["target_dataset"], "training target dataset")
+    return _target_dataset_from_payload(nested, field="training target dataset")
+
+
+def _training_target_source_id(payload: Mapping[str, object]) -> str:
+    return _text_value(payload["source_target_dataset_id"], "training target source dataset ID")
 
 
 def _pre_holdout_target_dataset(
@@ -371,13 +397,10 @@ def _training_target_payload(
     source_target_dataset_id: str | None = None,
 ) -> dict[str, object]:
     return {
-        "contract": TARGET_DATASET_CONTRACT,
+        "contract": _TRAINING_TARGET_PROJECTION_CONTRACT,
         "schema_version": 1,
-        "dataset_id": dataset.dataset_id,
         "source_target_dataset_id": source_target_dataset_id or dataset.dataset_id,
-        "observation_dataset_id": dataset.observation_dataset_id,
-        "foundation_configuration_id": dataset.foundation_configuration_id,
-        "rows": [row.as_json() for row in dataset.rows],
+        "target_dataset": _target_dataset_payload(dataset),
     }
 
 
@@ -433,6 +456,7 @@ def _training_paths_for_seal(
 def _load_training_children(
     root: Path,
     fit_payloads: Sequence[Mapping[str, object]],
+    selection: R2HoldoutSelectionManifest,
 ) -> tuple[
     dict[str, R2FeatureDataset],
     dict[str, TargetDataset],
@@ -451,6 +475,9 @@ def _load_training_children(
         if dataset.dataset_id != dataset_id:
             raise ValueError("training feature child differs from fit lineage")
         features[dataset_id] = dataset
+    expected_source = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_source, str):
+        raise ValueError("selection is missing the authenticated target source")
     targets: dict[str, TargetDataset] = {}
     target_sources: dict[str, str] = {}
     for dataset_id in sorted(target_ids):
@@ -458,10 +485,11 @@ def _load_training_children(
         dataset = _training_target_dataset_from_payload(payload)
         if dataset.dataset_id != dataset_id:
             raise ValueError("training target child differs from fit lineage")
+        source_id = _training_target_source_id(payload)
+        if source_id != expected_source:
+            raise ValueError("training target source differs from the frozen target dataset")
         targets[dataset_id] = dataset
-        target_sources[dataset_id] = _text_value(
-            payload["source_target_dataset_id"], "training target source dataset ID"
-        )
+        target_sources[dataset_id] = source_id
     return features, targets, target_sources
 
 
@@ -514,14 +542,20 @@ _TRAINING_FEATURE_FIELDS = {
     "row_count",
     "rows",
 }
-_TRAINING_TARGET_FIELDS = {
+_TARGET_DATASET_FIELDS = {
     "contract",
     "schema_version",
     "dataset_id",
-    "source_target_dataset_id",
     "observation_dataset_id",
     "foundation_configuration_id",
     "rows",
+}
+_TRAINING_TARGET_PROJECTION_CONTRACT = "qtrad-r2-target-projection-v1"
+_TRAINING_TARGET_FIELDS = {
+    "contract",
+    "schema_version",
+    "source_target_dataset_id",
+    "target_dataset",
 }
 
 _SELECTION_FIELDS = {
@@ -896,8 +930,9 @@ def _replay_final_fit(
     preprocessing = payload.get("preprocessing")
     if not isinstance(preprocessing, Mapping):
         raise ValueError("final fit preprocessing evidence must be an object")
-    if training_target_source_dataset_id != training_target_dataset.dataset_id:
-        raise ValueError("final fit target source differs from its authenticated child")
+    expected_source = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_source, str) or training_target_source_dataset_id != expected_source:
+        raise ValueError("final fit target source differs from the frozen target dataset")
     expected_lineage = {
         "selection_manifest_id": selection.manifest_id,
         "experiment_configuration_id": selection.experiment_configuration_id,
@@ -908,7 +943,7 @@ def _replay_final_fit(
         "feature_schema_id": str(payload["feature_schema_id"]),
         "training_feature_dataset_id": training_feature_dataset.dataset_id,
         "training_target_dataset_id": training_target_dataset.dataset_id,
-        "training_target_source_dataset_id": training_target_source_dataset_id,
+        "training_target_source_dataset_id": expected_source,
     }
     for key, expected in expected_lineage.items():
         if preprocessing.get(key) != expected:
@@ -1210,6 +1245,7 @@ def _verify_seal_registry(
             configuration_id,
             model_family,
             _feature_set_id,
+            _feature_dataset_id,
             _manifest_id,
         ) in selection.configuration_registry
     }
@@ -1342,7 +1378,7 @@ def _verify_prepare_children(
         ] != feature_by_configuration.get(configuration_id):
             raise ValueError("final fit lineage differs from its seal")
     training_features, training_targets, training_target_sources = _load_training_children(
-        root, fit_payloads
+        root, fit_payloads, selection
     )
     for payload in fit_payloads:
         feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1450,6 +1486,9 @@ def write_holdout_preparation(
     if set(coverage) != set(seal.coverage_ids):
         raise ValueError("coverage arguments do not exactly match the seal")
     fit_payloads = tuple(_as_json(final_fits[fit_id]) for fit_id in seal.final_fit_ids)
+    expected_source = selection.evaluation_policy.get("target_dataset_id")
+    if not isinstance(expected_source, str):
+        raise ValueError("selection is missing the authenticated target source")
     training_target_sources: dict[str, str] = {}
     for payload in fit_payloads:
         _feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1458,8 +1497,8 @@ def write_holdout_preparation(
             preprocessing.get("training_target_source_dataset_id"),
             "final fit target source dataset ID",
         )
-        if source_id != target_id:
-            raise ValueError("final fit target source differs from its training child")
+        if source_id != expected_source:
+            raise ValueError("final fit target source differs from the frozen target dataset")
         previous = training_target_sources.setdefault(target_id, source_id)
         if previous != source_id:
             raise ValueError("training target child has inconsistent source lineage")
@@ -2291,9 +2330,15 @@ def _artifact_reference(
     identity_key: str,
 ) -> tuple[ArtifactReference, dict[str, object]]:
     payload = _load_object(root / source_path)
+    semantic_id = payload.get(identity_key)
+    if contract == _TRAINING_TARGET_PROJECTION_CONTRACT:
+        nested = _object_dict(payload.get("target_dataset"), "training target dataset")
+        semantic_id = nested.get(identity_key)
+    if not isinstance(semantic_id, str):
+        raise ValueError(f"{contract} child lacks its semantic identity")
     reference = ArtifactReference(
         contract=contract,
-        semantic_id=str(payload[identity_key]),
+        semantic_id=semantic_id,
         path=bundle_path,
         sha256=sha256(canonical_bytes(payload)).hexdigest(),
     )
@@ -2312,6 +2357,7 @@ def _verify_artifact_reference_payload(
         R2_HOLDOUT_FEATURES_CONTRACT: "dataset_id",
         "qtrad-r2-features-v2": "dataset_id",
         TARGET_DATASET_CONTRACT: "dataset_id",
+        _TRAINING_TARGET_PROJECTION_CONTRACT: "dataset_id",
         "qtrad-r2-final-fit-v1": "fit_id",
         R2_HOLDOUT_FORECAST_CONTRACT: "dataset_id",
         R2_HOLDOUT_COVERAGE_CONTRACT: "coverage_id",
@@ -2323,7 +2369,11 @@ def _verify_artifact_reference_payload(
         raise ValueError(f"holdout bundle has an unsupported child contract: {reference.contract}")
     if payload.get("contract") != reference.contract:
         raise ValueError(f"holdout bundle child contract differs: {reference.path}")
-    if str(payload.get(identity_key)) != reference.semantic_id:
+    identity = payload.get(identity_key)
+    if reference.contract == _TRAINING_TARGET_PROJECTION_CONTRACT:
+        nested = _object_dict(payload.get("target_dataset"), "training target dataset")
+        identity = nested.get(identity_key)
+    if str(identity) != reference.semantic_id:
         raise ValueError(f"holdout bundle child identity differs: {reference.path}")
 
 
@@ -2395,7 +2445,7 @@ def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
             if relative.startswith("training/features/")
         ],
         *[
-            (relative, relative, TARGET_DATASET_CONTRACT, "dataset_id")
+            (relative, relative, _TRAINING_TARGET_PROJECTION_CONTRACT, "dataset_id")
             for relative in _training_paths_for_seal(root, seal)
             if relative.startswith("training/targets/")
         ],
@@ -2796,12 +2846,14 @@ def reveal_holdout_from_files(
         _coverage_dataset_from_payload(_load_object(root / "coverage" / f"{coverage_id}.json"))
         for coverage_id in seal.coverage_ids
     )
-
     target_dataset: TargetDataset | None = None
 
     def load_outcomes() -> TargetDataset:
         nonlocal target_dataset
-        target_dataset = _training_target_dataset_from_payload(_load_object(outcomes_path))
+        target_dataset = _target_dataset_from_payload(
+            _load_object(outcomes_path),
+            field="canonical target dataset",
+        )
         return target_dataset
 
     def evaluate(
