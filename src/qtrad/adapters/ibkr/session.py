@@ -134,6 +134,7 @@ class IbkrSessionSnapshot:
     desired_subscriptions: int
     active_subscriptions: int
     reason_codes: tuple[str, ...]
+    recovery_action: IbkrRecoveryAction = IbkrRecoveryAction.NONE
 
 
 class IbkrSession:
@@ -472,6 +473,13 @@ class IbkrSession:
         )
 
     def snapshot(self) -> IbkrSessionSnapshot:
+        recovery_action = IbkrRecoveryAction.NONE
+        if self._state is IbkrSessionState.FAILED_OPERATOR:
+            recovery_action = IbkrRecoveryAction.OPERATOR
+        elif "GATEWAY_RESTART_REQUIRED" in self._reason_codes:
+            recovery_action = IbkrRecoveryAction.RESTART_GATEWAY
+        elif "IBKR_PORT_RESET" in self._reason_codes:
+            recovery_action = IbkrRecoveryAction.RESTART_ADAPTER
         return IbkrSessionSnapshot(
             state=self._state,
             generation=self._generation,
@@ -482,6 +490,7 @@ class IbkrSession:
             desired_subscriptions=len(self._desired),
             active_subscriptions=len(self._active),
             reason_codes=tuple(sorted(self._reason_codes)),
+            recovery_action=recovery_action,
         )
 
     def reconnect_delay(self, attempt: int, random_fraction: float) -> float:

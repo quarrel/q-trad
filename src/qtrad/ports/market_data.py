@@ -29,6 +29,15 @@ _MAX_LISTING_REVIEW_CANDIDATES = 100
 
 @dataclass(frozen=True, slots=True)
 class MarketDataRecord:
+    """One provider callback normalised for the shared ingestion pipeline.
+
+    ``connection_generation`` and ``arrival_sequence`` are optional for
+    backwards compatibility with existing adapters.  Provider adapters that
+    need identity-authenticated replay must populate both values; IG keeps
+    its existing merged-update semantics and therefore continues to omit
+    them.
+    """
+
     provider: str
     environment: str
     subscription: str
@@ -39,6 +48,14 @@ class MarketDataRecord:
     quote: MarketQuote | None
     error_code: str | None = None
     error_detail: str | None = None
+    connection_generation: int | None = None
+    arrival_sequence: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.connection_generation is not None and self.connection_generation < 1:
+            raise ValueError("market-data connection generation must be positive")
+        if self.arrival_sequence is not None and self.arrival_sequence < 1:
+            raise ValueError("market-data arrival sequence must be positive")
 
 
 @dataclass(frozen=True, slots=True)
