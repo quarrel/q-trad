@@ -283,9 +283,8 @@ def freeze_holdout_selection(
     control_configuration_ids: Sequence[str] | None = None,
     verified_oof_bundle: R2OofBundle | None = None,
     verified_experiment: R2ExperimentConfig | None = None,
-    configuration_registry: Sequence[
-        tuple[str, ModelFamily, str | None, str | None, str | None]
-    ] | None = None,
+    configuration_registry: Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]]
+    | None = None,
     evaluation_policy: Mapping[str, JsonValue] | None = None,
 ) -> R2HoldoutSelectionManifest:
     """Create PR A from an independently verified, still-pending R2.F1 selection."""
@@ -928,8 +927,7 @@ def fit_final_ridge(
                 training_feature_dataset_id,
                 manifest,
             )
-            for configuration, family, feature_set, training_feature_dataset_id, manifest
-            in selection.configuration_registry
+            for configuration, family, feature_set, training_feature_dataset_id, manifest in selection.configuration_registry
             if configuration == configuration_id
         ),
         None,
@@ -1361,8 +1359,7 @@ def _feature_dataset_by_configuration(
     registry_entries = selection.configuration_registry
     registry = {
         configuration_id: (model_family, feature_set_id)
-        for configuration_id, model_family, feature_set_id, _feature_dataset_id, _manifest_id
-        in registry_entries
+        for configuration_id, model_family, feature_set_id, _feature_dataset_id, _manifest_id in registry_entries
     }
     configurations = tuple(
         selection.holdout_configuration_ids

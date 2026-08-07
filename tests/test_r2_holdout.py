@@ -760,10 +760,6 @@ def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> No
     assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in child["rows"])
 
 
-
-
-
-
 def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:
     selection, _opportunities_value, _fits, _forecasts, _coverage, seal = _prepared(tmp_path)
     outcomes_path = tmp_path.parent / "canonical-target.json"
