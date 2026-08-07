@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import datetime
 from enum import StrEnum
 from hashlib import sha256
@@ -450,6 +451,10 @@ class R2HoldoutSelectionManifest:
     state: HoldoutSelectionState
     holdout_outcomes_accessed: bool
     manifest_id: str
+    configuration_registry: tuple[tuple[str, ModelFamily, str | None, str | None], ...] = ()
+    evaluation_policy: Mapping[str, JsonValue] = dataclass_field(
+        default_factory=lambda: cast(dict[str, JsonValue], {})
+    )
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_SELECTION_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -488,6 +493,22 @@ class R2HoldoutSelectionManifest:
             self.comparator_families
         ):
             raise ValueError("comparator families must be unique and non-empty")
+        if self.configuration_registry:
+            registry_ids = tuple(item[0] for item in self.configuration_registry)
+            _ordered_ids(registry_ids, "configuration registry IDs")
+            if set(registry_ids) != set(evaluated):
+                raise ValueError("configuration registry must cover the evaluated configurations")
+            for (
+                configuration_id,
+                _model_family,
+                feature_set_id,
+                manifest_id,
+            ) in self.configuration_registry:
+                _require_id(configuration_id, "configuration registry configuration ID")
+                if feature_set_id is not None:
+                    _require_id(feature_set_id, "configuration registry feature-set ID")
+                if manifest_id is not None:
+                    _require_id(manifest_id, "configuration registry model manifest ID")
         if not self.questions or len({item.question_id for item in self.questions}) != len(
             self.questions
         ):
@@ -510,6 +531,8 @@ class R2HoldoutSelectionManifest:
         raw.pop("manifest_id", None)
         raw.setdefault("state", HoldoutSelectionState.SEALED_UNOPENED)
         raw.setdefault("holdout_outcomes_accessed", False)
+        raw.setdefault("configuration_registry", ())
+        raw.setdefault("evaluation_policy", {})
         raw["evaluated_configuration_ids"] = tuple(
             sorted(cast(Sequence[str], raw["evaluated_configuration_ids"]))
         )
@@ -523,6 +546,12 @@ class R2HoldoutSelectionManifest:
             sorted(cast(Sequence[str], raw["holdout_configuration_ids"]))
         )
         raw["comparator_families"] = tuple(cast(Sequence[ModelFamily], raw["comparator_families"]))
+        raw["configuration_registry"] = tuple(
+            cast(
+                Sequence[tuple[str, ModelFamily, str | None, str | None]],
+                raw["configuration_registry"],
+            )
+        )
         raw["questions"] = tuple(cast(Sequence[R2HoldoutQuestion], raw["questions"]))
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
@@ -549,8 +578,18 @@ class R2HoldoutSelectionManifest:
             "control_configuration_ids": list(self.control_configuration_ids),
             "holdout_configuration_ids": list(self.holdout_configuration_ids),
             "comparator_families": [item.value for item in self.comparator_families],
+            "configuration_registry": [
+                [configuration_id, model_family.value, feature_set_id, manifest_id]
+                for (
+                    configuration_id,
+                    model_family,
+                    feature_set_id,
+                    manifest_id,
+                ) in self.configuration_registry
+            ],
             "metric_policy": _json_object(self.metric_policy),
             "threshold_policy": _json_object(self.threshold_policy),
+            "evaluation_policy": _json_object(self.evaluation_policy),
             "final_fitting_policy": self.final_fitting_policy.as_json(),
             "questions": [item.as_json() for item in self.questions],
             "holdout_range": [item.isoformat() for item in self.holdout_range],
@@ -587,8 +626,10 @@ class R2HoldoutSelectionManifest:
             "control_configuration_ids",
             "holdout_configuration_ids",
             "comparator_families",
+            "configuration_registry",
             "metric_policy",
             "threshold_policy",
+            "evaluation_policy",
             "final_fitting_policy",
             "questions",
             "holdout_range",
@@ -605,8 +646,26 @@ class R2HoldoutSelectionManifest:
             raise ValueError("holdout selection manifest has unknown or unsupported fields")
         policy = R2FinalFittingPolicy.from_json(raw["final_fitting_policy"])
         question_values = raw["questions"]
+        registry_values = raw["configuration_registry"]
         if not isinstance(question_values, list):
             raise ValueError("holdout selection question register must be an array")
+        if not isinstance(registry_values, list):
+            raise ValueError("holdout configuration registry must be an array")
+        registry: list[tuple[str, ModelFamily, str | None, str | None]] = []
+        for raw_item in cast(list[object], registry_values):
+            if not isinstance(raw_item, list):
+                raise ValueError("holdout configuration registry entry is invalid")
+            item = cast(list[object], raw_item)
+            if len(item) != 4:
+                raise ValueError("holdout configuration registry entry is invalid")
+            registry.append(
+                (
+                    str(item[0]),
+                    ModelFamily(str(item[1])),
+                    None if item[2] is None else str(item[2]),
+                    None if item[3] is None else str(item[3]),
+                )
+            )
         return cls(
             experiment_configuration_id=str(raw["experiment_configuration_id"]),
             foundation_bundle_id=str(raw["foundation_bundle_id"]),
@@ -631,8 +690,10 @@ class R2HoldoutSelectionManifest:
             comparator_families=tuple(
                 ModelFamily(str(item)) for item in cast(list[object], raw["comparator_families"])
             ),
+            configuration_registry=tuple(registry),
             metric_policy=cast(Mapping[str, JsonValue], raw["metric_policy"]),
             threshold_policy=cast(Mapping[str, JsonValue], raw["threshold_policy"]),
+            evaluation_policy=cast(Mapping[str, JsonValue], raw["evaluation_policy"]),
             final_fitting_policy=policy,
             questions=tuple(
                 R2HoldoutQuestion.from_json(item) for item in cast(list[object], question_values)
@@ -907,6 +968,8 @@ class R2HoldoutFeatureDataset:
     outcome_blind_projection: str
     holdout_outcomes_accessed: bool
     dataset_id: str
+    target_dataset_id: str | None = None
+    opportunity_target_ids: tuple[tuple[str, str], ...] = ()
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_FEATURES_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -923,6 +986,12 @@ class R2HoldoutFeatureDataset:
             (self.dataset_id, "holdout feature dataset ID"),
         ):
             _require_id(value, field)
+        if self.target_dataset_id is None and self.holdout_scope is HoldoutScope.CONFIRMATORY:
+            raise ValueError(
+                "confirmatory holdout features require authenticated target-dataset lineage"
+            )
+        if self.target_dataset_id is not None:
+            _require_id(self.target_dataset_id, "holdout target dataset ID")
         if self.holdout_scope is HoldoutScope.DISPOSABLE_FIXTURE and (
             self.evidence_class is not EvidenceClass.IMPLEMENTATION
         ):
@@ -936,6 +1005,15 @@ class R2HoldoutFeatureDataset:
         unavailable = _ordered_ids(self.unavailable_opportunity_ids, "unavailable opportunity IDs")
         if not set(unavailable) <= set(expected):
             raise ValueError("unavailable opportunities must be expected opportunities")
+        target_pairs = tuple(sorted(self.opportunity_target_ids))
+        if target_pairs != self.opportunity_target_ids:
+            raise ValueError("opportunity target bindings must be ordered")
+        if len({opportunity_id for opportunity_id, _target_id in target_pairs}) != len(
+            target_pairs
+        ):
+            raise ValueError("opportunity target bindings must be unique")
+        if not {opportunity_id for opportunity_id, _target_id in target_pairs} <= set(expected):
+            raise ValueError("opportunity target binding is not expected")
         rows = tuple(sorted(self.rows, key=lambda item: (item.decision_time, item.row_id)))
         if rows != self.rows:
             raise ValueError("holdout feature rows must be deterministically ordered")
@@ -956,6 +1034,10 @@ class R2HoldoutFeatureDataset:
         raw.pop("dataset_id", None)
         raw.setdefault("outcome_blind_projection", "TARGET_OUTCOME_BLIND_V1")
         raw.setdefault("holdout_outcomes_accessed", False)
+        raw.setdefault("target_dataset_id", None)
+        raw["opportunity_target_ids"] = tuple(
+            sorted(cast(Sequence[tuple[str, str]], raw.get("opportunity_target_ids", ())))
+        )
         raw["expected_opportunity_ids"] = tuple(
             sorted(cast(Sequence[str], raw["expected_opportunity_ids"]))
         )
@@ -993,6 +1075,8 @@ class R2HoldoutFeatureDataset:
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "expected_opportunity_ids": list(self.expected_opportunity_ids),
             "unavailable_opportunity_ids": list(self.unavailable_opportunity_ids),
+            "opportunity_target_ids": [list(item) for item in self.opportunity_target_ids],
+            "target_dataset_id": self.target_dataset_id,
             "rows": [item.as_json() for item in self.rows],
             "outcome_blind_projection": self.outcome_blind_projection,
             "holdout_outcomes_accessed": self.holdout_outcomes_accessed,
@@ -1177,7 +1261,7 @@ class R2FinalFit:
 class R2HoldoutForecastRow:
     configuration_id: str
     target_id: str
-    feature_row_id: str
+    feature_row_id: str | None
     forecast: float
     model_family: ModelFamily
     row_id: str
@@ -1188,10 +1272,11 @@ class R2HoldoutForecastRow:
         for value, field in (
             (self.configuration_id, "forecast configuration ID"),
             (self.target_id, "forecast target ID"),
-            (self.feature_row_id, "forecast feature row ID"),
             (self.row_id, "forecast row ID"),
         ):
             _require_id(value, field)
+        if self.feature_row_id is not None:
+            _require_id(self.feature_row_id, "forecast feature row ID")
         _finite(self.forecast, "holdout forecast")
         if self.row_id != _semantic_id(self.semantic_json()):
             raise ValueError("forecast row ID does not authenticate its content")
@@ -1202,7 +1287,7 @@ class R2HoldoutForecastRow:
         *,
         configuration_id: str,
         target_id: str,
-        feature_row_id: str,
+        feature_row_id: str | None,
         forecast: float,
         model_family: ModelFamily,
     ) -> R2HoldoutForecastRow:
@@ -1244,7 +1329,7 @@ class R2HoldoutForecastDataset:
     selection_manifest_id: str
     feature_dataset_id: str
     configuration_id: str
-    final_fit_id: str
+    final_fit_id: str | None
     rows: tuple[R2HoldoutForecastRow, ...]
     expected_opportunity_ids: tuple[str, ...]
     source_class: MarketDataSourceClass
@@ -1261,10 +1346,11 @@ class R2HoldoutForecastDataset:
             (self.selection_manifest_id, "forecast selection ID"),
             (self.feature_dataset_id, "forecast feature dataset ID"),
             (self.configuration_id, "forecast configuration ID"),
-            (self.final_fit_id, "forecast final-fit ID"),
             (self.dataset_id, "forecast dataset ID"),
         ):
             _require_id(value, field)
+        if self.final_fit_id is not None:
+            _require_id(self.final_fit_id, "forecast final-fit ID")
         _ordered_ids(self.expected_opportunity_ids, "forecast expected opportunities")
         if self.holdout_outcomes_accessed:
             raise ValueError("holdout forecast generation cannot access outcomes")
@@ -1456,12 +1542,10 @@ class R2HoldoutForecastSeal:
             (self.coverage_ids, "seal coverage IDs"),
         ):
             _ordered_ids(values, field)
-        if not self.final_fit_ids or not self.forecast_dataset_ids or not self.coverage_ids:
-            raise ValueError("seal must bind final fits, forecasts, and coverage")
-        if len(self.final_fit_ids) != len(self.forecast_dataset_ids) or len(
-            self.final_fit_ids
-        ) != len(self.coverage_ids):
-            raise ValueError("seal child arrays must have matching cardinality")
+        if not self.forecast_dataset_ids or not self.coverage_ids:
+            raise ValueError("seal must bind forecasts and coverage")
+        if len(self.forecast_dataset_ids) != len(self.coverage_ids):
+            raise ValueError("seal forecast and coverage arrays must have matching cardinality")
         if len(self.configuration_pairs) == 0:
             raise ValueError("seal must freeze at least one configuration pair")
         if len(set(self.questions)) != len(self.questions):
@@ -1831,6 +1915,7 @@ class R2HoldoutOutcomeEvidence:
     evidence_class: EvidenceClass
     holdout_scope: HoldoutScope
     outcome_evidence_id: str
+    target_dataset_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -1846,6 +1931,10 @@ class R2HoldoutOutcomeEvidence:
             (self.outcome_evidence_id, "outcome evidence ID"),
         ):
             _require_id(value, field)
+        if self.target_dataset_id is None and self.holdout_scope is HoldoutScope.CONFIRMATORY:
+            raise ValueError("confirmatory outcomes require authenticated target-dataset lineage")
+        if self.target_dataset_id is not None:
+            _require_id(self.target_dataset_id, "outcome target dataset ID")
         _positive_range(self.holdout_range, "outcome holdout range")
         if tuple(sorted(self.expected_target_ids)) != self.expected_target_ids:
             raise ValueError("outcome expected target IDs must be ordered")
@@ -1880,6 +1969,7 @@ class R2HoldoutOutcomeEvidence:
     def create(cls, **values: object) -> R2HoldoutOutcomeEvidence:
         raw = dict(values)
         raw.pop("outcome_evidence_id", None)
+        raw.setdefault("target_dataset_id", None)
         raw["expected_target_ids"] = tuple(sorted(cast(Sequence[str], raw["expected_target_ids"])))
         raw["source_row_ids"] = tuple(
             sorted(cast(Sequence[tuple[str, str]], raw["source_row_ids"]))
@@ -1903,6 +1993,7 @@ class R2HoldoutOutcomeEvidence:
             "experiment_configuration_id": self.experiment_configuration_id,
             "foundation_bundle_id": self.foundation_bundle_id,
             "feature_dataset_id": self.feature_dataset_id,
+            "target_dataset_id": self.target_dataset_id,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "expected_target_ids": list(self.expected_target_ids),
             "source_row_ids": [[target_id, row_id] for target_id, row_id in self.source_row_ids],

@@ -11,6 +11,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Any, cast
 
+from qtrad.domain.foundation import TargetDataset
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import ArtifactReference
 from qtrad.domain.r2_holdout import (
@@ -166,8 +167,10 @@ _SELECTION_FIELDS = {
     "control_configuration_ids",
     "holdout_configuration_ids",
     "comparator_families",
+    "configuration_registry",
     "metric_policy",
     "threshold_policy",
+    "evaluation_policy",
     "final_fitting_policy",
     "questions",
     "holdout_range",
@@ -197,6 +200,8 @@ _FEATURE_FIELDS = {
     "expected_opportunity_ids",
     "unavailable_opportunity_ids",
     "rows",
+    "opportunity_target_ids",
+    "target_dataset_id",
     "outcome_blind_projection",
     "holdout_outcomes_accessed",
     "dataset_id",
@@ -317,6 +322,7 @@ _OUTCOME_EVIDENCE_FIELDS = {
     "experiment_configuration_id",
     "foundation_bundle_id",
     "feature_dataset_id",
+    "target_dataset_id",
     "holdout_range",
     "expected_target_ids",
     "source_row_ids",
@@ -351,6 +357,8 @@ _PREPARATION_CLAIM_FIELDS = {
     "selection_manifest_id",
     "seal_id",
     "state",
+    "transfer_id",
+    "source_claim_id",
     "claim_id",
 }
 _PREPARATION_USAGE_FIELDS = {
@@ -358,7 +366,9 @@ _PREPARATION_USAGE_FIELDS = {
     "schema_version",
     "selection_manifest_id",
     "seal_id",
-    "claim_id",
+    "source_claim_id",
+    "destination_claim_id",
+    "transfer_id",
     "usage_id",
 }
 
@@ -387,6 +397,8 @@ def _preparation_claim(
     seal_id: str,
     *,
     state: str = "AVAILABLE",
+    transfer_id: str | None = None,
+    source_claim_id: str | None = None,
 ) -> dict[str, object]:
     semantic = {
         "contract": _PREPARATION_CLAIM_CONTRACT,
@@ -394,6 +406,8 @@ def _preparation_claim(
         "selection_manifest_id": selection_manifest_id,
         "seal_id": seal_id,
         "state": state,
+        "transfer_id": transfer_id,
+        "source_claim_id": source_claim_id,
     }
     return {
         **semantic,
@@ -401,17 +415,36 @@ def _preparation_claim(
     }
 
 
+def _preparation_transfer_id(
+    selection_manifest_id: str,
+    seal_id: str,
+    source_claim_id: str,
+) -> str:
+    semantic = {
+        "contract": "qtrad-r2-holdout-preparation-transfer-v1",
+        "schema_version": 1,
+        "selection_manifest_id": selection_manifest_id,
+        "seal_id": seal_id,
+        "source_claim_id": source_claim_id,
+    }
+    return _semantic_id(semantic, "transfer_id")
+
+
 def _preparation_usage(
     selection_manifest_id: str,
     seal_id: str,
-    claim_id: str,
+    source_claim_id: str,
+    destination_claim_id: str,
+    transfer_id: str,
 ) -> dict[str, object]:
     semantic = {
         "contract": _PREPARATION_USAGE_CONTRACT,
         "schema_version": 1,
         "selection_manifest_id": selection_manifest_id,
         "seal_id": seal_id,
-        "claim_id": claim_id,
+        "source_claim_id": source_claim_id,
+        "destination_claim_id": destination_claim_id,
+        "transfer_id": transfer_id,
     }
     return {
         **semantic,
@@ -426,20 +459,43 @@ def _claim_preparation(
 ) -> None:
     claim_path = root / _PREPARATION_CLAIM_FILE
     current = _load_object(claim_path)
-    available = _preparation_claim(
+    initial_unopened = _preparation_claim(
         selection_manifest_id,
         seal_id,
-        state="AVAILABLE",
+        state="OWNED_UNOPENED",
     )
-    claimed = _preparation_claim(
+    initial_opened = _preparation_claim(
         selection_manifest_id,
         seal_id,
-        state="CLAIMED",
+        state="OWNED_OPENED",
     )
-    if current == available:
-        _replace_json(claim_path, claimed)
-    elif current != claimed:
-        raise ValueError("preparation claim does not bind the exact seal")
+    if current == initial_unopened:
+        _replace_json(claim_path, initial_opened)
+        return
+    if current == initial_opened:
+        return
+    transfer_id = current.get("transfer_id")
+    source_claim_id = current.get("source_claim_id")
+    if not isinstance(transfer_id, str) or not isinstance(source_claim_id, str):
+        raise ValueError("holdout preparation is not an owned transferred preparation")
+    owned_unopened = _preparation_claim(
+        selection_manifest_id,
+        seal_id,
+        state="OWNED_UNOPENED",
+        transfer_id=transfer_id,
+        source_claim_id=source_claim_id,
+    )
+    owned_opened = _preparation_claim(
+        selection_manifest_id,
+        seal_id,
+        state="OWNED_OPENED",
+        transfer_id=transfer_id,
+        source_claim_id=source_claim_id,
+    )
+    if current == owned_unopened:
+        _replace_json(claim_path, owned_opened)
+    elif current != owned_opened:
+        raise ValueError("holdout preparation is not owned by this root")
 
 
 def _replay_final_fit(selection: R2HoldoutSelectionManifest, payload: Mapping[str, object]) -> None:
@@ -563,6 +619,13 @@ def _feature_dataset_from_payload(payload: Mapping[str, object]) -> R2HoldoutFea
             str(item) for item in cast(list[object], payload["unavailable_opportunity_ids"])
         ),
         rows=rows,
+        opportunity_target_ids=tuple(
+            (str(cast(list[object], item)[0]), str(cast(list[object], item)[1]))
+            for item in cast(list[object], payload.get("opportunity_target_ids", []))
+        ),
+        target_dataset_id=(
+            None if payload.get("target_dataset_id") is None else str(payload["target_dataset_id"])
+        ),
         outcome_blind_projection=str(payload["outcome_blind_projection"]),
         holdout_outcomes_accessed=payload["holdout_outcomes_accessed"] is True,
         dataset_id=str(payload["dataset_id"]),
@@ -614,10 +677,28 @@ def _replay_holdout_outputs(
         )
         for item in fit_payloads
     )
+    unavailable = set(feature_dataset.unavailable_opportunity_ids)
+    target_by_opportunity = dict(feature_dataset.opportunity_target_ids)
+    row_target_by_opportunity = {row.opportunity_id: row.target_id for row in feature_dataset.rows}
+    opportunities = tuple(
+        SimpleNamespace(
+            opportunity_id=opportunity_id,
+            target_id=target_by_opportunity.get(
+                opportunity_id, row_target_by_opportunity.get(opportunity_id, opportunity_id)
+            ),
+            disposition=(
+                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
+                if opportunity_id in unavailable
+                else HoldoutOpportunityDisposition.ELIGIBLE
+            ),
+        )
+        for opportunity_id in feature_dataset.expected_opportunity_ids
+    )
     actual_forecasts = build_holdout_forecasts(
         selection=selection,
         feature_dataset=cast(Any, feature_dataset),
         final_fits=cast(Any, fits),
+        opportunities=cast(Any, opportunities),
     )
     forecasts_by_id = {item.dataset_id: item for item in actual_forecasts}
     for payload in forecast_payloads:
@@ -627,31 +708,18 @@ def _replay_holdout_outputs(
             raise ValueError(f"holdout forecast does not replay: {dataset_id}")
     if set(forecasts_by_id) != {str(item["dataset_id"]) for item in forecast_payloads}:
         raise ValueError("holdout forecast replay set differs from persisted children")
-
-    unavailable = set(feature_dataset.unavailable_opportunity_ids)
-    opportunities = tuple(
-        SimpleNamespace(
-            opportunity_id=opportunity_id,
-            disposition=(
-                HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE
-                if opportunity_id in unavailable
-                else HoldoutOpportunityDisposition.ELIGIBLE
-            ),
-        )
-        for opportunity_id in feature_dataset.expected_opportunity_ids
-    )
-    forecasts_by_configuration = {item.configuration_id: item for item in actual_forecasts}
+    fits_by_configuration = {fit.configuration_id: fit for fit in fits}
     actual_coverage = {
         item.coverage_id: item
         for item in (
             build_holdout_coverage(
                 selection=selection,
                 feature_dataset=cast(Any, feature_dataset),
-                final_fit=cast(Any, fit),
-                forecast_dataset=forecasts_by_configuration[fit.configuration_id],
+                final_fit=cast(Any, fits_by_configuration.get(forecast.configuration_id)),
+                forecast_dataset=forecast,
                 opportunities=cast(Any, opportunities),
             )
-            for fit in fits
+            for forecast in actual_forecasts
         )
     }
     for payload in coverage_payloads:
@@ -666,11 +734,41 @@ def _replay_holdout_outputs(
 def _verify_seal_registry(
     selection: R2HoldoutSelectionManifest,
     seal: R2HoldoutForecastSeal,
+    feature_payload: Mapping[str, object],
     fit_payloads: Sequence[Mapping[str, object]],
     forecast_payloads: Sequence[Mapping[str, object]],
     coverage_payloads: Sequence[Mapping[str, object]],
 ) -> None:
     expected_configurations = set(selection.holdout_configuration_ids)
+    registry_by_configuration = {
+        configuration_id: model_family.value
+        for (
+            configuration_id,
+            model_family,
+            _feature_set_id,
+            _manifest_id,
+        ) in selection.configuration_registry
+    }
+    registry_feature_sets = {
+        feature_set_id
+        for (
+            _configuration_id,
+            _model_family,
+            feature_set_id,
+            _manifest_id,
+        ) in selection.configuration_registry
+        if feature_set_id is not None
+    }
+    if len(registry_feature_sets) > 1 or (
+        registry_feature_sets
+        and str(feature_payload["feature_set_id"]) not in registry_feature_sets
+    ):
+        raise ValueError("holdout feature dataset differs from the authenticated OOF registry")
+    expected_fit_configurations = {
+        configuration_id
+        for configuration_id in expected_configurations
+        if registry_by_configuration.get(configuration_id) != "ZERO_RETURN"
+    }
     declared_families = {
         getattr(family, "value", str(family)) for family in selection.comparator_families
     }
@@ -687,53 +785,66 @@ def _verify_seal_registry(
     fits_by_configuration: dict[str, Mapping[str, object]] = {}
     for payload in fit_payloads:
         configuration_id = str(payload["configuration_id"])
-        if configuration_id in fits_by_configuration:
-            raise ValueError("holdout seal contains duplicate final-fit configurations")
+        model_family = str(payload["model_family"])
+        if (
+            configuration_id in fits_by_configuration
+            or configuration_id not in expected_fit_configurations
+            or model_family not in declared_families
+            or (
+                configuration_id in registry_by_configuration
+                and model_family != registry_by_configuration[configuration_id]
+            )
+        ):
+            raise ValueError("final-fit registry does not reconcile to the frozen selection")
         if (
             payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != seal.feature_dataset_id
-            or configuration_id not in expected_configurations
-            or str(payload["model_family"]) not in declared_families
         ):
-            raise ValueError("final-fit registry does not reconcile to the frozen selection")
+            raise ValueError("final-fit registry lineage differs from the frozen seal")
         fits_by_configuration[configuration_id] = payload
     forecasts_by_configuration: dict[str, Mapping[str, object]] = {}
     for payload in forecast_payloads:
         configuration_id = str(payload["configuration_id"])
-        if configuration_id in forecasts_by_configuration:
-            raise ValueError("holdout seal contains duplicate forecast configurations")
+        expected_family = registry_by_configuration.get(configuration_id)
         fit = fits_by_configuration.get(configuration_id)
         if (
-            fit is None
+            configuration_id in forecasts_by_configuration
+            or configuration_id not in expected_configurations
             or payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != seal.feature_dataset_id
-            or payload["final_fit_id"] != fit["fit_id"]
         ):
+            raise ValueError("forecast registry does not reconcile to the frozen selection")
+        if expected_family == "ZERO_RETURN":
+            if fit is not None or payload["final_fit_id"] is not None:
+                raise ValueError("ZERO_RETURN forecast must be fitless")
+        elif fit is None or payload["final_fit_id"] != fit["fit_id"]:
             raise ValueError("forecast registry does not reconcile to the final-fit registry")
         raw_rows = _object_list(payload["rows"], "holdout forecast rows")
         for raw_row in raw_rows:
             row = _object_dict(raw_row, "holdout forecast row")
-            if row.get("model_family") != fit["model_family"]:
-                raise ValueError("forecast row model family differs from its final fit")
+            row_family = expected_family or (str(fit["model_family"]) if fit is not None else "")
+            if row.get("model_family") != row_family:
+                raise ValueError("forecast row model family differs from its registry")
         forecasts_by_configuration[configuration_id] = payload
     coverage_by_configuration: dict[str, Mapping[str, object]] = {}
     for payload in coverage_payloads:
         configuration_id = str(payload["configuration_id"])
-        if configuration_id in coverage_by_configuration:
-            raise ValueError("holdout seal contains duplicate coverage configurations")
+        expected_family = registry_by_configuration.get(configuration_id)
         if (
-            configuration_id not in fits_by_configuration
+            configuration_id in coverage_by_configuration
+            or configuration_id not in expected_configurations
             or payload["selection_manifest_id"] != seal.selection_manifest_id
             or payload["feature_dataset_id"] != seal.feature_dataset_id
+            or (expected_family != "ZERO_RETURN" and configuration_id not in fits_by_configuration)
         ):
-            raise ValueError("coverage registry does not reconcile to the final-fit registry")
+            raise ValueError("coverage registry does not reconcile to the frozen selection")
         coverage_by_configuration[configuration_id] = payload
-    for registry, name in (
-        (fits_by_configuration, "final-fit"),
-        (forecasts_by_configuration, "forecast"),
-        (coverage_by_configuration, "coverage"),
+    for registry, expected, name in (
+        (fits_by_configuration, expected_fit_configurations, "final-fit"),
+        (forecasts_by_configuration, expected_configurations, "forecast"),
+        (coverage_by_configuration, expected_configurations, "coverage"),
     ):
-        if set(registry) != expected_configurations:
+        if set(registry) != expected:
             raise ValueError(f"{name} registry does not exactly cover frozen configurations")
 
 
@@ -807,6 +918,7 @@ def _verify_prepare_children(
     _verify_seal_registry(
         selection,
         seal,
+        feature,
         fit_payloads,
         forecast_payloads,
         coverage_payloads,
@@ -854,7 +966,7 @@ def write_holdout_preparation(
         _preparation_claim(
             selection.manifest_id,
             seal.seal_id,
-            state="AVAILABLE",
+            state="OWNED_UNOPENED",
         ),
     )
     selection_path = output / "selection.json"
@@ -897,6 +1009,10 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     )
     seal = R2HoldoutForecastSeal.from_json(seal_payload)
     selection = verify_holdout_selection(path / "selection.json")
+    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+        raise ValueError(
+            "confirmatory holdout preparation requires the unsupported source-child workflow"
+        )
     _verify_prepare_children(path, seal, selection)
     claim_payload = _verify_child(
         path,
@@ -911,8 +1027,35 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     ):
         raise ValueError("preparation claim does not bind the exact seal")
     claim_state = claim_payload.get("state")
-    if claim_state not in {"AVAILABLE", "CLAIMED"}:
+    if claim_state not in {"AVAILABLE", "TRANSFERRED", "OWNED_UNOPENED", "OWNED_OPENED"}:
         raise ValueError("preparation claim has an unsupported state")
+    if claim_state == "AVAILABLE":
+        expected_claim = _preparation_claim(selection.manifest_id, seal.seal_id)
+        if claim_payload != expected_claim:
+            raise ValueError("available preparation claim is not authenticated")
+    else:
+        transfer_id = claim_payload.get("transfer_id")
+        source_claim_id = claim_payload.get("source_claim_id")
+        if transfer_id is None and source_claim_id is None:
+            expected_claim = _preparation_claim(
+                selection.manifest_id,
+                seal.seal_id,
+                state=str(claim_state),
+            )
+            if claim_payload != expected_claim:
+                raise ValueError("owned preparation claim is not authenticated")
+        elif not isinstance(transfer_id, str) or not isinstance(source_claim_id, str):
+            raise ValueError("transferred preparation claim lacks ownership lineage")
+        else:
+            expected_claim = _preparation_claim(
+                selection.manifest_id,
+                seal.seal_id,
+                state=str(claim_state),
+                transfer_id=transfer_id,
+                source_claim_id=source_claim_id,
+            )
+            if claim_payload != expected_claim:
+                raise ValueError("preparation claim ownership lineage is not authenticated")
     allowed = {
         "manifest.json",
         "selection.json",
@@ -920,6 +1063,9 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
         _PREPARATION_CLAIM_FILE,
     }
     usage_path = path / _PREPARATION_USAGE_FILE
+    has_transfer_lineage = isinstance(claim_payload.get("transfer_id"), str) and isinstance(
+        claim_payload.get("source_claim_id"), str
+    )
     if usage_path.is_file():
         usage_payload = _verify_child(
             path,
@@ -928,14 +1074,30 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
             identity_key="usage_id",
             expected_fields=_PREPARATION_USAGE_FIELDS,
         )
+        if not has_transfer_lineage:
+            raise ValueError("untransferred preparation cannot carry a usage claim")
         expected_usage = _preparation_usage(
             selection.manifest_id,
             seal.seal_id,
-            str(claim_payload["claim_id"]),
+            str(claim_payload["source_claim_id"]),
+            str(usage_payload["destination_claim_id"]),
+            str(claim_payload["transfer_id"]),
         )
-        if claim_state != "CLAIMED" or usage_payload != expected_usage:
-            raise ValueError("preparation usage does not bind the claimed source")
+        expected_destination = _preparation_claim(
+            selection.manifest_id,
+            seal.seal_id,
+            state="OWNED_UNOPENED",
+            transfer_id=str(claim_payload["transfer_id"]),
+            source_claim_id=str(claim_payload["source_claim_id"]),
+        )
+        if (
+            usage_payload != expected_usage
+            or usage_payload["destination_claim_id"] != expected_destination["claim_id"]
+        ):
+            raise ValueError("preparation usage does not bind the transferred owner")
         allowed.add(_PREPARATION_USAGE_FILE)
+    elif has_transfer_lineage:
+        raise ValueError("transferred preparation requires a usage claim")
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
     allowed.update(f"fits/{fit_id}.json" for fit_id in seal.final_fit_ids)
@@ -981,27 +1143,47 @@ def prepare_holdout_from_files(
     if output.exists() or output.is_symlink():
         raise FileExistsError("holdout preparation output already exists")
     claim_path = source / _PREPARATION_CLAIM_FILE
-    claim = _preparation_claim(
+    existing_claim = _load_object(claim_path)
+    available = _preparation_claim(
         source_selection.manifest_id,
         source_seal.seal_id,
         state="AVAILABLE",
     )
-    existing_claim = _load_object(claim_path)
-    if existing_claim != claim:
-        if existing_claim.get("state") == "CLAIMED":
-            raise FileExistsError("holdout preparation has already been claimed")
-        raise ValueError("source preparation claim differs from its authenticated seal")
-    claimed = _preparation_claim(
+    initial_unopened = _preparation_claim(
         source_selection.manifest_id,
         source_seal.seal_id,
-        state="CLAIMED",
+        state="OWNED_UNOPENED",
     )
-    _replace_json(claim_path, claimed)
+    if existing_claim != available and existing_claim != initial_unopened:
+        raise FileExistsError("source preparation has already been transferred")
+    source_claim_id = str(existing_claim["claim_id"])
+    transfer_id = _preparation_transfer_id(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        source_claim_id,
+    )
+    transferred = _preparation_claim(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        state="TRANSFERRED",
+        transfer_id=transfer_id,
+        source_claim_id=source_claim_id,
+    )
+    destination_claim = _preparation_claim(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        state="OWNED_UNOPENED",
+        transfer_id=transfer_id,
+        source_claim_id=source_claim_id,
+    )
     usage = _preparation_usage(
         source_selection.manifest_id,
         source_seal.seal_id,
-        str(claimed["claim_id"]),
+        source_claim_id,
+        str(destination_claim["claim_id"]),
+        transfer_id,
     )
+    _replace_json(claim_path, transferred)
     _write_json(source / _PREPARATION_USAGE_FILE, usage)
     paths = [
         _PREPARATION_CLAIM_FILE,
@@ -1013,7 +1195,12 @@ def prepare_holdout_from_files(
         *(f"coverage/{coverage_id}.json" for coverage_id in source_seal.coverage_ids),
     ]
     for relative in paths:
-        _write_json(output / relative, _load_object(source / relative))
+        _write_json(
+            output / relative,
+            destination_claim
+            if relative == _PREPARATION_CLAIM_FILE
+            else _load_object(source / relative),
+        )
     _write_json(output / _PREPARATION_USAGE_FILE, usage)
     return verify_holdout_preparation(output)
 
@@ -1052,15 +1239,43 @@ def _outcome_binding_from_feature_payload(
         raise ValueError("feature preparation must contain one row per target")
     if len({row_id for _, row_id in source_row_ids}) != len(source_row_ids):
         raise ValueError("feature preparation source rows must be unique")
+    raw_bindings = _object_list(
+        feature_payload.get("opportunity_target_ids", []),
+        "feature opportunity target bindings",
+    )
+    bindings = tuple(
+        (str(cast(list[object], item)[0]), str(cast(list[object], item)[1]))
+        for item in raw_bindings
+    )
+    if bindings:
+        expected_target_ids = tuple(sorted(target_id for _opportunity_id, target_id in bindings))
+        row_by_target = {
+            str(cast(Mapping[str, object], raw)["target_id"]): str(
+                cast(Mapping[str, object], raw)["row_id"]
+            )
+            for raw in raw_rows
+        }
+        source_row_ids = [
+            (target_id, row_by_target.get(target_id, target_id))
+            for target_id in expected_target_ids
+        ]
+    else:
+        source_row_ids = sorted(source_row_ids)
+        expected_target_ids = tuple(target_id for target_id, _ in source_row_ids)
     return {
         "experiment_configuration_id": str(feature_payload["experiment_configuration_id"]),
         "foundation_bundle_id": str(feature_payload["foundation_bundle_id"]),
         "feature_dataset_id": str(feature_payload["dataset_id"]),
+        "target_dataset_id": (
+            None
+            if feature_payload.get("target_dataset_id") is None
+            else str(feature_payload["target_dataset_id"])
+        ),
         "holdout_range": (
             datetime.fromisoformat(str(raw_range[0])),
             datetime.fromisoformat(str(raw_range[1])),
         ),
-        "expected_target_ids": target_ids,
+        "expected_target_ids": expected_target_ids,
         "source_row_ids": tuple(source_row_ids),
     }
 
@@ -1089,6 +1304,9 @@ def _outcome_evidence_from_payload(payload: Mapping[str, object]) -> R2HoldoutOu
         experiment_configuration_id=str(payload["experiment_configuration_id"]),
         foundation_bundle_id=str(payload["foundation_bundle_id"]),
         feature_dataset_id=str(payload["feature_dataset_id"]),
+        target_dataset_id=(
+            None if payload.get("target_dataset_id") is None else str(payload["target_dataset_id"])
+        ),
         holdout_range=(
             datetime.fromisoformat(str(raw_range[0])),
             datetime.fromisoformat(str(raw_range[1])),
@@ -1121,6 +1339,30 @@ def _outcome_items(value: object) -> tuple[tuple[str, float], ...]:
         seen.add(target_id)
         items.append((target_id, _float_value(raw[1], "holdout outcome")))
     return tuple(items)
+
+
+def _outcome_items_from_source(
+    value: object,
+    *,
+    expected_target_dataset_id: str | None,
+    expected_target_ids: Sequence[str],
+) -> tuple[tuple[str, float], ...]:
+    if isinstance(value, TargetDataset):
+        if expected_target_dataset_id is None or value.dataset_id != expected_target_dataset_id:
+            raise ValueError("outcomes are not bound to the prepared target dataset")
+        rows_by_target = {row.target_id: row for row in value.rows}
+        selected: list[tuple[str, float]] = []
+        for target_id in expected_target_ids:
+            row = rows_by_target.get(target_id)
+            if row is None or row.log_return is None:
+                raise ValueError("prepared target dataset lacks a realised target")
+            selected.append((target_id, row.log_return))
+        return _outcome_items(selected)
+    if expected_target_dataset_id is not None:
+        raise ValueError(
+            "prepared target outcomes must be loaded from the authenticated target dataset"
+        )
+    return _outcome_items(value)
 
 
 def _opened_from_payload(payload: Mapping[str, object]) -> R2HoldoutOpenedMarker:
@@ -1200,7 +1442,10 @@ def reveal_holdout(
     consumed_by: str,
     opened_at: object,
     consumed_at: object,
-    outcome_loader: Callable[[], Mapping[str, float] | Sequence[tuple[str, float]]],
+    outcome_loader: Callable[
+        [],
+        TargetDataset | Mapping[str, float] | Sequence[tuple[str, float]],
+    ],
     evaluator: Callable[[Mapping[str, float], R2HoldoutOpenedMarker], R2HoldoutEvaluation],
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
@@ -1222,6 +1467,10 @@ def reveal_holdout(
             raise ValueError("selection child differs from expected reveal selection")
     else:
         raise FileNotFoundError("prepared holdout root must contain selection.json")
+    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+        raise ValueError(
+            "confirmatory reveal requires an independently verified target dataset child"
+        )
     _claim_preparation(
         root,
         selection.manifest_id,
@@ -1243,9 +1492,6 @@ def reveal_holdout(
     evaluation_id = _FAILURE_EVALUATION_ID
     error: BaseException | None = None
     try:
-        raw_outcomes = outcome_loader()
-        outcome_items = _outcome_items(raw_outcomes)
-        outcome_mapping = dict(outcome_items)
         feature_payload = _verify_child(
             root,
             "features.json",
@@ -1255,9 +1501,16 @@ def reveal_holdout(
             expected_id=seal.feature_dataset_id,
         )
         binding = _outcome_binding_from_feature_payload(feature_payload)
-        if tuple(sorted(target_id for target_id, _ in outcome_items)) != tuple(
-            cast(tuple[str, ...], binding["expected_target_ids"])
-        ):
+        expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
+        target_dataset_id = cast(str | None, binding["target_dataset_id"])
+        raw_outcomes = outcome_loader()
+        outcome_items = _outcome_items_from_source(
+            raw_outcomes,
+            expected_target_dataset_id=target_dataset_id,
+            expected_target_ids=expected_target_ids,
+        )
+        outcome_mapping = dict(outcome_items)
+        if tuple(sorted(target_id for target_id, _ in outcome_items)) != expected_target_ids:
             raise ValueError("holdout outcomes must exactly cover prepared targets")
         outcome_evidence = R2HoldoutOutcomeEvidence.create(
             selection_manifest_id=selection.manifest_id,
@@ -1425,10 +1678,17 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
         expected_id=seal.feature_dataset_id,
     )
     binding = _outcome_binding_from_feature_payload(feature_payload)
+    expected_target_dataset_id = selection.evaluation_policy.get("target_dataset_id")
+    if (
+        expected_target_dataset_id is not None
+        and binding["target_dataset_id"] != expected_target_dataset_id
+    ):
+        raise ValueError("holdout features are not bound to the frozen target dataset")
     if (
         outcome_evidence.experiment_configuration_id != str(binding["experiment_configuration_id"])
         or outcome_evidence.foundation_bundle_id != str(binding["foundation_bundle_id"])
         or outcome_evidence.feature_dataset_id != str(binding["feature_dataset_id"])
+        or outcome_evidence.target_dataset_id != binding["target_dataset_id"]
         or outcome_evidence.holdout_range != binding["holdout_range"]
         or outcome_evidence.expected_target_ids
         != cast(tuple[str, ...], binding["expected_target_ids"])
@@ -1893,7 +2153,9 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
             R2HoldoutForecastRow(
                 configuration_id=str(item["configuration_id"]),
                 target_id=str(item["target_id"]),
-                feature_row_id=str(item["feature_row_id"]),
+                feature_row_id=(
+                    None if item["feature_row_id"] is None else str(item["feature_row_id"])
+                ),
                 forecast=_float_value(item["forecast"], "forecast"),
                 model_family=ModelFamily(str(item["model_family"])),
                 row_id=str(item["row_id"]),
@@ -1903,7 +2165,7 @@ def _forecast_dataset_from_payload(payload: Mapping[str, object]):
         selection_manifest_id=str(payload["selection_manifest_id"]),
         feature_dataset_id=str(payload["feature_dataset_id"]),
         configuration_id=str(payload["configuration_id"]),
-        final_fit_id=str(payload["final_fit_id"]),
+        final_fit_id=(None if payload["final_fit_id"] is None else str(payload["final_fit_id"])),
         rows=tuple(parsed_rows),
         expected_opportunity_ids=tuple(str(item) for item in expected),
         source_class=MarketDataSourceClass(str(payload["source_class"])),

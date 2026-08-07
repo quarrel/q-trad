@@ -347,9 +347,9 @@ def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> Non
     first = tmp_path / "first"
     second = tmp_path / "second"
     prepare_holdout_from_files(tmp_path / "source", first)
-    with pytest.raises(FileExistsError, match="claimed"):
+    with pytest.raises(FileExistsError, match="transferred"):
         prepare_holdout_from_files(tmp_path / "source", second)
-    with pytest.raises(FileExistsError, match="claimed"):
+    with pytest.raises(FileExistsError, match="transferred"):
         prepare_holdout_from_files(first, second)
 
 
@@ -483,7 +483,7 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
             shutil.copytree(child, target)
         else:
             shutil.copy2(child, target)
-    with pytest.raises(FileExistsError, match="claimed"):
+    with pytest.raises(ValueError, match="usage"):
         prepare_holdout_from_files(stripped, tmp_path / "reopened")
 
 
@@ -560,3 +560,56 @@ def test_failed_configuration_and_unavailable_feature_remain_explicit() -> None:
     dispositions = {item.opportunity_id: item.disposition for item in coverage.rows}
     assert dispositions[opportunities[0].opportunity_id].value == "FAILED_CONFIGURATION"
     assert dispositions[opportunities[1].opportunity_id].value == "UNAVAILABLE_FEATURE"
+
+
+def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
+    selection, opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path / "source")
+    destination = tmp_path / "destination"
+    prepare_holdout_from_files(tmp_path / "source", destination)
+
+    def evaluator(outcomes, opened):
+        return evaluate_holdout(
+            selection=selection,
+            seal=seal,
+            opened_marker=opened,
+            forecast_datasets=forecasts,
+            coverage_datasets=coverage,
+            outcomes=outcomes,
+        )
+
+    with pytest.raises(ValueError, match="owned"):
+        reveal_holdout(
+            tmp_path / "source",
+            expected_selection_manifest_id=selection.manifest_id,
+            expected_seal_id=seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="test",
+            consumed_by="test",
+            opened_at=NOW,
+            consumed_at=NOW + timedelta(seconds=1),
+            outcome_loader=lambda: {
+                opportunities[0].target_id: 0.1,
+                opportunities[1].target_id: 0.2,
+            },
+            evaluator=evaluator,
+        )
+    assert not (tmp_path / "source" / "opened.json").exists()
+
+    evaluation, consumed = reveal_holdout(
+        destination,
+        expected_selection_manifest_id=selection.manifest_id,
+        expected_seal_id=seal.seal_id,
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        opened_by="test",
+        consumed_by="test",
+        opened_at=NOW,
+        consumed_at=NOW + timedelta(seconds=1),
+        outcome_loader=lambda: {
+            opportunities[0].target_id: 0.1,
+            opportunities[1].target_id: 0.2,
+        },
+        evaluator=evaluator,
+    )
+    assert evaluation is not None
+    assert evaluation.evaluation_id
+    assert consumed.outcome_accessed is True

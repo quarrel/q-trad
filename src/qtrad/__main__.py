@@ -212,6 +212,8 @@ from qtrad.runtime.r2_readiness import (
 from qtrad.runtime.r2_verification import (
     build_oof_bundle,
     build_software_bundle,
+    holdout_configuration_registry,
+    holdout_evaluation_policy,
     load_experiment_and_feature_paths,
     require_ibkr_adapter_runtime_identity,
     runtime_identities,
@@ -406,6 +408,18 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         control_configuration_ids=args.control_configuration_id,
         verified_oof_bundle=verified_oof,
         verified_experiment=verified_experiment,
+        configuration_registry=holdout_configuration_registry(
+            args.oof_bundle,
+            verified_oof,
+            expected_evaluation_report_id=prior.evaluation_report_id,
+            expected_selected_configuration_ids=prior.selected_configuration_ids,
+            expected_holdout_configuration_ids=prior.holdout_comparator_configuration_ids,
+        ),
+        evaluation_policy=holdout_evaluation_policy(
+            args.oof_bundle,
+            verified_oof,
+            expected_evaluation_report_id=prior.evaluation_report_id,
+        ),
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))

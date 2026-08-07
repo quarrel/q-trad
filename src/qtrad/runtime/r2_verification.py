@@ -10,7 +10,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -1741,6 +1741,134 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
     return matches[0]
+
+
+def _configuration_record_from_payload(value: object) -> ConfigurationRecord:
+    if not isinstance(value, dict):
+        raise ValueError("OOF configuration record must be an object")
+    raw = cast(dict[str, object], value)
+    return ConfigurationRecord(
+        configuration_id=str(raw["configuration_id"]),
+        model_family=ModelFamily(str(raw["model_family"])),
+        feature_set_id=(None if raw["feature_set_id"] is None else str(raw["feature_set_id"])),
+        disposition=ConfigurationDisposition(str(raw["disposition"])),
+        reason=str(raw["reason"]),
+        forecast_dataset_id=(
+            None if raw["forecast_dataset_id"] is None else str(raw["forecast_dataset_id"])
+        ),
+        evaluated_model_manifest_id=(
+            None
+            if raw["evaluated_model_manifest_id"] is None
+            else str(raw["evaluated_model_manifest_id"])
+        ),
+        market_data_source_class=MarketDataSourceClass(str(raw["market_data_source_class"])),
+    )
+
+
+def holdout_configuration_registry(
+    oof_bundle_path: Path,
+    bundle: R2OofBundle,
+    *,
+    expected_evaluation_report_id: str | None = None,
+    expected_selected_configuration_ids: Sequence[str] | None = None,
+    expected_holdout_configuration_ids: Sequence[str] | None = None,
+) -> tuple[tuple[str, ModelFamily, str | None, str | None], ...]:
+    """Return the authenticated OOF configuration registry for holdout freezing."""
+    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    if (
+        expected_evaluation_report_id is not None
+        and evaluation.get("report_id") != expected_evaluation_report_id
+    ):
+        raise ValueError("OOF evaluation child differs from prior selection report")
+    if expected_selected_configuration_ids is not None or (
+        expected_holdout_configuration_ids is not None
+    ):
+        register = _oof_child_payload(
+            oof_bundle_path,
+            bundle,
+            R2_EVALUATION_REGISTER_CONTRACT,
+        )
+        if (
+            expected_evaluation_report_id is not None
+            and register.get("selection_evaluation_report_id") != expected_evaluation_report_id
+        ):
+            raise ValueError("OOF register differs from prior selection report")
+        decisions = _selection_decisions_from_payload(register.get("selection_decisions"))
+        selected_ids = tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+        )
+        holdout_ids = tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition is ConfigurationDisposition.RETAINED_CONTROL
+        )
+        stored_selected = register.get("selection_selected_configuration_ids")
+        stored_holdout = register.get("selection_holdout_comparator_configuration_ids")
+        if (
+            not isinstance(stored_selected, list)
+            or not isinstance(stored_holdout, list)
+            or not all(isinstance(item, str) for item in (*stored_selected, *stored_holdout))
+            or tuple(sorted(cast(list[str], stored_selected))) != selected_ids
+            or tuple(sorted(cast(list[str], stored_holdout))) != holdout_ids
+        ):
+            raise ValueError("OOF register selection arrays do not replay its persisted decisions")
+        if (
+            expected_selected_configuration_ids is not None
+            and tuple(sorted(expected_selected_configuration_ids)) != selected_ids
+        ):
+            raise ValueError("OOF selection decisions differ from prior selection")
+        if (
+            expected_holdout_configuration_ids is not None
+            and tuple(sorted(expected_holdout_configuration_ids)) != holdout_ids
+        ):
+            raise ValueError("OOF holdout decisions differ from prior selection")
+    configurations = evaluation.get("configurations")
+    if not isinstance(configurations, list) or not configurations:
+        raise ValueError("OOF evaluation has no authenticated configuration registry")
+    records = tuple(_configuration_record_from_payload(item) for item in configurations)
+    ordered = tuple(sorted(records, key=lambda item: item.configuration_id))
+    if ordered != records or len({item.configuration_id for item in records}) != len(records):
+        raise ValueError("OOF evaluation configuration registry is not ordered and unique")
+    return tuple(
+        (
+            item.configuration_id,
+            item.model_family,
+            item.feature_set_id,
+            item.evaluated_model_manifest_id,
+        )
+        for item in records
+    )
+
+
+def holdout_evaluation_policy(
+    oof_bundle_path: Path,
+    bundle: R2OofBundle,
+    *,
+    expected_evaluation_report_id: str | None = None,
+) -> dict[str, JsonValue]:
+    """Return the authenticated evaluation controls needed by holdout sealing."""
+    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    if (
+        expected_evaluation_report_id is not None
+        and evaluation.get("report_id") != expected_evaluation_report_id
+    ):
+        raise ValueError("OOF evaluation child differs from prior selection report")
+    metric_policy = evaluation.get("metric_policy")
+    forecast_bucket_policy = evaluation.get("forecast_bucket_policy")
+    minimum_rows = evaluation.get("minimum_correlation_rows")
+    bucket_count = evaluation.get("forecast_bucket_count")
+    if not isinstance(metric_policy, str) or not isinstance(forecast_bucket_policy, str):
+        raise ValueError("OOF evaluation policies are not authenticated strings")
+    if not isinstance(minimum_rows, int) or not isinstance(bucket_count, int):
+        raise ValueError("OOF evaluation support controls are not authenticated integers")
+    return {
+        "metric_policy": metric_policy,
+        "forecast_bucket_policy": forecast_bucket_policy,
+        "minimum_correlation_rows": minimum_rows,
+        "forecast_bucket_count": bucket_count,
+    }
 
 
 def _selection_decisions_from_payload(value: object) -> tuple[SelectionDecision, ...]:
