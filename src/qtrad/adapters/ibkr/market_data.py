@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-from collections import deque
+from collections import OrderedDict, deque
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -75,6 +75,7 @@ _LIVE_SIZE_TICKS = frozenset({_BID_SIZE, _ASK_SIZE})
 _DELAYED_PRICE_TICKS = frozenset({_DELAYED_BID, _DELAYED_ASK})
 _DELAYED_SIZE_TICKS = frozenset({_DELAYED_BID_SIZE, _DELAYED_ASK_SIZE})
 _VALID_TICKS = _LIVE_PRICE_TICKS | _LIVE_SIZE_TICKS | _DELAYED_PRICE_TICKS | _DELAYED_SIZE_TICKS
+_MAX_RETIRED_REQUESTS = 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -151,6 +152,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._clock = clock
         self._current_bindings: dict[int, _SubscriptionBinding] = {}
         self._request_ids_by_listing: dict[str, int] = {}
+        self._retired_bindings: OrderedDict[int, tuple[int, _SubscriptionBinding]] = OrderedDict()
         self._market_data_types: dict[int, str] = {}
         self._bid_seen: set[str] = set()
         self._ask_seen: set[str] = set()
@@ -160,6 +162,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._terminal_error: IbkrConnectionIntegrityError | None = None
         self._superseded_callbacks = 0
         self._unknown_request_callbacks = 0
+        self._cancelled_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
 
     async def connect(self) -> None:
@@ -176,6 +179,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         finally:
             self._current_bindings.clear()
             self._request_ids_by_listing.clear()
+            self._retired_bindings.clear()
             self._market_data_types.clear()
             self._session.register_subscriptions(())
 
@@ -235,7 +239,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             if not self._session.accept_callback(callback.generation):
                 self._superseded_callbacks += 1
                 continue
-            self._last_message_at = self._callback_received_time(callback)
+            self._update_last_message_at(self._callback_received_time(callback))
             if callback.kind == "current_time":
                 if self._session.state is IbkrSessionState.WAITING_SERVER_TIME:
                     self._session.mark_server_time()
@@ -247,6 +251,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 continue
             binding = self._current_bindings.get(callback.request_id)
             if binding is None:
+                binding = self._retired_binding(callback)
+                if binding is not None:
+                    yield self._normalise_cancelled_request_callback(callback, binding)
+                    continue
                 yield self._normalise_unknown_request_callback(callback)
                 continue
             if callback.kind == "error":
@@ -337,6 +345,8 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(self._superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
+            ("cancelled_request_callbacks", str(self._cancelled_request_callbacks)),
+            ("retired_request_tombstones", str(len(self._retired_bindings))),
             ("market_data_types", _market_data_type_summary(self._market_data_types)),
             ("farms", ",".join(f"{name}={value}" for name, value in snapshot.farms)),
         )
@@ -368,7 +378,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             }
             self._reset_subscription_evidence()
         else:
+            self._session.reset_subscription_activity()
+            self._reset_subscription_evidence()
             for request_id in tuple(self._current_bindings):
+                self._retire_binding(request_id, self._current_bindings[request_id])
                 client.cancelMktData(request_id)
             self._current_bindings.clear()
             self._request_ids_by_listing.clear()
@@ -529,6 +542,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 continue
             binding = self._current_bindings.get(callback.request_id)
             if binding is None:
+                binding = self._retired_binding(callback)
+                if binding is not None:
+                    records.append(self._normalise_cancelled_request_callback(callback, binding))
+                    continue
                 records.append(self._normalise_unknown_request_callback(callback))
                 continue
             records.append(self._normalise_level1_callback(callback, binding))
@@ -541,7 +558,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             str(binding.listing.listing_id), generation=callback.generation
         )
         received = self._callback_received_time(callback)
-        self._last_message_at = received
+        self._update_last_message_at(received)
         tick_type = (
             _int_value(callback.values[0]) if callback.kind in {"tick_price", "tick_size"} else None
         )
@@ -650,7 +667,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if binding is None and callback.request_id >= 0:
             return self._normalise_unknown_request_callback(callback)
         received = self._callback_received_time(callback)
-        self._last_message_at = received
+        self._update_last_message_at(received)
         raw = {
             "callback_type": callback.kind,
             "request_id": callback.request_id,
@@ -679,7 +696,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
     def _normalise_unknown_request_callback(self, callback: _Callback) -> MarketDataRecord:
         self._unknown_request_callbacks += 1
         received = self._callback_received_time(callback)
-        self._last_message_at = received
+        self._update_last_message_at(received)
         tick_type = (
             _int_value(callback.values[0]) if callback.kind in {"tick_price", "tick_size"} else None
         )
@@ -696,6 +713,29 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 if callback.kind != "error"
                 else (f"request_id={callback.request_id};provider_error={_error_code(callback)}")
             ),
+        )
+
+    def _normalise_cancelled_request_callback(
+        self, callback: _Callback, binding: _SubscriptionBinding
+    ) -> MarketDataRecord:
+        self._cancelled_request_callbacks += 1
+        received = self._callback_received_time(callback)
+        self._update_last_message_at(received)
+        tick_type = (
+            _int_value(callback.values[0]) if callback.kind in {"tick_price", "tick_size"} else None
+        )
+        raw = self._raw_payload(callback, binding, received, tick_type=tick_type)
+        provider_error = (
+            f";provider_error={_error_code(callback)}" if callback.kind == "error" else ""
+        )
+        return self._record(
+            callback=callback,
+            binding=binding,
+            received=received,
+            raw=raw,
+            quote=None,
+            error_code="IBKR_CANCELLED_REQUEST_CALLBACK",
+            error_detail=f"request_id={callback.request_id}{provider_error}",
         )
 
     def _record(
@@ -802,11 +842,13 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
     def _reset_capture_state(self) -> None:
         self._current_bindings.clear()
         self._request_ids_by_listing.clear()
+        self._retired_bindings.clear()
         self._reset_subscription_evidence()
         self._last_message_at = None
         self._terminal_error = None
         self._superseded_callbacks = 0
         self._unknown_request_callbacks = 0
+        self._cancelled_request_callbacks = 0
         self._pending_records.clear()
 
     def _reset_subscription_evidence(self) -> None:
@@ -819,6 +861,22 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if callback.received_time is not None:
             return require_utc(callback.received_time, "IBKR native callback receive time")
         return require_utc(self._clock(), "IBKR native callback receive time")
+
+    def _update_last_message_at(self, received: datetime) -> None:
+        if self._last_message_at is None or received > self._last_message_at:
+            self._last_message_at = received
+
+    def _retire_binding(self, request_id: int, binding: _SubscriptionBinding) -> None:
+        self._retired_bindings[request_id] = (self._session.generation, binding)
+        self._retired_bindings.move_to_end(request_id)
+        while len(self._retired_bindings) > _MAX_RETIRED_REQUESTS:
+            self._retired_bindings.popitem(last=False)
+
+    def _retired_binding(self, callback: _Callback) -> _SubscriptionBinding | None:
+        retired = self._retired_bindings.get(callback.request_id)
+        if retired is None or retired[0] != callback.generation:
+            return None
+        return retired[1]
 
     def _received_time(self) -> datetime:
         return require_utc(self._clock(), "IBKR native observation time")

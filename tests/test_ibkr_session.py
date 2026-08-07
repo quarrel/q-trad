@@ -76,6 +76,18 @@ def test_data_maintained_does_not_request_resubscription() -> None:
     assert session.snapshot().state == IbkrSessionState.CONNECTED
 
 
+def test_reset_subscription_activity_starts_a_fresh_delivery_epoch() -> None:
+    session = _connected_session()
+    session.register_subscriptions((IbkrSubscription("fx:eur-usd", 10, "LIVE", ("BID", "ASK")),))
+    session.mark_subscription_active("fx:eur-usd", generation=1)
+
+    session.reset_subscription_activity()
+
+    assert session.snapshot().active_subscriptions == 0
+    assert session.snapshot().desired_subscriptions == 1
+    assert session.snapshot().state == IbkrSessionState.SUBSCRIBING
+
+
 def test_fresh_reconnect_clears_completed_upstream_loss() -> None:
     session = _connected_session()
 

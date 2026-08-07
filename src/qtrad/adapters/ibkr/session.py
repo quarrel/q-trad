@@ -258,6 +258,11 @@ class IbkrSession:
         self._active.intersection_update(self._desired)
         self._refresh_state()
 
+    def reset_subscription_activity(self) -> None:
+        """Start a fresh delivery epoch for the current desired subscriptions."""
+        self._active.clear()
+        self._refresh_state()
+
     def mark_subscription_active(self, listing_id: str, *, generation: int) -> None:
         if not self.accept_callback(generation):
             return

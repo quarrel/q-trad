@@ -310,19 +310,14 @@ async def test_superseded_generation_is_rejected_without_cross_generation_state(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("trailing_cancelled_request", (False, True))
 async def test_current_generation_unknown_request_callbacks_are_retained(
-    monkeypatch: pytest.MonkeyPatch, trailing_cancelled_request: bool
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient(Queue())
     adapter = _adapter(monkeypatch, client)
     listing = _listing()
     await _connect_and_subscribe(adapter, listing)
-    if trailing_cancelled_request:
-        await adapter.subscribe((listing,))
-        request_id = 1
-    else:
-        request_id = 999
+    request_id = 999
     client.callbacks.put(
         capability._Callback(
             "tick_price",
@@ -342,6 +337,79 @@ async def test_current_generation_unknown_request_callbacks_are_retained(
     assert "UNKNOWN_REQUEST_ID" in health.reason_codes
     assert ("unknown_request_callbacks", "1") in health.attributes
     assert ("superseded_callbacks", "0") in health.attributes
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_callbacks_retain_tombstoned_identity(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    adapter = _adapter(monkeypatch, client)
+    listing = _listing()
+    await _connect_and_subscribe(adapter, listing)
+
+    await adapter.subscribe((listing,))
+    client.callbacks.put(
+        capability._Callback(
+            "tick_price",
+            1,
+            (1, 1.1),
+            received_time=_NOW,
+        )
+    )
+
+    record = await anext(adapter.records())
+    health = await adapter.health()
+    assert client.cancelled == [1]
+    assert record.error_code == "IBKR_CANCELLED_REQUEST_CALLBACK"
+    assert record.subscription == str(listing.listing_id)
+    assert record.raw_payload["listing_id"] == str(listing.listing_id)
+    assert record.raw_payload["con_id"] == 100
+    assert record.raw_payload["request_id"] == 1
+    assert "UNKNOWN_REQUEST_ID" not in health.reason_codes
+    assert ("unknown_request_callbacks", "0") in health.attributes
+    assert ("cancelled_request_callbacks", "1") in health.attributes
+    assert ("retired_request_tombstones", "1") in health.attributes
+
+    await adapter.disconnect()
+    assert not adapter._retired_bindings
+
+
+@pytest.mark.asyncio
+async def test_replacing_subscription_requires_fresh_delivery_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    listing = _listing()
+    for code in (2104, 2106, 2158):
+        client.callbacks.put(capability._Callback("error", -1, (1_785_000_000, code, "CONNECTED")))
+    client.on_market_data.extend(
+        (
+            ("market_data_type", 1, (1,)),
+            ("tick_price", 1, (1, 1.1)),
+            ("tick_price", 1, (2, 1.2)),
+        )
+    )
+    adapter = _adapter(monkeypatch, client)
+    await _connect_and_subscribe(adapter, listing)
+    await _take(adapter.records(), 3)
+    assert (await adapter.health()).status is native.HealthStatus.HEALTHY
+
+    client.on_market_data.append(("market_data_type", 2, (1,)))
+    await adapter.subscribe((listing,))
+    type_record = await anext(adapter.records())
+    health = await adapter.health()
+
+    assert type_record.raw_payload["request_id"] == 2
+    assert health.status is not native.HealthStatus.HEALTHY
+    assert "BID_EVIDENCE_MISSING" in health.reason_codes
+    assert "ASK_EVIDENCE_MISSING" in health.reason_codes
+    assert health.attributes[0] == ("connection_generation", "1")
+
+    client.callbacks.put(capability._Callback("tick_price", 2, (1, 1.1)))
+    client.callbacks.put(capability._Callback("tick_price", 2, (2, 1.2)))
+    await _take(adapter.records(), 2)
+    assert (await adapter.health()).status is native.HealthStatus.HEALTHY
 
 
 @pytest.mark.asyncio
@@ -401,11 +469,22 @@ async def test_recovery_timeout_retains_intervening_callbacks_in_arrival_order(
     )
     await _connect_and_subscribe(adapter, _listing())
     stream = adapter.records()
+    trigger_received = _NOW + timedelta(seconds=1)
+    intervening_received = _NOW + timedelta(seconds=3)
     client.callbacks.put(
-        capability._Callback("error", -1, (1_785_000_000, 1100, "CONNECTION_LOST"))
+        capability._Callback(
+            "error",
+            -1,
+            (1_785_000_000, 1100, "CONNECTION_LOST"),
+            received_time=trigger_received,
+        )
     )
-    client.callbacks.put(capability._Callback("tick_price", 1, (1, 1.1), received_time=_NOW))
-    client.callbacks.put(capability._Callback("tick_price", 1, (2, 1.2), received_time=_NOW))
+    client.callbacks.put(
+        capability._Callback("tick_price", 1, (1, 1.1), received_time=intervening_received)
+    )
+    client.callbacks.put(
+        capability._Callback("tick_price", 1, (2, 1.2), received_time=intervening_received)
+    )
 
     records = [await anext(stream) for _ in range(3)]
     assert [record.raw_payload["callback_type"] for record in records] == [
@@ -415,6 +494,7 @@ async def test_recovery_timeout_retains_intervening_callbacks_in_arrival_order(
     ]
     assert [record.arrival_sequence for record in records] == [3, 4, 5]
     assert [record.raw_payload["raw_value"] for record in records[1:]] == [1.1, 1.2]
+    assert (await adapter.health()).last_message_at == intervening_received
     with pytest.raises(capability.IbkrConnectionIntegrityError, match="bounded recovery"):
         await anext(stream)
 
