@@ -93,6 +93,7 @@ class _Callback:
     arrival_sequence: int = 0
     diagnostic: str | None = None
     message_sha256: str | None = None
+    received_time: datetime | None = None
 
 
 class IbkrConnectionIntegrityError(RuntimeError):
@@ -964,7 +965,14 @@ def _emit(
     generation: int,
     arrival_sequence: int,
 ) -> None:
-    tagged = replace(callback, generation=generation, arrival_sequence=arrival_sequence)
+    tagged = replace(
+        callback,
+        generation=generation,
+        arrival_sequence=arrival_sequence,
+        received_time=(
+            callback.received_time if callback.received_time is not None else datetime.now(UTC)
+        ),
+    )
     try:
         callbacks.put_nowait(tagged)
     except Full as error:

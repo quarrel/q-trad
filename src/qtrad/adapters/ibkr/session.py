@@ -44,8 +44,8 @@ class IbkrSystemCode(IntEnum):
     MARKET_DATA_FARM_CONNECTED = 2104
     HISTORICAL_FARM_DISCONNECTED = 2105
     HISTORICAL_FARM_CONNECTED = 2106
-    MARKET_DATA_FARM_INACTIVE = 2107
-    HISTORICAL_FARM_INACTIVE = 2108
+    HISTORICAL_FARM_INACTIVE = 2107
+    MARKET_DATA_FARM_INACTIVE = 2108
     TWS_SERVER_DISCONNECTED = 2110
     MARKET_DATA_FARM_CONNECTING = 2119
     SECURITY_DEFINITION_FARM_DISCONNECTED = 2157
@@ -69,6 +69,7 @@ _FARM_INACTIVE: Final[frozenset[IbkrSystemCode]] = frozenset(
         IbkrSystemCode.HISTORICAL_FARM_INACTIVE,
     }
 )
+_REQUIRED_FARMS: Final[tuple[str, ...]] = ("market_data", "historical")
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +135,7 @@ class IbkrSessionSnapshot:
     desired_subscriptions: int
     active_subscriptions: int
     reason_codes: tuple[str, ...]
+    recovery_action: IbkrRecoveryAction = IbkrRecoveryAction.NONE
 
 
 class IbkrSession:
@@ -237,7 +239,7 @@ class IbkrSession:
             return
         if (
             self._upstream_lost_at is not None
-            or any(value == "DISCONNECTED" for value in self._farms.values())
+            or any(self._farms[name] == "DISCONNECTED" for name in _REQUIRED_FARMS)
             or "IBKR_TWS_SERVER_DISCONNECTED" in self._reason_codes
             or any(reason.startswith("UNKNOWN_GLOBAL_CODE_") for reason in self._reason_codes)
         ):
@@ -254,6 +256,11 @@ class IbkrSession:
             raise ValueError("IBKR subscription listing IDs must be unique")
         self._desired = {item.listing_id: item for item in subscriptions}
         self._active.intersection_update(self._desired)
+        self._refresh_state()
+
+    def reset_subscription_activity(self) -> None:
+        """Start a fresh delivery epoch for the current desired subscriptions."""
+        self._active.clear()
         self._refresh_state()
 
     def mark_subscription_active(self, listing_id: str, *, generation: int) -> None:
@@ -377,7 +384,10 @@ class IbkrSession:
         if system_code in _FARM_DOWN:
             farm = _FARM_DOWN[system_code]
             self._farms[farm] = "DISCONNECTED"
-            self._mark_degraded()
+            if farm in _REQUIRED_FARMS:
+                self._mark_degraded()
+            else:
+                self._refresh_state()
             reason = f"{farm.upper()}_FARM_DISCONNECTED"
             self._reason_codes.add(reason)
             return IbkrRecoveryDecision(IbkrRecoveryAction.NONE, reason, code=code)
@@ -398,6 +408,8 @@ class IbkrSession:
                 else "historical"
             )
             self._farms[farm] = "INACTIVE"
+            self._reason_codes.discard(f"{farm.upper()}_FARM_DISCONNECTED")
+            self._refresh_state()
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
                 f"{farm.upper()}_FARM_INACTIVE",
@@ -472,6 +484,13 @@ class IbkrSession:
         )
 
     def snapshot(self) -> IbkrSessionSnapshot:
+        recovery_action = IbkrRecoveryAction.NONE
+        if self._state is IbkrSessionState.FAILED_OPERATOR:
+            recovery_action = IbkrRecoveryAction.OPERATOR
+        elif "GATEWAY_RESTART_REQUIRED" in self._reason_codes:
+            recovery_action = IbkrRecoveryAction.RESTART_GATEWAY
+        elif "IBKR_PORT_RESET" in self._reason_codes:
+            recovery_action = IbkrRecoveryAction.RESTART_ADAPTER
         return IbkrSessionSnapshot(
             state=self._state,
             generation=self._generation,
@@ -482,6 +501,7 @@ class IbkrSession:
             desired_subscriptions=len(self._desired),
             active_subscriptions=len(self._active),
             reason_codes=tuple(sorted(self._reason_codes)),
+            recovery_action=recovery_action,
         )
 
     def reconnect_delay(self, attempt: int, random_fraction: float) -> float:
