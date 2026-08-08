@@ -20,6 +20,13 @@ class RawMessage:
     payload: Mapping[str, JsonValue]
     payload_representation: RawPayloadRepresentation
     adapter_version: str
+    capture_session_id: str | None = None
+    source_class: str | None = None
+    capture_source_id: str | None = None
+    universe_id: str | None = None
+    configuration_hash: str | None = None
+    connection_generation: int | None = None
+    arrival_sequence: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

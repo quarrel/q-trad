@@ -64,6 +64,7 @@ from qtrad.application.ibkr_results import (
 )
 from qtrad.application.ingestion import IngestionService
 from qtrad.application.listing_review import build_listing_review_manifest
+from qtrad.application.persistence import BoundedPersistenceWorker
 from qtrad.application.provider_history import build_provider_history_dataset
 from qtrad.application.r2_features import (
     R2FoundationInputs,
@@ -157,6 +158,10 @@ from qtrad.runtime.ibkr_historical import (
     write_ibkr_historical_plan,
     write_ibkr_historical_request_profile,
     write_ibkr_runtime_lock,
+)
+from qtrad.runtime.ibkr_native_capture import (
+    build_ibkr_native_adapter,
+    load_reviewed_configuration,
 )
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
@@ -531,8 +536,14 @@ def build_parser() -> argparse.ArgumentParser:
     promote.add_argument("--release-name", required=True)
     promote.add_argument("--output", type=Path, required=True)
 
-    ingest = subparsers.add_parser("ingest", help="run IG demo ingestion")
-    ingest.add_argument("--environment", choices=["ig-demo"], default="ig-demo")
+    ingest = subparsers.add_parser("ingest", help="run provider-neutral market-data ingestion")
+    ingest.add_argument("--provider", choices=["ig", "ibkr"])
+    ingest.add_argument("--environment", choices=["ig-demo", "ibkr-paper"])
+    ingest.add_argument(
+        "--ibkr-configuration",
+        type=Path,
+        help="reviewed exact IBKR native capture JSON configuration",
+    )
     ingest.add_argument("--max-seconds", type=float)
     ingest.add_argument("--force-reconnect-after-seconds", type=float)
 
@@ -1112,12 +1123,31 @@ def main(argv: Sequence[str] | None = None) -> None:
             output_path=args.output,
         )
     elif args.command == "ingest":
+        ingest_provider = args.provider
+        if ingest_provider is None:
+            ingest_provider = {
+                "ig-demo": "ig",
+                "ibkr-paper": "ibkr",
+            }.get(args.environment)
+        if args.environment is not None and (
+            (args.environment == "ibkr-paper" and ingest_provider != "ibkr")
+            or (args.environment == "ig-demo" and ingest_provider != "ig")
+        ):
+            raise ValueError("ingest provider and environment must identify the same source")
+        ingest_settings = settings
+        if ingest_provider is not None and ingest_provider != getattr(settings, "provider", "ig"):
+            ingest_settings = settings.model_copy(update={"provider": ingest_provider})
+        ingest_kwargs = {
+            "maximum_seconds": args.max_seconds,
+            "force_reconnect_after_seconds": args.force_reconnect_after_seconds,
+        }
+        if args.ibkr_configuration is not None:
+            ingest_kwargs["ibkr_configuration_path"] = args.ibkr_configuration
         asyncio.run(
             _ingest(
-                settings,
+                ingest_settings,
                 clock,
-                maximum_seconds=args.max_seconds,
-                force_reconnect_after_seconds=args.force_reconnect_after_seconds,
+                **ingest_kwargs,
             )
         )
     elif args.command == "backfill" and args.backfill_command == "plan":
@@ -4045,6 +4075,7 @@ async def _ingest(
     *,
     maximum_seconds: float | None = None,
     force_reconnect_after_seconds: float | None = None,
+    ibkr_configuration_path: Path | None = None,
 ) -> None:
     if maximum_seconds is not None and maximum_seconds <= 0:
         raise ValueError("maximum seconds must be positive")
@@ -4053,6 +4084,15 @@ async def _ingest(
             raise ValueError("forced reconnect interval must be positive")
         if maximum_seconds is not None and force_reconnect_after_seconds >= maximum_seconds:
             raise ValueError("forced reconnect must occur before maximum seconds")
+    if getattr(settings, "provider", "ig") == "ibkr":
+        await _ingest_ibkr_native(
+            settings,
+            clock,
+            maximum_seconds=maximum_seconds,
+            force_reconnect_after_seconds=force_reconnect_after_seconds,
+            configuration_path=ibkr_configuration_path,
+        )
+        return
     engine = _engine(settings)
     store = PostgresAuditStore(engine)
     universe = _capture_universe(settings)
@@ -4239,6 +4279,174 @@ async def _ingest(
                     "adapter_health": final_health.detail,
                     "forced_reconnect_requested": force_reconnect_after_seconds is not None,
                     "forced_reconnect_completed": forced_reconnect_completed,
+                },
+            )
+        await engine.dispose()
+        if reconnect_error is not None:
+            raise reconnect_error
+        if disconnect_error is not None:
+            raise disconnect_error
+
+
+async def _ingest_ibkr_native(
+    settings: Settings,
+    clock: Clock,
+    *,
+    maximum_seconds: float | None,
+    force_reconnect_after_seconds: float | None,
+    configuration_path: Path | None,
+) -> None:
+    """Run native IBKR through the same raw-to-canonical ingestion service."""
+
+    path = configuration_path or settings.ibkr_capture_configuration_path
+    if path is None:
+        raise ValueError(
+            "IBKR native ingestion requires a reviewed exact configuration path; "
+            "candidate universe TOML is not an ingestion authority"
+        )
+    configuration = load_reviewed_configuration(path)
+    identity = configuration.identity
+    engine = _engine(settings)
+    store = PostgresAuditStore(engine)
+    adapter = build_ibkr_native_adapter(settings, configuration, clock=clock)
+    run_id: RunId | None = None
+    worker: BoundedPersistenceWorker | None = None
+    reconnect_task: asyncio.Task[None] | None = None
+    terminal_status = "FAILED"
+    reconnect_error: Exception | None = None
+    disconnect_error: Exception | None = None
+    deadline_reached = False
+    try:
+        # The run UUID is also the durable capture-session identity.  It is
+        # created before the socket so a failed connection cannot emit an
+        # unlineaged callback if the adapter does become active.
+        run_id = await store.start_run(
+            kind=RunKind.INGESTION,
+            environment=BrokerEnvironment.IBKR_PAPER,
+            configuration_hash=configuration.configuration_hash,
+            started_at=clock.now(),
+        )
+        await store.seed_native_capture_instruments(configuration.listings)
+        for listing in configuration.listings:
+            await store.validate_provider_listing(
+                listing,
+                universe_hash=configuration.configuration_hash,
+                observed_at=clock.now(),
+                producer="ibkr-native-capture",
+                producer_version=__version__,
+            )
+        service = IngestionService(
+            store,
+            producer="ibkr-native-capture",
+            producer_version=__version__,
+            capture_identity=identity,
+            capture_session_id=str(run_id),
+        )
+        worker = BoundedPersistenceWorker(service, capacity=settings.ibkr_capture_queue_capacity)
+        await adapter.connect()
+        await adapter.subscribe(configuration.listings)
+        worker.start()
+        await store.record_adapter_health(
+            worker.compose_health(
+                await adapter.health(),
+                identity=identity,
+                capture_session_id=str(run_id),
+            )
+        )
+
+        async def force_reconnect() -> None:
+            assert force_reconnect_after_seconds is not None
+            await asyncio.sleep(force_reconnect_after_seconds)
+            await adapter.force_reconnect()
+
+        if force_reconnect_after_seconds is not None:
+            reconnect_task = asyncio.create_task(force_reconnect())
+
+        async def consume() -> None:
+            async for record in adapter.records():
+                worker.submit_nowait(record)
+
+        async def persist_health() -> None:
+            while True:
+                await asyncio.sleep(_HEALTH_PERSIST_INTERVAL_SECONDS)
+                await store.record_adapter_health(
+                    worker.compose_health(
+                        await adapter.health(),
+                        identity=identity,
+                        capture_session_id=str(run_id),
+                    )
+                )
+
+        tasks = (
+            asyncio.create_task(consume()),
+            asyncio.create_task(persist_health()),
+        )
+        try:
+            if maximum_seconds is None:
+                await asyncio.gather(*tasks)
+                raise RuntimeError("unbounded IBKR native ingestion iterator ended unexpectedly")
+            async with asyncio.timeout(maximum_seconds):
+                await asyncio.gather(*tasks)
+        except TimeoutError:
+            deadline_reached = True
+            terminal_status = "STOPPED"
+        finally:
+            for task in tasks:
+                if not task.done():
+                    task.cancel()
+            for task in tasks:
+                with suppress(asyncio.CancelledError):
+                    await task
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        terminal_status = "STOPPED"
+    finally:
+        if reconnect_task is not None:
+            if reconnect_task.done():
+                try:
+                    reconnect_task.result()
+                except Exception as error:
+                    reconnect_error = error
+                    terminal_status = "FAILED"
+            elif deadline_reached:
+                reconnect_error = RuntimeError(
+                    "forced reconnect did not complete before the ingestion deadline"
+                )
+                terminal_status = "FAILED"
+            else:
+                reconnect_task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await reconnect_task
+        if worker is not None:
+            await worker.drain_and_stop()
+        try:
+            await adapter.disconnect()
+        except Exception as error:
+            disconnect_error = error
+            terminal_status = "FAILED"
+        base_health = await adapter.health()
+        final_health = (
+            worker.compose_health(
+                base_health,
+                identity=identity,
+                capture_session_id=str(run_id) if run_id is not None else None,
+            )
+            if worker is not None
+            else base_health
+        )
+        await store.record_adapter_health(final_health)
+        if run_id is not None:
+            metrics = worker.snapshot() if worker is not None else None
+            await store.finish_run(
+                run_id,
+                status=terminal_status,
+                finished_at=clock.now(),
+                detail={
+                    "capture_session_id": str(run_id),
+                    "source_class": identity.source_class.value,
+                    "records_received": metrics.records_received if metrics else 0,
+                    "persisted": metrics.persisted if metrics else 0,
+                    "failed": metrics.failed if metrics else 0,
+                    "dropped": metrics.dropped if metrics else 0,
                 },
             )
         await engine.dispose()

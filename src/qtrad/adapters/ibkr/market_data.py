@@ -116,6 +116,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         api_identity: IbkrApiIdentity | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        freshness_max_age_seconds: float | None = None,
     ) -> None:
         if not pre_reviewed_listings:
             raise ValueError("IBKR native capture requires pre-reviewed listings")
@@ -150,6 +151,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._listings_by_id = {item.listing_id: item for item in listings}
         self._contract_evidence = dict(contract_evidence)
         self._clock = clock
+        if freshness_max_age_seconds is not None and freshness_max_age_seconds <= 0:
+            raise ValueError("IBKR evidence freshness threshold must be positive")
+        self._freshness_max_age_seconds = freshness_max_age_seconds
         self._current_bindings: dict[int, _SubscriptionBinding] = {}
         self._request_ids_by_listing: dict[str, int] = {}
         self._retired_bindings: OrderedDict[int, tuple[int, _SubscriptionBinding]] = OrderedDict()
@@ -157,6 +161,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._bid_seen: set[str] = set()
         self._ask_seen: set[str] = set()
         self._last_prices: dict[tuple[str, str], Decimal] = {}
+        self._first_bid_at: dict[str, datetime] = {}
+        self._last_bid_at: dict[str, datetime] = {}
+        self._first_ask_at: dict[str, datetime] = {}
+        self._last_ask_at: dict[str, datetime] = {}
         self._last_message_at: datetime | None = None
         self._connected_once = False
         self._terminal_error: IbkrConnectionIntegrityError | None = None
@@ -182,6 +190,16 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             self._retired_bindings.clear()
             self._market_data_types.clear()
             self._session.register_subscriptions(())
+
+    async def force_reconnect(self) -> None:
+        """Perform an explicit new connection generation for operator tests."""
+
+        listings = tuple(binding.listing for binding in self._current_binding_values())
+        if not listings:
+            raise RuntimeError("IBKR native capture has no active subscriptions to reconnect")
+        await self.disconnect()
+        await self.connect()
+        await self.subscribe(listings)
 
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
@@ -311,6 +329,21 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             for binding in self._current_bindings.values()
         ):
             reasons.add("ASK_EVIDENCE_MISSING")
+        if self._freshness_max_age_seconds is not None:
+            for binding in self._current_bindings.values():
+                listing_id = str(binding.listing.listing_id)
+                if (
+                    listing_id in self._last_bid_at
+                    and (observed_at - self._last_bid_at[listing_id]).total_seconds()
+                    > self._freshness_max_age_seconds
+                ):
+                    reasons.add("BID_EVIDENCE_STALE")
+                if (
+                    listing_id in self._last_ask_at
+                    and (observed_at - self._last_ask_at[listing_id]).total_seconds()
+                    > self._freshness_max_age_seconds
+                ):
+                    reasons.add("ASK_EVIDENCE_STALE")
         healthy = (
             self._client is not None
             and snapshot.state is IbkrSessionState.CONNECTED
@@ -349,6 +382,11 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("retired_request_tombstones", str(len(self._retired_bindings))),
             ("market_data_types", _market_data_type_summary(self._market_data_types)),
             ("farms", ",".join(f"{name}={value}" for name, value in snapshot.farms)),
+            ("freshness_max_age_seconds", str(self._freshness_max_age_seconds or "disabled")),
+            ("first_bid_at", _earliest_time(self._first_bid_at)),
+            ("last_bid_at", _latest_time(self._last_bid_at)),
+            ("first_ask_at", _earliest_time(self._first_ask_at)),
+            ("last_ask_at", _latest_time(self._last_ask_at)),
         )
         return AdapterHealth(
             adapter_name="ibkr-native-capture",
@@ -621,8 +659,12 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._last_prices[(listing_id, side)] = value
         if side == "BID":
             self._bid_seen.add(listing_id)
+            self._first_bid_at.setdefault(listing_id, received)
+            self._last_bid_at[listing_id] = received
         else:
             self._ask_seen.add(listing_id)
+            self._first_ask_at.setdefault(listing_id, received)
+            self._last_ask_at[listing_id] = received
         if prior_opposite is not None and (
             (side == "BID" and value > prior_opposite) or (side == "ASK" and value < prior_opposite)
         ):
@@ -860,6 +902,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._bid_seen.clear()
         self._ask_seen.clear()
         self._last_prices.clear()
+        self._first_bid_at.clear()
+        self._last_bid_at.clear()
+        self._first_ask_at.clear()
+        self._last_ask_at.clear()
 
     def _callback_received_time(self, callback: _Callback) -> datetime:
         if callback.received_time is not None:
@@ -918,6 +964,14 @@ def _market_data_type_summary(values: Mapping[int, str]) -> str:
         ",".join(f"{request_id}={data_type}" for request_id, data_type in sorted(values.items()))
         or "none"
     )
+
+
+def _earliest_time(values: Mapping[str, datetime]) -> str:
+    return min(values.values()).isoformat() if values else "none"
+
+
+def _latest_time(values: Mapping[str, datetime]) -> str:
+    return max(values.values()).isoformat() if values else "none"
 
 
 def _health_reason_blocks(reason: str) -> bool:

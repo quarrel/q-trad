@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     capture_source_id: str = "local-development"
     image: str = "qtrad-app:local"
     log_level: str = "INFO"
+    provider: Literal["ig", "ibkr"] = "ig"
 
     ig_username: str | None = None
     ig_password: SecretStr | None = None
@@ -42,6 +43,12 @@ class Settings(BaseSettings):
     ibkr_gateway_restart_cooldown_seconds: float = 900.0
     ibkr_gateway_restart_limit_per_hour: int = 3
     ibkr_checkpoint_root: Path = Path("/srv/qtrad/ibkr/checkpoints")
+    ibkr_capture_source_id: str = "ibkr-paper-v1"
+    ibkr_capture_universe_id: str = "capture-ibkr-v1"
+    ibkr_capture_configuration_path: Path | None = None
+    ibkr_capture_configuration_hash: str | None = None
+    ibkr_capture_freshness_seconds: float = 60.0
+    ibkr_capture_queue_capacity: int = 50_000
 
     @model_validator(mode="after")
     def validate_ibkr_stack(self) -> "Settings":
@@ -63,6 +70,22 @@ class Settings(BaseSettings):
             raise ValueError("IBKR session timeouts and restart limit must be positive")
         if not self.ibkr_checkpoint_root.is_absolute():
             raise ValueError("IBKR checkpoint root must be an absolute persistent path")
+        if self.provider == "ibkr":
+            if self.ibkr_capture_source_id != "ibkr-paper-v1":
+                raise ValueError("IBKR native capture source identity is fixed to ibkr-paper-v1")
+            if self.ibkr_capture_universe_id != "capture-ibkr-v1":
+                raise ValueError(
+                    "IBKR native capture universe identity is fixed to capture-ibkr-v1"
+                )
+            if self.ibkr_capture_configuration_hash is None:
+                # A live collector supplies this hash from its exact reviewed
+                # configuration.  The API may remain constructible without it,
+                # but a runtime must fail closed before connecting.
+                pass
+        if self.ibkr_capture_freshness_seconds <= 0:
+            raise ValueError("IBKR capture freshness threshold must be positive")
+        if self.ibkr_capture_queue_capacity <= 0:
+            raise ValueError("IBKR capture queue capacity must be positive")
         return self
 
     @field_validator("database_url")
@@ -81,6 +104,28 @@ class Settings(BaseSettings):
             raise ValueError(
                 "capture source ID must use lowercase letters, digits, '.', '_' or '-'"
             )
+        return value
+
+    @field_validator("ibkr_capture_source_id", "ibkr_capture_universe_id")
+    @classmethod
+    def valid_ibkr_capture_identity(cls, value: str) -> str:
+        if (
+            not value
+            or len(value) > 64
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for character in value
+            )
+        ):
+            raise ValueError("IBKR capture identity must be a bounded lower-case token")
+        return value
+
+    @field_validator("ibkr_capture_configuration_hash")
+    @classmethod
+    def valid_ibkr_capture_configuration_hash(cls, value: str | None) -> str | None:
+        if value is not None and (
+            len(value) != 64 or any(character not in "0123456789abcdef" for character in value)
+        ):
+            raise ValueError("IBKR capture configuration hash must be a lower-case SHA-256")
         return value
 
     @field_validator("ibkr_gateway_host")

@@ -100,6 +100,12 @@ class OperatorQueries:
         self,
         expected_instrument_ids: tuple[str, ...],
         expected_configuration_hash: str,
+        *,
+        provider: str = "ig",
+        environment: str = "IG_DEMO",
+        adapter_name: str = "ig-market-data",
+        freshness_seconds: float = 300.0,
+        source_class: str = "IG_NATIVE_CAPTURE",
     ) -> dict[str, Any]:
         """Return collector readiness rather than API/database liveness."""
 
@@ -109,26 +115,59 @@ class OperatorQueries:
             character not in "0123456789abcdef" for character in expected_configuration_hash
         ):
             raise ValueError("collector readiness requires a lower-case SHA-256 configuration hash")
+        if freshness_seconds <= 0:
+            raise ValueError("collector readiness freshness must be positive")
+        if any(
+            not value or "'" in value
+            for value in (provider, environment, adapter_name, source_class)
+        ):
+            raise ValueError("collector readiness source identity is invalid")
+        if source_class == "IBKR_NATIVE_CAPTURE":
+            fresh_quote_sql = """
+                    SELECT COUNT(*) FROM read_model.capture_latest_quotes
+                    WHERE source_class = :source_class
+                      AND provider = :provider
+                      AND environment = :environment
+                      AND instrument_id IN (
+                          SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                      )
+                      AND received_time >= clock_timestamp() - (
+                          :freshness_seconds * INTERVAL '1 second'
+                      )
+            """
+        else:
+            fresh_quote_sql = """
+                    SELECT COUNT(*) FROM read_model.latest_quotes
+                    WHERE instrument_id IN (
+                        SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
+                    )
+                    AND received_time >= clock_timestamp() - (
+                        :freshness_seconds * INTERVAL '1 second'
+                    )
+            """
         rows = await self._store.query(
             """
             SELECT
                 EXISTS (
                       SELECT 1 FROM ops.runs
                       WHERE kind = 'INGESTION' AND status = 'RUNNING'
+                        AND environment = :environment
                         AND configuration_hash = :configuration_hash
                 ) AS ingestion_running,
                 EXISTS (
                     SELECT 1 FROM ops.adapter_health
-                    WHERE adapter_name = 'ig-market-data' AND environment = 'IG_DEMO'
-                      AND status = 'HEALTHY'
+                    WHERE adapter_name = '"""
+            + adapter_name
+            + "' AND environment = '"
+            + environment
+            + "'\n                      AND status = 'HEALTHY'"
+            + "\n                      AND (:source_class = 'IG_NATIVE_CAPTURE' OR "
+            + "attributes->>'source_class' = :source_class)"
+            + """
                 ) AS adapter_healthy,
-                (
-                    SELECT COUNT(*) FROM read_model.latest_quotes
-                    WHERE instrument_id IN (
-                        SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
-                    )
-                    AND received_time >= clock_timestamp() - INTERVAL '5 minutes'
-                ) AS fresh_quote_count,
+                ("""
+            + fresh_quote_sql
+            + """) AS fresh_quote_count,
                 COALESCE((SELECT MAX(global_position) FROM canonical.events), 0) AS global_position,
                 COALESCE((
                     SELECT global_position FROM ops.projection_checkpoints
@@ -142,6 +181,10 @@ class OperatorQueries:
             {
                 "configuration_hash": expected_configuration_hash,
                 "instrument_ids": json.dumps(expected_instrument_ids),
+                "freshness_seconds": freshness_seconds,
+                "environment": environment,
+                "provider": provider,
+                "source_class": source_class,
             },
         )
         row = rows[0]
@@ -149,7 +192,11 @@ class OperatorQueries:
         if not row["ingestion_running"]:
             reasons.append("matching ingestion configuration is not running")
         if not row["adapter_healthy"]:
-            reasons.append("IG adapter is not healthy")
+            reasons.append(f"{adapter_name} adapter is not healthy")
+        if source_class == "IBKR_NATIVE_CAPTURE" and int(row["fresh_quote_count"]) < len(
+            expected_instrument_ids
+        ):
+            reasons.append("one or more native capture instruments lack fresh canonical evidence")
         if int(row["global_position"]) - int(row["checkpoint_position"]) > 100:
             reasons.append("projection is more than 100 events behind")
         checkpoint_updated_at = row["checkpoint_updated_at"]
@@ -164,9 +211,161 @@ class OperatorQueries:
             "checkpoint_position": int(row["checkpoint_position"]),
             "checkpoint_updated_at": checkpoint_updated_at,
             "configuration_hash": expected_configuration_hash,
+            "provider": provider,
+            "environment": environment,
+            "source_class": source_class,
         }
 
-    async def instruments(self) -> list[dict[str, Any]]:
+    async def source_instrument_ids(self, *, provider: str, environment: str) -> tuple[str, ...]:
+        rows = await self._store.query(
+            """
+            SELECT DISTINCT instrument_id
+            FROM reference.provider_listings
+            WHERE provider = :provider AND environment = :environment
+              AND (valid_to IS NULL OR valid_to > clock_timestamp())
+            ORDER BY instrument_id
+            """,
+            {"provider": provider, "environment": environment},
+        )
+        return tuple(str(row["instrument_id"]) for row in rows)
+
+    async def capture_identity(
+        self,
+        *,
+        provider: str | None = None,
+        environment: str | None = None,
+        capture_session_id: str | None = None,
+    ) -> dict[str, Any] | None:
+        rows = await self._store.query(
+            """
+            SELECT provider, environment, source_class, capture_source_id, universe_id,
+                   configuration_hash, capture_session_id, connection_generation,
+                   arrival_sequence, received_time
+            FROM raw.market_messages
+            WHERE (
+                CAST(:provider AS text) IS NULL
+                OR provider = CAST(:provider AS text)
+            ) AND (
+                CAST(:environment AS text) IS NULL
+                OR environment = CAST(:environment AS text)
+            ) AND (
+                CAST(:capture_session_id AS uuid) IS NULL
+                OR capture_session_id = CAST(:capture_session_id AS uuid)
+            )
+            ORDER BY id DESC
+            LIMIT 1
+            """,
+            {
+                "provider": provider,
+                "environment": environment,
+                "capture_session_id": capture_session_id,
+            },
+        )
+        return rows[0] if rows else None
+
+    async def capture_reconciliation(
+        self,
+        *,
+        provider: str,
+        environment: str,
+        capture_session_id: str | None = None,
+        adapter_accepted: int | None = None,
+        stale_generation_rejected: int = 0,
+        records_dropped: int = 0,
+        records_failed: int = 0,
+    ) -> dict[str, Any]:
+        rows = await self._store.query(
+            """
+            WITH selected AS (
+                SELECT id
+                FROM raw.market_messages
+                WHERE provider = :provider AND environment = :environment
+                  AND (
+                      CAST(:capture_session_id AS uuid) IS NULL
+                      OR capture_session_id = CAST(:capture_session_id AS uuid)
+                  )
+            ), canonical AS (
+                SELECT DISTINCT raw_record_id
+                FROM canonical.events
+                WHERE raw_record_id IN (SELECT id FROM selected)
+            ), quarantined AS (
+                SELECT DISTINCT raw_record_id
+                FROM raw.quarantine
+                WHERE raw_record_id IN (SELECT id FROM selected)
+            )
+            SELECT
+                (SELECT COUNT(*) FROM selected) AS raw_persisted,
+                (SELECT COUNT(*) FROM canonical) AS canonical_persisted,
+                (SELECT COUNT(*) FROM quarantined) AS quarantined,
+                (SELECT COUNT(*) FROM selected)
+                    - (SELECT COUNT(*) FROM canonical)
+                    - (SELECT COUNT(*) FROM quarantined) AS unclassified
+            """,
+            {
+                "provider": provider,
+                "environment": environment,
+                "capture_session_id": capture_session_id,
+            },
+        )
+        row = rows[0]
+        raw_persisted = int(row["raw_persisted"])
+        accepted = raw_persisted if adapter_accepted is None else adapter_accepted
+        return {
+            "provider": provider,
+            "environment": environment,
+            "capture_session_id": capture_session_id,
+            "adapter_accepted": accepted,
+            "raw_offered": accepted,
+            "raw_persisted": raw_persisted,
+            "canonical_eligible": int(row["canonical_persisted"]),
+            "canonical_persisted": int(row["canonical_persisted"]),
+            "quarantined": int(row["quarantined"]),
+            "unclassified_raw": int(row["unclassified"]),
+            "stale_generation_rejected": stale_generation_rejected,
+            "records_dropped": records_dropped,
+            "records_failed": records_failed,
+            "loss": max(accepted - raw_persisted, 0),
+        }
+
+    async def instruments(
+        self,
+        *,
+        provider: str | None = None,
+        environment: str | None = None,
+        source_class: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if source_class == "IBKR_NATIVE_CAPTURE":
+            return await self._store.query(
+                """
+                SELECT i.*, q.provider, q.environment, q.external_id,
+                       q.event_time AS quote_event_time, q.received_time,
+                       q.bid, q.ask,
+                       CASE
+                           WHEN q.received_time < clock_timestamp() - INTERVAL '30 seconds'
+                           THEN 'STALE'
+                           ELSE q.quality
+                       END AS quality
+                FROM reference.instruments i
+                LEFT JOIN read_model.capture_latest_quotes q
+                  ON q.instrument_id = i.instrument_id
+                 AND q.source_class = :source_class
+                 AND q.provider = :provider
+                 AND q.environment = :environment
+                WHERE EXISTS (
+                    SELECT 1 FROM reference.provider_listings l
+                    WHERE l.instrument_id = i.instrument_id
+                      AND l.provider = :provider
+                      AND l.environment = :environment
+                      AND (l.valid_to IS NULL OR l.valid_to > clock_timestamp())
+                )
+                ORDER BY i.instrument_id
+                """,
+                {
+                    "source_class": source_class,
+                    "provider": provider,
+                    "environment": environment,
+                },
+            )
         return await self._store.query(
             """
             SELECT i.*, q.provider, q.environment, q.external_id,
@@ -180,10 +379,35 @@ class OperatorQueries:
             FROM reference.instruments i
             LEFT JOIN read_model.latest_quotes q USING (instrument_id)
             ORDER BY i.instrument_id
-            """
+        """
         )
 
-    async def instrument(self, instrument_id: str) -> dict[str, Any] | None:
+    async def instrument(
+        self,
+        instrument_id: str,
+        *,
+        provider: str | None = None,
+        environment: str | None = None,
+        source_class: str | None = None,
+    ) -> dict[str, Any] | None:
+        quote_table = "read_model.latest_quotes"
+        quote_filter = ""
+        quote_parameters: dict[str, Any] = {}
+        if source_class == "IBKR_NATIVE_CAPTURE":
+            quote_table = "read_model.capture_latest_quotes"
+            quote_filter = """
+              AND q.source_class = :source_class
+              AND q.provider = :provider
+              AND q.environment = :environment
+            """
+            quote_parameters = {
+                "source_class": source_class,
+                "provider": provider,
+                "environment": environment,
+            }
+        join_clause = (
+            f"LEFT JOIN {quote_table} q ON q.instrument_id = i.instrument_id{quote_filter}"
+        )
         instruments = await self._store.query(
             """
             SELECT i.*, q.provider, q.environment, q.external_id,
@@ -195,10 +419,12 @@ class OperatorQueries:
                        ELSE q.quality
                    END AS quality
             FROM reference.instruments i
-            LEFT JOIN read_model.latest_quotes q USING (instrument_id)
+            """
+            + join_clause
+            + """
             WHERE i.instrument_id = :instrument_id
             """,
-            {"instrument_id": instrument_id},
+            {"instrument_id": instrument_id, **quote_parameters},
         )
         if not instruments:
             return None

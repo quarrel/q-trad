@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from qtrad.domain.events import EventEnvelope
+from qtrad.domain.market_data import MarketDataSourceClass
 
 
 @dataclass(frozen=True, slots=True)
@@ -29,6 +30,63 @@ class CaptureFeedIdentity:
             character not in "0123456789abcdef" for character in self.configuration_hash
         ):
             raise ValueError("capture feed configuration hash must be lower-case SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class CaptureIdentity:
+    """Immutable provider/source identity attached to one capture session.
+
+    ``CaptureFeedIdentity`` predates provider-selectable ingestion and remains the
+    public identity of a canonical feed.  This companion value adds the source
+    class and broker environment needed to keep native IBKR, historical IBKR and
+    IG evidence separate at the raw persistence boundary.
+    """
+
+    provider: str
+    environment: str
+    source_class: MarketDataSourceClass
+    capture_source_id: str
+    universe_id: str
+    configuration_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.provider or len(self.provider) > 32:
+            raise ValueError("capture provider must be bounded and non-empty")
+        if not self.environment or len(self.environment) > 32:
+            raise ValueError("capture environment must be bounded and non-empty")
+        if self.source_class is MarketDataSourceClass.IBKR_NATIVE_CAPTURE and (
+            self.provider != "ibkr" or self.environment != "IBKR_PAPER"
+        ):
+            raise ValueError("IBKR native capture identity must use ibkr/IBKR_PAPER")
+        if self.source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH and (
+            self.provider != "ibkr"
+        ):
+            raise ValueError("IBKR historical identity must use provider ibkr")
+        if self.source_class is MarketDataSourceClass.IG_NATIVE_CAPTURE and self.provider != "ig":
+            raise ValueError("IG native capture identity must use provider ig")
+        for name, value in (
+            ("capture source ID", self.capture_source_id),
+            ("capture universe ID", self.universe_id),
+        ):
+            if not value or len(value) > 64:
+                raise ValueError(f"{name} must contain between 1 and 64 characters")
+            if any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789._-" for character in value
+            ):
+                raise ValueError(f"{name} contains unsupported characters")
+        if len(self.configuration_hash) != 64 or any(
+            character not in "0123456789abcdef" for character in self.configuration_hash
+        ):
+            raise ValueError("capture configuration hash must be a lower-case SHA-256")
+
+    @property
+    def feed_identity(self) -> CaptureFeedIdentity:
+        return CaptureFeedIdentity(
+            feed_schema_version=1,
+            source_id=self.capture_source_id,
+            universe_name=self.universe_id,
+            configuration_hash=self.configuration_hash,
+        )
 
 
 @dataclass(frozen=True, slots=True)

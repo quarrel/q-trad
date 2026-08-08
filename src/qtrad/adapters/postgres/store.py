@@ -23,7 +23,13 @@ from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPacingPolicy,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
+from qtrad.domain.instruments import (
+    INITIAL_INSTRUMENTS,
+    AssetClass,
+    Instrument,
+    ProductType,
+    ProviderListing,
+)
 from qtrad.domain.market_data import BarProvenance, DataQuality, MarketBar, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.operations import (
@@ -81,6 +87,46 @@ class PostgresAuditStore(AuditStore):
                         "base_currency": instrument.base_currency,
                         "quote_currency": instrument.quote_currency,
                         "search_aliases": json.dumps(instrument.search_aliases),
+                    },
+                )
+
+    async def seed_native_capture_instruments(self, listings: Sequence[ProviderListing]) -> None:
+        """Ensure exact reviewed native listings have reference rows before projection."""
+
+        async with self._engine.begin() as connection:
+            for listing in listings:
+                namespace, _, name = str(listing.instrument_id).partition(":")
+                currencies = name.upper().split("-", maxsplit=1)
+                asset_class = {
+                    "fx": AssetClass.FX.value,
+                    "index": AssetClass.INDEX.value,
+                    "commodity": AssetClass.COMMODITY.value,
+                    "crypto": AssetClass.CRYPTO.value,
+                }.get(namespace, AssetClass.FX.value)
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference.instruments (
+                            instrument_id, display_name, asset_class, base_currency,
+                            quote_currency, search_aliases
+                        ) VALUES (
+                            :instrument_id, :display_name, :asset_class, :base_currency,
+                            :quote_currency, CAST(:search_aliases AS jsonb)
+                        )
+                        ON CONFLICT (instrument_id) DO NOTHING
+                        """
+                    ),
+                    {
+                        "instrument_id": str(listing.instrument_id),
+                        "display_name": listing.display_name,
+                        "asset_class": asset_class,
+                        "base_currency": currencies[0] if len(currencies) == 2 else None,
+                        "quote_currency": (
+                            currencies[1] if len(currencies) == 2 else listing.currency
+                        ),
+                        "search_aliases": json.dumps(
+                            (listing.display_name, listing.listing_id.external_id)
+                        ),
                     },
                 )
 
@@ -175,7 +221,13 @@ class PostgresAuditStore(AuditStore):
         )
 
     async def validate_provider_listing(
-        self, listing: ProviderListing, *, universe_hash: str, observed_at: datetime
+        self,
+        listing: ProviderListing,
+        *,
+        universe_hash: str,
+        observed_at: datetime,
+        producer: str = "ig-demo-discovery",
+        producer_version: str = "0.1.0",
     ) -> EventEnvelope | None:
         """Record a bounded listing-validation fact before changing its projection."""
 
@@ -209,15 +261,19 @@ class PostgresAuditStore(AuditStore):
             event_type="ProviderListingValidated",
             event_time=observed_at,
             received_time=observed_at,
-            producer="ig-demo-discovery",
-            producer_version="0.1.0",
+            producer=producer,
+            producer_version=producer_version,
             payload={"listing": effective_listing, "universe_hash": universe_hash},
         )
         try:
             persisted = await self.append(event, expected_stream_version=previous)
         except StreamVersionConflict:
             return await self.validate_provider_listing(
-                listing, universe_hash=universe_hash, observed_at=observed_at
+                listing,
+                universe_hash=universe_hash,
+                observed_at=observed_at,
+                producer=producer,
+                producer_version=producer_version,
             )
         return persisted
 
@@ -1138,11 +1194,16 @@ class PostgresAuditStore(AuditStore):
                   INSERT INTO raw.market_messages (
                       provider, environment, subscription, deduplication_key,
                       received_time, payload, payload_sha256, payload_representation,
-                      adapter_version
+                      adapter_version, capture_session_id, source_class,
+                      capture_source_id, universe_id, configuration_hash,
+                      connection_generation, arrival_sequence
                   ) VALUES (
                       :provider, :environment, :subscription, :deduplication_key,
                       :received_time, CAST(:payload AS jsonb), :payload_sha256,
-                      :payload_representation, :adapter_version
+                      :payload_representation, :adapter_version,
+                      CAST(:capture_session_id AS uuid), :source_class,
+                      :capture_source_id, :universe_id, :configuration_hash,
+                      :connection_generation, :arrival_sequence
                 )
                 ON CONFLICT (provider, environment, deduplication_key) DO NOTHING
                 RETURNING id
@@ -1158,6 +1219,13 @@ class PostgresAuditStore(AuditStore):
                 "payload_sha256": payload_hash,
                 "payload_representation": int(message.payload_representation),
                 "adapter_version": message.adapter_version,
+                "capture_session_id": message.capture_session_id,
+                "source_class": message.source_class,
+                "capture_source_id": message.capture_source_id,
+                "universe_id": message.universe_id,
+                "configuration_hash": message.configuration_hash,
+                "connection_generation": message.connection_generation,
+                "arrival_sequence": message.arrival_sequence,
             },
         )
         inserted = result.scalar_one_or_none()
@@ -1284,6 +1352,58 @@ class PostgresAuditStore(AuditStore):
         elif event.event_type == "MarketQuoteObserved":
             payload = event.payload
             listing = _mapping(payload["listing_id"])
+            capture_source_class = payload.get("capture_source_class")
+            if capture_source_class is not None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO read_model.capture_latest_quotes (
+                            source_class, provider, environment, capture_source_id,
+                            universe_id, instrument_id, external_id,
+                            event_time, received_time, bid, ask, bid_size, ask_size,
+                            quality, global_position
+                        ) VALUES (
+                            :source_class, :provider, :environment, :capture_source_id,
+                            :universe_id, :instrument_id, :external_id,
+                            :event_time, :received_time, :bid, :ask, :bid_size, :ask_size,
+                            :quality, :global_position
+                        )
+                        ON CONFLICT (source_class, provider, environment, instrument_id)
+                        DO UPDATE SET
+                            capture_source_id = EXCLUDED.capture_source_id,
+                            universe_id = EXCLUDED.universe_id,
+                            external_id = EXCLUDED.external_id,
+                            event_time = EXCLUDED.event_time,
+                            received_time = EXCLUDED.received_time,
+                            bid = EXCLUDED.bid,
+                            ask = EXCLUDED.ask,
+                            bid_size = EXCLUDED.bid_size,
+                            ask_size = EXCLUDED.ask_size,
+                            quality = EXCLUDED.quality,
+                            global_position = EXCLUDED.global_position
+                        WHERE read_model.capture_latest_quotes.global_position
+                              < EXCLUDED.global_position
+                        """
+                    ),
+                    {
+                        "source_class": str(capture_source_class),
+                        "provider": str(listing["provider"]),
+                        "environment": str(listing["environment"]),
+                        "capture_source_id": str(payload["capture_source_id"]),
+                        "universe_id": str(payload["capture_universe_id"]),
+                        "instrument_id": str(payload["instrument_id"]),
+                        "external_id": str(listing["external_id"]),
+                        "event_time": _parse_datetime(payload["event_time"]),
+                        "received_time": _parse_datetime(payload["received_time"]),
+                        "bid": payload.get("bid"),
+                        "ask": payload.get("ask"),
+                        "bid_size": payload.get("bid_size"),
+                        "ask_size": payload.get("ask_size"),
+                        "quality": str(payload["quality"]),
+                        "global_position": event.global_position,
+                    },
+                )
+                return
             await connection.execute(
                 text(
                     """

@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, create_async_engine
 from qtrad.adapters.postgres.queries import OperatorQueries
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.domain.events import EventEnvelope, JsonValue
+from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.modes import BrokerEnvironment
+from qtrad.ports.capture_feed import CaptureIdentity
+from qtrad.runtime.ibkr_native_capture import load_reviewed_configuration
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import load_capture_universe
 
@@ -82,6 +86,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def current_universe():
         return load_capture_universe(configuration.capture_universe_path)
 
+    def current_identity() -> tuple[CaptureIdentity, tuple[str, ...] | None]:
+        if configuration.provider == "ibkr":
+            if configuration.ibkr_capture_configuration_path is not None:
+                reviewed = load_reviewed_configuration(
+                    configuration.ibkr_capture_configuration_path
+                )
+                return reviewed.identity, tuple(
+                    str(item.instrument_id) for item in reviewed.listings
+                )
+            if configuration.ibkr_capture_configuration_hash is None:
+                raise HTTPException(
+                    status_code=503,
+                    detail="IBKR native capture configuration identity is not configured",
+                )
+            return (
+                CaptureIdentity(
+                    provider="ibkr",
+                    environment=BrokerEnvironment.IBKR_PAPER.value,
+                    source_class=MarketDataSourceClass.IBKR_NATIVE_CAPTURE,
+                    capture_source_id=configuration.ibkr_capture_source_id,
+                    universe_id=configuration.ibkr_capture_universe_id,
+                    configuration_hash=configuration.ibkr_capture_configuration_hash,
+                ),
+                None,
+            )
+        universe = current_universe()
+        return (
+            CaptureIdentity(
+                provider="ig",
+                environment=BrokerEnvironment.IG_DEMO.value,
+                source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
+                capture_source_id=configuration.capture_source_id,
+                universe_id=universe.name,
+                configuration_hash=universe.configuration_hash,
+            ),
+            tuple(str(instrument.instrument_id) for instrument in universe.instruments),
+        )
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
@@ -98,14 +140,50 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.get("/health")
     async def health() -> dict[str, str]:
         await queries.system()
-        return {"status": "ok", "mode": "data-only", "broker_environment": "IG_DEMO"}
+        return {
+            "status": "ok",
+            "mode": "data-only",
+            "provider": configuration.provider,
+            "broker_environment": (
+                BrokerEnvironment.IBKR_PAPER.value
+                if configuration.provider == "ibkr"
+                else BrokerEnvironment.IG_DEMO.value
+            ),
+        }
 
     @app.get("/health/ready")
     async def readiness() -> JSONResponse:
-        universe = current_universe()
+        identity, instrument_ids = current_identity()
+        expected_instruments = instrument_ids
+        if expected_instruments is None:
+            expected_instruments = await queries.source_instrument_ids(
+                provider=identity.provider, environment=identity.environment
+            )
+        if not expected_instruments:
+            result = {
+                "ready": False,
+                "reasons": ["no exact provider listings are persisted for the configured source"],
+                "expected_instruments": 0,
+                "configuration_hash": identity.configuration_hash,
+                "provider": identity.provider,
+                "environment": identity.environment,
+                "source_class": identity.source_class.value,
+            }
+            return JSONResponse(content=jsonable_encoder(result), status_code=503)
         result = await queries.readiness(
-            tuple(str(instrument.instrument_id) for instrument in universe.instruments),
-            universe.configuration_hash,
+            expected_instruments,
+            identity.configuration_hash,
+            provider=identity.provider,
+            environment=identity.environment,
+            adapter_name=(
+                "ibkr-native-capture" if identity.provider == "ibkr" else "ig-market-data"
+            ),
+            freshness_seconds=(
+                configuration.ibkr_capture_freshness_seconds
+                if identity.provider == "ibkr"
+                else 300.0
+            ),
+            source_class=identity.source_class.value,
         )
         status_code = 200 if result["ready"] else 503
         return JSONResponse(content=jsonable_encoder(result), status_code=status_code)
@@ -119,7 +197,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         after_position: Annotated[int, Query(ge=0)] = 0,
         limit: Annotated[int, Query(ge=1, le=1000)] = 500,
     ) -> FeedPageResponse:
-        universe = current_universe()
+        identity, _ = current_identity()
         page = await queries.event_page(after_position=after_position, limit=limit)
         if after_position > page.high_water_position:
             raise HTTPException(status_code=409, detail="cursor exceeds source high-water position")
@@ -127,9 +205,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         next_position = events[-1].global_position if events else after_position
         return FeedPageResponse(
             feed_schema_version=1,
-            source_id=configuration.capture_source_id,
-            universe_name=universe.name,
-            configuration_hash=universe.configuration_hash,
+            source_id=identity.capture_source_id,
+            universe_name=identity.universe_id,
+            configuration_hash=identity.configuration_hash,
             after_position=after_position,
             high_water_position=page.high_water_position,
             next_position=next_position,
@@ -137,13 +215,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             events=events,
         )
 
+    @app.get("/api/v1/capture/identity")
+    async def capture_identity() -> Any:
+        identity, _ = current_identity()
+        latest = await queries.capture_identity(
+            provider=identity.provider,
+            environment=identity.environment,
+        )
+        return jsonable_encoder(
+            {
+                "provider": identity.provider,
+                "environment": identity.environment,
+                "source_class": identity.source_class.value,
+                "capture_source_id": identity.capture_source_id,
+                "universe_id": identity.universe_id,
+                "configuration_hash": identity.configuration_hash,
+                "latest_raw_identity": latest,
+            }
+        )
+
+    @app.get("/api/v1/capture/reconciliation")
+    async def capture_reconciliation(capture_session_id: UUID | None = None) -> Any:
+        identity, _ = current_identity()
+        return jsonable_encoder(
+            await queries.capture_reconciliation(
+                provider=identity.provider,
+                environment=identity.environment,
+                capture_session_id=(str(capture_session_id) if capture_session_id else None),
+            )
+        )
+
     @app.get("/api/v1/instruments")
     async def instruments() -> Any:
-        return jsonable_encoder(await queries.instruments())
+        identity, _ = current_identity()
+        return jsonable_encoder(
+            await queries.instruments(
+                provider=identity.provider,
+                environment=identity.environment,
+                source_class=identity.source_class.value,
+            )
+        )
 
     @app.get("/api/v1/instruments/{instrument_id:path}")
     async def instrument(instrument_id: str) -> Any:
-        result = await queries.instrument(instrument_id)
+        identity, _ = current_identity()
+        result = await queries.instrument(
+            instrument_id,
+            provider=identity.provider,
+            environment=identity.environment,
+            source_class=identity.source_class.value,
+        )
         if result is None:
             raise HTTPException(status_code=404, detail="instrument not found")
         return jsonable_encoder(result)
@@ -183,26 +304,45 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/", response_class=HTMLResponse)
     async def console(request: Request) -> HTMLResponse:
+        identity, _ = current_identity()
         return TEMPLATES.TemplateResponse(
             request=request,
             name="index.html",
-            context={"system": await queries.system(), "instruments": await queries.instruments()},
+            context={
+                "system": await queries.system(),
+                "instruments": await queries.instruments(
+                    provider=identity.provider,
+                    environment=identity.environment,
+                    source_class=identity.source_class.value,
+                ),
+            },
         )
 
     @app.get("/console/overview", response_class=HTMLResponse)
     async def console_overview(request: Request) -> HTMLResponse:
+        identity, _ = current_identity()
         return TEMPLATES.TemplateResponse(
             request=request,
             name="_overview.html",
             context={
                 "system": await queries.system(),
-                "instruments": await queries.instruments(),
+                "instruments": await queries.instruments(
+                    provider=identity.provider,
+                    environment=identity.environment,
+                    source_class=identity.source_class.value,
+                ),
             },
         )
 
     @app.get("/console/instruments/{instrument_id:path}", response_class=HTMLResponse)
     async def instrument_page(request: Request, instrument_id: str) -> HTMLResponse:
-        result = await queries.instrument(instrument_id)
+        identity, _ = current_identity()
+        result = await queries.instrument(
+            instrument_id,
+            provider=identity.provider,
+            environment=identity.environment,
+            source_class=identity.source_class.value,
+        )
         if result is None:
             raise HTTPException(status_code=404, detail="instrument not found")
         return TEMPLATES.TemplateResponse(
