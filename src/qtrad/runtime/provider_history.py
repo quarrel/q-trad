@@ -16,6 +16,7 @@ from typing import cast
 import polars as pl
 
 from qtrad.application.provider_history import (
+    ProviderHistoryRequestEvidence,
     ProviderHistorySource,
     ProviderHistorySourceEvidence,
     build_provider_history_dataset,
@@ -49,7 +50,6 @@ from qtrad.domain.provider_history import (
     sha256_json,
 )
 from qtrad.runtime.ibkr_results import (
-    verify_ibkr_historical_result,
     verify_ibkr_historical_result_stream,
 )
 
@@ -1027,11 +1027,16 @@ def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEv
         _SOURCE_MANIFEST_PATH,
         "embedded IBKR result manifest",
     )
-    source_artifact = verify_ibkr_historical_result(source_path)
+    source_artifact = verify_ibkr_historical_result_stream(source_path)
+    request_evidence = tuple(
+        ProviderHistoryRequestEvidence.from_result(result)
+        for result in source_artifact.iter_request_results()
+    )
     return ProviderHistorySourceEvidence(
         dataset=dataset,
         observations=_read_provider_history_rows(path, dataset),
         source_artifact=source_artifact,
+        request_evidence=request_evidence,
     )
 
 

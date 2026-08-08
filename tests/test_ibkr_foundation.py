@@ -357,6 +357,21 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
     assert verified.targets.rows
 
 
+def test_stage8_source_evidence_keeps_request_results_streaming(
+    tmp_path: Path,
+) -> None:
+    artifact, _, provider_manifest = _published_provider_history(tmp_path)
+
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+
+    assert not hasattr(source_evidence.source_artifact, "request_results")
+    assert len(source_evidence.request_evidence) == len(artifact.request_results)
+    assert all(not hasattr(item, "accepted_rows") for item in source_evidence.request_evidence)
+    assert sum(item.accepted_row_count for item in source_evidence.request_evidence) == sum(
+        len(result.accepted_rows) for result in artifact.request_results
+    )
+
+
 def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
     configuration = _config(

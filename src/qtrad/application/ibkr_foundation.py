@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
@@ -9,7 +10,11 @@ from typing import cast
 from uuid import UUID, uuid5
 
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
-from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.application.provider_history import (
+    ProviderHistoryRequestEvidence,
+    ProviderHistorySourceEvidence,
+    request_evidence_by_hash,
+)
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
@@ -29,10 +34,7 @@ from qtrad.domain.ibkr_foundation import (
     IBKRFoundationReadinessState,
 )
 from qtrad.domain.ibkr_historical import IbkrHistoricalRequest, IbkrHistoricalRequestKind
-from qtrad.domain.ibkr_results import (
-    IbkrHistoricalEvidenceDisposition,
-    IbkrHistoricalRequestResult,
-)
+from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.provider_history import (
     ProviderHistoricalDataset,
@@ -207,10 +209,10 @@ def evaluate_ibkr_foundation_readiness(
     source_artifact = source_evidence.source_artifact
     plan = source_artifact.plan
     aggregate = source_artifact.aggregate
-    results_by_hash = {result.request_sha256: result for result in source_artifact.request_results}
+    results_by_hash = request_evidence_by_hash(source_evidence)
     requests_by_instrument: dict[
         str,
-        list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]],
+        list[tuple[IbkrHistoricalRequest, ProviderHistoryRequestEvidence]],
     ] = {}
     for request in plan.requests:
         result = results_by_hash.get(request.request_sha256)
@@ -294,7 +296,7 @@ def evaluate_ibkr_foundation_readiness(
                 "schedule_dispositions": schedule_dispositions,
                 "eligible": candidate in eligible_instruments,
                 "contract_ids": contract_ids,
-                "bar_row_count": sum(len(result.accepted_rows) for result in bar_results),
+                "bar_row_count": sum(result.accepted_row_count for result in bar_results),
                 "schedule_session_count": sum(len(result.sessions) for result in schedule_results),
             },
         )
@@ -304,7 +306,7 @@ def evaluate_ibkr_foundation_readiness(
             or not bar_results
             or not any(
                 result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
-                and result.accepted_rows
+                and result.accepted_row_count > 0
                 for result in bar_results
             )
         ):
@@ -422,12 +424,26 @@ def _provider_evidence(
 ]:
     source = source_evidence.source_artifact
     requests_by_hash = {request.request_sha256: request for request in source.plan.requests}
-    resolved_results: list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]] = []
-    for result in source.request_results:
-        request = requests_by_hash.get(result.request_sha256)
+    results_by_hash = request_evidence_by_hash(source_evidence)
+    resolved_results: list[tuple[IbkrHistoricalRequest, ProviderHistoryRequestEvidence]] = []
+    for request_hash, result in results_by_hash.items():
+        request = requests_by_hash.get(request_hash)
         if request is None:
             raise ValueError("IBKR source result request is absent from the verified plan")
         resolved_results.append((request, result))
+
+    accepted_starts_by_request: dict[str, set[datetime]] = defaultdict(set)
+    for row in source_evidence.observations:
+        request_sha256 = getattr(row, "request_sha256", None)
+        interval_start = getattr(row, "interval_start", None)
+        if isinstance(request_sha256, str) and isinstance(interval_start, datetime):
+            accepted_starts_by_request[request_sha256].add(interval_start)
+    if not accepted_starts_by_request:
+        for result in getattr(source_evidence.source_artifact, "request_results", ()):
+            for raw in result.accepted_rows:
+                accepted_starts_by_request[result.request_sha256].add(
+                    _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
+                )
 
     intervals: dict[str, set[tuple[datetime, datetime]]] = {}
     for request, result in resolved_results:
@@ -470,10 +486,7 @@ def _provider_evidence(
                     )
                 )
             continue
-        accepted_starts = {
-            _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
-            for raw in result.accepted_rows
-        }
+        accepted_starts = accepted_starts_by_request.get(request.request_sha256, set())
         for expected_start, expected_end in expected_intervals:
             missing_start: datetime | None = None
             cursor = expected_start

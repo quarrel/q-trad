@@ -54,12 +54,34 @@ ProviderHistorySource = IbkrHistoricalResultArtifact | ProviderHistoryResultSour
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderHistoryRequestEvidence:
+    """Compact request evidence retained by the foundation builder."""
+
+    request_sha256: str
+    result_sha256: str
+    evidence_disposition: IbkrHistoricalEvidenceDisposition
+    accepted_row_count: int
+    sessions: tuple[dict[str, JsonValue], ...]
+
+    @classmethod
+    def from_result(cls, result: IbkrHistoricalRequestResult) -> ProviderHistoryRequestEvidence:
+        return cls(
+            request_sha256=result.request_sha256,
+            result_sha256=result.result_sha256,
+            evidence_disposition=result.evidence_disposition,
+            accepted_row_count=len(result.accepted_rows),
+            sessions=tuple(dict(session) for session in result.sessions),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
 
     dataset: ProviderHistoricalDataset
     observations: tuple[ProviderHistoricalObservation, ...]
-    source_artifact: IbkrHistoricalResultArtifact
+    source_artifact: ProviderHistorySource
+    request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
 
     def __post_init__(self) -> None:
         if (
@@ -75,6 +97,25 @@ class ProviderHistorySourceEvidence:
             raise ValueError("provider-history source aggregate differs from its dataset")
         if len(self.observations) != self.dataset.row_count:
             raise ValueError("provider-history source observation count differs from its dataset")
+
+
+def request_evidence_by_hash(
+    source_evidence: ProviderHistorySourceEvidence,
+) -> dict[str, ProviderHistoryRequestEvidence]:
+    """Return compact request evidence without forcing a streaming source to materialise."""
+
+    explicit_evidence = getattr(source_evidence, "request_evidence", ())
+    if explicit_evidence:
+        evidence = explicit_evidence
+    else:
+        request_results = getattr(source_evidence.source_artifact, "request_results", ())
+        evidence = tuple(
+            ProviderHistoryRequestEvidence.from_result(result) for result in request_results
+        )
+    result = {item.request_sha256: item for item in evidence}
+    if len(result) != len(evidence):
+        raise ValueError("provider-history request evidence identities are not unique")
+    return result
 
 
 def build_provider_history_dataset(
