@@ -7,21 +7,45 @@ import io
 import json
 import shutil
 from collections.abc import Mapping, Sequence
+from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
 
 import polars as pl
 
+from qtrad.adapters.parquet.observations import _observation_from_row
 from qtrad.application.ibkr_foundation import IBKRFoundationBuild, build_ibkr_foundation
 from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.application.r2_ibkr_historical import (
+    _availability_dataset_id,
+    ibkr_availability_evidence,
+)
+from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue, to_json_value
-from qtrad.domain.foundation import FoundationConfig
+from qtrad.domain.folds import FoldDataset
+from qtrad.domain.foundation import FoundationConfig, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_FOUNDATION_CONTRACT,
     IBKR_FOUNDATION_SCHEMA_VERSION,
+    IBKRFoundationReadiness,
+    IBKRFoundationReadinessCause,
+    IBKRFoundationReadinessState,
 )
-from qtrad.runtime.foundation_bundle import decode_foundation_config
-from qtrad.runtime.provider_history import read_provider_history_source_evidence
+from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.r2_holdout import (
+    R2HoldoutCausalMetadata,
+    R2HoldoutTargetIndex,
+    R2HoldoutTargetSource,
+    R2OutcomeBlindObservationView,
+    R2OutcomeBlindPanelView,
+    R2OutcomeBlindTargetView,
+)
+from qtrad.domain.research import ObservationDataset
+from qtrad.runtime.foundation_bundle import _fold, _panel_row, decode_foundation_config
+from qtrad.runtime.provider_history import (
+    read_provider_history_source_evidence,
+    verify_provider_history_file_only,
+)
 
 _FOUNDATION_CHILD_CONTRACT = "qtrad-ibkr-historical-foundation-child-v1"
 _FOUNDATION_CHILD_SCHEMA_VERSION = 1
@@ -31,7 +55,16 @@ _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
-_CHILD_KINDS = ("observations", "panel", "targets", "folds")
+_CHILD_KINDS = (
+    "observations",
+    "panel",
+    "targets",
+    "folds",
+    "target-index",
+    "causal-metadata",
+    "blind-observations",
+    "blind-panel",
+)
 _CHILD_FIELDS = {
     "contract",
     "schema_version",
@@ -323,6 +356,347 @@ def load_ibkr_foundation_with_identity(path: Path) -> tuple[IBKRFoundationBuild,
     return build, _text(document["build_sha256"], "IBKR foundation build hash")
 
 
+def load_ibkr_foundation_outcome_blind_with_identity(
+    path: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> tuple[IBKRFoundationBuild, str]:
+    """Load the IBKR foundation without decoding outcome-bearing children.
+
+    The normal loader above is intentionally complete and is used after the
+    marker is opened.  Representative OOF must use this narrower path: target,
+    panel and observation children are authenticated by manifest/file bytes,
+    while only the persisted outcome-blind projections and folds are decoded.
+    """
+
+    manifest_path = _regular_file(path, "IBKR foundation manifest")
+    manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
+    document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
+    if set(document) != {
+        "contract",
+        "schema_version",
+        "source_class",
+        "provider_history_manifest",
+        "provider_history_sha256",
+        "build_sha256",
+        "payload",
+    }:
+        raise ValueError("IBKR foundation bundle has unknown or missing fields")
+    if document["contract"] != IBKR_FOUNDATION_CONTRACT:
+        raise ValueError("IBKR foundation bundle contract is unsupported")
+    if document["schema_version"] != IBKR_FOUNDATION_SCHEMA_VERSION:
+        raise ValueError("IBKR foundation bundle schema is unsupported")
+    if document["source_class"] != "IBKR_HISTORICAL_RESEARCH":
+        raise ValueError("IBKR foundation bundle source class is unsupported")
+    if manifest_bytes != _json_bytes(document) + b"\n":
+        raise ValueError("IBKR foundation manifest bytes are not canonical")
+
+    root = manifest_path.parent
+    provider_path = _safe_child(
+        root,
+        _text(document["provider_history_manifest"], "provider-history manifest path"),
+        "provider-history manifest",
+    )
+    provider_bytes = _bounded_bytes(provider_path, _MAX_MANIFEST_BYTES, "provider-history manifest")
+    provider_manifest_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    if provider_manifest_sha256 != _text(
+        document["provider_history_sha256"], "provider-history manifest hash"
+    ):
+        raise ValueError("provider-history manifest bytes changed")
+    provider_dataset = verify_provider_history_file_only(provider_path)
+
+    payload = _mapping(document["payload"], "IBKR foundation payload")
+    if _sha(payload) != _text(document["build_sha256"], "IBKR foundation build hash"):
+        raise ValueError("IBKR foundation payload identity does not match")
+    configuration = decode_foundation_config(
+        _mapping(payload["configuration"], "IBKR foundation configuration")
+    )
+    expected_provider = {
+        "dataset_sha256": provider_dataset.dataset_sha256,
+        "row_count": provider_dataset.row_count,
+        "contract_selection_sha256": provider_dataset.contract_selection_sha256,
+        "plan_sha256": provider_dataset.plan_sha256,
+        "runtime_sha256": provider_dataset.runtime_sha256,
+        "aggregate_sha256": provider_dataset.aggregate_sha256,
+    }
+    if _mapping(payload["provider_history"]) != expected_provider:
+        raise ValueError("IBKR foundation provider-history metadata differs from its child")
+
+    children = _mapping(payload["children"], "IBKR foundation children")
+    child_ids = _child_reference_dataset_ids(children)
+    expected_lineage = {
+        "provider_manifest_sha256": provider_manifest_sha256,
+        "provider_dataset_sha256": provider_dataset.dataset_sha256,
+        "plan_sha256": provider_dataset.plan_sha256,
+        "aggregate_sha256": provider_dataset.aggregate_sha256,
+    }
+    decoded = _verify_children_blind(
+        root,
+        children,
+        child_ids,
+        expected_lineage,
+    )
+    if child_ids["observations"] != configuration.observation_dataset_id:
+        raise ValueError("IBKR foundation observation child differs from configuration")
+    if child_ids["blind-observations"] != _blind_observation_projection_id(
+        source_dataset_id=child_ids["observations"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-observations"],
+    ):
+        raise ValueError("IBKR blind observation projection identity is invalid")
+    if child_ids["blind-panel"] != _blind_panel_projection_id(
+        source_dataset_id=child_ids["panel"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-panel"],
+    ):
+        raise ValueError("IBKR blind panel projection identity is invalid")
+
+    target_index = R2HoldoutTargetIndex.from_rows(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        rows=decoded["target-index"],
+    )
+    if target_index.dataset_id != child_ids["target-index"]:
+        raise ValueError("IBKR holdout target index identity is invalid")
+    causal_metadata = R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=child_ids["panel"],
+        rows=decoded["causal-metadata"],
+    )
+    if causal_metadata.dataset_id != child_ids["causal-metadata"]:
+        raise ValueError("IBKR holdout causal metadata identity is invalid")
+
+    blind_observations = R2OutcomeBlindObservationView(
+        dataset_id=child_ids["observations"],
+        rows=tuple(_observation_from_row(row) for row in decoded["blind-observations"]),
+        configuration={
+            "ordered_instruments": list(configuration.ordered_instruments),
+            "availability_basis": configuration.availability_basis.value,
+        },
+        source_dataset_ids=(provider_dataset.dataset_sha256,),
+        selection_policies={"availability_basis": configuration.availability_basis.value},
+        projection_id=child_ids["blind-observations"],
+    )
+    blind_panel = R2OutcomeBlindPanelView(
+        dataset_id=child_ids["panel"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        rows=tuple(_panel_row(row) for row in decoded["blind-panel"]),
+        projection_id=child_ids["blind-panel"],
+    )
+    blind_targets = R2OutcomeBlindTargetView.from_source(holdout_target_source)
+    if (
+        holdout_target_source.source_target_dataset_id != child_ids["targets"]
+        or holdout_target_source.observation_dataset_id != child_ids["observations"]
+        or holdout_target_source.foundation_configuration_id != configuration.configuration_id
+    ):
+        raise ValueError("IBKR holdout target source is not bound to the foundation children")
+    holdout_target_source.verify_target_index(target_index)
+
+    active_intervals = _decode_active_intervals(payload["active_intervals"])
+    provider_gaps = tuple(
+        cast(
+            Mapping[str, JsonValue],
+            _mapping(item, "IBKR provider gap"),
+        )
+        for item in _sequence(payload["provider_gaps"])
+    )
+    readiness = _decode_readiness(payload["readiness"])
+    provisional = IBKRFoundationBuild(
+        configuration=configuration,
+        observations=blind_observations,
+        panel=blind_panel,
+        targets=blind_targets,
+        folds=FoldDataset(
+            folds=tuple(_fold(row) for row in decoded["folds"]),
+            target_dataset_id=child_ids["targets"],
+            foundation_configuration_id=configuration.configuration_id,
+            dataset_id=child_ids["folds"],
+        ),
+        target_index=target_index,
+        causal_metadata=causal_metadata,
+        provider_history=provider_dataset,
+        active_intervals=active_intervals,
+        provider_gaps=provider_gaps,
+        readiness=readiness,
+    )
+    availability = ibkr_availability_evidence(provisional)
+    holdout_target_source.verify_r1_causal_evidence(
+        causal_metadata=causal_metadata,
+        source_active_intervals=active_intervals,
+        data_gaps=_data_gap_tuples(provider_gaps),
+        availability_evidence_id=_availability_dataset_id(
+            blind_observations.dataset_id,
+            availability,
+        ),
+    )
+    try:
+        expected_folds = build_expanding_folds(cast(TargetDataset, blind_targets), configuration)
+    except ValueError as error:
+        if str(error) != "no scientifically valid expanding folds are available":
+            raise
+        expected_folds = FoldDataset.create(
+            (),
+            target_dataset_id=child_ids["targets"],
+            foundation_configuration_id=configuration.configuration_id,
+        )
+    if provisional.folds != expected_folds:
+        raise ValueError("IBKR foundation folds differ from deterministic blind replay")
+    return provisional, _text(document["build_sha256"], "IBKR foundation build hash")
+
+
+def _child_reference_dataset_ids(children: Mapping[str, object]) -> dict[str, str]:
+    result: dict[str, str] = {}
+    if set(children) != set(_CHILD_KINDS):
+        raise ValueError("IBKR foundation child set is incomplete or duplicated")
+    for kind in _CHILD_KINDS:
+        raw_parts = children[kind]
+        if not isinstance(raw_parts, list) or not raw_parts:
+            raise ValueError("IBKR foundation child parts are invalid")
+        ids = {
+            _text(
+                _mapping(part, "IBKR foundation child reference")["dataset_id"], "child dataset ID"
+            )
+            for part in raw_parts
+        }
+        if len(ids) != 1:
+            raise ValueError("IBKR foundation child parts use multiple dataset identities")
+        result[kind] = next(iter(ids))
+    return result
+
+
+def _blind_observation_projection_id(
+    *,
+    source_dataset_id: str,
+    holdout_start: datetime,
+    rows: Sequence[Mapping[str, JsonValue]],
+) -> str:
+    typed = tuple(_observation_from_row(cast(Mapping[str, object], row)) for row in rows)
+    return R2OutcomeBlindObservationView.compute_projection_id(
+        source_dataset_id=source_dataset_id,
+        holdout_start=holdout_start,
+        rows=typed,
+    )
+
+
+def _blind_panel_projection_id(
+    *,
+    source_dataset_id: str,
+    holdout_start: datetime,
+    rows: Sequence[Mapping[str, JsonValue]],
+) -> str:
+    typed = tuple(_panel_row(cast(Mapping[str, object], row)) for row in rows)
+    return R2OutcomeBlindPanelView.compute_projection_id(
+        source_dataset_id=source_dataset_id,
+        holdout_start=holdout_start,
+        rows=typed,
+    )
+
+
+def _decode_active_intervals(value: object) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+    raw = _mapping(value, "IBKR active intervals")
+    decoded: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
+    for instrument_id, raw_intervals in raw.items():
+        intervals: list[tuple[datetime, datetime]] = []
+        if not isinstance(raw_intervals, list):
+            raise ValueError("IBKR active intervals must be arrays")
+        for raw_interval in raw_intervals:
+            if not isinstance(raw_interval, list) or len(raw_interval) != 2:
+                raise ValueError("IBKR active interval must contain two timestamps")
+            start = _timestamp(raw_interval[0], "IBKR active interval start")
+            end = _timestamp(raw_interval[1], "IBKR active interval end")
+            if end <= start:
+                raise ValueError("IBKR active interval must be positive")
+            intervals.append((start, end))
+        if tuple(sorted(intervals)) != tuple(intervals):
+            raise ValueError("IBKR active intervals are not ordered")
+        decoded[instrument_id] = tuple(intervals)
+    return decoded
+
+
+def _data_gap_tuples(
+    gaps: Sequence[Mapping[str, object]],
+) -> tuple[tuple[str, datetime, datetime], ...]:
+    result: list[tuple[str, datetime, datetime]] = []
+    for gap in gaps:
+        result.append(
+            (
+                _text(gap["instrument_id"], "IBKR gap instrument"),
+                _timestamp(gap["interval_start"], "IBKR gap start"),
+                _timestamp(gap["interval_end"], "IBKR gap end"),
+            )
+        )
+    return tuple(result)
+
+
+def _decode_readiness(value: object) -> IBKRFoundationReadiness:
+    raw = _mapping(value, "IBKR foundation readiness")
+    expected = {
+        "contract",
+        "schema_version",
+        "state",
+        "causes",
+        "candidate_instruments",
+        "groups",
+        "common_support_start",
+        "common_support_end",
+        "common_support_rows",
+        "rows_by_candidate",
+        "evidence",
+    }
+    if set(raw) != expected:
+        raise ValueError("IBKR foundation readiness has an unexpected schema")
+    candidates = tuple(
+        InstrumentId(_text(item, "readiness candidate"))
+        for item in _sequence(raw["candidate_instruments"])
+    )
+    groups = tuple(_text(item, "readiness group") for item in _sequence(raw["groups"]))
+    rows_by_candidate = {
+        key: _int(item, "readiness candidate row count")
+        for key, item in _mapping(raw["rows_by_candidate"]).items()
+    }
+    return IBKRFoundationReadiness(
+        state=IBKRFoundationReadinessState(_text(raw["state"], "readiness state")),
+        causes=tuple(
+            IBKRFoundationReadinessCause(_text(item, "readiness cause"))
+            for item in _sequence(raw["causes"])
+        ),
+        candidate_instruments=candidates,
+        groups=groups,
+        common_support_start=(
+            None
+            if raw["common_support_start"] is None
+            else _timestamp(raw["common_support_start"], "readiness support start")
+        ),
+        common_support_end=(
+            None
+            if raw["common_support_end"] is None
+            else _timestamp(raw["common_support_end"], "readiness support end")
+        ),
+        common_support_rows=_int(raw["common_support_rows"], "readiness support rows"),
+        rows_by_candidate=rows_by_candidate,
+        evidence=cast(dict[str, JsonValue], _mapping(raw["evidence"])),
+    )
+
+
+def _sequence(value: object) -> list[object]:
+    if not isinstance(value, list):
+        raise ValueError("expected a JSON array")
+    return cast(list[object], value)
+
+
+def _timestamp(value: object, field: str) -> datetime:
+    if not isinstance(value, str):
+        raise ValueError(f"{field} must be an ISO-8601 timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
+        raise ValueError(f"{field} must use UTC")
+    return parsed
+
+
 def _child_lineage(
     build: IBKRFoundationBuild,
     source_evidence: ProviderHistorySourceEvidence,
@@ -556,21 +930,176 @@ def _verify_children(
         raise ValueError("IBKR foundation child closure contains unexpected files")
 
 
+def _verify_children_blind(
+    bundle_root: Path,
+    children: Mapping[str, object],
+    expected_dataset_ids: Mapping[str, str],
+    expected_lineage: Mapping[str, JsonValue],
+) -> dict[str, tuple[dict[str, JsonValue], ...]]:
+    """Verify child bytes while decoding only outcome-blind projections and folds."""
+
+    if set(children) != set(_CHILD_KINDS):
+        raise ValueError("IBKR foundation child set is incomplete or duplicated")
+    decoded_kinds = {
+        "folds",
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+    }
+    decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    expected_files: set[str] = set()
+    child_root_names: set[str] = set()
+    for kind in _CHILD_KINDS:
+        raw_parts = children[kind]
+        if not isinstance(raw_parts, list) or not raw_parts:
+            raise ValueError("IBKR foundation child parts are invalid")
+        if len(raw_parts) > _MAX_CHILD_PARTS:
+            raise ValueError("IBKR foundation child part count exceeds its bound")
+        observed_rows: list[dict[str, JsonValue]] = []
+        previous_path = ""
+        for part_index, raw_part in enumerate(raw_parts):
+            reference = _child_reference(raw_part, kind)
+            manifest_reference = _text(reference["manifest_path"], "child manifest path")
+            if manifest_reference <= previous_path:
+                raise ValueError("IBKR foundation child references are not canonical")
+            previous_path = manifest_reference
+            child_root_names.add(PurePosixPath(manifest_reference).parts[0])
+            manifest_path = _safe_child(
+                bundle_root,
+                manifest_reference,
+                "IBKR foundation child manifest",
+            )
+            manifest_bytes = _bounded_bytes(
+                manifest_path,
+                _MAX_CHILD_MANIFEST_BYTES,
+                "IBKR foundation child manifest",
+            )
+            manifest = _mapping(_parse_json(manifest_bytes, "IBKR foundation child manifest"))
+            if set(manifest) != _CHILD_FIELDS:
+                raise ValueError("IBKR foundation child manifest has unknown or missing fields")
+            if manifest_bytes != _json_bytes(manifest) + b"\n":
+                raise ValueError("IBKR foundation child manifest bytes are not canonical")
+            if manifest["contract"] != _FOUNDATION_CHILD_CONTRACT:
+                raise ValueError("IBKR foundation child contract is unsupported")
+            if manifest["schema_version"] != _FOUNDATION_CHILD_SCHEMA_VERSION:
+                raise ValueError("IBKR foundation child schema is unsupported")
+            identity = dict(manifest)
+            manifest_hash = _text(identity.pop("manifest_sha256"), "child manifest hash")
+            if manifest_hash != _sha(identity):
+                raise ValueError("IBKR foundation child manifest identity does not match")
+            if manifest_hash != _text(reference["manifest_sha256"], "child manifest hash"):
+                raise ValueError("IBKR foundation child manifest hash differs from its reference")
+            if _text(manifest["kind"], "child kind") != kind:
+                raise ValueError("IBKR foundation child kind differs from its reference")
+            if _text(manifest["dataset_id"], "child dataset ID") != expected_dataset_ids[kind]:
+                raise ValueError("IBKR foundation child dataset differs from its authority")
+            if _int(manifest["part_index"], "child part index") != part_index:
+                raise ValueError("IBKR foundation child part index is not contiguous")
+            manifest_row_count = _int(manifest["row_count"], "child row count")
+            if manifest_row_count < 0 or manifest_row_count > _MAX_CHILD_ROWS:
+                raise ValueError("IBKR foundation child row count exceeds its bound")
+            manifest_file = _text(manifest["file"], "IBKR foundation child Parquet path")
+            manifest_lineage = _mapping(manifest["lineage"], "child lineage")
+            if manifest_lineage != dict(expected_lineage):
+                raise ValueError("IBKR foundation child lineage differs from its authority")
+            expected_reference: dict[str, object] = {
+                "kind": kind,
+                "dataset_id": manifest["dataset_id"],
+                "manifest_id": manifest_hash[:24],
+                "manifest_path": manifest_reference,
+                "manifest_sha256": manifest_hash,
+                "row_count": manifest_row_count,
+                "file": manifest_file,
+                "file_sha256": manifest["file_sha256"],
+            }
+            if reference != expected_reference:
+                raise ValueError("IBKR foundation child reference differs from its manifest")
+            file_path = _safe_child(
+                bundle_root,
+                manifest_file,
+                "IBKR foundation child Parquet",
+            )
+            parquet_bytes = _bounded_bytes(
+                file_path,
+                _MAX_CHILD_FILE_BYTES,
+                "IBKR foundation child Parquet",
+            )
+            if hashlib.sha256(parquet_bytes).hexdigest() != _text(
+                manifest["file_sha256"], "child Parquet hash"
+            ):
+                raise ValueError("IBKR foundation child Parquet bytes changed")
+            if pl.read_parquet_schema(file_path) != {"payload": pl.String}:
+                raise ValueError("IBKR foundation child Parquet schema is unsupported")
+            if kind in decoded_kinds:
+                rows = _read_child_rows(
+                    file_path,
+                    expected_row_count=manifest_row_count,
+                )
+                if _sha([_canonical_row(row) for row in rows]) != _text(
+                    manifest["rows_sha256"], "child row hash"
+                ):
+                    raise ValueError("IBKR foundation child row identity does not match")
+                observed_rows.extend(rows)
+            expected_files.update({manifest_reference, manifest_file})
+        if kind in decoded_kinds:
+            decoded[kind] = tuple(observed_rows)
+
+    if len(child_root_names) != 1:
+        raise ValueError("IBKR foundation child references use multiple roots")
+    child_root = bundle_root / next(iter(child_root_names))
+    actual_files = {
+        path.relative_to(bundle_root).as_posix() for path in child_root.rglob("*") if path.is_file()
+    }
+    if actual_files != expected_files:
+        raise ValueError("IBKR foundation child closure contains unexpected files")
+    return decoded
+
+
 def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonValue], ...]]:
+    observations = cast(ObservationDataset, build.observations)
+    panel = cast(PanelDataset, build.panel)
+    targets = cast(TargetDataset, build.targets)
+    blind_observations = R2OutcomeBlindObservationView.from_dataset(
+        observations,
+        holdout_start=build.configuration.holdout_range[0],
+    )
+    blind_panel = R2OutcomeBlindPanelView.from_dataset(
+        panel,
+        holdout_start=build.configuration.holdout_range[0],
+    )
     return {
-        "observations": tuple(row.as_json() for row in build.observations.rows),
-        "panel": tuple(row.as_json() for row in build.panel.rows),
-        "targets": tuple(row.as_json() for row in build.targets.rows),
+        "observations": tuple(row.as_json() for row in observations.rows),
+        "panel": tuple(row.as_json() for row in panel.rows),
+        "targets": tuple(row.as_json() for row in targets.rows),
         "folds": tuple(row.as_json() for row in build.folds.folds),
+        "target-index": tuple(item.as_json() for item in build.target_index.targets),
+        "causal-metadata": tuple(item.as_json() for item in build.causal_metadata.rows),
+        "blind-observations": tuple(row.as_json() for row in blind_observations.rows),
+        "blind-panel": tuple(row.as_json() for row in blind_panel.rows),
     }
 
 
 def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
+    observations = cast(ObservationDataset, build.observations)
+    panel = cast(PanelDataset, build.panel)
+    blind_observations = R2OutcomeBlindObservationView.from_dataset(
+        observations,
+        holdout_start=build.configuration.holdout_range[0],
+    )
+    blind_panel = R2OutcomeBlindPanelView.from_dataset(
+        panel,
+        holdout_start=build.configuration.holdout_range[0],
+    )
     return {
-        "observations": build.observations.dataset_id,
-        "panel": build.panel.dataset_id,
+        "observations": observations.dataset_id,
+        "panel": panel.dataset_id,
         "targets": build.targets.dataset_id,
         "folds": build.folds.dataset_id,
+        "target-index": build.target_index.dataset_id,
+        "causal-metadata": build.causal_metadata.dataset_id,
+        "blind-observations": blind_observations.projection_id,
+        "blind-panel": blind_panel.projection_id,
     }
 
 

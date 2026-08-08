@@ -824,6 +824,136 @@ def read_provider_history_observations(
     return dataset, _read_provider_history_rows(path, dataset)
 
 
+def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
+    """Authenticate the provider-history closure without decoding bar rows.
+
+    The complete verifier remains the authority after the holdout is opened.
+    This path is intentionally limited to canonical manifests, semantic
+    identities, partition metadata/footer counts, and byte hashes so F2 cannot
+    materialise provider features or outcomes.
+    """
+
+    manifest_path = _require_file(path, "provider-history manifest")
+    root = manifest_path.parent
+    manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
+    document = _mapping(_parse_json(manifest_bytes, "provider-history manifest"), "manifest")
+    _require_exact_keys(
+        document,
+        {
+            "contract",
+            "schema_version",
+            "selector_contract",
+            "dataset",
+            "availability_policy",
+            "source_result",
+            "source_plan_row_bound",
+            "files",
+            "manifest_sha256",
+        },
+        "provider-history manifest",
+    )
+    identity = dict(document)
+    manifest_sha256 = _string(identity.pop("manifest_sha256"), "manifest_sha256")
+    if document["contract"] != PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT:
+        raise ValueError("provider-history manifest contract is unsupported")
+    if document["schema_version"] != PROVIDER_HISTORY_SCHEMA_VERSION:
+        raise ValueError("provider-history manifest schema is unsupported")
+    if document["selector_contract"] != PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT:
+        raise ValueError("provider-history availability selector contract is unsupported")
+    if manifest_sha256 != _sha256_json(identity):
+        raise ValueError("provider-history manifest identity does not match its content")
+    if manifest_bytes != canonical_json_bytes(cast(Mapping[str, JsonValue], document)):
+        raise ValueError("provider-history manifest bytes are not canonical")
+
+    dataset_document = _mapping(document["dataset"], "provider-history dataset")
+    policy = ProviderHistoricalAvailabilityPolicy.from_json_value(document["availability_policy"])
+    dataset = _dataset_from_manifest(dataset_document, policy)
+    source_reference = _source_reference(document["source_result"])
+    if source_reference["path"] != _SOURCE_MANIFEST_PATH:
+        raise ValueError("provider-history source result path is not canonical")
+    source_path = _safe_child(root, str(source_reference["path"]), "source result")
+    source_root = source_path.parent
+    source_bytes = _read_bounded(source_path, "embedded IBKR result manifest")
+    if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
+        raise ValueError("embedded IBKR result manifest bytes do not match its reference")
+    source_stream = verify_ibkr_historical_result_stream(source_path)
+    if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
+        raise ValueError("embedded IBKR result identity does not match provider history")
+    if source_stream.plan.plan_sha256 != source_reference["plan_sha256"]:
+        raise ValueError("embedded IBKR plan identity does not match provider history")
+    partition_bounds = provider_history_partition_row_bounds(source_stream)
+    source_plan_row_bound = _int(
+        document["source_plan_row_bound"],
+        "provider-history source-plan row bound",
+    )
+    if source_plan_row_bound != sum(partition_bounds.values()):
+        raise ValueError("provider-history source-plan row bound does not match its source")
+    if dataset.row_count > source_plan_row_bound:
+        raise ValueError("provider-history dataset exceeds its source-plan capacity")
+    source_files = _source_files(source_root)
+    expected_source_digests = {
+        _MANIFEST_NAME: sha256_bytes(source_bytes),
+        _PLAN_NAME: source_stream.aggregate.plan.bytes_sha256,
+        **{
+            reference.path: reference.bytes_sha256
+            for reference in source_stream.aggregate.request_results
+        },
+    }
+    if source_files != set(expected_source_digests):
+        raise ValueError("provider-history source result closure differs from its manifest")
+    for relative_path, expected_digest in expected_source_digests.items():
+        child = _safe_child(source_root, relative_path, "provider-history source child")
+        if sha256_bytes(_read_bounded(child, "provider-history source child")) != expected_digest:
+            raise ValueError("provider-history source child bytes changed")
+
+    raw_files = document["files"]
+    if not isinstance(raw_files, list) or len(raw_files) > _MAX_CLOSURE_FILES:
+        raise ValueError("provider-history files are invalid or exceed their bound")
+    expected_partitions = {partition.key: partition for partition in dataset.partitions}
+    expected_by_path = {
+        _partition_path(partition.key): partition for partition in dataset.partitions
+    }
+    expected_bound_paths = {_partition_path(key) for key in partition_bounds}
+    expected_paths = {
+        _MANIFEST_NAME,
+        *{f"{_SOURCE_DIRECTORY}/{relative}" for relative in source_files},
+    }
+    previous_path = ""
+    seen_keys: set[tuple[str, date]] = set()
+    for item in raw_files:
+        reference = _file_reference(item)
+        relative_path = _string(reference["path"], "provider-history partition path")
+        if previous_path and relative_path <= previous_path:
+            raise ValueError("provider-history partition references are not canonical")
+        previous_path = relative_path
+        if relative_path not in expected_bound_paths:
+            raise ValueError("provider-history partition path is absent from the source plan")
+        partition_path = _safe_child(root, relative_path, "provider-history partition")
+        partition_bytes = _read_bounded(partition_path, "provider-history partition")
+        if sha256_bytes(partition_bytes) != str(reference["bytes_sha256"]):
+            raise ValueError("provider-history partition bytes do not match its reference")
+        if set(pl.read_parquet_schema(partition_path)) != set(_OBSERVATION_FIELDS):
+            raise ValueError("provider-history partition columns are not exact")
+        if _parquet_footer_row_count(partition_path) != _int(
+            reference["row_count"], "provider-history partition row count"
+        ):
+            raise ValueError(
+                "provider-history partition footer row count differs from its reference"
+            )
+        expected = expected_by_path.get(relative_path)
+        if expected is None or expected.partition_sha256 != str(reference["partition_sha256"]):
+            raise ValueError("provider-history partition identity differs from its dataset")
+        key = expected.key
+        if key in seen_keys:
+            raise ValueError("provider-history partition references are duplicated")
+        seen_keys.add(key)
+        expected_paths.add(relative_path)
+    if seen_keys != set(expected_partitions):
+        raise ValueError("provider-history partition closure differs from its dataset")
+    _require_exact_tree(root, expected_paths)
+    return dataset
+
+
 def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEvidence:
     """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
 

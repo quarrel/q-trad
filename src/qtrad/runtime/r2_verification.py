@@ -85,7 +85,7 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
-from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
@@ -105,7 +105,9 @@ from qtrad.domain.r2_readiness import (
 )
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import verify_outcome_blind_foundation_bundle
-from qtrad.runtime.ibkr_foundation import load_ibkr_foundation_with_identity
+from qtrad.runtime.ibkr_foundation import (
+    load_ibkr_foundation_outcome_blind_with_identity,
+)
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     atomic_create,
@@ -2320,8 +2322,9 @@ async def _replay_representative_oof_async(path: Path) -> None:
     experiment = load_r2_experiment(paths["experiment"])
     representative_profile = descriptor.get("representative_profile")
     if representative_profile == IBKR_HISTORICAL_PROFILE:
-        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-            paths["foundation"]
+        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
+            paths["foundation"],
+            holdout_target_source=holdout_target_source,
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
             raise ValueError("IBKR replay foundation differs from the experiment")
@@ -2355,13 +2358,6 @@ async def _replay_representative_oof_async(path: Path) -> None:
             holdout_target_source=holdout_target_source,
         )
         _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
-    if representative_profile == IBKR_HISTORICAL_PROFILE:
-        verified = replace(
-            cast(R2FoundationInputs, verified),
-            targets=cast(
-                TargetDataset, R2OutcomeBlindTargetView.from_source(holdout_target_source)
-            ),
-        )
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"

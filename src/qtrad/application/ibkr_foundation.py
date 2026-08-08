@@ -38,6 +38,13 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalDataset,
     ProviderHistoricalObservation,
 )
+from qtrad.domain.r2_holdout import (
+    R2HoldoutCausalMetadata,
+    R2HoldoutTargetIndex,
+    R2OutcomeBlindObservationView,
+    R2OutcomeBlindPanelView,
+    R2OutcomeBlindTargetView,
+)
 from qtrad.domain.research import ObservationDataset, ObservationRow
 
 _PROVIDER_EVENT_NAMESPACE = UUID("e0f2e1a2-5c22-4e86-a6a8-f2c7a8c9a9e9")
@@ -48,10 +55,12 @@ class IBKRFoundationBuild:
     """All source-specific children required before downstream R2 work."""
 
     configuration: FoundationConfig
-    observations: ObservationDataset
-    panel: PanelDataset
-    targets: TargetDataset
+    observations: ObservationDataset | R2OutcomeBlindObservationView
+    panel: PanelDataset | R2OutcomeBlindPanelView
+    targets: TargetDataset | R2OutcomeBlindTargetView
     folds: FoldDataset
+    target_index: R2HoldoutTargetIndex
+    causal_metadata: R2HoldoutCausalMetadata
     provider_history: ProviderHistoricalDataset
     active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     provider_gaps: tuple[Mapping[str, JsonValue], ...]
@@ -171,6 +180,8 @@ def build_ibkr_foundation(
         panel=panel,
         targets=targets,
         folds=folds,
+        target_index=R2HoldoutTargetIndex.create(targets),
+        causal_metadata=R2HoldoutCausalMetadata.create(panel),
         provider_history=provider_dataset,
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,

@@ -24,6 +24,7 @@ from qtrad.domain.foundation import (
     ExcursionDisposition,
     PanelAuditDisposition,
     PanelDataset,
+    PanelRow,
     PanelStatus,
     ReturnDisposition,
     TargetDataset,
@@ -33,6 +34,7 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import ArtifactReference
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily
+from qtrad.domain.research import ObservationDataset, ObservationRow
 from qtrad.domain.time import require_utc
 
 R2_HOLDOUT_SELECTION_CONTRACT = "qtrad-r2-selection-v3"
@@ -1272,6 +1274,369 @@ class R2HoldoutTargetIdentity:
 
 
 @dataclass(frozen=True, slots=True)
+class R2HoldoutTargetIndex:
+    """Outcome-blind target identity projection authenticated at R1."""
+
+    source_target_dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    targets: tuple[R2HoldoutTargetIdentity, ...]
+    dataset_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-holdout-target-index-v1"
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        _require_id(self.source_target_dataset_id, "holdout target index source dataset ID")
+        _require_id(self.observation_dataset_id, "holdout target index observation ID")
+        _require_id(self.foundation_configuration_id, "holdout target index configuration ID")
+        _require_id(self.dataset_id, "holdout target index ID")
+        if tuple(sorted(self.targets, key=lambda item: item.target_id)) != self.targets:
+            raise ValueError("holdout target index identities must be ordered")
+        if self.dataset_id != self._identity(
+            self.targets,
+            source_target_dataset_id=self.source_target_dataset_id,
+            observation_dataset_id=self.observation_dataset_id,
+            foundation_configuration_id=self.foundation_configuration_id,
+        ):
+            raise ValueError("holdout target index ID does not authenticate its identities")
+
+    @classmethod
+    def _identity(
+        cls,
+        targets: Sequence[R2HoldoutTargetIdentity],
+        *,
+        source_target_dataset_id: str | None = None,
+        observation_dataset_id: str | None = None,
+        foundation_configuration_id: str | None = None,
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": cls.SCHEMA_VERSION,
+                "source_target_dataset_id": source_target_dataset_id,
+                "observation_dataset_id": observation_dataset_id,
+                "foundation_configuration_id": foundation_configuration_id,
+                "targets": [item.as_json() for item in targets],
+            }
+        )
+
+    @classmethod
+    def create(cls, target_dataset: TargetDataset) -> R2HoldoutTargetIndex:
+        targets = tuple(
+            sorted(
+                (R2HoldoutTargetIdentity.from_row(row) for row in target_dataset.rows),
+                key=lambda item: item.target_id,
+            )
+        )
+        return cls(
+            source_target_dataset_id=target_dataset.dataset_id,
+            observation_dataset_id=target_dataset.observation_dataset_id,
+            foundation_configuration_id=target_dataset.foundation_configuration_id,
+            targets=targets,
+            dataset_id=cls._identity(
+                targets,
+                source_target_dataset_id=target_dataset.dataset_id,
+                observation_dataset_id=target_dataset.observation_dataset_id,
+                foundation_configuration_id=target_dataset.foundation_configuration_id,
+            ),
+        )
+
+    @classmethod
+    def from_rows(
+        cls,
+        *,
+        source_target_dataset_id: str,
+        observation_dataset_id: str,
+        foundation_configuration_id: str,
+        rows: Sequence[Mapping[str, object]],
+    ) -> R2HoldoutTargetIndex:
+        targets = tuple(
+            sorted(
+                (R2HoldoutTargetIdentity.from_json(row) for row in rows),
+                key=lambda item: item.target_id,
+            )
+        )
+        return cls(
+            source_target_dataset_id=source_target_dataset_id,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
+            targets=targets,
+            dataset_id=cls._identity(
+                targets,
+                source_target_dataset_id=source_target_dataset_id,
+                observation_dataset_id=observation_dataset_id,
+                foundation_configuration_id=foundation_configuration_id,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2HoldoutCausalMetadataRow:
+    """OHLC-free panel metadata used to derive holdout opportunities."""
+
+    instrument_id: str
+    basis: PriceBasis
+    decision_time: datetime
+    feature_data_asof: datetime
+    latest_feature_bar_end: datetime
+    status: PanelStatus
+    audit_disposition: PanelAuditDisposition | None
+    interval_start: datetime | None
+    interval_end: datetime | None
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-holdout-causal-metadata-row-v1"
+
+    def __post_init__(self) -> None:
+        _require_text(self.instrument_id, "holdout causal metadata instrument")
+        for value, field in (
+            (self.decision_time, "causal metadata decision time"),
+            (self.feature_data_asof, "causal metadata feature cutoff"),
+            (self.latest_feature_bar_end, "causal metadata latest bar"),
+        ):
+            require_utc(value, field)
+        for value, field in (
+            (self.interval_start, "causal metadata interval start"),
+            (self.interval_end, "causal metadata interval end"),
+        ):
+            if value is not None:
+                require_utc(value, field)
+        if (self.interval_start is None) != (self.interval_end is None):
+            raise ValueError("causal metadata interval bounds must be paired")
+
+    @classmethod
+    def from_panel(cls, row: PanelRow) -> R2HoldoutCausalMetadataRow:
+        return cls(
+            instrument_id=row.instrument_id,
+            basis=row.basis,
+            decision_time=row.decision_time,
+            feature_data_asof=row.feature_data_asof,
+            latest_feature_bar_end=row.latest_feature_bar_end,
+            status=row.status,
+            audit_disposition=row.audit_disposition,
+            interval_start=row.interval_start,
+            interval_end=row.interval_end,
+        )
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": 1,
+            "instrument_id": self.instrument_id,
+            "basis": self.basis.value,
+            "decision_time": self.decision_time.isoformat(),
+            "feature_data_asof": self.feature_data_asof.isoformat(),
+            "latest_feature_bar_end": self.latest_feature_bar_end.isoformat(),
+            "status": self.status.value,
+            "audit_disposition": (
+                self.audit_disposition.value if self.audit_disposition is not None else None
+            ),
+            "interval_start": (
+                self.interval_start.isoformat() if self.interval_start is not None else None
+            ),
+            "interval_end": self.interval_end.isoformat()
+            if self.interval_end is not None
+            else None,
+        }
+
+    @classmethod
+    def from_json(cls, value: object) -> R2HoldoutCausalMetadataRow:
+        if not isinstance(value, Mapping):
+            raise ValueError("holdout causal metadata row must be an object")
+        raw = cast(Mapping[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "instrument_id",
+            "basis",
+            "decision_time",
+            "feature_data_asof",
+            "latest_feature_bar_end",
+            "status",
+            "audit_disposition",
+            "interval_start",
+            "interval_end",
+        }
+        if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
+            raise ValueError("holdout causal metadata row has unknown or unsupported fields")
+        return cls(
+            instrument_id=str(raw["instrument_id"]),
+            basis=PriceBasis(str(raw["basis"])),
+            decision_time=datetime.fromisoformat(str(raw["decision_time"])),
+            feature_data_asof=datetime.fromisoformat(str(raw["feature_data_asof"])),
+            latest_feature_bar_end=datetime.fromisoformat(str(raw["latest_feature_bar_end"])),
+            status=PanelStatus(str(raw["status"])),
+            audit_disposition=(
+                None
+                if raw["audit_disposition"] is None
+                else PanelAuditDisposition(str(raw["audit_disposition"]))
+            ),
+            interval_start=(
+                None
+                if raw["interval_start"] is None
+                else datetime.fromisoformat(str(raw["interval_start"]))
+            ),
+            interval_end=(
+                None
+                if raw["interval_end"] is None
+                else datetime.fromisoformat(str(raw["interval_end"]))
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2HoldoutCausalMetadata:
+    """Authenticated, outcome- and OHLC-free projection of an R1 panel."""
+
+    source_panel_dataset_id: str
+    rows: tuple[R2HoldoutCausalMetadataRow, ...]
+    dataset_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-holdout-causal-metadata-v1"
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        _require_id(self.source_panel_dataset_id, "causal metadata panel ID")
+        _require_id(self.dataset_id, "causal metadata dataset ID")
+        if self.dataset_id != self._identity(
+            self.rows, source_panel_dataset_id=self.source_panel_dataset_id
+        ):
+            raise ValueError("causal metadata ID does not authenticate its rows")
+
+    @classmethod
+    def _identity(
+        cls,
+        rows: Sequence[R2HoldoutCausalMetadataRow],
+        *,
+        source_panel_dataset_id: str | None = None,
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": cls.SCHEMA_VERSION,
+                "source_panel_dataset_id": source_panel_dataset_id,
+                "rows": [row.as_json() for row in rows],
+            }
+        )
+
+    @classmethod
+    def create(cls, panel: PanelDataset) -> R2HoldoutCausalMetadata:
+        rows = tuple(R2HoldoutCausalMetadataRow.from_panel(row) for row in panel.rows)
+        return cls(
+            source_panel_dataset_id=panel.dataset_id,
+            rows=rows,
+            dataset_id=cls._identity(rows, source_panel_dataset_id=panel.dataset_id),
+        )
+
+    @classmethod
+    def from_rows(
+        cls, *, source_panel_dataset_id: str, rows: Sequence[Mapping[str, object]]
+    ) -> R2HoldoutCausalMetadata:
+        ordered = tuple(R2HoldoutCausalMetadataRow.from_json(row) for row in rows)
+        return cls(
+            source_panel_dataset_id=source_panel_dataset_id,
+            rows=ordered,
+            dataset_id=cls._identity(ordered, source_panel_dataset_id=source_panel_dataset_id),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2OutcomeBlindObservationView:
+    """Pre-holdout observation rows retaining the authenticated R1 identity."""
+
+    dataset_id: str
+    rows: tuple[ObservationRow, ...]
+    configuration: Mapping[str, JsonValue]
+    source_dataset_ids: tuple[str, ...]
+    selection_policies: Mapping[str, JsonValue]
+    projection_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-outcome-blind-observations-v1"
+
+    @classmethod
+    def compute_projection_id(
+        cls,
+        *,
+        source_dataset_id: str,
+        holdout_start: datetime,
+        rows: Sequence[ObservationRow],
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": 1,
+                "source_dataset_id": source_dataset_id,
+                "holdout_start": holdout_start.isoformat(),
+                "rows": [row.as_json() for row in rows],
+            }
+        )
+
+    @classmethod
+    def from_dataset(
+        cls, dataset: ObservationDataset, *, holdout_start: datetime
+    ) -> R2OutcomeBlindObservationView:
+        rows = tuple(row for row in dataset.rows if row.interval_end <= holdout_start)
+        projection_id = cls.compute_projection_id(
+            source_dataset_id=dataset.dataset_id, holdout_start=holdout_start, rows=rows
+        )
+        return cls(
+            dataset_id=dataset.dataset_id,
+            rows=rows,
+            configuration=dataset.configuration,
+            source_dataset_ids=dataset.source_dataset_ids,
+            selection_policies=dataset.selection_policies,
+            projection_id=projection_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2OutcomeBlindPanelView:
+    """Pre-holdout panel rows retaining the authenticated R1 identity."""
+
+    dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    rows: tuple[PanelRow, ...]
+    projection_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-outcome-blind-panel-v1"
+
+    @classmethod
+    def compute_projection_id(
+        cls,
+        *,
+        source_dataset_id: str,
+        holdout_start: datetime,
+        rows: Sequence[PanelRow],
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": 1,
+                "source_dataset_id": source_dataset_id,
+                "holdout_start": holdout_start.isoformat(),
+                "rows": [row.as_json() for row in rows],
+            }
+        )
+
+    @classmethod
+    def from_dataset(
+        cls, dataset: PanelDataset, *, holdout_start: datetime
+    ) -> R2OutcomeBlindPanelView:
+        rows = tuple(row for row in dataset.rows if row.decision_time < holdout_start)
+        projection_id = cls.compute_projection_id(
+            source_dataset_id=dataset.dataset_id, holdout_start=holdout_start, rows=rows
+        )
+        return cls(
+            dataset_id=dataset.dataset_id,
+            observation_dataset_id=dataset.observation_dataset_id,
+            foundation_configuration_id=dataset.foundation_configuration_id,
+            rows=rows,
+            projection_id=projection_id,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class R2HoldoutTargetSource:
     """Authenticated outcome-blind source evidence used before holdout opening.
 
@@ -1292,6 +1657,8 @@ class R2HoldoutTargetSource:
     source_id: str
     causal_panel_dataset_id: str | None = None
     availability_evidence_id: str | None = None
+    target_index_dataset_id: str | None = None
+    causal_metadata_dataset_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_TARGET_SOURCE_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
@@ -1317,6 +1684,10 @@ class R2HoldoutTargetSource:
             _require_id(
                 self.availability_evidence_id or "", "holdout target source availability ID"
             )
+        if self.target_index_dataset_id is not None:
+            _require_id(self.target_index_dataset_id, "holdout target source target index ID")
+        if self.causal_metadata_dataset_id is not None:
+            _require_id(self.causal_metadata_dataset_id, "holdout target source causal metadata ID")
         if not self.target_instruments or len(set(self.target_instruments)) != len(
             self.target_instruments
         ):
@@ -1394,12 +1765,14 @@ class R2HoldoutTargetSource:
                 key=lambda item: item.target_id,
             )
         )
+        target_index = R2HoldoutTargetIndex.create(source_target_dataset)
         pre_holdout = _project_pre_holdout_target(
             source_target_dataset,
             holdout_start=holdout_range[0],
             primary_horizon_seconds=primary_horizon_seconds,
             target_instruments=target_instruments,
         )
+        causal_metadata_dataset_id: str | None = None
         if panel is None:
             if source_active_intervals is not None or data_gaps is not None:
                 raise ValueError("causal holdout evidence requires a panel")
@@ -1423,6 +1796,9 @@ class R2HoldoutTargetSource:
                 data_gaps=data_gaps or (),
             )
             causal_panel_dataset_id = panel.dataset_id
+            causal_metadata_dataset_id = R2HoldoutCausalMetadata.create(panel).dataset_id
+        if panel is None:
+            causal_metadata_dataset_id = None
         if opportunities is not None:
             supplied_opportunities = tuple(
                 sorted(opportunities, key=lambda item: item.opportunity_id)
@@ -1458,7 +1834,22 @@ class R2HoldoutTargetSource:
             opportunities=derived_opportunities,
             causal_panel_dataset_id=causal_panel_dataset_id,
             availability_evidence_id=availability_evidence_id,
+            target_index_dataset_id=target_index.dataset_id,
+            causal_metadata_dataset_id=causal_metadata_dataset_id,
         )
+
+    def verify_target_index(self, target_index: R2HoldoutTargetIndex) -> None:
+        """Bind source identities to the independently persisted R1 index."""
+        if self.target_index_dataset_id != target_index.dataset_id:
+            raise ValueError("holdout target source target-index binding differs from R1 evidence")
+        if (
+            target_index.source_target_dataset_id != self.source_target_dataset_id
+            or target_index.observation_dataset_id != self.observation_dataset_id
+            or target_index.foundation_configuration_id != self.foundation_configuration_id
+        ):
+            raise ValueError("holdout target source target-index lineage differs from R1 evidence")
+        if target_index.targets != self.targets:
+            raise ValueError("holdout target source identities differ from R1 target index")
 
     @classmethod
     def _derive_opportunities_from_r1_evidence(
@@ -1468,9 +1859,10 @@ class R2HoldoutTargetSource:
         holdout_range: tuple[datetime, datetime],
         primary_horizon_seconds: int,
         target_instruments: Sequence[str],
-        panel: PanelDataset,
+        panel: PanelDataset | None,
         source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
         data_gaps: Sequence[tuple[str, datetime, datetime]],
+        causal_metadata: R2HoldoutCausalMetadata | None = None,
     ) -> tuple[HoldoutTargetOpportunity, ...]:
         """Derive the registry from authenticated R1 causal evidence.
 
@@ -1480,8 +1872,13 @@ class R2HoldoutTargetSource:
         recorded gaps, and the target maturity boundary.
         """
         _positive_range(holdout_range, "holdout target source holdout range")
+        if causal_metadata is None:
+            if panel is None:
+                raise ValueError("R1 opportunity derivation requires causal metadata")
+            causal_metadata = R2HoldoutCausalMetadata.create(panel)
+        metadata = causal_metadata
         panel_by_key = {
-            (row.instrument_id, row.basis, row.decision_time): row for row in panel.rows
+            (row.instrument_id, row.basis, row.decision_time): row for row in metadata.rows
         }
         opportunities: list[HoldoutTargetOpportunity] = []
         for identity in target_identities:
@@ -1538,14 +1935,24 @@ class R2HoldoutTargetSource:
     def verify_r1_causal_evidence(
         self,
         *,
-        panel: PanelDataset,
+        panel: PanelDataset | None = None,
+        causal_metadata: R2HoldoutCausalMetadata | None = None,
         source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
         data_gaps: Sequence[tuple[str, datetime, datetime]],
         availability_evidence_id: str,
     ) -> None:
         """Verify source semantics against authenticated R1 panel/evidence."""
-        if self.causal_panel_dataset_id != panel.dataset_id:
+        if causal_metadata is None:
+            if panel is None:
+                raise ValueError("R1 causal verification requires a metadata projection")
+            causal_metadata = R2HoldoutCausalMetadata.create(panel)
+        if self.causal_panel_dataset_id != causal_metadata.source_panel_dataset_id:
             raise ValueError("holdout target source panel binding differs from R1 evidence")
+        if (
+            self.causal_metadata_dataset_id is not None
+            and self.causal_metadata_dataset_id != causal_metadata.dataset_id
+        ):
+            raise ValueError("holdout target source metadata binding differs from R1 evidence")
         if self.availability_evidence_id != availability_evidence_id:
             raise ValueError("holdout target source availability binding differs from R1 evidence")
         expected = self._derive_opportunities_from_r1_evidence(
@@ -1554,6 +1961,7 @@ class R2HoldoutTargetSource:
             primary_horizon_seconds=self.primary_horizon_seconds,
             target_instruments=self.target_instruments,
             panel=panel,
+            causal_metadata=causal_metadata,
             source_active_intervals=source_active_intervals,
             data_gaps=data_gaps,
         )
@@ -1630,6 +2038,10 @@ class R2HoldoutTargetSource:
                 key=lambda item: item.opportunity_id,
             )
         )
+        raw.setdefault("causal_panel_dataset_id", None)
+        raw.setdefault("availability_evidence_id", None)
+        raw.setdefault("target_index_dataset_id", None)
+        raw.setdefault("causal_metadata_dataset_id", None)
         semantic = {
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
@@ -1674,6 +2086,8 @@ class R2HoldoutTargetSource:
             opportunities=self.opportunities,
             causal_panel_dataset_id=self.causal_panel_dataset_id,
             availability_evidence_id=self.availability_evidence_id,
+            target_index_dataset_id=self.target_index_dataset_id,
+            causal_metadata_dataset_id=self.causal_metadata_dataset_id,
         )
         if expected_source.source_id != self.source_id:
             raise ValueError("holdout target source does not authenticate the retained target")
@@ -1687,6 +2101,8 @@ class R2HoldoutTargetSource:
             "foundation_configuration_id": self.foundation_configuration_id,
             "causal_panel_dataset_id": self.causal_panel_dataset_id,
             "availability_evidence_id": self.availability_evidence_id,
+            "target_index_dataset_id": self.target_index_dataset_id,
+            "causal_metadata_dataset_id": self.causal_metadata_dataset_id,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "primary_horizon_seconds": self.primary_horizon_seconds,
             "opportunity_derivation_policy": self.OPPORTUNITY_DERIVATION_POLICY,
@@ -1712,6 +2128,8 @@ class R2HoldoutTargetSource:
             "foundation_configuration_id",
             "causal_panel_dataset_id",
             "availability_evidence_id",
+            "target_index_dataset_id",
+            "causal_metadata_dataset_id",
             "holdout_range",
             "primary_horizon_seconds",
             "opportunity_derivation_policy",
@@ -1756,6 +2174,16 @@ class R2HoldoutTargetSource:
             availability_evidence_id=(
                 str(raw["availability_evidence_id"])
                 if raw["availability_evidence_id"] is not None
+                else None
+            ),
+            target_index_dataset_id=(
+                str(raw["target_index_dataset_id"])
+                if raw["target_index_dataset_id"] is not None
+                else None
+            ),
+            causal_metadata_dataset_id=(
+                str(raw["causal_metadata_dataset_id"])
+                if raw["causal_metadata_dataset_id"] is not None
                 else None
             ),
             holdout_range=(

@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,8 +15,9 @@ from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
-from qtrad.domain.foundation import AvailabilityBasis, PanelDataset
+from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.research import (
     ObservationDataset,
     ObservationRow,
@@ -29,6 +31,7 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
+    verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.settings import Settings
 from tests.test_r1_walk_forward import _config
@@ -248,6 +251,56 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
             image_identity="test@sha256:" + "1" * 64,
         )
     assert {item.name for item in (tmp_path / "manifests").glob("*.json")} == manifests_before
+
+
+@pytest.mark.asyncio
+async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, path, clock, configuration = await _bundle(tmp_path)
+    row_counts = cast(Mapping[str, JsonValue], bundle.build_summary["row_counts"])
+    assert set(row_counts) == {
+        "observations",
+        "panel",
+        "targets",
+        "folds",
+        "forecasts",
+    }
+    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    source = R2HoldoutTargetSource.create_from_target_dataset(
+        verified.targets,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(
+            str(instrument)
+            for instrument, role in configuration.instrument_roles.items()
+            if role is InstrumentRole.TARGET
+        ),
+        panel=verified.panel,
+        availability_evidence_id=bundle.availability.dataset_id,
+    )
+    original_read_rows = ParquetFoundationArtifactStore.read_rows
+
+    async def guarded_read_rows(
+        self: ParquetFoundationArtifactStore, manifest_id: str
+    ) -> tuple[dict[str, JsonValue], ...]:
+        manifest = await self.read_manifest(manifest_id)
+        assert manifest.kind not in {"panel", "targets", "forecasts"}
+        return await original_read_rows(self, manifest_id)
+
+    monkeypatch.setattr(ParquetFoundationArtifactStore, "read_rows", guarded_read_rows)
+
+    async def reject_observation_rows(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("outcome-blind verification decoded observation rows")
+
+    monkeypatch.setattr(ParquetObservationStore, "read_observations", reject_observation_rows)
+    blind = await verify_outcome_blind_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        holdout_target_source=source,
+    )
+    assert blind.targets.rows == source.pre_holdout_target_dataset.rows
 
 
 @pytest.mark.asyncio

@@ -18,7 +18,20 @@ from qtrad.ports.clock import Clock
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _ARTEFACT_ROOT = "foundation-v1"
 _MANIFEST_ROOT = "foundation-manifests"
-_KINDS = frozenset({"configuration", "availability", "panel", "targets", "folds", "forecasts"})
+_KINDS = frozenset(
+    {
+        "configuration",
+        "availability",
+        "panel",
+        "targets",
+        "folds",
+        "forecasts",
+        "r2-target-index",
+        "r2-causal-metadata",
+        "r2-blind-observations",
+        "r2-blind-panel",
+    }
+)
 
 
 class _ManifestModel(BaseModel):

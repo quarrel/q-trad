@@ -92,7 +92,6 @@ from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
-from qtrad.domain.foundation import TargetDataset
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.ibkr_historical import (
     IbkrAcquisitionRuntime,
@@ -141,6 +140,7 @@ from qtrad.runtime.ibkr_canary import (
 )
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
+    load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -1864,6 +1864,8 @@ async def _load_r2_foundation_inputs(
     *,
     foundation_bundle_path: Path,
     experiment: R2ExperimentConfig,
+    outcome_blind: bool = False,
+    holdout_target_source: object | None = None,
 ) -> VerifiedFoundation | R2FoundationInputs:
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         return await verify_foundation_bundle(
@@ -1872,9 +1874,19 @@ async def _load_r2_foundation_inputs(
             clock=clock,
         )
 
-    stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-        foundation_bundle_path
-    )
+    if outcome_blind:
+        from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+
+        if not isinstance(holdout_target_source, R2HoldoutTargetSource):
+            raise ValueError("blind IBKR foundation loading requires a holdout target source")
+        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
+            foundation_bundle_path,
+            holdout_target_source=holdout_target_source,
+        )
+    else:
+        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
+            foundation_bundle_path
+        )
     if experiment.r1_bundle_id != foundation_bundle_id:
         raise ValueError("IBKR experiment does not bind the verified Stage 8 foundation")
     if experiment.source_adapter_identity is None:
@@ -1907,7 +1919,7 @@ async def _build_r2_oof(
     output_path: Path,
     holdout_target_source_path: Path | None,
 ) -> None:
-    from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
+    from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
     experiment, feature_paths = load_experiment_and_feature_paths(
         experiment_path=experiment_path,
@@ -1926,21 +1938,13 @@ async def _build_r2_oof(
             holdout_target_source=holdout_target_source,
         )
     else:
-        # The source-specific Stage 8 adapter already supplies authenticated
-        # children.  Replace only the target view consumed by F2 with the
-        # outcome-blind source projection before calling the shared OOF path.
-        verified_full = await _load_r2_foundation_inputs(
+        verified = await _load_r2_foundation_inputs(
             settings,
             clock,
             foundation_bundle_path=foundation_bundle_path,
             experiment=experiment,
-        )
-        verified = replace(
-            cast(R2FoundationInputs, verified_full),
-            targets=cast(
-                TargetDataset,
-                R2OutcomeBlindTargetView.from_source(holdout_target_source),
-            ),
+            outcome_blind=True,
+            holdout_target_source=holdout_target_source,
         )
     manifest = build_oof_bundle(
         verified=cast(R1FoundationBindings, verified),
