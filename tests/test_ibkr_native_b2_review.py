@@ -21,7 +21,7 @@ from qtrad.ports.ibkr_capability import IbkrContractEvidence
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 
 
-def _evidence(liquid_hours: str) -> IbkrContractEvidence:
+def _evidence(liquid_hours: str, *, timezone: str | None = "UTC") -> IbkrContractEvidence:
     return IbkrContractEvidence(
         con_id=123,
         symbol="EUR",
@@ -36,7 +36,7 @@ def _evidence(liquid_hours: str) -> IbkrContractEvidence:
         valid_exchanges=("IDEALPRO",),
         long_name="EUR.USD",
         underlier_con_id=None,
-        timezone="UTC",
+        timezone=timezone,
         trading_hours=liquid_hours,
         liquid_hours=liquid_hours,
     )
@@ -59,6 +59,25 @@ def test_authenticated_ibkr_liquid_hours_distinguish_closed_and_open_sessions() 
         ibkr_contract_activity(_evidence("20260808:0930-bad"), _NOW) is IbkrMarketActivity.UNKNOWN
     )
     assert ibkr_contract_is_expected_active(_evidence("20260808:0930-bad"), _NOW)
+
+
+def test_ambiguous_liquid_hours_are_unknown_and_require_freshness() -> None:
+    assert (
+        ibkr_contract_activity(_evidence("20260808:CLOSED", timezone=None), _NOW)
+        is IbkrMarketActivity.UNKNOWN
+    )
+    assert (
+        ibkr_contract_activity(_evidence("20260808:CLOSED", timezone="UTC+01:00"), _NOW)
+        is IbkrMarketActivity.UNKNOWN
+    )
+    assert (
+        ibkr_contract_activity(_evidence("20260808:CLOSED", timezone="\x00"), _NOW)
+        is IbkrMarketActivity.UNKNOWN
+    )
+    assert (
+        ibkr_contract_activity(_evidence("20260808:1700-20260808:1600"), _NOW)
+        is IbkrMarketActivity.UNKNOWN
+    )
 
 
 class _ReconciliationStore:
@@ -140,6 +159,26 @@ class _ReadinessStore:
         ]
 
 
+class _InactiveStaleHealthStore:
+    async def query(
+        self, statement: str, parameters: dict[str, object] | None = None
+    ) -> list[dict[str, Any]]:
+        assert parameters is not None
+        assert "observed_at >= clock_timestamp()" in statement
+        assert parameters["health_observation_max_age_seconds"] == 10.0
+        assert json.loads(str(parameters["instrument_ids"])) == []
+        return [
+            {
+                "ingestion_running": True,
+                "adapter_healthy": False,
+                "fresh_quote_count": 0,
+                "global_position": 10,
+                "checkpoint_position": 10,
+                "checkpoint_updated_at": _NOW,
+            }
+        ]
+
+
 @pytest.mark.asyncio
 async def test_readiness_counts_only_authenticated_expected_active_instruments() -> None:
     result = await OperatorQueries(cast(PostgresAuditStore, _ReadinessStore())).readiness(
@@ -156,3 +195,21 @@ async def test_readiness_counts_only_authenticated_expected_active_instruments()
     assert result["expected_instruments"] == 2
     assert result["expected_active_instruments"] == 1
     assert result["fresh_quote_count"] == 1
+
+
+@pytest.mark.asyncio
+async def test_closed_market_readiness_rejects_stale_adapter_health() -> None:
+    result = await OperatorQueries(cast(PostgresAuditStore, _InactiveStaleHealthStore())).readiness(
+        ("index:australia-200",),
+        "a" * 64,
+        provider="ibkr",
+        environment="IBKR_PAPER",
+        adapter_name="ibkr-native-capture",
+        source_class="IBKR_NATIVE_CAPTURE",
+        expected_active_instrument_ids=(),
+    )
+
+    assert result["ready"] is False
+    assert result["expected_active_instruments"] == 0
+    assert result["fresh_quote_count"] == 0
+    assert "ibkr-native-capture adapter is not healthy" in result["reasons"]

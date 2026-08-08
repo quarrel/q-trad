@@ -6,7 +6,10 @@ from typing import Any
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.ports.storage import EventPage
 
+# The runtime persists health every second; ten seconds allows scheduler jitter while
+# ensuring closed-market exemptions cannot hide a dead collector.
 _HEARTBEAT_OBSERVATION_MAX_AGE_SECONDS = 10.0
+_ADAPTER_HEALTH_OBSERVATION_MAX_AGE_SECONDS = 10.0
 
 
 def _boolean_health_field(fields: dict[str, str], name: str) -> bool | None:
@@ -107,6 +110,7 @@ class OperatorQueries:
         freshness_seconds: float = 300.0,
         source_class: str = "IG_NATIVE_CAPTURE",
         expected_active_instrument_ids: tuple[str, ...] | None = None,
+        health_observation_max_age_seconds: float = _ADAPTER_HEALTH_OBSERVATION_MAX_AGE_SECONDS,
     ) -> dict[str, Any]:
         """Return collector readiness rather than API/database liveness."""
 
@@ -125,6 +129,8 @@ class OperatorQueries:
             raise ValueError("collector readiness requires a lower-case SHA-256 configuration hash")
         if freshness_seconds <= 0:
             raise ValueError("collector readiness freshness must be positive")
+        if health_observation_max_age_seconds <= 0:
+            raise ValueError("collector readiness health observation age must be positive")
         if any(
             not value or "'" in value
             for value in (provider, environment, adapter_name, source_class)
@@ -169,7 +175,9 @@ class OperatorQueries:
             + adapter_name
             + "' AND environment = '"
             + environment
-            + "'\n                      AND status = 'HEALTHY'"
+            + "' AND status = 'HEALTHY'"
+            + "\n                      AND observed_at >= clock_timestamp() - "
+            + "(:health_observation_max_age_seconds * INTERVAL '1 second')"
             + "\n                      AND (:source_class = 'IG_NATIVE_CAPTURE' OR "
             + "attributes->>'source_class' = :source_class)"
             + "\n                      AND (:source_class <> 'IBKR_NATIVE_CAPTURE' OR "
@@ -193,6 +201,7 @@ class OperatorQueries:
                 "configuration_hash": expected_configuration_hash,
                 "instrument_ids": json.dumps(active_instrument_ids),
                 "freshness_seconds": freshness_seconds,
+                "health_observation_max_age_seconds": health_observation_max_age_seconds,
                 "environment": environment,
                 "provider": provider,
                 "source_class": source_class,

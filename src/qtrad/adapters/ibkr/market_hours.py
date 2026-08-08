@@ -49,9 +49,11 @@ def ibkr_contract_activity(
     observed_at = require_utc(observed_at, "observed_at")
     if not evidence.liquid_hours:
         return IbkrMarketActivity.UNKNOWN
+    if not evidence.timezone:
+        return IbkrMarketActivity.UNKNOWN
     try:
-        timezone = ZoneInfo(evidence.timezone or "UTC")
-    except ZoneInfoNotFoundError:
+        timezone = ZoneInfo(evidence.timezone)
+    except (ValueError, ZoneInfoNotFoundError):
         return IbkrMarketActivity.UNKNOWN
 
     entries = _parse_liquid_hours(evidence.liquid_hours)
@@ -128,10 +130,10 @@ def _parse_liquid_hours(value: str) -> tuple[_LiquidHoursEntry, ...]:
             if start is None or end is None:
                 valid = False
                 continue
-            start_date, start_minutes = start
-            end_date, end_minutes = end
+            start_date, start_minutes, start_explicit = start
+            end_date, end_minutes, end_explicit = end
             if end_date < start_date or (end_date == start_date and end_minutes <= start_minutes):
-                if end_date == start_date:
+                if end_date == start_date and not start_explicit and not end_explicit:
                     end_date += timedelta(days=1)
                 else:
                     valid = False
@@ -146,21 +148,23 @@ def _parse_endpoint(
     default_date: date,
     *,
     allow_2400: bool = False,
-) -> tuple[date, int] | None:
+) -> tuple[date, int, bool] | None:
     parts = value.strip().split(":")
     if len(parts) == 1:
         endpoint_date = default_date
+        has_explicit_date = False
         hhmm = parts[0]
     elif len(parts) == 2:
         try:
             endpoint_date = datetime.strptime(parts[0], "%Y%m%d").date()
         except ValueError:
             return None
+        has_explicit_date = True
         hhmm = parts[1]
     else:
         return None
     minutes = _parse_hhmm(hhmm, allow_2400=allow_2400)
-    return None if minutes is None else (endpoint_date, minutes)
+    return None if minutes is None else (endpoint_date, minutes, has_explicit_date)
 
 
 def _parse_hhmm(value: str, *, allow_2400: bool = False) -> int | None:
