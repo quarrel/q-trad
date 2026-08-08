@@ -212,8 +212,8 @@ async def test_native_callbacks_worker_projection_health_and_api(
     client = _FakeClient(Queue())
     client.on_market_data.extend(
         (
-            ("error", -1, (2104, "Market data farm connected", "")),
-            ("error", -1, (2106, "Historical farm connected", "")),
+            ("error", -1, (-1, 2104, "Market data farm connected")),
+            ("error", -1, (-1, 2106, "Historical farm connected")),
             ("market_data_type", 1, (1,)),
             ("tick_price", 1, (1, 1.1000)),
             ("tick_price", 1, (2, 1.1002)),
