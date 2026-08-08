@@ -212,12 +212,14 @@ async def test_native_callbacks_worker_projection_health_and_api(
     client = _FakeClient(Queue())
     client.on_market_data.extend(
         (
+            ("error", -1, (2104, "Market data farm connected", "")),
+            ("error", -1, (2106, "Historical farm connected", "")),
             ("market_data_type", 1, (1,)),
             ("tick_price", 1, (1, 1.1000)),
             ("tick_price", 1, (2, 1.1002)),
         )
     )
-    client.callback_received_times.extend(_NOW + timedelta(seconds=offset) for offset in range(3))
+    client.callback_received_times.extend(_NOW + timedelta(seconds=offset) for offset in range(5))
     adapter = _adapter(monkeypatch, client, (listing,))
     app = None
     try:
@@ -240,14 +242,14 @@ async def test_native_callbacks_worker_projection_health_and_api(
         worker.start()
         await adapter.connect()
         await adapter.subscribe((listing,))
-        records = [await anext(adapter.records()) for _ in range(3)]
+        records = [await anext(adapter.records()) for _ in range(5)]
         for record in records:
             worker.submit_nowait(record)
         await worker.drain_and_stop()
 
         snapshot = worker.snapshot()
-        assert snapshot.records_received == 3
-        assert snapshot.persisted == 3
+        assert snapshot.records_received == 5
+        assert snapshot.persisted == 5
         assert snapshot.failed == 0
         assert snapshot.dropped == 0
         health = worker.compose_health(
@@ -281,8 +283,8 @@ async def test_native_callbacks_worker_projection_health_and_api(
             """,
             {"session_id": str(run_id)},
         )
-        assert len(raw) == 3
-        assert [row["arrival_sequence"] for row in raw] == [3, 4, 5]
+        assert len(raw) == 5
+        assert [row["arrival_sequence"] for row in raw] == [3, 4, 5, 6, 7]
         assert all(row["source_class"] == "IBKR_NATIVE_CAPTURE" for row in raw)
         assert all(row["configuration_hash"] == _CONFIGURATION_HASH for row in raw)
 
@@ -293,10 +295,10 @@ async def test_native_callbacks_worker_projection_health_and_api(
             configuration_hash=identity.configuration_hash,
             capture_session_id=str(run_id),
         )
-        assert reconciliation["adapter_accepted"] == 3
-        assert reconciliation["raw_persisted"] == 3
+        assert reconciliation["adapter_accepted"] == 5
+        assert reconciliation["raw_persisted"] == 5
         assert reconciliation["canonical_persisted"] == 2
-        assert reconciliation["quarantined"] == 1
+        assert reconciliation["quarantined"] == 3
         assert reconciliation["records_dropped"] == 0
         assert reconciliation["records_failed"] == 0
         assert reconciliation["loss"] == 0
@@ -349,7 +351,7 @@ async def test_native_callbacks_worker_projection_health_and_api(
 
             api_reconciliation = await http_client.get("/api/v1/capture/reconciliation")
             assert api_reconciliation.status_code == 200
-            assert api_reconciliation.json()["adapter_accepted"] == 3
+            assert api_reconciliation.json()["adapter_accepted"] == 5
 
             instruments = await http_client.get("/api/v1/instruments")
             assert instruments.status_code == 200
@@ -371,8 +373,8 @@ async def test_native_callbacks_worker_projection_health_and_api(
             finished_at=_NOW,
             detail={
                 "fixture": "b2",
-                "records_received": 3,
-                "persisted": 3,
+                "records_received": 5,
+                "persisted": 5,
                 "failed": 0,
                 "dropped": 0,
             },
