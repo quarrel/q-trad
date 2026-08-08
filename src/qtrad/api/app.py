@@ -2,7 +2,7 @@
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Literal
 from uuid import UUID
@@ -124,6 +124,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             tuple(str(instrument.instrument_id) for instrument in universe.instruments),
         )
 
+    def current_expected_active_instruments(
+        expected_instruments: tuple[str, ...],
+    ) -> tuple[str, ...] | None:
+        if configuration.provider != "ibkr":
+            return None
+        if configuration.ibkr_capture_configuration_path is None:
+            raise HTTPException(
+                status_code=503,
+                detail="IBKR native expected-active policy is not configured",
+            )
+        reviewed = load_reviewed_configuration(configuration.ibkr_capture_configuration_path)
+        active = set(reviewed.expected_active_instrument_ids(datetime.now(UTC)))
+        return tuple(item for item in expected_instruments if item in active)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
@@ -172,6 +186,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "source_class": identity.source_class.value,
             }
             return JSONResponse(content=jsonable_encoder(result), status_code=503)
+        expected_active_instruments = current_expected_active_instruments(expected_instruments)
         result = await queries.readiness(
             expected_instruments,
             identity.configuration_hash,
@@ -186,6 +201,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 else 300.0
             ),
             source_class=identity.source_class.value,
+            expected_active_instrument_ids=expected_active_instruments,
         )
         status_code = 200 if result["ready"] else 503
         return JSONResponse(content=jsonable_encoder(result), status_code=status_code)
@@ -368,8 +384,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="instrument.html",
             context={"detail": result},
         )
-
-    return app
 
     return app
 

@@ -1579,6 +1579,7 @@ class PostgresAuditStore(AuditStore):
             await connection.execute(text("TRUNCATE read_model.latest_quotes"))
             await connection.execute(text("TRUNCATE read_model.market_bars"))
             await connection.execute(text("TRUNCATE read_model.data_gaps"))
+            await connection.execute(text("TRUNCATE read_model.capture_latest_quotes"))
             rows = await connection.execute(
                 text("SELECT * FROM canonical.events ORDER BY global_position")
             )

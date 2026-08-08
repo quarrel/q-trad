@@ -660,3 +660,25 @@ async def test_delayed_and_crossed_quotes_are_visible_but_not_healthy_native_evi
     health = await adapter.health()
     assert health.status is not native.HealthStatus.HEALTHY
     assert "MARKET_DATA_TYPE_NOT_LIVE" in health.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_closed_authenticated_listing_does_not_make_health_stale(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    client.on_market_data.append(("market_data_type", 1, (1,)))
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        freshness_max_age_seconds=1.0,
+        expected_active_policy=lambda _listing, _observed_at: False,
+    )
+    await _connect_and_subscribe(adapter, _listing())
+    await anext(adapter.records())
+
+    health = await adapter.health()
+    assert "BID_EVIDENCE_MISSING" not in health.reason_codes
+    assert "ASK_EVIDENCE_MISSING" not in health.reason_codes
+    assert "BID_EVIDENCE_STALE" not in health.reason_codes
+    assert "ASK_EVIDENCE_STALE" not in health.reason_codes

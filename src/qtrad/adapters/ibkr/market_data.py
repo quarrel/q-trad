@@ -78,6 +78,10 @@ _VALID_TICKS = _LIVE_PRICE_TICKS | _LIVE_SIZE_TICKS | _DELAYED_PRICE_TICKS | _DE
 _MAX_RETIRED_REQUESTS = 1024
 
 
+def _always_expected_active(_: ProviderListing, __: datetime) -> bool:
+    return True
+
+
 @dataclass(frozen=True, slots=True)
 class _SubscriptionBinding:
     listing: ProviderListing
@@ -117,6 +121,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         freshness_max_age_seconds: float | None = None,
+        expected_active_policy: Callable[[ProviderListing, datetime], bool] | None = None,
     ) -> None:
         if not pre_reviewed_listings:
             raise ValueError("IBKR native capture requires pre-reviewed listings")
@@ -154,6 +159,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if freshness_max_age_seconds is not None and freshness_max_age_seconds <= 0:
             raise ValueError("IBKR evidence freshness threshold must be positive")
         self._freshness_max_age_seconds = freshness_max_age_seconds
+        self._expected_active_policy = expected_active_policy or _always_expected_active
         self._current_bindings: dict[int, _SubscriptionBinding] = {}
         self._request_ids_by_listing: dict[str, int] = {}
         self._retired_bindings: OrderedDict[int, tuple[int, _SubscriptionBinding]] = OrderedDict()
@@ -319,19 +325,29 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             for request_id in self._current_bindings
         ):
             reasons.add("MARKET_DATA_TYPE_NOT_LIVE")
+        expected_active = {
+            str(binding.listing.listing_id): self._expected_active_policy(
+                binding.listing, observed_at
+            )
+            for binding in self._current_bindings.values()
+        }
         if any(
             str(binding.listing.listing_id) not in self._bid_seen
             for binding in self._current_bindings.values()
+            if expected_active[str(binding.listing.listing_id)]
         ):
             reasons.add("BID_EVIDENCE_MISSING")
         if any(
             str(binding.listing.listing_id) not in self._ask_seen
             for binding in self._current_bindings.values()
+            if expected_active[str(binding.listing.listing_id)]
         ):
             reasons.add("ASK_EVIDENCE_MISSING")
         if self._freshness_max_age_seconds is not None:
             for binding in self._current_bindings.values():
                 listing_id = str(binding.listing.listing_id)
+                if not expected_active[listing_id]:
+                    continue
                 if (
                     listing_id in self._last_bid_at
                     and (observed_at - self._last_bid_at[listing_id]).total_seconds()
@@ -375,6 +391,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("recovery_epoch", str(snapshot.recovery_epoch)),
             ("desired_subscriptions", str(snapshot.desired_subscriptions)),
             ("active_subscriptions", str(snapshot.active_subscriptions)),
+            ("expected_active_subscriptions", str(sum(expected_active.values()))),
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(self._superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),

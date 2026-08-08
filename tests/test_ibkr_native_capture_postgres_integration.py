@@ -246,6 +246,7 @@ async def test_native_callbacks_worker_projection_health_and_api(
         for record in records:
             worker.submit_nowait(record)
         await worker.drain_and_stop()
+        assert await service.advance_bars(_NOW + timedelta(minutes=2)) == ()
 
         snapshot = worker.snapshot()
         assert snapshot.records_received == 5
@@ -329,6 +330,23 @@ async def test_native_callbacks_worker_projection_health_and_api(
             "SELECT 1 FROM read_model.latest_quotes WHERE instrument_id = :instrument_id",
             {"instrument_id": str(listing.instrument_id)},
         )
+
+        await store.rebuild_projections()
+        rebuilt_quote = await store.query(
+            """
+            SELECT configuration_hash, bid, ask
+            FROM read_model.capture_latest_quotes
+            WHERE instrument_id = :instrument_id
+            """,
+            {"instrument_id": str(listing.instrument_id)},
+        )
+        assert rebuilt_quote == [
+            {
+                "configuration_hash": _CONFIGURATION_HASH,
+                "bid": None,
+                "ask": Decimal("1.1002"),
+            }
+        ]
 
         app = create_app(
             Settings(

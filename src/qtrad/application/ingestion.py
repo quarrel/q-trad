@@ -6,7 +6,7 @@ from uuid import uuid4
 from qtrad.application.bars import OneMinuteBarBuilder
 from qtrad.application.gaps import GapDetector
 from qtrad.domain.events import EventEnvelope, to_json_value
-from qtrad.domain.market_data import DataGap, MarketBar
+from qtrad.domain.market_data import DataGap, MarketBar, MarketDataSourceClass
 from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.market_data import MarketDataRecord
 from qtrad.ports.storage import AppendResult, AuditStore, RawMessage
@@ -120,26 +120,36 @@ class IngestionService:
         )
         if not result.duplicate:
             self._stream_versions[stream_id] = event.stream_version
-            gap = self._gap_detector.observe(quote, detected_at=record.received_time)
-            if gap is not None:
-                await self._append_gap(gap)
-            if self._bar_builder.correction_expired(quote):
-                interval_start = quote.event_time.replace(second=0, microsecond=0)
-                await self._append_gap(
-                    DataGap(
-                        instrument_id=quote.instrument_id,
-                        interval_start=interval_start,
-                        interval_end=interval_start + self._bar_builder.interval,
-                        reason="BAR_CORRECTION_WINDOW_EXPIRED",
-                        detected_at=record.received_time,
+            native_capture = (
+                self._capture_identity is not None
+                and self._capture_identity.source_class is MarketDataSourceClass.IBKR_NATIVE_CAPTURE
+            )
+            if not native_capture:
+                gap = self._gap_detector.observe(quote, detected_at=record.received_time)
+                if gap is not None:
+                    await self._append_gap(gap)
+                if self._bar_builder.correction_expired(quote):
+                    interval_start = quote.event_time.replace(second=0, microsecond=0)
+                    await self._append_gap(
+                        DataGap(
+                            instrument_id=quote.instrument_id,
+                            interval_start=interval_start,
+                            interval_end=interval_start + self._bar_builder.interval,
+                            reason="BAR_CORRECTION_WINDOW_EXPIRED",
+                            detected_at=record.received_time,
+                        )
                     )
-                )
-            else:
-                for bar in self._bar_builder.on_quote(quote):
-                    await self._append_bar(bar, received_time=record.received_time)
+                else:
+                    for bar in self._bar_builder.on_quote(quote):
+                        await self._append_bar(bar, received_time=record.received_time)
         return result
 
     async def advance_bars(self, watermark: datetime) -> tuple[EventEnvelope, ...]:
+        if (
+            self._capture_identity is not None
+            and self._capture_identity.source_class is MarketDataSourceClass.IBKR_NATIVE_CAPTURE
+        ):
+            return ()
         events: list[EventEnvelope] = []
         for bar in self._bar_builder.advance(watermark):
             events.append(await self._append_bar(bar, received_time=watermark))

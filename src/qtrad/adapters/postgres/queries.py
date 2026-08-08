@@ -106,11 +106,19 @@ class OperatorQueries:
         adapter_name: str = "ig-market-data",
         freshness_seconds: float = 300.0,
         source_class: str = "IG_NATIVE_CAPTURE",
+        expected_active_instrument_ids: tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         """Return collector readiness rather than API/database liveness."""
 
         if not expected_instrument_ids:
             raise ValueError("collector readiness requires expected instruments")
+        active_instrument_ids = (
+            expected_instrument_ids
+            if expected_active_instrument_ids is None
+            else expected_active_instrument_ids
+        )
+        if any(item not in expected_instrument_ids for item in active_instrument_ids):
+            raise ValueError("active readiness instruments must be configured instruments")
         if len(expected_configuration_hash) != 64 or any(
             character not in "0123456789abcdef" for character in expected_configuration_hash
         ):
@@ -183,7 +191,7 @@ class OperatorQueries:
             """,
             {
                 "configuration_hash": expected_configuration_hash,
-                "instrument_ids": json.dumps(expected_instrument_ids),
+                "instrument_ids": json.dumps(active_instrument_ids),
                 "freshness_seconds": freshness_seconds,
                 "environment": environment,
                 "provider": provider,
@@ -197,7 +205,7 @@ class OperatorQueries:
         if not row["adapter_healthy"]:
             reasons.append(f"{adapter_name} adapter is not healthy")
         if source_class == "IBKR_NATIVE_CAPTURE" and int(row["fresh_quote_count"]) < len(
-            expected_instrument_ids
+            active_instrument_ids
         ):
             reasons.append("one or more native capture instruments lack fresh canonical evidence")
         if int(row["global_position"]) - int(row["checkpoint_position"]) > 100:
@@ -209,6 +217,7 @@ class OperatorQueries:
             "ready": not reasons,
             "reasons": reasons,
             "expected_instruments": len(expected_instrument_ids),
+            "expected_active_instruments": len(active_instrument_ids),
             "fresh_quote_count": int(row["fresh_quote_count"]),
             "global_position": int(row["global_position"]),
             "checkpoint_position": int(row["checkpoint_position"]),
@@ -297,6 +306,46 @@ class OperatorQueries:
         records_dropped: int = 0,
         records_failed: int = 0,
     ) -> dict[str, Any]:
+        native = source_class == "IBKR_NATIVE_CAPTURE"
+        resolved_capture_session_id = capture_session_id
+        if native and resolved_capture_session_id is None:
+            identity_parameters = {
+                "provider": provider,
+                "environment": environment,
+                "source_class": source_class,
+                "configuration_hash": configuration_hash,
+            }
+            latest_session_rows = await self._store.query(
+                """
+                SELECT capture_session_id
+                FROM ops.capture_session_metrics
+                WHERE provider = :provider
+                  AND environment = :environment
+                  AND source_class = :source_class
+                  AND configuration_hash = :configuration_hash
+                ORDER BY observed_at DESC, capture_session_id DESC
+                LIMIT 1
+                """,
+                identity_parameters,
+            )
+            if not latest_session_rows:
+                latest_session_rows = await self._store.query(
+                    """
+                    SELECT capture_session_id
+                    FROM raw.market_messages
+                    WHERE provider = :provider
+                      AND environment = :environment
+                      AND source_class = :source_class
+                      AND configuration_hash = :configuration_hash
+                      AND capture_session_id IS NOT NULL
+                    ORDER BY received_time DESC, id DESC
+                    LIMIT 1
+                    """,
+                    identity_parameters,
+                )
+            if latest_session_rows:
+                resolved_capture_session_id = str(latest_session_rows[0]["capture_session_id"])
+
         rows = await self._store.query(
             """
             WITH selected AS (
@@ -337,12 +386,11 @@ class OperatorQueries:
                 "environment": environment,
                 "source_class": source_class,
                 "configuration_hash": configuration_hash,
-                "capture_session_id": capture_session_id,
+                "capture_session_id": resolved_capture_session_id,
             },
         )
         row = rows[0]
         raw_persisted = int(row["raw_persisted"])
-        native = source_class == "IBKR_NATIVE_CAPTURE"
         metrics_rows = (
             await self._store.query(
                 """
@@ -364,7 +412,7 @@ class OperatorQueries:
                     "environment": environment,
                     "source_class": source_class,
                     "configuration_hash": configuration_hash,
-                    "capture_session_id": capture_session_id,
+                    "capture_session_id": resolved_capture_session_id,
                 },
             )
             if native
@@ -397,7 +445,7 @@ class OperatorQueries:
             "environment": environment,
             "source_class": source_class,
             "configuration_hash": configuration_hash,
-            "capture_session_id": capture_session_id,
+            "capture_session_id": resolved_capture_session_id,
             "adapter_accepted": accepted,
             "raw_offered": raw_offered,
             "raw_persisted": raw_persisted,
