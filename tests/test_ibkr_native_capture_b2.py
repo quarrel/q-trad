@@ -1,11 +1,16 @@
 """B2 composition, identity, freshness and bounded-persistence fixtures."""
 
+import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 
-from qtrad.application.persistence import BoundedPersistenceWorker
+from qtrad.application.persistence import (
+    BoundedPersistenceWorker,
+    PersistenceBackpressureError,
+    PersistenceWorkerError,
+)
 from qtrad.domain.audit import RawPayloadRepresentation
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
@@ -117,14 +122,15 @@ async def test_bounded_persistence_reports_drops_and_fails_closed() -> None:
     worker = BoundedPersistenceWorker(service, capacity=1)
     worker.start()
     assert worker.submit_nowait(_record(1)) is True
-    assert worker.submit_nowait(_record(2)) is False
+    with pytest.raises(PersistenceBackpressureError):
+        worker.submit_nowait(_record(2))
     await worker.drain_and_stop()
 
     snapshot = worker.snapshot()
     assert snapshot.records_received == 2
-    assert snapshot.persisted == 1
+    assert snapshot.persisted == 0
     assert snapshot.failed == 0
-    assert snapshot.dropped == 1
+    assert snapshot.dropped == 2
     composed = worker.compose_health(_health())
     assert composed.status is HealthStatus.DEGRADED
     assert "PERSISTENCE_RECORDS_DROPPED" in composed.reason_codes
@@ -136,6 +142,8 @@ async def test_persistence_failure_is_visible_in_composed_health() -> None:
     worker = BoundedPersistenceWorker(_PersistenceService(fail=True), capacity=2)
     worker.start()
     assert worker.submit_nowait(_record(1)) is True
+    with pytest.raises(PersistenceWorkerError):
+        await asyncio.wait_for(worker.wait_for_failure(), timeout=1)
     await worker.drain_and_stop()
 
     snapshot = worker.snapshot()

@@ -88,6 +88,7 @@ class IngestionService:
             stream_id = (
                 f"market-quote:{self._capture_identity.source_class.value}:"
                 f"{self._capture_identity.provider}:{self._capture_identity.environment}:"
+                f"{self._capture_identity.configuration_hash}:"
                 f"{quote.instrument_id}"
             )
             payload = to_json_value(quote)
@@ -96,8 +97,11 @@ class IngestionService:
             payload = {
                 **payload,
                 "capture_source_class": self._capture_identity.source_class.value,
+                "capture_provider": self._capture_identity.provider,
+                "capture_environment": self._capture_identity.environment,
                 "capture_source_id": self._capture_identity.capture_source_id,
                 "capture_universe_id": self._capture_identity.universe_id,
+                "capture_configuration_hash": self._capture_identity.configuration_hash,
             }
         previous_version = await self._stream_version(stream_id)
         event = EventEnvelope.create(

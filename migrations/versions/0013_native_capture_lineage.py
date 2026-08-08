@@ -19,6 +19,7 @@ def upgrade() -> None:
             environment TEXT NOT NULL,
             capture_source_id TEXT NOT NULL,
             universe_id TEXT NOT NULL,
+            configuration_hash TEXT NOT NULL,
             instrument_id TEXT NOT NULL REFERENCES reference.instruments(instrument_id),
             external_id TEXT NOT NULL,
             event_time TIMESTAMPTZ NOT NULL,
@@ -29,7 +30,7 @@ def upgrade() -> None:
             ask_size NUMERIC,
             quality TEXT NOT NULL,
             global_position BIGINT NOT NULL,
-            PRIMARY KEY (source_class, provider, environment, instrument_id)
+            PRIMARY KEY (source_class, provider, environment, configuration_hash, instrument_id)
         )
         """
     )

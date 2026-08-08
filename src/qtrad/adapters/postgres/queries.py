@@ -128,6 +128,7 @@ class OperatorQueries:
                     WHERE source_class = :source_class
                       AND provider = :provider
                       AND environment = :environment
+                      AND configuration_hash = :configuration_hash
                       AND instrument_id IN (
                           SELECT jsonb_array_elements_text(CAST(:instrument_ids AS jsonb))
                       )
@@ -163,6 +164,8 @@ class OperatorQueries:
             + "'\n                      AND status = 'HEALTHY'"
             + "\n                      AND (:source_class = 'IG_NATIVE_CAPTURE' OR "
             + "attributes->>'source_class' = :source_class)"
+            + "\n                      AND (:source_class <> 'IBKR_NATIVE_CAPTURE' OR "
+            + "attributes->>'configuration_hash' = :configuration_hash)"
             + """
                 ) AS adapter_healthy,
                 ("""
@@ -216,16 +219,24 @@ class OperatorQueries:
             "source_class": source_class,
         }
 
-    async def source_instrument_ids(self, *, provider: str, environment: str) -> tuple[str, ...]:
+    async def source_instrument_ids(
+        self, *, provider: str, environment: str, configuration_hash: str | None = None
+    ) -> tuple[str, ...]:
         rows = await self._store.query(
             """
             SELECT DISTINCT instrument_id
             FROM reference.provider_listings
             WHERE provider = :provider AND environment = :environment
+              AND (CAST(:configuration_hash AS text) IS NULL
+                   OR universe_hash = CAST(:configuration_hash AS text))
               AND (valid_to IS NULL OR valid_to > clock_timestamp())
             ORDER BY instrument_id
             """,
-            {"provider": provider, "environment": environment},
+            {
+                "provider": provider,
+                "environment": environment,
+                "configuration_hash": configuration_hash,
+            },
         )
         return tuple(str(row["instrument_id"]) for row in rows)
 
@@ -234,6 +245,8 @@ class OperatorQueries:
         *,
         provider: str | None = None,
         environment: str | None = None,
+        source_class: str | None = None,
+        configuration_hash: str | None = None,
         capture_session_id: str | None = None,
     ) -> dict[str, Any] | None:
         rows = await self._store.query(
@@ -249,6 +262,12 @@ class OperatorQueries:
                 CAST(:environment AS text) IS NULL
                 OR environment = CAST(:environment AS text)
             ) AND (
+                CAST(:source_class AS text) IS NULL
+                OR source_class = CAST(:source_class AS text)
+            ) AND (
+                CAST(:configuration_hash AS text) IS NULL
+                OR configuration_hash = CAST(:configuration_hash AS text)
+            ) AND (
                 CAST(:capture_session_id AS uuid) IS NULL
                 OR capture_session_id = CAST(:capture_session_id AS uuid)
             )
@@ -258,6 +277,8 @@ class OperatorQueries:
             {
                 "provider": provider,
                 "environment": environment,
+                "source_class": source_class,
+                "configuration_hash": configuration_hash,
                 "capture_session_id": capture_session_id,
             },
         )
@@ -268,6 +289,8 @@ class OperatorQueries:
         *,
         provider: str,
         environment: str,
+        source_class: str | None = None,
+        configuration_hash: str | None = None,
         capture_session_id: str | None = None,
         adapter_accepted: int | None = None,
         stale_generation_rejected: int = 0,
@@ -280,6 +303,14 @@ class OperatorQueries:
                 SELECT id
                 FROM raw.market_messages
                 WHERE provider = :provider AND environment = :environment
+                  AND (
+                      CAST(:source_class AS text) IS NULL
+                      OR source_class = CAST(:source_class AS text)
+                  )
+                  AND (
+                      CAST(:configuration_hash AS text) IS NULL
+                      OR configuration_hash = CAST(:configuration_hash AS text)
+                  )
                   AND (
                       CAST(:capture_session_id AS uuid) IS NULL
                       OR capture_session_id = CAST(:capture_session_id AS uuid)
@@ -304,27 +335,81 @@ class OperatorQueries:
             {
                 "provider": provider,
                 "environment": environment,
+                "source_class": source_class,
+                "configuration_hash": configuration_hash,
                 "capture_session_id": capture_session_id,
             },
         )
         row = rows[0]
         raw_persisted = int(row["raw_persisted"])
-        accepted = raw_persisted if adapter_accepted is None else adapter_accepted
+        native = source_class == "IBKR_NATIVE_CAPTURE"
+        metrics_rows = (
+            await self._store.query(
+                """
+                SELECT records_received, persisted, failed, dropped, observed_at
+                FROM ops.capture_session_metrics
+                WHERE provider = :provider
+                  AND environment = :environment
+                  AND source_class = :source_class
+                  AND configuration_hash = :configuration_hash
+                  AND (
+                      CAST(:capture_session_id AS uuid) IS NULL
+                      OR capture_session_id = CAST(:capture_session_id AS uuid)
+                  )
+                ORDER BY observed_at DESC
+                LIMIT 1
+                """,
+                {
+                    "provider": provider,
+                    "environment": environment,
+                    "source_class": source_class,
+                    "configuration_hash": configuration_hash,
+                    "capture_session_id": capture_session_id,
+                },
+            )
+            if native
+            else []
+        )
+        if native and metrics_rows:
+            metrics = metrics_rows[0]
+            accepted: int | None = int(metrics["records_received"])
+            raw_offered: int | None = accepted
+            effective_dropped = int(metrics["dropped"])
+            effective_failed = int(metrics["failed"])
+            reconciliation_source = "ops.capture_session_metrics"
+        elif native and adapter_accepted is None:
+            accepted = None
+            raw_offered = None
+            effective_dropped = None
+            effective_failed = None
+            reconciliation_source = "DURABLE_SESSION_METRICS_UNAVAILABLE"
+        else:
+            accepted = raw_persisted if adapter_accepted is None else adapter_accepted
+            raw_offered = accepted
+            effective_dropped = records_dropped
+            effective_failed = records_failed
+            reconciliation_source = (
+                "CALLER_COUNTERS" if adapter_accepted is not None else "RAW_PERSISTED_FALLBACK"
+            )
+        loss = None if accepted is None else max(accepted - raw_persisted, 0)
         return {
             "provider": provider,
             "environment": environment,
+            "source_class": source_class,
+            "configuration_hash": configuration_hash,
             "capture_session_id": capture_session_id,
             "adapter_accepted": accepted,
-            "raw_offered": accepted,
+            "raw_offered": raw_offered,
             "raw_persisted": raw_persisted,
             "canonical_eligible": int(row["canonical_persisted"]),
             "canonical_persisted": int(row["canonical_persisted"]),
             "quarantined": int(row["quarantined"]),
             "unclassified_raw": int(row["unclassified"]),
             "stale_generation_rejected": stale_generation_rejected,
-            "records_dropped": records_dropped,
-            "records_failed": records_failed,
-            "loss": max(accepted - raw_persisted, 0),
+            "records_dropped": effective_dropped,
+            "records_failed": effective_failed,
+            "reconciliation_source": reconciliation_source,
+            "loss": loss,
         }
 
     async def instruments(
@@ -333,12 +418,13 @@ class OperatorQueries:
         provider: str | None = None,
         environment: str | None = None,
         source_class: str | None = None,
+        configuration_hash: str | None = None,
     ) -> list[dict[str, Any]]:
         if source_class == "IBKR_NATIVE_CAPTURE":
             return await self._store.query(
                 """
                 SELECT i.*, q.provider, q.environment, q.external_id,
-                       q.event_time AS quote_event_time, q.received_time,
+                       q.configuration_hash, q.event_time AS quote_event_time, q.received_time,
                        q.bid, q.ask,
                        CASE
                            WHEN q.received_time < clock_timestamp() - INTERVAL '30 seconds'
@@ -351,11 +437,13 @@ class OperatorQueries:
                  AND q.source_class = :source_class
                  AND q.provider = :provider
                  AND q.environment = :environment
+                 AND q.configuration_hash = :configuration_hash
                 WHERE EXISTS (
                     SELECT 1 FROM reference.provider_listings l
                     WHERE l.instrument_id = i.instrument_id
                       AND l.provider = :provider
                       AND l.environment = :environment
+                      AND l.universe_hash = :configuration_hash
                       AND (l.valid_to IS NULL OR l.valid_to > clock_timestamp())
                 )
                 ORDER BY i.instrument_id
@@ -364,6 +452,7 @@ class OperatorQueries:
                     "source_class": source_class,
                     "provider": provider,
                     "environment": environment,
+                    "configuration_hash": configuration_hash,
                 },
             )
         return await self._store.query(
@@ -379,7 +468,7 @@ class OperatorQueries:
             FROM reference.instruments i
             LEFT JOIN read_model.latest_quotes q USING (instrument_id)
             ORDER BY i.instrument_id
-        """
+            """,
         )
 
     async def instrument(
@@ -389,22 +478,31 @@ class OperatorQueries:
         provider: str | None = None,
         environment: str | None = None,
         source_class: str | None = None,
+        configuration_hash: str | None = None,
     ) -> dict[str, Any] | None:
         quote_table = "read_model.latest_quotes"
         quote_filter = ""
         quote_parameters: dict[str, Any] = {}
+        listing_filter = ""
         if source_class == "IBKR_NATIVE_CAPTURE":
             quote_table = "read_model.capture_latest_quotes"
             quote_filter = """
               AND q.source_class = :source_class
               AND q.provider = :provider
               AND q.environment = :environment
+              AND q.configuration_hash = :configuration_hash
             """
             quote_parameters = {
                 "source_class": source_class,
                 "provider": provider,
                 "environment": environment,
+                "configuration_hash": configuration_hash,
             }
+            listing_filter = """
+              AND l.provider = :provider
+              AND l.environment = :environment
+              AND l.universe_hash = :configuration_hash
+            """
         join_clause = (
             f"LEFT JOIN {quote_table} q ON q.instrument_id = i.instrument_id{quote_filter}"
         )
@@ -431,11 +529,14 @@ class OperatorQueries:
         bars = await self.bars(instrument_id=instrument_id, limit=300)
         listings = await self._store.query(
             """
-            SELECT * FROM reference.provider_listings
-            WHERE instrument_id = :instrument_id
-            ORDER BY valid_from DESC
+            SELECT l.* FROM reference.provider_listings l
+            WHERE l.instrument_id = :instrument_id
+            """
+            + listing_filter
+            + """
+            ORDER BY l.valid_from DESC
             """,
-            {"instrument_id": instrument_id},
+            {"instrument_id": instrument_id, **quote_parameters},
         )
         return {"instrument": instruments[0], "bars": bars, "listings": listings}
 
@@ -510,5 +611,21 @@ class OperatorQueries:
             "SELECT * FROM ops.research_manifests ORDER BY created_at DESC"
         )
 
-    async def event_page(self, *, after_position: int, limit: int) -> EventPage:
-        return await self._store.read_page(after_position=after_position, limit=limit)
+    async def event_page(
+        self,
+        *,
+        after_position: int,
+        limit: int,
+        source_class: str | None = None,
+        provider: str | None = None,
+        environment: str | None = None,
+        configuration_hash: str | None = None,
+    ) -> EventPage:
+        return await self._store.read_page(
+            after_position=after_position,
+            limit=limit,
+            source_class=source_class,
+            provider=provider,
+            environment=environment,
+            configuration_hash=configuration_hash,
+        )

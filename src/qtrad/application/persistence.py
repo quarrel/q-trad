@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Protocol
@@ -28,6 +29,14 @@ class RecordPersistence(Protocol):
     async def process(self, record: MarketDataRecord) -> object: ...
 
 
+class PersistenceWorkerError(RuntimeError):
+    """The native capture cannot continue without durable persistence."""
+
+
+class PersistenceBackpressureError(PersistenceWorkerError):
+    """The bounded persistence queue could not accept an offered record."""
+
+
 class BoundedPersistenceWorker:
     """Serialise the provider-neutral ingestion service behind a bounded queue."""
 
@@ -45,6 +54,8 @@ class BoundedPersistenceWorker:
         self._dropped = 0
         self._last_persisted_at: datetime | None = None
         self._last_error: str | None = None
+        self._terminal_error: PersistenceWorkerError | None = None
+        self._failure_event = asyncio.Event()
 
     def start(self) -> None:
         if self._task is not None:
@@ -54,24 +65,54 @@ class BoundedPersistenceWorker:
     def submit_nowait(self, record: MarketDataRecord) -> bool:
         if self._task is None or self._stopping:
             raise RuntimeError("persistence worker is not accepting records")
+        if self._terminal_error is not None:
+            raise self._terminal_error
         self._records_received += 1
         try:
             self._queue.put_nowait(record)
-        except asyncio.QueueFull:
+        except asyncio.QueueFull as error:
             self._dropped += 1
-            return False
+            terminal = PersistenceBackpressureError(
+                "native capture persistence queue is full; capture must stop"
+            )
+            self._set_terminal_error(terminal)
+            raise terminal from error
         return True
+
+    async def wait_for_failure(self) -> None:
+        await self._failure_event.wait()
+        if self._terminal_error is not None:
+            raise self._terminal_error
 
     async def drain_and_stop(self) -> None:
         if self._task is None:
             return
         self._stopping = True
-        await self._queue.join()
+        if self._terminal_error is None:
+            join_task = asyncio.create_task(self._queue.join())
+            failure_task = asyncio.create_task(self._failure_event.wait())
+            done, _ = await asyncio.wait(
+                (join_task, failure_task), return_when=asyncio.FIRST_COMPLETED
+            )
+            if self._terminal_error is not None or failure_task in done:
+                self._discard_pending()
+            else:
+                await join_task
+            for task in (join_task, failure_task):
+                if not task.done():
+                    task.cancel()
+                with suppress(asyncio.CancelledError):
+                    await task
+        else:
+            self._discard_pending()
         await self._task
         self._task = None
 
     async def _run(self) -> None:
         while not self._stopping or not self._queue.empty():
+            if self._terminal_error is not None:
+                self._discard_pending()
+                return
             try:
                 record = await asyncio.wait_for(self._queue.get(), timeout=0.1)
             except TimeoutError:
@@ -81,10 +122,32 @@ class BoundedPersistenceWorker:
             except Exception as error:
                 self._failed += 1
                 self._last_error = type(error).__name__
+                self._set_terminal_error(
+                    PersistenceWorkerError(
+                        f"native capture persistence failed: {type(error).__name__}"
+                    )
+                )
+                self._queue.task_done()
+                return
             else:
                 self._persisted += 1
                 self._last_persisted_at = datetime.now(UTC)
-            finally:
+                self._queue.task_done()
+
+    def _set_terminal_error(self, error: PersistenceWorkerError) -> None:
+        if self._terminal_error is None:
+            self._terminal_error = error
+            self._last_error = type(error).__name__
+            self._failure_event.set()
+
+    def _discard_pending(self) -> None:
+        while True:
+            try:
+                self._queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+            else:
+                self._dropped += 1
                 self._queue.task_done()
 
     def snapshot(self) -> PersistenceSnapshot:

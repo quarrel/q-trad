@@ -4343,16 +4343,35 @@ async def _ingest_ibkr_native(
             capture_session_id=str(run_id),
         )
         worker = BoundedPersistenceWorker(service, capacity=settings.ibkr_capture_queue_capacity)
+        assert run_id is not None
+        assert worker is not None
+        capture_session_id = run_id.value
         await adapter.connect()
         await adapter.subscribe(configuration.listings)
         worker.start()
-        await store.record_adapter_health(
-            worker.compose_health(
+
+        async def persist_health_snapshot() -> None:
+            composed = worker.compose_health(
                 await adapter.health(),
                 identity=identity,
-                capture_session_id=str(run_id),
+                capture_session_id=str(capture_session_id),
             )
-        )
+            await store.record_adapter_health(composed)
+            metrics = worker.snapshot()
+            await store.record_capture_session_metrics(
+                capture_session_id=capture_session_id,
+                provider=identity.provider,
+                environment=identity.environment,
+                source_class=identity.source_class.value,
+                configuration_hash=identity.configuration_hash,
+                observed_at=composed.observed_at,
+                records_received=metrics.records_received,
+                persisted=metrics.persisted,
+                failed=metrics.failed,
+                dropped=metrics.dropped,
+            )
+
+        await persist_health_snapshot()
 
         async def force_reconnect() -> None:
             assert force_reconnect_after_seconds is not None
@@ -4366,20 +4385,18 @@ async def _ingest_ibkr_native(
             async for record in adapter.records():
                 worker.submit_nowait(record)
 
+        async def observe_persistence_failure() -> None:
+            await worker.wait_for_failure()
+
         async def persist_health() -> None:
             while True:
                 await asyncio.sleep(_HEALTH_PERSIST_INTERVAL_SECONDS)
-                await store.record_adapter_health(
-                    worker.compose_health(
-                        await adapter.health(),
-                        identity=identity,
-                        capture_session_id=str(run_id),
-                    )
-                )
+                await persist_health_snapshot()
 
         tasks = (
             asyncio.create_task(consume()),
             asyncio.create_task(persist_health()),
+            asyncio.create_task(observe_persistence_failure()),
         )
         try:
             if maximum_seconds is None:
@@ -4424,6 +4441,9 @@ async def _ingest_ibkr_native(
             disconnect_error = error
             terminal_status = "FAILED"
         base_health = await adapter.health()
+        metrics = worker.snapshot() if worker is not None else None
+        if metrics is not None and (metrics.failed or metrics.dropped):
+            terminal_status = "FAILED"
         final_health = (
             worker.compose_health(
                 base_health,
@@ -4434,8 +4454,21 @@ async def _ingest_ibkr_native(
             else base_health
         )
         await store.record_adapter_health(final_health)
+        if worker is not None and run_id is not None:
+            final_metrics = worker.snapshot()
+            await store.record_capture_session_metrics(
+                capture_session_id=run_id.value,
+                provider=identity.provider,
+                environment=identity.environment,
+                source_class=identity.source_class.value,
+                configuration_hash=identity.configuration_hash,
+                observed_at=final_health.observed_at,
+                records_received=final_metrics.records_received,
+                persisted=final_metrics.persisted,
+                failed=final_metrics.failed,
+                dropped=final_metrics.dropped,
+            )
         if run_id is not None:
-            metrics = worker.snapshot() if worker is not None else None
             await store.finish_run(
                 run_id,
                 status=terminal_status,

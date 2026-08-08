@@ -157,7 +157,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         expected_instruments = instrument_ids
         if expected_instruments is None:
             expected_instruments = await queries.source_instrument_ids(
-                provider=identity.provider, environment=identity.environment
+                provider=identity.provider,
+                environment=identity.environment,
+                configuration_hash=identity.configuration_hash,
             )
         if not expected_instruments:
             result = {
@@ -198,7 +200,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         limit: Annotated[int, Query(ge=1, le=1000)] = 500,
     ) -> FeedPageResponse:
         identity, _ = current_identity()
-        page = await queries.event_page(after_position=after_position, limit=limit)
+        page = await queries.event_page(
+            after_position=after_position,
+            limit=limit,
+            source_class=identity.source_class.value,
+            provider=identity.provider,
+            environment=identity.environment,
+            configuration_hash=identity.configuration_hash,
+        )
         if after_position > page.high_water_position:
             raise HTTPException(status_code=409, detail="cursor exceeds source high-water position")
         events = [FeedEventResponse.from_event(event) for event in page.events]
@@ -221,6 +230,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         latest = await queries.capture_identity(
             provider=identity.provider,
             environment=identity.environment,
+            source_class=identity.source_class.value,
+            configuration_hash=identity.configuration_hash,
         )
         return jsonable_encoder(
             {
@@ -241,6 +252,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             await queries.capture_reconciliation(
                 provider=identity.provider,
                 environment=identity.environment,
+                source_class=identity.source_class.value,
+                configuration_hash=identity.configuration_hash,
                 capture_session_id=(str(capture_session_id) if capture_session_id else None),
             )
         )
@@ -253,6 +266,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 provider=identity.provider,
                 environment=identity.environment,
                 source_class=identity.source_class.value,
+                configuration_hash=identity.configuration_hash,
             )
         )
 
@@ -264,6 +278,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider=identity.provider,
             environment=identity.environment,
             source_class=identity.source_class.value,
+            configuration_hash=identity.configuration_hash,
         )
         if result is None:
             raise HTTPException(status_code=404, detail="instrument not found")
@@ -314,6 +329,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     provider=identity.provider,
                     environment=identity.environment,
                     source_class=identity.source_class.value,
+                    configuration_hash=identity.configuration_hash,
                 ),
             },
         )
@@ -330,6 +346,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     provider=identity.provider,
                     environment=identity.environment,
                     source_class=identity.source_class.value,
+                    configuration_hash=identity.configuration_hash,
                 ),
             },
         )
@@ -342,6 +359,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             provider=identity.provider,
             environment=identity.environment,
             source_class=identity.source_class.value,
+            configuration_hash=identity.configuration_hash,
         )
         if result is None:
             raise HTTPException(status_code=404, detail="instrument not found")
@@ -350,6 +368,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             name="instrument.html",
             context={"detail": result},
         )
+
+    return app
 
     return app
 

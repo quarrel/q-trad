@@ -656,6 +656,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         side = "BID" if tick_type in {_BID, _DELAYED_BID} else "ASK"
         opposite = "ASK" if side == "BID" else "BID"
         prior_opposite = self._last_prices.get((listing_id, opposite))
+        if prior_opposite is not None and (
+            (side == "BID" and value > prior_opposite) or (side == "ASK" and value < prior_opposite)
+        ):
+            return None, "IBKR_CROSSED_QUOTE", f"{side}={value} crossed {opposite}={prior_opposite}"
         self._last_prices[(listing_id, side)] = value
         if side == "BID":
             self._bid_seen.add(listing_id)
@@ -665,10 +669,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             self._ask_seen.add(listing_id)
             self._first_ask_at.setdefault(listing_id, received)
             self._last_ask_at[listing_id] = received
-        if prior_opposite is not None and (
-            (side == "BID" and value > prior_opposite) or (side == "ASK" and value < prior_opposite)
-        ):
-            return None, "IBKR_CROSSED_QUOTE", f"{side}={value} crossed {opposite}={prior_opposite}"
         data_type = self._market_data_types.get(callback.request_id)
         quality = (
             DataQuality.HEALTHY
