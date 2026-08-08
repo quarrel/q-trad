@@ -5,8 +5,9 @@ from uuid import uuid4
 
 from qtrad.application.bars import OneMinuteBarBuilder
 from qtrad.application.gaps import GapDetector
-from qtrad.domain.events import EventEnvelope
-from qtrad.domain.market_data import DataGap, MarketBar
+from qtrad.domain.events import EventEnvelope, to_json_value
+from qtrad.domain.market_data import DataGap, MarketBar, MarketDataSourceClass
+from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.market_data import MarketDataRecord
 from qtrad.ports.storage import AppendResult, AuditStore, RawMessage
 
@@ -20,6 +21,8 @@ class IngestionService:
         producer_version: str,
         bar_builder: OneMinuteBarBuilder | None = None,
         gap_detector: GapDetector | None = None,
+        capture_identity: CaptureIdentity | None = None,
+        capture_session_id: str | None = None,
     ) -> None:
         self._store = store
         self._producer = producer
@@ -27,17 +30,44 @@ class IngestionService:
         self._bar_builder = bar_builder or OneMinuteBarBuilder()
         self._gap_detector = gap_detector or GapDetector()
         self._stream_versions: dict[str, int] = {}
+        if capture_identity is not None and capture_session_id is None:
+            raise ValueError("capture session identity is required with a capture identity")
+        self._capture_identity = capture_identity
+        self._capture_session_id = capture_session_id
 
     async def process(self, record: MarketDataRecord) -> AppendResult:
         raw = RawMessage(
             provider=record.provider,
             environment=record.environment,
             subscription=record.subscription,
-            deduplication_key=record.deduplication_key,
+            deduplication_key=(
+                f"{self._capture_session_id}:{record.deduplication_key}"
+                if self._capture_session_id is not None
+                else record.deduplication_key
+            ),
             received_time=record.received_time,
             payload=record.raw_payload,
             payload_representation=record.payload_representation,
             adapter_version=self._producer_version,
+            capture_session_id=self._capture_session_id,
+            source_class=(
+                self._capture_identity.source_class.value
+                if self._capture_identity is not None
+                else None
+            ),
+            capture_source_id=(
+                self._capture_identity.capture_source_id
+                if self._capture_identity is not None
+                else None
+            ),
+            universe_id=(self._capture_identity.universe_id if self._capture_identity else None),
+            configuration_hash=(
+                self._capture_identity.configuration_hash
+                if self._capture_identity is not None
+                else None
+            ),
+            connection_generation=record.connection_generation,
+            arrival_sequence=record.arrival_sequence,
         )
         if record.quote is None:
             return AppendResult(
@@ -51,7 +81,28 @@ class IngestionService:
             )
 
         quote = record.quote
-        stream_id = f"market-quote:{quote.instrument_id}"
+        if self._capture_identity is None:
+            stream_id = f"market-quote:{quote.instrument_id}"
+            payload = to_json_value(quote)
+        else:
+            stream_id = (
+                f"market-quote:{self._capture_identity.source_class.value}:"
+                f"{self._capture_identity.provider}:{self._capture_identity.environment}:"
+                f"{self._capture_identity.configuration_hash}:"
+                f"{quote.instrument_id}"
+            )
+            payload = to_json_value(quote)
+            if not isinstance(payload, dict):
+                raise TypeError("market quote did not serialise to an object")
+            payload = {
+                **payload,
+                "capture_source_class": self._capture_identity.source_class.value,
+                "capture_provider": self._capture_identity.provider,
+                "capture_environment": self._capture_identity.environment,
+                "capture_source_id": self._capture_identity.capture_source_id,
+                "capture_universe_id": self._capture_identity.universe_id,
+                "capture_configuration_hash": self._capture_identity.configuration_hash,
+            }
         previous_version = await self._stream_version(stream_id)
         event = EventEnvelope.create(
             stream_id=stream_id,
@@ -61,7 +112,7 @@ class IngestionService:
             received_time=quote.received_time,
             producer=self._producer,
             producer_version=self._producer_version,
-            payload=quote,
+            payload=payload,
             correlation_id=uuid4(),
         )
         result = await self._store.capture_and_append(
@@ -69,26 +120,36 @@ class IngestionService:
         )
         if not result.duplicate:
             self._stream_versions[stream_id] = event.stream_version
-            gap = self._gap_detector.observe(quote, detected_at=record.received_time)
-            if gap is not None:
-                await self._append_gap(gap)
-            if self._bar_builder.correction_expired(quote):
-                interval_start = quote.event_time.replace(second=0, microsecond=0)
-                await self._append_gap(
-                    DataGap(
-                        instrument_id=quote.instrument_id,
-                        interval_start=interval_start,
-                        interval_end=interval_start + self._bar_builder.interval,
-                        reason="BAR_CORRECTION_WINDOW_EXPIRED",
-                        detected_at=record.received_time,
+            native_capture = (
+                self._capture_identity is not None
+                and self._capture_identity.source_class is MarketDataSourceClass.IBKR_NATIVE_CAPTURE
+            )
+            if not native_capture:
+                gap = self._gap_detector.observe(quote, detected_at=record.received_time)
+                if gap is not None:
+                    await self._append_gap(gap)
+                if self._bar_builder.correction_expired(quote):
+                    interval_start = quote.event_time.replace(second=0, microsecond=0)
+                    await self._append_gap(
+                        DataGap(
+                            instrument_id=quote.instrument_id,
+                            interval_start=interval_start,
+                            interval_end=interval_start + self._bar_builder.interval,
+                            reason="BAR_CORRECTION_WINDOW_EXPIRED",
+                            detected_at=record.received_time,
+                        )
                     )
-                )
-            else:
-                for bar in self._bar_builder.on_quote(quote):
-                    await self._append_bar(bar, received_time=record.received_time)
+                else:
+                    for bar in self._bar_builder.on_quote(quote):
+                        await self._append_bar(bar, received_time=record.received_time)
         return result
 
     async def advance_bars(self, watermark: datetime) -> tuple[EventEnvelope, ...]:
+        if (
+            self._capture_identity is not None
+            and self._capture_identity.source_class is MarketDataSourceClass.IBKR_NATIVE_CAPTURE
+        ):
+            return ()
         events: list[EventEnvelope] = []
         for bar in self._bar_builder.advance(watermark):
             events.append(await self._append_bar(bar, received_time=watermark))

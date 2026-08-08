@@ -23,7 +23,13 @@ from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPacingPolicy,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
-from qtrad.domain.instruments import INITIAL_INSTRUMENTS, Instrument, ProductType, ProviderListing
+from qtrad.domain.instruments import (
+    INITIAL_INSTRUMENTS,
+    INSTRUMENTS_BY_ID,
+    Instrument,
+    ProductType,
+    ProviderListing,
+)
 from qtrad.domain.market_data import BarProvenance, DataQuality, MarketBar, PriceBasis
 from qtrad.domain.modes import BrokerEnvironment, RunKind
 from qtrad.domain.operations import (
@@ -74,6 +80,40 @@ class PostgresAuditStore(AuditStore):
             for instrument in instruments:
                 await connection.execute(
                     statement,
+                    {
+                        "instrument_id": str(instrument.instrument_id),
+                        "display_name": instrument.display_name,
+                        "asset_class": instrument.asset_class.value,
+                        "base_currency": instrument.base_currency,
+                        "quote_currency": instrument.quote_currency,
+                        "search_aliases": json.dumps(instrument.search_aliases),
+                    },
+                )
+
+    async def seed_native_capture_instruments(self, listings: Sequence[ProviderListing]) -> None:
+        """Ensure exact reviewed native listings use canonical reference metadata."""
+
+        async with self._engine.begin() as connection:
+            for listing in listings:
+                instrument = INSTRUMENTS_BY_ID.get(listing.instrument_id)
+                if instrument is None:
+                    raise ValueError(
+                        "native capture listing has no authenticated canonical instrument: "
+                        f"{listing.instrument_id}"
+                    )
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO reference.instruments (
+                            instrument_id, display_name, asset_class, base_currency,
+                            quote_currency, search_aliases
+                        ) VALUES (
+                            :instrument_id, :display_name, :asset_class, :base_currency,
+                            :quote_currency, CAST(:search_aliases AS jsonb)
+                        )
+                        ON CONFLICT (instrument_id) DO NOTHING
+                        """
+                    ),
                     {
                         "instrument_id": str(instrument.instrument_id),
                         "display_name": instrument.display_name,
@@ -175,7 +215,13 @@ class PostgresAuditStore(AuditStore):
         )
 
     async def validate_provider_listing(
-        self, listing: ProviderListing, *, universe_hash: str, observed_at: datetime
+        self,
+        listing: ProviderListing,
+        *,
+        universe_hash: str,
+        observed_at: datetime,
+        producer: str = "ig-demo-discovery",
+        producer_version: str = "0.1.0",
     ) -> EventEnvelope | None:
         """Record a bounded listing-validation fact before changing its projection."""
 
@@ -209,15 +255,19 @@ class PostgresAuditStore(AuditStore):
             event_type="ProviderListingValidated",
             event_time=observed_at,
             received_time=observed_at,
-            producer="ig-demo-discovery",
-            producer_version="0.1.0",
+            producer=producer,
+            producer_version=producer_version,
             payload={"listing": effective_listing, "universe_hash": universe_hash},
         )
         try:
             persisted = await self.append(event, expected_stream_version=previous)
         except StreamVersionConflict:
             return await self.validate_provider_listing(
-                listing, universe_hash=universe_hash, observed_at=observed_at
+                listing,
+                universe_hash=universe_hash,
+                observed_at=observed_at,
+                producer=producer,
+                producer_version=producer_version,
             )
         return persisted
 
@@ -300,6 +350,63 @@ class PostgresAuditStore(AuditStore):
                     "reason_codes": list(health.reason_codes),
                     "recovery_action": health.recovery_action.value,
                     "attributes": dict(health.attributes),
+                },
+            )
+
+    async def record_capture_session_metrics(
+        self,
+        *,
+        capture_session_id: UUID,
+        provider: str,
+        environment: str,
+        source_class: str,
+        configuration_hash: str,
+        observed_at: datetime,
+        records_received: int,
+        persisted: int,
+        failed: int,
+        dropped: int,
+    ) -> None:
+        """Persist the counters needed to reconcile one native capture session."""
+        if any(value < 0 for value in (records_received, persisted, failed, dropped)):
+            raise ValueError("capture-session metrics cannot be negative")
+        _require_sha256(configuration_hash, "capture-session metrics configuration hash")
+        async with self._engine.begin() as connection:
+            await connection.execute(
+                text(
+                    """
+                    INSERT INTO ops.capture_session_metrics (
+                        capture_session_id, provider, environment, source_class,
+                        configuration_hash, observed_at, records_received, persisted,
+                        failed, dropped
+                    ) VALUES (
+                        :capture_session_id, :provider, :environment, :source_class,
+                        :configuration_hash, :observed_at, :records_received, :persisted,
+                        :failed, :dropped
+                    )
+                    ON CONFLICT (capture_session_id) DO UPDATE SET
+                        provider = EXCLUDED.provider,
+                        environment = EXCLUDED.environment,
+                        source_class = EXCLUDED.source_class,
+                        configuration_hash = EXCLUDED.configuration_hash,
+                        observed_at = EXCLUDED.observed_at,
+                        records_received = EXCLUDED.records_received,
+                        persisted = EXCLUDED.persisted,
+                        failed = EXCLUDED.failed,
+                        dropped = EXCLUDED.dropped
+                    """
+                ),
+                {
+                    "capture_session_id": capture_session_id,
+                    "provider": provider,
+                    "environment": environment,
+                    "source_class": source_class,
+                    "configuration_hash": configuration_hash,
+                    "observed_at": observed_at,
+                    "records_received": records_received,
+                    "persisted": persisted,
+                    "failed": failed,
+                    "dropped": dropped,
                 },
             )
 
@@ -1138,11 +1245,16 @@ class PostgresAuditStore(AuditStore):
                   INSERT INTO raw.market_messages (
                       provider, environment, subscription, deduplication_key,
                       received_time, payload, payload_sha256, payload_representation,
-                      adapter_version
+                      adapter_version, capture_session_id, source_class,
+                      capture_source_id, universe_id, configuration_hash,
+                      connection_generation, arrival_sequence
                   ) VALUES (
                       :provider, :environment, :subscription, :deduplication_key,
                       :received_time, CAST(:payload AS jsonb), :payload_sha256,
-                      :payload_representation, :adapter_version
+                      :payload_representation, :adapter_version,
+                      CAST(:capture_session_id AS uuid), :source_class,
+                      :capture_source_id, :universe_id, :configuration_hash,
+                      :connection_generation, :arrival_sequence
                 )
                 ON CONFLICT (provider, environment, deduplication_key) DO NOTHING
                 RETURNING id
@@ -1158,6 +1270,13 @@ class PostgresAuditStore(AuditStore):
                 "payload_sha256": payload_hash,
                 "payload_representation": int(message.payload_representation),
                 "adapter_version": message.adapter_version,
+                "capture_session_id": message.capture_session_id,
+                "source_class": message.source_class,
+                "capture_source_id": message.capture_source_id,
+                "universe_id": message.universe_id,
+                "configuration_hash": message.configuration_hash,
+                "connection_generation": message.connection_generation,
+                "arrival_sequence": message.arrival_sequence,
             },
         )
         inserted = result.scalar_one_or_none()
@@ -1284,6 +1403,60 @@ class PostgresAuditStore(AuditStore):
         elif event.event_type == "MarketQuoteObserved":
             payload = event.payload
             listing = _mapping(payload["listing_id"])
+            capture_source_class = payload.get("capture_source_class")
+            if capture_source_class is not None:
+                await connection.execute(
+                    text(
+                        """
+                        INSERT INTO read_model.capture_latest_quotes (
+                            source_class, provider, environment, capture_source_id,
+                            universe_id, configuration_hash, instrument_id, external_id,
+                            event_time, received_time, bid, ask, bid_size, ask_size,
+                            quality, global_position
+                        ) VALUES (
+                            :source_class, :provider, :environment, :capture_source_id,
+                            :universe_id, :configuration_hash, :instrument_id, :external_id,
+                            :event_time, :received_time, :bid, :ask, :bid_size, :ask_size,
+                            :quality, :global_position
+                        )
+                        ON CONFLICT (
+                            source_class, provider, environment, configuration_hash, instrument_id
+                        ) DO UPDATE SET
+                            capture_source_id = EXCLUDED.capture_source_id,
+                            universe_id = EXCLUDED.universe_id,
+                            external_id = EXCLUDED.external_id,
+                            event_time = EXCLUDED.event_time,
+                            received_time = EXCLUDED.received_time,
+                            bid = EXCLUDED.bid,
+                            ask = EXCLUDED.ask,
+                            bid_size = EXCLUDED.bid_size,
+                            ask_size = EXCLUDED.ask_size,
+                            quality = EXCLUDED.quality,
+                            global_position = EXCLUDED.global_position
+                        WHERE read_model.capture_latest_quotes.global_position
+                              < EXCLUDED.global_position
+                        """
+                    ),
+                    {
+                        "source_class": str(capture_source_class),
+                        "provider": str(payload["capture_provider"]),
+                        "environment": str(payload["capture_environment"]),
+                        "capture_source_id": str(payload["capture_source_id"]),
+                        "universe_id": str(payload["capture_universe_id"]),
+                        "configuration_hash": str(payload["capture_configuration_hash"]),
+                        "instrument_id": str(payload["instrument_id"]),
+                        "external_id": str(listing["external_id"]),
+                        "event_time": _parse_datetime(payload["event_time"]),
+                        "received_time": _parse_datetime(payload["received_time"]),
+                        "bid": payload.get("bid"),
+                        "ask": payload.get("ask"),
+                        "bid_size": payload.get("bid_size"),
+                        "ask_size": payload.get("ask_size"),
+                        "quality": str(payload["quality"]),
+                        "global_position": event.global_position,
+                    },
+                )
+                return
             await connection.execute(
                 text(
                     """
@@ -1406,6 +1579,7 @@ class PostgresAuditStore(AuditStore):
             await connection.execute(text("TRUNCATE read_model.latest_quotes"))
             await connection.execute(text("TRUNCATE read_model.market_bars"))
             await connection.execute(text("TRUNCATE read_model.data_gaps"))
+            await connection.execute(text("TRUNCATE read_model.capture_latest_quotes"))
             rows = await connection.execute(
                 text("SELECT * FROM canonical.events ORDER BY global_position")
             )
@@ -1455,26 +1629,66 @@ class PostgresAuditStore(AuditStore):
             async for row in result.mappings():
                 yield _event_from_row(row)
 
-    async def read_page(self, *, after_position: int, limit: int) -> EventPage:
+    async def read_page(
+        self,
+        *,
+        after_position: int,
+        limit: int,
+        source_class: str | None = None,
+        provider: str | None = None,
+        environment: str | None = None,
+        configuration_hash: str | None = None,
+    ) -> EventPage:
         if after_position < 0:
             raise ValueError("event cursor cannot be negative")
         if not 1 <= limit <= 1000:
             raise ValueError("event page limit must be between 1 and 1000")
+        identity_filter = ""
+        parameters: dict[str, object] = {
+            "after_position": after_position,
+            "limit": limit,
+        }
+        if source_class == "IBKR_NATIVE_CAPTURE":
+            identity_filter = """
+              AND payload->>'capture_source_class' = :source_class
+              AND payload->>'capture_provider' = :provider
+              AND payload->>'capture_environment' = :environment
+              AND payload->>'capture_configuration_hash' = :configuration_hash
+            """
+            parameters.update(
+                {
+                    "source_class": source_class,
+                    "provider": provider,
+                    "environment": environment,
+                    "configuration_hash": configuration_hash,
+                }
+            )
         async with self._engine.connect() as connection:
             result = await connection.execute(
                 text(
                     """
                     SELECT * FROM canonical.events
                     WHERE global_position > :after_position
+                    """
+                    + identity_filter
+                    + """
                     ORDER BY global_position
                     LIMIT :limit
                     """
                 ),
-                {"after_position": after_position, "limit": limit},
+                parameters,
             )
             events = tuple(_event_from_row(row) for row in result.mappings())
             high_water_result = await connection.execute(
-                text("SELECT COALESCE(MAX(global_position), 0) FROM canonical.events")
+                text(
+                    """
+                    SELECT COALESCE(MAX(global_position), 0)
+                    FROM canonical.events
+                    WHERE TRUE
+                    """
+                    + identity_filter
+                ),
+                parameters,
             )
             high_water_position = int(high_water_result.scalar_one())
         return EventPage(events=events, high_water_position=high_water_position)

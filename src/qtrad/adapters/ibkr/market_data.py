@@ -26,6 +26,7 @@ from qtrad.adapters.ibkr.capability import (
     _error_disposition,
     _is_global_error,
 )
+from qtrad.adapters.ibkr.market_hours import IbkrMarketActivity
 from qtrad.adapters.ibkr.session import (
     IbkrRecoveryAction,
     IbkrSessionState,
@@ -78,6 +79,10 @@ _VALID_TICKS = _LIVE_PRICE_TICKS | _LIVE_SIZE_TICKS | _DELAYED_PRICE_TICKS | _DE
 _MAX_RETIRED_REQUESTS = 1024
 
 
+def _always_expected_active(_: ProviderListing, __: datetime) -> IbkrMarketActivity:
+    return IbkrMarketActivity.ACTIVE
+
+
 @dataclass(frozen=True, slots=True)
 class _SubscriptionBinding:
     listing: ProviderListing
@@ -116,6 +121,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         api_identity: IbkrApiIdentity | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        freshness_max_age_seconds: float | None = None,
+        expected_active_policy: Callable[[ProviderListing, datetime], IbkrMarketActivity | bool]
+        | None = None,
     ) -> None:
         if not pre_reviewed_listings:
             raise ValueError("IBKR native capture requires pre-reviewed listings")
@@ -150,6 +158,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._listings_by_id = {item.listing_id: item for item in listings}
         self._contract_evidence = dict(contract_evidence)
         self._clock = clock
+        if freshness_max_age_seconds is not None and freshness_max_age_seconds <= 0:
+            raise ValueError("IBKR evidence freshness threshold must be positive")
+        self._freshness_max_age_seconds = freshness_max_age_seconds
+        self._expected_active_policy = expected_active_policy or _always_expected_active
         self._current_bindings: dict[int, _SubscriptionBinding] = {}
         self._request_ids_by_listing: dict[str, int] = {}
         self._retired_bindings: OrderedDict[int, tuple[int, _SubscriptionBinding]] = OrderedDict()
@@ -157,6 +169,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._bid_seen: set[str] = set()
         self._ask_seen: set[str] = set()
         self._last_prices: dict[tuple[str, str], Decimal] = {}
+        self._first_bid_at: dict[str, datetime] = {}
+        self._last_bid_at: dict[str, datetime] = {}
+        self._first_ask_at: dict[str, datetime] = {}
+        self._last_ask_at: dict[str, datetime] = {}
         self._last_message_at: datetime | None = None
         self._connected_once = False
         self._terminal_error: IbkrConnectionIntegrityError | None = None
@@ -164,6 +180,14 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._unknown_request_callbacks = 0
         self._cancelled_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
+
+    def _market_activity(
+        self, binding: _SubscriptionBinding, observed_at: datetime
+    ) -> IbkrMarketActivity:
+        result = self._expected_active_policy(binding.listing, observed_at)
+        if isinstance(result, IbkrMarketActivity):
+            return result
+        return IbkrMarketActivity.ACTIVE if result else IbkrMarketActivity.INACTIVE
 
     async def connect(self) -> None:
         if self._current_bindings:
@@ -182,6 +206,16 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             self._retired_bindings.clear()
             self._market_data_types.clear()
             self._session.register_subscriptions(())
+
+    async def force_reconnect(self) -> None:
+        """Perform an explicit new connection generation for operator tests."""
+
+        listings = tuple(binding.listing for binding in self._current_binding_values())
+        if not listings:
+            raise RuntimeError("IBKR native capture has no active subscriptions to reconnect")
+        await self.disconnect()
+        await self.connect()
+        await self.subscribe(listings)
 
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
@@ -301,16 +335,45 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             for request_id in self._current_bindings
         ):
             reasons.add("MARKET_DATA_TYPE_NOT_LIVE")
+        activity = {
+            str(binding.listing.listing_id): self._market_activity(binding, observed_at)
+            for binding in self._current_bindings.values()
+        }
+        expected_active = {
+            listing_id: status is not IbkrMarketActivity.INACTIVE
+            for listing_id, status in activity.items()
+        }
+        if any(status is IbkrMarketActivity.UNKNOWN for status in activity.values()):
+            reasons.add("IBKR_LIQUID_HOURS_OUT_OF_COVERAGE")
         if any(
             str(binding.listing.listing_id) not in self._bid_seen
             for binding in self._current_bindings.values()
+            if expected_active[str(binding.listing.listing_id)]
         ):
             reasons.add("BID_EVIDENCE_MISSING")
         if any(
             str(binding.listing.listing_id) not in self._ask_seen
             for binding in self._current_bindings.values()
+            if expected_active[str(binding.listing.listing_id)]
         ):
             reasons.add("ASK_EVIDENCE_MISSING")
+        if self._freshness_max_age_seconds is not None:
+            for binding in self._current_bindings.values():
+                listing_id = str(binding.listing.listing_id)
+                if not expected_active[listing_id]:
+                    continue
+                if (
+                    listing_id in self._last_bid_at
+                    and (observed_at - self._last_bid_at[listing_id]).total_seconds()
+                    > self._freshness_max_age_seconds
+                ):
+                    reasons.add("BID_EVIDENCE_STALE")
+                if (
+                    listing_id in self._last_ask_at
+                    and (observed_at - self._last_ask_at[listing_id]).total_seconds()
+                    > self._freshness_max_age_seconds
+                ):
+                    reasons.add("ASK_EVIDENCE_STALE")
         healthy = (
             self._client is not None
             and snapshot.state is IbkrSessionState.CONNECTED
@@ -342,6 +405,18 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("recovery_epoch", str(snapshot.recovery_epoch)),
             ("desired_subscriptions", str(snapshot.desired_subscriptions)),
             ("active_subscriptions", str(snapshot.active_subscriptions)),
+            ("expected_active_subscriptions", str(sum(expected_active.values()))),
+            (
+                "liquid_hours_out_of_coverage",
+                ",".join(
+                    sorted(
+                        listing_id
+                        for listing_id, status in activity.items()
+                        if status is IbkrMarketActivity.UNKNOWN
+                    )
+                )
+                or "none",
+            ),
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(self._superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
@@ -349,6 +424,11 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("retired_request_tombstones", str(len(self._retired_bindings))),
             ("market_data_types", _market_data_type_summary(self._market_data_types)),
             ("farms", ",".join(f"{name}={value}" for name, value in snapshot.farms)),
+            ("freshness_max_age_seconds", str(self._freshness_max_age_seconds or "disabled")),
+            ("first_bid_at", _earliest_time(self._first_bid_at)),
+            ("last_bid_at", _latest_time(self._last_bid_at)),
+            ("first_ask_at", _earliest_time(self._first_ask_at)),
+            ("last_ask_at", _latest_time(self._last_ask_at)),
         )
         return AdapterHealth(
             adapter_name="ibkr-native-capture",
@@ -618,15 +698,19 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         side = "BID" if tick_type in {_BID, _DELAYED_BID} else "ASK"
         opposite = "ASK" if side == "BID" else "BID"
         prior_opposite = self._last_prices.get((listing_id, opposite))
-        self._last_prices[(listing_id, side)] = value
-        if side == "BID":
-            self._bid_seen.add(listing_id)
-        else:
-            self._ask_seen.add(listing_id)
         if prior_opposite is not None and (
             (side == "BID" and value > prior_opposite) or (side == "ASK" and value < prior_opposite)
         ):
             return None, "IBKR_CROSSED_QUOTE", f"{side}={value} crossed {opposite}={prior_opposite}"
+        self._last_prices[(listing_id, side)] = value
+        if side == "BID":
+            self._bid_seen.add(listing_id)
+            self._first_bid_at.setdefault(listing_id, received)
+            self._last_bid_at[listing_id] = received
+        else:
+            self._ask_seen.add(listing_id)
+            self._first_ask_at.setdefault(listing_id, received)
+            self._last_ask_at[listing_id] = received
         data_type = self._market_data_types.get(callback.request_id)
         quality = (
             DataQuality.HEALTHY
@@ -860,6 +944,10 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._bid_seen.clear()
         self._ask_seen.clear()
         self._last_prices.clear()
+        self._first_bid_at.clear()
+        self._last_bid_at.clear()
+        self._first_ask_at.clear()
+        self._last_ask_at.clear()
 
     def _callback_received_time(self, callback: _Callback) -> datetime:
         if callback.received_time is not None:
@@ -918,6 +1006,14 @@ def _market_data_type_summary(values: Mapping[int, str]) -> str:
         ",".join(f"{request_id}={data_type}" for request_id, data_type in sorted(values.items()))
         or "none"
     )
+
+
+def _earliest_time(values: Mapping[str, datetime]) -> str:
+    return min(values.values()).isoformat() if values else "none"
+
+
+def _latest_time(values: Mapping[str, datetime]) -> str:
+    return max(values.values()).isoformat() if values else "none"
 
 
 def _health_reason_blocks(reason: str) -> bool:
