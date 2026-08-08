@@ -9,7 +9,11 @@ from typing import Any, cast
 
 import pytest
 
-from qtrad.adapters.ibkr.market_hours import ibkr_contract_is_expected_active
+from qtrad.adapters.ibkr.market_hours import (
+    IbkrMarketActivity,
+    ibkr_contract_activity,
+    ibkr_contract_is_expected_active,
+)
 from qtrad.adapters.postgres.queries import OperatorQueries
 from qtrad.adapters.postgres.store import PostgresAuditStore
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
@@ -39,12 +43,22 @@ def _evidence(liquid_hours: str) -> IbkrContractEvidence:
 
 
 def test_authenticated_ibkr_liquid_hours_distinguish_closed_and_open_sessions() -> None:
-    assert not ibkr_contract_is_expected_active(_evidence("20260808:CLOSED"), _NOW)
-    assert ibkr_contract_is_expected_active(_evidence("20260808:0000-2400"), _NOW)
-    assert ibkr_contract_is_expected_active(
-        _evidence("20260807:1700-1600;20260808:1700-1600"), _NOW
+    assert ibkr_contract_activity(_evidence("20260808:CLOSED"), _NOW) is IbkrMarketActivity.INACTIVE
+    assert (
+        ibkr_contract_activity(_evidence("20260808:0000-20260808:2400"), _NOW)
+        is IbkrMarketActivity.ACTIVE
     )
-    assert ibkr_contract_is_expected_active(_evidence("20260807:CLOSED"), _NOW)
+    assert (
+        ibkr_contract_activity(
+            _evidence("20260807:1700-20260808:1600;20260808:1700-20260809:1600"), _NOW
+        )
+        is IbkrMarketActivity.ACTIVE
+    )
+    assert ibkr_contract_activity(_evidence("20260807:CLOSED"), _NOW) is IbkrMarketActivity.UNKNOWN
+    assert (
+        ibkr_contract_activity(_evidence("20260808:0930-bad"), _NOW) is IbkrMarketActivity.UNKNOWN
+    )
+    assert ibkr_contract_is_expected_active(_evidence("20260808:0930-bad"), _NOW)
 
 
 class _ReconciliationStore:

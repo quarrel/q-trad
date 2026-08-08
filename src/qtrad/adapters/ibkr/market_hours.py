@@ -2,65 +2,107 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from enum import StrEnum
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from qtrad.domain.time import require_utc
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 
 
-def ibkr_contract_is_expected_active(
+class IbkrMarketActivity(StrEnum):
+    """Operational interpretation of the finite authenticated liquid-hours schedule."""
+
+    ACTIVE = "ACTIVE"
+    INACTIVE = "INACTIVE"
+    UNKNOWN = "UNKNOWN"
+
+
+@dataclass(frozen=True, slots=True)
+class _LiquidInterval:
+    start_date: date
+    start_minutes: int
+    end_date: date
+    end_minutes: int
+
+
+@dataclass(frozen=True, slots=True)
+class _LiquidHoursEntry:
+    session_date: date
+    intervals: tuple[_LiquidInterval, ...]
+    valid: bool
+
+
+def ibkr_contract_activity(
     evidence: IbkrContractEvidence,
     observed_at: datetime,
-) -> bool:
-    """Return whether the reviewed contract is expected to be trading now.
+) -> IbkrMarketActivity:
+    """Classify a reviewed contract at a UTC observation time.
 
-    IBKR's ``liquidHours`` is part of the exact contract evidence bound into the
-    reviewed capture configuration. An absent or not-yet-covered schedule is
-    treated as expected-active so an unknown calendar never creates a false
-    exemption from freshness checks.
+    IBKR's ``liquidHours`` is finite, dated contract evidence.  A missing,
+    malformed, invalid-timezone, or out-of-horizon schedule is UNKNOWN.  The
+    caller must therefore refresh the reviewed evidence before continuous
+    operation; UNKNOWN is never treated as a closed-market exemption.
     """
 
     observed_at = require_utc(observed_at, "observed_at")
     if not evidence.liquid_hours:
-        return True
+        return IbkrMarketActivity.UNKNOWN
     try:
         timezone = ZoneInfo(evidence.timezone or "UTC")
     except ZoneInfoNotFoundError:
-        return True
+        return IbkrMarketActivity.UNKNOWN
 
-    local_time = observed_at.astimezone(timezone)
     entries = _parse_liquid_hours(evidence.liquid_hours)
     if not entries:
-        return True
+        return IbkrMarketActivity.UNKNOWN
+    local_time = observed_at.astimezone(timezone)
 
-    has_current_date = False
-    for session_date, intervals in entries:
-        if session_date == local_time.date():
-            has_current_date = True
-        for start_minutes, end_minutes in intervals:
-            start = datetime.combine(
-                session_date,
-                time(hour=start_minutes // 60, minute=start_minutes % 60),
-                tzinfo=timezone,
-            )
-            end = start + timedelta(
-                minutes=(
-                    end_minutes - start_minutes
-                    if end_minutes > start_minutes
-                    else 24 * 60 + end_minutes - start_minutes
-                )
-            )
+    for entry in entries:
+        if not entry.valid:
+            continue
+        for interval in entry.intervals:
+            start = _local_datetime(interval.start_date, interval.start_minutes, timezone)
+            end = _local_datetime(interval.end_date, interval.end_minutes, timezone)
+            if interval.end_minutes == 24 * 60:
+                end += timedelta(days=1)
+            if end <= start:
+                end += timedelta(days=1)
             if start <= local_time < end:
-                return True
+                return IbkrMarketActivity.ACTIVE
 
-    return not has_current_date
+    current_entries = [entry for entry in entries if entry.session_date == local_time.date()]
+    if not current_entries or any(not entry.valid for entry in current_entries):
+        return IbkrMarketActivity.UNKNOWN
+    return IbkrMarketActivity.INACTIVE
 
 
-def _parse_liquid_hours(
-    value: str,
-) -> tuple[tuple[date, tuple[tuple[int, int], ...]], ...]:
-    entries: list[tuple[date, tuple[tuple[int, int], ...]]] = []
+def ibkr_contract_is_expected_active(
+    evidence: IbkrContractEvidence,
+    observed_at: datetime,
+) -> bool:
+    """Return whether freshness is required for this contract now.
+
+    UNKNOWN is conservatively expected-active.  Only a valid INACTIVE schedule
+    can exempt a listing from bid/ask freshness checks.
+    """
+
+    return ibkr_contract_activity(evidence, observed_at) is not IbkrMarketActivity.INACTIVE
+
+
+def _local_datetime(session_date: date, minutes: int, timezone: ZoneInfo) -> datetime:
+    if minutes == 24 * 60:
+        return datetime.combine(session_date, time(0), tzinfo=timezone)
+    return datetime.combine(
+        session_date,
+        time(hour=minutes // 60, minute=minutes % 60),
+        tzinfo=timezone,
+    )
+
+
+def _parse_liquid_hours(value: str) -> tuple[_LiquidHoursEntry, ...]:
+    entries: list[_LiquidHoursEntry] = []
     for segment in value.split(";"):
         segment = segment.strip()
         if not segment or ":" not in segment:
@@ -71,19 +113,54 @@ def _parse_liquid_hours(
         except ValueError:
             continue
         if windows_text.upper() == "CLOSED":
-            entries.append((session_date, ()))
+            entries.append(_LiquidHoursEntry(session_date, (), True))
             continue
-        intervals: list[tuple[int, int]] = []
+
+        intervals: list[_LiquidInterval] = []
+        valid = True
         for window in windows_text.split(","):
             bounds = window.split("-", 1)
             if len(bounds) != 2:
+                valid = False
                 continue
-            start = _parse_hhmm(bounds[0])
-            end = _parse_hhmm(bounds[1], allow_2400=True)
-            if start is not None and end is not None:
-                intervals.append((start, end))
-        entries.append((session_date, tuple(intervals)))
+            start = _parse_endpoint(bounds[0], session_date)
+            end = _parse_endpoint(bounds[1], session_date, allow_2400=True)
+            if start is None or end is None:
+                valid = False
+                continue
+            start_date, start_minutes = start
+            end_date, end_minutes = end
+            if end_date < start_date or (end_date == start_date and end_minutes <= start_minutes):
+                if end_date == start_date:
+                    end_date += timedelta(days=1)
+                else:
+                    valid = False
+                    continue
+            intervals.append(_LiquidInterval(start_date, start_minutes, end_date, end_minutes))
+        entries.append(_LiquidHoursEntry(session_date, tuple(intervals), valid and bool(intervals)))
     return tuple(entries)
+
+
+def _parse_endpoint(
+    value: str,
+    default_date: date,
+    *,
+    allow_2400: bool = False,
+) -> tuple[date, int] | None:
+    parts = value.strip().split(":")
+    if len(parts) == 1:
+        endpoint_date = default_date
+        hhmm = parts[0]
+    elif len(parts) == 2:
+        try:
+            endpoint_date = datetime.strptime(parts[0], "%Y%m%d").date()
+        except ValueError:
+            return None
+        hhmm = parts[1]
+    else:
+        return None
+    minutes = _parse_hhmm(hhmm, allow_2400=allow_2400)
+    return None if minutes is None else (endpoint_date, minutes)
 
 
 def _parse_hhmm(value: str, *, allow_2400: bool = False) -> int | None:

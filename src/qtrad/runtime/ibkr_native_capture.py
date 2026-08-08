@@ -18,7 +18,10 @@ from typing import cast
 
 from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint
 from qtrad.adapters.ibkr.market_data import IbkrNativeMarketDataAdapter
-from qtrad.adapters.ibkr.market_hours import ibkr_contract_is_expected_active
+from qtrad.adapters.ibkr.market_hours import (
+    IbkrMarketActivity,
+    ibkr_contract_activity,
+)
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
@@ -75,8 +78,11 @@ class IbkrNativeCaptureConfiguration:
             configuration_hash=self.configuration_hash,
         )
 
+    def activity(self, listing_id: ProviderListingId, observed_at: datetime) -> IbkrMarketActivity:
+        return ibkr_contract_activity(self.contract_evidence[listing_id], observed_at)
+
     def is_expected_active(self, listing_id: ProviderListingId, observed_at: datetime) -> bool:
-        return ibkr_contract_is_expected_active(self.contract_evidence[listing_id], observed_at)
+        return self.activity(listing_id, observed_at) is not IbkrMarketActivity.INACTIVE
 
     def expected_active_instrument_ids(self, observed_at: datetime) -> tuple[str, ...]:
         return tuple(
@@ -186,7 +192,7 @@ def build_ibkr_native_adapter(
         ),
         clock=clock.now,
         freshness_max_age_seconds=settings.ibkr_capture_freshness_seconds,
-        expected_active_policy=lambda listing, observed_at: configuration.is_expected_active(
+        expected_active_policy=lambda listing, observed_at: configuration.activity(
             listing.listing_id, observed_at
         ),
     )

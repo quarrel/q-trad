@@ -13,6 +13,7 @@ import pytest
 
 from qtrad.adapters.ibkr import capability
 from qtrad.adapters.ibkr import market_data as native
+from qtrad.adapters.ibkr.market_hours import IbkrMarketActivity
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.market_data import DataQuality
@@ -682,3 +683,26 @@ async def test_closed_authenticated_listing_does_not_make_health_stale(
     assert "ASK_EVIDENCE_MISSING" not in health.reason_codes
     assert "BID_EVIDENCE_STALE" not in health.reason_codes
     assert "ASK_EVIDENCE_STALE" not in health.reason_codes
+
+
+@pytest.mark.asyncio
+async def test_out_of_coverage_liquid_hours_remain_freshness_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    client.on_market_data.append(("market_data_type", 1, (1,)))
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        freshness_max_age_seconds=1.0,
+        expected_active_policy=lambda _listing, _observed_at: IbkrMarketActivity.UNKNOWN,
+    )
+    await _connect_and_subscribe(adapter, _listing())
+    await anext(adapter.records())
+
+    health = await adapter.health()
+    assert health.status is native.HealthStatus.DEGRADED
+    assert "IBKR_LIQUID_HOURS_OUT_OF_COVERAGE" in health.reason_codes
+    assert "BID_EVIDENCE_MISSING" in health.reason_codes
+    assert "ASK_EVIDENCE_MISSING" in health.reason_codes
+    assert dict(health.attributes)["liquid_hours_out_of_coverage"] == "ibkr:IBKR_PAPER:eur-usd"

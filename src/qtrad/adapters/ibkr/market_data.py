@@ -26,6 +26,7 @@ from qtrad.adapters.ibkr.capability import (
     _error_disposition,
     _is_global_error,
 )
+from qtrad.adapters.ibkr.market_hours import IbkrMarketActivity
 from qtrad.adapters.ibkr.session import (
     IbkrRecoveryAction,
     IbkrSessionState,
@@ -78,8 +79,8 @@ _VALID_TICKS = _LIVE_PRICE_TICKS | _LIVE_SIZE_TICKS | _DELAYED_PRICE_TICKS | _DE
 _MAX_RETIRED_REQUESTS = 1024
 
 
-def _always_expected_active(_: ProviderListing, __: datetime) -> bool:
-    return True
+def _always_expected_active(_: ProviderListing, __: datetime) -> IbkrMarketActivity:
+    return IbkrMarketActivity.ACTIVE
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,7 +122,8 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
         freshness_max_age_seconds: float | None = None,
-        expected_active_policy: Callable[[ProviderListing, datetime], bool] | None = None,
+        expected_active_policy: Callable[[ProviderListing, datetime], IbkrMarketActivity | bool]
+        | None = None,
     ) -> None:
         if not pre_reviewed_listings:
             raise ValueError("IBKR native capture requires pre-reviewed listings")
@@ -178,6 +180,14 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._unknown_request_callbacks = 0
         self._cancelled_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
+
+    def _market_activity(
+        self, binding: _SubscriptionBinding, observed_at: datetime
+    ) -> IbkrMarketActivity:
+        result = self._expected_active_policy(binding.listing, observed_at)
+        if isinstance(result, IbkrMarketActivity):
+            return result
+        return IbkrMarketActivity.ACTIVE if result else IbkrMarketActivity.INACTIVE
 
     async def connect(self) -> None:
         if self._current_bindings:
@@ -325,12 +335,16 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             for request_id in self._current_bindings
         ):
             reasons.add("MARKET_DATA_TYPE_NOT_LIVE")
-        expected_active = {
-            str(binding.listing.listing_id): self._expected_active_policy(
-                binding.listing, observed_at
-            )
+        activity = {
+            str(binding.listing.listing_id): self._market_activity(binding, observed_at)
             for binding in self._current_bindings.values()
         }
+        expected_active = {
+            listing_id: status is not IbkrMarketActivity.INACTIVE
+            for listing_id, status in activity.items()
+        }
+        if any(status is IbkrMarketActivity.UNKNOWN for status in activity.values()):
+            reasons.add("IBKR_LIQUID_HOURS_OUT_OF_COVERAGE")
         if any(
             str(binding.listing.listing_id) not in self._bid_seen
             for binding in self._current_bindings.values()
@@ -392,6 +406,17 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("desired_subscriptions", str(snapshot.desired_subscriptions)),
             ("active_subscriptions", str(snapshot.active_subscriptions)),
             ("expected_active_subscriptions", str(sum(expected_active.values()))),
+            (
+                "liquid_hours_out_of_coverage",
+                ",".join(
+                    sorted(
+                        listing_id
+                        for listing_id, status in activity.items()
+                        if status is IbkrMarketActivity.UNKNOWN
+                    )
+                )
+                or "none",
+            ),
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(self._superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
