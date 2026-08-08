@@ -56,6 +56,7 @@ _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
+_BOUNDED_PROVIDER_HISTORY_ROWS = 500_000
 _BASE_CHILD_KINDS = (
     "observations",
     "panel",
@@ -228,22 +229,39 @@ def write_ibkr_foundation(
         raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
 
     source_evidence = read_provider_history_source_evidence(provider_manifest)
-    build = build_ibkr_foundation(source_evidence, configuration)
-    if build.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
-        raise ValueError("provider history changed during foundation construction")
+    bounded = len(source_evidence.observations) > _BOUNDED_PROVIDER_HISTORY_ROWS
+    build: IBKRFoundationBuild | None = None
+    if not bounded:
+        build = build_ibkr_foundation(source_evidence, configuration)
+        if build.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
+            raise ValueError("provider history changed during foundation construction")
 
     child_root_created = False
     output_created = False
     try:
         child_root.mkdir()
         child_root_created = True
-        children = _write_children(
-            child_root,
-            output.parent,
-            build,
-            source_evidence,
-            provider_manifest,
-        )
+        if bounded:
+            from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
+
+            build, children = build_bounded_provider_foundation(
+                source_evidence=source_evidence,
+                configuration=configuration,
+                child_root=child_root,
+                bundle_root=output.parent,
+                child_name=child_root.name,
+                provider_manifest_sha256=hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
+            )
+        else:
+            assert build is not None
+            children = _write_children(
+                child_root,
+                output.parent,
+                build,
+                source_evidence,
+                provider_manifest,
+            )
+        assert build is not None
         document = _manifest_payload(
             build,
             source_evidence,
@@ -263,6 +281,7 @@ def write_ibkr_foundation(
         if output_created:
             output.unlink()
         raise
+    assert build is not None
     return build
 
 
@@ -315,6 +334,16 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
     configuration_payload = _mapping(payload["configuration"], "IBKR foundation configuration")
     configuration = decode_foundation_config(configuration_payload)
     source_evidence = read_provider_history_source_evidence(provider_path)
+    if len(source_evidence.observations) > _BOUNDED_PROVIDER_HISTORY_ROWS:
+        from qtrad.runtime.ibkr_foundation_bounded import verify_bounded_provider_foundation
+
+        return verify_bounded_provider_foundation(
+            source_evidence=source_evidence,
+            configuration=configuration,
+            bundle_path=manifest_path,
+            document=document,
+            payload=payload,
+        )
     replay = build_ibkr_foundation(source_evidence, configuration)
 
     children = cast(dict[str, JsonValue], _mapping(payload["children"], "IBKR foundation children"))

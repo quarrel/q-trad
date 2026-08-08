@@ -730,3 +730,32 @@ def test_stage8_cli_build_and_verify_round_trip(
     cli.main(["research", "foundation", "readiness", "--bundle", str(bundle)])
     readiness_output = json.loads(capsys.readouterr().out)
     assert readiness_output["state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
+
+
+def test_provider_history_foundation_bounded_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    full = build_ibkr_foundation(source_evidence, configuration)
+    import qtrad.runtime.ibkr_foundation as foundation_runtime
+
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    bundle = tmp_path / "bounded-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    verified = verify_ibkr_foundation(bundle)
+    assert verified.readiness.as_json() == full.readiness.as_json()
+    assert verified.observations.dataset_id == full.observations.dataset_id
+    assert verified.panel.dataset_id == full.panel.dataset_id
+    assert verified.targets.dataset_id == full.targets.dataset_id
+    assert verified.folds.dataset_id == full.folds.dataset_id
+    assert verified.observations.dataset_id
