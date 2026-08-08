@@ -170,6 +170,21 @@ def _verify_b3_provider_authority(
                 f"B3 source provider evidence does not match the authenticated "
                 f"review for {instrument_id}"
             )
+        if listing.currency != authenticated.currency:
+            raise ValueError(
+                f"B3 source listing currency does not match authenticated review "
+                f"for {instrument_id}"
+            )
+        if listing.price_increment != authenticated.minimum_tick:
+            raise ValueError(
+                f"B3 source listing price increment does not match authenticated "
+                f"minimum tick for {instrument_id}"
+            )
+        if listing.economics:
+            raise ValueError(
+                f"B3 source listing economics are not independently authenticated "
+                f"for {instrument_id}"
+            )
 
 
 def promote_b3_configuration(

@@ -376,6 +376,19 @@ def test_b3_promotion_rejects_non_con_id_provider_tamper(tmp_path: Path) -> None
         _promote(tampered, tmp_path, authority_source=source)
 
 
+def test_b3_promotion_rejects_unauthenticated_listing_economics(tmp_path: Path) -> None:
+    source = _source()
+    listing = source.listings[0]
+    tampered_listing = replace(listing, economics={"contract_size": "tampered"})
+    tampered = IbkrNativeCaptureConfiguration.from_reviewed(
+        (tampered_listing, *source.listings[1:]),
+        source.contract_evidence,
+    )
+
+    with pytest.raises(ValueError, match="listing economics"):
+        _promote(tampered, tmp_path, authority_source=source)
+
+
 @pytest.mark.parametrize(
     ("aud_con_id", "include_aud", "include_australia", "message"),
     [
