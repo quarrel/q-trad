@@ -397,9 +397,12 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     frozen_metadata = (
         {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
     )
-    holdout_target_source = R2HoldoutTargetSource.from_json(
-        _load_holdout_cli_object(args.holdout_target_source)
-    )
+    if verified_oof.holdout_target_source is None:
+        raise ValueError("verified OOF bundle has no authenticated holdout target source")
+    source_path = args.oof_bundle.parent / verified_oof.holdout_target_source.path
+    holdout_target_source = R2HoldoutTargetSource.from_json(_load_holdout_cli_object(source_path))
+    if holdout_target_source.source_id != verified_oof.holdout_target_source.semantic_id:
+        raise ValueError("OOF holdout target source identity differs from its reference")
     pre_holdout_projection = R2HoldoutTargetProjection.from_json(
         _load_holdout_cli_object(args.pre_holdout_projection)
     )
@@ -942,14 +945,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
     baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
-    baselines_holdout_selection.add_argument(
-        "--holdout-target-source",
-        "--source-target-dataset",
-        dest="holdout_target_source",
-        type=Path,
-        required=True,
-        help="authenticated outcome-blind target source evidence JSON",
-    )
     baselines_holdout_selection.add_argument(
         "--holdout-opportunity-registry",
         "--holdout-opportunities",
