@@ -116,7 +116,7 @@ from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_SOURCE,
     IBKRHistoricalAdapterIdentity,
 )
-from qtrad.domain.r2_readiness import R2ExperimentConfig
+from qtrad.domain.r2_readiness import EvidenceClass, R2ExperimentConfig
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
@@ -223,6 +223,7 @@ from qtrad.runtime.r2_readiness import (
     write_r2_readiness,
 )
 from qtrad.runtime.r2_verification import (
+    CONFIRMATORY_RUN_KIND,
     build_oof_bundle,
     build_software_bundle,
     freeze_confirmatory_selection,
@@ -2068,6 +2069,7 @@ async def _load_r2_foundation_inputs(
         stage8_foundation,
         foundation_bundle_id=foundation_bundle_id,
         adapter_identity=adapter_identity,
+        evidence_class=experiment.evidence_class,
     )
     if expected.as_json() != experiment.as_json():
         raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
@@ -2096,7 +2098,7 @@ async def _build_r2_oof(
         feature_arguments=feature_arguments,
     )
     if holdout_target_source_path is None:
-        raise ValueError("representative OOF build requires an authenticated holdout target source")
+        raise ValueError("OOF build requires an authenticated holdout target source")
     holdout_target_source = R2HoldoutTargetSource.from_json(
         _load_holdout_cli_object(holdout_target_source_path)
     )
@@ -2123,6 +2125,11 @@ async def _build_r2_oof(
         research_root=settings.research_root,
         clock=clock,
         output=output_path,
+        run_kind=(
+            CONFIRMATORY_RUN_KIND
+            if experiment.evidence_class is EvidenceClass.CONFIRMATORY
+            else "REPRESENTATIVE"
+        ),
         representative_profile=(
             IBKR_HISTORICAL_PROFILE
             if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE

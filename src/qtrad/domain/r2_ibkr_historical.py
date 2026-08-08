@@ -179,9 +179,7 @@ def validate_ibkr_historical_profile(
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         raise ValueError("IBKR historical profile requires IBKR_HISTORICAL_RESEARCH")
     if experiment.evidence_class is not expected_evidence_class:
-        raise ValueError(
-            "IBKR historical profile has an unexpected evidence classification"
-        )
+        raise ValueError("IBKR historical profile has an unexpected evidence classification")
     if experiment.source_adapter_identity is None:
         raise ValueError("IBKR historical profile requires a persisted adapter identity")
     adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)

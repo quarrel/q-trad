@@ -164,9 +164,7 @@ def build_ibkr_historical_experiment(
         model_families=tuple(ModelFamily),
         market_data_source_class=IBKR_HISTORICAL_SOURCE,
     )
-    validate_ibkr_historical_profile(
-        experiment, expected_evidence_class=evidence_class
-    )
+    validate_ibkr_historical_profile(experiment, expected_evidence_class=evidence_class)
     return experiment
 
 
