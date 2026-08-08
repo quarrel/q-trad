@@ -9,7 +9,7 @@ import os
 import shutil
 import tempfile
 from collections.abc import Mapping
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import cast
 
@@ -1057,6 +1057,8 @@ def _read_provider_history_rows(
         raise ValueError("provider-history files are invalid")
     rows: list[ProviderHistoricalObservation] = []
     root = manifest_path.parent
+    previous_key: tuple[str, datetime, str] | None = None
+    needs_sort = False
     for item in raw_files:
         reference = _file_reference(item)
         partition = _read_parquet_rows(
@@ -1068,16 +1070,25 @@ def _read_provider_history_rows(
             expected_row_count=_int(reference["row_count"], "provider-history partition row count"),
             row_upper_bound=_int(reference["row_upper_bound"], "provider-history row upper bound"),
         )
-        rows.extend(partition.rows)
-    ordered = tuple(
-        sorted(
-            rows,
-            key=lambda row: (
-                row.instrument_id,
-                row.interval_start,
-                row.request_sha256,
-            ),
+        for row in partition.rows:
+            key = (row.instrument_id, row.interval_start, row.request_sha256)
+            if previous_key is not None and key < previous_key:
+                needs_sort = True
+            previous_key = key
+            rows.append(row)
+    ordered = (
+        tuple(
+            sorted(
+                rows,
+                key=lambda row: (
+                    row.instrument_id,
+                    row.interval_start,
+                    row.request_sha256,
+                ),
+            )
         )
+        if needs_sort
+        else tuple(rows)
     )
     if len(ordered) != dataset.row_count:
         raise ValueError("provider-history row reader count differs from verified dataset")
