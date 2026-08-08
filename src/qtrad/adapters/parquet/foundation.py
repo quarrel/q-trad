@@ -111,6 +111,15 @@ class ParquetFoundationArtifactStore:
         await self.read_rows(manifest_id)
         return manifest
 
+    async def verify_file(self, manifest_id: str) -> FoundationChildManifest:
+        """Verify a child manifest and file bytes without decoding its rows.
+
+        This is used by the pre-holdout F2 boundary for outcome-bearing target
+        children: the physical child is authenticated, but its rows are not
+        opened before the holdout is revealed.
+        """
+        return await asyncio.to_thread(self._verify_file_sync, manifest_id)
+
     def _write_sync(
         self,
         kind: str,
@@ -243,6 +252,13 @@ class ParquetFoundationArtifactStore:
                 raise ValueError("foundation child row must be a JSON object")
             rows.append(value)
         return tuple(rows)
+
+    def _verify_file_sync(self, manifest_id: str) -> FoundationChildManifest:
+        manifest = self._read_manifest_sync(manifest_id)
+        path = self._root / _safe_file(manifest.file)
+        if hashlib.sha256(path.read_bytes()).hexdigest() != manifest.file_sha256:
+            raise ValueError(f"foundation child file hash mismatch: {manifest.file}")
+        return manifest
 
 
 def _canonical_row(row: Mapping[str, JsonValue]) -> str:

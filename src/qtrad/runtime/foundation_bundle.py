@@ -49,6 +49,7 @@ from qtrad.domain.foundation_bundle import (
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import DataGap, DataQuality, MarketDataSourceClass, PriceBasis
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 from qtrad.domain.research import (
     AvailabilityDelayReport,
     ObservationDataset,
@@ -109,6 +110,20 @@ class VerifiedFoundationBundle:
     targets: TargetDataset
     folds: FoldDataset
     forecasts: ForecastDataset
+    source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
+    availability_evidence: Mapping[str, JsonValue]
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomeBlindVerifiedFoundationBundle:
+    """R1 evidence verified without decoding the outcome-bearing target child."""
+
+    bundle: FoundationBundle
+    configuration: FoundationConfig
+    observations: ObservationDataset
+    panel: PanelDataset
+    targets: R2OutcomeBlindTargetView
+    folds: FoldDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
 
@@ -804,6 +819,197 @@ async def verify_foundation_bundle(
         targets=targets,
         folds=folds,
         forecasts=forecasts,
+        source_active_intervals=evidence.source_active_intervals,
+        availability_evidence=availability,
+    )
+
+
+async def verify_outcome_blind_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> OutcomeBlindVerifiedFoundationBundle:
+    """Verify the R1 inputs needed by F2 without opening target rows.
+
+    Configuration, availability, panel and fold rows are independently replayed.
+    The target and forecast Parquet files are authenticated by manifest and file
+    hash only; neither is decoded.  The source child supplies the pre-holdout
+    target view and is checked against the authenticated target manifest identity.
+    """
+    bundle = load_foundation_bundle(bundle_path)
+    observation_store = ParquetObservationStore(root, clock)
+    observation_manifest = await observation_store.verify(bundle.observations.manifest_id)
+    _verify_observation_reference(bundle.observations, observation_manifest)
+    observations = await observation_store.read_observations(observation_manifest.manifest_id)
+    evidence = verify_observation_build_evidence(observation_manifest, observations)
+
+    store = ParquetFoundationArtifactStore(root, clock)
+    references = (
+        bundle.configuration,
+        bundle.availability,
+        bundle.panel,
+        bundle.targets,
+        bundle.folds,
+        bundle.forecasts,
+    )
+    manifests: dict[str, FoundationChildManifest] = {}
+    rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    for reference in references:
+        if reference.name in {"targets", "forecasts"}:
+            manifest = await store.verify_file(reference.manifest_id)
+        else:
+            manifest = await store.verify(reference.manifest_id)
+            rows[reference.name] = await store.read_rows(reference.manifest_id)
+        _verify_child_reference(reference, manifest)
+        manifests[reference.name] = manifest
+
+    configuration = decode_foundation_config(_single_row(rows, "configuration"))
+    verify_foundation_configuration_evidence(configuration, observations, evidence)
+    availability = cast(Mapping[str, JsonValue], _single_row(rows, "availability"))
+    if availability != evidence.payload:
+        raise ValueError("availability child differs from observation build evidence")
+    expected_availability_id = _hash_json(
+        {
+            "contract": AVAILABILITY_EVIDENCE_CONTRACT,
+            "observation_dataset_id": observations.dataset_id,
+            "evidence": availability,
+        }
+    )
+    if manifests["availability"].dataset_id != expected_availability_id:
+        raise ValueError("availability child semantic identity is invalid")
+
+    _require_lineage(
+        manifests["configuration"],
+        {"observation_dataset_id": observations.dataset_id},
+    )
+    _require_lineage(
+        manifests["availability"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "observation_manifest_id": observation_manifest.manifest_id,
+        },
+    )
+    _require_lineage(
+        manifests["panel"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["targets"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["folds"],
+        {
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["forecasts"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "panel_dataset_id": manifests["panel"].dataset_id,
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "fold_dataset_id": manifests["folds"].dataset_id,
+        },
+    )
+
+    build_summary = _mapping(bundle.build_summary)
+    if set(build_summary) != {"application_version", "image_identity", "row_counts"}:
+        raise ValueError("foundation build summary has an unexpected schema")
+    application_version = _text(build_summary["application_version"])
+    image_identity = _text(build_summary["image_identity"])
+    expected_row_counts: dict[str, JsonValue] = {
+        reference.name: reference.row_count for reference in references
+    }
+    if _mapping(build_summary["row_counts"]) != expected_row_counts:
+        raise ValueError("foundation build summary row counts are invalid")
+    for manifest in manifests.values():
+        if (
+            manifest.application_version != application_version
+            or manifest.image_identity != image_identity
+        ):
+            raise ValueError("foundation child build identity differs from the bundle")
+
+    panel = PanelDataset(
+        rows=tuple(_panel_row(row) for row in rows["panel"]),
+        observation_dataset_id=_lineage_text(manifests["panel"], "observation_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["panel"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["panel"].dataset_id,
+    )
+    folds = FoldDataset(
+        folds=tuple(_fold(row) for row in rows["folds"]),
+        target_dataset_id=_lineage_text(manifests["folds"], "target_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["folds"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["folds"].dataset_id,
+    )
+    expected_panel = build_asof_panel(
+        observations,
+        configuration,
+        gaps=evidence.gaps,
+        source_active_intervals=evidence.source_active_intervals,
+    )
+    if panel != expected_panel:
+        raise ValueError("foundation panel differs from deterministic causal replay")
+
+    holdout_target_source.verify_r1_causal_evidence(
+        panel=panel,
+        source_active_intervals=evidence.source_active_intervals,
+        data_gaps=tuple(
+            (gap.instrument_id.value, gap.interval_start, gap.interval_end) for gap in evidence.gaps
+        ),
+        availability_evidence_id=manifests["availability"].dataset_id,
+    )
+
+    if (
+        holdout_target_source.source_target_dataset_id != manifests["targets"].dataset_id
+        or holdout_target_source.observation_dataset_id != observations.dataset_id
+        or holdout_target_source.foundation_configuration_id != configuration.configuration_id
+        or len(holdout_target_source.targets) != manifests["targets"].row_count
+    ):
+        raise ValueError("holdout target source is not bound to the authenticated target child")
+    expected_target_instruments = tuple(
+        instrument_id
+        for instrument_id in configuration.ordered_instruments
+        if InstrumentRole(configuration.instrument_roles[instrument_id]) is InstrumentRole.TARGET
+    )
+    if (
+        holdout_target_source.holdout_range != configuration.holdout_range
+        or holdout_target_source.primary_horizon_seconds
+        != int(configuration.primary_vertical_horizon.total_seconds())
+        or holdout_target_source.target_instruments != expected_target_instruments
+    ):
+        raise ValueError("holdout target source policy differs from authenticated configuration")
+    target_ids = {item.target_id for item in holdout_target_source.targets}
+    for fold in folds.folds:
+        if not set(fold.training_target_ids) | set(fold.validation_target_ids) <= target_ids:
+            raise ValueError("fold membership is not covered by the holdout target source")
+    expected_folds = build_expanding_folds(
+        cast(TargetDataset, R2OutcomeBlindTargetView.from_source(holdout_target_source)),
+        configuration,
+    )
+    if folds != expected_folds:
+        raise ValueError("foundation folds differ from deterministic pre-holdout replay")
+
+    return OutcomeBlindVerifiedFoundationBundle(
+        bundle=bundle,
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=R2OutcomeBlindTargetView.from_source(holdout_target_source),
+        folds=folds,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
     )

@@ -4,9 +4,11 @@ import json
 import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
 from typing import NoReturn, cast
+from uuid import UUID
 
 import pytest
 
@@ -20,6 +22,9 @@ from qtrad.application.r2_holdout import (
 )
 from qtrad.domain.foundation import (
     ExcursionDisposition,
+    PanelDataset,
+    PanelRow,
+    PanelStatus,
     ReturnDisposition,
     TargetDataset,
     TargetRow,
@@ -361,6 +366,131 @@ def _target_dataset(*, include_noneligible: bool = False) -> TargetDataset:
     )
 
 
+def _causal_source() -> R2HoldoutTargetSource:
+    target_dataset = _target_dataset(include_noneligible=True)
+    panel_rows = tuple(
+        PanelRow(
+            decision_time=opportunity.decision_time,
+            instrument_id=opportunity.instrument_id,
+            basis=PriceBasis.MID,
+            feature_data_asof=opportunity.feature_data_asof,
+            latest_feature_bar_end=opportunity.latest_feature_bar_end,
+            status=PanelStatus.OBSERVED,
+            audit_disposition=None,
+            selected_event_id=UUID(int=index + 1),
+            selected_stream_version=1,
+            selected_global_position=index + 1,
+            selected_availability_time=opportunity.feature_data_asof,
+            selected_revision=1,
+            interval_start=opportunity.feature_data_asof - timedelta(minutes=1),
+            interval_end=opportunity.latest_feature_bar_end,
+            open=Decimal("1"),
+            high=Decimal("1"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            sample_count=1,
+            quality=None,
+        )
+        for index, opportunity in enumerate(_opportunities(include_noneligible=True))
+    )
+    panel = PanelDataset.create(
+        panel_rows,
+        observation_dataset_id=_id("observations"),
+        foundation_configuration_id=_id("foundation"),
+    )
+    return R2HoldoutTargetSource.create_from_target_dataset(
+        target_dataset,
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+        panel=panel,
+        source_active_intervals={
+            "INSTRUMENT_0": ((NOW, NOW + timedelta(days=3)),),
+            "INSTRUMENT_1": ((NOW, NOW + timedelta(days=3)),),
+        },
+        availability_evidence_id=_id("availability"),
+    )
+
+
+def test_holdout_source_replays_causal_disposition_from_r1_evidence() -> None:
+    source = _causal_source()
+    panel_id = source.causal_panel_dataset_id
+    assert panel_id is not None
+    panel = PanelDataset(
+        rows=tuple(
+            PanelRow(
+                decision_time=opportunity.decision_time,
+                instrument_id=opportunity.instrument_id,
+                basis=PriceBasis.MID,
+                feature_data_asof=opportunity.feature_data_asof,
+                latest_feature_bar_end=opportunity.latest_feature_bar_end,
+                status=PanelStatus.OBSERVED,
+                audit_disposition=None,
+                selected_event_id=UUID(int=index + 1),
+                selected_stream_version=1,
+                selected_global_position=index + 1,
+                selected_availability_time=opportunity.feature_data_asof,
+                selected_revision=1,
+                interval_start=opportunity.feature_data_asof - timedelta(minutes=1),
+                interval_end=opportunity.latest_feature_bar_end,
+                open=Decimal("1"),
+                high=Decimal("1"),
+                low=Decimal("1"),
+                close=Decimal("1"),
+                sample_count=1,
+                quality=None,
+            )
+            for index, opportunity in enumerate(_opportunities(include_noneligible=True))
+        ),
+        observation_dataset_id=_id("observations"),
+        foundation_configuration_id=_id("foundation"),
+        dataset_id=panel_id,
+    )
+    source.verify_r1_causal_evidence(
+        panel=panel,
+        source_active_intervals={
+            "INSTRUMENT_0": ((NOW, NOW + timedelta(days=3)),),
+            "INSTRUMENT_1": ((NOW, NOW + timedelta(days=3)),),
+        },
+        data_gaps=(),
+        availability_evidence_id=_id("availability"),
+    )
+    mutated = HoldoutTargetOpportunity.create(
+        target_id=source.opportunities[0].target_id,
+        instrument_id=source.opportunities[0].instrument_id,
+        decision_time=source.opportunities[0].decision_time,
+        target_horizon_seconds=900,
+        feature_data_asof=source.opportunities[0].feature_data_asof + timedelta(minutes=1),
+        latest_feature_bar_end=source.opportunities[0].latest_feature_bar_end,
+        dependency_start=source.opportunities[0].dependency_start,
+        dependency_end=source.opportunities[0].dependency_end,
+        disposition=source.opportunities[0].disposition,
+    )
+    tampered = R2HoldoutTargetSource.create(
+        source_target_dataset_id=source.source_target_dataset_id,
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+        holdout_range=source.holdout_range,
+        primary_horizon_seconds=source.primary_horizon_seconds,
+        target_instruments=source.target_instruments,
+        targets=source.targets,
+        pre_holdout_target_dataset=source.pre_holdout_target_dataset,
+        opportunities=(mutated, *source.opportunities[1:]),
+        causal_panel_dataset_id=source.causal_panel_dataset_id,
+        availability_evidence_id=source.availability_evidence_id,
+    )
+    with pytest.raises(ValueError, match="causal registry"):
+        tampered.verify_r1_causal_evidence(
+            panel=panel,
+            source_active_intervals={
+                "INSTRUMENT_0": ((NOW, NOW + timedelta(days=3)),),
+                "INSTRUMENT_1": ((NOW, NOW + timedelta(days=3)),),
+            },
+            data_gaps=(),
+            availability_evidence_id=_id("availability"),
+        )
+
+
 def _training_feature_dataset(*, include_noneligible: bool = False) -> R2FeatureDataset:
     schema, feature_name, training_feature_set_id = _training_feature_spec()
     experiment_id = _id("experiment")
@@ -650,16 +780,14 @@ def test_opportunity_registry_requires_complete_source_coverage_and_round_trips(
         dependency_end=opportunities[0].dependency_end,
         disposition=HoldoutOpportunityDisposition.GAP,
     )
-    mutated_source = R2HoldoutTargetSource.create_from_target_dataset(
-        source,
-        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
-        primary_horizon_seconds=900,
-        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
-        opportunities=(mutated_opportunity, opportunities[1]),
-    )
-    mutated_registry = R2HoldoutOpportunityRegistry.create_from_source(mutated_source)
-    with pytest.raises(ValueError, match="source"):
-        mutated_registry.verify_source(target_source)
+    with pytest.raises(ValueError, match="authenticated source derivation"):
+        R2HoldoutTargetSource.create_from_target_dataset(
+            source,
+            holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+            primary_horizon_seconds=900,
+            target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+            opportunities=(mutated_opportunity, opportunities[1]),
+        )
 
 
 def test_target_source_preserves_verified_instrument_order() -> None:

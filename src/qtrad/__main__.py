@@ -92,6 +92,7 @@ from qtrad.application.run_reconciliation import build_run_reconciliation_plan
 from qtrad.application.universe_promotion import promote_reviewed_universe
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import EventEnvelope, JsonValue, to_json_value
+from qtrad.domain.foundation import TargetDataset
 from qtrad.domain.historical_coverage import BackfillPlan, BackfillQuotaEvidence
 from qtrad.domain.ibkr_historical import (
     IbkrAcquisitionRuntime,
@@ -132,6 +133,7 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
+    verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_canary import (
     verify_ibkr_historical_canary_evidence,
@@ -1910,23 +1912,41 @@ async def _build_r2_oof(
     output_path: Path,
     holdout_target_source_path: Path | None,
 ) -> None:
-    from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+    from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 
     experiment, feature_paths = load_experiment_and_feature_paths(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
-    verified = await _load_r2_foundation_inputs(
-        settings,
-        clock,
-        foundation_bundle_path=foundation_bundle_path,
-        experiment=experiment,
+    if holdout_target_source_path is None:
+        raise ValueError("representative OOF build requires an authenticated holdout target source")
+    holdout_target_source = R2HoldoutTargetSource.from_json(
+        _load_holdout_cli_object(holdout_target_source_path)
     )
-    holdout_target_source = (
-        None
-        if holdout_target_source_path is None
-        else R2HoldoutTargetSource.from_json(_load_holdout_cli_object(holdout_target_source_path))
-    )
+    if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
+        verified = await verify_outcome_blind_foundation_bundle(
+            root=settings.research_root,
+            bundle_path=foundation_bundle_path,
+            clock=clock,
+            holdout_target_source=holdout_target_source,
+        )
+    else:
+        # The source-specific Stage 8 adapter already supplies authenticated
+        # children.  Replace only the target view consumed by F2 with the
+        # outcome-blind source projection before calling the shared OOF path.
+        verified_full = await _load_r2_foundation_inputs(
+            settings,
+            clock,
+            foundation_bundle_path=foundation_bundle_path,
+            experiment=experiment,
+        )
+        verified = replace(
+            cast(R2FoundationInputs, verified_full),
+            targets=cast(
+                TargetDataset,
+                R2OutcomeBlindTargetView.from_source(holdout_target_source),
+            ),
+        )
     manifest = build_oof_bundle(
         verified=cast(R1FoundationBindings, verified),
         experiment=experiment,

@@ -4,15 +4,24 @@ from __future__ import annotations
 
 import hashlib
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import cast
 
 import pytest
 
-from qtrad.domain.market_data import MarketDataSourceClass
+from qtrad.domain.foundation import (
+    ExcursionDisposition,
+    ReturnDisposition,
+    TargetDataset,
+    TargetRow,
+)
+from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
     R2OofBundle,
 )
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.runtime.r2_bundles import (
     atomic_create,
@@ -65,6 +74,52 @@ def _bundle_and_children() -> tuple[R2OofBundle, dict[str, dict[str, object]]]:
     return bundle, children
 
 
+def _holdout_source_payload() -> dict[str, object]:
+    now = datetime(2026, 1, 1, tzinfo=UTC)
+    rows = []
+    for decision_time, value in (
+        (now - timedelta(days=1), 0.1),
+        (now + timedelta(days=1), 0.2),
+    ):
+        horizon = timedelta(seconds=900)
+        rows.append(
+            TargetRow(
+                instrument_id="INSTRUMENT_0",
+                decision_time=decision_time,
+                horizon=horizon,
+                target_basis=PriceBasis.MID,
+                target_revision_policy="FIXTURE_V1",
+                target_start_time=decision_time,
+                target_end_time=decision_time + horizon,
+                target_freeze_at=decision_time + horizon,
+                target_available_at=decision_time + horizon,
+                label_start_close=None,
+                label_end_close=None,
+                log_return=value,
+                return_disposition=ReturnDisposition.VALID,
+                start_event_id=None,
+                end_event_id=None,
+                upper_log_excursion=None,
+                lower_log_excursion=None,
+                excursion_disposition=ExcursionDisposition.INCOMPLETE_PATH,
+            )
+        )
+    target_dataset = TargetDataset.create(
+        rows,
+        observation_dataset_id=hashlib.sha256(b"observations").hexdigest(),
+        foundation_configuration_id=hashlib.sha256(b"foundation").hexdigest(),
+    )
+    return cast(
+        dict[str, object],
+        R2HoldoutTargetSource.create_from_target_dataset(
+            target_dataset,
+            holdout_range=(now, now + timedelta(days=2)),
+            primary_horizon_seconds=900,
+            target_instruments=("INSTRUMENT_0",),
+        ).as_json(),
+    )
+
+
 def test_oof_bundle_round_trip_is_independently_authenticated(tmp_path: Path) -> None:
     bundle, children = _bundle_and_children()
     manifest_path = write_r2_oof_bundle(tmp_path, bundle, children)
@@ -108,13 +163,9 @@ def test_reordered_reference_arrays_replay_to_the_same_identity(tmp_path: Path) 
 
 def test_oof_bundle_binds_the_holdout_target_source_child(tmp_path: Path) -> None:
     base, children = _bundle_and_children()
-    source_id = hashlib.sha256(b"holdout-source").hexdigest()
-    source_contract = "qtrad-r2-holdout-target-source-v1"
-    source_payload: dict[str, object] = {
-        "contract": source_contract,
-        "schema_version": 1,
-        "source_id": source_id,
-    }
+    source_payload = _holdout_source_payload()
+    source_id = str(source_payload["source_id"])
+    source_contract = R2HoldoutTargetSource.CONTRACT
     source_path = "holdout/target-source.json"
     source_reference = ArtifactReference(
         source_contract,
@@ -141,6 +192,41 @@ def test_oof_bundle_binds_the_holdout_target_source_child(tmp_path: Path) -> Non
     verified = verify_r2_oof_bundle(manifest_path)
 
     assert verified.holdout_target_source == source_reference
+
+
+def test_oof_bundle_rejects_an_untyped_holdout_target_source_child(tmp_path: Path) -> None:
+    base, children = _bundle_and_children()
+    source_id = hashlib.sha256(b"holdout-source").hexdigest()
+    source_path = "holdout/target-source.json"
+    payload: dict[str, object] = {
+        "contract": R2HoldoutTargetSource.CONTRACT,
+        "schema_version": 1,
+        "source_id": source_id,
+    }
+    reference = ArtifactReference(
+        R2HoldoutTargetSource.CONTRACT,
+        source_id,
+        source_path,
+        hashlib.sha256(canonical_bytes(payload)).hexdigest(),
+    )
+    bundle = R2OofBundle.create(
+        foundation_bundle_id=base.foundation_bundle_id,
+        experiment_configuration_id=base.experiment_configuration_id,
+        source_class=base.source_class,
+        evidence_class=base.evidence_class,
+        feature_children=base.feature_children,
+        preprocessing_children=base.preprocessing_children,
+        fit_children=base.fit_children,
+        forecast_manifests=base.forecast_manifests,
+        coverage_children=base.coverage_children,
+        evaluation_children=base.evaluation_children,
+        holdout_target_source=reference,
+    )
+    children[source_path] = payload
+    manifest_path = write_r2_oof_bundle(tmp_path, bundle, children)
+
+    with pytest.raises(ValueError, match="target source"):
+        verify_r2_oof_bundle(manifest_path)
 
 
 def test_bundle_rejects_unsafe_paths_and_duplicate_cross_category_children() -> None:

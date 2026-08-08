@@ -17,6 +17,7 @@ from qtrad.domain.r2_bundles import (
     R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import R2_SELECTION_CONTRACT
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_models import R2_PREPROCESSING_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
@@ -250,6 +251,10 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
+        if ref.contract == R2HoldoutTargetSource.CONTRACT:
+            source = R2HoldoutTargetSource.from_json(child)
+            if source.source_id != ref.semantic_id:
+                raise ValueError("OOF holdout target source identity differs from its reference")
         _verify_lineage_payload(child, bundle)
         if child.get("contract") == "qtrad-r2-oof-run-descriptor-v1":
             descriptor_id = child.get("descriptor_id")

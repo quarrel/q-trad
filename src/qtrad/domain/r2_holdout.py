@@ -22,6 +22,9 @@ from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import (
     TARGET_DATASET_CONTRACT,
     ExcursionDisposition,
+    PanelAuditDisposition,
+    PanelDataset,
+    PanelStatus,
     ReturnDisposition,
     TargetDataset,
     TargetRow,
@@ -1160,6 +1163,7 @@ class R2HoldoutTargetIdentity:
     target_end_time: datetime
     target_freeze_at: datetime
     target_available_at: datetime
+    target_availability_disposition: ReturnDisposition
 
     CONTRACT: ClassVar[str] = "qtrad-r2-holdout-target-identity-v1"
 
@@ -1205,6 +1209,7 @@ class R2HoldoutTargetIdentity:
             target_end_time=row.target_end_time,
             target_freeze_at=row.target_freeze_at,
             target_available_at=row.target_available_at,
+            target_availability_disposition=row.return_disposition,
         )
 
     def matches_row(self, row: TargetRow) -> bool:
@@ -1224,6 +1229,7 @@ class R2HoldoutTargetIdentity:
             "target_end_time": self.target_end_time.isoformat(),
             "target_freeze_at": self.target_freeze_at.isoformat(),
             "target_available_at": self.target_available_at.isoformat(),
+            "target_availability_disposition": self.target_availability_disposition.value,
         }
 
     @classmethod
@@ -1244,6 +1250,7 @@ class R2HoldoutTargetIdentity:
             "target_end_time",
             "target_freeze_at",
             "target_available_at",
+            "target_availability_disposition",
         }
         if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
             raise ValueError("holdout target identity has unknown or unsupported fields")
@@ -1258,6 +1265,9 @@ class R2HoldoutTargetIdentity:
             target_end_time=datetime.fromisoformat(str(raw["target_end_time"])),
             target_freeze_at=datetime.fromisoformat(str(raw["target_freeze_at"])),
             target_available_at=datetime.fromisoformat(str(raw["target_available_at"])),
+            target_availability_disposition=ReturnDisposition(
+                str(raw["target_availability_disposition"])
+            ),
         )
 
 
@@ -1280,9 +1290,17 @@ class R2HoldoutTargetSource:
     pre_holdout_target_dataset: TargetDataset
     opportunities: tuple[HoldoutTargetOpportunity, ...]
     source_id: str
+    causal_panel_dataset_id: str | None = None
+    availability_evidence_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_HOLDOUT_TARGET_SOURCE_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 1
+    # These are part of the source-level, outcome-blind derivation policy.  They
+    # intentionally do not come from the holdout-opportunity JSON supplied by a
+    # caller.  The source builder derives the values below from the authenticated
+    # target child and the primary horizon before it writes the source child.
+    FEATURE_LOOKBACK_SECONDS: ClassVar[int] = 60
+    OPPORTUNITY_DERIVATION_POLICY: ClassVar[str] = "R1_PANEL_AVAILABILITY_AND_TARGET_MATURITY_V2"
 
     def __post_init__(self) -> None:
         _require_id(self.source_target_dataset_id, "holdout target source dataset ID")
@@ -1292,6 +1310,13 @@ class R2HoldoutTargetSource:
         _positive_range(self.holdout_range, "holdout target source holdout range")
         if self.primary_horizon_seconds <= 0:
             raise ValueError("holdout target source horizon must be positive")
+        if (self.causal_panel_dataset_id is None) != (self.availability_evidence_id is None):
+            raise ValueError("holdout target source causal evidence references must be paired")
+        if self.causal_panel_dataset_id is not None:
+            _require_id(self.causal_panel_dataset_id, "holdout target source panel ID")
+            _require_id(
+                self.availability_evidence_id or "", "holdout target source availability ID"
+            )
         if not self.target_instruments or len(set(self.target_instruments)) != len(
             self.target_instruments
         ):
@@ -1357,7 +1382,11 @@ class R2HoldoutTargetSource:
         holdout_range: tuple[datetime, datetime],
         primary_horizon_seconds: int,
         target_instruments: Sequence[str],
-        opportunities: Sequence[HoldoutTargetOpportunity],
+        opportunities: Sequence[HoldoutTargetOpportunity] | None = None,
+        panel: PanelDataset | None = None,
+        source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]] | None = None,
+        data_gaps: Sequence[tuple[str, datetime, datetime]] | None = None,
+        availability_evidence_id: str | None = None,
     ) -> R2HoldoutTargetSource:
         identities = tuple(
             sorted(
@@ -1371,6 +1400,52 @@ class R2HoldoutTargetSource:
             primary_horizon_seconds=primary_horizon_seconds,
             target_instruments=target_instruments,
         )
+        if panel is None:
+            if source_active_intervals is not None or data_gaps is not None:
+                raise ValueError("causal holdout evidence requires a panel")
+            derived_opportunities = cls._derive_opportunities(
+                source_target_dataset,
+                holdout_range=holdout_range,
+                primary_horizon_seconds=primary_horizon_seconds,
+                target_instruments=target_instruments,
+            )
+            causal_panel_dataset_id = None
+        else:
+            if availability_evidence_id is None:
+                raise ValueError("causal holdout evidence requires an availability ID")
+            derived_opportunities = cls._derive_opportunities_from_r1_evidence(
+                identities,
+                holdout_range=holdout_range,
+                primary_horizon_seconds=primary_horizon_seconds,
+                target_instruments=target_instruments,
+                panel=panel,
+                source_active_intervals=source_active_intervals or {},
+                data_gaps=data_gaps or (),
+            )
+            causal_panel_dataset_id = panel.dataset_id
+        if opportunities is not None:
+            supplied_opportunities = tuple(
+                sorted(opportunities, key=lambda item: item.opportunity_id)
+            )
+            if any(
+                item.disposition
+                in {
+                    HoldoutOpportunityDisposition.UNAVAILABLE_FEATURE,
+                    HoldoutOpportunityDisposition.FAILED_CONFIGURATION,
+                }
+                for item in supplied_opportunities
+            ):
+                raise ValueError(
+                    "holdout target source cannot contain configuration-specific dispositions"
+                )
+            if {item.target_id for item in supplied_opportunities} != {
+                item.target_id for item in derived_opportunities
+            }:
+                raise ValueError("holdout opportunities are not complete")
+            if supplied_opportunities != derived_opportunities:
+                raise ValueError(
+                    "holdout opportunities differ from authenticated source derivation"
+                )
         return cls.create(
             source_target_dataset_id=source_target_dataset.dataset_id,
             observation_dataset_id=source_target_dataset.observation_dataset_id,
@@ -1380,8 +1455,163 @@ class R2HoldoutTargetSource:
             target_instruments=tuple(target_instruments),
             targets=identities,
             pre_holdout_target_dataset=pre_holdout,
-            opportunities=tuple(opportunities),
+            opportunities=derived_opportunities,
+            causal_panel_dataset_id=causal_panel_dataset_id,
+            availability_evidence_id=availability_evidence_id,
         )
+
+    @classmethod
+    def _derive_opportunities_from_r1_evidence(
+        cls,
+        target_identities: Sequence[R2HoldoutTargetIdentity],
+        *,
+        holdout_range: tuple[datetime, datetime],
+        primary_horizon_seconds: int,
+        target_instruments: Sequence[str],
+        panel: PanelDataset,
+        source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
+        data_gaps: Sequence[tuple[str, datetime, datetime]],
+    ) -> tuple[HoldoutTargetOpportunity, ...]:
+        """Derive the registry from authenticated R1 causal evidence.
+
+        Target rows contribute only the outcome-blind target identity and its
+        availability disposition.  Feature timing comes from the authenticated
+        panel; inactive/gap classification is recomputed from source activity,
+        recorded gaps, and the target maturity boundary.
+        """
+        _positive_range(holdout_range, "holdout target source holdout range")
+        panel_by_key = {
+            (row.instrument_id, row.basis, row.decision_time): row for row in panel.rows
+        }
+        opportunities: list[HoldoutTargetOpportunity] = []
+        for identity in target_identities:
+            if not (
+                identity.target_horizon_seconds == primary_horizon_seconds
+                and identity.instrument_id in target_instruments
+                and holdout_range[0] <= identity.decision_time < holdout_range[1]
+            ):
+                continue
+            panel_row = panel_by_key.get(
+                (identity.instrument_id, identity.target_basis, identity.decision_time)
+            )
+            if panel_row is None:
+                raise ValueError("R1 panel lacks a holdout target opportunity row")
+            dependency_start = identity.decision_time - timedelta(seconds=primary_horizon_seconds)
+            dependency_end = identity.decision_time + timedelta(seconds=primary_horizon_seconds)
+            active = any(
+                start <= dependency_start and end >= dependency_end
+                for start, end in source_active_intervals.get(identity.instrument_id, ())
+            )
+            has_gap = any(
+                instrument_id == identity.instrument_id
+                and gap_start < dependency_end
+                and gap_end > dependency_start
+                for instrument_id, gap_start, gap_end in data_gaps
+            )
+            if identity.target_available_at > holdout_range[1] or not active:
+                disposition = HoldoutOpportunityDisposition.INACTIVE
+            elif panel_row.status is PanelStatus.MISSING_AS_OF_CUTOFF:
+                disposition = (
+                    HoldoutOpportunityDisposition.INACTIVE
+                    if panel_row.audit_disposition is PanelAuditDisposition.SOURCE_NOT_ACTIVE
+                    else HoldoutOpportunityDisposition.GAP
+                )
+            elif has_gap or identity.target_availability_disposition is not ReturnDisposition.VALID:
+                disposition = HoldoutOpportunityDisposition.GAP
+            else:
+                disposition = HoldoutOpportunityDisposition.ELIGIBLE
+            opportunities.append(
+                HoldoutTargetOpportunity.create(
+                    target_id=identity.target_id,
+                    instrument_id=identity.instrument_id,
+                    decision_time=identity.decision_time,
+                    target_horizon_seconds=primary_horizon_seconds,
+                    feature_data_asof=panel_row.feature_data_asof,
+                    latest_feature_bar_end=panel_row.latest_feature_bar_end,
+                    dependency_start=dependency_start,
+                    dependency_end=dependency_end,
+                    disposition=disposition,
+                )
+            )
+        return tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
+
+    def verify_r1_causal_evidence(
+        self,
+        *,
+        panel: PanelDataset,
+        source_active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
+        data_gaps: Sequence[tuple[str, datetime, datetime]],
+        availability_evidence_id: str,
+    ) -> None:
+        """Verify source semantics against authenticated R1 panel/evidence."""
+        if self.causal_panel_dataset_id != panel.dataset_id:
+            raise ValueError("holdout target source panel binding differs from R1 evidence")
+        if self.availability_evidence_id != availability_evidence_id:
+            raise ValueError("holdout target source availability binding differs from R1 evidence")
+        expected = self._derive_opportunities_from_r1_evidence(
+            self.targets,
+            holdout_range=self.holdout_range,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            target_instruments=self.target_instruments,
+            panel=panel,
+            source_active_intervals=source_active_intervals,
+            data_gaps=data_gaps,
+        )
+        if expected != self.opportunities:
+            raise ValueError("holdout target source causal registry differs from R1 evidence")
+
+    @classmethod
+    def _derive_opportunities(
+        cls,
+        target_dataset: TargetDataset,
+        *,
+        holdout_range: tuple[datetime, datetime],
+        primary_horizon_seconds: int,
+        target_instruments: Sequence[str],
+    ) -> tuple[HoldoutTargetOpportunity, ...]:
+        """Derive the shared outcome-blind registry from authenticated target rows.
+
+        Target rows are read only at the upstream source-building boundary.  The
+        resulting registry carries timing and availability classifications into
+        F2/G1/G2, so those fields are no longer selected by an independent JSON
+        argument.  ``return_disposition`` is availability metadata here; the
+        realised return itself is never copied into an opportunity.
+        """
+        _positive_range(holdout_range, "holdout target source holdout range")
+        if primary_horizon_seconds <= 0:
+            raise ValueError("holdout target source horizon must be positive")
+        instruments = tuple(target_instruments)
+        rows = {
+            row.target_id: row
+            for row in target_dataset.rows
+            if row.horizon.total_seconds() == primary_horizon_seconds
+            and row.instrument_id in instruments
+            and holdout_range[0] <= row.decision_time < holdout_range[1]
+        }
+        opportunities: list[HoldoutTargetOpportunity] = []
+        for row in rows.values():
+            if row.target_available_at > holdout_range[1]:
+                disposition = HoldoutOpportunityDisposition.INACTIVE
+            elif row.return_disposition is ReturnDisposition.VALID:
+                disposition = HoldoutOpportunityDisposition.ELIGIBLE
+            else:
+                disposition = HoldoutOpportunityDisposition.GAP
+            opportunities.append(
+                HoldoutTargetOpportunity.create(
+                    target_id=row.target_id,
+                    instrument_id=row.instrument_id,
+                    decision_time=row.decision_time,
+                    target_horizon_seconds=primary_horizon_seconds,
+                    feature_data_asof=row.decision_time
+                    - timedelta(seconds=cls.FEATURE_LOOKBACK_SECONDS),
+                    latest_feature_bar_end=row.decision_time
+                    - timedelta(seconds=cls.FEATURE_LOOKBACK_SECONDS),
+                    dependency_start=row.decision_time - timedelta(seconds=primary_horizon_seconds),
+                    dependency_end=row.decision_time + timedelta(seconds=primary_horizon_seconds),
+                    disposition=disposition,
+                )
+            )
+        return tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
 
     @classmethod
     def create(cls, **values: object) -> R2HoldoutTargetSource:
@@ -1403,6 +1633,7 @@ class R2HoldoutTargetSource:
         semantic = {
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
+            "opportunity_derivation_policy": cls.OPPORTUNITY_DERIVATION_POLICY,
             **{key: _contract_json(value) for key, value in raw.items()},
         }
         constructor = cast(Callable[..., R2HoldoutTargetSource], cls)
@@ -1431,12 +1662,18 @@ class R2HoldoutTargetSource:
         )
         if expected_pre != self.pre_holdout_target_dataset:
             raise ValueError("holdout target source pre-holdout child is not source-derived")
-        expected_source = self.create_from_target_dataset(
-            target_dataset,
+        expected_source = self.create(
+            source_target_dataset_id=target_dataset.dataset_id,
+            observation_dataset_id=target_dataset.observation_dataset_id,
+            foundation_configuration_id=target_dataset.foundation_configuration_id,
             holdout_range=self.holdout_range,
             primary_horizon_seconds=self.primary_horizon_seconds,
             target_instruments=self.target_instruments,
+            targets=actual_targets,
+            pre_holdout_target_dataset=expected_pre,
             opportunities=self.opportunities,
+            causal_panel_dataset_id=self.causal_panel_dataset_id,
+            availability_evidence_id=self.availability_evidence_id,
         )
         if expected_source.source_id != self.source_id:
             raise ValueError("holdout target source does not authenticate the retained target")
@@ -1448,8 +1685,11 @@ class R2HoldoutTargetSource:
             "source_target_dataset_id": self.source_target_dataset_id,
             "observation_dataset_id": self.observation_dataset_id,
             "foundation_configuration_id": self.foundation_configuration_id,
+            "causal_panel_dataset_id": self.causal_panel_dataset_id,
+            "availability_evidence_id": self.availability_evidence_id,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "primary_horizon_seconds": self.primary_horizon_seconds,
+            "opportunity_derivation_policy": self.OPPORTUNITY_DERIVATION_POLICY,
             "target_instruments": list(self.target_instruments),
             "targets": [item.as_json() for item in self.targets],
             "pre_holdout_target_dataset": self.pre_holdout_target_dataset.as_json(),
@@ -1470,8 +1710,11 @@ class R2HoldoutTargetSource:
             "source_target_dataset_id",
             "observation_dataset_id",
             "foundation_configuration_id",
+            "causal_panel_dataset_id",
+            "availability_evidence_id",
             "holdout_range",
             "primary_horizon_seconds",
+            "opportunity_derivation_policy",
             "target_instruments",
             "targets",
             "pre_holdout_target_dataset",
@@ -1480,6 +1723,8 @@ class R2HoldoutTargetSource:
         }
         if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
             raise ValueError("holdout target source has unknown or unsupported fields")
+        if raw["opportunity_derivation_policy"] != cls.OPPORTUNITY_DERIVATION_POLICY:
+            raise ValueError("holdout target source opportunity policy is unsupported")
         raw_range_value = raw["holdout_range"]
         if not isinstance(raw_range_value, list):
             raise ValueError("holdout target source holdout range is invalid")
@@ -1503,6 +1748,16 @@ class R2HoldoutTargetSource:
             source_target_dataset_id=str(raw["source_target_dataset_id"]),
             observation_dataset_id=str(raw["observation_dataset_id"]),
             foundation_configuration_id=str(raw["foundation_configuration_id"]),
+            causal_panel_dataset_id=(
+                str(raw["causal_panel_dataset_id"])
+                if raw["causal_panel_dataset_id"] is not None
+                else None
+            ),
+            availability_evidence_id=(
+                str(raw["availability_evidence_id"])
+                if raw["availability_evidence_id"] is not None
+                else None
+            ),
             holdout_range=(
                 datetime.fromisoformat(str(raw_range[0])),
                 datetime.fromisoformat(str(raw_range[1])),
@@ -1515,6 +1770,31 @@ class R2HoldoutTargetSource:
                 HoldoutTargetOpportunity.from_json(item) for item in raw_opportunities
             ),
             source_id=str(raw["source_id"]),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2OutcomeBlindTargetView:
+    """The pre-holdout rows exposed to F2 under the full target identity.
+
+    ``dataset_id`` remains the authenticated R1 target-child identity so feature
+    and fold bindings cannot be rewritten around a filtered child.  ``rows`` are
+    supplied only by the source's independently persisted pre-holdout projection;
+    no post-boundary target value is available through this view.
+    """
+
+    dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    rows: tuple[TargetRow, ...]
+
+    @classmethod
+    def from_source(cls, source: R2HoldoutTargetSource) -> R2OutcomeBlindTargetView:
+        return cls(
+            dataset_id=source.source_target_dataset_id,
+            observation_dataset_id=source.observation_dataset_id,
+            foundation_configuration_id=source.foundation_configuration_id,
+            rows=source.pre_holdout_target_dataset.rows,
         )
 
 

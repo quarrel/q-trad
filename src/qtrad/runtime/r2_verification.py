@@ -85,7 +85,7 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
-from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
@@ -104,7 +104,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.ports.clock import Clock
-from qtrad.runtime.foundation_bundle import verify_foundation_bundle
+from qtrad.runtime.foundation_bundle import verify_outcome_blind_foundation_bundle
 from qtrad.runtime.ibkr_foundation import load_ibkr_foundation_with_identity
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
@@ -1363,6 +1363,10 @@ def build_oof_bundle(
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     if run_kind == "REPRESENTATIVE":
+        if holdout_target_source is None:
+            raise ValueError(
+                "representative OOF build requires an authenticated holdout target source"
+            )
         if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
             if representative_profile != IBKR_HISTORICAL_PROFILE:
                 raise ValueError("IBKR historical representative run requires IBKR_HISTORICAL_V1")
@@ -1380,7 +1384,12 @@ def build_oof_bundle(
         recompute_rows=run_kind != "SYNTHETIC",
     )
     if holdout_target_source is not None:
-        holdout_target_source.verify_target_dataset(verified.targets)
+        if verified.targets.dataset_id != holdout_target_source.source_target_dataset_id:
+            raise ValueError("OOF target view differs from the authenticated holdout source")
+        if tuple(verified.targets.rows) != holdout_target_source.pre_holdout_target_dataset.rows:
+            raise ValueError(
+                "OOF target rows are not the authenticated pre-holdout target projection"
+            )
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     identities = runtime_identities()
@@ -2258,6 +2267,10 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 
 async def _replay_representative_oof_async(path: Path) -> None:
     bundle = verify_r2_oof_bundle(path)
+    if bundle.holdout_target_source is None:
+        raise ValueError("representative OOF bundle has no authenticated holdout target source")
+    source_payload = _load_selection(path.parent / bundle.holdout_target_source.path)
+    holdout_target_source = R2HoldoutTargetSource.from_json(source_payload)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
     if descriptor.get("run_kind") != "REPRESENTATIVE":
         raise ValueError("representative replay requires a representative OOF run")
@@ -2335,17 +2348,25 @@ async def _replay_representative_oof_async(path: Path) -> None:
     elif representative_profile is not None:
         raise ValueError("representative OOF descriptor has an unsupported profile")
     else:
-        verified = await verify_foundation_bundle(
+        verified = await verify_outcome_blind_foundation_bundle(
             root=research_root,
             bundle_path=paths["foundation"],
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            holdout_target_source=holdout_target_source,
         )
-        _validate_representative_capture_v4(verified, experiment)
+        _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
+    if representative_profile == IBKR_HISTORICAL_PROFILE:
+        verified = replace(
+            cast(R2FoundationInputs, verified),
+            targets=cast(
+                TargetDataset, R2OutcomeBlindTargetView.from_source(holdout_target_source)
+            ),
+        )
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
         build_oof_bundle(
-            verified=verified,
+            verified=cast(R1FoundationBindings, verified),
             experiment=experiment,
             feature_manifest_paths=feature_paths,
             research_root=research_root,
@@ -2356,6 +2377,7 @@ async def _replay_representative_oof_async(path: Path) -> None:
             ),
             run_kind="REPRESENTATIVE",
             replay_inputs=paths,
+            holdout_target_source=holdout_target_source,
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError(
