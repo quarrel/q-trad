@@ -169,13 +169,19 @@ IBKR_HISTORICAL_MINIMUM_INNER_VALIDATION_ROWS = 20
 IBKR_HISTORICAL_MINIMUM_OUTER_VALIDATION_ROWS = 20
 
 
-def validate_ibkr_historical_profile(experiment: R2ExperimentConfig) -> None:
-    """Reject an experiment that is not the fixed implementation-only profile."""
+def validate_ibkr_historical_profile(
+    experiment: R2ExperimentConfig,
+    *,
+    expected_evidence_class: EvidenceClass = IBKR_HISTORICAL_EVIDENCE,
+) -> None:
+    """Reject an experiment that is not the fixed IBKR historical profile."""
 
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         raise ValueError("IBKR historical profile requires IBKR_HISTORICAL_RESEARCH")
-    if experiment.evidence_class is not IBKR_HISTORICAL_EVIDENCE:
-        raise ValueError("IBKR historical profile requires implementation-only evidence")
+    if experiment.evidence_class is not expected_evidence_class:
+        raise ValueError(
+            "IBKR historical profile has an unexpected evidence classification"
+        )
     if experiment.source_adapter_identity is None:
         raise ValueError("IBKR historical profile requires a persisted adapter identity")
     adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)

@@ -225,12 +225,14 @@ from qtrad.runtime.r2_readiness import (
 from qtrad.runtime.r2_verification import (
     build_oof_bundle,
     build_software_bundle,
+    freeze_confirmatory_selection,
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
     require_ibkr_adapter_runtime_identity,
     runtime_identities,
     selection_freeze,
+    verify_confirmatory_f2,
     verify_oof_bundle,
     verify_software_bundle,
     verify_software_bundle_async,
@@ -948,6 +950,20 @@ def build_parser() -> argparse.ArgumentParser:
         "oof-verify", help="independently verify an R2 OOF bundle"
     )
     baselines_oof_verify.add_argument("--bundle", type=Path, required=True)
+
+    baselines_confirmatory_f2_verify = baselines_sub.add_parser(
+        "confirmatory-f2-verify",
+        help="independently verify and replay a confirmatory F2 OOF authority",
+    )
+    baselines_confirmatory_f2_verify.add_argument("--bundle", type=Path, required=True)
+
+    baselines_confirmatory_selection = baselines_sub.add_parser(
+        "confirmatory-selection-freeze",
+        help="derive confirmatory G1 selection from verified F2 only",
+    )
+    baselines_confirmatory_selection.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
+    baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
 
     baselines_selection_freeze = baselines_sub.add_parser(
         "selection-freeze", help="freeze disposable implementation selection mechanics"
@@ -1759,6 +1775,36 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         bundle = verify_oof_bundle(args.bundle)
         print(json.dumps(bundle.as_json(), sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-f2-verify"
+    ):
+        authority = verify_confirmatory_f2(args.bundle)
+        print(
+            json.dumps(
+                {
+                    "bundle_id": authority.bundle.bundle_id,
+                    "experiment_configuration_id": authority.experiment_configuration_id,
+                    "foundation_bundle_id": authority.foundation_bundle_id,
+                    "evidence_class": authority.evidence_class.value,
+                    "run_kind": authority.descriptor["run_kind"],
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-selection-freeze"
+    ):
+        authority = verify_confirmatory_f2(args.f2_bundle)
+        freeze_confirmatory_selection(
+            verified_f2=authority,
+            output=args.output,
+            frozen_by=args.frozen_by,
+        )
+        print(json.dumps({"selection": str(args.output)}, sort_keys=True))
     elif (
         args.command == "research"
         and args.research_command == "baselines"

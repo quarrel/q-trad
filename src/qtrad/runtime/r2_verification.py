@@ -47,7 +47,10 @@ from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
     build_r2_preprocessing_selection,
 )
-from qtrad.application.r2_readiness import R1FoundationBindings, _availability_dataset_id
+from qtrad.application.r2_readiness import (
+    R1FoundationBindings,
+    _availability_dataset_id,
+)
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, FoldDataset, membership_hash
@@ -85,7 +88,16 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
-from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+from qtrad.domain.r2_holdout import (
+    HoldoutDirection,
+    HoldoutScope,
+    R2FinalFittingPolicy,
+    R2HoldoutOpportunityRegistry,
+    R2HoldoutQuestion,
+    R2HoldoutSelectionManifest,
+    R2HoldoutTargetProjection,
+    R2HoldoutTargetSource,
+)
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
@@ -121,6 +133,8 @@ from qtrad.runtime.r2_bundles import (
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
+CONFIRMATORY_RUN_KIND = "CONFIRMATORY"
+_IMPLEMENTATION_RUN_KINDS = frozenset({"SYNTHETIC", "REPRESENTATIVE"})
 _IMAGE_IDENTITY_CONTRACT = "qtrad-runtime-image-identity-v1"
 _REQUIRED_FEATURE_SETS = frozenset({"L0", "L1", "P0", "P1"})
 _CAPTURE_V4_UNIVERSE = (
@@ -159,6 +173,141 @@ _CAPTURE_V4_TARGETS = (
 
 
 _DEPLOYMENT_IMAGE_IDENTITY_PATH = Path("/run/qtrad/image-identity.json")
+
+
+_VERIFIED_CONFIRMATORY_F2_TOKEN = object()
+
+
+class VerifiedConfirmatoryF2:
+    """Runtime-only authority proving one independently replayed confirmatory F2 run."""
+
+    __slots__ = (
+        "_bundle",
+        "_configuration_registry",
+        "_descriptor",
+        "_evaluated_configurations",
+        "_evaluation_policy",
+        "_evaluation_report_id",
+        "_holdout_comparator_configuration_ids",
+        "_holdout_target_source",
+        "_local_comparator_manifest_id",
+        "_runtime_identities",
+        "_selected_configuration_ids",
+        "_selection_decisions",
+    )
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedConfirmatoryF2 is constructed only by verify_confirmatory_f2")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("VerifiedConfirmatoryF2 is immutable")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        bundle: R2OofBundle,
+        holdout_target_source: R2HoldoutTargetSource,
+        descriptor: Mapping[str, JsonValue],
+        evaluation_report_id: str,
+        local_comparator_manifest_id: str,
+        evaluated_configurations: tuple[ConfigurationRecord, ...],
+        selection_decisions: tuple[SelectionDecision, ...],
+        selected_configuration_ids: tuple[str, ...],
+        holdout_comparator_configuration_ids: tuple[str, ...],
+        configuration_registry: tuple[
+            tuple[str, ModelFamily, str | None, str | None, str | None], ...
+        ],
+        evaluation_policy: Mapping[str, JsonValue],
+        runtime_identities: Mapping[str, str],
+    ) -> VerifiedConfirmatoryF2:
+        if token is not _VERIFIED_CONFIRMATORY_F2_TOKEN:
+            raise TypeError("VerifiedConfirmatoryF2 is constructed only by its verifier")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_bundle", bundle)
+        object.__setattr__(instance, "_holdout_target_source", holdout_target_source)
+        object.__setattr__(instance, "_descriptor", dict(descriptor))
+        object.__setattr__(instance, "_evaluation_report_id", evaluation_report_id)
+        object.__setattr__(instance, "_local_comparator_manifest_id", local_comparator_manifest_id)
+        object.__setattr__(instance, "_evaluated_configurations", evaluated_configurations)
+        object.__setattr__(instance, "_selection_decisions", selection_decisions)
+        object.__setattr__(instance, "_selected_configuration_ids", selected_configuration_ids)
+        object.__setattr__(
+            instance,
+            "_holdout_comparator_configuration_ids",
+            holdout_comparator_configuration_ids,
+        )
+        object.__setattr__(instance, "_configuration_registry", configuration_registry)
+        object.__setattr__(instance, "_evaluation_policy", dict(evaluation_policy))
+        object.__setattr__(instance, "_runtime_identities", dict(runtime_identities))
+        return instance
+
+    @property
+    def bundle(self) -> R2OofBundle:
+        return self._bundle
+
+    @property
+    def foundation_bundle_id(self) -> str:
+        return self._bundle.foundation_bundle_id
+
+    @property
+    def experiment_configuration_id(self) -> str:
+        return self._bundle.experiment_configuration_id
+
+    @property
+    def evaluation_report_id(self) -> str:
+        return self._evaluation_report_id
+
+    @property
+    def local_comparator_manifest_id(self) -> str:
+        return self._local_comparator_manifest_id
+
+    @property
+    def source_class(self) -> MarketDataSourceClass:
+        return self._bundle.source_class
+
+    @property
+    def evidence_class(self) -> EvidenceClass:
+        return self._bundle.evidence_class
+
+    @property
+    def holdout_target_source(self) -> R2HoldoutTargetSource:
+        return self._holdout_target_source
+
+    @property
+    def descriptor(self) -> Mapping[str, JsonValue]:
+        return self._descriptor
+
+    @property
+    def evaluated_configurations(self) -> tuple[ConfigurationRecord, ...]:
+        return self._evaluated_configurations
+
+    @property
+    def selection_decisions(self) -> tuple[SelectionDecision, ...]:
+        return self._selection_decisions
+
+    @property
+    def selected_configuration_ids(self) -> tuple[str, ...]:
+        return self._selected_configuration_ids
+
+    @property
+    def holdout_comparator_configuration_ids(self) -> tuple[str, ...]:
+        return self._holdout_comparator_configuration_ids
+
+    @property
+    def configuration_registry(
+        self,
+    ) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
+        return self._configuration_registry
+
+    @property
+    def evaluation_policy(self) -> Mapping[str, JsonValue]:
+        return self._evaluation_policy
+
+    @property
+    def runtime_identities(self) -> Mapping[str, str]:
+        return self._runtime_identities
 
 
 def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
@@ -323,17 +472,35 @@ def _descriptor_payload(
         "contract": OOF_DESCRIPTOR_CONTRACT,
         "schema_version": 1,
         "foundation_bundle_id": foundation_bundle_id,
+        "r1_bundle_id": experiment.r1_bundle_id,
         "experiment_configuration_id": experiment.configuration_id,
+        "foundation_configuration_id": experiment.foundation_configuration_id,
+        "observation_dataset_id": experiment.observation_dataset_id,
+        "panel_dataset_id": experiment.panel_dataset_id,
+        "target_dataset_id": experiment.target_dataset_id,
+        "fold_dataset_id": experiment.fold_dataset_id,
         "source_class": experiment.market_data_source_class.value,
         "evidence_class": experiment.evidence_class.value,
         "feature_sets": list(feature_names),
         "run_kind": run_kind,
         "application_identity": identities["application_identity"],
+        "image_identity": identities["image_identity"],
         "python_identity": identities["python_identity"],
         "numpy_identity": identities["numpy_identity"],
         "sklearn_identity": identities["sklearn_identity"],
         "holdout_range": [item.isoformat() for item in experiment.holdout_range],
         "acceptance_thresholds": dict(experiment.acceptance_thresholds),
+        "alpha_grid": list(experiment.alpha_grid),
+        "inner_validation_policy": experiment.inner_validation_policy,
+        "preprocessing_policy": experiment.preprocessing_policy,
+        "pooled_weighting_policy": experiment.pooled_weighting_policy,
+        "ridge_solver": experiment.ridge_solver,
+        "ridge_tolerance": experiment.ridge_tolerance,
+        "ridge_max_iterations": experiment.ridge_max_iterations,
+        "minimum_training_rows": experiment.minimum_training_rows,
+        "minimum_inner_validation_rows": experiment.minimum_inner_validation_rows,
+        "model_selection_policy": experiment.model_selection_policy,
+        "metric_policy": experiment.metric_policy,
         "target_instruments": list(experiment.target_instruments),
         "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
@@ -345,11 +512,16 @@ def _descriptor_payload(
 
 
 def _validate_representative_ibkr_historical_v1(
-    verified: R1FoundationBindings, experiment: R2ExperimentConfig
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    *,
+    expected_evidence_class: EvidenceClass = EvidenceClass.IMPLEMENTATION,
 ) -> None:
-    """Admit only the fixed source-specific IBKR implementation profile."""
+    """Admit only the fixed source-specific IBKR historical profile."""
 
-    validate_ibkr_historical_profile(experiment)
+    validate_ibkr_historical_profile(
+        experiment, expected_evidence_class=expected_evidence_class
+    )
     if experiment.market_data_source_class is not MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
         raise ValueError("IBKR historical representative run has the wrong source class")
     if tuple(verified.bundle.ordered_instruments) != experiment.ordered_instruments:
@@ -974,6 +1146,7 @@ def _synthetic_pipeline_inputs(
     application_identity: str = "synthetic",
     image_identity: str = "qtrad@sha256:" + "1" * 64,
     adapter_identity: IBKRHistoricalAdapterIdentity | None = None,
+    evidence_class: EvidenceClass = EvidenceClass.IMPLEMENTATION,
 ) -> tuple[
     R1FoundationBindings,
     R2ExperimentConfig,
@@ -1073,7 +1246,7 @@ def _synthetic_pipeline_inputs(
         holdout_range=holdout,
         numeric_replay_relative_tolerance=1e-10,
         numeric_replay_absolute_tolerance=1e-12,
-        evidence_class=EvidenceClass.IMPLEMENTATION,
+        evidence_class=evidence_class,
         market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
         source_adapter_identity=adapter_identity.as_json() if adapter_identity else None,
         model_families=tuple(ModelFamily),
@@ -1364,6 +1537,23 @@ def build_oof_bundle(
     holdout_target_source: R2HoldoutTargetSource | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
+    if run_kind not in {*_IMPLEMENTATION_RUN_KINDS, CONFIRMATORY_RUN_KIND}:
+        raise ValueError("OOF descriptor has an unsupported run kind")
+    if (
+        experiment.evidence_class is EvidenceClass.CONFIRMATORY
+        and run_kind != CONFIRMATORY_RUN_KIND
+    ):
+        raise ValueError("CONFIRMATORY evidence requires the CONFIRMATORY OOF run kind")
+    if (
+        experiment.evidence_class is not EvidenceClass.CONFIRMATORY
+        and run_kind == CONFIRMATORY_RUN_KIND
+    ):
+        raise ValueError("CONFIRMATORY OOF runs require CONFIRMATORY evidence")
+    if run_kind == CONFIRMATORY_RUN_KIND:
+        if holdout_target_source is None:
+            raise ValueError("confirmatory OOF build requires an authenticated target source")
+        if replay_inputs is None:
+            raise ValueError("confirmatory OOF build requires authenticated replay inputs")
     if run_kind == "REPRESENTATIVE":
         if holdout_target_source is None:
             raise ValueError(
@@ -1927,6 +2117,407 @@ def holdout_configuration_registry(
     return tuple(registry)
 
 
+def _confirmatory_replay_experiment_path(
+    bundle_path: Path, descriptor: Mapping[str, object]
+) -> Path:
+    replay = descriptor.get("replay_inputs")
+    if not isinstance(replay, dict):
+        raise ValueError("confirmatory OOF descriptor has no replay-input closure")
+    children = replay.get("children")
+    if not isinstance(children, dict):
+        raise ValueError("confirmatory OOF replay-input closure is malformed")
+    child = children.get("experiment")
+    if not isinstance(child, dict) or not isinstance(child.get("path"), str):
+        raise ValueError("confirmatory OOF replay closure has no experiment child")
+    path = bundle_path.parent / child["path"]
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("confirmatory OOF replay experiment is unavailable")
+    return path
+
+
+def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
+    """Verify and replay a qualifying, outcome-blind confirmatory F2 authority."""
+    bundle = verify_r2_oof_bundle(path)
+    if bundle.evidence_class is not EvidenceClass.CONFIRMATORY:
+        raise ValueError("confirmatory F2 requires CONFIRMATORY evidence")
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    if descriptor.get("run_kind") != CONFIRMATORY_RUN_KIND:
+        raise ValueError("confirmatory F2 requires the CONFIRMATORY OOF run kind")
+    if descriptor.get("evidence_class") != EvidenceClass.CONFIRMATORY.value:
+        raise ValueError("confirmatory F2 descriptor has the wrong evidence class")
+    if descriptor.get("holdout_excluded") is not True:
+        raise ValueError("confirmatory F2 must exclude the locked holdout")
+    if bundle.holdout_target_source is None:
+        raise ValueError("confirmatory F2 has no authenticated target source")
+    source_path = path.parent / bundle.holdout_target_source.path
+    source_payload = _load_selection(source_path)
+    source = R2HoldoutTargetSource.from_json(source_payload)
+    if source.source_id != bundle.holdout_target_source.semantic_id:
+        raise ValueError("confirmatory target source identity differs from its reference")
+    expected_descriptor_values = {
+        "foundation_bundle_id": bundle.foundation_bundle_id,
+        "experiment_configuration_id": bundle.experiment_configuration_id,
+        "source_class": bundle.source_class.value,
+        "evidence_class": bundle.evidence_class.value,
+        "target_dataset_id": source.source_target_dataset_id,
+        "observation_dataset_id": source.observation_dataset_id,
+        "foundation_configuration_id": source.foundation_configuration_id,
+        "target_instruments": list(source.target_instruments),
+        "primary_horizon_seconds": source.primary_horizon_seconds,
+        "holdout_range": [item.isoformat() for item in source.holdout_range],
+    }
+    for key, expected in expected_descriptor_values.items():
+        if descriptor.get(key) != expected:
+            raise ValueError(f"confirmatory F2 descriptor has an unauthenticated {key}")
+
+    experiment = load_r2_experiment(_confirmatory_replay_experiment_path(path, descriptor))
+    if experiment.configuration_id != bundle.experiment_configuration_id:
+        raise ValueError("confirmatory F2 experiment differs from the OOF envelope")
+    if experiment.evidence_class is not EvidenceClass.CONFIRMATORY:
+        raise ValueError("confirmatory F2 replay experiment is not confirmatory")
+    if experiment.market_data_source_class is not bundle.source_class:
+        raise ValueError("confirmatory F2 experiment source differs from the OOF envelope")
+    if (
+        experiment.target_dataset_id != source.source_target_dataset_id
+        or experiment.observation_dataset_id != source.observation_dataset_id
+        or experiment.foundation_configuration_id != source.foundation_configuration_id
+        or tuple(experiment.target_instruments) != source.target_instruments
+        or experiment.holdout_range != source.holdout_range
+        or int(experiment.primary_horizon.total_seconds()) != source.primary_horizon_seconds
+    ):
+        raise ValueError("confirmatory F2 target source differs from the exact experiment")
+    experiment_descriptor_values: dict[str, object] = {
+        "r1_bundle_id": experiment.r1_bundle_id,
+        "foundation_configuration_id": experiment.foundation_configuration_id,
+        "panel_dataset_id": experiment.panel_dataset_id,
+        "fold_dataset_id": experiment.fold_dataset_id,
+        "acceptance_thresholds": dict(experiment.acceptance_thresholds),
+        "alpha_grid": list(experiment.alpha_grid),
+        "inner_validation_policy": experiment.inner_validation_policy,
+        "preprocessing_policy": experiment.preprocessing_policy,
+        "pooled_weighting_policy": experiment.pooled_weighting_policy,
+        "ridge_solver": experiment.ridge_solver,
+        "ridge_tolerance": experiment.ridge_tolerance,
+        "ridge_max_iterations": experiment.ridge_max_iterations,
+        "minimum_training_rows": experiment.minimum_training_rows,
+        "minimum_inner_validation_rows": experiment.minimum_inner_validation_rows,
+        "model_selection_policy": experiment.model_selection_policy,
+        "metric_policy": experiment.metric_policy,
+    }
+    for key, expected in experiment_descriptor_values.items():
+        if descriptor.get(key) != expected:
+            raise ValueError(f"confirmatory F2 descriptor differs for {key}")
+
+    _replay_confirmatory_oof(path)
+    identities = runtime_identities()
+    for key in (
+        "application_identity",
+        "image_identity",
+        "python_identity",
+        "numpy_identity",
+        "sklearn_identity",
+    ):
+        if descriptor.get(key) != identities[key]:
+            raise ValueError(f"confirmatory F2 runtime identity differs for {key}")
+
+    register = _oof_child_payload(path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
+    raw_configurations = register.get("configurations")
+    if not isinstance(raw_configurations, list) or not raw_configurations:
+        raise ValueError("confirmatory F2 register has no complete configuration set")
+    configurations = tuple(_configuration_record_from_payload(item) for item in raw_configurations)
+    configuration_ids = tuple(item.configuration_id for item in configurations)
+    if tuple(sorted(set(configuration_ids))) != configuration_ids:
+        raise ValueError("confirmatory F2 configuration register is not ordered and unique")
+    if {item.model_family for item in configurations} != set(ModelFamily):
+        raise ValueError("confirmatory F2 configuration register is incomplete")
+
+    decisions = _selection_decisions_from_payload(register.get("selection_decisions"))
+    if tuple(item.configuration_id for item in decisions) != configuration_ids:
+        raise ValueError("confirmatory F2 selection decisions do not cover the register")
+    selected_ids = tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+    )
+    holdout_ids = tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition
+        in (ConfigurationDisposition.SELECTED_CANDIDATE, ConfigurationDisposition.RETAINED_CONTROL)
+    )
+    stored_selected = register.get("selection_selected_configuration_ids")
+    stored_holdout = register.get("selection_holdout_comparator_configuration_ids")
+    if (
+        not isinstance(stored_selected, list)
+        or not isinstance(stored_holdout, list)
+        or not all(
+            isinstance(item, str) for item in (*stored_selected, *stored_holdout)
+        )
+        or tuple(sorted(stored_selected)) != selected_ids
+        or tuple(sorted(stored_holdout)) != holdout_ids
+    ):
+        raise ValueError("confirmatory F2 register selection is not independently replayable")
+    report_id = register.get("selection_evaluation_report_id")
+    if not isinstance(report_id, str) or register.get("report_id") is None:
+        raise ValueError("confirmatory F2 register has no authenticated evaluation report")
+    local_ref = register.get("local_comparator")
+    if not isinstance(local_ref, dict) or not isinstance(local_ref.get("semantic_id"), str):
+        raise ValueError("confirmatory F2 register has no authenticated local comparator")
+    local_comparator_manifest_id = local_ref["semantic_id"]
+    evaluation_policy = holdout_evaluation_policy(
+        path,
+        bundle,
+        expected_evaluation_report_id=report_id,
+    )
+    registry = holdout_configuration_registry(
+        path,
+        bundle,
+        expected_evaluation_report_id=report_id,
+        expected_selected_configuration_ids=selected_ids,
+        expected_holdout_configuration_ids=holdout_ids,
+    )
+    return VerifiedConfirmatoryF2._create(
+        _VERIFIED_CONFIRMATORY_F2_TOKEN,
+        bundle=bundle,
+        holdout_target_source=source,
+        descriptor=cast(Mapping[str, JsonValue], descriptor),
+        evaluation_report_id=report_id,
+        local_comparator_manifest_id=local_comparator_manifest_id,
+        evaluated_configurations=configurations,
+        selection_decisions=decisions,
+        selected_configuration_ids=selected_ids,
+        holdout_comparator_configuration_ids=holdout_ids,
+        configuration_registry=registry,
+        evaluation_policy=cast(Mapping[str, JsonValue], evaluation_policy),
+        runtime_identities=identities,
+    )
+
+
+def freeze_confirmatory_selection(
+    *,
+    verified_f2: VerifiedConfirmatoryF2,
+    output: Path,
+    frozen_by: str,
+) -> Path:
+    """Derive and persist confirmatory G1 from one verified F2 authority only."""
+    if type(verified_f2) is not VerifiedConfirmatoryF2:
+        raise TypeError("confirmatory selection requires VerifiedConfirmatoryF2")
+    if not frozen_by.strip():
+        raise ValueError("frozen-by must be non-empty")
+    source = verified_f2.holdout_target_source
+    projection = R2HoldoutTargetProjection.create_from_source(source)
+    projection.verify_source(source)
+    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(source)
+    opportunity_registry.verify_source(source)
+    descriptor = verified_f2.descriptor
+    holdout_range = source.holdout_range
+    selected = verified_f2.selected_configuration_ids
+    controls = tuple(
+        sorted(
+            set(verified_f2.holdout_comparator_configuration_ids) - set(selected)
+        )
+    )
+    if not selected or not controls:
+        raise ValueError("confirmatory F2 must derive at least one candidate and control")
+
+    thresholds_raw = descriptor.get("acceptance_thresholds")
+    if not isinstance(thresholds_raw, dict) or not thresholds_raw:
+        raise ValueError("confirmatory F2 has no authenticated threshold policy")
+    thresholds: dict[str, float] = {}
+    for name, value in thresholds_raw.items():
+        if (
+            not isinstance(name, str)
+            or isinstance(value, bool)
+            or not isinstance(value, (int, float))
+        ):
+            raise ValueError("confirmatory F2 threshold policy is malformed")
+        thresholds[name] = float(value)
+    metric = verified_f2.evaluation_policy.get("metric_policy")
+    if not isinstance(metric, str):
+        raise ValueError("confirmatory F2 has no authenticated metric policy")
+    minimum_support = verified_f2.evaluation_policy.get("minimum_correlation_rows")
+    if not isinstance(minimum_support, int) or minimum_support <= 0:
+        raise ValueError("confirmatory F2 has no authenticated support policy")
+    alpha_grid_raw = descriptor.get("alpha_grid")
+    if not isinstance(alpha_grid_raw, list) or not alpha_grid_raw:
+        raise ValueError("confirmatory F2 has no authenticated alpha grid")
+    if not all(
+        isinstance(value, (int, float)) and not isinstance(value, bool)
+        for value in alpha_grid_raw
+    ):
+        raise ValueError("confirmatory F2 alpha grid is malformed")
+    minimum_training_rows = descriptor.get("minimum_training_rows")
+    minimum_inner_validation_rows = descriptor.get("minimum_inner_validation_rows")
+    if not isinstance(minimum_training_rows, int) or minimum_training_rows <= 0:
+        raise ValueError("confirmatory F2 has no authenticated training-row policy")
+    if not isinstance(minimum_inner_validation_rows, int) or minimum_inner_validation_rows <= 0:
+        raise ValueError("confirmatory F2 has no authenticated validation-row policy")
+
+    registry_by_id = {item[0]: item for item in verified_f2.configuration_registry}
+    comparator_families = tuple(
+        sorted(
+            {registry_by_id[item][1] for item in (*selected, *controls)},
+            key=lambda family: family.value,
+        )
+    )
+    threshold = max(thresholds.values())
+    questions = tuple(
+        R2HoldoutQuestion.create(
+            question=f"{candidate} versus {control} on {metric}",
+            candidate_configuration_id=candidate,
+            comparator_configuration_id=control,
+            metric=metric,
+            support_policy="COMMON_SUPPORT",
+            direction=HoldoutDirection.LOWER_IS_BETTER,
+            threshold=threshold,
+            minimum_support=minimum_support,
+            minimum_coverage=1.0,
+            conclusion_policy="CONFIRMATORY_PREDECLARED_V1",
+        )
+        for candidate in selected
+        for control in controls
+    )
+    if not questions:
+        raise ValueError("confirmatory selection must derive a non-empty question register")
+
+    runtime_values: dict[str, JsonValue] = dict(verified_f2.runtime_identities)
+    runtime_values["instrument_identity_order"] = list(source.target_instruments)
+    final_fitting_policy = R2FinalFittingPolicy.create(
+        pre_holdout_membership_policy="MATURE_BEFORE_HOLDOUT",
+        maturity_purge_policy="TARGET_INTERVAL_PURGE",
+        inner_validation_policy=str(descriptor.get("inner_validation_policy")),
+        alpha_grid=tuple(
+            float(cast(float | int, value)) for value in alpha_grid_raw
+        ),
+        alpha_tie_break_policy="LOSS_THEN_LARGER_ALPHA",
+        preprocessing_policy=str(descriptor.get("preprocessing_policy")),
+        pooled_membership_policy="FIXED_UNIVERSE",
+        pooled_weighting_policy=str(descriptor.get("pooled_weighting_policy")),
+        instrument_intercept_policy="GLOBAL_INTERCEPT",
+        solver_identity={
+            "name": str(descriptor.get("ridge_solver")),
+            "tolerance": float(cast(float | int, descriptor.get("ridge_tolerance", 1e-8))),
+            "max_iterations": int(
+                cast(float | int, descriptor.get("ridge_max_iterations", 1000))
+            ),
+        },
+        training_prediction_threshold=1e-10,
+        failure_disposition_policy="RETAIN_EXPLICIT_FAILURE",
+        runtime_identities=runtime_values,
+    )
+    evaluation_policy: dict[str, JsonValue] = dict(verified_f2.evaluation_policy)
+    evaluation_policy.update(
+        {
+            "primary_horizon_seconds": source.primary_horizon_seconds,
+            "target_dataset_id": source.source_target_dataset_id,
+            "target_instruments": list(source.target_instruments),
+            "holdout_target_source_id": source.source_id,
+            "holdout_target_source_artifact": source.as_json(),
+            "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+            "pre_holdout_target_dataset": source.pre_holdout_target_dataset.as_json(),
+            "pre_holdout_projection_id": projection.projection_id,
+            "pre_holdout_projection": projection.as_json(),
+            "holdout_opportunity_registry_id": opportunity_registry.registry_id,
+            "holdout_opportunity_registry_artifact": opportunity_registry.as_json(),
+            "model_selection_policy": "OOF_PRIMARY_MSE_V1",
+            "loss_policy": "OOF_PRIMARY_MSE_V1",
+            "minimum_training_rows": minimum_training_rows,
+            "minimum_inner_validation_rows": minimum_inner_validation_rows,
+            "pre_holdout_membership_policy": final_fitting_policy.pre_holdout_membership_policy,
+            "maturity_purge_policy": final_fitting_policy.maturity_purge_policy,
+            "instrument_intercept_policy": final_fitting_policy.instrument_intercept_policy,
+            "alpha_tie_break_policy": final_fitting_policy.alpha_tie_break_policy,
+            "preprocessing_policy": final_fitting_policy.preprocessing_policy,
+            "pooled_membership_policy": final_fitting_policy.pooled_membership_policy,
+            "pooled_weighting_policy": final_fitting_policy.pooled_weighting_policy,
+            "solver_identity": dict(final_fitting_policy.solver_identity),
+            "holdout_opportunity_registry": [
+                [
+                    item.opportunity_id,
+                    item.target_id,
+                    item.instrument_id,
+                    item.decision_time.isoformat(),
+                    item.target_horizon_seconds,
+                    item.disposition.value,
+                ]
+                for item in opportunity_registry.opportunities
+            ],
+        }
+    )
+    frozen_at = datetime.now(UTC)
+    prior_selection = SelectionManifest.create(
+        experiment_configuration_id=verified_f2.experiment_configuration_id,
+        evidence_class=verified_f2.evidence_class,
+        evaluation_report_id=verified_f2.evaluation_report_id,
+        local_comparator_manifest_id=verified_f2.local_comparator_manifest_id,
+        evaluated_configuration_ids=tuple(
+            item.configuration_id for item in verified_f2.evaluated_configurations
+        ),
+        predeclared_comparators=comparator_families,
+        primary_metric=metric,
+        secondary_metrics=("RMSE",),
+        acceptance_thresholds=tuple(sorted(thresholds.items())),
+        decisions=verified_f2.selection_decisions,
+        selected_configuration_ids=selected,
+        holdout_comparator_configuration_ids=verified_f2.holdout_comparator_configuration_ids,
+        final_fitting_procedure="R2_CONFIRMATORY_F2_DERIVED",
+        holdout_range=holdout_range,
+        application_image_identity=str(descriptor["application_identity"]),
+        frozen_at=frozen_at,
+        frozen_by=frozen_by,
+        market_data_source_class=verified_f2.source_class,
+        foundation_bundle_id=verified_f2.foundation_bundle_id,
+        oof_bundle_id=verified_f2.bundle.bundle_id,
+    )
+    selection = R2HoldoutSelectionManifest.create(
+        experiment_configuration_id=verified_f2.experiment_configuration_id,
+        foundation_bundle_id=verified_f2.foundation_bundle_id,
+        oof_bundle_id=verified_f2.bundle.bundle_id,
+        evaluation_report_id=verified_f2.evaluation_report_id,
+        prior_selection_manifest_id=prior_selection.manifest_id,
+        source_class=verified_f2.source_class,
+        evidence_class=EvidenceClass.CONFIRMATORY,
+        holdout_scope=HoldoutScope.CONFIRMATORY,
+        evaluated_configuration_ids=tuple(
+            item.configuration_id for item in verified_f2.evaluated_configurations
+        ),
+        selected_configuration_ids=selected,
+        control_configuration_ids=controls,
+        holdout_configuration_ids=tuple(sorted((*selected, *controls))),
+        comparator_families=comparator_families,
+        metric_policy={"name": metric, "support": "COMMON_SUPPORT"},
+        threshold_policy={"acceptance_thresholds": thresholds},
+        evaluation_policy=evaluation_policy,
+        final_fitting_policy=final_fitting_policy,
+        questions=questions,
+        holdout_range=holdout_range,
+        experiment_count=len(verified_f2.evaluated_configurations),
+        holdout_opportunity_registry=tuple(
+            (
+                item.opportunity_id,
+                item.target_id,
+                item.instrument_id,
+                item.decision_time,
+                item.target_horizon_seconds,
+                item.disposition,
+            )
+            for item in opportunity_registry.opportunities
+        ),
+        configuration_registry=verified_f2.configuration_registry,
+        runtime_identities=runtime_values,
+        frozen_metadata={
+            "source_class": verified_f2.source_class.value,
+            "evidence_class": EvidenceClass.CONFIRMATORY.value,
+            "oof_bundle_id": verified_f2.bundle.bundle_id,
+            "operator": frozen_by,
+        },
+        frozen_at=frozen_at,
+        frozen_by=frozen_by,
+    )
+    atomic_create(output, canonical_bytes(cast(dict[str, object], selection.as_json())))
+    return output
+
+
 def holdout_evaluation_policy(
     oof_bundle_path: Path,
     bundle: R2OofBundle,
@@ -2267,21 +2858,25 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-async def _replay_representative_oof_async(path: Path) -> None:
+async def _replay_staged_oof_async(
+    path: Path,
+    *,
+    expected_run_kind: str = "REPRESENTATIVE",
+) -> None:
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
-        raise ValueError("representative OOF bundle has no authenticated holdout target source")
+        raise ValueError("staged OOF bundle has no authenticated holdout target source")
     source_payload = _load_selection(path.parent / bundle.holdout_target_source.path)
     holdout_target_source = R2HoldoutTargetSource.from_json(source_payload)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    if descriptor.get("run_kind") != "REPRESENTATIVE":
-        raise ValueError("representative replay requires a representative OOF run")
+    if descriptor.get("run_kind") != expected_run_kind:
+        raise ValueError(f"staged replay requires a {expected_run_kind} OOF run")
     raw_inputs = descriptor.get("replay_inputs")
     if not isinstance(raw_inputs, dict):
-        raise ValueError("representative OOF descriptor has no authenticated replay inputs")
+        raise ValueError("staged OOF descriptor has no authenticated replay inputs")
     raw_children_value = raw_inputs.get("children")
     if raw_inputs.get("root") != "." or not isinstance(raw_children_value, dict):
-        raise ValueError("representative replay inputs are malformed")
+        raise ValueError("staged replay inputs are malformed")
     raw_children = cast(dict[object, object], raw_children_value)
     expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
     if set(raw_children) != expected_names:
@@ -2291,12 +2886,12 @@ async def _replay_representative_oof_async(path: Path) -> None:
     bundle_root = path.parent.resolve()
     for name, value in raw_children.items():
         if not isinstance(name, str) or not isinstance(value, dict):
-            raise ValueError("representative replay input child is malformed")
+            raise ValueError("staged replay input child is malformed")
         raw_path = value.get("path")
         raw_root = value.get("root")
         expected_digest = value.get("sha256")
         if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
-            raise ValueError("representative replay input identity is incomplete")
+            raise ValueError("staged replay input identity is incomplete")
         relative_path = PurePosixPath(cast(str, raw_path))
         relative_root = PurePosixPath(cast(str, raw_root))
         if (
@@ -2305,21 +2900,28 @@ async def _replay_representative_oof_async(path: Path) -> None:
             or ".." in relative_path.parts
             or ".." in relative_root.parts
         ):
-            raise ValueError("representative replay input path is unsafe")
+            raise ValueError("staged replay input path is unsafe")
         candidate = (bundle_root / relative_path).resolve()
         root = (bundle_root / relative_root).resolve()
         if not candidate.is_relative_to(bundle_root) or not root.is_relative_to(bundle_root):
-            raise ValueError("representative replay input escapes the bundle root")
+            raise ValueError("staged replay input escapes the bundle root")
         if candidate.is_symlink() or not candidate.is_file():
-            raise ValueError(f"representative replay input is unavailable: {name}")
+            raise ValueError(f"staged replay input is unavailable: {name}")
         if sha256(candidate.read_bytes()).hexdigest() != cast(str, expected_digest):
-            raise ValueError(f"representative replay input changed: {name}")
+            raise ValueError(f"staged replay input changed: {name}")
         paths[name] = candidate
         roots[name] = root
     research_root = roots["foundation"]
     if any(roots[name] != research_root for name in _REQUIRED_FEATURE_SETS):
-        raise ValueError("representative feature inputs do not share the foundation root")
+        raise ValueError("staged feature inputs do not share the foundation root")
     experiment = load_r2_experiment(paths["experiment"])
+    expected_evidence_class = (
+        EvidenceClass.CONFIRMATORY
+        if expected_run_kind == CONFIRMATORY_RUN_KIND
+        else EvidenceClass.IMPLEMENTATION
+    )
+    if experiment.evidence_class is not expected_evidence_class:
+        raise ValueError("staged OOF experiment has the wrong evidence classification")
     representative_profile = descriptor.get("representative_profile")
     if representative_profile == IBKR_HISTORICAL_PROFILE:
         stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
@@ -2338,6 +2940,7 @@ async def _replay_representative_oof_async(path: Path) -> None:
             stage8_foundation,
             foundation_bundle_id=foundation_bundle_id,
             adapter_identity=adapter_identity,
+            evidence_class=expected_evidence_class,
         )
         if expected_experiment.as_json() != experiment.as_json():
             raise ValueError("IBKR experiment is not authenticated")
@@ -2347,7 +2950,11 @@ async def _replay_representative_oof_async(path: Path) -> None:
             foundation_bundle_id=foundation_bundle_id,
             adapter_identity=adapter_identity,
         )
-        _validate_representative_ibkr_historical_v1(verified, experiment)
+        _validate_representative_ibkr_historical_v1(
+            verified,
+            experiment,
+            expected_evidence_class=expected_evidence_class,
+        )
     elif representative_profile is not None:
         raise ValueError("representative OOF descriptor has an unsupported profile")
     else:
@@ -2357,7 +2964,10 @@ async def _replay_representative_oof_async(path: Path) -> None:
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
             holdout_target_source=holdout_target_source,
         )
-        _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
+        if expected_run_kind != CONFIRMATORY_RUN_KIND:
+            _validate_representative_capture_v4(
+                cast(R1FoundationBindings, verified), experiment
+            )
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
@@ -2371,18 +2981,30 @@ async def _replay_representative_oof_async(path: Path) -> None:
             representative_profile=(
                 representative_profile if isinstance(representative_profile, str) else None
             ),
-            run_kind="REPRESENTATIVE",
+            run_kind=expected_run_kind,
             replay_inputs=paths,
             holdout_target_source=holdout_target_source,
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError(
-                "representative OOF bundle does not replay to the authenticated pipeline"
+                "staged OOF bundle does not replay to the authenticated pipeline"
             )
+
+
+async def _replay_representative_oof_async(path: Path) -> None:
+    await _replay_staged_oof_async(path)
+
+
+async def _replay_confirmatory_oof_async(path: Path) -> None:
+    await _replay_staged_oof_async(path, expected_run_kind=CONFIRMATORY_RUN_KIND)
 
 
 def _replay_representative_oof(path: Path) -> None:
     asyncio.run(_replay_representative_oof_async(path))
+
+
+def _replay_confirmatory_oof(path: Path) -> None:
+    asyncio.run(_replay_confirmatory_oof_async(path))
 
 
 def _replay_synthetic_oof(path: Path) -> None:
@@ -2409,6 +3031,8 @@ def verify_oof_bundle(path: Path) -> R2OofBundle:
         _replay_synthetic_oof(path)
     elif run_kind == "REPRESENTATIVE":
         _replay_representative_oof(path)
+    elif run_kind == CONFIRMATORY_RUN_KIND:
+        raise ValueError("confirmatory OOF bundles require verify_confirmatory_f2")
     else:
         raise ValueError("OOF descriptor has an unsupported run kind")
     return bundle
