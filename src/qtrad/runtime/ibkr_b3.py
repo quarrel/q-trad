@@ -14,6 +14,7 @@ import tomllib
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import cast
 
@@ -22,6 +23,10 @@ from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
+from qtrad.runtime.ibkr_historical import (
+    load_ibkr_capability_review,
+    verify_ibkr_contract_selection,
+)
 from qtrad.runtime.ibkr_native_capture import (
     IbkrNativeCaptureConfiguration,
     load_reviewed_configuration,
@@ -65,15 +70,127 @@ def _require_hash(value: str, field: str) -> None:
         raise ValueError(f"{field} must be a lower-case SHA-256 digest")
 
 
+def _review_optional_string(value: object) -> str | None:
+    return None if value is None else str(value)
+
+
+def _review_contract_evidence(
+    review: Mapping[str, object],
+    instrument_id: InstrumentId,
+    con_id: int,
+) -> IbkrContractEvidence:
+    instruments = cast(Sequence[object], review["instruments"])
+    for raw_instrument_value in instruments:
+        instrument = cast(Mapping[str, object], raw_instrument_value)
+        if str(instrument["instrument_id"]) != str(instrument_id):
+            continue
+        query_results = cast(Sequence[object], instrument["queries"])
+        for raw_result_value in query_results:
+            result = cast(Mapping[str, object], raw_result_value)
+            contracts = cast(Sequence[object], result["contracts"])
+            for raw_contract_value in contracts:
+                payload = cast(Mapping[str, object], raw_contract_value)
+                if int(cast(str | int, payload["con_id"])) != con_id:
+                    continue
+                minimum_tick = payload["minimum_tick"]
+                return IbkrContractEvidence(
+                    con_id=con_id,
+                    symbol=str(payload["symbol"]),
+                    local_symbol=str(payload["local_symbol"]),
+                    security_type=str(payload["security_type"]),
+                    exchange=str(payload["exchange"]),
+                    currency=str(payload["currency"]),
+                    trading_class=_review_optional_string(payload["trading_class"]),
+                    multiplier=_review_optional_string(payload["multiplier"]),
+                    minimum_tick=Decimal(str(minimum_tick)) if minimum_tick is not None else None,
+                    market_rule_ids=tuple(
+                        str(item) for item in cast(Sequence[object], payload["market_rule_ids"])
+                    ),
+                    valid_exchanges=tuple(
+                        str(item) for item in cast(Sequence[object], payload["valid_exchanges"])
+                    ),
+                    long_name=_review_optional_string(payload["long_name"]),
+                    underlier_con_id=(
+                        int(cast(str | int, payload["underlier_con_id"]))
+                        if payload["underlier_con_id"] is not None
+                        else None
+                    ),
+                    timezone=_review_optional_string(payload["timezone"]),
+                    trading_hours=_review_optional_string(payload["trading_hours"]),
+                    liquid_hours=_review_optional_string(payload["liquid_hours"]),
+                    primary_exchange=_review_optional_string(payload.get("primary_exchange")),
+                    contract_month=_review_optional_string(payload.get("contract_month")),
+                )
+    raise ValueError(
+        f"B3 authority review has no exact contract for {instrument_id} conId {con_id}"
+    )
+
+
+def _verify_b3_provider_authority(
+    source: IbkrNativeCaptureConfiguration,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+) -> None:
+    selection = verify_ibkr_contract_selection(
+        contract_selection_path,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    review = load_ibkr_capability_review(
+        capability_review_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    decisions = {decision.instrument_id: decision for decision in selection.decisions}
+    for instrument_id_text, _, expected_con_id in B3_TARGETS:
+        instrument_id = InstrumentId(instrument_id_text)
+        decision = decisions.get(instrument_id)
+        if decision is None or not decision.acquisition_eligible or decision.fingerprint is None:
+            raise ValueError(f"B3 authority does not accept the exact contract for {instrument_id}")
+        if decision.fingerprint.con_id != expected_con_id:
+            raise ValueError(f"B3 authority conId mismatch for {instrument_id}")
+        listing = next(
+            (item for item in source.listings if item.instrument_id == instrument_id),
+            None,
+        )
+        if listing is None:
+            raise ValueError(f"B3 source is missing the authority instrument {instrument_id}")
+        contract = source.contract_evidence.get(listing.listing_id)
+        if contract is None:
+            raise ValueError(f"B3 source is missing provider evidence for {instrument_id}")
+        authenticated = _review_contract_evidence(review, instrument_id, contract.con_id)
+        if authenticated != contract:
+            raise ValueError(
+                f"B3 source provider evidence does not match the authenticated "
+                f"review for {instrument_id}"
+            )
+
+
 def promote_b3_configuration(
     source: IbkrNativeCaptureConfiguration,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
 ) -> IbkrNativeCaptureConfiguration:
-    """Create the immutable B3 subset from an already reviewed B2 config.
+    """Create the exact-two subset only from an authenticated provider closure."""
 
-    Every listing and evidence object is reused byte-for-byte at the Python
-    value level.  The source configuration is never changed.
-    """
-
+    _verify_b3_provider_authority(
+        source,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        contract_selection_path=contract_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
     evidence: dict[ProviderListingId, IbkrContractEvidence] = {}
     listings: list[ProviderListing] = []
     for instrument_id_text, expected_external_id, expected_con_id in B3_TARGETS:
@@ -95,10 +212,7 @@ def promote_b3_configuration(
         listings.append(listing)
         evidence[listing.listing_id] = contract
 
-    promoted = IbkrNativeCaptureConfiguration.from_reviewed(
-        listings,
-        evidence,
-    )
+    promoted = IbkrNativeCaptureConfiguration.from_reviewed(listings, evidence)
     if len(promoted.listings) != 2:
         raise ValueError("B3 release must contain exactly two listings")
     return promoted

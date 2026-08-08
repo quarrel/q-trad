@@ -545,6 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     db = subparsers.add_parser("db", help="database operations")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("upgrade", help="apply migrations and seed instruments")
+    db_sub.add_parser("migrate", help="apply migrations without seeding any universe")
+    db_sub.add_parser("verify-head", help="verify the dedicated database is at the migration head")
 
     deployment = subparsers.add_parser("deployment", help="capture deployment operations")
     deployment_sub = deployment.add_subparsers(dest="deployment_command", required=True)
@@ -558,6 +560,11 @@ def build_parser() -> argparse.ArgumentParser:
         "ibkr-promote", help="create the exact-two B3 config from reviewed evidence"
     )
     promote_b3.add_argument("--source-configuration", type=Path, required=True)
+    promote_b3.add_argument("--capability-review", type=Path, required=True)
+    promote_b3.add_argument("--operator-selection", type=Path, required=True)
+    promote_b3.add_argument("--contract-selection", type=Path, required=True)
+    promote_b3.add_argument("--catalogue", type=Path, required=True)
+    promote_b3.add_argument("--probe-spec", type=Path, required=True)
     promote_b3.add_argument("--output", type=Path, required=True)
     verify_b3 = deployment_sub.add_parser(
         "ibkr-verify", help="verify an exact-two B3 config offline"
@@ -1143,6 +1150,10 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "db" and args.db_command == "upgrade":
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
+    elif args.command == "db" and args.db_command == "migrate":
+        _upgrade_database(settings)
+    elif args.command == "db" and args.db_command == "verify-head":
+        asyncio.run(_require_database_at_migration_head(settings))
     elif args.command == "deployment" and args.deployment_command == "inspect":
         descriptor = load_capture_deployment_descriptor(
             args.descriptor, repository_root=args.repository_root
@@ -1150,7 +1161,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(descriptor.to_json())
     elif args.command == "deployment" and args.deployment_command == "ibkr-promote":
         source = load_reviewed_configuration(args.source_configuration)
-        promoted = promote_b3_configuration(source)
+        promoted = promote_b3_configuration(
+            source,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+        )
         write_reviewed_configuration(args.output, promoted)
         print(
             json.dumps(
@@ -1175,7 +1193,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             observed_at=args.observed_at,
         )
         print(json.dumps(report, sort_keys=True))
-        if not report["valid"]:
+        if (
+            not report["valid"]
+            or not report["operational_ready"]
+            or report["requires_evidence_refresh"]
+        ):
             raise SystemExit(1)
     elif args.command == "runs" and args.runs_command == "reconcile-plan":
         asyncio.run(

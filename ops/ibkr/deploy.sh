@@ -43,6 +43,21 @@ base_image="${QTRAD_IMAGE:-$image}"
 
 fail() { echo "IBKR B3 preflight: $*" >&2; exit 64; }
 
+verify_checkout_identity() {
+    [[ "$application_commit" =~ ^[0-9a-f]{40}$ ]] || fail "application commit is invalid"
+    checkout_commit="$(git -C "$repository_root" rev-parse --verify HEAD 2>/dev/null)" || fail "checkout commit cannot be resolved"
+    [[ "$checkout_commit" == "$application_commit" ]] || fail "checkout commit does not match the reviewed descriptor"
+    [[ -z "$(git -C "$repository_root" status --porcelain --untracked-files=all)" ]] || fail "reviewed checkout is dirty"
+}
+
+verify_host_identity() {
+    QTRAD_IBKR_IMAGE="$image"         QTRAD_IBKR_APPLICATION_COMMIT="$application_commit"         QTRAD_IBKR_API_VERSION="$api_version"         QTRAD_IBKR_GATEWAY_VERSION="$gateway_version"         QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256="$gateway_archive_sha"         QTRAD_IBKR_API_PACKAGE_FINGERPRINT="$api_fingerprint"         QTRAD_IBKR_CHECKPOINT_ROOT="$checkpoint_root"         "$script_dir/verify-host.sh"
+}
+
+verify_database_head() {
+    docker run --rm --network host --user 10001:10001         --read-only --cap-drop=ALL --security-opt=no-new-privileges         --env-file "$env_file" --entrypoint uv "$image"         run --frozen --no-dev --no-sync python -m qtrad db verify-head
+}
+
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || fail "image must be immutable"
 [[ "$base_image" == "$image" ]] || fail "application and IBKR image identities differ"
 [[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ ]] || fail "API fingerprint is invalid"
@@ -63,10 +78,12 @@ fail() { echo "IBKR B3 preflight: $*" >&2; exit 64; }
 [[ -d "$repository_root" ]] || fail "repository root is not readable"
 command -v "$preflight_bin" >/dev/null || fail "qtrad offline preflight command is unavailable"
 command -v jq >/dev/null || fail "jq is required to compare release identities"
+command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
 preflight_json="$("$preflight_bin" deployment ibkr-preflight \
     --descriptor "$descriptor" --repository-root "$repository_root" \
     --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}")"
+application_commit="$(jq -er '.application_commit' <<<"$preflight_json")"
 printf '%s\n' "$preflight_json" | jq -e \
     --arg image "$image" \
     --arg configuration_hash "$configuration_hash" \
@@ -83,6 +100,8 @@ printf '%s\n' "$preflight_json" | jq -e \
     --arg api_port "$api_port" \
     --arg client_id "$client_id" \
     '.valid == true
+     and .operational_ready == true
+     and .requires_evidence_refresh == false
      and .image == $image
      and .configuration_hash == $configuration_hash
      and .configuration_path == $configuration_path
@@ -101,17 +120,15 @@ printf '%s\n' "$preflight_json" | jq -e \
      and .source == "ibkr-paper-v1"
      and .universe == "capture-ibkr-v1"' >/dev/null || fail "release identity does not match the reviewed descriptor"
 
+verify_checkout_identity
+verify_host_identity
+verify_database_head
+
 if [[ "$mode" == "--check" ]]; then
     echo "IBKR B3 preflight passed; no host mutation performed"
     exit 0
 fi
-
-docker pull "$image"
-"$script_dir/verify-host.sh"
-docker run --rm --network host --user 10001:10001 \
-    --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-    --env-file "$env_file" --entrypoint uv "$image" \
-    run --frozen --no-dev --no-sync python -m qtrad db upgrade
+# Database schema changes require the explicit, migration-only qtrad db migrate command.
 install -d -o 10001 -g 10001 -m 0750 "$checkpoint_root"
 
 install -D -m 0750 "$script_dir/qtrad-ibkr-ingest-wrapper.example" /usr/local/sbin/qtrad-ibkr-ingest

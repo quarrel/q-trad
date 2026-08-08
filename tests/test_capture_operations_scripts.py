@@ -92,7 +92,10 @@ def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
 
     assert "usage: deploy.sh --check|--apply" in deploy
     assert 'if [[ "$mode" == "--check" ]]' in deploy
-    assert 'docker pull "$image"' in deploy
+    assert "verify_host_identity" in deploy
+    assert "verify_database_head" in deploy
+    assert "db verify-head" in deploy
+    assert "qtrad db upgrade" not in deploy
     assert '"$preflight_bin" deployment ibkr-preflight' in deploy
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in wrapper
     assert '--volume "$checkpoint_root:$checkpoint_root:rw"' in wrapper
