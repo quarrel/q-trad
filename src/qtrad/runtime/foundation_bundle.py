@@ -971,6 +971,22 @@ async def verify_foundation_bundle(
             },
         )
         _require_lineage(
+            projection_manifests["observations"],
+            {
+                "observation_dataset_id": observations.dataset_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+            },
+        )
+        _require_lineage(
+            projection_manifests["panel"],
+            {
+                "panel_dataset_id": panel.dataset_id,
+                "observation_dataset_id": observations.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+            },
+        )
+        _require_lineage(
             projection_manifests["pre_holdout_target"],
             {
                 "target_dataset_id": targets.dataset_id,
