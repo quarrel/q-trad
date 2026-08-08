@@ -3,14 +3,18 @@ set -euo pipefail
 umask 077
 
 backup_dir="${QTRAD_IBKR_BACKUP_DIR:-/srv/qtrad/postgres/backups}"
-status_dir="${QTRAD_IBKR_STATUS_DIR:-/var/lib/qtrad}"
-container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-postgres}"
-database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad}"
-user="${QTRAD_IBKR_POSTGRES_USER:-qtrad}"
+status_dir="${QTRAD_IBKR_STATUS_DIR:-/var/lib/qtrad/ibkr}"
+container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-postgres}"
+database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad_ibkr}"
+user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
 retention_days="${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-14}"
 
 [[ "$backup_dir" == /srv/qtrad/postgres/* ]] || {
     echo "backup directory must remain on /srv/qtrad/postgres" >&2
+    exit 64
+}
+[[ "$database" == qtrad_ibkr ]] || {
+    echo "backup script is dedicated to qtrad_ibkr" >&2
     exit 64
 }
 [[ "$retention_days" =~ ^[1-9][0-9]*$ ]] || {
@@ -24,15 +28,12 @@ name="qtrad-ibkr-${timestamp}.dump"
 partial="$backup_dir/.${name}.partial"
 archive="$backup_dir/$name"
 
-cleanup() {
-    rm -f "$partial"
-}
+cleanup() { rm -f "$partial"; }
 trap cleanup EXIT
 
 docker exec "$container" \
     pg_dump --format=custom --no-owner --username="$user" --dbname="$database" > "$partial"
-docker exec "$container" \
-    pg_restore --list < "$partial" > /dev/null
+docker exec "$container" pg_restore --list < "$partial" > /dev/null
 mv -f "$partial" "$archive"
 sha256sum "$archive" > "$archive.sha256"
 

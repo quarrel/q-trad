@@ -5,4 +5,5 @@ Wants=qtrad-ibkr-ingest.service
 
 [Service]
 Type=oneshot
+EnvironmentFile=/etc/qtrad/ibkr-ingest.env
 ExecStart=/usr/local/sbin/qtrad-ibkr-healthcheck

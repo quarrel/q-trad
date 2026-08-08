@@ -3,16 +3,28 @@ set -euo pipefail
 umask 077
 
 backup_dir="${QTRAD_IBKR_BACKUP_DIR:-/srv/qtrad/postgres/backups}"
-container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-postgres}"
-database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad}"
-user="${QTRAD_IBKR_POSTGRES_USER:-qtrad}"
-latest="$(find "$backup_dir" -maxdepth 1 -type f -name 'qtrad-ibkr-*.dump' -printf '%T@ %p\\n' | sort -nr | head -n 1 | cut -d ' ' -f 2-)"
+container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-postgres}"
+database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad_ibkr}"
+restore_database="${QTRAD_IBKR_RESTORE_DATABASE:-qtrad_ibkr_restore_verify}"
+user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
+
+[[ "$database" == qtrad_ibkr && "$restore_database" != "$database" ]] || {
+    echo "restore target must be separate from qtrad_ibkr" >&2
+    exit 64
+}
+[[ "$restore_database" =~ ^qtrad_ibkr_restore_[a-z0-9_]+$ ]] || {
+    echo "restore target name is not a dedicated disposable IBKR database" >&2
+    exit 64
+}
+latest="$(find "$backup_dir" -maxdepth 1 -type f -name 'qtrad-ibkr-*.dump' -printf '%T@ %p\n' | sort -nr | head -n 1 | cut -d ' ' -f 2-)"
 [[ -n "$latest" && -f "$latest" ]] || {
     echo "no IBKR PostgreSQL backup is available" >&2
     exit 69
 }
 sha256sum --check "$latest.sha256"
-docker exec "$container" \
-    pg_restore --list < "$latest"
-docker exec "$container" \
-    psql --username="$user" --dbname="$database" --command 'SELECT 1' > /dev/null
+docker exec "$container" psql --username="$user" --dbname=postgres \
+    --command "SELECT 'CREATE DATABASE \"$restore_database\"' WHERE NOT EXISTS (SELECT FROM pg_database WHERE datname = '$restore_database')\gexec" > /dev/null
+docker exec "$container" pg_restore --exit-on-error --no-owner \
+    --username="$user" --dbname="$restore_database" < "$latest"
+docker exec "$container" psql --username="$user" --dbname="$restore_database" \
+    --command 'SELECT 1' > /dev/null

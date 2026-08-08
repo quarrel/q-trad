@@ -1,0 +1,21 @@
+[Unit]
+Description=q-trad IBKR read-only operator API
+Requires=docker.service qtrad-ibkr-postgres.service
+After=docker.service qtrad-ibkr-postgres.service
+RequiresMountsFor=/srv/qtrad/postgres
+
+[Service]
+Type=simple
+User=root
+EnvironmentFile=/etc/qtrad/ibkr-ingest.env
+ExecStart=/usr/local/sbin/qtrad-ibkr-api
+ExecStop=/usr/bin/docker stop --time 30 qtrad-ibkr-api
+Restart=always
+RestartSec=10
+KillMode=control-group
+TimeoutStopSec=60
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
