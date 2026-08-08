@@ -12,7 +12,7 @@ from typing import cast
 from qtrad.application.ibkr_foundation import IBKRFoundationBuild
 from qtrad.application.r2_features import R2FoundationInputs
 from qtrad.domain.events import JsonValue, to_json_value
-from qtrad.domain.foundation import InstrumentRole
+from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.foundation_bundle import AVAILABILITY_EVIDENCE_CONTRACT, FoundationBundle
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_ibkr_historical import (
@@ -36,6 +36,7 @@ from qtrad.domain.r2_readiness import (
     ModelFamily,
     R2ExperimentConfig,
 )
+from qtrad.domain.research import ObservationDataset
 from qtrad.domain.time import require_utc
 
 _REPRESENTATIVE_REASON = "fixed IBKR historical implementation profile"
@@ -247,7 +248,7 @@ def build_ibkr_r2_foundation_inputs(
         targets=child(foundation.targets.dataset_id),
         folds=child(foundation.folds.dataset_id),
     )
-    observations = foundation.observations
+    observations = cast(ObservationDataset, foundation.observations)
     if (
         observations.configuration.get("availability_basis")
         != configuration.availability_basis.value
@@ -257,8 +258,8 @@ def build_ibkr_r2_foundation_inputs(
         bundle=cast(FoundationBundle, bundle),
         configuration=configuration,
         observations=observations,
-        panel=foundation.panel,
-        targets=foundation.targets,
+        panel=cast(PanelDataset, foundation.panel),
+        targets=cast(TargetDataset, foundation.targets),
         folds=foundation.folds,
         availability_evidence=evidence,
     )

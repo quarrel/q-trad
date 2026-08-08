@@ -129,6 +129,10 @@ remains offline/replay.
   file-only adaptation, profile-bound OOF replay and an implementation-only v2 R2.H envelope verifier; no
   fresh representative execution or qualifying bundle exists, so R2.F1/R2.H remain pending. No confirmatory
   model-selection or effectiveness claim is made.
+- The disposable R2.G2 holdout machinery is implemented with versioned selection, outcome-blind feature
+  preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
+  irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
+  holdout, confirmatory OOF selection, or effectiveness conclusion exists.
 - ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
   market-data-only IBKR paper source and its historical evidence boundaries. Stage 1 provides typed
   `qtrad-ibkr-contract-selection-v1` and `qtrad-ibkr-acquisition-runtime-v1` artefacts, strict

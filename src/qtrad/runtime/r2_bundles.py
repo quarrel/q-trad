@@ -17,6 +17,7 @@ from qtrad.domain.r2_bundles import (
     R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import R2_SELECTION_CONTRACT
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_models import R2_PREPROCESSING_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
@@ -195,10 +196,14 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         "forecast_manifests",
         "coverage_children",
         "evaluation_children",
+        "holdout_target_source",
         "bundle_id",
     }:
         raise ValueError("R2 OOF bundle has unknown or missing fields")
-    if payload["contract"] != R2OofBundle.CONTRACT or payload["schema_version"] != 1:
+    if (
+        payload["contract"] != R2OofBundle.CONTRACT
+        or payload["schema_version"] != R2OofBundle.SCHEMA_VERSION
+    ):
         raise ValueError("R2 OOF bundle contract is unsupported")
     refs = {
         key: _references(payload[key])
@@ -218,9 +223,18 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         evidence_class=_evidence(payload["evidence_class"]),
         **refs,
         bundle_id=_text(payload["bundle_id"]),
+        holdout_target_source=(
+            None
+            if payload["holdout_target_source"] is None
+            else ArtifactReference.from_json(payload["holdout_target_source"])
+        ),
     )
     all_refs = _all_oof_references(bundle)
-    canonical = any(reference.contract.startswith("qtrad-r2-") for reference in all_refs)
+    canonical = any(
+        reference.contract.startswith("qtrad-r2-")
+        and reference.contract != "qtrad-r2-holdout-target-source-v1"
+        for reference in all_refs
+    )
     register_refs = [
         reference
         for reference in bundle.evaluation_children
@@ -237,6 +251,10 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
+        if ref.contract == R2HoldoutTargetSource.CONTRACT:
+            source = R2HoldoutTargetSource.from_json(child)
+            if source.source_id != ref.semantic_id:
+                raise ValueError("OOF holdout target source identity differs from its reference")
         _verify_lineage_payload(child, bundle)
         if child.get("contract") == "qtrad-r2-oof-run-descriptor-v1":
             descriptor_id = child.get("descriptor_id")
@@ -281,6 +299,10 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                     "R2 evaluation register report ID does not authenticate its content"
                 )
             _verify_evaluation_register(child, bundle, path.parent)
+    if len(descriptor_refs) == 1:
+        descriptor = _load_object(path.parent / descriptor_refs[0].path)
+        if descriptor.get("run_kind") == "REPRESENTATIVE" and bundle.holdout_target_source is None:
+            raise ValueError("representative OOF bundle must bind an authenticated holdout source")
     _allow_bound_selection(path.parent, bundle)
     _reject_orphan_files(path.parent, allowed_paths)
     return bundle
@@ -364,6 +386,7 @@ def _all_oof_references(bundle: R2OofBundle) -> tuple[ArtifactReference, ...]:
         *bundle.forecast_manifests,
         *bundle.coverage_children,
         *bundle.evaluation_children,
+        *((bundle.holdout_target_source,) if bundle.holdout_target_source is not None else ()),
     )
 
 
@@ -462,6 +485,7 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
                 "descriptor_id",
                 "scenario_id",
                 "ablation_id",
+                "source_id",
             )
             if key in payload
         ),
@@ -492,6 +516,7 @@ def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> 
         if (
             isinstance(contract, str)
             and contract.startswith("qtrad-r2-")
+            and contract != "qtrad-r2-holdout-target-source-v1"
             and (source is None or evidence is None)
         ):
             raise ValueError("R2 child must declare source and evidence class")

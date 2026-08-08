@@ -10,7 +10,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -85,6 +85,7 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_set_id,
 )
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
     IBKR_HISTORICAL_PROFILE,
@@ -103,8 +104,10 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.ports.clock import Clock
-from qtrad.runtime.foundation_bundle import verify_foundation_bundle
-from qtrad.runtime.ibkr_foundation import load_ibkr_foundation_with_identity
+from qtrad.runtime.foundation_bundle import verify_outcome_blind_foundation_bundle
+from qtrad.runtime.ibkr_foundation import (
+    load_ibkr_foundation_outcome_blind_with_identity,
+)
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     atomic_create,
@@ -897,6 +900,7 @@ def _payload_identity(payload: Mapping[str, object]) -> str:
         "descriptor_id",
         "scenario_id",
         "ablation_id",
+        "source_id",
     ):
         value = payload.get(key)
         if isinstance(value, str):
@@ -1357,9 +1361,14 @@ def build_oof_bundle(
     run_kind: str = "REPRESENTATIVE",
     replay_inputs: Mapping[str, Path] | None = None,
     representative_profile: str | None = None,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     if run_kind == "REPRESENTATIVE":
+        if holdout_target_source is None:
+            raise ValueError(
+                "representative OOF build requires an authenticated holdout target source"
+            )
         if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
             if representative_profile != IBKR_HISTORICAL_PROFILE:
                 raise ValueError("IBKR historical representative run requires IBKR_HISTORICAL_V1")
@@ -1376,6 +1385,13 @@ def build_oof_bundle(
         clock=clock,
         recompute_rows=run_kind != "SYNTHETIC",
     )
+    if holdout_target_source is not None:
+        if verified.targets.dataset_id != holdout_target_source.source_target_dataset_id:
+            raise ValueError("OOF target view differs from the authenticated holdout source")
+        if tuple(verified.targets.rows) != holdout_target_source.pre_holdout_target_dataset.rows:
+            raise ValueError(
+                "OOF target rows are not the authenticated pre-holdout target projection"
+            )
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     identities = runtime_identities()
@@ -1705,6 +1721,12 @@ def build_oof_bundle(
     evaluation_refs.append(
         _descriptor_reference(output=output, relative_path=descriptor_path, payload=descriptor)
     )
+    holdout_source_ref: ArtifactReference | None = None
+    if holdout_target_source is not None:
+        source_path = "holdout/target-source.json"
+        source_payload = cast(dict[str, object], holdout_target_source.as_json())
+        children[source_path] = source_payload
+        holdout_source_ref = _child_reference(source_path, source_payload)
     bundle = R2OofBundle.create(
         foundation_bundle_id=verified.bundle.bundle_id,
         experiment_configuration_id=experiment.configuration_id,
@@ -1716,6 +1738,7 @@ def build_oof_bundle(
         forecast_manifests=tuple(forecast_manifest_refs),
         coverage_children=tuple(coverage_refs),
         evaluation_children=tuple(evaluation_refs),
+        holdout_target_source=holdout_source_ref,
     )
     return write_r2_oof_bundle(output, bundle, children)
 
@@ -1737,10 +1760,200 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
         payload = _load_selection(bundle_path.parent / reference.path)
         if contract == R2_EVALUATION_CONTRACT and "report_id" not in payload:
             continue
+        authenticated = reference_for_json(
+            path=reference.path,
+            contract=contract,
+            semantic_id=_payload_identity(payload),
+            content=payload,
+        )
+        if (
+            authenticated.semantic_id != reference.semantic_id
+            or authenticated.sha256 != reference.sha256
+        ):
+            raise ValueError(
+                "OOF child bytes or semantic identity differ from its bundle reference"
+            )
         matches.append(payload)
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
     return matches[0]
+
+
+def _configuration_record_from_payload(value: object) -> ConfigurationRecord:
+    if not isinstance(value, dict):
+        raise ValueError("OOF configuration record must be an object")
+    raw = cast(dict[str, object], value)
+    return ConfigurationRecord(
+        configuration_id=str(raw["configuration_id"]),
+        model_family=ModelFamily(str(raw["model_family"])),
+        feature_set_id=(None if raw["feature_set_id"] is None else str(raw["feature_set_id"])),
+        disposition=ConfigurationDisposition(str(raw["disposition"])),
+        reason=str(raw["reason"]),
+        forecast_dataset_id=(
+            None if raw["forecast_dataset_id"] is None else str(raw["forecast_dataset_id"])
+        ),
+        evaluated_model_manifest_id=(
+            None
+            if raw["evaluated_model_manifest_id"] is None
+            else str(raw["evaluated_model_manifest_id"])
+        ),
+        market_data_source_class=MarketDataSourceClass(str(raw["market_data_source_class"])),
+    )
+
+
+def holdout_configuration_registry(
+    oof_bundle_path: Path,
+    bundle: R2OofBundle,
+    *,
+    expected_evaluation_report_id: str | None = None,
+    expected_selected_configuration_ids: Sequence[str] | None = None,
+    expected_holdout_configuration_ids: Sequence[str] | None = None,
+) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
+    """Return the authenticated OOF configuration registry for holdout freezing."""
+    if expected_evaluation_report_id is not None:
+        evaluation_reference_ids = {
+            reference.semantic_id
+            for reference in bundle.evaluation_children
+            if reference.contract == R2_EVALUATION_CONTRACT
+        }
+        if expected_evaluation_report_id not in evaluation_reference_ids:
+            raise ValueError("prior selection report is not an authenticated OOF evaluation child")
+    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    if (
+        expected_evaluation_report_id is not None
+        and evaluation.get("report_id") != expected_evaluation_report_id
+    ):
+        raise ValueError("OOF evaluation child differs from prior selection report")
+    if expected_selected_configuration_ids is not None or (
+        expected_holdout_configuration_ids is not None
+    ):
+        register = _oof_child_payload(
+            oof_bundle_path,
+            bundle,
+            R2_EVALUATION_REGISTER_CONTRACT,
+        )
+        if (
+            expected_evaluation_report_id is not None
+            and register.get("selection_evaluation_report_id") != expected_evaluation_report_id
+        ):
+            raise ValueError("OOF register differs from prior selection report")
+        decisions = _selection_decisions_from_payload(register.get("selection_decisions"))
+        selected_ids = tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+        )
+        holdout_ids = tuple(
+            item.configuration_id
+            for item in decisions
+            if item.disposition
+            in (
+                ConfigurationDisposition.RETAINED_CONTROL,
+                ConfigurationDisposition.SELECTED_CANDIDATE,
+            )
+        )
+        stored_selected = register.get("selection_selected_configuration_ids")
+        stored_holdout = register.get("selection_holdout_comparator_configuration_ids")
+        if (
+            not isinstance(stored_selected, list)
+            or not isinstance(stored_holdout, list)
+            or not all(isinstance(item, str) for item in (*stored_selected, *stored_holdout))
+            or tuple(sorted(cast(list[str], stored_selected))) != selected_ids
+            or tuple(sorted(cast(list[str], stored_holdout))) != holdout_ids
+        ):
+            raise ValueError("OOF register selection arrays do not replay its persisted decisions")
+        if (
+            expected_selected_configuration_ids is not None
+            and tuple(sorted(expected_selected_configuration_ids)) != selected_ids
+        ):
+            raise ValueError("OOF selection decisions differ from prior selection")
+        if (
+            expected_holdout_configuration_ids is not None
+            and tuple(sorted(expected_holdout_configuration_ids)) != holdout_ids
+        ):
+            raise ValueError("OOF holdout decisions differ from prior selection")
+    evaluated_models = evaluation.get("evaluated_models")
+    if not isinstance(evaluated_models, list) or not evaluated_models:
+        raise ValueError("OOF evaluation has no authenticated evaluated-model registry")
+    manifests: dict[str, tuple[ModelFamily, str | None, str | None]] = {}
+    for raw_model in evaluated_models:
+        if not isinstance(raw_model, dict):
+            raise ValueError("OOF evaluated-model manifest must be an object")
+        manifest_id = raw_model.get("manifest_id")
+        if not isinstance(manifest_id, str):
+            raise ValueError("OOF evaluated-model manifest has no authenticated ID")
+        if manifest_id in manifests:
+            raise ValueError("OOF evaluated-model manifest IDs are not unique")
+        feature_set_id = raw_model.get("feature_set_id")
+        feature_dataset_id = raw_model.get("feature_dataset_id")
+        if feature_set_id is not None and not isinstance(feature_set_id, str):
+            raise ValueError("OOF evaluated-model feature-set ID is invalid")
+        if feature_dataset_id is not None and not isinstance(feature_dataset_id, str):
+            raise ValueError("OOF evaluated-model feature-dataset ID is invalid")
+        manifests[manifest_id] = (
+            ModelFamily(str(raw_model.get("model_family"))),
+            feature_set_id,
+            feature_dataset_id,
+        )
+    configurations = evaluation.get("configurations")
+    if not isinstance(configurations, list) or not configurations:
+        raise ValueError("OOF evaluation has no authenticated configuration registry")
+    records = tuple(_configuration_record_from_payload(item) for item in configurations)
+    ordered = tuple(sorted(records, key=lambda item: item.configuration_id))
+    if ordered != records or len({item.configuration_id for item in records}) != len(records):
+        raise ValueError("OOF evaluation configuration registry is not ordered and unique")
+    registry: list[tuple[str, ModelFamily, str | None, str | None, str | None]] = []
+    for item in records:
+        manifest_id = item.evaluated_model_manifest_id
+        if manifest_id is None or manifest_id not in manifests:
+            raise ValueError(
+                "OOF configuration does not reference an authenticated evaluated model"
+            )
+        manifest_family, manifest_feature_set_id, feature_dataset_id = manifests[manifest_id]
+        if (
+            item.model_family is not manifest_family
+            or item.feature_set_id != manifest_feature_set_id
+        ):
+            raise ValueError("OOF configuration differs from its authenticated evaluated model")
+        registry.append(
+            (
+                item.configuration_id,
+                item.model_family,
+                item.feature_set_id,
+                feature_dataset_id,
+                manifest_id,
+            )
+        )
+    return tuple(registry)
+
+
+def holdout_evaluation_policy(
+    oof_bundle_path: Path,
+    bundle: R2OofBundle,
+    *,
+    expected_evaluation_report_id: str | None = None,
+) -> dict[str, JsonValue]:
+    """Return the authenticated evaluation controls needed by holdout sealing."""
+    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    if (
+        expected_evaluation_report_id is not None
+        and evaluation.get("report_id") != expected_evaluation_report_id
+    ):
+        raise ValueError("OOF evaluation child differs from prior selection report")
+    metric_policy = evaluation.get("metric_policy")
+    forecast_bucket_policy = evaluation.get("forecast_bucket_policy")
+    minimum_rows = evaluation.get("minimum_correlation_rows")
+    bucket_count = evaluation.get("forecast_bucket_count")
+    if not isinstance(metric_policy, str) or not isinstance(forecast_bucket_policy, str):
+        raise ValueError("OOF evaluation policies are not authenticated strings")
+    if not isinstance(minimum_rows, int) or not isinstance(bucket_count, int):
+        raise ValueError("OOF evaluation support controls are not authenticated integers")
+    return {
+        "metric_policy": metric_policy,
+        "forecast_bucket_policy": forecast_bucket_policy,
+        "minimum_correlation_rows": minimum_rows,
+        "forecast_bucket_count": bucket_count,
+    }
 
 
 def _selection_decisions_from_payload(value: object) -> tuple[SelectionDecision, ...]:
@@ -2056,6 +2269,10 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
 
 async def _replay_representative_oof_async(path: Path) -> None:
     bundle = verify_r2_oof_bundle(path)
+    if bundle.holdout_target_source is None:
+        raise ValueError("representative OOF bundle has no authenticated holdout target source")
+    source_payload = _load_selection(path.parent / bundle.holdout_target_source.path)
+    holdout_target_source = R2HoldoutTargetSource.from_json(source_payload)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
     if descriptor.get("run_kind") != "REPRESENTATIVE":
         raise ValueError("representative replay requires a representative OOF run")
@@ -2105,8 +2322,9 @@ async def _replay_representative_oof_async(path: Path) -> None:
     experiment = load_r2_experiment(paths["experiment"])
     representative_profile = descriptor.get("representative_profile")
     if representative_profile == IBKR_HISTORICAL_PROFILE:
-        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-            paths["foundation"]
+        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
+            paths["foundation"],
+            holdout_target_source=holdout_target_source,
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
             raise ValueError("IBKR replay foundation differs from the experiment")
@@ -2133,17 +2351,18 @@ async def _replay_representative_oof_async(path: Path) -> None:
     elif representative_profile is not None:
         raise ValueError("representative OOF descriptor has an unsupported profile")
     else:
-        verified = await verify_foundation_bundle(
+        verified = await verify_outcome_blind_foundation_bundle(
             root=research_root,
             bundle_path=paths["foundation"],
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            holdout_target_source=holdout_target_source,
         )
-        _validate_representative_capture_v4(verified, experiment)
+        _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
         build_oof_bundle(
-            verified=verified,
+            verified=cast(R1FoundationBindings, verified),
             experiment=experiment,
             feature_manifest_paths=feature_paths,
             research_root=research_root,
@@ -2154,6 +2373,7 @@ async def _replay_representative_oof_async(path: Path) -> None:
             ),
             run_kind="REPRESENTATIVE",
             replay_inputs=paths,
+            holdout_target_source=holdout_target_source,
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError(

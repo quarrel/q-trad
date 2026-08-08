@@ -43,7 +43,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   contracts plus CLI operations and mutation-tested independent authentication. The source-specific IBKR
   representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
   replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
-  and the locked holdout remain gated on a frozen qualifying foundation.
+  and the locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
+  (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption)
+  are implemented and tested with implementation-only fixtures; no real holdout or effectiveness evidence exists.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,

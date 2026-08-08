@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -12,16 +13,22 @@ from typing import cast
 import pytest
 
 import qtrad.runtime.ibkr_foundation as foundation_runtime
+import qtrad.runtime.provider_history as provider_history_runtime
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import (
+    IBKRFoundationBuild,
     _provider_evidence,
     build_ibkr_foundation,
     evaluate_ibkr_foundation_readiness,
 )
 from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.application.r2_ibkr_historical import (
+    _availability_dataset_id,
+    ibkr_availability_evidence,
+)
 from qtrad.domain.events import JsonValue
-from qtrad.domain.foundation import InstrumentRole, TargetDataset
+from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_CANDIDATES,
     IBKR_CONFIRMATORY_GROUPS,
@@ -34,9 +41,11 @@ from qtrad.domain.ibkr_historical import IbkrHistoricalRequestKind
 from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
+    load_ibkr_foundation_outcome_blind_with_identity,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -103,6 +112,33 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
         configuration=configuration,
     )
     return bundle
+
+
+def _holdout_source_for_build(build: IBKRFoundationBuild) -> R2HoldoutTargetSource:
+    availability = ibkr_availability_evidence(build)
+    targets = cast(TargetDataset, build.targets)
+    panel = cast(PanelDataset, build.panel)
+    gaps = tuple(
+        (
+            str(gap["instrument_id"]),
+            datetime.fromisoformat(str(gap["interval_start"])),
+            datetime.fromisoformat(str(gap["interval_end"])),
+        )
+        for gap in build.provider_gaps
+    )
+    return R2HoldoutTargetSource.create_from_target_dataset(
+        targets,
+        holdout_range=build.configuration.holdout_range,
+        primary_horizon_seconds=900,
+        target_instruments=tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+        panel=panel,
+        source_active_intervals=build.active_intervals,
+        data_gaps=gaps,
+        availability_evidence_id=_availability_dataset_id(
+            cast(ObservationDataset, build.observations).dataset_id,
+            availability,
+        ),
+    )
 
 
 def test_stage8_writer_preserves_racing_output_on_child_failure(
@@ -204,6 +240,11 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         "panel",
         "targets",
         "folds",
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+        "pre-holdout-target",
     }
     assert all(
         "rows" not in child
@@ -219,6 +260,101 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         match=r"manifest bytes are not canonical|payload identity",
     ):
         verify_ibkr_foundation(bundle)
+
+
+def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    full_build = build_ibkr_foundation(source_evidence, configuration)
+    bundle = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    holdout_source = _holdout_source_for_build(full_build)
+    original_read_child_rows = foundation_runtime._read_child_rows
+
+    def guarded_read_child_rows(
+        path: Path, *, expected_row_count: int
+    ) -> tuple[dict[str, JsonValue], ...]:
+        forbidden = {"observations", "panel", "targets"}
+        assert not forbidden.intersection(path.parts)
+        return original_read_child_rows(path, expected_row_count=expected_row_count)
+
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", guarded_read_child_rows)
+
+    def reject_full_build(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("blind loading rebuilt the full foundation")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        reject_full_build,
+    )
+
+    def reject_provider_rows(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("blind loading decoded provider rows")
+
+    monkeypatch.setattr(
+        provider_history_runtime,
+        "_read_parquet_rows",
+        reject_provider_rows,
+    )
+    blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
+        bundle,
+        holdout_target_source=holdout_source,
+    )
+
+    assert build_id
+    assert isinstance(blind_build.targets, R2OutcomeBlindTargetView)
+    assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
+
+
+def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    bundle = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    payload = document["payload"]
+    base_kinds = {"observations", "panel", "targets", "folds"}
+    payload["children"] = {
+        kind: value for kind, value in payload["children"].items() if kind in base_kinds
+    }
+    encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    document["build_sha256"] = hashlib.sha256(encoded_payload).hexdigest()
+    document["payload"] = payload
+    child_root = bundle.parent / f"{bundle.name}.children"
+    extension_kinds = {
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+        "pre-holdout-target",
+    }
+    for kind in extension_kinds:
+        for directory in ("parquet", "manifests"):
+            shutil.rmtree(child_root / directory / kind)
+    bundle.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n")
+
+    verified = verify_ibkr_foundation(bundle)
+    assert verified.targets.rows
 
 
 def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> None:

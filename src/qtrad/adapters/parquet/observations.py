@@ -113,6 +113,20 @@ class ParquetObservationStore:
         await self.read_observations(manifest_id)
         return manifest
 
+    async def verify_file(self, manifest_id: str) -> ObservationManifest:
+        """Verify observation manifest and partition bytes without decoding rows."""
+        return await asyncio.to_thread(self._verify_file_sync, manifest_id)
+
+    def _verify_file_sync(self, manifest_id: str) -> ObservationManifest:
+        manifest = self._read_manifest_sync(manifest_id)
+        for relative, expected_hash in manifest.file_sha256.items():
+            path = self._root / relative
+            if not path.is_file() or path.is_symlink():
+                raise ValueError(f"observation partition is not a regular file: {relative}")
+            if hashlib.sha256(path.read_bytes()).hexdigest() != expected_hash:
+                raise ValueError(f"observation partition bytes changed: {relative}")
+        return manifest
+
     def _write_sync(
         self,
         dataset: ObservationDataset,

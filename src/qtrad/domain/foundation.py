@@ -479,6 +479,16 @@ class TargetDataset:
         if self.dataset_id != expected:
             raise ValueError("target dataset ID does not match its semantic rows")
 
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": TARGET_DATASET_CONTRACT,
+            "schema_version": 1,
+            "dataset_id": self.dataset_id,
+            "observation_dataset_id": self.observation_dataset_id,
+            "foundation_configuration_id": self.foundation_configuration_id,
+            "rows": [row.as_json() for row in self.rows],
+        }
+
     @classmethod
     def create(
         cls,

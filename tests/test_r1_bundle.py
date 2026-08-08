@@ -1,4 +1,5 @@
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -14,8 +15,10 @@ from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
-from qtrad.domain.foundation import AvailabilityBasis, PanelDataset
+from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
+from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.research import (
     ObservationDataset,
     ObservationRow,
@@ -29,6 +32,8 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
+    verify_outcome_blind_foundation_bundle,
+    write_foundation_bundle,
 )
 from qtrad.runtime.settings import Settings
 from tests.test_r1_walk_forward import _config
@@ -248,6 +253,122 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
             image_identity="test@sha256:" + "1" * 64,
         )
     assert {item.name for item in (tmp_path / "manifests").glob("*.json")} == manifests_before
+
+
+@pytest.mark.asyncio
+async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, path, clock, configuration = await _bundle(tmp_path)
+    row_counts = cast(Mapping[str, JsonValue], bundle.build_summary["row_counts"])
+    assert set(row_counts) == {
+        "observations",
+        "panel",
+        "targets",
+        "folds",
+        "forecasts",
+    }
+    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    source = R2HoldoutTargetSource.create_from_target_dataset(
+        verified.targets,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(
+            str(instrument)
+            for instrument, role in configuration.instrument_roles.items()
+            if role is InstrumentRole.TARGET
+        ),
+        panel=verified.panel,
+        availability_evidence_id=bundle.availability.dataset_id,
+    )
+    original_read_rows = ParquetFoundationArtifactStore.read_rows
+
+    async def guarded_read_rows(
+        self: ParquetFoundationArtifactStore, manifest_id: str
+    ) -> tuple[dict[str, JsonValue], ...]:
+        manifest = await self.read_manifest(manifest_id)
+        assert manifest.kind not in {"panel", "targets", "forecasts"}
+        return await original_read_rows(self, manifest_id)
+
+    monkeypatch.setattr(ParquetFoundationArtifactStore, "read_rows", guarded_read_rows)
+
+    async def reject_observation_rows(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("outcome-blind verification decoded observation rows")
+
+    monkeypatch.setattr(ParquetObservationStore, "read_observations", reject_observation_rows)
+    blind = await verify_outcome_blind_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        holdout_target_source=source,
+    )
+    assert blind.targets.rows == source.pre_holdout_target_dataset.rows
+
+    assert source.pre_holdout_target_dataset.rows
+    first = source.pre_holdout_target_dataset.rows[0]
+    changed_pre_holdout = type(source.pre_holdout_target_dataset).create(
+        (
+            replace(first, log_return=(first.log_return or 0.0) + 0.123),
+            *source.pre_holdout_target_dataset.rows[1:],
+        ),
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+    )
+    tampered_source = R2HoldoutTargetSource.create(
+        source_target_dataset_id=source.source_target_dataset_id,
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+        holdout_range=source.holdout_range,
+        primary_horizon_seconds=source.primary_horizon_seconds,
+        target_instruments=source.target_instruments,
+        targets=source.targets,
+        pre_holdout_target_dataset=changed_pre_holdout,
+        opportunities=source.opportunities,
+        causal_panel_dataset_id=source.causal_panel_dataset_id,
+        availability_evidence_id=source.availability_evidence_id,
+        target_index_dataset_id=source.target_index_dataset_id,
+        causal_metadata_dataset_id=source.causal_metadata_dataset_id,
+    )
+    with pytest.raises(ValueError, match="pre-holdout target projection"):
+        await verify_outcome_blind_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            holdout_target_source=tampered_source,
+        )
+
+
+@pytest.mark.asyncio
+async def test_full_verifier_accepts_extension_free_v2_bundle(tmp_path: Path) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    standard_summary = {
+        key: value
+        for key, value in bundle.build_summary.items()
+        if key != "outcome_blind_projections"
+    }
+    legacy = FoundationBundle.create(
+        configuration=bundle.configuration,
+        observations=bundle.observations,
+        availability=bundle.availability,
+        panel=bundle.panel,
+        targets=bundle.targets,
+        folds=bundle.folds,
+        forecasts=bundle.forecasts,
+        ordered_instruments=bundle.ordered_instruments,
+        range_start=bundle.range_start,
+        range_end=bundle.range_end,
+        coverage=bundle.coverage,
+        build_summary=standard_summary,
+        market_data_source_class=bundle.market_data_source_class,
+    )
+    legacy_path = path.with_name("legacy-foundation.json")
+    write_foundation_bundle(legacy_path, legacy)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=legacy_path,
+        clock=clock,
+    )
+    assert verified.targets.dataset_id == bundle.targets.dataset_id
 
 
 @pytest.mark.asyncio
