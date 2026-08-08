@@ -468,8 +468,10 @@ def freeze_holdout_selection(
                 "forecast_bucket_policy": authenticated_forecast_buckets,
                 "state_bucket_policy": verified_experiment.state_bucket_policy,
                 "model_selection_policy": verified_experiment.model_selection_policy,
-                "loss_policy": "OOF_PRIMARY_MSE_V1",
-                "instrument_identity_policy": "ORDERED_EXPERIMENT_UNIVERSE",
+                "loss_policy": verified_experiment.model_selection_policy,
+                "instrument_identity_policy": final_fitting_policy.runtime_identities.get(
+                    "instrument_identity_policy", "ORDERED_EXPERIMENT_UNIVERSE"
+                ),
                 "purged_target_ids": [],
             }
         )

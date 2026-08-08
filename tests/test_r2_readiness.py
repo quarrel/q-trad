@@ -9,10 +9,12 @@ import pytest
 
 from qtrad.application.r2_readiness import (
     _availability_dataset_id,
+    evaluate_outcome_blind_confirmatory_readiness,
     evaluate_r2_readiness,
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, ReturnDisposition
+from qtrad.domain.r2_holdout import HoldoutOpportunityDisposition
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
     EvidenceClass,
@@ -315,6 +317,89 @@ def _refresh_availability_identity(verified: Any) -> None:
         verified.observations.dataset_id,
         verified.availability_evidence,
     )
+
+
+def _outcome_blind_source(config: R2ExperimentConfig, verified: Any) -> Any:
+    identities = tuple(
+        SimpleNamespace(
+            target_id=row.target_id,
+            instrument_id=row.instrument_id,
+            decision_time=row.decision_time,
+            target_horizon_seconds=int(row.horizon.total_seconds()),
+            target_start_time=row.target_start_time,
+            target_end_time=row.target_end_time,
+            target_freeze_at=row.decision_time,
+            target_available_at=row.decision_time,
+            target_availability_disposition=row.return_disposition,
+        )
+        for row in verified.targets.rows
+    )
+    opportunities = tuple(
+        SimpleNamespace(
+            target_id=row.target_id,
+            instrument_id=row.instrument_id,
+            decision_time=row.decision_time,
+            target_horizon_seconds=int(row.horizon.total_seconds()),
+            disposition=HoldoutOpportunityDisposition.ELIGIBLE,
+        )
+        for row in verified.targets.rows
+        if row.block == "holdout"
+    )
+    return SimpleNamespace(
+        source_target_dataset_id=config.target_dataset_id,
+        observation_dataset_id=config.observation_dataset_id,
+        foundation_configuration_id=config.foundation_configuration_id,
+        holdout_range=config.holdout_range,
+        primary_horizon_seconds=int(config.primary_horizon.total_seconds()),
+        target_instruments=config.target_instruments,
+        targets=identities,
+        opportunities=opportunities,
+    )
+
+
+def test_outcome_blind_confirmatory_readiness_replays_authenticated_projection() -> None:
+    config = experiment()
+    verified = _verified(config)
+    source = _outcome_blind_source(config, verified)
+    active = {instrument: ((START, END),) for instrument in config.ordered_instruments}
+
+    report = evaluate_outcome_blind_confirmatory_readiness(
+        experiment=config,
+        target_source=source,
+        folds=verified.folds,
+        source_active=active,
+        r1_bundle_id=config.r1_bundle_id,
+    )
+    assert report.confirmatory_data_ready.value == "READY"
+    assert report.usable_common_week_count == 16
+
+    mutated_first = SimpleNamespace(**vars(source.targets[0]))
+    mutated_first.target_availability_disposition = ReturnDisposition.MISSING_END
+    mutated_source = SimpleNamespace(**vars(source))
+    mutated_source.targets = (mutated_first, *source.targets[1:])
+    mutated = evaluate_outcome_blind_confirmatory_readiness(
+        experiment=config,
+        target_source=cast(Any, mutated_source),
+        folds=verified.folds,
+        source_active=active,
+        r1_bundle_id=config.r1_bundle_id,
+    )
+    assert mutated.confirmatory_data_ready.value == "NOT_READY"
+    assert any("training members" in item for item in mutated.unmet_conditions)
+
+
+def test_outcome_blind_confirmatory_readiness_rejects_short_initial_training() -> None:
+    config = experiment()
+    verified = _verified(config, folds=_folds(short_training=True))
+    report = evaluate_outcome_blind_confirmatory_readiness(
+        experiment=config,
+        target_source=_outcome_blind_source(config, verified),
+        folds=verified.folds,
+        source_active={instrument: ((START, END),) for instrument in config.ordered_instruments},
+        r1_bundle_id=config.r1_bundle_id,
+    )
+    assert report.confirmatory_data_ready.value == "NOT_READY"
+    assert any("6 calendar weeks" in item for item in report.unmet_conditions)
 
 
 def test_experiment_round_trip_preserves_semantic_identity(tmp_path: Path) -> None:

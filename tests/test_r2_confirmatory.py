@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -22,7 +23,12 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutTargetSource,
     R2OutcomeBlindTargetView,
 )
-from qtrad.domain.r2_readiness import EvidenceClass
+from qtrad.domain.r2_readiness import (
+    EvidenceClass,
+    FeatureFamily,
+    R2ReadinessReport,
+    ReadinessState,
+)
 from qtrad.domain.research import ObservationRow
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import canonical_bytes
@@ -234,7 +240,40 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
         },
     )
     bundle_path = _build_confirmatory_fixture(tmp_path)
-    monkeypatch.setattr(verification, "_replay_confirmatory_oof", lambda _: None)
+    monkeypatch.setattr(verification, "_replay_confirmatory_oof", lambda _: (None, {}))
+
+    def ready_report(**kwargs: object) -> R2ReadinessReport:
+        experiment = cast(Any, kwargs["experiment"])
+        return R2ReadinessReport(
+            experiment_configuration_id=experiment.configuration_id,
+            r1_bundle_id=experiment.r1_bundle_id,
+            software_contract_ready=ReadinessState.READY,
+            representative_integration_ready=ReadinessState.READY,
+            confirmatory_data_ready=ReadinessState.READY,
+            inner_validation_rows_ready=ReadinessState.PARTIALLY_READY,
+            confirmatory_oof_ready=ReadinessState.NOT_READY,
+            locked_holdout_ready=ReadinessState.NOT_READY,
+            feature_family_states={family: ReadinessState.READY for family in FeatureFamily},
+            coverage_matrix={},
+            usable_common_week_count=16,
+            active_source_duration_seconds={},
+            unmet_conditions=(),
+            evidence_class=experiment.evidence_class,
+            market_data_source_class=experiment.market_data_source_class,
+        )
+
+    monkeypatch.setattr(
+        verification,
+        "evaluate_outcome_blind_confirmatory_readiness",
+        lambda **kwargs: replace(
+            ready_report(**kwargs),
+            confirmatory_data_ready=ReadinessState.NOT_READY,
+            unmet_conditions=("fixture readiness gate",),
+        ),
+    )
+    with pytest.raises(ValueError, match="independently replayed outcome-blind readiness"):
+        verify_confirmatory_f2(bundle_path)
+    monkeypatch.setattr(verification, "evaluate_outcome_blind_confirmatory_readiness", ready_report)
 
     authority = verify_confirmatory_f2(bundle_path)
 
@@ -243,6 +282,18 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
         VerifiedConfirmatoryF2()
     assert authority.evidence_class is EvidenceClass.CONFIRMATORY
     assert authority.descriptor["run_kind"] == CONFIRMATORY_RUN_KIND
+    with pytest.raises(TypeError):
+        cast(Any, authority.descriptor)["run_kind"] = "REPRESENTATIVE"
+    with pytest.raises(TypeError):
+        cast(Any, authority.selection_policy)["primary_metric"] = "RMSE"
+    with pytest.raises(TypeError):
+        cast(Any, authority.selection_policy["acceptance_thresholds"])[0][0] = "tampered"
+    with pytest.raises(TypeError):
+        cast(Any, authority.experiment.acceptance_thresholds)["tampered"] = 0.0
+    with pytest.raises(TypeError):
+        cast(Any, authority.readiness_report.feature_family_states)[FeatureFamily.LOCAL_RETURNS] = (
+            ReadinessState.NOT_READY
+        )
 
     with pytest.raises(ValueError, match="require verify_confirmatory_f2"):
         verification.verify_oof_bundle(bundle_path)
@@ -261,6 +312,19 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
     assert selection["holdout_scope"] == HoldoutScope.CONFIRMATORY.value
     assert selection["evidence_class"] == EvidenceClass.CONFIRMATORY.value
     assert selection["holdout_outcomes_accessed"] is False
+    assert selection["questions"][0]["support_policy"] == "COMMON_ELIGIBLE"
+    assert selection["questions"][0]["metric"] == "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
+    assert (
+        selection["final_fitting_policy"]["pooled_membership_policy"]
+        == "FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1"
+    )
+    assert selection["final_fitting_policy"]["instrument_intercept_policy"] == (
+        "NO_GLOBAL_INTERCEPT_V1"
+    )
+    assert selection["final_fitting_policy"]["runtime_identities"]["instrument_identity_order"] == [
+        "index:synthetic-a",
+        "index:synthetic-b",
+    ]
 
     with pytest.raises(FileExistsError):
         freeze_confirmatory_selection(

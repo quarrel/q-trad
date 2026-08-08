@@ -5,13 +5,15 @@ from collections import Counter
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
-from typing import Protocol
+from types import SimpleNamespace
+from typing import Protocol, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import Fold, FoldDataset
 from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import FoundationConfig, PanelDataset, ReturnDisposition, TargetDataset
 from qtrad.domain.foundation_bundle import AVAILABILITY_EVIDENCE_CONTRACT, FoundationBundle
+from qtrad.domain.r2_holdout import HoldoutOpportunityDisposition, R2HoldoutTargetSource
 from qtrad.domain.r2_readiness import (
     CoverageCell,
     EligibilityDecision,
@@ -216,6 +218,214 @@ def evaluate_r2_readiness(
         locked_holdout_ready=locked,
         feature_family_states=feature_states,
         coverage_matrix=coverage_matrix,
+        usable_common_week_count=usable_common_weeks,
+        active_source_duration_seconds=active_source_durations,
+        unmet_conditions=tuple(unmet),
+        evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
+    )
+
+
+def evaluate_outcome_blind_confirmatory_readiness(
+    *,
+    experiment: R2ExperimentConfig,
+    target_source: R2HoldoutTargetSource,
+    folds: FoldDataset,
+    source_active: Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    r1_bundle_id: str,
+) -> R2ReadinessReport:
+    """Replay confirmatory data gates from R1 outcome-blind projections only.
+
+    This is deliberately separate from :func:`evaluate_r2_readiness`: F2 may
+    authenticate target identities and causal availability, but must not open
+    the realised target child.  The lightweight row view below contains only
+    identity, timing, and availability disposition metadata.
+    """
+
+    if (
+        r1_bundle_id != experiment.r1_bundle_id
+        or folds.dataset_id != experiment.fold_dataset_id
+        or folds.target_dataset_id != target_source.source_target_dataset_id
+        or folds.foundation_configuration_id != experiment.foundation_configuration_id
+    ):
+        raise ValueError("outcome-blind readiness folds differ from the verified source")
+    if (
+        target_source.source_target_dataset_id != experiment.target_dataset_id
+        or target_source.observation_dataset_id != experiment.observation_dataset_id
+        or target_source.foundation_configuration_id != experiment.foundation_configuration_id
+        or target_source.holdout_range != experiment.holdout_range
+        or target_source.primary_horizon_seconds != int(experiment.primary_horizon.total_seconds())
+        or target_source.target_instruments != tuple(experiment.target_instruments)
+    ):
+        raise ValueError("outcome-blind readiness source differs from the verified experiment")
+    if set(source_active) != set(experiment.ordered_instruments):
+        raise ValueError("outcome-blind readiness source-active universe is incomplete")
+    # Existing readiness helpers operate on a TargetDataset-shaped row view.
+    # SimpleNamespace is intentional here: no TargetRow is constructed, and
+    # the view has no field from which a realised label can be recovered.
+    blind_rows = tuple(
+        SimpleNamespace(
+            target_id=item.target_id,
+            instrument_id=item.instrument_id,
+            decision_time=item.decision_time,
+            horizon=timedelta(seconds=item.target_horizon_seconds),
+            target_start_time=item.target_start_time,
+            target_end_time=item.target_end_time,
+            target_available_at=item.target_available_at,
+            return_disposition=item.target_availability_disposition,
+        )
+        for item in target_source.targets
+    )
+    blind_targets = cast(TargetDataset, SimpleNamespace(rows=blind_rows))
+    fold_values = folds.folds
+    coverage = _coverage_matrix(
+        experiment=experiment,
+        targets=blind_targets,
+        folds=fold_values,
+        source_active=source_active,
+    )
+
+    # The holdout cell must come from the authenticated source-derived
+    # opportunity registry, rather than from an identity-only approximation.
+    for instrument in experiment.confirmatory_target_instruments:
+        holdout = tuple(
+            item
+            for item in target_source.opportunities
+            if item.instrument_id == instrument
+            and item.target_horizon_seconds == int(experiment.primary_horizon.total_seconds())
+            and experiment.holdout_range[0] <= item.decision_time < experiment.holdout_range[1]
+        )
+        cells = list(coverage[instrument])
+        holdout_index = next(index for index, cell in enumerate(cells) if cell.block == "holdout")
+        cells[holdout_index] = CoverageCell(
+            instrument_id=instrument,
+            block="holdout",
+            block_start=experiment.holdout_range[0],
+            block_end=experiment.holdout_range[1],
+            expected_active_opportunities=sum(
+                item.disposition is HoldoutOpportunityDisposition.ELIGIBLE for item in holdout
+            ),
+            valid_targets=sum(
+                item.disposition is HoldoutOpportunityDisposition.ELIGIBLE for item in holdout
+            ),
+        )
+        coverage[instrument] = tuple(cells)
+
+    feature_states = {
+        family: _feature_state(experiment.feature_eligibility[family]) for family in FeatureFamily
+    }
+    group_counts = Counter(experiment.market_groups.values())
+    coverage_passes = all(
+        cell.expected_active_opportunities > 0
+        and cell.coverage is not None
+        and cell.coverage >= _MINIMUM_COVERAGE
+        for cells in coverage.values()
+        for cell in cells
+    )
+    training_counts, validation_counts = _membership_counts(
+        experiment=experiment, targets=blind_targets, folds=fold_values
+    )
+    training_rows_pass = all(
+        training_counts.get(instrument, 0) >= experiment.minimum_training_rows
+        for instrument in experiment.confirmatory_target_instruments
+    )
+    validation_rows_pass = len(validation_counts) == 3 and all(
+        counts.get(instrument, 0) >= experiment.minimum_outer_validation_rows
+        for counts in validation_counts
+        for instrument in experiment.confirmatory_target_instruments
+    )
+    holdout_rows_pass = all(
+        next(cell.valid_targets for cell in coverage[instrument] if cell.block == "holdout")
+        >= experiment.minimum_outer_validation_rows
+        for instrument in experiment.confirmatory_target_instruments
+    )
+    candidate_start = fold_values[0].training_start if fold_values else experiment.holdout_range[0]
+    candidate_end = experiment.holdout_range[1]
+    usable_common_weeks = _usable_common_week_count(
+        experiment=experiment,
+        targets=blind_targets,
+        source_active=source_active,
+        candidate_start=candidate_start,
+        candidate_end=candidate_end,
+    )
+    unmet: list[str] = []
+    conditions = (
+        (
+            usable_common_weeks >= _REQUIRED_COMMON_WEEKS,
+            "confirmatory evidence has fewer than 16 weekly buckets with source-active "
+            "target opportunities for every confirmatory instrument",
+        ),
+        (
+            len(experiment.confirmatory_target_instruments) >= 6,
+            "confirmatory subset has fewer than 6 targets",
+        ),
+        (len(group_counts) >= 3, "confirmatory subset has fewer than 3 market groups"),
+        (
+            sum(count >= 2 for count in group_counts.values()) >= 3,
+            "confirmatory subset needs at least 2 targets in each of 3 groups",
+        ),
+        (
+            coverage_passes,
+            "one or more instrument/research-block cells has no active opportunities or "
+            "target coverage below 90%",
+        ),
+        (
+            training_rows_pass,
+            "one or more confirmatory instruments has too few first-fold training members",
+        ),
+        (
+            validation_rows_pass,
+            "one or more confirmatory instrument/fold cells has too few valid members",
+        ),
+        (
+            holdout_rows_pass,
+            "one or more confirmatory instruments has too few valid holdout targets",
+        ),
+        (len(fold_values) == 3, "confirmatory bundle must have exactly 3 OOF folds"),
+        (
+            bool(fold_values)
+            and fold_values[0].training_cutoff - fold_values[0].training_start
+            >= _INITIAL_TRAINING_DURATION,
+            "initial training interval is shorter than 6 calendar weeks",
+        ),
+        (
+            len(fold_values) == 3
+            and all(
+                fold.validation_end - fold.validation_start >= _VALIDATION_DURATION
+                for fold in fold_values
+            ),
+            "each of the 3 OOF validation intervals must span at least 2 calendar weeks",
+        ),
+        (
+            experiment.holdout_range[1] - experiment.holdout_range[0] >= _HOLDOUT_DURATION,
+            "locked holdout is shorter than 4 weeks",
+        ),
+        (
+            all(state is not ReadinessState.PARTIALLY_READY for state in feature_states.values()),
+            "feature-family eligibility has pending pre-holdout decisions",
+        ),
+    )
+    confirmatory_data = _state_from_conditions(conditions, unmet)
+    active_source_durations = {
+        instrument: _union_duration(
+            source_active[instrument], start=candidate_start, end=candidate_end
+        ).total_seconds()
+        for instrument in experiment.confirmatory_target_instruments
+    }
+    unmet.append(
+        "minimum_inner_validation_rows requires a verified R2.C chronological inner-split artefact"
+    )
+    return R2ReadinessReport(
+        experiment_configuration_id=experiment.configuration_id,
+        r1_bundle_id=r1_bundle_id,
+        software_contract_ready=ReadinessState.READY,
+        representative_integration_ready=ReadinessState.READY,
+        confirmatory_data_ready=confirmatory_data,
+        inner_validation_rows_ready=ReadinessState.PARTIALLY_READY,
+        confirmatory_oof_ready=ReadinessState.NOT_READY,
+        locked_holdout_ready=ReadinessState.NOT_READY,
+        feature_family_states=feature_states,
+        coverage_matrix=coverage,
         usable_common_week_count=usable_common_weeks,
         active_source_duration_seconds=active_source_durations,
         unmet_conditions=tuple(unmet),
