@@ -235,13 +235,25 @@ def _foundation_child_lineage(
 def _sorted_groups(
     rows: Sequence[ProviderHistoricalObservation],
 ) -> dict[str, tuple[tuple[ProviderHistoricalObservation, int], ...]]:
-    ordered = sorted(
-        rows,
-        key=lambda row: (row.instrument_id, row.interval_start, row.interval_end),
-    )
     grouped: dict[str, list[tuple[ProviderHistoricalObservation, int]]] = defaultdict(list)
-    for position, row in enumerate(ordered, 1):
+    previous_key: tuple[str, datetime, datetime] | None = None
+    for position, row in enumerate(rows, 1):
+        key = (row.instrument_id, row.interval_start, row.interval_end)
+        if previous_key is not None and key < previous_key:
+            ordered = sorted(
+                rows,
+                key=lambda item: (
+                    item.instrument_id,
+                    item.interval_start,
+                    item.interval_end,
+                ),
+            )
+            grouped = defaultdict(list)
+            for position, item in enumerate(ordered, 1):
+                grouped[item.instrument_id].append((item, position))
+            break
         grouped[row.instrument_id].append((row, position))
+        previous_key = key
     return {instrument: tuple(values) for instrument, values in grouped.items()}
 
 
