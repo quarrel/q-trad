@@ -39,6 +39,7 @@ from qtrad.domain.r2_holdout import (
     R2OutcomeBlindObservationView,
     R2OutcomeBlindPanelView,
     R2OutcomeBlindTargetView,
+    R2PreHoldoutTargetProjection,
 )
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.foundation_bundle import _fold, _panel_row, decode_foundation_config
@@ -55,16 +56,20 @@ _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
-_CHILD_KINDS = (
+_BASE_CHILD_KINDS = (
     "observations",
     "panel",
     "targets",
     "folds",
+)
+_EXTENSION_CHILD_KINDS = (
     "target-index",
     "causal-metadata",
     "blind-observations",
     "blind-panel",
+    "pre-holdout-target",
 )
+_CHILD_KINDS = _BASE_CHILD_KINDS + _EXTENSION_CHILD_KINDS
 _CHILD_FIELDS = {
     "contract",
     "schema_version",
@@ -323,12 +328,20 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
         source_evidence,
         provider_manifest_sha256,
     )
+    child_set = set(children)
+    if child_set == set(_BASE_CHILD_KINDS):
+        child_kinds = _BASE_CHILD_KINDS
+    elif child_set == set(_CHILD_KINDS):
+        child_kinds = _CHILD_KINDS
+    else:
+        raise ValueError("IBKR foundation child set is incomplete or unsupported")
     _verify_children(
         root,
         children,
         expected_rows,
         expected_dataset_ids,
         expected_lineage,
+        child_kinds=child_kinds,
     )
 
     if replay.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
@@ -465,6 +478,36 @@ def load_ibkr_foundation_outcome_blind_with_identity(
     )
     if causal_metadata.dataset_id != child_ids["causal-metadata"]:
         raise ValueError("IBKR holdout causal metadata identity is invalid")
+    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(decoded["pre-holdout-target"][0])
+    projection_mismatches = []
+    if pre_holdout_target.source_target_dataset_id != child_ids["targets"]:
+        projection_mismatches.append("source target")
+    if pre_holdout_target.observation_dataset_id != child_ids["observations"]:
+        projection_mismatches.append("observation")
+    if pre_holdout_target.foundation_configuration_id != configuration.configuration_id:
+        projection_mismatches.append("configuration")
+    if pre_holdout_target.holdout_start != configuration.holdout_range[0]:
+        projection_mismatches.append("holdout start")
+    if pre_holdout_target.primary_horizon_seconds != int(
+        configuration.primary_vertical_horizon.total_seconds()
+    ):
+        projection_mismatches.append("horizon")
+    if pre_holdout_target.target_instruments != tuple(
+        sorted(holdout_target_source.target_instruments)
+    ):
+        projection_mismatches.append("instruments")
+    if (
+        pre_holdout_target.projected_target_dataset
+        != holdout_target_source.pre_holdout_target_dataset
+    ):
+        projection_mismatches.append("projected rows")
+    if pre_holdout_target.projection_id != child_ids["pre-holdout-target"]:
+        projection_mismatches.append("projection ID")
+    if projection_mismatches:
+        raise ValueError(
+            "IBKR pre-holdout target projection is not source-authenticated: "
+            + ", ".join(projection_mismatches)
+        )
 
     blind_observations = R2OutcomeBlindObservationView(
         dataset_id=child_ids["observations"],
@@ -810,12 +853,15 @@ def _verify_children(
     expected_rows: Mapping[str, tuple[dict[str, JsonValue], ...]],
     expected_dataset_ids: Mapping[str, str],
     expected_lineage: Mapping[str, JsonValue],
+    *,
+    child_kinds: Sequence[str] | None = None,
 ) -> None:
-    if set(children) != set(_CHILD_KINDS):
+    kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
+    if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
-    for kind in _CHILD_KINDS:
+    for kind in kinds:
         raw_parts = children[kind]
         if not isinstance(raw_parts, list) or not raw_parts:
             raise ValueError("IBKR foundation child parts are invalid")
@@ -946,6 +992,7 @@ def _verify_children_blind(
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "pre-holdout-target",
     }
     decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     expected_files: set[str] = set()
@@ -1068,6 +1115,7 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
         panel,
         holdout_start=build.configuration.holdout_range[0],
     )
+    pre_holdout_target = _pre_holdout_target_projection(build, targets)
     return {
         "observations": tuple(row.as_json() for row in observations.rows),
         "panel": tuple(row.as_json() for row in panel.rows),
@@ -1077,6 +1125,7 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
         "causal-metadata": tuple(item.as_json() for item in build.causal_metadata.rows),
         "blind-observations": tuple(row.as_json() for row in blind_observations.rows),
         "blind-panel": tuple(row.as_json() for row in blind_panel.rows),
+        "pre-holdout-target": (pre_holdout_target.as_json(),),
     }
 
 
@@ -1091,6 +1140,7 @@ def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
         panel,
         holdout_start=build.configuration.holdout_range[0],
     )
+    pre_holdout_target = _pre_holdout_target_projection(build, cast(TargetDataset, build.targets))
     return {
         "observations": observations.dataset_id,
         "panel": panel.dataset_id,
@@ -1100,7 +1150,24 @@ def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
         "causal-metadata": build.causal_metadata.dataset_id,
         "blind-observations": blind_observations.projection_id,
         "blind-panel": blind_panel.projection_id,
+        "pre-holdout-target": pre_holdout_target.projection_id,
     }
+
+
+def _pre_holdout_target_projection(
+    build: IBKRFoundationBuild,
+    targets: TargetDataset,
+) -> R2PreHoldoutTargetProjection:
+    return R2PreHoldoutTargetProjection.create_from_target_dataset(
+        targets,
+        holdout_start=build.configuration.holdout_range[0],
+        primary_horizon_seconds=int(build.configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(
+            instrument_id
+            for instrument_id in build.configuration.ordered_instruments
+            if build.configuration.instrument_roles[instrument_id].value == "TARGET"
+        ),
+    )
 
 
 def _canonical_row(row: Mapping[str, JsonValue]) -> str:

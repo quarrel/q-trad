@@ -49,6 +49,7 @@ R2_HOLDOUT_EVALUATION_CONTRACT = "qtrad-r2-holdout-evaluation-v1"
 R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT = "qtrad-r2-holdout-outcome-evidence-v1"
 R2_HOLDOUT_BUNDLE_CONTRACT = "qtrad-r2-holdout-bundle-v1"
 R2_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-holdout-target-projection-v2"
+R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-pre-holdout-target-projection-v1"
 R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT = "qtrad-r2-holdout-opportunity-registry-v2"
 R2_HOLDOUT_TARGET_SOURCE_CONTRACT = "qtrad-r2-holdout-target-source-v1"
 
@@ -2223,6 +2224,173 @@ class R2OutcomeBlindTargetView:
             observation_dataset_id=source.observation_dataset_id,
             foundation_configuration_id=source.foundation_configuration_id,
             rows=source.pre_holdout_target_dataset.rows,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2PreHoldoutTargetProjection:
+    """R1-authoritative projection of mature primary-horizon target rows."""
+
+    source_target_dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    holdout_start: datetime
+    primary_horizon_seconds: int
+    target_instruments: tuple[str, ...]
+    projection_policy: str
+    projected_target_dataset: TargetDataset
+    projected_target_dataset_id: str
+    projection_id: str
+
+    CONTRACT: ClassVar[str] = R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+    POLICY: ClassVar[str] = "PRIMARY_HORIZON_MATURE_BEFORE_HOLDOUT_V1"
+
+    def __post_init__(self) -> None:
+        _require_id(self.source_target_dataset_id, "pre-holdout projection source target ID")
+        _require_id(self.observation_dataset_id, "pre-holdout projection observation ID")
+        _require_id(self.foundation_configuration_id, "pre-holdout projection configuration ID")
+        _require_id(self.projected_target_dataset_id, "pre-holdout projected target ID")
+        _require_id(self.projection_id, "pre-holdout projection ID")
+        require_utc(self.holdout_start, "pre-holdout projection holdout start")
+        if self.primary_horizon_seconds <= 0:
+            raise ValueError("pre-holdout projection horizon must be positive")
+        if self.projection_policy != self.POLICY:
+            raise ValueError("pre-holdout projection policy is unsupported")
+        if tuple(sorted(set(self.target_instruments))) != self.target_instruments:
+            raise ValueError("pre-holdout projection instruments are not canonical")
+        if (
+            self.projected_target_dataset.dataset_id != self.projected_target_dataset_id
+            or self.projected_target_dataset.observation_dataset_id != self.observation_dataset_id
+            or self.projected_target_dataset.foundation_configuration_id
+            != self.foundation_configuration_id
+        ):
+            raise ValueError("pre-holdout projection child lineage is invalid")
+        if self.projection_id != _semantic_id(self.semantic_json()):
+            raise ValueError("pre-holdout projection ID does not authenticate its content")
+
+    @classmethod
+    def create_from_target_dataset(
+        cls,
+        source: TargetDataset,
+        *,
+        holdout_start: datetime,
+        primary_horizon_seconds: int,
+        target_instruments: Sequence[str],
+    ) -> R2PreHoldoutTargetProjection:
+        instruments = tuple(sorted(set(target_instruments)))
+        projected = _project_pre_holdout_target(
+            source,
+            holdout_start=holdout_start,
+            primary_horizon_seconds=primary_horizon_seconds,
+            target_instruments=instruments,
+        )
+        unbound = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            "source_target_dataset_id": source.dataset_id,
+            "observation_dataset_id": source.observation_dataset_id,
+            "foundation_configuration_id": source.foundation_configuration_id,
+            "holdout_start": holdout_start.isoformat(),
+            "primary_horizon_seconds": primary_horizon_seconds,
+            "target_instruments": list(instruments),
+            "projection_policy": cls.POLICY,
+            "projected_target_dataset": projected.as_json(),
+            "projected_target_dataset_id": projected.dataset_id,
+        }
+        return cls(
+            source_target_dataset_id=source.dataset_id,
+            observation_dataset_id=source.observation_dataset_id,
+            foundation_configuration_id=source.foundation_configuration_id,
+            holdout_start=holdout_start,
+            primary_horizon_seconds=primary_horizon_seconds,
+            target_instruments=instruments,
+            projection_policy=cls.POLICY,
+            projected_target_dataset=projected,
+            projected_target_dataset_id=projected.dataset_id,
+            projection_id=_semantic_id(unbound),
+        )
+
+    def verify_source(self, source: TargetDataset) -> None:
+        if (
+            source.dataset_id != self.source_target_dataset_id
+            or source.observation_dataset_id != self.observation_dataset_id
+            or source.foundation_configuration_id != self.foundation_configuration_id
+        ):
+            raise ValueError("pre-holdout projection source differs from its authority")
+        expected = self.create_from_target_dataset(
+            source,
+            holdout_start=self.holdout_start,
+            primary_horizon_seconds=self.primary_horizon_seconds,
+            target_instruments=self.target_instruments,
+        )
+        if expected.projected_target_dataset != self.projected_target_dataset:
+            raise ValueError("pre-holdout projection labels differ from the source dataset")
+        if expected.projection_id != self.projection_id:
+            raise ValueError("pre-holdout projection identity differs from the source dataset")
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "source_target_dataset_id": self.source_target_dataset_id,
+            "observation_dataset_id": self.observation_dataset_id,
+            "foundation_configuration_id": self.foundation_configuration_id,
+            "holdout_start": self.holdout_start.isoformat(),
+            "primary_horizon_seconds": self.primary_horizon_seconds,
+            "target_instruments": list(self.target_instruments),
+            "projection_policy": self.projection_policy,
+            "projected_target_dataset": self.projected_target_dataset.as_json(),
+            "projected_target_dataset_id": self.projected_target_dataset_id,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "projection_id": self.projection_id}
+
+    @classmethod
+    def from_json(cls, value: object) -> R2PreHoldoutTargetProjection:
+        if not isinstance(value, Mapping):
+            raise ValueError("pre-holdout projection must be an object")
+        raw = cast(Mapping[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "source_target_dataset_id",
+            "observation_dataset_id",
+            "foundation_configuration_id",
+            "holdout_start",
+            "primary_horizon_seconds",
+            "target_instruments",
+            "projection_policy",
+            "projected_target_dataset",
+            "projected_target_dataset_id",
+            "projection_id",
+        }
+        if set(raw) != expected or raw["contract"] != cls.CONTRACT or raw["schema_version"] != 1:
+            raise ValueError("pre-holdout projection has unknown or unsupported fields")
+        raw_instruments_value = raw["target_instruments"]
+        projected_raw = raw["projected_target_dataset"]
+        raw_horizon = raw["primary_horizon_seconds"]
+        if (
+            not isinstance(raw_instruments_value, list)
+            or not isinstance(projected_raw, Mapping)
+            or not isinstance(raw_horizon, (int, float, str))
+        ):
+            raise ValueError("pre-holdout projection child is malformed")
+        raw_instruments = cast(list[object], raw_instruments_value)
+        return cls(
+            source_target_dataset_id=str(raw["source_target_dataset_id"]),
+            observation_dataset_id=str(raw["observation_dataset_id"]),
+            foundation_configuration_id=str(raw["foundation_configuration_id"]),
+            holdout_start=datetime.fromisoformat(str(raw["holdout_start"])),
+            primary_horizon_seconds=int(raw_horizon),
+            target_instruments=tuple(str(item) for item in raw_instruments),
+            projection_policy=str(raw["projection_policy"]),
+            projected_target_dataset=_target_dataset_from_json(
+                cast(Mapping[str, object], projected_raw)
+            ),
+            projected_target_dataset_id=str(raw["projected_target_dataset_id"]),
+            projection_id=str(raw["projection_id"]),
         )
 
 

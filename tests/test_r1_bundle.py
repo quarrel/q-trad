@@ -16,6 +16,7 @@ from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
+from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.research import (
@@ -32,6 +33,7 @@ from qtrad.runtime.foundation_bundle import (
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
     verify_outcome_blind_foundation_bundle,
+    write_foundation_bundle,
 )
 from qtrad.runtime.settings import Settings
 from tests.test_r1_walk_forward import _config
@@ -301,6 +303,72 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         holdout_target_source=source,
     )
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
+
+    assert source.pre_holdout_target_dataset.rows
+    first = source.pre_holdout_target_dataset.rows[0]
+    changed_pre_holdout = type(source.pre_holdout_target_dataset).create(
+        (
+            replace(first, log_return=(first.log_return or 0.0) + 0.123),
+            *source.pre_holdout_target_dataset.rows[1:],
+        ),
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+    )
+    tampered_source = R2HoldoutTargetSource.create(
+        source_target_dataset_id=source.source_target_dataset_id,
+        observation_dataset_id=source.observation_dataset_id,
+        foundation_configuration_id=source.foundation_configuration_id,
+        holdout_range=source.holdout_range,
+        primary_horizon_seconds=source.primary_horizon_seconds,
+        target_instruments=source.target_instruments,
+        targets=source.targets,
+        pre_holdout_target_dataset=changed_pre_holdout,
+        opportunities=source.opportunities,
+        causal_panel_dataset_id=source.causal_panel_dataset_id,
+        availability_evidence_id=source.availability_evidence_id,
+        target_index_dataset_id=source.target_index_dataset_id,
+        causal_metadata_dataset_id=source.causal_metadata_dataset_id,
+    )
+    with pytest.raises(ValueError, match="pre-holdout target projection"):
+        await verify_outcome_blind_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            holdout_target_source=tampered_source,
+        )
+
+
+@pytest.mark.asyncio
+async def test_full_verifier_accepts_extension_free_v2_bundle(tmp_path: Path) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    standard_summary = {
+        key: value
+        for key, value in bundle.build_summary.items()
+        if key != "outcome_blind_projections"
+    }
+    legacy = FoundationBundle.create(
+        configuration=bundle.configuration,
+        observations=bundle.observations,
+        availability=bundle.availability,
+        panel=bundle.panel,
+        targets=bundle.targets,
+        folds=bundle.folds,
+        forecasts=bundle.forecasts,
+        ordered_instruments=bundle.ordered_instruments,
+        range_start=bundle.range_start,
+        range_end=bundle.range_end,
+        coverage=bundle.coverage,
+        build_summary=standard_summary,
+        market_data_source_class=bundle.market_data_source_class,
+    )
+    legacy_path = path.with_name("legacy-foundation.json")
+    write_foundation_bundle(legacy_path, legacy)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=legacy_path,
+        clock=clock,
+    )
+    assert verified.targets.dataset_id == bundle.targets.dataset_id
 
 
 @pytest.mark.asyncio

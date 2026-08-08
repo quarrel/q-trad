@@ -30,6 +30,7 @@ _KINDS = frozenset(
         "r2-causal-metadata",
         "r2-blind-observations",
         "r2-blind-panel",
+        "r2-pre-holdout-target",
     }
 )
 

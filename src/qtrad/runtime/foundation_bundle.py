@@ -60,6 +60,7 @@ from qtrad.domain.r2_holdout import (
     R2OutcomeBlindObservationView,
     R2OutcomeBlindPanelView,
     R2OutcomeBlindTargetView,
+    R2PreHoldoutTargetProjection,
 )
 from qtrad.domain.research import (
     AvailabilityDelayReport,
@@ -617,6 +618,17 @@ async def persist_foundation_bundle(
     blind_panel = R2OutcomeBlindPanelView.from_dataset(
         panel, holdout_start=configuration.holdout_range[0]
     )
+    target_instruments = tuple(
+        instrument_id
+        for instrument_id in configuration.ordered_instruments
+        if InstrumentRole(configuration.instrument_roles[instrument_id]) is InstrumentRole.TARGET
+    )
+    pre_holdout_target = R2PreHoldoutTargetProjection.create_from_target_dataset(
+        targets,
+        holdout_start=configuration.holdout_range[0],
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=target_instruments,
+    )
     target_index_manifest = await store.write(
         kind="r2-target-index",
         contract=R2HoldoutTargetIndex.CONTRACT,
@@ -673,6 +685,21 @@ async def persist_foundation_bundle(
         application_version=application_version,
         image_identity=image_identity,
     )
+    pre_holdout_target_manifest = await store.write(
+        kind="r2-pre-holdout-target",
+        contract=R2PreHoldoutTargetProjection.CONTRACT,
+        schema_version=R2PreHoldoutTargetProjection.SCHEMA_VERSION,
+        dataset_id=pre_holdout_target.projection_id,
+        rows=(pre_holdout_target.as_json(),),
+        lineage={
+            "target_dataset_id": targets.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+        },
+        application_version=application_version,
+        image_identity=image_identity,
+    )
     build_summary: dict[str, JsonValue] = {
         "application_version": application_version,
         "image_identity": image_identity,
@@ -692,6 +719,9 @@ async def persist_foundation_bundle(
                 "blind-observations", blind_observations_manifest
             ).as_json(),
             "panel": _child_reference("blind-panel", blind_panel_manifest).as_json(),
+            "pre_holdout_target": _child_reference(
+                "pre-holdout-target", pre_holdout_target_manifest
+            ).as_json(),
         },
     }
     bundle = build_foundation_bundle(
@@ -800,11 +830,16 @@ async def verify_foundation_bundle(
         },
     )
     build_summary = _mapping(bundle.build_summary)
-    if set(build_summary) != {
+    standard_build_summary_keys = {
         "application_version",
         "image_identity",
         "row_counts",
-        "outcome_blind_projections",
+    }
+    extension_build_summary_keys = standard_build_summary_keys | {"outcome_blind_projections"}
+    build_summary_keys = frozenset(build_summary)
+    if build_summary_keys not in {
+        frozenset(standard_build_summary_keys),
+        frozenset(extension_build_summary_keys),
     }:
         raise ValueError("foundation build summary has an unexpected schema")
     application_version = _text(build_summary["application_version"])
@@ -894,6 +929,126 @@ async def verify_foundation_bundle(
         forecasts=forecasts,
         coverage=bundle.coverage,
     )
+    blind_projection_payload = build_summary.get("outcome_blind_projections")
+    if blind_projection_payload is not None:
+        projection_payload = _mapping(blind_projection_payload)
+        projection_names = {
+            "target_index": "target-index",
+            "causal_metadata": "causal-metadata",
+            "observations": "blind-observations",
+            "panel": "blind-panel",
+            "pre_holdout_target": "pre-holdout-target",
+        }
+        if set(projection_payload) != set(projection_names):
+            raise ValueError("foundation outcome-blind projection set is incomplete")
+        projection_manifests: dict[str, FoundationChildManifest] = {}
+        projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+        for key, name in projection_names.items():
+            reference = _reference(name, projection_payload[key])
+            manifest = await store.verify(reference.manifest_id)
+            _verify_child_reference(reference, manifest)
+            if (
+                manifest.application_version != application_version
+                or manifest.image_identity != image_identity
+            ):
+                raise ValueError("foundation projection build identity differs from the bundle")
+            projection_manifests[key] = manifest
+            projection_rows[key] = await store.read_rows(reference.manifest_id)
+        _require_lineage(
+            projection_manifests["target_index"],
+            {
+                "target_dataset_id": targets.dataset_id,
+                "observation_dataset_id": observations.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+            },
+        )
+        _require_lineage(
+            projection_manifests["causal_metadata"],
+            {
+                "panel_dataset_id": panel.dataset_id,
+                "observation_dataset_id": observations.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+            },
+        )
+        _require_lineage(
+            projection_manifests["pre_holdout_target"],
+            {
+                "target_dataset_id": targets.dataset_id,
+                "observation_dataset_id": observations.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+            },
+        )
+        expected_target_index = R2HoldoutTargetIndex.create(targets)
+        target_index = R2HoldoutTargetIndex.from_rows(
+            source_target_dataset_id=targets.dataset_id,
+            observation_dataset_id=observations.dataset_id,
+            foundation_configuration_id=configuration.configuration_id,
+            rows=projection_rows["target_index"],
+        )
+        if (
+            target_index != expected_target_index
+            or target_index.dataset_id != projection_manifests["target_index"].dataset_id
+        ):
+            raise ValueError("foundation target-index projection differs from full replay")
+        expected_causal_metadata = R2HoldoutCausalMetadata.create(panel)
+        causal_metadata = R2HoldoutCausalMetadata.from_rows(
+            source_panel_dataset_id=panel.dataset_id,
+            rows=projection_rows["causal_metadata"],
+        )
+        if (
+            causal_metadata != expected_causal_metadata
+            or causal_metadata.dataset_id != projection_manifests["causal_metadata"].dataset_id
+        ):
+            raise ValueError("foundation causal metadata projection differs from full replay")
+        expected_blind_observations = R2OutcomeBlindObservationView.from_dataset(
+            observations, holdout_start=configuration.holdout_range[0]
+        )
+        actual_blind_observations = R2OutcomeBlindObservationView(
+            dataset_id=observations.dataset_id,
+            rows=tuple(
+                _observation_from_row(cast(Mapping[str, object], row))
+                for row in projection_rows["observations"]
+            ),
+            configuration=observations.configuration,
+            source_dataset_ids=observations.source_dataset_ids,
+            selection_policies=observations.selection_policies,
+            projection_id=projection_manifests["observations"].dataset_id,
+        )
+        if actual_blind_observations != expected_blind_observations:
+            raise ValueError("foundation blind observation projection differs from full replay")
+        expected_blind_panel = R2OutcomeBlindPanelView.from_dataset(
+            panel, holdout_start=configuration.holdout_range[0]
+        )
+        actual_blind_panel = R2OutcomeBlindPanelView(
+            dataset_id=panel.dataset_id,
+            observation_dataset_id=observations.dataset_id,
+            foundation_configuration_id=configuration.configuration_id,
+            rows=tuple(_panel_row(row) for row in projection_rows["panel"]),
+            projection_id=projection_manifests["panel"].dataset_id,
+        )
+        if actual_blind_panel != expected_blind_panel:
+            raise ValueError("foundation blind panel projection differs from full replay")
+        pre_holdout_target = R2PreHoldoutTargetProjection.from_json(
+            _single_row(projection_rows, "pre_holdout_target")
+        )
+        expected_pre_holdout_target = R2PreHoldoutTargetProjection.create_from_target_dataset(
+            targets,
+            holdout_start=configuration.holdout_range[0],
+            primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+            target_instruments=tuple(
+                instrument_id
+                for instrument_id in configuration.ordered_instruments
+                if InstrumentRole(configuration.instrument_roles[instrument_id])
+                is InstrumentRole.TARGET
+            ),
+        )
+        if (
+            pre_holdout_target != expected_pre_holdout_target
+            or pre_holdout_target.projection_id
+            != projection_manifests["pre_holdout_target"].dataset_id
+        ):
+            raise ValueError("foundation pre-holdout target projection differs from full replay")
     if (
         bundle.configuration.dataset_id != configuration.configuration_id
         or bundle.ordered_instruments != configuration.ordered_instruments
@@ -981,7 +1136,10 @@ async def verify_outcome_blind_foundation_bundle(
         "causal_metadata": "causal-metadata",
         "observations": "blind-observations",
         "panel": "blind-panel",
+        "pre_holdout_target": "pre-holdout-target",
     }
+    if set(projection_payload) != set(projection_names):
+        raise ValueError("foundation outcome-blind projection set is incomplete")
     projection_manifests: dict[str, FoundationChildManifest] = {}
     projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     for key, name in projection_names.items():
@@ -1097,6 +1255,15 @@ async def verify_outcome_blind_foundation_bundle(
             "holdout_start": configuration.holdout_range[0].isoformat(),
         },
     )
+    _require_lineage(
+        projection_manifests["pre_holdout_target"],
+        {
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "observation_dataset_id": observation_manifest.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+        },
+    )
     for manifest in (*manifests.values(), *projection_manifests.values()):
         if (
             manifest.application_version != application_version
@@ -1118,6 +1285,23 @@ async def verify_outcome_blind_foundation_bundle(
     )
     if causal_metadata.dataset_id != projection_manifests["causal_metadata"].dataset_id:
         raise ValueError("holdout causal metadata child identity is invalid")
+    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(
+        _single_row(projection_rows, "pre_holdout_target")
+    )
+    if (
+        pre_holdout_target.source_target_dataset_id != manifests["targets"].dataset_id
+        or pre_holdout_target.observation_dataset_id != observation_manifest.dataset_id
+        or pre_holdout_target.foundation_configuration_id != configuration.configuration_id
+        or pre_holdout_target.holdout_start != configuration.holdout_range[0]
+        or pre_holdout_target.primary_horizon_seconds
+        != int(configuration.primary_vertical_horizon.total_seconds())
+        or pre_holdout_target.target_instruments
+        != tuple(sorted(holdout_target_source.target_instruments))
+        or pre_holdout_target.projection_id != projection_manifests["pre_holdout_target"].dataset_id
+        or pre_holdout_target.projected_target_dataset
+        != holdout_target_source.pre_holdout_target_dataset
+    ):
+        raise ValueError("pre-holdout target projection is not bound to the holdout source")
     holdout_target_source.verify_target_index(target_index)
     holdout_target_source.verify_r1_causal_evidence(
         causal_metadata=causal_metadata,

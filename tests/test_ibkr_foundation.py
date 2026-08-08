@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -243,6 +244,7 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "pre-holdout-target",
     }
     assert all(
         "rows" not in child
@@ -314,6 +316,45 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert build_id
     assert isinstance(blind_build.targets, R2OutcomeBlindTargetView)
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
+
+
+def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    bundle = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    payload = document["payload"]
+    base_kinds = {"observations", "panel", "targets", "folds"}
+    payload["children"] = {
+        kind: value for kind, value in payload["children"].items() if kind in base_kinds
+    }
+    encoded_payload = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    document["build_sha256"] = hashlib.sha256(encoded_payload).hexdigest()
+    document["payload"] = payload
+    child_root = bundle.parent / f"{bundle.name}.children"
+    extension_kinds = {
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+        "pre-holdout-target",
+    }
+    for kind in extension_kinds:
+        for directory in ("parquet", "manifests"):
+            shutil.rmtree(child_root / directory / kind)
+    bundle.write_text(json.dumps(document, sort_keys=True, separators=(",", ":")) + "\n")
+
+    verified = verify_ibkr_foundation(bundle)
+    assert verified.targets.rows
 
 
 def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> None:
