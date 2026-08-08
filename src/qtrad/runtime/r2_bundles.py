@@ -299,6 +299,10 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                     "R2 evaluation register report ID does not authenticate its content"
                 )
             _verify_evaluation_register(child, bundle, path.parent)
+    if len(descriptor_refs) == 1:
+        descriptor = _load_object(path.parent / descriptor_refs[0].path)
+        if descriptor.get("run_kind") == "REPRESENTATIVE" and bundle.holdout_target_source is None:
+            raise ValueError("representative OOF bundle must bind an authenticated holdout source")
     _allow_bound_selection(path.parent, bundle)
     _reject_orphan_files(path.parent, allowed_paths)
     return bundle
