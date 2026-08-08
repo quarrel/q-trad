@@ -10,8 +10,12 @@ mode="${1:-}"
 [[ "$mode" == "--check" || "$mode" == "--apply" ]] || usage
 [[ "${2:-}" == "" ]] || usage
 
-script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
-env_file="${QTRAD_IBKR_ENV_FILE:-/etc/qtrad/ibkr-ingest.env}"
+canonical_env_file="/etc/qtrad/ibkr-ingest.env"
+if [[ -n "${QTRAD_IBKR_ENV_FILE:-}" && "$QTRAD_IBKR_ENV_FILE" != "$canonical_env_file" ]]; then
+    echo "IBKR B3 preflight: QTRAD_IBKR_ENV_FILE must use canonical $canonical_env_file" >&2
+    exit 64
+fi
+env_file="$canonical_env_file"
 if [[ -f "$env_file" ]]; then
     set -a
     # shellcheck disable=SC1090
@@ -119,6 +123,8 @@ printf '%s\n' "$preflight_json" | jq -e \
      and .client_id == ($client_id|tonumber)
      and .source == "ibkr-paper-v1"
      and .universe == "capture-ibkr-v1"' >/dev/null || fail "release identity does not match the reviewed descriptor"
+
+[[ -r "$env_file" ]] || fail "canonical IBKR ingest environment file is not readable"
 
 verify_checkout_identity
 verify_host_identity

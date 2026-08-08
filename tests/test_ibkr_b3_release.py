@@ -487,6 +487,7 @@ def test_b3_descriptor_rejects_secret_fields(tmp_path: Path) -> None:
 def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     ops = _REPOSITORY_ROOT / "ops" / "ibkr"
     ingest = (ops / "qtrad-ibkr-ingest-wrapper.example").read_text(encoding="utf-8")
+    ingest_unit = (ops / "qtrad-ibkr-ingest.service.example").read_text(encoding="utf-8")
     api = (ops / "qtrad-ibkr-api-wrapper.example").read_text(encoding="utf-8")
     deploy = (ops / "deploy.sh").read_text(encoding="utf-8")
     backup = (ops / "postgres-backup.sh").read_text(encoding="utf-8")
@@ -508,6 +509,9 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "QTRAD_IBKR_PASSWORD" not in api
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in api
     assert "usage: deploy.sh --check|--apply" in deploy
+    assert 'env_file="/etc/qtrad/ibkr-ingest.env"' in deploy
+    assert "EnvironmentFile=/etc/qtrad/ibkr-ingest.env" in ingest_unit
+    assert "--env-file /etc/qtrad/ibkr-ingest.env" in ingest
     assert "verify_host_identity" in deploy
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
@@ -577,10 +581,10 @@ def test_deploy_rejects_stale_schedule_before_mutation(tmp_path: Path, mode: str
     preflight.chmod(0o755)
 
     environment = os.environ.copy()
+    environment.pop("QTRAD_IBKR_ENV_FILE", None)
     environment.update(
         {
             "PATH": str(tmp_path) + os.pathsep + environment["PATH"],
-            "QTRAD_IBKR_ENV_FILE": str(tmp_path / "missing.env"),
             "QTRAD_IBKR_IMAGE": image,
             "QTRAD_IMAGE": image,
             "QTRAD_IBKR_RELEASE_DESCRIPTOR": str(descriptor),
@@ -607,3 +611,39 @@ def test_deploy_rejects_stale_schedule_before_mutation(tmp_path: Path, mode: str
     assert result.returncode != 0
     assert "release identity does not match" in result.stderr
     assert not docker_marker.exists()
+
+
+def test_deploy_rejects_noncanonical_env_override(tmp_path: Path) -> None:
+    image_a = "registry.example.invalid/qtrad@sha256:" + "a" * 64
+    image_b = "registry.example.invalid/qtrad@sha256:" + "b" * 64
+    env_a = tmp_path / "release-a.env"
+    env_b = tmp_path / "release-b.env"
+    env_a.write_text(f"QTRAD_IBKR_IMAGE={image_a}\n", encoding="utf-8")
+    env_b.write_text(f"QTRAD_IBKR_IMAGE={image_b}\n", encoding="utf-8")
+    preflight_marker = tmp_path / "preflight-called"
+    preflight = tmp_path / "qtrad-preflight"
+    preflight.write_text(
+        "#!/bin/sh\nprintf 'preflight was reached\\n' > " + str(preflight_marker) + "\n",
+        encoding="utf-8",
+    )
+    preflight.chmod(0o755)
+
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "QTRAD_IBKR_ENV_FILE": str(env_a),
+            "QTRAD_B3_PREFLIGHT_BIN": str(preflight),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(_REPOSITORY_ROOT / "ops" / "ibkr" / "deploy.sh"), "--apply"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert env_a.read_text(encoding="utf-8") != env_b.read_text(encoding="utf-8")
+    assert result.returncode != 0
+    assert "canonical" in result.stderr
+    assert not preflight_marker.exists()
