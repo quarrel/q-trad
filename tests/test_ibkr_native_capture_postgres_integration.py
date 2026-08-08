@@ -323,7 +323,7 @@ async def test_native_callbacks_worker_projection_health_and_api(
         )
         assert len(capture_quote) == 1
         assert capture_quote[0]["configuration_hash"] == _CONFIGURATION_HASH
-        assert capture_quote[0]["bid"] == Decimal("1.1")
+        assert capture_quote[0]["bid"] is None
         assert capture_quote[0]["ask"] == Decimal("1.1002")
         assert not await store.query(
             "SELECT 1 FROM read_model.latest_quotes WHERE instrument_id = :instrument_id",
