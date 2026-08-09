@@ -222,6 +222,7 @@ _DEPLOYMENT_IMAGE_IDENTITY_PATH = Path("/run/qtrad/image-identity.json")
 
 _VERIFIED_CONFIRMATORY_F2_TOKEN = object()
 _VERIFIED_CONFIRMATORY_G1_TOKEN = object()
+_VERIFIED_CONFIRMATORY_G1_PROVENANCE = object()
 _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN = object()
 
 
@@ -478,11 +479,17 @@ class VerifiedConfirmatoryF2:
 class _VerifiedConfirmatoryG2FeatureAccess:
     """Verifier-issued capability to decode the G2-safe feature source after G1."""
 
-    __slots__ = ("_authority", "_selection_manifest_id", "_verified_f2")
+    __slots__ = (
+        "_authority",
+        "_selection_manifest_id",
+        "_verified_f2",
+        "_verifier_provenance",
+    )
 
     _authority: ConfirmatoryG2FeatureSourceAuthority
     _selection_manifest_id: str
     _verified_f2: VerifiedConfirmatoryF2
+    _verifier_provenance: object
 
     def __init__(self) -> None:
         raise TypeError("G2 feature access is issued only by verified G1")
@@ -501,6 +508,7 @@ class _VerifiedConfirmatoryG2FeatureAccess:
         object.__setattr__(instance, "_authority", verified_f2._g2_feature_source_authority)
         object.__setattr__(instance, "_selection_manifest_id", selection.manifest_id)
         object.__setattr__(instance, "_verified_f2", verified_f2)
+        object.__setattr__(instance, "_verifier_provenance", _VERIFIED_CONFIRMATORY_G1_PROVENANCE)
         return instance
 
     def __setattr__(self, name: str, value: object) -> None:
@@ -510,11 +518,17 @@ class _VerifiedConfirmatoryG2FeatureAccess:
 class VerifiedConfirmatoryG1:
     """Runtime-only authority proving an exact persisted confirmatory G1 freeze."""
 
-    __slots__ = ("_g2_feature_access", "_selection", "_verified_f2")
+    __slots__ = (
+        "_g2_feature_access",
+        "_selection",
+        "_verified_f2",
+        "_verifier_provenance",
+    )
 
     _g2_feature_access: _VerifiedConfirmatoryG2FeatureAccess
     _selection: R2HoldoutSelectionManifest
     _verified_f2: VerifiedConfirmatoryF2
+    _verifier_provenance: object
 
     def __init__(self) -> None:
         raise TypeError("VerifiedConfirmatoryG1 is constructed only by verify_confirmatory_g1")
@@ -544,6 +558,7 @@ class VerifiedConfirmatoryG1:
                 selection=selection,
             ),
         )
+        object.__setattr__(instance, "_verifier_provenance", _VERIFIED_CONFIRMATORY_G1_PROVENANCE)
         return instance
 
     @property
@@ -3234,7 +3249,17 @@ def verify_confirmatory_g2_feature_source(
 
     if type(verified_g1) is not VerifiedConfirmatoryG1:
         raise TypeError("G2 feature decoding requires VerifiedConfirmatoryG1")
+    if (
+        getattr(verified_g1, "_verifier_provenance", None)
+        is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
+    ):
+        raise TypeError("G2 feature decoding requires verified G1 provenance")
     access = verified_g1._g2_feature_access
+    if (
+        type(access) is not _VerifiedConfirmatoryG2FeatureAccess
+        or getattr(access, "_verifier_provenance", None) is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
+    ):
+        raise TypeError("G2 feature decoding requires verified G1 feature access")
     if (
         access._verified_f2 is not verified_g1.verified_f2
         or access._selection_manifest_id != verified_g1.selection.manifest_id

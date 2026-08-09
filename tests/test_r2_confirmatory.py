@@ -598,6 +598,29 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     with pytest.raises(TypeError, match="constructed only by verify_confirmatory_g1"):
         VerifiedConfirmatoryG1()
 
+    real_access = object.__getattribute__(verified_g1, "_g2_feature_access")
+    forged_access = object.__new__(type(real_access))
+    for field in ("_authority", "_selection_manifest_id", "_verified_f2"):
+        object.__setattr__(
+            forged_access,
+            field,
+            object.__getattribute__(real_access, field),
+        )
+    forged_g1 = object.__new__(VerifiedConfirmatoryG1)
+    object.__setattr__(forged_g1, "_verified_f2", verified_g1.verified_f2)
+    object.__setattr__(forged_g1, "_selection", verified_g1.selection)
+    object.__setattr__(forged_g1, "_g2_feature_access", forged_access)
+    with pytest.raises(TypeError, match="requires verified G1 provenance"):
+        verify_confirmatory_g2_feature_source(forged_g1)
+
+    object.__setattr__(
+        forged_g1,
+        "_verifier_provenance",
+        object.__getattribute__(verified_g1, "_verifier_provenance"),
+    )
+    with pytest.raises(TypeError, match="requires verified G1 feature access"):
+        verify_confirmatory_g2_feature_source(forged_g1)
+
     changed_policy = _rebuild_g1_selection(
         verified_g1.selection,
         metric_policy={
