@@ -80,7 +80,7 @@ jobs:
           -u QTRAD_MIGRATION_DATABASE_URL
           uv run pytest
           -m "not postgres"
-          -n 2
+          -n 4
           --dist worksteal
           --durations=25
           --durations-min=0.5
