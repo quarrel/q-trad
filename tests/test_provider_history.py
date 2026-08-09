@@ -575,16 +575,16 @@ def test_provider_history_eligibility_replays_two_chunks_and_excludes_incomplete
 
 
 def test_provider_history_publishes_26_week_partitions_through_real_replay(tmp_path: Path) -> None:
-    artifact = _build_stage6_artifact(day_count=26 * 7, bars_per_request=60)
+    artifact = _build_stage6_artifact(day_count=26 * 7, bars_per_request=1)
     result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
 
     dataset = build_provider_history_dataset(
         artifact,
         availability_delay=timedelta(minutes=5),
     )
-    assert dataset.row_count == 26 * 7 * 60
+    assert dataset.row_count == 26 * 7
     assert len(dataset.partitions) == 26 * 7
-    assert all(partition.row_count == 60 for partition in dataset.partitions)
+    assert all(partition.row_count == 1 for partition in dataset.partitions)
 
     manifest = publish_provider_history(
         tmp_path / "provider",

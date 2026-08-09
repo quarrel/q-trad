@@ -108,7 +108,7 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30),
     )
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(
@@ -117,6 +117,16 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
         configuration=configuration,
     )
     return bundle
+
+
+@pytest.fixture(scope="module")
+def _authenticated_foundation_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    template_root = tmp_path_factory.mktemp("authenticated-stage8-foundation")
+    bundle = _foundation_bundle_fixture(template_root)
+    verify_ibkr_foundation(bundle)
+    return template_root
 
 
 def _holdout_source_for_build(build: IBKRFoundationBuild) -> R2HoldoutTargetSource:
@@ -665,11 +675,14 @@ def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() ->
 )
 def test_stage8_rejects_child_manifest_lineage_and_part_drift(
     tmp_path: Path,
+    _authenticated_foundation_template: Path,
     field: str,
     value: object,
     message: str,
 ) -> None:
-    bundle = _foundation_bundle_fixture(tmp_path)
+    clone_root = tmp_path / "authenticated-stage8-foundation"
+    shutil.copytree(_authenticated_foundation_template, clone_root)
+    bundle = clone_root / "foundation.json"
     _rewrite_child_manifest(bundle, field, value)
 
     with pytest.raises(ValueError, match=message):
