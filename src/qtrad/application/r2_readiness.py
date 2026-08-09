@@ -303,7 +303,12 @@ def evaluate_outcome_blind_confirmatory_readiness(
             block_start=experiment.holdout_range[0],
             block_end=experiment.holdout_range[1],
             expected_active_opportunities=sum(
-                item.disposition is HoldoutOpportunityDisposition.ELIGIBLE for item in holdout
+                item.disposition
+                in (
+                    HoldoutOpportunityDisposition.ELIGIBLE,
+                    HoldoutOpportunityDisposition.GAP,
+                )
+                for item in holdout
             ),
             valid_targets=sum(
                 item.disposition is HoldoutOpportunityDisposition.ELIGIBLE for item in holdout

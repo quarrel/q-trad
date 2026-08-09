@@ -402,6 +402,47 @@ def test_outcome_blind_confirmatory_readiness_rejects_short_initial_training() -
     assert any("6 calendar weeks" in item for item in report.unmet_conditions)
 
 
+def test_outcome_blind_holdout_gap_remains_in_coverage_denominator() -> None:
+    config = experiment()
+    verified = _verified(config)
+    source = _outcome_blind_source(config, verified)
+    first_instrument = config.confirmatory_target_instruments[0]
+    gap_ids = {
+        item.target_id for item in source.opportunities if item.instrument_id == first_instrument
+    }
+    gap_ids = set(sorted(gap_ids)[:3])
+    mutated_opportunities = tuple(
+        SimpleNamespace(
+            **{
+                **vars(item),
+                "disposition": (
+                    HoldoutOpportunityDisposition.GAP
+                    if item.target_id in gap_ids
+                    else item.disposition
+                ),
+            }
+        )
+        for item in source.opportunities
+    )
+    mutated_source = SimpleNamespace(**vars(source))
+    mutated_source.opportunities = mutated_opportunities
+
+    report = evaluate_outcome_blind_confirmatory_readiness(
+        experiment=config,
+        target_source=cast(Any, mutated_source),
+        folds=verified.folds,
+        source_active={instrument: ((START, END),) for instrument in config.ordered_instruments},
+        r1_bundle_id=config.r1_bundle_id,
+    )
+
+    holdout = next(
+        cell for cell in report.coverage_matrix[first_instrument] if cell.block == "holdout"
+    )
+    assert holdout.expected_active_opportunities == 20
+    assert holdout.valid_targets == 17
+    assert report.confirmatory_data_ready.value == "NOT_READY"
+
+
 def test_experiment_round_trip_preserves_semantic_identity(tmp_path: Path) -> None:
     original = experiment()
     path = tmp_path / "experiment.json"

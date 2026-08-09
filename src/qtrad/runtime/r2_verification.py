@@ -111,7 +111,9 @@ from qtrad.domain.r2_models import (
     POOLED_INSTRUMENT_IDENTITY_POLICY,
     POOLED_INSTRUMENT_MEMBERSHIP_POLICY,
     POOLED_INTERCEPT_POLICY,
+    R2_PREPROCESSING_SELECTION_CONTRACT,
     PreprocessingFeatureKind,
+    R2PreprocessingSelection,
     derive_r2_preprocessing_schema,
 )
 from qtrad.domain.r2_readiness import (
@@ -123,6 +125,7 @@ from qtrad.domain.r2_readiness import (
     ModelFamily,
     R2ExperimentConfig,
     R2ReadinessReport,
+    ReadinessState,
 )
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import verify_outcome_blind_foundation_bundle
@@ -139,6 +142,7 @@ from qtrad.runtime.r2_bundles import (
     write_r2_oof_bundle,
     write_r2_software_bundle,
 )
+from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
@@ -1263,6 +1267,10 @@ def _synthetic_pipeline_inputs(
     adapter_identity: IBKRHistoricalAdapterIdentity | None = None,
     evidence_class: EvidenceClass = EvidenceClass.IMPLEMENTATION,
     include_holdout_target: bool = False,
+    qualifying_confirmatory: bool = False,
+    market_data_source_class: MarketDataSourceClass = (
+        MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
+    ),
 ) -> tuple[
     R1FoundationBindings,
     R2ExperimentConfig,
@@ -1271,7 +1279,14 @@ def _synthetic_pipeline_inputs(
     """Create deterministic typed inputs for the same R2 build path used in production."""
     start = datetime(2026, 1, 1, tzinfo=UTC)
     horizon = timedelta(minutes=15)
-    holdout = (start + timedelta(hours=6), start + timedelta(hours=24))
+    holdout = (
+        (
+            start + timedelta(weeks=12, minutes=1),
+            start + timedelta(weeks=16, minutes=1),
+        )
+        if qualifying_confirmatory
+        else (start + timedelta(hours=6), start + timedelta(hours=24))
+    )
     ordered = (*target_names, context_name)
     r1_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
     observation_id = sha256(f"{fixture_name}-observations".encode()).hexdigest()
@@ -1344,9 +1359,9 @@ def _synthetic_pipeline_inputs(
         ridge_tolerance=1e-8,
         ridge_max_iterations=10_000,
         pooled_weighting_policy="EQUAL_INSTRUMENT_TOTAL_WEIGHT_MEAN_ONE",
-        minimum_training_rows=2,
-        minimum_inner_validation_rows=1,
-        minimum_outer_validation_rows=1,
+        minimum_training_rows=100 if qualifying_confirmatory else 2,
+        minimum_inner_validation_rows=20 if qualifying_confirmatory else 1,
+        minimum_outer_validation_rows=20 if qualifying_confirmatory else 1,
         metric_policy="R2_METRICS_V1",
         forecast_bucket_policy="TRAINING_QUANTILES_V1",
         state_bucket_policy="TRAINING_THRESHOLDS_V1",
@@ -1363,12 +1378,39 @@ def _synthetic_pipeline_inputs(
         numeric_replay_relative_tolerance=1e-10,
         numeric_replay_absolute_tolerance=1e-12,
         evidence_class=evidence_class,
-        market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        market_data_source_class=market_data_source_class,
         source_adapter_identity=adapter_identity.as_json() if adapter_identity else None,
         model_families=tuple(ModelFamily),
     )
     targets_rows: list[TargetRow] = []
-    target_decisions = [start + timedelta(minutes=15 * index) for index in range(8)]
+    if qualifying_confirmatory:
+        blocks = (
+            (start, start + timedelta(weeks=6), 100),
+            (
+                start + timedelta(weeks=6, minutes=1),
+                start + timedelta(weeks=8, minutes=1),
+                20,
+            ),
+            (
+                start + timedelta(weeks=8, minutes=1),
+                start + timedelta(weeks=10, minutes=1),
+                20,
+            ),
+            (
+                start + timedelta(weeks=10, minutes=1),
+                holdout[0],
+                20,
+            ),
+            (holdout[0], holdout[1], 20),
+        )
+        target_decisions = [
+            block_start
+            + (block_end - block_start - horizon - timedelta(minutes=1)) * (index / (count - 1))
+            for block_start, block_end, count in blocks
+            for index in range(count)
+        ]
+    else:
+        target_decisions = [start + timedelta(minutes=15 * index) for index in range(8)]
     if include_holdout_target:
         target_decisions.append(holdout[0])
     for index, decision in enumerate(target_decisions):
@@ -1386,7 +1428,11 @@ def _synthetic_pipeline_inputs(
                     target_available_at=decision + horizon,
                     label_start_close=Decimal("100"),
                     label_end_close=Decimal("101"),
-                    log_return=0.01 * (index + instrument_index),
+                    log_return=(
+                        0.01 * (index + 1) * (instrument_index + 1)
+                        if qualifying_confirmatory
+                        else 0.01 * (index + instrument_index)
+                    ),
                     return_disposition=ReturnDisposition.VALID,
                     start_event_id=UUID(int=index * 2 + instrument_index + 1),
                     end_event_id=UUID(int=index * 2 + instrument_index + 2),
@@ -1400,30 +1446,48 @@ def _synthetic_pipeline_inputs(
         observation_dataset_id=observation_id,
         foundation_configuration_id=foundation_id,
     )
-    training_ids = tuple(
-        row.target_id
-        for row in targets.rows
-        if row.target_end_time <= start + timedelta(minutes=75)
+    fold_values: list[Fold] = []
+    fold_ranges = (
+        tuple(
+            (
+                start + timedelta(weeks=6 + 2 * index, minutes=1),
+                start + timedelta(weeks=8 + 2 * index, minutes=1),
+            )
+            for index in range(3)
+        )
+        if qualifying_confirmatory
+        else ((start + timedelta(minutes=90), start + timedelta(minutes=120)),)
     )
-    validation_ids = tuple(
-        row.target_id
-        for row in targets.rows
-        if start + timedelta(minutes=90) <= row.target_start_time < holdout[0]
-    )
-    fold = Fold(
-        fold_id="synthetic-outer-0",
-        training_start=start,
-        training_cutoff=start + timedelta(minutes=75),
-        validation_start=start + timedelta(minutes=90),
-        validation_end=start + timedelta(minutes=120),
-        embargo_end=start + timedelta(minutes=90),
-        training_target_ids=training_ids,
-        validation_target_ids=validation_ids,
-        holdout_excluded=True,
-        membership_hash=membership_hash(training_ids, validation_ids),
-    )
+    for index, (validation_start, validation_end) in enumerate(fold_ranges):
+        training_cutoff = (
+            validation_start - timedelta(minutes=1)
+            if qualifying_confirmatory
+            else start + timedelta(minutes=75)
+        )
+        training_ids = tuple(
+            row.target_id for row in targets.rows if row.target_end_time <= training_cutoff
+        )
+        validation_ids = tuple(
+            row.target_id
+            for row in targets.rows
+            if validation_start <= row.target_start_time < validation_end
+        )
+        fold_values.append(
+            Fold(
+                fold_id=f"synthetic-outer-{index}",
+                training_start=start,
+                training_cutoff=training_cutoff,
+                validation_start=validation_start,
+                validation_end=validation_end,
+                embargo_end=validation_start,
+                training_target_ids=training_ids,
+                validation_target_ids=validation_ids,
+                holdout_excluded=True,
+                membership_hash=membership_hash(training_ids, validation_ids),
+            )
+        )
     folds = FoldDataset.create(
-        (fold,),
+        fold_values,
         target_dataset_id=targets.dataset_id,
         foundation_configuration_id=foundation_id,
     )
@@ -1485,7 +1549,10 @@ def _synthetic_pipeline_inputs(
         "availability_delay_report": {},
         "revision_delay_report": {},
         "data_gaps": [],
-        "source_active_intervals": {name: [] for name in ordered},
+        "source_active_intervals": {
+            name: [[start.isoformat(), holdout[1].isoformat()]] if qualifying_confirmatory else []
+            for name in ordered
+        },
         "lineage_summary": {},
         "observation_bounds": {
             "interval_start": start.isoformat(),
@@ -1859,8 +1926,10 @@ def build_oof_bundle(
     fit_refs: list[ArtifactReference] = []
     coverage_refs: list[ArtifactReference] = []
     forecast_manifest_refs: list[ArtifactReference] = []
+    forecast_manifest_identities: set[tuple[str, str]] = set()
     evaluation_refs: list[ArtifactReference] = []
     forecast_child_refs: list[ArtifactReference] = []
+    forecast_child_by_identity: dict[tuple[str, str], ArtifactReference] = {}
     all_results = (*local_result.fold_results, *pooled_result.fold_results)
     for index, result in enumerate(all_results):
         fit_payload = cast(dict[str, object], result.fit.as_json())
@@ -1884,9 +1953,18 @@ def build_oof_bundle(
             evidence_class=experiment.evidence_class,
         )
         forecast_child_path = f"forecasts/{index:04d}.data.json"
-        children[forecast_child_path] = forecast_payload
         forecast_child_ref = _child_reference(forecast_child_path, forecast_payload)
-        forecast_child_refs.append(forecast_child_ref)
+        forecast_identity = (
+            forecast_child_ref.contract,
+            forecast_child_ref.semantic_id,
+        )
+        existing_forecast_ref = forecast_child_by_identity.get(forecast_identity)
+        if existing_forecast_ref is None:
+            children[forecast_child_path] = forecast_payload
+            forecast_child_refs.append(forecast_child_ref)
+            forecast_child_by_identity[forecast_identity] = forecast_child_ref
+        else:
+            forecast_child_ref = existing_forecast_ref
         forecast_manifest = R2ForecastManifest.create(
             forecast_dataset_id=result.forecasts.dataset_id,
             experiment_configuration_id=experiment.configuration_id,
@@ -1896,10 +1974,18 @@ def build_oof_bundle(
         )
         forecast_manifest_payload = cast(dict[str, object], forecast_manifest.as_json())
         forecast_manifest_path = f"forecasts/{index:04d}.manifest.json"
-        children[forecast_manifest_path] = forecast_manifest_payload
-        forecast_manifest_refs.append(
-            _child_reference(forecast_manifest_path, forecast_manifest_payload)
+        forecast_manifest_ref = _child_reference(
+            forecast_manifest_path,
+            forecast_manifest_payload,
         )
+        forecast_manifest_identity = (
+            forecast_manifest_ref.contract,
+            forecast_manifest_ref.semantic_id,
+        )
+        if forecast_manifest_identity not in forecast_manifest_identities:
+            children[forecast_manifest_path] = forecast_manifest_payload
+            forecast_manifest_refs.append(forecast_manifest_ref)
+            forecast_manifest_identities.add(forecast_manifest_identity)
 
     for summary, name in (
         (local_result.coefficient_stability, "local"),
@@ -1914,8 +2000,13 @@ def build_oof_bundle(
             },
         )
         path = f"evaluation/{name}-stability.json"
-        children[path] = payload
-        evaluation_refs.append(_child_reference(path, payload))
+        reference = _child_reference(path, payload)
+        if not any(
+            item.contract == reference.contract and item.semantic_id == reference.semantic_id
+            for item in evaluation_refs
+        ):
+            children[path] = payload
+            evaluation_refs.append(reference)
     local_comparator_payload: dict[str, object] = {
         **local_comparator.as_json(),
         "source_class": experiment.market_data_source_class.value,
@@ -2306,6 +2397,132 @@ def _authenticated_selection_policy(
     }
 
 
+def _qualified_inner_validation_selections(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    experiment: R2ExperimentConfig,
+    folds: FoldDataset,
+    runtime_values: Mapping[str, str],
+) -> tuple[R2PreprocessingSelection, ...]:
+    """Authenticate the complete R2.C inner-split register needed for F2 readiness."""
+
+    expected_fold_ids = tuple(fold.fold_id for fold in folds.folds)
+    expected_count = len(expected_fold_ids) * (2 * len(experiment.target_instruments) + 2)
+    if len(bundle.preprocessing_children) != expected_count:
+        raise ValueError("confirmatory F2 preprocessing register is incomplete")
+
+    selections: list[R2PreprocessingSelection] = []
+    for reference in bundle.preprocessing_children:
+        child_path = bundle_path.parent / reference.path
+        payload = _load_selection(child_path)
+        semantic_id = _payload_identity(payload)
+        authenticated = reference_for_json(
+            path=reference.path,
+            contract=R2_PREPROCESSING_SELECTION_CONTRACT,
+            semantic_id=semantic_id,
+            content=payload,
+        )
+        if reference != authenticated:
+            raise ValueError("confirmatory F2 preprocessing child reference is unauthenticated")
+        selection = decode_r2_preprocessing_selection(payload)
+        if selection.artifact_id != reference.semantic_id:
+            raise ValueError("confirmatory F2 preprocessing child identity differs")
+        if (
+            selection.experiment_configuration_id != experiment.configuration_id
+            or selection.fold_dataset_id != experiment.fold_dataset_id
+            or selection.target_dataset_id != experiment.target_dataset_id
+            or selection.horizon != experiment.primary_horizon
+            or selection.evidence_class is not EvidenceClass.CONFIRMATORY
+            or selection.market_data_source_class is not experiment.market_data_source_class
+            or selection.application_image_identity != runtime_values["application_identity"]
+            or selection.sklearn_library_identity != runtime_values["sklearn_identity"]
+            or selection.outer_fold_id not in expected_fold_ids
+        ):
+            raise ValueError("confirmatory F2 preprocessing child has incompatible lineage")
+        if (
+            len(selection.selection.inner_validation_target_ids)
+            < experiment.minimum_inner_validation_rows
+        ):
+            raise ValueError(
+                "confirmatory F2 preprocessing child has too few inner-validation rows"
+            )
+        selections.append(selection)
+
+    if len({item.artifact_id for item in selections}) != len(selections):
+        raise ValueError("confirmatory F2 preprocessing register contains duplicates")
+
+    feature_sets = {item.name: item for item in experiment.feature_sets}
+    if set(feature_sets) != set(_REQUIRED_FEATURE_SETS):
+        raise ValueError("confirmatory F2 experiment feature register is incomplete")
+
+    expected_feature_ids = {
+        name: feature_set_id(
+            experiment.configuration_id,
+            name,
+            feature_schema_for_set(experiment, name),
+            experiment.market_data_source_class,
+        )
+        for name in _REQUIRED_FEATURE_SETS
+    }
+    local = tuple(item for item in selections if item.model_family is ModelFamily.LOCAL_RIDGE)
+    local_feature_ids = tuple(sorted({item.feature_set_id for item in local}))
+    expected_local_feature_ids = tuple(
+        sorted((expected_feature_ids["L0"], expected_feature_ids["L1"]))
+    )
+    if local_feature_ids != expected_local_feature_ids:
+        raise ValueError("confirmatory F2 local preprocessing register is incomplete")
+    local_scopes = {
+        (item.feature_set_id, item.target_instruments, item.outer_fold_id) for item in local
+    }
+    expected_local_scopes = {
+        (feature_set_id, (instrument,), fold_id)
+        for feature_set_id in local_feature_ids
+        for instrument in experiment.target_instruments
+        for fold_id in expected_fold_ids
+    }
+    if local_scopes != expected_local_scopes or len(local) != len(expected_local_scopes):
+        raise ValueError("confirmatory F2 local inner-split coverage is incomplete")
+
+    for family in (
+        ModelFamily.POOLED_LOCAL_RIDGE,
+        ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    ):
+        family_selections = tuple(item for item in selections if item.model_family is family)
+        expected_feature_id = expected_feature_ids[
+            "P0" if family is ModelFamily.POOLED_LOCAL_RIDGE else "P1"
+        ]
+        if {item.feature_set_id for item in family_selections} != {expected_feature_id}:
+            raise ValueError(
+                f"confirmatory F2 pooled feature scope is incomplete for {family.value}"
+            )
+        scopes = {(item.target_instruments, item.outer_fold_id) for item in family_selections}
+        expected_scopes = {
+            (tuple(experiment.target_instruments), fold_id) for fold_id in expected_fold_ids
+        }
+        if scopes != expected_scopes or len(family_selections) != len(expected_scopes):
+            raise ValueError(
+                f"confirmatory F2 pooled inner-split coverage is incomplete for {family.value}"
+            )
+
+    return tuple(selections)
+
+
+def _complete_confirmatory_readiness(
+    report: R2ReadinessReport,
+) -> R2ReadinessReport:
+    pending_inner_split = (
+        "minimum_inner_validation_rows requires a verified R2.C chronological inner-split artefact"
+    )
+    return replace(
+        report,
+        inner_validation_rows_ready=ReadinessState.READY,
+        confirmatory_oof_ready=ReadinessState.READY,
+        unmet_conditions=tuple(
+            condition for condition in report.unmet_conditions if condition != pending_inner_split
+        ),
+    )
+
+
 def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     """Verify and replay a qualifying, outcome-blind confirmatory F2 authority."""
     bundle = verify_r2_oof_bundle(path)
@@ -2413,6 +2630,20 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     ):
         if descriptor.get(key) != identities[key]:
             raise ValueError(f"confirmatory F2 runtime identity differs for {key}")
+
+    _qualified_inner_validation_selections(
+        path,
+        bundle,
+        experiment,
+        replayed_folds,
+        identities,
+    )
+    readiness_report = _complete_confirmatory_readiness(readiness_report)
+    if (
+        readiness_report.inner_validation_rows_ready is not ReadinessState.READY
+        or readiness_report.confirmatory_oof_ready is not ReadinessState.READY
+    ):
+        raise ValueError("confirmatory F2 has incomplete R2.C/F2 readiness")
 
     register = _oof_child_payload(path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
     raw_configurations = register.get("configurations")
@@ -2555,18 +2786,35 @@ def freeze_confirmatory_selection(
     minimum_coverage = thresholds.get("minimum_common_support")
     if threshold is None or minimum_coverage is None:
         raise ValueError("confirmatory F2 has no authenticated comparison policy")
-    zero_controls = tuple(
-        item_id for item_id in controls if registry_by_id[item_id][1] is ModelFamily.ZERO_RETURN
-    )
-    if len(zero_controls) != 1:
-        raise ValueError(
-            "confirmatory F2 requires exactly one authenticated ZERO_RETURN comparator"
+    hierarchy_by_family: dict[ModelFamily, str] = {}
+    for configuration_id in verified_f2.holdout_comparator_configuration_ids:
+        family = registry_by_id[configuration_id][1]
+        if family in hierarchy_by_family:
+            raise ValueError("confirmatory F2 holdout hierarchy contains duplicate model families")
+        hierarchy_by_family[family] = configuration_id
+    required_controls = {ModelFamily.ZERO_RETURN, ModelFamily.LOCAL_RIDGE}
+    if not required_controls.issubset(hierarchy_by_family):
+        raise ValueError("confirmatory F2 holdout comparator hierarchy lacks its local baseline")
+    hierarchy = tuple(
+        (candidate, comparator)
+        for candidate, comparator in (
+            (ModelFamily.LOCAL_RIDGE, ModelFamily.ZERO_RETURN),
+            (ModelFamily.POOLED_LOCAL_RIDGE, ModelFamily.LOCAL_RIDGE),
+            (
+                ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+                ModelFamily.POOLED_LOCAL_RIDGE,
+            ),
         )
+        if candidate in hierarchy_by_family and comparator in hierarchy_by_family
+    )
     questions = tuple(
         R2HoldoutQuestion.create(
-            question=f"{candidate} versus {zero_controls[0]} on {metric}",
-            candidate_configuration_id=candidate,
-            comparator_configuration_id=zero_controls[0],
+            question=(
+                f"{hierarchy_by_family[candidate_family]} versus "
+                f"{hierarchy_by_family[comparator_family]} on {metric}"
+            ),
+            candidate_configuration_id=hierarchy_by_family[candidate_family],
+            comparator_configuration_id=hierarchy_by_family[comparator_family],
             metric=metric,
             support_policy="COMMON_ELIGIBLE",
             direction=HoldoutDirection.LOWER_IS_BETTER,
@@ -2575,10 +2823,8 @@ def freeze_confirmatory_selection(
             minimum_coverage=minimum_coverage,
             conclusion_policy="THRESHOLD_OR_INCONCLUSIVE",
         )
-        for candidate in selected
+        for candidate_family, comparator_family in hierarchy
     )
-    if not questions:
-        raise ValueError("confirmatory selection must derive a non-empty question register")
 
     runtime_values: dict[str, JsonValue] = dict(verified_f2.runtime_identities)
     runtime_values["instrument_identity_order"] = list(source.target_instruments)

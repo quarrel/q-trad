@@ -776,6 +776,33 @@ def _selection_decisions(
     hierarchy_ids = {item.configuration_id for item in hierarchy.values()}
     comparison_by_candidate = {item.candidate: item for item in report.comparisons}
     stability_by_candidate = {item.candidate: item for item in report.stability}
+    gate_register: dict[str, tuple[SelectionGateOutcome, ...]] = {}
+    selected_register: dict[ModelFamily, bool] = {}
+    for family, configuration in hierarchy.items():
+        if (
+            family is ModelFamily.ZERO_RETURN
+            or configuration.disposition is ConfigurationDisposition.FAILED
+        ):
+            selected_register[family] = False
+            continue
+        comparison = comparison_by_candidate[family]
+        gates = _credibility_gates(
+            configuration.configuration_id,
+            comparison,
+            stability_by_candidate[family],
+            report,
+            thresholds,
+        )
+        primary_delta = _metric_difference(
+            comparison.comparator_instrument_balanced_mse,
+            comparison.candidate_instrument_balanced_mse,
+        )
+        gate_register[configuration.configuration_id] = gates
+        selected_register[family] = (
+            primary_delta.availability.value == "DEFINED"
+            and _metric_number(primary_delta) > 0.0
+            and all(gate.passed for gate in gates)
+        )
     decisions: list[SelectionDecision] = []
     for configuration in report.configurations:
         family = configuration.model_family
@@ -809,30 +836,17 @@ def _selection_decisions(
                 )
             )
             continue
-        comparison = comparison_by_candidate[family]
-        stability = stability_by_candidate[family]
-        gates = _credibility_gates(
-            configuration.configuration_id,
-            comparison,
-            stability,
-            report,
-            thresholds,
-        )
-        primary_delta = _metric_difference(
-            comparison.comparator_instrument_balanced_mse,
-            comparison.candidate_instrument_balanced_mse,
-        )
-        selected = (
-            primary_delta.availability.value == "DEFINED"
-            and _metric_number(primary_delta) > 0.0
-            and all(gate.passed for gate in gates)
-        )
+        gates = gate_register[configuration.configuration_id]
+        selected = selected_register[family]
         if selected:
             disposition = ConfigurationDisposition.SELECTED_CANDIDATE
             reason = "improves its immediate comparator and passes every frozen gate"
-        elif family is ModelFamily.LOCAL_RIDGE:
+        elif family is ModelFamily.LOCAL_RIDGE or (
+            family is ModelFamily.POOLED_LOCAL_RIDGE
+            and selected_register[ModelFamily.POOLED_CROSS_ASSET_RIDGE]
+        ):
             disposition = ConfigurationDisposition.RETAINED_CONTROL
-            reason = "required local baseline retained as a control"
+            reason = "required immediate comparator retained as a holdout control"
         else:
             disposition = ConfigurationDisposition.REJECTED
             reason = "does not satisfy the frozen immediate-comparator selection gates"

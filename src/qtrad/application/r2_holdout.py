@@ -601,10 +601,11 @@ def freeze_holdout_selection(
         raise ValueError("G2 source class differs from the prior selection")
     if prior_selection.evidence_class is not evidence_class:
         raise ValueError("G2 evidence class differs from the prior selection")
+    holdout_configurations = set(prior_selection.holdout_comparator_configuration_ids)
     for question in questions:
         if (
-            question.candidate_configuration_id not in selected
-            or question.comparator_configuration_id not in controls
+            question.candidate_configuration_id not in holdout_configurations
+            or question.comparator_configuration_id not in holdout_configurations
         ):
             raise ValueError(
                 "holdout question references a configuration outside the frozen registry"
