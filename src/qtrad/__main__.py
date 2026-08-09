@@ -1848,7 +1848,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.ibkr_configuration is not None:
             ingest_kwargs["ibkr_configuration_path"] = args.ibkr_configuration
         asyncio.run(
-            _ingest(
+            _run_ingest(
                 ingest_settings,
                 clock,
                 **ingest_kwargs,
@@ -5078,6 +5078,44 @@ async def _synchronise_capture_universe(
                 f"active provider listing does not match release for {instrument_id}"
             )
     return tuple(by_instrument[instrument_id] for instrument_id in instrument_ids)
+
+
+async def _run_ingest(
+    settings: Settings,
+    clock: Clock,
+    *,
+    maximum_seconds: float | None = None,
+    force_reconnect_after_seconds: float | None = None,
+    ibkr_configuration_path: Path | None = None,
+) -> None:
+    """Run ingestion with process termination translated to orderly cancellation."""
+
+    loop = asyncio.get_running_loop()
+    ingest_task = asyncio.create_task(
+        _ingest(
+            settings,
+            clock,
+            maximum_seconds=maximum_seconds,
+            force_reconnect_after_seconds=force_reconnect_after_seconds,
+            ibkr_configuration_path=ibkr_configuration_path,
+        )
+    )
+    signal_installed = False
+
+    def request_shutdown() -> None:
+        if not ingest_task.done():
+            ingest_task.cancel()
+
+    try:
+        try:
+            loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+            signal_installed = True
+        except (NotImplementedError, RuntimeError):
+            LOGGER.warning("ingest_termination_signal_unavailable")
+        await ingest_task
+    finally:
+        if signal_installed:
+            loop.remove_signal_handler(signal.SIGTERM)
 
 
 async def _ingest(
