@@ -7,8 +7,6 @@ not discover contracts, contact IBKR, inspect a live database, or mutate a host.
 
 from __future__ import annotations
 
-import hashlib
-import json
 import re
 import tomllib
 from collections.abc import Mapping, Sequence
@@ -19,7 +17,7 @@ from pathlib import Path
 from typing import cast
 
 from qtrad.adapters.ibkr.market_hours import IbkrMarketActivity
-from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.events import JsonValue
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import AssetClass, ProductType, ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
@@ -27,9 +25,17 @@ from qtrad.runtime.ibkr_historical import (
     load_ibkr_capability_review,
     verify_ibkr_contract_selection,
 )
-from qtrad.runtime.ibkr_native_capture import (
-    IbkrNativeCaptureConfiguration,
-    load_reviewed_configuration,
+from qtrad.runtime.ibkr_native_capture import IbkrNativeCaptureConfiguration
+from qtrad.runtime.ibkr_release import (
+    IbkrAuthorityPaths,
+    authority_identity,
+    configuration_payload,
+    load_canonical_release_configuration,
+    load_release_document,
+    write_release,
+)
+from qtrad.runtime.ibkr_release import (
+    IbkrPromotionAuthority as IbkrB3PromotionAuthority,
 )
 from qtrad.runtime.universe import load_capture_candidates
 
@@ -44,48 +50,6 @@ B3_API_PORT = 8000
 B3_GATEWAY_HOSTS = frozenset({"127.0.0.1", "::1"})
 B3_SUPPORTED_IBKR_VERSIONS = frozenset({"10.45", "10.49"})
 
-_AUTHORITY_HASH_FIELDS = (
-    "capability_review_sha256",
-    "operator_selection_sha256",
-    "contract_selection_sha256",
-    "catalogue_sha256",
-    "probe_spec_sha256",
-)
-
-
-@dataclass(frozen=True, slots=True)
-class IbkrB3PromotionAuthority:
-    """Exact immutable files whose replay authorised one B3 release."""
-
-    capability_review_sha256: str
-    operator_selection_sha256: str
-    contract_selection_sha256: str
-    catalogue_sha256: str
-    probe_spec_sha256: str
-
-    def __post_init__(self) -> None:
-        for field_name in _AUTHORITY_HASH_FIELDS:
-            _require_hash(getattr(self, field_name), f"B3 {field_name}")
-
-    def as_json_value(self) -> dict[str, JsonValue]:
-        return {field_name: getattr(self, field_name) for field_name in _AUTHORITY_HASH_FIELDS}
-
-    @classmethod
-    def from_json_value(cls, value: object) -> IbkrB3PromotionAuthority:
-        if not isinstance(value, Mapping) or set(value) != set(_AUTHORITY_HASH_FIELDS):
-            raise ValueError("B3 release requires exact promotion authority identities")
-        authority = cast(Mapping[str, object], value)
-        return cls(
-            **{field_name: str(authority[field_name]) for field_name in _AUTHORITY_HASH_FIELDS}
-        )
-
-
-def _sha256_file(path: Path, label: str) -> str:
-    try:
-        return hashlib.sha256(path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise ValueError(f"unable to read B3 {label} authority: {path}") from error
-
 
 def _promotion_authority(
     *,
@@ -95,12 +59,15 @@ def _promotion_authority(
     catalogue_path: Path,
     probe_spec_path: Path,
 ) -> IbkrB3PromotionAuthority:
-    return IbkrB3PromotionAuthority(
-        capability_review_sha256=_sha256_file(capability_review_path, "capability review"),
-        operator_selection_sha256=_sha256_file(operator_selection_path, "operator selection"),
-        contract_selection_sha256=_sha256_file(contract_selection_path, "contract selection"),
-        catalogue_sha256=_sha256_file(catalogue_path, "catalogue"),
-        probe_spec_sha256=_sha256_file(probe_spec_path, "probe spec"),
+    return authority_identity(
+        IbkrAuthorityPaths(
+            capability_review_path=capability_review_path,
+            operator_selection_path=operator_selection_path,
+            contract_selection_path=contract_selection_path,
+            catalogue_path=catalogue_path,
+            probe_spec_path=probe_spec_path,
+        ),
+        label="B3",
     )
 
 
@@ -434,46 +401,10 @@ def _configuration_payload(
     configuration: IbkrNativeCaptureConfiguration,
     authority: IbkrB3PromotionAuthority,
 ) -> dict[str, JsonValue]:
-    listings: list[JsonValue] = []
-    for listing in sorted(configuration.listings, key=lambda item: str(item.listing_id)):
-        evidence = configuration.contract_evidence[listing.listing_id]
-        listings.append(
-            cast(
-                JsonValue,
-                {
-                    "provider": listing.listing_id.provider,
-                    "environment": listing.listing_id.environment,
-                    "external_id": listing.listing_id.external_id,
-                    "instrument_id": str(listing.instrument_id),
-                    "display_name": listing.display_name,
-                    "product_type": listing.product_type.value,
-                    "currency": listing.currency,
-                    "minimum_deal_size": str(listing.minimum_deal_size),
-                    "price_increment": (
-                        str(listing.price_increment)
-                        if listing.price_increment is not None
-                        else None
-                    ),
-                    "valid_from": listing.valid_from.isoformat(),
-                    "valid_to": listing.valid_to.isoformat()
-                    if listing.valid_to is not None
-                    else None,
-                    "metadata_version": listing.metadata_version,
-                    "economics": cast(dict[str, JsonValue], to_json_value(listing.economics)),
-                    "evidence": cast(dict[str, JsonValue], to_json_value(evidence)),
-                },
-            )
-        )
-    return cast(
-        dict[str, JsonValue],
-        {
-            "contract": B3_RELEASE_CONTRACT,
-            "capture_source_id": configuration.capture_source_id,
-            "universe_id": configuration.universe_id,
-            "configuration_hash": configuration.configuration_hash,
-            "promotion_authority": authority.as_json_value(),
-            "listings": listings,
-        },
+    return configuration_payload(
+        configuration,
+        authority,
+        contract=B3_RELEASE_CONTRACT,
     )
 
 
@@ -497,11 +428,7 @@ def write_reviewed_configuration(
         catalogue_path=catalogue_path,
         probe_spec_path=probe_spec_path,
     )
-    payload = _configuration_payload(configuration, authority)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
-    with path.open("xb") as handle:
-        handle.write(encoded)
+    write_release(path, _configuration_payload(configuration, authority))
 
 
 def _load_authenticated_b3_release(
@@ -515,21 +442,16 @@ def _load_authenticated_b3_release(
 ) -> tuple[IbkrNativeCaptureConfiguration, IbkrB3PromotionAuthority]:
     """Load one canonical B3 envelope and replay its immutable authority closure."""
 
-    try:
-        document = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise ValueError(f"unable to read B3 release configuration: {path}") from error
-    if not isinstance(document, Mapping):
-        raise ValueError("B3 release configuration must be an object")
-    if document.get("contract") != B3_RELEASE_CONTRACT:
-        raise ValueError("B3 release configuration contract marker is unsupported")
+    document = load_release_document(path, label="B3")
     embedded_authority = IbkrB3PromotionAuthority.from_json_value(
         document.get("promotion_authority")
     )
-    configuration = load_reviewed_configuration(path)
-    expected_document = _configuration_payload(configuration, embedded_authority)
-    if document != expected_document:
-        raise ValueError("B3 release configuration contains non-canonical fields")
+    configuration = load_canonical_release_configuration(
+        path,
+        contract=B3_RELEASE_CONTRACT,
+        authority=embedded_authority,
+        label="B3",
+    )
 
     _, authenticated_authority = _authenticate_b3_provider_authority(
         configuration,

@@ -28,6 +28,7 @@ image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
 descriptor="${QTRAD_IBKR_RELEASE_DESCRIPTOR:?set QTRAD_IBKR_RELEASE_DESCRIPTOR}"
 repository_root="${QTRAD_IBKR_REPOSITORY_ROOT:-$script_dir/../..}"
 preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-qtrad}"
+release_policy="${QTRAD_IBKR_RELEASE_POLICY:-b3-exact-two}"
 checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
 gateway_archive_sha="${QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256:?set QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256}"
@@ -86,6 +87,7 @@ verify_database_head() {
 [[ "$api_host" == 127.0.0.1 ]] || fail "API must use the reviewed runtime host"
 [[ "$gateway_port" == 4002 && "$api_port" == 8000 ]] || fail "unexpected private ports"
 [[ "$client_id" =~ ^[1-9][0-9]*$ ]] || fail "client ID must be positive"
+[[ "$release_policy" == b3-exact-two || "$release_policy" == b4-exact-six ]] || fail "release policy is invalid"
 [[ "$database_name" == qtrad_ibkr ]] || fail "database must be dedicated qtrad_ibkr"
 [[ "$api_version" == "$gateway_version" && ( "$api_version" == 10.49 || "$api_version" == 10.45 ) ]] || fail "API/Gateway versions mismatch"
 [[ -r "$descriptor" ]] || fail "release descriptor is not readable"
@@ -96,7 +98,8 @@ command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
 preflight_json="$("$preflight_bin" deployment ibkr-preflight \
-    --descriptor "$descriptor" --repository-root "$repository_root" \
+    --policy "$release_policy" --descriptor "$descriptor" \
+    --repository-root "$repository_root" \
     --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}")"
 application_commit="$(jq -er '.application_commit' <<<"$preflight_json")"
 printf '%s\n' "$preflight_json" | jq -e \

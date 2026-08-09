@@ -137,9 +137,17 @@ from qtrad.runtime.foundation_bundle import (
 )
 from qtrad.runtime.ibkr_b3 import (
     b3_preflight,
+    load_b3_deployment_descriptor,
     promote_b3_configuration,
     verify_b3_release,
     write_reviewed_configuration,
+)
+from qtrad.runtime.ibkr_b4 import (
+    b4_preflight,
+    promote_b4_configuration,
+    verify_b3_qualification_for_release,
+    verify_b4_release,
+    write_b4_release,
 )
 from qtrad.runtime.ibkr_canary import (
     verify_ibkr_historical_canary_evidence,
@@ -173,6 +181,7 @@ from qtrad.runtime.ibkr_native_capture import (
     build_ibkr_native_adapter,
     load_reviewed_configuration,
 )
+from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
@@ -569,6 +578,17 @@ def build_parser() -> argparse.ArgumentParser:
     promote_b3.add_argument("--catalogue", type=Path, required=True)
     promote_b3.add_argument("--probe-spec", type=Path, required=True)
     promote_b3.add_argument("--output", type=Path, required=True)
+    promote_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+    )
+    promote_b3.add_argument("--parent-release", type=Path)
+    promote_b3.add_argument("--parent-descriptor", type=Path)
+    promote_b3.add_argument("--parent-qualification", type=Path)
+    promote_b3.add_argument("--parent-capability-review", type=Path)
+    promote_b3.add_argument("--parent-operator-selection", type=Path)
+    promote_b3.add_argument("--parent-contract-selection", type=Path)
+    promote_b3.add_argument("--parent-catalogue", type=Path)
+    promote_b3.add_argument("--parent-probe-spec", type=Path)
     verify_b3 = deployment_sub.add_parser(
         "ibkr-verify", help="verify an exact-two B3 config offline"
     )
@@ -579,12 +599,39 @@ def build_parser() -> argparse.ArgumentParser:
     verify_b3.add_argument("--catalogue", type=Path, required=True)
     verify_b3.add_argument("--probe-spec", type=Path, required=True)
     verify_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
+    verify_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+    )
+    verify_b3.add_argument("--parent-release", type=Path)
+    verify_b3.add_argument("--parent-descriptor", type=Path)
+    verify_b3.add_argument("--parent-qualification", type=Path)
+    verify_b3.add_argument("--parent-capability-review", type=Path)
+    verify_b3.add_argument("--parent-operator-selection", type=Path)
+    verify_b3.add_argument("--parent-contract-selection", type=Path)
+    verify_b3.add_argument("--parent-catalogue", type=Path)
+    verify_b3.add_argument("--parent-probe-spec", type=Path)
     preflight_b3 = deployment_sub.add_parser(
         "ibkr-preflight", help="verify B3 release identity without host or provider I/O"
+    )
+    preflight_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
     )
     preflight_b3.add_argument("--descriptor", type=Path, required=True)
     preflight_b3.add_argument("--repository-root", type=Path, default=Path.cwd())
     preflight_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
+
+    qualification_b3 = deployment_sub.add_parser(
+        "ibkr-qualification-verify",
+        help="verify an immutable B3 qualification artifact without provider I/O",
+    )
+    qualification_b3.add_argument("--qualification", type=Path, required=True)
+    qualification_b3.add_argument("--release", type=Path, required=True)
+    qualification_b3.add_argument("--descriptor", type=Path, required=True)
+    qualification_b3.add_argument("--capability-review", type=Path, required=True)
+    qualification_b3.add_argument("--operator-selection", type=Path, required=True)
+    qualification_b3.add_argument("--contract-selection", type=Path, required=True)
+    qualification_b3.add_argument("--catalogue", type=Path, required=True)
+    qualification_b3.add_argument("--probe-spec", type=Path, required=True)
 
     runs = subparsers.add_parser("runs", help="operational run evidence")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
@@ -1183,48 +1230,141 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(descriptor.to_json())
     elif args.command == "deployment" and args.deployment_command == "ibkr-promote":
         source = load_reviewed_configuration(args.source_configuration)
-        promoted = promote_b3_configuration(
-            source,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-        )
-        write_reviewed_configuration(
-            args.output,
-            promoted,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-        )
+        if args.policy == "b3-exact-two":
+            configuration = promote_b3_configuration(
+                source,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+            )
+            write_reviewed_configuration(
+                args.output,
+                configuration,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+            )
+            contract = "qtrad-ibkr-native-release-v1"
+        else:
+            required = (
+                "parent_release",
+                "parent_descriptor",
+                "parent_qualification",
+                "parent_capability_review",
+                "parent_operator_selection",
+                "parent_contract_selection",
+                "parent_catalogue",
+                "parent_probe_spec",
+            )
+            missing = [name for name in required if getattr(args, name) is None]
+            if missing:
+                raise SystemExit(
+                    "B4 promotion requires " + ", ".join(name.replace("_", "-") for name in missing)
+                )
+            parent_paths = IbkrAuthorityPaths(
+                capability_review_path=args.parent_capability_review,
+                operator_selection_path=args.parent_operator_selection,
+                contract_selection_path=args.parent_contract_selection,
+                catalogue_path=args.parent_catalogue,
+                probe_spec_path=args.parent_probe_spec,
+            )
+            qualification = verify_b3_qualification_for_release(
+                args.parent_qualification,
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                deployment=load_b3_deployment_descriptor(args.parent_descriptor),
+            )
+            promotion = promote_b4_configuration(
+                source,
+                authority_paths=IbkrAuthorityPaths(
+                    capability_review_path=args.capability_review,
+                    operator_selection_path=args.operator_selection,
+                    contract_selection_path=args.contract_selection,
+                    catalogue_path=args.catalogue,
+                    probe_spec_path=args.probe_spec,
+                ),
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                qualification=qualification,
+            )
+            write_b4_release(args.output, promotion)
+            configuration = promotion.configuration
+            contract = "qtrad-ibkr-native-release-v2"
         print(
             json.dumps(
                 {
-                    "contract": "qtrad-ibkr-native-release-v1",
-                    "configuration_hash": promoted.configuration_hash,
-                    "instrument_count": len(promoted.listings),
+                    "contract": contract,
+                    "configuration_hash": configuration.configuration_hash,
+                    "instrument_count": len(configuration.listings),
                 },
                 sort_keys=True,
             )
         )
     elif args.command == "deployment" and args.deployment_command == "ibkr-verify":
-        report = verify_b3_release(
-            args.configuration,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-            observed_at=args.observed_at,
-        )
+        if args.policy == "b3-exact-two":
+            report = verify_b3_release(
+                args.configuration,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+                observed_at=args.observed_at,
+            )
+        else:
+            required = (
+                "parent_release",
+                "parent_descriptor",
+                "parent_qualification",
+                "parent_capability_review",
+                "parent_operator_selection",
+                "parent_contract_selection",
+                "parent_catalogue",
+                "parent_probe_spec",
+            )
+            missing = [name for name in required if getattr(args, name) is None]
+            if missing:
+                raise SystemExit(
+                    "B4 verification requires "
+                    + ", ".join(name.replace("_", "-") for name in missing)
+                )
+            parent_paths = IbkrAuthorityPaths(
+                capability_review_path=args.parent_capability_review,
+                operator_selection_path=args.parent_operator_selection,
+                contract_selection_path=args.parent_contract_selection,
+                catalogue_path=args.parent_catalogue,
+                probe_spec_path=args.parent_probe_spec,
+            )
+            qualification = verify_b3_qualification_for_release(
+                args.parent_qualification,
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                deployment=load_b3_deployment_descriptor(args.parent_descriptor),
+            )
+            report = verify_b4_release(
+                args.configuration,
+                authority_paths=IbkrAuthorityPaths(
+                    capability_review_path=args.capability_review,
+                    operator_selection_path=args.operator_selection,
+                    contract_selection_path=args.contract_selection,
+                    catalogue_path=args.catalogue,
+                    probe_spec_path=args.probe_spec,
+                ),
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                qualification=qualification,
+                observed_at=args.observed_at,
+            )
         print(json.dumps(report, sort_keys=True))
         if not report["valid"]:
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-preflight":
-        report = b3_preflight(
+        preflight = b3_preflight if args.policy == "b3-exact-two" else b4_preflight
+        report = preflight(
             args.descriptor,
             repository_root=args.repository_root,
             observed_at=args.observed_at,
@@ -1236,6 +1376,33 @@ def main(argv: Sequence[str] | None = None) -> None:
             or report["requires_evidence_refresh"]
         ):
             raise SystemExit(1)
+    elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-verify":
+        capability = verify_b3_qualification_for_release(
+            args.qualification,
+            parent_release_path=args.release,
+            parent_authority_paths=IbkrAuthorityPaths(
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+            ),
+            deployment=load_b3_deployment_descriptor(args.descriptor),
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": "qtrad-ibkr-native-qualification-v1",
+                    "stage": capability.stage,
+                    "artifact_sha256": capability.artifact_sha256,
+                    "release_sha256": capability.release_sha256,
+                    "configuration_hash": capability.configuration_hash,
+                    "instrument_count": len(capability.instruments),
+                    "qualified_at": capability.qualified_at.isoformat(),
+                },
+                sort_keys=True,
+            )
+        )
     elif args.command == "runs" and args.runs_command == "reconcile-plan":
         asyncio.run(
             _plan_run_reconciliation(

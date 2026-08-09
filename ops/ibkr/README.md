@@ -53,6 +53,33 @@ B3 does not run a host, Gateway, database, deployment or qualification operation
 
 Use `qtrad deployment ibkr-promote` only with an already reviewed B2 configuration and the immutable capability-review, operator-selection, contract-selection, catalogue and probe files; it replays that closure and writes their exact hashes into a new exact-two release create-only. `qtrad deployment ibkr-verify` requires the same authority files and replays them against the final persisted evidence. `qtrad deployment ibkr-preflight` reads their absolute paths from the immutable descriptor and performs the same replay. The B3 implementation and verification boundary stops there; live Gateway, database, deployment, restart/reconnect, backup/restore and qualification evidence require separate authorization.
 
+## Offline B4 software boundary
+
+B4 remains offline software until a separately authorized, real B3 qualification has
+been frozen. The exact-six policy is AUD/USD, EUR/USD, Australia 200, US 500, Gold,
+and US Crude. The four new conIds and all contract fields must come from a fresh,
+replayed capability-review/selection closure; the implementation does not guess them.
+
+B4 promotion, verification, and preflight are intentionally fail-closed until the
+live snapshot tranche supplies independently replayable immutable evidence. A sealed
+qualification summary is not provenance and cannot mint the runtime-only capability.
+Once that evidence reader exists, `qtrad deployment ibkr-promote --policy b4-exact-six`
+will require the authenticated B3 release, its five authority files, the B3 deployment
+descriptor, and fresh exact-six authority. The B4 release will record parent release
+and qualification identities and remain create-only under
+`qtrad-ibkr-native-release-v2`.
+
+The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
+listing identities, conIds, and immutable listing semantics. The other four contracts
+must come from the fresh replayed authority closure. B4 continues to reuse the existing
+service, database, port, client-ID, and checkpoint topology.
+
+These commands do not create a real B4 release in this software phase and do not
+qualify B3 or B4. Closed-market connectivity is not qualification evidence. Real
+qualification still requires LIVE bid and ask evidence during authenticated ACTIVE
+periods, zero-loss persistence, controlled reconnect with fresh post-reconnect data,
+and verified backup/restore.
+
 ## Running explicit historical CLI commands
 
 The published IBKR image has an `uv` entrypoint. To invoke a q-trad subcommand, override that
