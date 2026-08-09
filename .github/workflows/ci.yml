@@ -80,11 +80,9 @@ jobs:
           -u QTRAD_MIGRATION_DATABASE_URL
           uv run pytest
           -m "not postgres"
-          -n 4
-          --dist worksteal
           --durations=25
           --durations-min=0.5
-          --junitxml=pytest-parallel.xml
+          --junitxml=pytest-non-postgres.xml
 
       - name: Test PostgreSQL integration
         run: >-
@@ -101,7 +99,7 @@ jobs:
         with:
           name: pytest-timing-${{ github.run_attempt }}
           path: |
-            pytest-parallel.xml
+            pytest-non-postgres.xml
             pytest-postgres.xml
           if-no-files-found: warn
           retention-days: 7
