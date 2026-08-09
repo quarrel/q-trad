@@ -491,7 +491,11 @@ async def test_security_definition_farm_failure_does_not_block_request_error() -
     )
     adapter._callbacks.put(capability._Callback("error", 1, (1_785_000_001, 200, "REQUEST_ERROR")))
 
-    callbacks = await adapter._collect_until(1, "historical_data_end")
+    callbacks = await adapter._collect_until(
+        1,
+        "historical_data_end",
+        timeout_seconds=1.0,
+    )
 
     assert capability._error_codes(callbacks) == ("IBKR_200", "IBKR_2157")
     assert capability._status(callbacks, "historical_data_end") == "ERROR"

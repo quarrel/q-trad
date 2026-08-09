@@ -17,6 +17,8 @@ FORBIDDEN_QTRAD_DEPENDENCIES = {
     "application": {"adapters", "api", "runtime"},
 }
 
+_POSTGRES_DATABASE_ENVIRONMENT_VARIABLE = "QTRAD_TEST_" + "DATABASE_URL"
+
 
 def _imports(path: Path) -> set[str]:
     tree = ast.parse(path.read_text(encoding="utf-8"))
@@ -50,3 +52,21 @@ def test_core_dependency_direction(layer: str, path: Path) -> None:
         if (parts := name.split("."))[:1] == ["qtrad"] and len(parts) > 1
     }
     assert qtrad_layers.isdisjoint(FORBIDDEN_QTRAD_DEPENDENCIES[layer])
+
+
+def test_postgres_database_url_is_only_accessed_through_fixture() -> None:
+    direct_accesses: dict[Path, list[int]] = {}
+    for path in sorted(Path("tests").rglob("test_*.py")):
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        direct_access_lines = [
+            node.lineno
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Constant)
+            and node.value == _POSTGRES_DATABASE_ENVIRONMENT_VARIABLE
+        ]
+        if direct_access_lines:
+            direct_accesses[path] = direct_access_lines
+    assert not direct_accesses, (
+        f"tests access QTRAD_TEST_DATABASE_URL directly: {direct_accesses}; "
+        "use the postgres_database_url fixture and pytest.mark.postgres"
+    )
