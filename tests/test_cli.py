@@ -1,6 +1,7 @@
 import asyncio
 import json
-from collections.abc import AsyncIterator, Mapping, Sequence
+import signal
+from collections.abc import AsyncIterator, Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -155,7 +156,7 @@ def cli_clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
         ),
         (
             ["ingest", "--max-seconds", "60", "--force-reconnect-after-seconds", "20"],
-            "_ingest",
+            "_run_ingest",
             (("maximum_seconds", 60.0), ("force_reconnect_after_seconds", 20.0)),
         ),
         (
@@ -1104,6 +1105,53 @@ async def test_ingestion_rejects_invalid_time_bounds_before_io(
             maximum_seconds=maximum_seconds,
             force_reconnect_after_seconds=reconnect_seconds,
         )
+
+
+@pytest.mark.asyncio
+async def test_sigterm_cancels_ingestion_for_orderly_shutdown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    loop = asyncio.get_running_loop()
+    handlers: list[Callable[[], None]] = []
+    removed: list[int] = []
+    started = asyncio.Event()
+    stopped = asyncio.Event()
+
+    async def ingest(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            stopped.set()
+
+    def add_signal_handler(signum: int, callback: Callable[[], None], *args: object) -> None:
+        assert signum == signal.SIGTERM
+        assert args == ()
+        handlers.append(callback)
+
+    def remove_signal_handler(signum: int) -> bool:
+        removed.append(signum)
+        return True
+
+    monkeypatch.setattr(cli, "_ingest", ingest)
+    monkeypatch.setattr(loop, "add_signal_handler", add_signal_handler)
+    monkeypatch.setattr(loop, "remove_signal_handler", remove_signal_handler)
+
+    task = asyncio.create_task(
+        cli._run_ingest(
+            cast(Settings, SimpleNamespace()),
+            Mock(spec=Clock),
+        )
+    )
+    await started.wait()
+    assert len(handlers) == 1
+
+    handlers[0]()
+    await asyncio.wait_for(task, timeout=1)
+
+    assert stopped.is_set()
+    assert removed == [signal.SIGTERM]
 
 
 def test_parser_rejects_non_demo_ingestion_environment() -> None:
