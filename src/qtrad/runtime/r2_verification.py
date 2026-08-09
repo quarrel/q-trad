@@ -38,7 +38,11 @@ from qtrad.application.r2_features import (
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
-from qtrad.application.r2_holdout import freeze_holdout_selection
+from qtrad.application.r2_holdout import (
+    _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN,
+    VerifiedConfirmatoryHoldoutAuthority,
+    freeze_holdout_selection,
+)
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_historical_experiment,
     build_ibkr_r2_foundation_inputs,
@@ -239,6 +243,7 @@ class VerifiedConfirmatoryF2:
     __slots__ = (
         "_bundle",
         "_configuration_registry",
+        "_confirmatory_holdout_authority",
         "_descriptor",
         "_evaluated_configurations",
         "_evaluation_policy",
@@ -255,6 +260,7 @@ class VerifiedConfirmatoryF2:
     )
 
     _bundle: R2OofBundle
+    _confirmatory_holdout_authority: VerifiedConfirmatoryHoldoutAuthority
     _configuration_registry: tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]
     _descriptor: Mapping[str, JsonValue]
     _evaluated_configurations: tuple[ConfigurationRecord, ...]
@@ -295,6 +301,7 @@ class VerifiedConfirmatoryF2:
             tuple[str, ModelFamily, str | None, str | None, str | None], ...
         ],
         evaluation_policy: Mapping[str, JsonValue],
+        confirmatory_holdout_authority: VerifiedConfirmatoryHoldoutAuthority,
         readiness_report: R2ReadinessReport,
         runtime_identities: Mapping[str, str],
         selection_policy: Mapping[str, JsonValue],
@@ -321,6 +328,9 @@ class VerifiedConfirmatoryF2:
             holdout_comparator_configuration_ids,
         )
         object.__setattr__(instance, "_configuration_registry", configuration_registry)
+        object.__setattr__(
+            instance, "_confirmatory_holdout_authority", confirmatory_holdout_authority
+        )
         object.__setattr__(
             instance,
             "_evaluation_policy",
@@ -398,6 +408,10 @@ class VerifiedConfirmatoryF2:
         self,
     ) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
         return self._configuration_registry
+
+    @property
+    def confirmatory_holdout_authority(self) -> VerifiedConfirmatoryHoldoutAuthority:
+        return self._confirmatory_holdout_authority
 
     @property
     def evaluation_policy(self) -> Mapping[str, JsonValue]:
@@ -2704,6 +2718,13 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         expected_selected_configuration_ids=selected_ids,
         expected_holdout_configuration_ids=holdout_ids,
     )
+    confirmatory_holdout_authority = VerifiedConfirmatoryHoldoutAuthority._create(
+        _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN,
+        oof_bundle_id=bundle.bundle_id,
+        evaluation_report_id=report_id,
+        configuration_registry=registry,
+        evaluation_policy=evaluation_policy,
+    )
     return VerifiedConfirmatoryF2._create(
         _VERIFIED_CONFIRMATORY_F2_TOKEN,
         bundle=bundle,
@@ -2718,6 +2739,7 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         holdout_comparator_configuration_ids=holdout_ids,
         configuration_registry=registry,
         evaluation_policy=cast(Mapping[str, JsonValue], evaluation_policy),
+        confirmatory_holdout_authority=confirmatory_holdout_authority,
         readiness_report=readiness_report,
         runtime_identities=identities,
         selection_policy=selection_policy,
@@ -2931,6 +2953,7 @@ def freeze_confirmatory_selection(
         verified_experiment=experiment,
         configuration_registry=verified_f2.configuration_registry,
         evaluation_policy=evaluation_policy,
+        confirmatory_authority=verified_f2.confirmatory_holdout_authority,
         holdout_target_source=source,
         holdout_opportunity_registry=opportunity_registry,
         pre_holdout_projection=projection,

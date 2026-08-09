@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -15,6 +16,7 @@ import pytest
 
 import qtrad.runtime.r2_verification as verification
 from qtrad.application.r2_features import build_raw_feature_rows, feature_schema_for_set
+from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
 from qtrad.domain.foundation import PanelRow, PanelStatus
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
@@ -30,6 +32,7 @@ from qtrad.domain.r2_readiness import (
     EvidenceClass,
     FeatureFamily,
     MarketDataSourceClass,
+    ModelFamily,
     R2ReadinessReport,
     ReadinessState,
 )
@@ -460,6 +463,56 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
         match="confirmatory question is not an authenticated immediate comparison",
     ):
         cast(Any, shared_freeze)(**{**captured_freeze, "questions": (invented_question,)})
+    tampered_evaluation_policy = dict(
+        cast(Mapping[str, JsonValue], captured_freeze["evaluation_policy"])
+    )
+    tampered_evaluation_policy["comparison_registry"] = [
+        *cast(list[JsonValue], tampered_evaluation_policy["comparison_registry"]),
+        ["POOLED_CROSS_ASSET_RIDGE", "ZERO_RETURN"],
+    ]
+    with pytest.raises(
+        ValueError,
+        match="evaluation policy differs from verifier-only confirmatory authority",
+    ):
+        cast(Any, shared_freeze)(
+            **{
+                **captured_freeze,
+                "questions": (invented_question,),
+                "evaluation_policy": tampered_evaluation_policy,
+            }
+        )
+    tampered_configuration_registry = tuple(
+        (
+            configuration_id,
+            (ModelFamily.ZERO_RETURN if family is ModelFamily.POOLED_CROSS_ASSET_RIDGE else family),
+            feature_set_id,
+            feature_dataset_id,
+            manifest_id,
+        )
+        for (
+            configuration_id,
+            family,
+            feature_set_id,
+            feature_dataset_id,
+            manifest_id,
+        ) in cast(
+            tuple[
+                tuple[str, ModelFamily, str | None, str | None, str | None],
+                ...,
+            ],
+            captured_freeze["configuration_registry"],
+        )
+    )
+    with pytest.raises(
+        ValueError,
+        match="configuration registry differs from verifier-only confirmatory authority",
+    ):
+        cast(Any, shared_freeze)(
+            **{
+                **captured_freeze,
+                "configuration_registry": tampered_configuration_registry,
+            }
+        )
     assert (
         selection["final_fitting_policy"]["pooled_membership_policy"]
         == "FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1"
