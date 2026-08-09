@@ -44,6 +44,7 @@ image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE to an immutable digest}"
     exit 1
 }
 gateway_version="${QTRAD_IBKR_GATEWAY_VERSION:-10.49}"
+application_commit="${QTRAD_IBKR_APPLICATION_COMMIT:-}"
 gateway_archive_sha="${QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256:?set QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256 to the private Gateway archive SHA-256}"
 gateway_manifest="${QTRAD_IBKR_GATEWAY_MANIFEST:?set QTRAD_IBKR_GATEWAY_MANIFEST to the private Gateway identity manifest}"
 [[ -f "$gateway_manifest" ]] || {
@@ -81,6 +82,12 @@ jq -e \
      and (.["org.qtrad.source.digest"] | test("^[0-9a-f]{64}$"))
      and (.["org.opencontainers.image.revision"] | test("^[0-9a-f]{40,64}$"))
      and (."org.opencontainers.image.created" | length > 0)' <<<"$labels" >/dev/null
+if [[ -n "$application_commit" ]]; then
+    jq -e --arg application_commit "$application_commit"         '.["org.opencontainers.image.revision"] == $application_commit' <<<"$labels" >/dev/null || {
+        echo "image revision does not match the reviewed application commit" >&2
+        exit 1
+    }
+fi
 
 evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
 checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT to a persistent host path}"

@@ -1,40 +1,31 @@
 #!/usr/bin/env bash
 set -euo pipefail
-# Deliberate guard: the Stage 5 adapter/canary is implemented but host qualification is pending.
-echo "qtrad-ibkr-ingest is gated; no qualified continuous IBKR host operation is enabled" >&2
-exit 78
 
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
-evidence_root="${QTRAD_IBKR_EVIDENCE_ROOT:-/srv/qtrad/ibkr/evidence}"
-checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT to a persistent host path}"
+checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT}"
+configuration_file="${QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH}"
+database_url="${QTRAD_DATABASE_URL:?set QTRAD_DATABASE_URL}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
-[[ "$checkpoint_root" == /* ]] || exit 64
-mkdir -p "$evidence_root" "$checkpoint_root"
-chown 10001:10001 "$evidence_root" "$checkpoint_root"
+configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH}"
 
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
-[[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ ]] || exit 64
-[[ -d /srv/qtrad/postgres && -w /srv/qtrad/postgres ]] || exit 69
-[[ -d "$evidence_root" && -w "$evidence_root" ]] || exit 69
-[[ -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
+[[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ && "$configuration_hash" =~ ^[0-9a-f]{64}$ ]] || exit 64
+[[ "$checkpoint_root" == /* && -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
+[[ -r "$configuration_file" ]] || exit 69
+[[ "$database_url" == postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr ]] || exit 64
 if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' \
     | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' > /dev/null; then
     echo 'Gateway API is not localhost-only' >&2
     exit 69
 fi
-command -v firewall-cmd >/dev/null
-[[ "$(firewall-cmd --state)" == "running" ]] || {
-    echo 'firewalld is not running' >&2
-    exit 69
-}
-if firewall-cmd --query-port=4002/tcp; then
-    echo 'Gateway API is exposed by firewalld' >&2
-    exit 69
-fi
 
 exec docker run --rm --name qtrad-ibkr-ingest --network host \
+    --user 10001:10001 --read-only --cap-drop=ALL \
+    --security-opt=no-new-privileges --pids-limit 256 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
     --env-file /etc/qtrad/ibkr-ingest.env \
-    --volume /srv/qtrad/postgres:/srv/qtrad/postgres \
-    --volume "$evidence_root:$evidence_root" \
-    --volume "$checkpoint_root:$checkpoint_root" \
-    "$image"
+    --volume /srv/qtrad/postgres:/srv/qtrad/postgres:rw \
+    --volume "$checkpoint_root:$checkpoint_root:rw" \
+    --volume "$configuration_file:$configuration_file:ro" \
+    --entrypoint uv "$image" run --frozen --no-dev --no-sync python -m qtrad ingest --provider ibkr --environment ibkr-paper \
+    --ibkr-configuration "$configuration_file"

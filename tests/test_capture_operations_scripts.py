@@ -84,17 +84,22 @@ def test_oci_collector_deployments_reject_active_pcp() -> None:
         assert 'systemctl is-enabled --quiet "$unit"' in script
 
 
-def test_ibkr_operations_are_explicit_about_the_unimplemented_continuous_adapter() -> None:
+def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
     ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
     deploy = (ibkr / "deploy.sh").read_text()
     wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
     readme = (ibkr / "README.md").read_text()
 
-    assert "no Gateway, ingest or operator-API service was started" in deploy
-    assert 'docker pull "$image"' in deploy
-    assert "QTRAD_IBKR_CHECKPOINT_ROOT" in wrapper
-    assert '--volume "$checkpoint_root:$checkpoint_root"' in wrapper
-    assert "continuous IBKR adapter and its operator API are not implemented" in readme
+    assert "usage: deploy.sh --check|--apply" in deploy
+    assert 'if [[ "$mode" == "--check" ]]' in deploy
+    assert "verify_host_identity" in deploy
+    assert "verify_database_head" in deploy
+    assert "db verify-head" in deploy
+    assert "qtrad db upgrade" not in deploy
+    assert '"$preflight_bin" deployment ibkr-preflight' in deploy
+    assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in wrapper
+    assert '--volume "$checkpoint_root:$checkpoint_root:rw"' in wrapper
+    assert "B3" in readme
 
 
 def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:

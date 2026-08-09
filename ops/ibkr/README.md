@@ -4,12 +4,9 @@ These files are deployment templates for the separate paper, read-only IBKR runt
 licensed Gateway/API archives, IBC configuration, passwords, 2FA material or rendered environment
 files into Git.
 
-The continuous IBKR adapter and its operator API are not implemented. The direct official TWS
-historical adapter, bounded request-profile canary, and one-shot historical executor now exist. Host
-service deployment remains deliberately gated: the executor must be launched explicitly, uses a
-PostgreSQL-held single-execution lock, and never starts orders, continuous ingest, or a health service.
-The bounded capability probe, canary/profile verifiers, and independently verified execution/result
-artifacts are the required evidence boundaries.
+B3 now supplies the software-only exact-two native-capture release boundary: promotion reuses reviewed B2 evidence for AUD/USD (conId 14433401) and Australia 200 (conId 111987484), while the offline preflight binds the immutable image, configuration hash, matched API/Gateway/IBC identities, private endpoints, dedicated database, current migration head and service templates. The wrappers use the existing `qtrad ingest --provider ibkr` and read-only API commands with persistent checkpoints and bounded health recovery.
+
+B3 does not run a host, Gateway, database, deployment or qualification operation. `qtrad deployment ibkr-verify` and `qtrad deployment ibkr-preflight` are offline checks; `deploy.sh --check` is non-mutating, while `deploy.sh --apply` is an explicitly invoked host mutation reserved for separately authorized operation. No B3 result is an overall IBKR capture or Stage-6 qualification claim.
 
 ## Before running the bounded probe
 
@@ -52,10 +49,9 @@ artifacts are the required evidence boundaries.
    Allow group id <group-ocid> to read repos in compartment id <compartment-ocid> where target.repo.name = 'qtrad/qtrad-ibkr'
    Allow group id <group-ocid> to manage repos in compartment id <compartment-ocid> where all {target.repo.name = 'qtrad/qtrad-ibkr', request.permission = 'REPOSITORY_UPDATE'}
    ~~~
-7. Run `deploy.sh` only as the invariant check; it pulls the immutable image digest before local
-   inspection. It does not enable services while continuous ingest is absent. Run the explicit bounded
-   command:
-   `qtrad instruments review --provider ibkr --environment paper --execute-account-probe`.
+## Offline B3 release checks
+
+Use `qtrad deployment ibkr-promote` only with an already reviewed B2 configuration and the immutable capability-review, operator-selection, contract-selection, catalogue and probe files; it replays that closure and writes their exact hashes into a new exact-two release create-only. `qtrad deployment ibkr-verify` requires the same authority files and replays them against the final persisted evidence. `qtrad deployment ibkr-preflight` reads their absolute paths from the immutable descriptor and performs the same replay. The B3 implementation and verification boundary stops there; live Gateway, database, deployment, restart/reconnect, backup/restore and qualification evidence require separate authorization.
 
 ## Running explicit historical CLI commands
 
@@ -71,9 +67,9 @@ docker run --rm --network host --user 10001:10001 --entrypoint uv \
   python -m qtrad historical ibkr <command> ...
 ```
 
-Appending `historical` directly to the image without `--entrypoint uv` asks `uv` to execute
-the wrong program and fails before q-trad starts. Use the explicit bounded CLI only; the continuous
-ingest wrapper remains deliberately gated.
+The published IBKR image has an explicit `uv` entrypoint. The B3 ingest wrapper invokes the
+same frozen command as an unprivileged, read-only container and binds the reviewed configuration
+and persistent checkpoint paths; it is installed only by an explicitly authorized `deploy.sh --apply`.
 
 ## OCIR repository setup
 

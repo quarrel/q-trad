@@ -1,0 +1,40 @@
+# B3 is create-only: replace every RELEASE_* value from the reviewed release
+# bundle before installation. This file contains no credentials.
+[release]
+application_commit = "RELEASE_COMMIT_40_HEX"
+image = "registry.example.invalid/qtrad@sha256:RELEASE_IMAGE_64_HEX"
+configuration_path = "/etc/qtrad/ibkr-b3-capture.json"
+configuration_hash = "RELEASE_CONFIGURATION_64_HEX"
+api_package_fingerprint = "RELEASE_API_PACKAGE_64_HEX"
+schema_head = "0014"
+
+[authority]
+capability_review_path = "/etc/qtrad/ibkr-authority/capability-review.json"
+operator_selection_path = "/etc/qtrad/ibkr-authority/operator-selection.json"
+contract_selection_path = "/etc/qtrad/ibkr-authority/contract-selection.json"
+catalogue_path = "/etc/qtrad/ibkr-authority/capture-ibkr-v1-candidates.toml"
+probe_spec_path = "/etc/qtrad/ibkr-authority/capability-probe.toml"
+
+[ibkr]
+gateway_archive_sha256 = "RELEASE_GATEWAY_ARCHIVE_64_HEX"
+api_version = "10.49"
+gateway_version = "10.49"
+ibc_version = "3.24.1"
+client_id = 71
+
+[network]
+gateway_host = "127.0.0.1"
+gateway_port = 4002
+api_host = "127.0.0.1"
+api_port = 8000
+
+[database]
+name = "qtrad_ibkr"
+url_environment = "QTRAD_DATABASE_URL"
+checkpoint_root = "/srv/qtrad/postgres/qtrad-ibkr-checkpoints"
+
+[services]
+ingest = "qtrad-ibkr-ingest.service"
+api = "qtrad-ibkr-api.service"
+health_timer = "qtrad-ibkr-health.timer"
+backup_timer = "qtrad-ibkr-backup.timer"

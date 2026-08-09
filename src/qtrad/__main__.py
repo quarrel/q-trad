@@ -135,6 +135,12 @@ from qtrad.runtime.foundation_bundle import (
     verify_observation_build_evidence,
     verify_outcome_blind_foundation_bundle,
 )
+from qtrad.runtime.ibkr_b3 import (
+    b3_preflight,
+    promote_b3_configuration,
+    verify_b3_release,
+    write_reviewed_configuration,
+)
 from qtrad.runtime.ibkr_canary import (
     verify_ibkr_historical_canary_evidence,
     write_ibkr_historical_canary_evidence,
@@ -539,6 +545,8 @@ def build_parser() -> argparse.ArgumentParser:
     db = subparsers.add_parser("db", help="database operations")
     db_sub = db.add_subparsers(dest="db_command", required=True)
     db_sub.add_parser("upgrade", help="apply migrations and seed instruments")
+    db_sub.add_parser("migrate", help="apply migrations without seeding any universe")
+    db_sub.add_parser("verify-head", help="verify the dedicated database is at the migration head")
 
     deployment = subparsers.add_parser("deployment", help="capture deployment operations")
     deployment_sub = deployment.add_subparsers(dest="deployment_command", required=True)
@@ -547,6 +555,33 @@ def build_parser() -> argparse.ArgumentParser:
     )
     deployment_inspect.add_argument("--descriptor", type=Path, required=True)
     deployment_inspect.add_argument("--repository-root", type=Path, default=Path.cwd())
+
+    promote_b3 = deployment_sub.add_parser(
+        "ibkr-promote", help="create the exact-two B3 config from reviewed evidence"
+    )
+    promote_b3.add_argument("--source-configuration", type=Path, required=True)
+    promote_b3.add_argument("--capability-review", type=Path, required=True)
+    promote_b3.add_argument("--operator-selection", type=Path, required=True)
+    promote_b3.add_argument("--contract-selection", type=Path, required=True)
+    promote_b3.add_argument("--catalogue", type=Path, required=True)
+    promote_b3.add_argument("--probe-spec", type=Path, required=True)
+    promote_b3.add_argument("--output", type=Path, required=True)
+    verify_b3 = deployment_sub.add_parser(
+        "ibkr-verify", help="verify an exact-two B3 config offline"
+    )
+    verify_b3.add_argument("--configuration", type=Path, required=True)
+    verify_b3.add_argument("--capability-review", type=Path, required=True)
+    verify_b3.add_argument("--operator-selection", type=Path, required=True)
+    verify_b3.add_argument("--contract-selection", type=Path, required=True)
+    verify_b3.add_argument("--catalogue", type=Path, required=True)
+    verify_b3.add_argument("--probe-spec", type=Path, required=True)
+    verify_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
+    preflight_b3 = deployment_sub.add_parser(
+        "ibkr-preflight", help="verify B3 release identity without host or provider I/O"
+    )
+    preflight_b3.add_argument("--descriptor", type=Path, required=True)
+    preflight_b3.add_argument("--repository-root", type=Path, default=Path.cwd())
+    preflight_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
 
     runs = subparsers.add_parser("runs", help="operational run evidence")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
@@ -1120,11 +1155,70 @@ def main(argv: Sequence[str] | None = None) -> None:
     if args.command == "db" and args.db_command == "upgrade":
         _upgrade_database(settings)
         asyncio.run(_seed(settings))
+    elif args.command == "db" and args.db_command == "migrate":
+        _upgrade_database(settings)
+    elif args.command == "db" and args.db_command == "verify-head":
+        asyncio.run(_require_database_at_migration_head(settings))
     elif args.command == "deployment" and args.deployment_command == "inspect":
         descriptor = load_capture_deployment_descriptor(
             args.descriptor, repository_root=args.repository_root
         )
         print(descriptor.to_json())
+    elif args.command == "deployment" and args.deployment_command == "ibkr-promote":
+        source = load_reviewed_configuration(args.source_configuration)
+        promoted = promote_b3_configuration(
+            source,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+        )
+        write_reviewed_configuration(
+            args.output,
+            promoted,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": "qtrad-ibkr-native-release-v1",
+                    "configuration_hash": promoted.configuration_hash,
+                    "instrument_count": len(promoted.listings),
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.command == "deployment" and args.deployment_command == "ibkr-verify":
+        report = verify_b3_release(
+            args.configuration,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+            observed_at=args.observed_at,
+        )
+        print(json.dumps(report, sort_keys=True))
+        if not report["valid"]:
+            raise SystemExit(1)
+    elif args.command == "deployment" and args.deployment_command == "ibkr-preflight":
+        report = b3_preflight(
+            args.descriptor,
+            repository_root=args.repository_root,
+            observed_at=args.observed_at,
+        )
+        print(json.dumps(report, sort_keys=True))
+        if (
+            not report["valid"]
+            or not report["operational_ready"]
+            or report["requires_evidence_refresh"]
+        ):
+            raise SystemExit(1)
     elif args.command == "runs" and args.runs_command == "reconcile-plan":
         asyncio.run(
             _plan_run_reconciliation(

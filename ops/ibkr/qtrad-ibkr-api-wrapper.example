@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
+configuration_file="${QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH}"
+database_url="${QTRAD_DATABASE_URL:?set QTRAD_DATABASE_URL}"
+configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH}"
+[[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
+[[ -r "$configuration_file" ]] || exit 69
+[[ "$database_url" == postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr && "$configuration_hash" =~ ^[0-9a-f]{64}$ ]] || exit 64
+
+exec docker run --rm --name qtrad-ibkr-api --network host \
+    --user 10001:10001 --read-only --cap-drop=ALL \
+    --security-opt=no-new-privileges --pids-limit 128 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --env-file /etc/qtrad/ibkr-ingest.env \
+    --volume "$configuration_file:$configuration_file:ro" \
+    --entrypoint uv "$image" run --frozen --no-dev --no-sync python -m qtrad api --host 127.0.0.1 --port 8000
