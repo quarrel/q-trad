@@ -169,6 +169,21 @@ async def _take(iterator: Any, count: int) -> list[native.MarketDataRecord]:
     return [await anext(iterator) for _ in range(count)]
 
 
+def _expire_when_callback_queue_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: native.IbkrNativeMarketDataAdapter,
+) -> None:
+    next_queued_callback = adapter._next_queued_callback
+
+    async def next_callback(deadline: float) -> capability._Callback:
+        del deadline
+        if adapter._callbacks.empty():
+            raise TimeoutError("fixture callback queue exhausted")
+        return await next_queued_callback(capability.monotonic() + 1.0)
+
+    monkeypatch.setattr(adapter, "_next_queued_callback", next_callback)
+
+
 @pytest.mark.asyncio
 async def test_exact_mapping_and_one_sided_callbacks_are_identity_bearing(
     monkeypatch: pytest.MonkeyPatch,
@@ -479,13 +494,9 @@ async def test_recovery_timeout_retains_intervening_callbacks_in_arrival_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient(Queue())
-    adapter = _adapter(
-        monkeypatch,
-        client,
-        request_timeout_seconds=0.001,
-        upstream_recovery_timeout_seconds=0.001,
-    )
+    adapter = _adapter(monkeypatch, client)
     await _connect_and_subscribe(adapter, _listing())
+    _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     stream = adapter.records()
     trigger_received = _NOW + timedelta(seconds=1)
     intervening_received = _NOW + timedelta(seconds=3)
@@ -522,13 +533,9 @@ async def test_server_time_recovery_timeout_retains_intervening_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient(Queue())
-    adapter = _adapter(
-        monkeypatch,
-        client,
-        request_timeout_seconds=0.001,
-        server_time_timeout_seconds=0.001,
-    )
+    adapter = _adapter(monkeypatch, client)
     await _connect_and_subscribe(adapter, _listing())
+    _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     client.emit_current_time = False
     stream = adapter.records()
     client.callbacks.put(
