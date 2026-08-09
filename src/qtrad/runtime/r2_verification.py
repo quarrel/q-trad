@@ -3786,7 +3786,7 @@ def reveal_confirmatory_g2(
     opened_by: str,
     consumed_by: str,
     opened_at: datetime,
-    consumed_at: datetime,
+    clock: Clock,
 ) -> tuple[R2HoldoutEvaluation, R2HoldoutConsumedMarker]:
     """Irreversibly reveal and evaluate only the science frozen by verified G1."""
 
@@ -3808,7 +3808,7 @@ def reveal_confirmatory_g2(
         opened_by=opened_by,
         consumed_by=consumed_by,
         opened_at=opened_at,
-        consumed_at=consumed_at,
+        consumed_at=clock.now,
         outcome_loader=load_outcomes,
     )
     evaluation, consumed = result

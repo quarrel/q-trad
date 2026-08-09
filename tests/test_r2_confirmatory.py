@@ -779,6 +779,51 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         original_outcome_items,
     )
 
+    def terminal_clock(opened_at: datetime, *, seconds: int = 1) -> Clock:
+        return cast(
+            Clock,
+            SimpleNamespace(now=lambda: opened_at + timedelta(seconds=seconds)),
+        )
+
+    base_marker_failure_root = tmp_path / "base-marker-failure"
+    copytree(preparation_root, base_marker_failure_root)
+    base_marker_failure_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=base_marker_failure_root,
+    )
+    claim_before = (base_marker_failure_root / ".preparation-claim.json").read_bytes()
+    original_base_json_writer = cast(Any, holdout_runtime)._write_json
+
+    def fail_base_opened(path: Path, payload: object) -> None:
+        if path.name == "opened.json":
+            raise RuntimeError("injected base OPENED failure")
+        original_base_json_writer(path, payload)
+
+    monkeypatch.setattr(holdout_runtime, "_write_json", fail_base_opened)
+    base_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected base OPENED failure"):
+        reveal_confirmatory_g2(
+            preparation=base_marker_failure_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=base_marker_failure_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=base_opened_at,
+            clock=terminal_clock(base_opened_at),
+        )
+    assert (base_marker_failure_root / ".preparation-claim.json").read_bytes() == claim_before
+    assert not (base_marker_failure_root / "opened.json").exists()
+    assert not (base_marker_failure_root / "consumed.json").exists()
+    assert (
+        verify_confirmatory_g2_preparation(
+            verified_g1=verified_g1,
+            path=base_marker_failure_root,
+        ).seal.seal_id
+        == base_marker_failure_preparation.seal.seal_id
+    )
+    monkeypatch.setattr(holdout_runtime, "_write_json", original_base_json_writer)
+
     marker_failure_root = tmp_path / "marker-failure"
     copytree(preparation_root, marker_failure_root)
     marker_failure_preparation = verify_confirmatory_g2_preparation(
@@ -803,7 +848,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=marker_opened_at,
-            consumed_at=marker_opened_at + timedelta(seconds=1),
+            clock=terminal_clock(marker_opened_at),
         )
     assert (marker_failure_root / "opened.json").is_file()
     assert not (marker_failure_root / "confirmatory-opened.json").exists()
@@ -842,7 +887,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=failed_opened_at,
-            consumed_at=failed_opened_at + timedelta(seconds=1),
+            clock=terminal_clock(failed_opened_at),
         )
     assert (failure_root / "opened.json").is_file()
     assert (failure_root / "confirmatory-opened.json").is_file()
@@ -862,7 +907,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=failed_opened_at,
-            consumed_at=failed_opened_at + timedelta(seconds=2),
+            clock=terminal_clock(failed_opened_at, seconds=2),
         )
 
     monkeypatch.setattr(verification, "_decode_confirmatory_target", original_decoder)
@@ -889,7 +934,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=evaluation_opened_at,
-            consumed_at=evaluation_opened_at + timedelta(seconds=1),
+            clock=terminal_clock(evaluation_opened_at),
         )
     assert (
         verify_confirmatory_r2h(
@@ -924,7 +969,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=result_opened_at,
-            consumed_at=result_opened_at + timedelta(seconds=1),
+            clock=terminal_clock(result_opened_at),
         )
     assert not (result_failure_root / "evaluation.json").exists()
     assert (result_failure_root / "consumed.json").is_file()
@@ -961,7 +1006,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             opened_by="fixture-operator",
             consumed_by="fixture-operator",
             opened_at=consumed_opened_at,
-            consumed_at=consumed_opened_at + timedelta(seconds=1),
+            clock=terminal_clock(consumed_opened_at),
         )
     assert (consumed_failure_root / "evaluation.json").is_file()
     assert not (consumed_failure_root / "consumed.json").exists()
@@ -988,7 +1033,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         opened_by="fixture-operator",
         consumed_by="fixture-operator",
         opened_at=opened_at,
-        consumed_at=opened_at + timedelta(seconds=1),
+        clock=terminal_clock(opened_at),
     )
     assert evaluation is not None
     assert consumed.evaluation_id == evaluation.evaluation_id

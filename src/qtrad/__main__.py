@@ -2076,7 +2076,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             opened_by=args.opened_by,
             consumed_by=args.consumed_by,
             opened_at=opened_at,
-            consumed_at=opened_at + timedelta(microseconds=1),
+            clock=clock,
         )
         print(
             json.dumps(

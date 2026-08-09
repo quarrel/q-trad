@@ -59,6 +59,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutTargetSource,
 )
 from qtrad.domain.r2_readiness import FeatureFamily
+from qtrad.domain.time import require_utc
 from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 
 _MAX_BYTES = 64 * 1024 * 1024
@@ -935,13 +936,12 @@ def _preparation_usage(
     }
 
 
-def _claim_preparation(
+def _preparation_claim_transition(
     root: Path,
     selection_manifest_id: str,
     seal_id: str,
-) -> None:
-    claim_path = root / _PREPARATION_CLAIM_FILE
-    current = _load_object(claim_path)
+) -> tuple[dict[str, object], dict[str, object]]:
+    current = _load_object(root / _PREPARATION_CLAIM_FILE)
     initial_unopened = _preparation_claim(
         selection_manifest_id,
         seal_id,
@@ -953,10 +953,9 @@ def _claim_preparation(
         state="OWNED_OPENED",
     )
     if current == initial_unopened:
-        _replace_json(claim_path, initial_opened)
-        return
+        return current, initial_opened
     if current == initial_opened:
-        return
+        return current, current
     if current.get("state") == "TRANSFERRED":
         raise ValueError("transferred holdout preparation is not revealable from the source root")
     transfer_id = current.get("transfer_id")
@@ -978,9 +977,21 @@ def _claim_preparation(
         source_claim_id=source_claim_id,
     )
     if current == owned_unopened:
-        _replace_json(claim_path, owned_opened)
-    elif current != owned_opened:
-        raise ValueError("holdout preparation is not owned by this root")
+        return current, owned_opened
+    if current == owned_opened:
+        return current, current
+    raise ValueError("holdout preparation is not owned by this root")
+
+
+def _claim_preparation(
+    root: Path,
+    selection_manifest_id: str,
+    seal_id: str,
+) -> None:
+    claim_path = root / _PREPARATION_CLAIM_FILE
+    current, opened = _preparation_claim_transition(root, selection_manifest_id, seal_id)
+    if current != opened:
+        _replace_json(claim_path, opened)
 
 
 def _replay_final_fit(
@@ -2200,6 +2211,29 @@ def _write_opened_marker(
     return marker
 
 
+def _validate_consumed_time_source(*, opened_at: object, consumed_at: object) -> None:
+    if not isinstance(opened_at, datetime):
+        raise TypeError("opened_at must be a datetime")
+    require_utc(opened_at, "holdout opened time")
+    if callable(consumed_at):
+        return
+    if not isinstance(consumed_at, datetime):
+        raise TypeError("consumed_at must be a datetime or zero-argument callable")
+    require_utc(consumed_at, "holdout consumed time")
+    if consumed_at < opened_at:
+        raise ValueError("holdout consumed time must not precede OPENED")
+
+
+def _resolve_consumed_at(*, opened_at: datetime, consumed_at: object) -> datetime:
+    value = cast(Callable[[], object], consumed_at)() if callable(consumed_at) else consumed_at
+    if not isinstance(value, datetime):
+        raise TypeError("consumed_at source must return a datetime")
+    require_utc(value, "holdout consumed time")
+    if value < opened_at:
+        raise ValueError("holdout consumed time must not precede OPENED")
+    return value
+
+
 def reveal_holdout(
     root: Path,
     *,
@@ -2243,13 +2277,10 @@ def reveal_holdout(
         raise ValueError(
             "confirmatory reveal requires an independently verified target dataset child"
         )
-    _claim_preparation(
-        root,
-        selection.manifest_id,
-        seal.seal_id,
-    )
     if root.joinpath("consumed.json").exists() or root.joinpath("consumed.json").is_symlink():
         raise FileExistsError("holdout has already been consumed")
+    _validate_consumed_time_source(opened_at=opened_at, consumed_at=consumed_at)
+    _preparation_claim_transition(root, selection.manifest_id, seal.seal_id)
     marker = _write_opened_marker(
         root,
         selection_manifest_id=selection.manifest_id,
@@ -2264,6 +2295,11 @@ def reveal_holdout(
     evaluation_id = _FAILURE_EVALUATION_ID
     error: BaseException | None = None
     try:
+        _claim_preparation(
+            root,
+            selection.manifest_id,
+            seal.seal_id,
+        )
         feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
         binding = _outcome_binding_from_feature_payload(feature_payload, selection=selection)
         expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
@@ -2313,13 +2349,15 @@ def reveal_holdout(
         error = exc
         evaluation_id = _FAILURE_EVALUATION_ID
     finally:
-        if not isinstance(consumed_at, datetime):
-            raise TypeError("consumed_at must be a datetime")
+        resolved_consumed_at = _resolve_consumed_at(
+            opened_at=marker.opened_at,
+            consumed_at=consumed_at,
+        )
         consumed = R2HoldoutConsumedMarker.create(
             selection_manifest_id=selection.manifest_id,
             seal_id=seal.seal_id,
             opened_marker_id=marker.marker_id,
-            consumed_at=consumed_at,
+            consumed_at=resolved_consumed_at,
             consumed_by=consumed_by,
             evaluation_id=evaluation_id,
         )
@@ -2367,13 +2405,16 @@ def recover_holdout_consumption(
         raise ValueError("recovery opened marker differs from the exact original seal")
     if root.joinpath("consumed.json").exists() or root.joinpath("consumed.json").is_symlink():
         raise FileExistsError("holdout has already been consumed")
-    if not isinstance(consumed_at, datetime):
-        raise TypeError("consumed_at must be a datetime")
+    _validate_consumed_time_source(opened_at=opened.opened_at, consumed_at=consumed_at)
+    resolved_consumed_at = _resolve_consumed_at(
+        opened_at=opened.opened_at,
+        consumed_at=consumed_at,
+    )
     consumed = R2HoldoutConsumedMarker.create(
         selection_manifest_id=expected_selection_manifest_id,
         seal_id=expected_seal_id,
         opened_marker_id=opened.marker_id,
-        consumed_at=consumed_at,
+        consumed_at=resolved_consumed_at,
         consumed_by=consumed_by,
         evaluation_id=evaluation_id,
     )
@@ -2400,6 +2441,8 @@ def verify_holdout_markers(root: Path) -> tuple[R2HoldoutOpenedMarker, R2Holdout
     consumed = _consumed_from_payload(consumed_payload)
     if consumed.opened_marker_id != opened.marker_id:
         raise ValueError("consumed marker does not bind the opened marker")
+    if consumed.consumed_at < opened.opened_at:
+        raise ValueError("holdout consumed time must not precede OPENED")
     if (consumed.selection_manifest_id, consumed.seal_id) != (
         opened.selection_manifest_id,
         opened.seal_id,
@@ -3155,7 +3198,7 @@ def _reveal_confirmatory_holdout(
     opened_by: str,
     consumed_by: str,
     opened_at: datetime,
-    consumed_at: datetime,
+    consumed_at: Callable[[], datetime],
     outcome_loader: Callable[[], TargetDataset],
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Run frozen confirmatory evaluation after marker-first target decoding."""
