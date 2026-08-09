@@ -600,6 +600,45 @@ class R2HoldoutSelectionManifest:
                 question.comparator_configuration_id,
             } <= set(holdout):
                 raise ValueError("question references a configuration outside the holdout set")
+        if self.holdout_scope is HoldoutScope.CONFIRMATORY:
+            raw_comparisons = self.evaluation_policy.get("comparison_registry")
+            if not isinstance(raw_comparisons, (list, tuple)) or not raw_comparisons:
+                raise ValueError(
+                    "confirmatory holdout requires an authenticated comparison registry"
+                )
+            allowed_comparisons: set[tuple[ModelFamily, ModelFamily]] = set()
+            for raw_comparison in raw_comparisons:
+                if (
+                    not isinstance(raw_comparison, (list, tuple))
+                    or len(raw_comparison) != 2
+                    or not all(isinstance(item, str) for item in raw_comparison)
+                ):
+                    raise ValueError("confirmatory comparison registry entry is invalid")
+                try:
+                    comparison = (
+                        ModelFamily(raw_comparison[0]),
+                        ModelFamily(raw_comparison[1]),
+                    )
+                except ValueError as exc:
+                    raise ValueError(
+                        "confirmatory comparison registry has an invalid model family"
+                    ) from exc
+                if comparison in allowed_comparisons:
+                    raise ValueError("confirmatory comparison registry contains duplicate pairs")
+                allowed_comparisons.add(comparison)
+            family_by_configuration = {
+                configuration_id: family
+                for configuration_id, family, *_ in self.configuration_registry
+            }
+            for question in self.questions:
+                comparison = (
+                    family_by_configuration[question.candidate_configuration_id],
+                    family_by_configuration[question.comparator_configuration_id],
+                )
+                if comparison not in allowed_comparisons:
+                    raise ValueError(
+                        "confirmatory question is not an authenticated immediate comparison"
+                    )
         _positive_range(self.holdout_range, "holdout range")
         require_utc(self.frozen_at, "selection freeze time")
         _require_text(self.frozen_by, "selection frozen-by")

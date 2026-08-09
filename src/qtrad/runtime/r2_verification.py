@@ -2945,7 +2945,8 @@ def holdout_evaluation_policy(
     *,
     expected_evaluation_report_id: str | None = None,
 ) -> dict[str, JsonValue]:
-    """Return the authenticated evaluation controls needed by holdout sealing."""
+    """Return authenticated evaluation controls and immediate comparison pairs."""
+
     evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
     if (
         expected_evaluation_report_id is not None
@@ -2960,11 +2961,31 @@ def holdout_evaluation_policy(
         raise ValueError("OOF evaluation policies are not authenticated strings")
     if not isinstance(minimum_rows, int) or not isinstance(bucket_count, int):
         raise ValueError("OOF evaluation support controls are not authenticated integers")
+
+    raw_comparisons = evaluation.get("comparisons")
+    if not isinstance(raw_comparisons, list) or not raw_comparisons:
+        raise ValueError("OOF evaluation report has no authenticated comparison registry")
+    comparison_registry: list[JsonValue] = []
+    seen_comparisons: set[tuple[ModelFamily, ModelFamily]] = set()
+    for raw_comparison in raw_comparisons:
+        if not isinstance(raw_comparison, dict):
+            raise ValueError("OOF evaluation comparison registry entry is not an object")
+        try:
+            candidate = ModelFamily(raw_comparison.get("candidate"))
+            comparator = ModelFamily(raw_comparison.get("comparator"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("OOF evaluation comparison registry has an invalid family") from exc
+        pair = (candidate, comparator)
+        if pair in seen_comparisons:
+            raise ValueError("OOF evaluation comparison registry contains duplicate pairs")
+        seen_comparisons.add(pair)
+        comparison_registry.append([candidate.value, comparator.value])
     return {
         "metric_policy": metric_policy,
         "forecast_bucket_policy": forecast_bucket_policy,
         "minimum_correlation_rows": minimum_rows,
         "forecast_bucket_count": bucket_count,
+        "comparison_registry": comparison_registry,
     }
 
 

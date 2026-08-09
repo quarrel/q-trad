@@ -21,6 +21,8 @@ from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
 from qtrad.domain.r2_holdout import (
     HoldoutScope,
+    R2HoldoutQuestion,
+    R2HoldoutSelectionManifest,
     R2HoldoutTargetSource,
     R2OutcomeBlindTargetView,
 )
@@ -397,6 +399,14 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
 
     monkeypatch.setattr(verification, "_load_selection", reject_full_target_decoder)
     selection_path = tmp_path / "selection.json"
+    captured_freeze: dict[str, Any] = {}
+    shared_freeze = verification.freeze_holdout_selection
+
+    def capture_freeze(**kwargs: Any) -> R2HoldoutSelectionManifest:
+        captured_freeze.update(kwargs)
+        return shared_freeze(**kwargs)
+
+    monkeypatch.setattr(verification, "freeze_holdout_selection", capture_freeze)
     freeze_confirmatory_selection(
         verified_f2=authority,
         output=selection_path,
@@ -427,6 +437,29 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
     )
     assert pooled_local_id not in selection["selected_configuration_ids"]
     assert selection["questions"][2]["comparator_configuration_id"] == pooled_local_id
+
+    configuration_ids_by_family = {
+        family: configuration_id for configuration_id, family in family_by_configuration.items()
+    }
+    frozen_questions = cast(tuple[R2HoldoutQuestion, ...], captured_freeze["questions"])
+    source_question = frozen_questions[-1]
+    invented_question = R2HoldoutQuestion.create(
+        question="invented P1 versus zero comparison",
+        candidate_configuration_id=configuration_ids_by_family["POOLED_CROSS_ASSET_RIDGE"],
+        comparator_configuration_id=configuration_ids_by_family["ZERO_RETURN"],
+        metric=source_question.metric,
+        direction=source_question.direction,
+        threshold=source_question.threshold,
+        minimum_support=source_question.minimum_support,
+        minimum_coverage=source_question.minimum_coverage,
+        support_policy=source_question.support_policy,
+        conclusion_policy=source_question.conclusion_policy,
+    )
+    with pytest.raises(
+        ValueError,
+        match="confirmatory question is not an authenticated immediate comparison",
+    ):
+        cast(Any, shared_freeze)(**{**captured_freeze, "questions": (invented_question,)})
     assert (
         selection["final_fitting_policy"]["pooled_membership_policy"]
         == "FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1"
