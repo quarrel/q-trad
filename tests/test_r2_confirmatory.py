@@ -20,6 +20,7 @@ from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
 from qtrad.domain.foundation import PanelRow, PanelStatus
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
+from qtrad.domain.r2_evaluation import ConfigurationDisposition, SelectionManifest
 from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
 from qtrad.domain.r2_holdout import (
     HoldoutScope,
@@ -513,6 +514,78 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
                 "configuration_registry": tampered_configuration_registry,
             }
         )
+    prior_selection = cast(SelectionManifest, captured_freeze["prior_selection"])
+
+    def rebuild_prior_selection(**overrides: Any) -> SelectionManifest:
+        values: dict[str, Any] = {
+            "experiment_configuration_id": prior_selection.experiment_configuration_id,
+            "evidence_class": prior_selection.evidence_class,
+            "evaluation_report_id": prior_selection.evaluation_report_id,
+            "local_comparator_manifest_id": prior_selection.local_comparator_manifest_id,
+            "evaluated_configuration_ids": prior_selection.evaluated_configuration_ids,
+            "predeclared_comparators": prior_selection.predeclared_comparators,
+            "primary_metric": prior_selection.primary_metric,
+            "secondary_metrics": prior_selection.secondary_metrics,
+            "acceptance_thresholds": prior_selection.acceptance_thresholds,
+            "decisions": prior_selection.decisions,
+            "selected_configuration_ids": prior_selection.selected_configuration_ids,
+            "holdout_comparator_configuration_ids": (
+                prior_selection.holdout_comparator_configuration_ids
+            ),
+            "final_fitting_procedure": prior_selection.final_fitting_procedure,
+            "holdout_range": prior_selection.holdout_range,
+            "application_image_identity": prior_selection.application_image_identity,
+            "frozen_at": prior_selection.frozen_at,
+            "frozen_by": prior_selection.frozen_by,
+            "market_data_source_class": prior_selection.market_data_source_class,
+            "foundation_bundle_id": prior_selection.foundation_bundle_id,
+            "oof_bundle_id": prior_selection.oof_bundle_id,
+        }
+        values.update(overrides)
+        return cast(Any, SelectionManifest.create)(**values)
+
+    promoted_decisions = tuple(
+        (
+            replace(decision, disposition=ConfigurationDisposition.SELECTED_CANDIDATE)
+            if decision.configuration_id == pooled_local_id
+            else decision
+        )
+        for decision in prior_selection.decisions
+    )
+    promoted_selection = rebuild_prior_selection(
+        decisions=promoted_decisions,
+        selected_configuration_ids=tuple(
+            sorted((*prior_selection.selected_configuration_ids, pooled_local_id))
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="prior selection differs from verifier-only confirmatory authority",
+    ):
+        cast(Any, shared_freeze)(**{**captured_freeze, "prior_selection": promoted_selection})
+
+    changed_metric_selection = rebuild_prior_selection(primary_metric="RMSE")
+    with pytest.raises(
+        ValueError,
+        match="prior selection differs from verifier-only confirmatory authority",
+    ):
+        cast(Any, shared_freeze)(**{**captured_freeze, "prior_selection": changed_metric_selection})
+
+    threshold_name, threshold_value = prior_selection.acceptance_thresholds[0]
+    changed_threshold_selection = rebuild_prior_selection(
+        acceptance_thresholds=(
+            (threshold_name, threshold_value + 0.01),
+            *prior_selection.acceptance_thresholds[1:],
+        )
+    )
+    with pytest.raises(
+        ValueError,
+        match="prior selection differs from verifier-only confirmatory authority",
+    ):
+        cast(Any, shared_freeze)(
+            **{**captured_freeze, "prior_selection": changed_threshold_selection}
+        )
+
     assert (
         selection["final_fitting_policy"]["pooled_membership_policy"]
         == "FIXED_UNIVERSE_OUTER_INNER_FIT_VALIDATION_V1"

@@ -2724,6 +2724,17 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         evaluation_report_id=report_id,
         configuration_registry=registry,
         evaluation_policy=evaluation_policy,
+        experiment_configuration_id=bundle.experiment_configuration_id,
+        evidence_class=bundle.evidence_class,
+        local_comparator_manifest_id=local_comparator_manifest_id,
+        evaluated_configuration_ids=tuple(item.configuration_id for item in configurations),
+        selection_decisions=decisions,
+        selected_configuration_ids=selected_ids,
+        holdout_comparator_configuration_ids=holdout_ids,
+        selection_policy=selection_policy,
+        holdout_range=experiment.holdout_range,
+        source_class=bundle.source_class,
+        foundation_bundle_id=bundle.foundation_bundle_id,
     )
     return VerifiedConfirmatoryF2._create(
         _VERIFIED_CONFIRMATORY_F2_TOKEN,
