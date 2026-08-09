@@ -15,4 +15,4 @@ exec docker run --rm --name qtrad-ibkr-api --network host \
     --tmpfs /tmp:rw,noexec,nosuid,size=64m \
     --env-file /etc/qtrad/ibkr-ingest.env \
     --volume "$configuration_file:$configuration_file:ro" \
-    --entrypoint uv "$image" run --frozen --no-dev --no-sync python -m qtrad api --host 127.0.0.1 --port 8000
+    --entrypoint /app/.venv/bin/python "$image" -m qtrad api --host 127.0.0.1 --port 8000

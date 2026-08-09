@@ -26,5 +26,5 @@ exec docker run --rm --name qtrad-ibkr-ingest --network host \
     --volume /srv/qtrad/postgres:/srv/qtrad/postgres:rw \
     --volume "$checkpoint_root:$checkpoint_root:rw" \
     --volume "$configuration_file:$configuration_file:ro" \
-    --entrypoint uv "$image" run --frozen --no-dev --no-sync python -m qtrad ingest --provider ibkr --environment ibkr-paper \
+    --entrypoint /app/.venv/bin/python "$image" -m qtrad ingest --provider ibkr --environment ibkr-paper \
     --ibkr-configuration "$configuration_file"
