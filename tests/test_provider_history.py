@@ -63,7 +63,11 @@ from qtrad.runtime.ibkr_results import (
     verify_ibkr_historical_result_stream,
     write_ibkr_historical_result,
 )
-from qtrad.runtime.provider_history import publish_provider_history, verify_provider_history
+from qtrad.runtime.provider_history import (
+    publish_provider_history,
+    read_provider_history_source_evidence,
+    verify_provider_history,
+)
 from tests.test_ibkr_historical_results import _build_fixture
 
 _START = datetime(2026, 2, 1, tzinfo=UTC)
@@ -725,6 +729,31 @@ def test_provider_history_streams_one_result_and_partition_at_a_time(
     assert max_partition_live == 1
 
 
+def test_source_evidence_decodes_request_result_children_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    result_iterations = 0
+    original_results = IbkrHistoricalResultStream.iter_request_results
+
+    def tracked_results(
+        stream: IbkrHistoricalResultStream,
+        *,
+        request_order: tuple[IbkrHistoricalRequest, ...] | None = None,
+    ):
+        nonlocal result_iterations
+        result_iterations += 1
+        yield from original_results(stream, request_order=request_order)
+
+    monkeypatch.setattr(IbkrHistoricalResultStream, "iter_request_results", tracked_results)
+
+    evidence = read_provider_history_source_evidence(manifest)
+
+    assert evidence.dataset.row_count > 0
+    assert result_iterations == 1
+
+
 def test_provider_history_publishes_without_prebuilt_dataset(tmp_path: Path) -> None:
     artifact = _build_stage6_artifact(day_count=2)
     result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
@@ -755,14 +784,6 @@ def test_provider_history_replays_source_before_parquet_decoding(
 
     monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", fail_if_decoded)
 
-    def fail_if_bounds_derived(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("partition bounds must not be derived before Stage 6 replay")
-
-    monkeypatch.setattr(
-        provider_history_application,
-        "_partition_row_bounds",
-        fail_if_bounds_derived,
-    )
     with pytest.raises(ValueError, match="child bytes digest"):
         verify_provider_history(manifest)
 

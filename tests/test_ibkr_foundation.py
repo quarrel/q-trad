@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -41,6 +41,7 @@ from qtrad.domain.ibkr_historical import IbkrHistoricalRequestKind
 from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance
+from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
@@ -577,6 +578,7 @@ def _session_aware_source_evidence(
         ProviderHistorySourceEvidence,
         SimpleNamespace(
             observations=tuple(observations),
+            observation_summary=None,
             source_artifact=source_artifact,
             dataset=SimpleNamespace(
                 row_count=len(observations),
@@ -889,6 +891,19 @@ def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
         )
 
 
+def test_compact_provider_observation_summary_matches_row_replay(tmp_path: Path) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+
+    assert source_evidence.observation_summary is not None
+    summarized = _provider_evidence(source_evidence, include_bounds=True)
+    replayed = _provider_evidence(
+        replace(source_evidence, observation_summary=None), include_bounds=True
+    )
+
+    assert summarized == replayed
+
+
 def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_early(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -904,11 +919,18 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
     original_verifier = foundation_runtime.read_provider_history_source_evidence
     verifier_started = False
 
-    def assert_checkpoint_prepared(path: Path):
+    def assert_checkpoint_prepared(
+        path: Path,
+        *,
+        verified_partition_callback: Callable[
+            [tuple[ProviderHistoricalObservation, ...], int], None
+        ]
+        | None = None,
+    ) -> ProviderHistorySourceEvidence:
         nonlocal verifier_started
         verifier_started = True
         assert (checkpoint_root / "identity.json").is_file()
-        return original_verifier(path)
+        return original_verifier(path, verified_partition_callback=verified_partition_callback)
 
     monkeypatch.setattr(
         foundation_runtime,
@@ -928,7 +950,7 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
     junk_root.mkdir()
     (junk_root / "unexpected").write_text("junk", encoding="utf-8")
 
-    def reject_source_verification(_path: Path):
+    def reject_source_verification(_path: Path, **_kwargs: object) -> ProviderHistorySourceEvidence:
         raise AssertionError("source verification started before checkpoint rejection")
 
     monkeypatch.setattr(
@@ -948,6 +970,53 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
     assert not rejected_output.exists()
 
 
+def test_stage8_observation_capture_aborts_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    original_verifier = foundation_runtime.read_provider_history_source_evidence
+
+    def fail_after_verification(
+        path: Path,
+        *,
+        verified_partition_callback: Callable[
+            [tuple[ProviderHistoricalObservation, ...], int], None
+        ]
+        | None = None,
+    ) -> ProviderHistorySourceEvidence:
+        original_verifier(path, verified_partition_callback=verified_partition_callback)
+        raise ValueError("forced failure after source verification")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        fail_after_verification,
+    )
+    checkpoint_root = tmp_path / "aborted-checkpoint"
+    output = tmp_path / "aborted-foundation.json"
+
+    with pytest.raises(ValueError, match="forced failure after source verification"):
+        write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+            workers=1,
+        )
+
+    assert {
+        path.relative_to(checkpoint_root) for path in checkpoint_root.rglob("*") if path.is_file()
+    } == {Path("identity.json")}
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}.children").exists()
+
+
 def test_bounded_foundation_reuses_identity_bound_checkpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -960,19 +1029,16 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
 
     global_iterations = 0
-    original_iteration = VerifiedProviderHistoryRows.__iter__
 
-    def count_global_provider_row_iterations(rows: VerifiedProviderHistoryRows):
+    def reject_global_provider_row_iteration(_rows: VerifiedProviderHistoryRows):
         nonlocal global_iterations
         global_iterations += 1
-        if global_iterations > 1:
-            raise AssertionError("checkpointed Stage 8 scanned all provider rows more than once")
-        return original_iteration(rows)
+        raise AssertionError("checkpointed Stage 8 rescanned all provider rows")
 
     monkeypatch.setattr(
         VerifiedProviderHistoryRows,
         "__iter__",
-        count_global_provider_row_iterations,
+        reject_global_provider_row_iteration,
     )
     checkpoint_root = tmp_path / "stage8-checkpoint"
     first_progress: list[Mapping[str, object]] = []
@@ -983,8 +1049,12 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         checkpoint_root=checkpoint_root,
         progress_callback=first_progress.append,
     )
-    assert global_iterations == 1
+    assert global_iterations == 0
     global_iterations = 0
+    assert any(
+        event.get("phase") == "observations" and event.get("event") == "reused"
+        for event in first_progress
+    )
     assert any(
         event.get("phase") == "derived" and event.get("event") == "completed"
         for event in first_progress
@@ -999,7 +1069,7 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         checkpoint_root=checkpoint_root,
         progress_callback=second_progress.append,
     )
-    assert global_iterations == 1
+    assert global_iterations == 0
     assert any(
         event.get("phase") == "observations" and event.get("event") == "reused"
         for event in second_progress
@@ -1014,7 +1084,7 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     assert second.folds.dataset_id == first.folds.dataset_id
     global_iterations = 0
     verified = verify_ibkr_foundation(second_bundle)
-    assert global_iterations == 1
+    assert global_iterations == 0
     assert verified.readiness.as_json() == second.readiness.as_json()
 
     changed = replace(configuration, name="changed-checkpoint-identity")

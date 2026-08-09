@@ -62,6 +62,43 @@ class ProviderHistoryObservationRows(Protocol):
 
 
 @dataclass(frozen=True, slots=True)
+class ProviderHistoryObservationSummary:
+    """Compact accepted-row coverage captured during authoritative verification."""
+
+    accepted_intervals_by_request: tuple[
+        tuple[str, tuple[tuple[datetime, datetime], ...]],
+        ...,
+    ]
+    source_start: datetime
+    source_end: datetime
+
+    def __post_init__(self) -> None:
+        require_utc(self.source_start, "provider-history source start")
+        require_utc(self.source_end, "provider-history source end")
+        if self.source_end <= self.source_start:
+            raise ValueError("provider-history source bounds are invalid")
+        previous_request: str | None = None
+        for request_sha256, intervals in self.accepted_intervals_by_request:
+            if not request_sha256 or (
+                previous_request is not None and request_sha256 <= previous_request
+            ):
+                raise ValueError("provider-history summary requests are not canonical")
+            previous_request = request_sha256
+            previous_end: datetime | None = None
+            for interval_start, interval_end in intervals:
+                require_utc(interval_start, "provider-history accepted interval start")
+                require_utc(interval_end, "provider-history accepted interval end")
+                if interval_end <= interval_start or (
+                    previous_end is not None and interval_start <= previous_end
+                ):
+                    raise ValueError("provider-history accepted intervals are not canonical")
+                previous_end = interval_end
+
+    def intervals_by_request(self) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+        return dict(self.accepted_intervals_by_request)
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderHistoryRequestEvidence:
     """Compact request evidence retained by the foundation builder."""
 
@@ -90,6 +127,7 @@ class ProviderHistorySourceEvidence:
     observations: ProviderHistoryObservationRows
     source_artifact: ProviderHistorySource
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
+    observation_summary: ProviderHistoryObservationSummary | None = None
 
     def __post_init__(self) -> None:
         if (

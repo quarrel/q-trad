@@ -388,6 +388,119 @@ def prepare_stage8_checkpoint(
     )
 
 
+@dataclass(slots=True)
+class _ObservationCaptureState:
+    path: Path
+    source_start: datetime | None = None
+    source_end: datetime | None = None
+
+
+class _Stage8ObservationCapture:
+    """Stage authenticated rows for checkpoint publication after full verification."""
+
+    def __init__(
+        self,
+        checkpoint: _Stage8Checkpoint,
+        *,
+        provider_dataset_sha256: str,
+    ) -> None:
+        if checkpoint.root is None:
+            raise AssertionError("Stage 8 observation capture requires a checkpoint root")
+        self._checkpoint = checkpoint
+        self._provider_dataset_sha256 = provider_dataset_sha256
+        self._temporary = Path(mkdtemp(prefix=".verified-observations-", dir=str(checkpoint.root)))
+        self._states: dict[str, _ObservationCaptureState | None] = {}
+        self._finished = False
+
+    def add_partition(
+        self,
+        rows: tuple[ProviderHistoricalObservation, ...],
+        row_offset: int,
+    ) -> None:
+        if self._finished:
+            raise ValueError("Stage 8 observation capture is already finished")
+        if not rows:
+            return
+        instrument = rows[0].instrument_id
+        if any(row.instrument_id != instrument for row in rows):
+            raise ValueError("verified provider partition contains multiple instruments")
+        if instrument not in self._states:
+            cached = self._checkpoint.observation(instrument)
+            if cached is not None:
+                self._states[instrument] = None
+            else:
+                digest = hashlib.sha256(instrument.encode("utf-8")).hexdigest()
+                self._states[instrument] = _ObservationCaptureState(
+                    path=self._temporary / f"{digest}.jsonl"
+                )
+        state = self._states[instrument]
+        if state is None:
+            return
+        with state.path.open("a", encoding="utf-8") as stream:
+            for position, provider_row in enumerate(rows, row_offset + 1):
+                row = _adapt_observation(
+                    provider_row,
+                    self._provider_dataset_sha256,
+                    position,
+                )
+                state.source_start = (
+                    row.interval_start
+                    if state.source_start is None
+                    else min(state.source_start, row.interval_start)
+                )
+                state.source_end = (
+                    row.interval_end
+                    if state.source_end is None
+                    else max(state.source_end, row.interval_end)
+                )
+                stream.write(_canonical_row(row.as_json()))
+                stream.write("\n")
+
+    def complete(self) -> None:
+        if self._finished:
+            raise ValueError("Stage 8 observation capture is already finished")
+        try:
+            for instrument, state in sorted(self._states.items()):
+                if state is None:
+                    continue
+                self._checkpoint.store_observation(
+                    instrument,
+                    state.path,
+                    source_start=state.source_start,
+                    source_end=state.source_end,
+                )
+        finally:
+            self._finished = True
+            shutil.rmtree(self._temporary, ignore_errors=True)
+
+    def abort(self) -> None:
+        if self._finished:
+            return
+        self._finished = True
+        shutil.rmtree(self._temporary, ignore_errors=True)
+
+
+def prepare_stage8_observation_capture(
+    root: Path,
+    *,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+) -> _Stage8ObservationCapture:
+    """Authenticate a checkpoint and prepare fused verified-row capture."""
+
+    checkpoint = _Stage8Checkpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+    )
+    return _Stage8ObservationCapture(
+        checkpoint,
+        provider_dataset_sha256=provider_dataset_sha256,
+    )
+
+
 class _ReplayCheckpoint:
     """Identity-bound cache of child parts already matched to one published bundle."""
 

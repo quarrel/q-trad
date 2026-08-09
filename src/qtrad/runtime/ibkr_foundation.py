@@ -251,10 +251,13 @@ def write_ibkr_foundation(
     provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
         _stage8_checkpoint_source_identity(provider_manifest)
     )
+    observation_capture = None
     if checkpoint_root is not None and provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
-        from qtrad.runtime.ibkr_foundation_bounded import prepare_stage8_checkpoint
+        from qtrad.runtime.ibkr_foundation_bounded import (
+            prepare_stage8_observation_capture,
+        )
 
-        prepare_stage8_checkpoint(
+        observation_capture = prepare_stage8_observation_capture(
             checkpoint_root,
             provider_manifest_sha256=provider_manifest_sha256,
             provider_dataset_sha256=provider_dataset_sha256,
@@ -267,8 +270,17 @@ def write_ibkr_foundation(
     started = time.monotonic()
     _emit_stage8_progress(progress_callback, started, "source-verification", "started")
     try:
-        source_evidence = read_provider_history_source_evidence(provider_manifest)
+        source_evidence = read_provider_history_source_evidence(
+            provider_manifest,
+            verified_partition_callback=(
+                observation_capture.add_partition if observation_capture is not None else None
+            ),
+        )
+        if observation_capture is not None:
+            observation_capture.complete()
     except BaseException as error:
+        if observation_capture is not None:
+            observation_capture.abort()
         _emit_stage8_progress(
             progress_callback,
             started,

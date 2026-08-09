@@ -8,7 +8,7 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Iterator, Mapping
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -17,7 +17,9 @@ from typing import cast
 import polars as pl
 
 from qtrad.application.provider_history import (
+    ProviderHistoryObservationSummary,
     ProviderHistoryRequestEvidence,
+    ProviderHistoryResultSource,
     ProviderHistorySource,
     ProviderHistorySourceEvidence,
     build_provider_history_dataset,
@@ -26,11 +28,14 @@ from qtrad.application.provider_history import (
     replay_provider_history_dataset,
 )
 from qtrad.domain.events import JsonValue, to_json_value
+from qtrad.domain.ibkr_historical import IbkrHistoricalPlan, IbkrHistoricalRequest
 from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
     MAX_IBKR_RESULT_BYTES,
     MAX_IBKR_RESULT_CHILDREN,
     MAX_IBKR_RESULT_REQUEST_BYTES,
+    IbkrHistoricalAggregateResult,
+    IbkrHistoricalRequestResult,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -308,8 +313,94 @@ def _partition_path(key: tuple[str, date]) -> str:
     )
 
 
+_VerifiedPartitionCallback = Callable[
+    [tuple[ProviderHistoricalObservation, ...], int],
+    None,
+]
+
+
+class _RequestEvidenceCapturingSource:
+    def __init__(self, source: ProviderHistoryResultSource) -> None:
+        self._source = source
+        self.plan: IbkrHistoricalPlan = source.plan
+        self.plan_bytes = source.plan_bytes
+        self.aggregate: IbkrHistoricalAggregateResult = source.aggregate
+        self.request_evidence: list[ProviderHistoryRequestEvidence] = []
+        self._iterated = False
+
+    def iter_request_results(
+        self,
+        *,
+        request_order: Sequence[IbkrHistoricalRequest] | None = None,
+    ) -> Iterator[IbkrHistoricalRequestResult]:
+        if self._iterated:
+            raise ValueError(
+                "provider-history source request results were traversed more than once"
+            )
+        self._iterated = True
+        for result in self._source.iter_request_results(request_order=request_order):
+            self.request_evidence.append(ProviderHistoryRequestEvidence.from_result(result))
+            yield result
+
+
+@dataclass(frozen=True, slots=True)
+class _ProviderHistoryVerification:
+    dataset: ProviderHistoricalDataset
+    source_artifact: ProviderHistorySource
+    request_evidence: tuple[ProviderHistoryRequestEvidence, ...]
+    observation_summary: ProviderHistoryObservationSummary | None
+
+
+class _ObservationSummaryBuilder:
+    def __init__(self) -> None:
+        self._accepted: dict[str, list[tuple[datetime, datetime]]] = {}
+        self._source_start: datetime | None = None
+        self._source_end: datetime | None = None
+
+    def add(self, rows: tuple[ProviderHistoricalObservation, ...]) -> None:
+        for row in rows:
+            self._source_start = (
+                row.interval_start
+                if self._source_start is None
+                else min(self._source_start, row.interval_start)
+            )
+            self._source_end = (
+                row.interval_end
+                if self._source_end is None
+                else max(self._source_end, row.interval_end)
+            )
+            accepted_end = row.interval_start + timedelta(minutes=1)
+            intervals = self._accepted.setdefault(row.request_sha256, [])
+            if intervals and row.interval_start <= intervals[-1][1]:
+                previous_start, previous_end = intervals[-1]
+                intervals[-1] = (previous_start, max(previous_end, accepted_end))
+            else:
+                intervals.append((row.interval_start, accepted_end))
+
+    def finish(self) -> ProviderHistoryObservationSummary | None:
+        if self._source_start is None or self._source_end is None:
+            return None
+        return ProviderHistoryObservationSummary(
+            accepted_intervals_by_request=tuple(
+                (request_sha256, tuple(intervals))
+                for request_sha256, intervals in sorted(self._accepted.items())
+            ),
+            source_start=self._source_start,
+            source_end=self._source_end,
+        )
+
+
 def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     """Verify the complete provider-history and embedded Stage 6 closure from files only."""
+
+    return _verify_provider_history(path).dataset
+
+
+def _verify_provider_history(
+    path: Path,
+    *,
+    verified_partition_callback: _VerifiedPartitionCallback | None = None,
+) -> _ProviderHistoryVerification:
     manifest_path = _require_file(path, "provider-history manifest")
     root = manifest_path.parent
     manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
@@ -353,12 +444,12 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
     source_stream = verify_ibkr_historical_result_stream(source_path)
-    for _ in source_stream.iter_request_results():
-        pass
+    captured_source = _RequestEvidenceCapturingSource(source_stream)
     expected = build_provider_history_dataset(
-        source_stream,
+        captured_source,
         availability_delay=policy.delay,
     )
+    request_evidence = tuple(captured_source.request_evidence)
     if expected.dataset_sha256 != dataset.dataset_sha256:
         raise ValueError("provider-history dataset does not replay from request-result children")
     if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
@@ -389,6 +480,8 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
     observed_refs: list[ProviderHistoricalPartitionReference] = []
     expected_refs = {partition.key: partition for partition in dataset.partitions}
     seen_keys: set[tuple[str, date]] = set()
+    summary_builder = _ObservationSummaryBuilder()
+    row_offset = 0
     for item in files:
         reference = _file_reference(item)
         relative_path = _string(reference["path"], "provider-history partition path")
@@ -429,10 +522,16 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
             )
         if actual_partition.partition_sha256 != str(reference["partition_sha256"]):
             raise ValueError("provider-history partition identity differs from its file reference")
+        summary_builder.add(partition.rows)
+        if verified_partition_callback is not None:
+            verified_partition_callback(partition.rows, row_offset)
+        row_offset += len(partition.rows)
         seen_keys.add(key)
         observed_refs.append(actual_partition)
         expected_paths.add(relative_path)
 
+    if row_offset != dataset.row_count:
+        raise ValueError("provider-history verified row count differs from its dataset")
     if seen_keys != set(expected_refs):
         raise ValueError("provider-history partition closure differs from its dataset references")
     observed = ProviderHistoricalDataset.create(
@@ -452,7 +551,12 @@ def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
         f"{_SOURCE_DIRECTORY}/{relative_path}" for relative_path in source_file_paths
     )
     _require_exact_tree(root, expected_paths)
-    return observed
+    return _ProviderHistoryVerification(
+        dataset=observed,
+        source_artifact=source_stream,
+        request_evidence=request_evidence,
+        observation_summary=summary_builder.finish(),
+    )
 
 
 def _dataset_from_manifest(
@@ -1018,26 +1122,23 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
     return dataset
 
 
-def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEvidence:
+def read_provider_history_source_evidence(
+    path: Path,
+    *,
+    verified_partition_callback: _VerifiedPartitionCallback | None = None,
+) -> ProviderHistorySourceEvidence:
     """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
 
-    dataset = verify_provider_history(path)
-    manifest_path = _require_file(path, "provider-history manifest")
-    source_path = _safe_child(
-        manifest_path.parent,
-        _SOURCE_MANIFEST_PATH,
-        "embedded IBKR result manifest",
-    )
-    source_artifact = verify_ibkr_historical_result_stream(source_path)
-    request_evidence = tuple(
-        ProviderHistoryRequestEvidence.from_result(result)
-        for result in source_artifact.iter_request_results()
+    verification = _verify_provider_history(
+        path,
+        verified_partition_callback=verified_partition_callback,
     )
     return ProviderHistorySourceEvidence(
-        dataset=dataset,
-        observations=_provider_history_rows(path, dataset),
-        source_artifact=source_artifact,
-        request_evidence=request_evidence,
+        dataset=verification.dataset,
+        observations=_provider_history_rows(path, verification.dataset),
+        source_artifact=verification.source_artifact,
+        request_evidence=verification.request_evidence,
+        observation_summary=verification.observation_summary,
     )
 
 

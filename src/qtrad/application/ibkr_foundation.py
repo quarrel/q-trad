@@ -469,27 +469,37 @@ def _provider_evidence(
             raise ValueError("IBKR source result request is absent from the verified plan")
         resolved_results.append((request, result))
 
+    observation_summary = source_evidence.observation_summary
     accepted_starts_by_request: dict[str, set[datetime]] = defaultdict(set)
+    accepted_intervals_by_request: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
     source_start: datetime | None = None
     source_end: datetime | None = None
-    for row in source_evidence.observations:
-        request_sha256 = getattr(row, "request_sha256", None)
-        interval_start = getattr(row, "interval_start", None)
-        interval_end = getattr(row, "interval_end", None)
-        if isinstance(request_sha256, str) and isinstance(interval_start, datetime):
-            accepted_starts_by_request[request_sha256].add(interval_start)
-        if isinstance(interval_start, datetime):
-            source_start = (
-                interval_start if source_start is None else min(source_start, interval_start)
-            )
-        if isinstance(interval_end, datetime):
-            source_end = interval_end if source_end is None else max(source_end, interval_end)
-    if not accepted_starts_by_request:
-        for result in getattr(source_evidence.source_artifact, "request_results", ()):
-            for raw in result.accepted_rows:
-                accepted_starts_by_request[result.request_sha256].add(
-                    _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
+    if observation_summary is not None:
+        accepted_intervals_by_request = observation_summary.intervals_by_request()
+        source_start = observation_summary.source_start
+        source_end = observation_summary.source_end
+    else:
+        for row in source_evidence.observations:
+            request_sha256 = getattr(row, "request_sha256", None)
+            interval_start = getattr(row, "interval_start", None)
+            interval_end = getattr(row, "interval_end", None)
+            if isinstance(request_sha256, str) and isinstance(interval_start, datetime):
+                accepted_starts_by_request[request_sha256].add(interval_start)
+            if isinstance(interval_start, datetime):
+                source_start = (
+                    interval_start if source_start is None else min(source_start, interval_start)
                 )
+            if isinstance(interval_end, datetime):
+                source_end = interval_end if source_end is None else max(source_end, interval_end)
+        if not accepted_starts_by_request:
+            for result in getattr(source_evidence.source_artifact, "request_results", ()):
+                for raw in result.accepted_rows:
+                    accepted_starts_by_request[result.request_sha256].add(
+                        _evidence_time(
+                            cast(Mapping[str, object], raw)["bar_start"],
+                            "bar_start",
+                        )
+                    )
 
     intervals: dict[str, set[tuple[datetime, datetime]]] = {}
     for request, result in resolved_results:
@@ -532,6 +542,24 @@ def _provider_evidence(
                     )
                 )
             continue
+        if observation_summary is not None:
+            accepted_intervals = accepted_intervals_by_request.get(request.request_sha256, ())
+            for expected_start, expected_end in expected_intervals:
+                for missing_start, missing_end in _missing_provider_intervals(
+                    expected_start,
+                    expected_end,
+                    accepted_intervals,
+                ):
+                    gaps.append(
+                        _gap(
+                            instrument_id,
+                            missing_start,
+                            missing_end,
+                            request.request_sha256,
+                            result.result_sha256,
+                        )
+                    )
+            continue
         accepted_starts = accepted_starts_by_request.get(request.request_sha256, set())
         for expected_start, expected_end in expected_intervals:
             missing_start: datetime | None = None
@@ -571,6 +599,28 @@ def _provider_evidence(
             raise ValueError("provider-history source has no observations")
         return active_intervals, provider_gaps, source_start, source_end
     return active_intervals, provider_gaps
+
+
+def _missing_provider_intervals(
+    expected_start: datetime,
+    expected_end: datetime,
+    accepted_intervals: Sequence[tuple[datetime, datetime]],
+) -> tuple[tuple[datetime, datetime], ...]:
+    missing: list[tuple[datetime, datetime]] = []
+    cursor = expected_start
+    for accepted_start, accepted_end in accepted_intervals:
+        if accepted_end <= cursor:
+            continue
+        if accepted_start >= expected_end:
+            break
+        if accepted_start > cursor:
+            missing.append((cursor, min(accepted_start, expected_end)))
+        cursor = max(cursor, min(accepted_end, expected_end))
+        if cursor >= expected_end:
+            break
+    if cursor < expected_end:
+        missing.append((cursor, expected_end))
+    return tuple(missing)
 
 
 def _gap(
