@@ -8,12 +8,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 import qtrad.runtime.ibkr_foundation as foundation_runtime
 import qtrad.runtime.provider_history as provider_history_runtime
+import qtrad.runtime.r2_verification as r2_verification_runtime
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import (
@@ -45,10 +46,8 @@ from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetV
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
-    load_ibkr_foundation_outcome_blind_with_g2_authority,
     load_ibkr_foundation_outcome_blind_with_identity,
     verify_ibkr_foundation,
-    verify_ibkr_g2_feature_source,
     write_ibkr_foundation,
 )
 from qtrad.runtime.provider_history import read_provider_history_source_evidence
@@ -321,20 +320,16 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert isinstance(blind_build.targets, R2OutcomeBlindTargetView)
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
 
-    blind_build, build_id, g2_authority = load_ibkr_foundation_outcome_blind_with_g2_authority(
-        bundle,
-        holdout_target_source=holdout_source,
+    _blind_build, build_id, g2_authority = (
+        foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
+            bundle,
+            holdout_target_source=holdout_source,
+        )
     )
     assert g2_authority.foundation_bundle_id == build_id
-    monkeypatch.setattr(foundation_runtime, "_read_child_rows", original_read_child_rows)
-    g2_source = verify_ibkr_g2_feature_source(
-        g2_authority,
-        holdout_target_source=holdout_source,
-    )
-    assert any(
-        configuration.holdout_range[0] <= row.decision_time < configuration.holdout_range[1]
-        for row in g2_source.panel.rows
-    )
+    assert not hasattr(foundation_runtime, "verify_ibkr_g2_feature_source")
+    with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
+        r2_verification_runtime.verify_confirmatory_g2_feature_source(cast(Any, g2_authority))
 
 
 def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:

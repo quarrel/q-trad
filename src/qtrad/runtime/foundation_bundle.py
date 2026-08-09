@@ -1595,12 +1595,12 @@ async def verify_outcome_blind_foundation_bundle(
     )
 
 
-async def verify_g2_feature_source(
+async def _verify_g2_feature_source(
     authority: G2FeatureSourceAuthority,
     *,
     clock: Clock,
 ) -> VerifiedG2FeatureSource:
-    """Decode only the exact G2-safe children authenticated before G1."""
+    """Decode exact G2-safe children only after the confirmatory G1 gate."""
 
     expected_source_id = _g2_feature_source_id(
         foundation_bundle_id=authority.foundation_bundle_id,

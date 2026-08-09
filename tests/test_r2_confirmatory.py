@@ -75,6 +75,7 @@ from qtrad.runtime.r2_verification import (
     prepare_confirmatory_g2,
     verify_confirmatory_f2,
     verify_confirmatory_g1,
+    verify_confirmatory_g2_feature_source,
     verify_confirmatory_g2_preparation,
 )
 
@@ -557,6 +558,10 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     )
 
     authority = verify_confirmatory_f2(bundle_path)
+    assert not hasattr(authority, "g2_feature_source_authority")
+    assert not hasattr(foundation_runtime, "verify_g2_feature_source")
+    with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
+        verify_confirmatory_g2_feature_source(cast(Any, authority))
 
     assert all(
         row.interval_end <= authority.experiment.holdout_range[0]
@@ -583,6 +588,13 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         path=selection_path,
     )
     assert type(verified_g1) is VerifiedConfirmatoryG1
+    g2_source = verify_confirmatory_g2_feature_source(verified_g1)
+    assert any(
+        authority.experiment.holdout_range[0]
+        <= row.decision_time
+        < authority.experiment.holdout_range[1]
+        for row in g2_source.panel.rows
+    )
     with pytest.raises(TypeError, match="constructed only by verify_confirmatory_g1"):
         VerifiedConfirmatoryG1()
 

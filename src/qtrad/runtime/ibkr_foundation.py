@@ -726,7 +726,7 @@ def load_ibkr_foundation_outcome_blind_with_identity(
     return build, build_id
 
 
-def load_ibkr_foundation_outcome_blind_with_g2_authority(
+def _load_ibkr_foundation_outcome_blind_with_g2_authority(
     path: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
@@ -741,12 +741,12 @@ def load_ibkr_foundation_outcome_blind_with_g2_authority(
     return build, build_id, authority
 
 
-def verify_ibkr_g2_feature_source(
+def _verify_ibkr_g2_feature_source(
     authority: IBKRG2FeatureSourceAuthority,
     *,
     holdout_target_source: R2HoldoutTargetSource,
 ) -> VerifiedG2FeatureSource:
-    """Independently decode the exact IBKR G2 children bound into verified F2."""
+    """Decode exact IBKR G2 children only after the confirmatory G1 gate."""
 
     _build, build_id, replayed_authority, source = _load_ibkr_foundation_outcome_blind(
         authority.path,

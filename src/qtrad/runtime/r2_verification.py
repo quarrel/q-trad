@@ -150,13 +150,14 @@ from qtrad.domain.r2_readiness import (
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import (
     G2FeatureSourceAuthority,
-    verify_g2_feature_source,
+    VerifiedG2FeatureSource,
+    _verify_g2_feature_source,
     verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_foundation import (
     IBKRG2FeatureSourceAuthority,
-    load_ibkr_foundation_outcome_blind_with_g2_authority,
-    verify_ibkr_g2_feature_source,
+    _load_ibkr_foundation_outcome_blind_with_g2_authority,
+    _verify_ibkr_g2_feature_source,
 )
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
@@ -418,10 +419,6 @@ class VerifiedConfirmatoryF2:
         return self._holdout_target_source
 
     @property
-    def g2_feature_source_authority(self) -> ConfirmatoryG2FeatureSourceAuthority:
-        return self._g2_feature_source_authority
-
-    @property
     def outcome_blind_foundation(self) -> R1FoundationBindings:
         """Return independently verified R1 projections that contain no holdout outcomes."""
 
@@ -478,11 +475,44 @@ class VerifiedConfirmatoryF2:
         return self._selection_policy
 
 
+class _VerifiedConfirmatoryG2FeatureAccess:
+    """Verifier-issued capability to decode the G2-safe feature source after G1."""
+
+    __slots__ = ("_authority", "_selection_manifest_id", "_verified_f2")
+
+    _authority: ConfirmatoryG2FeatureSourceAuthority
+    _selection_manifest_id: str
+    _verified_f2: VerifiedConfirmatoryF2
+
+    def __init__(self) -> None:
+        raise TypeError("G2 feature access is issued only by verified G1")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        verified_f2: VerifiedConfirmatoryF2,
+        selection: R2HoldoutSelectionManifest,
+    ) -> _VerifiedConfirmatoryG2FeatureAccess:
+        if token is not _VERIFIED_CONFIRMATORY_G1_TOKEN:
+            raise TypeError("G2 feature access is issued only by verified G1")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_authority", verified_f2._g2_feature_source_authority)
+        object.__setattr__(instance, "_selection_manifest_id", selection.manifest_id)
+        object.__setattr__(instance, "_verified_f2", verified_f2)
+        return instance
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("G2 feature access is immutable")
+
+
 class VerifiedConfirmatoryG1:
     """Runtime-only authority proving an exact persisted confirmatory G1 freeze."""
 
-    __slots__ = ("_selection", "_verified_f2")
+    __slots__ = ("_g2_feature_access", "_selection", "_verified_f2")
 
+    _g2_feature_access: _VerifiedConfirmatoryG2FeatureAccess
     _selection: R2HoldoutSelectionManifest
     _verified_f2: VerifiedConfirmatoryF2
 
@@ -505,6 +535,15 @@ class VerifiedConfirmatoryG1:
         instance = object.__new__(cls)
         object.__setattr__(instance, "_verified_f2", verified_f2)
         object.__setattr__(instance, "_selection", selection)
+        object.__setattr__(
+            instance,
+            "_g2_feature_access",
+            _VerifiedConfirmatoryG2FeatureAccess._create(
+                token,
+                verified_f2=verified_f2,
+                selection=selection,
+            ),
+        )
         return instance
 
     @property
@@ -3188,6 +3227,48 @@ def _confirmatory_feature_sets(
     return MappingProxyType(result)
 
 
+def verify_confirmatory_g2_feature_source(
+    verified_g1: VerifiedConfirmatoryG1,
+) -> VerifiedG2FeatureSource:
+    """Decode the exact G2-safe feature source only with verified G1 provenance."""
+
+    if type(verified_g1) is not VerifiedConfirmatoryG1:
+        raise TypeError("G2 feature decoding requires VerifiedConfirmatoryG1")
+    access = verified_g1._g2_feature_access
+    if (
+        access._verified_f2 is not verified_g1.verified_f2
+        or access._selection_manifest_id != verified_g1.selection.manifest_id
+    ):
+        raise ValueError("G2 feature access differs from verified G1 provenance")
+    authority = access._authority
+    verified_f2 = verified_g1.verified_f2
+    source = (
+        _verify_ibkr_g2_feature_source(
+            authority,
+            holdout_target_source=verified_f2.holdout_target_source,
+        )
+        if isinstance(authority, IBKRG2FeatureSourceAuthority)
+        else asyncio.run(
+            _verify_g2_feature_source(
+                authority,
+                clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            )
+        )
+    )
+    experiment = verified_f2.experiment
+    if (
+        source.source_id != authority.source_id
+        or source.observations.dataset_id != experiment.observation_dataset_id
+        or source.panel.dataset_id != experiment.panel_dataset_id
+        or source.panel.observation_dataset_id != experiment.observation_dataset_id
+        or source.panel.foundation_configuration_id != experiment.foundation_configuration_id
+        or source.observations.holdout_range != experiment.holdout_range
+        or source.panel.holdout_range != experiment.holdout_range
+    ):
+        raise ValueError("verified G2 feature source differs from the exact G1 experiment")
+    return source
+
+
 @dataclass(frozen=True, slots=True)
 class _ConfirmatoryG2Build:
     training_features: Mapping[str, R2FeatureDataset]
@@ -3212,30 +3293,7 @@ def _build_confirmatory_g2(
     experiment = verified_f2.experiment
     target_source = verified_f2.holdout_target_source
     foundation = cast(R2OutcomeBlindFeatureInputs, verified_f2.outcome_blind_foundation)
-    g2_authority = verified_f2.g2_feature_source_authority
-    g2_source = (
-        verify_ibkr_g2_feature_source(
-            g2_authority,
-            holdout_target_source=target_source,
-        )
-        if isinstance(g2_authority, IBKRG2FeatureSourceAuthority)
-        else asyncio.run(
-            verify_g2_feature_source(
-                g2_authority,
-                clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
-            )
-        )
-    )
-    if (
-        g2_source.source_id != g2_authority.source_id
-        or g2_source.observations.dataset_id != experiment.observation_dataset_id
-        or g2_source.panel.dataset_id != experiment.panel_dataset_id
-        or g2_source.panel.observation_dataset_id != experiment.observation_dataset_id
-        or g2_source.panel.foundation_configuration_id != experiment.foundation_configuration_id
-        or g2_source.observations.holdout_range != experiment.holdout_range
-        or g2_source.panel.holdout_range != experiment.holdout_range
-    ):
-        raise ValueError("verified G2 feature source differs from the exact G1 experiment")
+    g2_source = verify_confirmatory_g2_feature_source(verified_g1)
     holdout_foundation = cast(
         R2OutcomeBlindFeatureInputs,
         SimpleNamespace(
@@ -3881,7 +3939,7 @@ async def _replay_staged_oof_async(
             stage8_foundation,
             foundation_bundle_id,
             g2_feature_source_authority,
-        ) = load_ibkr_foundation_outcome_blind_with_g2_authority(
+        ) = _load_ibkr_foundation_outcome_blind_with_g2_authority(
             paths["foundation"], holdout_target_source=holdout_target_source
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
