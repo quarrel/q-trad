@@ -31,6 +31,7 @@ from qtrad.domain.r2_ibkr_historical import (
 )
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
+    EvidenceClass,
     FeatureEligibility,
     FeatureFamily,
     ModelFamily,
@@ -47,6 +48,7 @@ def build_ibkr_historical_experiment(
     *,
     foundation_bundle_id: str,
     adapter_identity: IBKRHistoricalAdapterIdentity,
+    evidence_class: EvidenceClass = IBKR_HISTORICAL_EVIDENCE,
 ) -> R2ExperimentConfig:
     """Build the profile from a verified Stage 8 foundation and persisted adapter identity."""
 
@@ -158,11 +160,11 @@ def build_ibkr_historical_experiment(
         holdout_range=configuration.holdout_range,
         numeric_replay_relative_tolerance=1e-10,
         numeric_replay_absolute_tolerance=1e-12,
-        evidence_class=IBKR_HISTORICAL_EVIDENCE,
+        evidence_class=evidence_class,
         model_families=tuple(ModelFamily),
         market_data_source_class=IBKR_HISTORICAL_SOURCE,
     )
-    validate_ibkr_historical_profile(experiment)
+    validate_ibkr_historical_profile(experiment, expected_evidence_class=evidence_class)
     return experiment
 
 

@@ -80,6 +80,5 @@ def _test_image_identity_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
-
 def pytest_sessionfinish(session: pytest.Session, exitstatus: int) -> None:
     _unlink_manifest(_manifest_path)

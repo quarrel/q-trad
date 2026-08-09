@@ -7,6 +7,7 @@ requires the immutable opened marker.
 
 from __future__ import annotations
 
+import json
 import warnings
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -20,7 +21,7 @@ from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import TARGET_DATASET_CONTRACT, TargetDataset, TargetRow
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import R2OofBundle
-from qtrad.domain.r2_evaluation import SelectionManifest
+from qtrad.domain.r2_evaluation import SelectionDecision, SelectionManifest
 from qtrad.domain.r2_features import R2FeatureDataset
 from qtrad.domain.r2_holdout import (
     FinalFitDisposition,
@@ -55,6 +56,277 @@ from qtrad.domain.r2_models import (
 )
 from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentConfig
 from qtrad.domain.time import require_utc
+
+_VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN = object()
+
+
+class VerifiedConfirmatoryHoldoutAuthority:
+    """Immutable F2 selection, configuration, and comparison authority.
+
+    Constructed only by the confirmatory F2 verifier.
+    """
+
+    __slots__ = (
+        "_comparison_registry",
+        "_configuration_registry",
+        "_evaluation_report_id",
+        "_forecast_bucket_count",
+        "_forecast_bucket_policy",
+        "_metric_policy",
+        "_minimum_correlation_rows",
+        "_oof_bundle_id",
+        "_selection_state",
+    )
+    _comparison_registry: tuple[tuple[ModelFamily, ModelFamily], ...]
+    _configuration_registry: tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]
+    _evaluation_report_id: str
+    _forecast_bucket_count: int
+    _forecast_bucket_policy: str
+    _metric_policy: str
+    _minimum_correlation_rows: int
+    _oof_bundle_id: str
+    _selection_state: bytes
+
+    def __init__(self) -> None:
+        raise TypeError(
+            "VerifiedConfirmatoryHoldoutAuthority is constructed only by verify_confirmatory_f2"
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("VerifiedConfirmatoryHoldoutAuthority is immutable")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        oof_bundle_id: str,
+        evaluation_report_id: str,
+        configuration_registry: Sequence[
+            tuple[str, ModelFamily, str | None, str | None, str | None]
+        ],
+        evaluation_policy: Mapping[str, JsonValue],
+        experiment_configuration_id: str,
+        evidence_class: EvidenceClass,
+        local_comparator_manifest_id: str,
+        evaluated_configuration_ids: Sequence[str],
+        selection_decisions: Sequence[SelectionDecision],
+        selected_configuration_ids: Sequence[str],
+        holdout_comparator_configuration_ids: Sequence[str],
+        selection_policy: Mapping[str, JsonValue],
+        holdout_range: tuple[datetime, datetime],
+        source_class: MarketDataSourceClass,
+        foundation_bundle_id: str,
+    ) -> VerifiedConfirmatoryHoldoutAuthority:
+        if token is not _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN:
+            raise TypeError(
+                "VerifiedConfirmatoryHoldoutAuthority is constructed only by its verifier"
+            )
+        metric_policy = evaluation_policy.get("metric_policy")
+        forecast_bucket_policy = evaluation_policy.get("forecast_bucket_policy")
+        minimum_correlation_rows = evaluation_policy.get("minimum_correlation_rows")
+        forecast_bucket_count = evaluation_policy.get("forecast_bucket_count")
+        if not isinstance(metric_policy, str) or not isinstance(forecast_bucket_policy, str):
+            raise ValueError("confirmatory authority has invalid evaluation policies")
+        if (
+            isinstance(minimum_correlation_rows, bool)
+            or not isinstance(minimum_correlation_rows, int)
+            or isinstance(forecast_bucket_count, bool)
+            or not isinstance(forecast_bucket_count, int)
+        ):
+            raise ValueError("confirmatory authority has invalid evaluation support controls")
+        comparison_registry = cls._comparison_pairs(evaluation_policy)
+        registry = tuple(configuration_registry)
+        if not registry:
+            raise ValueError("confirmatory authority has no configuration registry")
+        selection_state = cls._selection_state_bytes(
+            experiment_configuration_id=experiment_configuration_id,
+            evidence_class=evidence_class,
+            evaluation_report_id=evaluation_report_id,
+            local_comparator_manifest_id=local_comparator_manifest_id,
+            evaluated_configuration_ids=evaluated_configuration_ids,
+            selection_decisions=selection_decisions,
+            selected_configuration_ids=selected_configuration_ids,
+            holdout_comparator_configuration_ids=holdout_comparator_configuration_ids,
+            selection_policy=selection_policy,
+            holdout_range=holdout_range,
+            source_class=source_class,
+            foundation_bundle_id=foundation_bundle_id,
+            oof_bundle_id=oof_bundle_id,
+        )
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_oof_bundle_id", oof_bundle_id)
+        object.__setattr__(instance, "_evaluation_report_id", evaluation_report_id)
+        object.__setattr__(instance, "_configuration_registry", registry)
+        object.__setattr__(instance, "_comparison_registry", comparison_registry)
+        object.__setattr__(instance, "_metric_policy", metric_policy)
+        object.__setattr__(instance, "_forecast_bucket_policy", forecast_bucket_policy)
+        object.__setattr__(instance, "_minimum_correlation_rows", minimum_correlation_rows)
+        object.__setattr__(instance, "_forecast_bucket_count", forecast_bucket_count)
+        object.__setattr__(instance, "_selection_state", selection_state)
+        return instance
+
+    @staticmethod
+    def _comparison_pairs(
+        evaluation_policy: Mapping[str, JsonValue],
+    ) -> tuple[tuple[ModelFamily, ModelFamily], ...]:
+        raw_registry = evaluation_policy.get("comparison_registry")
+        if not isinstance(raw_registry, (list, tuple)) or not raw_registry:
+            raise ValueError("confirmatory authority has no comparison registry")
+        pairs: list[tuple[ModelFamily, ModelFamily]] = []
+        for raw_pair in raw_registry:
+            if (
+                not isinstance(raw_pair, (list, tuple))
+                or len(raw_pair) != 2
+                or not all(isinstance(item, str) for item in raw_pair)
+            ):
+                raise ValueError("confirmatory authority comparison registry is malformed")
+            pairs.append((ModelFamily(raw_pair[0]), ModelFamily(raw_pair[1])))
+        if len(set(pairs)) != len(pairs):
+            raise ValueError("confirmatory authority comparison registry has duplicate pairs")
+        return tuple(pairs)
+
+    @staticmethod
+    def _selection_state_bytes(
+        *,
+        experiment_configuration_id: str,
+        evidence_class: EvidenceClass,
+        evaluation_report_id: str,
+        local_comparator_manifest_id: str,
+        evaluated_configuration_ids: Sequence[str],
+        selection_decisions: Sequence[SelectionDecision],
+        selected_configuration_ids: Sequence[str],
+        holdout_comparator_configuration_ids: Sequence[str],
+        selection_policy: Mapping[str, JsonValue],
+        holdout_range: tuple[datetime, datetime],
+        source_class: MarketDataSourceClass,
+        foundation_bundle_id: str,
+        oof_bundle_id: str,
+    ) -> bytes:
+        primary_metric = selection_policy.get("primary_metric")
+        secondary_metrics = selection_policy.get("secondary_metrics")
+        acceptance_thresholds = selection_policy.get("acceptance_thresholds")
+        predeclared_comparators = selection_policy.get("predeclared_comparators")
+        final_fitting_procedure = selection_policy.get("final_fitting_procedure")
+        if not isinstance(primary_metric, str) or not isinstance(final_fitting_procedure, str):
+            raise ValueError("confirmatory authority has invalid selection policies")
+        if not isinstance(secondary_metrics, (list, tuple)) or not all(
+            isinstance(item, str) for item in secondary_metrics
+        ):
+            raise ValueError("confirmatory authority has invalid secondary metrics")
+        if not isinstance(predeclared_comparators, (list, tuple)) or not all(
+            isinstance(item, str) for item in predeclared_comparators
+        ):
+            raise ValueError("confirmatory authority has invalid predeclared comparators")
+        if not isinstance(acceptance_thresholds, (list, tuple)):
+            raise ValueError("confirmatory authority has invalid acceptance thresholds")
+        thresholds: list[list[str | float]] = []
+        for item in acceptance_thresholds:
+            if (
+                not isinstance(item, (list, tuple))
+                or len(item) != 2
+                or not isinstance(item[0], str)
+                or isinstance(item[1], bool)
+                or not isinstance(item[1], (int, float))
+            ):
+                raise ValueError("confirmatory authority has invalid acceptance thresholds")
+            thresholds.append([item[0], float(item[1])])
+        payload = {
+            "experiment_configuration_id": experiment_configuration_id,
+            "evidence_class": evidence_class.value,
+            "evaluation_report_id": evaluation_report_id,
+            "local_comparator_manifest_id": local_comparator_manifest_id,
+            "evaluated_configuration_ids": sorted(evaluated_configuration_ids),
+            "predeclared_comparators": list(predeclared_comparators),
+            "primary_metric": primary_metric,
+            "secondary_metrics": list(secondary_metrics),
+            "acceptance_thresholds": sorted(thresholds),
+            "decisions": [
+                decision.as_json()
+                for decision in sorted(selection_decisions, key=lambda item: item.configuration_id)
+            ],
+            "selected_configuration_ids": sorted(selected_configuration_ids),
+            "holdout_comparator_configuration_ids": sorted(holdout_comparator_configuration_ids),
+            "final_fitting_procedure": final_fitting_procedure,
+            "holdout_range": [item.isoformat() for item in holdout_range],
+            "source_class": source_class.value,
+            "foundation_bundle_id": foundation_bundle_id,
+            "oof_bundle_id": oof_bundle_id,
+        }
+        return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+
+    @property
+    def oof_bundle_id(self) -> str:
+        return self._oof_bundle_id
+
+    @property
+    def evaluation_report_id(self) -> str:
+        return self._evaluation_report_id
+
+    @property
+    def configuration_registry(
+        self,
+    ) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
+        return self._configuration_registry
+
+    def authenticates_prior_selection(self, selection: SelectionManifest) -> bool:
+        selection_policy: dict[str, JsonValue] = {
+            "primary_metric": selection.primary_metric,
+            "secondary_metrics": list(selection.secondary_metrics),
+            "acceptance_thresholds": [
+                [name, value] for name, value in selection.acceptance_thresholds
+            ],
+            "predeclared_comparators": [
+                comparator.value for comparator in selection.predeclared_comparators
+            ],
+            "final_fitting_procedure": selection.final_fitting_procedure,
+        }
+        try:
+            selection_state = self._selection_state_bytes(
+                experiment_configuration_id=selection.experiment_configuration_id,
+                evidence_class=selection.evidence_class,
+                evaluation_report_id=selection.evaluation_report_id,
+                local_comparator_manifest_id=selection.local_comparator_manifest_id,
+                evaluated_configuration_ids=selection.evaluated_configuration_ids,
+                selection_decisions=selection.decisions,
+                selected_configuration_ids=selection.selected_configuration_ids,
+                holdout_comparator_configuration_ids=(
+                    selection.holdout_comparator_configuration_ids
+                ),
+                selection_policy=selection_policy,
+                holdout_range=selection.holdout_range,
+                source_class=cast(MarketDataSourceClass, selection.market_data_source_class),
+                foundation_bundle_id=cast(str, selection.foundation_bundle_id),
+                oof_bundle_id=cast(str, selection.oof_bundle_id),
+            )
+        except (TypeError, ValueError):
+            return False
+        return selection_state == self._selection_state
+
+    def authenticates_evaluation_policy(self, policy: Mapping[str, JsonValue]) -> bool:
+        try:
+            comparisons = self._comparison_pairs(policy)
+        except (TypeError, ValueError):
+            return False
+        return (
+            policy.get("metric_policy") == self._metric_policy
+            and policy.get("forecast_bucket_policy") == self._forecast_bucket_policy
+            and policy.get("minimum_correlation_rows") == self._minimum_correlation_rows
+            and policy.get("forecast_bucket_count") == self._forecast_bucket_count
+            and comparisons == self._comparison_registry
+        )
+
+    def evaluation_policy(self) -> dict[str, JsonValue]:
+        return {
+            "metric_policy": self._metric_policy,
+            "forecast_bucket_policy": self._forecast_bucket_policy,
+            "minimum_correlation_rows": self._minimum_correlation_rows,
+            "forecast_bucket_count": self._forecast_bucket_count,
+            "comparison_registry": [
+                [candidate.value, comparator.value]
+                for candidate, comparator in self._comparison_registry
+            ],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -339,6 +611,7 @@ def freeze_holdout_selection(
     configuration_registry: Sequence[tuple[str, ModelFamily, str | None, str | None, str | None]]
     | None = None,
     evaluation_policy: Mapping[str, JsonValue] | None = None,
+    confirmatory_authority: VerifiedConfirmatoryHoldoutAuthority | None = None,
     holdout_target_source: R2HoldoutTargetSource,
     holdout_opportunity_registry: R2HoldoutOpportunityRegistry,
     pre_holdout_projection: R2HoldoutTargetProjection,
@@ -358,6 +631,10 @@ def freeze_holdout_selection(
         raise ValueError("G2 control configuration IDs must be unique and ordered")
     if set(controls) != set(inferred_controls):
         raise ValueError("G2 controls differ from the independently replayed selection")
+    if holdout_scope is HoldoutScope.CONFIRMATORY and (
+        verified_oof_bundle is None or confirmatory_authority is None
+    ):
+        raise ValueError("confirmatory holdout selection requires verifier-only F2 authority")
     if verified_oof_bundle is not None:
         if (
             verified_oof_bundle.experiment_configuration_id
@@ -402,11 +679,41 @@ def freeze_holdout_selection(
             source_class=source_class,
             evidence_class=evidence_class,
         )
-        if configuration_registry is None or not configuration_registry:
-            raise ValueError(
-                "verified OOF freeze requires its authenticated configuration registry"
-            )
-        frozen_configuration_registry = tuple(configuration_registry)
+        if holdout_scope is HoldoutScope.CONFIRMATORY:
+            if (
+                confirmatory_authority is None
+                or confirmatory_authority.oof_bundle_id != verified_oof_bundle.bundle_id
+                or confirmatory_authority.evaluation_report_id
+                != prior_selection.evaluation_report_id
+            ):
+                raise ValueError("confirmatory authority differs from the verified OOF lineage")
+            if not confirmatory_authority.authenticates_prior_selection(prior_selection):
+                raise ValueError(
+                    "prior selection differs from verifier-only confirmatory authority"
+                )
+            if tuple(configuration_registry or ()) != confirmatory_authority.configuration_registry:
+                raise ValueError(
+                    "configuration registry differs from verifier-only confirmatory authority"
+                )
+            if (
+                evaluation_policy is None
+                or not confirmatory_authority.authenticates_evaluation_policy(evaluation_policy)
+            ):
+                raise ValueError(
+                    "evaluation policy differs from verifier-only confirmatory authority"
+                )
+            frozen_configuration_registry = confirmatory_authority.configuration_registry
+            frozen_evaluation_policy = dict(evaluation_policy)
+            frozen_evaluation_policy.update(confirmatory_authority.evaluation_policy())
+        else:
+            if configuration_registry is None or not configuration_registry:
+                raise ValueError(
+                    "verified OOF freeze requires its authenticated configuration registry"
+                )
+            frozen_configuration_registry = tuple(configuration_registry)
+            if evaluation_policy is None:
+                raise ValueError("verified OOF freeze requires its authenticated evaluation policy")
+            frozen_evaluation_policy = dict(evaluation_policy)
         registry_ids = tuple(item[0] for item in frozen_configuration_registry)
         if registry_ids != evaluated:
             raise ValueError(
@@ -414,9 +721,6 @@ def freeze_holdout_selection(
             )
         if not set(selected + controls) <= set(registry_ids):
             raise ValueError("verified OOF selection references an unknown configuration")
-        if evaluation_policy is None:
-            raise ValueError("verified OOF freeze requires its authenticated evaluation policy")
-        frozen_evaluation_policy = dict(evaluation_policy)
         authenticated_metric = frozen_evaluation_policy.get("metric_policy")
         authenticated_forecast_buckets = frozen_evaluation_policy.get("forecast_bucket_policy")
         authenticated_minimum_rows = frozen_evaluation_policy.get("minimum_correlation_rows")
@@ -468,8 +772,10 @@ def freeze_holdout_selection(
                 "forecast_bucket_policy": authenticated_forecast_buckets,
                 "state_bucket_policy": verified_experiment.state_bucket_policy,
                 "model_selection_policy": verified_experiment.model_selection_policy,
-                "loss_policy": "OOF_PRIMARY_MSE_V1",
-                "instrument_identity_policy": "ORDERED_EXPERIMENT_UNIVERSE",
+                "loss_policy": verified_experiment.model_selection_policy,
+                "instrument_identity_policy": final_fitting_policy.runtime_identities.get(
+                    "instrument_identity_policy", "ORDERED_EXPERIMENT_UNIVERSE"
+                ),
                 "purged_target_ids": [],
             }
         )
@@ -599,10 +905,11 @@ def freeze_holdout_selection(
         raise ValueError("G2 source class differs from the prior selection")
     if prior_selection.evidence_class is not evidence_class:
         raise ValueError("G2 evidence class differs from the prior selection")
+    holdout_configurations = set(prior_selection.holdout_comparator_configuration_ids)
     for question in questions:
         if (
-            question.candidate_configuration_id not in selected
-            or question.comparator_configuration_id not in controls
+            question.candidate_configuration_id not in holdout_configurations
+            or question.comparator_configuration_id not in holdout_configurations
         ):
             raise ValueError(
                 "holdout question references a configuration outside the frozen registry"

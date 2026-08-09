@@ -116,7 +116,7 @@ from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_SOURCE,
     IBKRHistoricalAdapterIdentity,
 )
-from qtrad.domain.r2_readiness import R2ExperimentConfig
+from qtrad.domain.r2_readiness import EvidenceClass, R2ExperimentConfig
 from qtrad.ports.capture_feed import CaptureFeedIdentity
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import BackfillRequest
@@ -223,14 +223,17 @@ from qtrad.runtime.r2_readiness import (
     write_r2_readiness,
 )
 from qtrad.runtime.r2_verification import (
+    CONFIRMATORY_RUN_KIND,
     build_oof_bundle,
     build_software_bundle,
+    freeze_confirmatory_selection,
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
     require_ibkr_adapter_runtime_identity,
     runtime_identities,
     selection_freeze,
+    verify_confirmatory_f2,
     verify_oof_bundle,
     verify_software_bundle,
     verify_software_bundle_async,
@@ -948,6 +951,20 @@ def build_parser() -> argparse.ArgumentParser:
         "oof-verify", help="independently verify an R2 OOF bundle"
     )
     baselines_oof_verify.add_argument("--bundle", type=Path, required=True)
+
+    baselines_confirmatory_f2_verify = baselines_sub.add_parser(
+        "confirmatory-f2-verify",
+        help="independently verify and replay a confirmatory F2 OOF authority",
+    )
+    baselines_confirmatory_f2_verify.add_argument("--bundle", type=Path, required=True)
+
+    baselines_confirmatory_selection = baselines_sub.add_parser(
+        "confirmatory-selection-freeze",
+        help="derive confirmatory G1 selection from verified F2 only",
+    )
+    baselines_confirmatory_selection.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
+    baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
 
     baselines_selection_freeze = baselines_sub.add_parser(
         "selection-freeze", help="freeze disposable implementation selection mechanics"
@@ -1762,6 +1779,36 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-f2-verify"
+    ):
+        authority = verify_confirmatory_f2(args.bundle)
+        print(
+            json.dumps(
+                {
+                    "bundle_id": authority.bundle.bundle_id,
+                    "experiment_configuration_id": authority.experiment_configuration_id,
+                    "foundation_bundle_id": authority.foundation_bundle_id,
+                    "evidence_class": authority.evidence_class.value,
+                    "run_kind": authority.descriptor["run_kind"],
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-selection-freeze"
+    ):
+        authority = verify_confirmatory_f2(args.f2_bundle)
+        freeze_confirmatory_selection(
+            verified_f2=authority,
+            output=args.output,
+            frozen_by=args.frozen_by,
+        )
+        print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
         and args.baselines_command == "selection-freeze"
     ):
         selection_freeze(
@@ -2022,6 +2069,7 @@ async def _load_r2_foundation_inputs(
         stage8_foundation,
         foundation_bundle_id=foundation_bundle_id,
         adapter_identity=adapter_identity,
+        evidence_class=experiment.evidence_class,
     )
     if expected.as_json() != experiment.as_json():
         raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
@@ -2050,7 +2098,7 @@ async def _build_r2_oof(
         feature_arguments=feature_arguments,
     )
     if holdout_target_source_path is None:
-        raise ValueError("representative OOF build requires an authenticated holdout target source")
+        raise ValueError("OOF build requires an authenticated holdout target source")
     holdout_target_source = R2HoldoutTargetSource.from_json(
         _load_holdout_cli_object(holdout_target_source_path)
     )
@@ -2077,6 +2125,11 @@ async def _build_r2_oof(
         research_root=settings.research_root,
         clock=clock,
         output=output_path,
+        run_kind=(
+            CONFIRMATORY_RUN_KIND
+            if experiment.evidence_class is EvidenceClass.CONFIRMATORY
+            else "REPRESENTATIVE"
+        ),
         representative_profile=(
             IBKR_HISTORICAL_PROFILE
             if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
