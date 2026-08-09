@@ -740,13 +740,16 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
+    assert 'backup_env_file="/etc/qtrad/ibkr-backup.env"' in deploy
+    assert "verify_backup_identity" in deploy
     assert "systemctl enable --now" not in deploy
     assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
     assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
     assert "qtrad_ibkr_restore_verify_" in restore
     assert "sha256sum --check" in restore
-    assert "pg_restore --exit-on-error" in restore
+    assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
+    assert 'docker exec -i "$container" pg_restore --list' in backup
     assert "COMMENT ON DATABASE" in restore
     assert "restore-evidence" in restore
     assert "QTRAD_IBKR_RESTORE_ARCHIVE" in restore
@@ -887,12 +890,17 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     script_dir = repository / "ops" / "ibkr"
     script_dir.mkdir(parents=True)
     canonical_env = tmp_path / "ibkr-ingest.env"
+    backup_env = tmp_path / "ibkr-backup.env"
     calls = tmp_path / "calls"
 
     deploy_source = (_REPOSITORY_ROOT / "ops" / "ibkr" / "deploy.sh").read_text(encoding="utf-8")
     deploy_source = deploy_source.replace(
         'canonical_env_file="/etc/qtrad/ibkr-ingest.env"',
         f'canonical_env_file="{canonical_env}"',
+    )
+    deploy_source = deploy_source.replace(
+        'backup_env_file="/etc/qtrad/ibkr-backup.env"',
+        f'backup_env_file="{backup_env}"',
     )
     deploy_path = script_dir / "deploy.sh"
     _write_executable(deploy_path, deploy_source)
@@ -936,6 +944,10 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
             fake_bin / command,
             f"#!/bin/sh\nprintf '%s %s\\n' {command} \"$*\" >> '{calls}'\n",
         )
+    _write_executable(
+        fake_bin / "stat",
+        "#!/bin/sh\ncase \"$*\" in *%U:%G*) printf 'root:root\\n' ;; *) printf '600\\n' ;; esac\n",
+    )
 
     image = "registry.example.invalid/qtrad@sha256:" + "b" * 64
     configuration_hash = "a" * 64
@@ -950,6 +962,16 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         f"QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH={configuration_hash}\n",
         encoding="utf-8",
     )
+    backup_env.write_text(
+        "QTRAD_IBKR_BACKUP_DIR=/srv/qtrad/postgres/backups\n"
+        "QTRAD_IBKR_STATUS_DIR=/var/lib/qtrad/ibkr\n"
+        "QTRAD_IBKR_POSTGRES_CONTAINER=qtrad-ibkr-native-postgres\n"
+        "QTRAD_IBKR_POSTGRES_DATABASE=qtrad_ibkr\n"
+        "QTRAD_IBKR_POSTGRES_USER=qtrad_ibkr\n"
+        "QTRAD_IBKR_BACKUP_RETENTION_DAYS=14\n",
+        encoding="utf-8",
+    )
+    backup_env.chmod(0o600)
 
     preflight = tmp_path / "qtrad-preflight"
     preflight_report = {

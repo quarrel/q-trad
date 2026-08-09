@@ -59,7 +59,7 @@ archive_sha256="$(sha256sum "$latest" | cut -d ' ' -f 1)"
 
 docker exec "$container" psql --username="$user" --dbname=postgres \
     --command "CREATE DATABASE \"$restore_database\"" > /dev/null
-docker exec "$container" pg_restore --exit-on-error --no-owner \
+docker exec -i "$container" pg_restore --exit-on-error --no-owner \
     --username="$user" --dbname="$restore_database" < "$latest"
 schema_head="$(docker exec "$container" psql --tuples-only --no-align \
     --username="$user" --dbname="$restore_database" \

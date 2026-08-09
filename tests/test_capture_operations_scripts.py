@@ -182,6 +182,8 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "qtrad_ibkr|qtrad_ibkr" in ready
     assert "qtrad-ibkr-native-postgres" in backup
     assert "qtrad-ibkr-native-postgres" in restore
+    assert 'docker exec -i "$container" pg_restore --list' in backup
+    assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
     backup_service = (ibkr / "qtrad-ibkr-backup.service.example").read_text()
     restore_service = (ibkr / "qtrad-ibkr-restore-verify.service.example").read_text()
     assert "Requires=qtrad-ibkr-postgres.service" in backup_service
