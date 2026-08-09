@@ -700,7 +700,8 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     restore = (ops / "postgres-restore-verify.sh").read_text(encoding="utf-8")
 
     assert "qtrad ingest --provider ibkr" in ingest
-    assert "--entrypoint uv" in ingest
+    assert '--entrypoint /app/.venv/bin/python "$image"' in ingest
+    assert "run --frozen" not in ingest
     assert "--user 10001:10001" in ingest
     assert "--read-only" in ingest
     assert "--cap-drop=ALL" in ingest
@@ -709,12 +710,16 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "QTRAD_IBKR_PASSWORD" not in ingest
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in ingest
     assert "qtrad api --host 127.0.0.1 --port 8000" in api
+    assert '--entrypoint /app/.venv/bin/python "$image"' in api
+    assert "run --frozen" not in api
     assert "--user 10001:10001" in api
     assert "--read-only" in api
     assert "--publish" not in api
     assert "QTRAD_IBKR_PASSWORD" not in api
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in api
     assert "usage: deploy.sh --check|--apply" in deploy
+    assert '--entrypoint /app/.venv/bin/python "$image"' in deploy
+    assert "run --frozen --no-dev --no-sync python -m qtrad db verify-head" not in deploy
     script_dir = 'script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"'
     assert script_dir in deploy
     assert deploy.index(script_dir) < deploy.index("canonical_env_file=")

@@ -141,9 +141,11 @@ docker run --rm --network host --user 10001:10001 --entrypoint uv \
   python -m qtrad historical ibkr <command> ...
 ```
 
-The published IBKR image has an explicit `uv` entrypoint. The B3 ingest wrapper invokes the
-same frozen command as an unprivileged, read-only container and binds the reviewed configuration
-and persistent checkpoint paths; it is installed only by an explicitly authorized `deploy.sh --apply`.
+The B3 deployment, ingest, and API wrappers invoke the installed virtual-environment Python
+directly. This preserves the frozen image dependency set without requiring a writable package-manager
+cache inside their unprivileged, read-only containers. The ingest wrapper binds the reviewed
+configuration and persistent checkpoint paths and is installed only by an explicitly authorized
+`deploy.sh --apply`.
 
 ## OCIR repository setup
 

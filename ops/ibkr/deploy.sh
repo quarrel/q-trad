@@ -70,8 +70,8 @@ verify_host_identity() {
 verify_database_head() {
     docker run --rm --network host --user 10001:10001 \
         --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-        --env-file "$env_file" --entrypoint uv "$image" \
-        run --frozen --no-dev --no-sync python -m qtrad db verify-head
+        --env-file "$env_file" --entrypoint /app/.venv/bin/python "$image" \
+        -m qtrad db verify-head
 }
 
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || fail "image must be immutable"
