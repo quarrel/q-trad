@@ -156,8 +156,8 @@ def test_ibkr_offline_preflight_runs_through_the_immutable_container(
     assert "--user 10001:10001" in call
     assert f"--volume {etc_root}:{etc_root}:ro" in call
     assert f"--volume {authority_root}:{authority_root}:ro" in call
-    assert f"--entrypoint uv {image}" in call
-    assert "python -m qtrad deployment ibkr-preflight --help" in call
+    assert f"--entrypoint /app/.venv/bin/python {image}" in call
+    assert "-m qtrad deployment ibkr-preflight --help" in call
 
 
 def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -> None:

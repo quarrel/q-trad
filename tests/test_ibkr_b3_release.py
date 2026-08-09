@@ -730,8 +730,8 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "--cap-drop=ALL" in container_cli
     assert "--volume /etc/qtrad:/etc/qtrad:ro" in container_cli
     assert "--volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro" in container_cli
-    assert '--entrypoint uv "$image"' in container_cli
-    assert 'python -m qtrad "$@"' in container_cli
+    assert '--entrypoint /app/.venv/bin/python "$image"' in container_cli
+    assert '-m qtrad "$@"' in container_cli
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
