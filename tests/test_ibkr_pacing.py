@@ -120,6 +120,7 @@ async def _reserve(
     )
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",

@@ -944,6 +944,7 @@ def _unique_plan() -> tuple[IbkrHistoricalPlan, IbkrHistoricalRequestProfile]:
     return candidate, profile
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1177,6 +1178,7 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
     await engine.dispose()
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1215,6 +1217,7 @@ async def test_postgres_result_snapshot_bounds_callbacks_per_attempt(
         await engine.dispose()
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1558,6 +1561,7 @@ async def test_execute_pending_reports_recovered_outcomes_without_provider_conne
     assert provider.disconnect_count == 0
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1817,6 +1821,7 @@ async def test_terminal_requests_are_publishable_after_execution() -> None:
         assert store.plan_publication_status[plan.plan_sha256] is IbkrPublicationStatus.PUBLISHED
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1897,6 +1902,7 @@ async def test_postgres_store_publishes_terminal_attempts() -> None:
         await engine.dispose()
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -1965,6 +1971,7 @@ async def test_postgres_fresh_session_namespaces_restarted_request_ids() -> None
         await engine.dispose()
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
@@ -2022,6 +2029,7 @@ async def test_postgres_selected_attempt_cannot_be_mutated_across_requests() -> 
         await engine.dispose()
 
 
+@pytest.mark.postgres
 @pytest.mark.skipif(
     not os.getenv("QTRAD_TEST_DATABASE_URL"),
     reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",

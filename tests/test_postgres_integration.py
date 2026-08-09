@@ -40,13 +40,16 @@ from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_fee
 from qtrad.runtime.settings import Settings
 
 DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason=(
-        "QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration; "
-        "run ops/dev/verify.sh for the complete local gate"
+pytestmark = [
+    pytest.mark.postgres,
+    pytest.mark.skipif(
+        not DATABASE_URL,
+        reason=(
+            "QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration; "
+            "run ops/dev/verify.sh for the complete local gate"
+        ),
     ),
-)
+]
 
 
 @pytest.mark.asyncio

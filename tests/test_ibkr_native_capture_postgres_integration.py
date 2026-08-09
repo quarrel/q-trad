@@ -29,10 +29,13 @@ from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime.settings import Settings
 
 DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(
-    DATABASE_URL is None,
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
+pytestmark = [
+    pytest.mark.postgres,
+    pytest.mark.skipif(
+        DATABASE_URL is None,
+        reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
+    ),
+]
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 _CONFIGURATION_HASH = "b" * 64

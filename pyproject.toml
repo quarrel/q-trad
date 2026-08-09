@@ -28,6 +28,7 @@ dev = [
     "pyright>=1.1.402,<2",
     "pytest>=8.4,<9",
     "pytest-asyncio>=1.0,<2",
+    "pytest-xdist>=3.8,<4",
     "ruff>=0.12,<1",
     "ty>=0.0.56,<0.1",
 ]
@@ -46,6 +47,9 @@ packages = ["src/qtrad"]
 addopts = "-ra"
 asyncio_mode = "auto"
 testpaths = ["tests"]
+markers = [
+    "postgres: requires the isolated PostgreSQL test database and runs serially",
+]
 
 [tool.ruff]
 line-length = 100

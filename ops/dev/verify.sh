@@ -59,4 +59,14 @@ uv run alembic upgrade 0003
 uv run pytest -q \
   tests/test_postgres_integration.py::test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run
 uv run alembic upgrade head
-uv run pytest -q
+uv run pytest -q \
+  -m "not postgres" \
+  -n 4 \
+  --dist worksteal \
+  --durations=25 \
+  --durations-min=0.5
+uv run pytest -q \
+  -m postgres \
+  -n 0 \
+  --durations=25 \
+  --durations-min=0.5
