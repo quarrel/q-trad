@@ -19,6 +19,12 @@ which also invokes the generic capture-universe seeder. `deploy.sh --check`
 requires this database service and the expected migration head before any B3
 runtime mutation.
 
+The host does not install the q-trad Python application. By default,
+`deploy.sh` runs offline release preflight through `qtrad-container-cli.sh` in
+the exact immutable IBKR image, with networking disabled and only `/etc/qtrad`
+and `/srv/qtrad/ibkr` mounted read-only. This keeps the preflight executable
+identity aligned with the image that later runs the collector and API.
+
 The official Gateway may expose its API listener as a wildcard socket. That
 shape is accepted only because `verify-host.sh` independently requires the
 reviewed `TrustedIPs` configuration and a firewalld policy that prevents remote

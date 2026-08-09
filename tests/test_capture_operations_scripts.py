@@ -97,10 +97,67 @@ def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
-    assert '"$preflight_bin" deployment ibkr-preflight' in deploy
+    assert "deployment ibkr-preflight" in deploy
+    assert 'bash "$script_dir/qtrad-container-cli.sh"' in deploy
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in wrapper
     assert '--volume "$checkpoint_root:$checkpoint_root:rw"' in wrapper
     assert "B3" in readme
+
+
+def test_ibkr_offline_preflight_runs_through_the_immutable_container(
+    tmp_path: Path,
+) -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    etc_root = tmp_path / "etc-qtrad"
+    authority_root = tmp_path / "srv-qtrad-ibkr"
+    repository_root = authority_root / "repository"
+    repository_root.mkdir(parents=True)
+    etc_root.mkdir()
+
+    wrapper = (ibkr / "qtrad-container-cli.sh").read_text()
+    wrapper = wrapper.replace("/etc/qtrad", str(etc_root)).replace(
+        "/srv/qtrad/ibkr", str(authority_root)
+    )
+    wrapper_path = tmp_path / "qtrad-container-cli.sh"
+    wrapper_path.write_text(wrapper)
+
+    calls = tmp_path / "docker-calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$QTRAD_TEST_DOCKER_CALLS"\n'
+        "printf '{\"valid\":true}\\n'\n"
+    )
+    docker.chmod(0o755)
+
+    image = "registry.example.invalid/qtrad-ibkr@sha256:" + "a" * 64
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+            "QTRAD_IBKR_IMAGE": image,
+            "QTRAD_IBKR_REPOSITORY_ROOT": str(repository_root),
+            "QTRAD_TEST_DOCKER_CALLS": str(calls),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(wrapper_path), "deployment", "ibkr-preflight", "--help"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == '{"valid":true}\n'
+    call = calls.read_text()
+    assert "--network none" in call
+    assert "--user 10001:10001" in call
+    assert f"--volume {etc_root}:{etc_root}:ro" in call
+    assert f"--volume {authority_root}:{authority_root}:ro" in call
+    assert f"--entrypoint uv {image}" in call
+    assert "python -m qtrad deployment ibkr-preflight --help" in call
 
 
 def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -> None:
