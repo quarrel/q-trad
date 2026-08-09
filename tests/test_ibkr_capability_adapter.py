@@ -258,7 +258,6 @@ async def test_contract_query_failure_never_probes_partial_or_missing_results(
     monkeypatch.setattr(capability, "_contract", lambda query: SimpleNamespace())
     adapter = capability.OfficialIbkrCapabilityAdapter(
         capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
-        request_timeout_seconds=0.001,
         client_factory=factory,
         sleep=_immediate_sleep,
     )
@@ -271,6 +270,8 @@ async def test_contract_query_failure_never_probes_partial_or_missing_results(
     )
 
     await adapter.connect()
+    if mode == "timeout":
+        _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     result = (await adapter.probe((query,)))[0]
     await adapter.disconnect()
 
@@ -395,11 +396,13 @@ def test_finite_negative_futures_quote_is_usable_except_exact_sentinel() -> None
     assert capability._market_availability(callbacks, "LIVE", True, True) == "LIVE_AVAILABLE"
 
 
-def _collector_adapter() -> capability.OfficialIbkrCapabilityAdapter:
+def _collector_adapter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> capability.OfficialIbkrCapabilityAdapter:
     adapter = capability.OfficialIbkrCapabilityAdapter(
         capability.IbkrGatewayEndpoint(host="127.0.0.1", port=4002, client_id=71),
-        request_timeout_seconds=0.001,
-        upstream_recovery_timeout_seconds=0.001,
+        request_timeout_seconds=1.0,
+        upstream_recovery_timeout_seconds=1.0,
         client_factory=lambda callbacks: object(),
     )
     adapter._session.begin_connection()
@@ -412,7 +415,23 @@ def _collector_adapter() -> capability.OfficialIbkrCapabilityAdapter:
             adapter._callbacks.put(capability._Callback("current_time", -1, (0,)))
 
     adapter._client = Client()
+    _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     return adapter
+
+
+def _expire_when_callback_queue_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: capability.OfficialIbkrCapabilityAdapter,
+) -> None:
+    next_queued_callback = adapter._next_queued_callback
+
+    async def next_callback(deadline: float) -> capability._Callback:
+        del deadline
+        if adapter._callbacks.empty():
+            raise TimeoutError("fixture callback queue exhausted")
+        return await next_queued_callback(capability.monotonic() + 1.0)
+
+    monkeypatch.setattr(adapter, "_next_queued_callback", next_callback)
 
 
 @pytest.mark.asyncio
@@ -420,20 +439,24 @@ def _collector_adapter() -> capability.OfficialIbkrCapabilityAdapter:
     ("error_code", "classification"), ((1100, "CONNECTION_LOST"), (1300, "PORT_RESET"))
 )
 async def test_global_connection_failure_terminates_market_data_collection(
-    error_code: int, classification: str
+    monkeypatch: pytest.MonkeyPatch,
+    error_code: int,
+    classification: str,
 ) -> None:
-    adapter = _collector_adapter()
+    adapter = _collector_adapter(monkeypatch)
     adapter._callbacks.put(
         capability._Callback("error", -1, (1_785_000_000, error_code, classification))
     )
 
     with pytest.raises(capability.IbkrConnectionIntegrityError, match=f"IBKR_{error_code}"):
-        await adapter._collect_for(1, 0.001)
+        await adapter._collect_for(1, 1.0)
 
 
 @pytest.mark.asyncio
-async def test_restored_with_lost_subscriptions_terminates_historical_collection() -> None:
-    adapter = _collector_adapter()
+async def test_restored_with_lost_subscriptions_terminates_historical_collection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _collector_adapter(monkeypatch)
     adapter._callbacks.put(
         capability._Callback("error", -1, (1_785_000_000, 1101, "CONNECTION_RESTORED_DATA_LOST"))
     )
@@ -443,8 +466,10 @@ async def test_restored_with_lost_subscriptions_terminates_historical_collection
 
 
 @pytest.mark.asyncio
-async def test_restored_connection_with_data_maintained_remains_request_evidence() -> None:
-    adapter = _collector_adapter()
+async def test_restored_connection_with_data_maintained_remains_request_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _collector_adapter(monkeypatch)
     adapter._callbacks.put(
         capability._Callback(
             "error", -1, (1_785_000_000, 1102, "CONNECTION_RESTORED_DATA_MAINTAINED")
@@ -459,8 +484,10 @@ async def test_restored_connection_with_data_maintained_remains_request_evidence
 
 
 @pytest.mark.asyncio
-async def test_security_definition_farm_recovery_preserves_interrupted_request_callbacks() -> None:
-    adapter = _collector_adapter()
+async def test_security_definition_farm_recovery_preserves_interrupted_request_callbacks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _collector_adapter(monkeypatch)
     adapter._callbacks.put(
         capability._Callback(
             "error",
@@ -480,8 +507,10 @@ async def test_security_definition_farm_recovery_preserves_interrupted_request_c
 
 
 @pytest.mark.asyncio
-async def test_security_definition_farm_failure_does_not_block_request_error() -> None:
-    adapter = _collector_adapter()
+async def test_security_definition_farm_failure_does_not_block_request_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _collector_adapter(monkeypatch)
     adapter._callbacks.put(
         capability._Callback(
             "error",
@@ -502,8 +531,10 @@ async def test_security_definition_farm_failure_does_not_block_request_error() -
 
 
 @pytest.mark.asyncio
-async def test_historical_timeout_retains_prior_connection_notice() -> None:
-    adapter = _collector_adapter()
+async def test_historical_timeout_retains_prior_connection_notice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    adapter = _collector_adapter(monkeypatch)
 
     class Client:
         def reqCurrentTime(self) -> None:
