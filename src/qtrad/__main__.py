@@ -7,7 +7,8 @@ import json
 import logging
 import os
 import signal
-from collections.abc import Sequence
+import sys
+from collections.abc import Mapping, Sequence
 from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -148,6 +149,7 @@ from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
     load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
+    rehearse_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -901,6 +903,13 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_source.add_argument("--provider-history-manifest", type=Path)
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
+    foundation_build.add_argument("--checkpoint-root", type=Path)
+    foundation_rehearse = research_foundation_sub.add_parser(
+        "rehearse", help="exercise Stage 8 with disposable publication and reusable checkpoints"
+    )
+    foundation_rehearse.add_argument("--provider-history-manifest", type=Path, required=True)
+    foundation_rehearse.add_argument("--configuration", type=Path, required=True)
+    foundation_rehearse.add_argument("--checkpoint-root", type=Path)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
     baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
     baselines_experiment_build = baselines_sub.add_parser(
@@ -1713,7 +1722,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 provider_history_manifest_path=args.provider_history_manifest,
                 configuration_path=args.configuration,
                 output_path=args.output,
+                checkpoint_root_path=args.checkpoint_root,
             )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "rehearse"
+    ):
+        _rehearse_foundation_bundle(
+            provider_history_manifest_path=args.provider_history_manifest,
+            configuration_path=args.configuration,
+            checkpoint_root_path=args.checkpoint_root,
         )
     elif (
         args.command == "research"
@@ -2494,6 +2514,7 @@ async def _build_foundation_bundle(
     provider_history_manifest_path: Path | None,
     configuration_path: Path,
     output_path: Path,
+    checkpoint_root_path: Path | None,
 ) -> None:
     if (observations_manifest_path is None) == (provider_history_manifest_path is None):
         raise ValueError("exactly one foundation source must be provided")
@@ -2503,6 +2524,8 @@ async def _build_foundation_bundle(
             output_path,
             provider_manifest=provider_history_manifest_path,
             configuration=configuration,
+            checkpoint_root=checkpoint_root_path,
+            progress_callback=_stage8_progress,
         )
         print(
             json.dumps(
@@ -2517,7 +2540,6 @@ async def _build_foundation_bundle(
             )
         )
         return
-
     if observations_manifest_path is None:
         raise ValueError("observation manifest must be provided for the native source")
     expected_directory = settings.research_root.resolve() / "manifests"
@@ -2568,6 +2590,37 @@ async def _build_foundation_bundle(
             sort_keys=True,
         )
     )
+
+
+def _rehearse_foundation_bundle(
+    *,
+    provider_history_manifest_path: Path,
+    configuration_path: Path,
+    checkpoint_root_path: Path | None,
+) -> None:
+    configuration = load_foundation_config(configuration_path)
+    build = rehearse_ibkr_foundation(
+        provider_manifest=provider_history_manifest_path,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root_path,
+        progress_callback=_stage8_progress,
+    )
+    print(
+        json.dumps(
+            {
+                "contract": "qtrad-stage8-foundation-rehearsal-v1",
+                "published": False,
+                "source_class": "IBKR_HISTORICAL_RESEARCH",
+                "readiness": build.readiness.as_json(),
+                "provider_history_dataset_sha256": build.provider_history.dataset_sha256,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _stage8_progress(payload: Mapping[str, object]) -> None:
+    print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
 
 
 async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_path: Path) -> None:

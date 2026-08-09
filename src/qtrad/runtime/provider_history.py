@@ -8,7 +8,8 @@ import json
 import os
 import shutil
 import tempfile
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import cast
@@ -884,7 +885,7 @@ def read_provider_history_observations(
     """Verify a provider-history closure, then decode every canonical Parquet row."""
 
     dataset = verify_provider_history(path)
-    return dataset, _read_provider_history_rows(path, dataset)
+    return dataset, tuple(_provider_history_rows(path, dataset))
 
 
 def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
@@ -1034,16 +1035,99 @@ def read_provider_history_source_evidence(path: Path) -> ProviderHistorySourceEv
     )
     return ProviderHistorySourceEvidence(
         dataset=dataset,
-        observations=_read_provider_history_rows(path, dataset),
+        observations=_provider_history_rows(path, dataset),
         source_artifact=source_artifact,
         request_evidence=request_evidence,
     )
 
 
-def _read_provider_history_rows(
+@dataclass(frozen=True, slots=True)
+class _ProviderHistoryPartitionInput:
+    reference: ProviderHistoricalPartitionReference
+    path: Path
+    row_count: int
+    row_upper_bound: int
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedProviderHistoryRows:
+    """Re-iterable canonical rows backed by verified bounded Parquet parts."""
+
+    dataset: ProviderHistoricalDataset
+    partitions: tuple[_ProviderHistoryPartitionInput, ...]
+
+    def __len__(self) -> int:
+        return self.dataset.row_count
+
+    @property
+    def instruments(self) -> tuple[str, ...]:
+        return tuple(dict.fromkeys(part.reference.key[0] for part in self.partitions))
+
+    def __iter__(self) -> Iterator[ProviderHistoricalObservation]:
+        yield from self._iter_partitions(self.partitions, expected_count=len(self))
+
+    def iter_instrument(self, instrument_id: str) -> Iterator[ProviderHistoricalObservation]:
+        selected = tuple(part for part in self.partitions if part.reference.key[0] == instrument_id)
+        expected_count = sum(part.row_count for part in selected)
+        yield from self._iter_partitions(selected, expected_count=expected_count)
+
+    def iter_instrument_with_positions(
+        self,
+        instrument_id: str,
+    ) -> Iterator[tuple[ProviderHistoricalObservation, int]]:
+        """Yield one instrument with its canonical global row positions."""
+
+        offset = 0
+        selected: list[_ProviderHistoryPartitionInput] = []
+        for part in self.partitions:
+            part_instrument = part.reference.key[0]
+            if part_instrument < instrument_id:
+                offset += part.row_count
+                continue
+            if part_instrument == instrument_id:
+                selected.append(part)
+                continue
+            if selected or part_instrument > instrument_id:
+                break
+        expected_count = sum(part.row_count for part in selected)
+        for position, row in enumerate(
+            self._iter_partitions(tuple(selected), expected_count=expected_count),
+            offset + 1,
+        ):
+            yield row, position
+
+    @staticmethod
+    def _iter_partitions(
+        partitions: tuple[_ProviderHistoryPartitionInput, ...],
+        *,
+        expected_count: int,
+    ) -> Iterator[ProviderHistoricalObservation]:
+        observed_count = 0
+        previous_key: tuple[str, datetime, str] | None = None
+        for item in partitions:
+            partition = _read_parquet_rows(
+                item.path,
+                expected_row_count=item.row_count,
+                row_upper_bound=item.row_upper_bound,
+            )
+            actual_reference = ProviderHistoricalPartitionReference.from_partition(partition)
+            if actual_reference != item.reference:
+                raise ValueError("provider-history partition changed after closure verification")
+            for row in partition.rows:
+                key = (row.instrument_id, row.interval_start, row.request_sha256)
+                if previous_key is not None and key < previous_key:
+                    raise ValueError("provider-history streamed rows are not canonical")
+                previous_key = key
+                observed_count += 1
+                yield row
+        if observed_count != expected_count:
+            raise ValueError("provider-history streamed row count differs from its dataset")
+
+
+def _provider_history_rows(
     path: Path,
     dataset: ProviderHistoricalDataset,
-) -> tuple[ProviderHistoricalObservation, ...]:
+) -> VerifiedProviderHistoryRows:
     manifest_path = _require_file(path, "provider-history manifest")
     document = _mapping(
         _parse_json(
@@ -1055,41 +1139,36 @@ def _read_provider_history_rows(
     raw_files = document["files"]
     if not isinstance(raw_files, list):
         raise ValueError("provider-history files are invalid")
-    rows: list[ProviderHistoricalObservation] = []
-    root = manifest_path.parent
-    previous_key: tuple[str, datetime, str] | None = None
-    needs_sort = False
+    references_by_path: dict[str, dict[str, object]] = {}
     for item in raw_files:
         reference = _file_reference(item)
-        partition = _read_parquet_rows(
-            _safe_child(
-                root,
-                _string(reference["path"], "provider-history partition path"),
-                "provider-history partition",
-            ),
-            expected_row_count=_int(reference["row_count"], "provider-history partition row count"),
-            row_upper_bound=_int(reference["row_upper_bound"], "provider-history row upper bound"),
-        )
-        for row in partition.rows:
-            key = (row.instrument_id, row.interval_start, row.request_sha256)
-            if previous_key is not None and key < previous_key:
-                needs_sort = True
-            previous_key = key
-            rows.append(row)
-    ordered = (
-        tuple(
-            sorted(
-                rows,
-                key=lambda row: (
-                    row.instrument_id,
-                    row.interval_start,
-                    row.request_sha256,
-                ),
+        relative_path = _string(reference["path"], "provider-history partition path")
+        if relative_path in references_by_path:
+            raise ValueError("provider-history partition paths are duplicated")
+        references_by_path[relative_path] = reference
+
+    root = manifest_path.parent
+    partitions: list[_ProviderHistoryPartitionInput] = []
+    for expected in dataset.partitions:
+        relative_path = _partition_path(expected.key)
+        raw = references_by_path.pop(relative_path, None)
+        if raw is None:
+            raise ValueError("provider-history dataset partition file is missing")
+        partitions.append(
+            _ProviderHistoryPartitionInput(
+                reference=expected,
+                path=_safe_child(root, relative_path, "provider-history partition"),
+                row_count=_int(raw["row_count"], "provider-history partition row count"),
+                row_upper_bound=_int(raw["row_upper_bound"], "provider-history row upper bound"),
             )
         )
-        if needs_sort
-        else tuple(rows)
-    )
-    if len(ordered) != dataset.row_count:
-        raise ValueError("provider-history row reader count differs from verified dataset")
-    return ordered
+    if references_by_path:
+        raise ValueError("provider-history manifest has additional partition files")
+    return VerifiedProviderHistoryRows(dataset=dataset, partitions=tuple(partitions))
+
+
+def _read_provider_history_rows(
+    path: Path,
+    dataset: ProviderHistoricalDataset,
+) -> tuple[ProviderHistoricalObservation, ...]:
+    return tuple(_provider_history_rows(path, dataset))

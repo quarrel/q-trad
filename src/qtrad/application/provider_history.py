@@ -53,6 +53,14 @@ class ProviderHistoryResultSource(Protocol):
 ProviderHistorySource = IbkrHistoricalResultArtifact | ProviderHistoryResultSource
 
 
+class ProviderHistoryObservationRows(Protocol):
+    """Re-iterable provider rows without requiring one in-memory tuple."""
+
+    def __iter__(self) -> Iterator[ProviderHistoricalObservation]: ...
+
+    def __len__(self) -> int: ...
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderHistoryRequestEvidence:
     """Compact request evidence retained by the foundation builder."""
@@ -79,7 +87,7 @@ class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
 
     dataset: ProviderHistoricalDataset
-    observations: tuple[ProviderHistoricalObservation, ...]
+    observations: ProviderHistoryObservationRows
     source_artifact: ProviderHistorySource
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
 

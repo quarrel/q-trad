@@ -46,10 +46,14 @@ from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
     load_ibkr_foundation_outcome_blind_with_identity,
+    rehearse_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
-from qtrad.runtime.provider_history import read_provider_history_source_evidence
+from qtrad.runtime.provider_history import (
+    VerifiedProviderHistoryRows,
+    read_provider_history_source_evidence,
+)
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
 
@@ -364,6 +368,15 @@ def test_stage8_source_evidence_keeps_request_results_streaming(
 
     source_evidence = read_provider_history_source_evidence(provider_manifest)
 
+    assert isinstance(source_evidence.observations, VerifiedProviderHistoryRows)
+    assert len(source_evidence.observations) == source_evidence.dataset.row_count
+    instrument = source_evidence.observations.instruments[0]
+    positioned = tuple(source_evidence.observations.iter_instrument_with_positions(instrument))
+    assert positioned
+    assert all(row.instrument_id == instrument for row, _ in positioned)
+    assert [position for _, position in positioned] == sorted(
+        position for _, position in positioned
+    )
     assert not hasattr(source_evidence.source_artifact, "request_results")
     assert len(source_evidence.request_evidence) == len(artifact.request_results)
     assert all(not hasattr(item, "accepted_rows") for item in source_evidence.request_evidence)
@@ -440,7 +453,7 @@ def _session_aware_source_evidence(
     source_end = datetime(2026, 3, 5, tzinfo=UTC)
     requests: list[object] = []
     results: list[object] = []
-    observations: list[object] = []
+    observations: list[SimpleNamespace] = []
     target_rows: list[object] = []
     contracts: list[object] = []
 
@@ -559,11 +572,24 @@ def _session_aware_source_evidence(
         aggregate=aggregate,
         request_results=tuple(results),
     )
+    partition_instruments = sorted({str(row.instrument_id) for row in observations})
     source_evidence = cast(
         ProviderHistorySourceEvidence,
         SimpleNamespace(
             observations=tuple(observations),
             source_artifact=source_artifact,
+            dataset=SimpleNamespace(
+                row_count=len(observations),
+                partitions=tuple(
+                    SimpleNamespace(
+                        instrument_id=instrument,
+                        row_count=sum(
+                            1 for row in observations if str(row.instrument_id) == instrument
+                        ),
+                    )
+                    for instrument in partition_instruments
+                ),
+            ),
         ),
     )
     targets = cast(TargetDataset, SimpleNamespace(rows=tuple(target_rows)))
@@ -759,3 +785,126 @@ def test_provider_history_foundation_bounded_replay(
     assert verified.targets.dataset_id == full.targets.dataset_id
     assert verified.folds.dataset_id == full.folds.dataset_id
     assert verified.observations.dataset_id
+    assert verified.target_index is None
+    assert verified.causal_metadata is None
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    assert set(document["payload"]["children"]) == {
+        "observations",
+        "panel",
+        "targets",
+        "folds",
+    }
+
+
+def test_bounded_foundation_reuses_identity_bound_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+
+    global_iterations = 0
+    original_iteration = VerifiedProviderHistoryRows.__iter__
+
+    def count_global_provider_row_iterations(rows: VerifiedProviderHistoryRows):
+        nonlocal global_iterations
+        global_iterations += 1
+        if global_iterations > 1:
+            raise AssertionError("checkpointed Stage 8 scanned all provider rows more than once")
+        return original_iteration(rows)
+
+    monkeypatch.setattr(
+        VerifiedProviderHistoryRows,
+        "__iter__",
+        count_global_provider_row_iterations,
+    )
+    checkpoint_root = tmp_path / "stage8-checkpoint"
+    first_progress: list[Mapping[str, object]] = []
+    first = write_ibkr_foundation(
+        tmp_path / "first-foundation.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        progress_callback=first_progress.append,
+    )
+    assert global_iterations == 1
+    global_iterations = 0
+    assert any(
+        event.get("phase") == "derived" and event.get("event") == "completed"
+        for event in first_progress
+    )
+
+    second_progress: list[Mapping[str, object]] = []
+    second_bundle = tmp_path / "second-foundation.json"
+    second = write_ibkr_foundation(
+        second_bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        progress_callback=second_progress.append,
+    )
+    assert global_iterations == 1
+    assert any(
+        event.get("phase") == "observations" and event.get("event") == "reused"
+        for event in second_progress
+    )
+    assert any(
+        event.get("phase") == "derived" and event.get("event") == "reused"
+        for event in second_progress
+    )
+    assert second.observations.dataset_id == first.observations.dataset_id
+    assert second.panel.dataset_id == first.panel.dataset_id
+    assert second.targets.dataset_id == first.targets.dataset_id
+    assert second.folds.dataset_id == first.folds.dataset_id
+    global_iterations = 0
+    verified = verify_ibkr_foundation(second_bundle)
+    assert global_iterations == 1
+    assert verified.readiness.as_json() == second.readiness.as_json()
+
+    changed = replace(configuration, name="changed-checkpoint-identity")
+    rejected_output = tmp_path / "rejected-foundation.json"
+    with pytest.raises(ValueError, match="checkpoint identity does not match"):
+        write_ibkr_foundation(
+            rejected_output,
+            provider_manifest=provider_manifest,
+            configuration=changed,
+            checkpoint_root=checkpoint_root,
+        )
+    assert not rejected_output.exists()
+    assert not rejected_output.with_name(f"{rejected_output.name}.children").exists()
+
+
+def test_stage8_rehearsal_is_non_publishing_and_reports_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    before = set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*"))
+    progress: list[Mapping[str, object]] = []
+
+    build = rehearse_ibkr_foundation(
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=tmp_path / "rehearsal-checkpoint",
+        progress_callback=progress.append,
+    )
+
+    assert build.provider_history.dataset_sha256
+    assert set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*")) == before
+    assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "completed"
+        for event in progress
+    )
+    assert any(
+        event.get("phase") == "publication" and event.get("event") == "completed"
+        for event in progress
+    )

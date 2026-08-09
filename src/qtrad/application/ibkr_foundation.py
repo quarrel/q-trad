@@ -6,7 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast, overload
 from uuid import UUID, uuid5
 
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
@@ -61,8 +61,8 @@ class IBKRFoundationBuild:
     panel: PanelDataset | R2OutcomeBlindPanelView
     targets: TargetDataset | R2OutcomeBlindTargetView
     folds: FoldDataset
-    target_index: R2HoldoutTargetIndex
-    causal_metadata: R2HoldoutCausalMetadata
+    target_index: R2HoldoutTargetIndex | None
+    causal_metadata: R2HoldoutCausalMetadata | None
     provider_history: ProviderHistoricalDataset
     active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     provider_gaps: tuple[Mapping[str, JsonValue], ...]
@@ -205,7 +205,6 @@ def evaluate_ibkr_foundation_readiness(
     """Replay fixed history gates from the verified Stage 6/7 evidence."""
 
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
-    provider_rows = source_evidence.observations
     source_artifact = source_evidence.source_artifact
     plan = source_artifact.plan
     aggregate = source_artifact.aggregate
@@ -221,7 +220,11 @@ def evaluate_ibkr_foundation_readiness(
         requests_by_instrument.setdefault(str(request.instrument_id), []).append((request, result))
 
     rows_by_candidate = {
-        candidate: sum(1 for row in provider_rows if row.instrument_id == candidate)
+        candidate: sum(
+            partition.row_count
+            for partition in source_evidence.dataset.partitions
+            if partition.instrument_id == candidate
+        )
         for candidate in sorted(candidate_names)
     }
     valid_target_times = {
@@ -362,7 +365,7 @@ def evaluate_ibkr_foundation_readiness(
         common_support_rows=len(common_times),
         rows_by_candidate=rows_by_candidate,
         evidence={
-            "provider_row_count": len(provider_rows),
+            "provider_row_count": source_evidence.dataset.row_count,
             "provider_gap_count": len(confirmatory_gaps),
             "total_provider_gap_count": len(provider_gaps),
             "target_row_count": len(targets.rows),
@@ -416,12 +419,46 @@ def _adapt_observation(
     )
 
 
+@overload
 def _provider_evidence(
     source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: Literal[False] = False,
 ) -> tuple[
     dict[str, tuple[tuple[datetime, datetime], ...]],
     tuple[Mapping[str, JsonValue], ...],
-]:
+]: ...
+
+
+@overload
+def _provider_evidence(
+    source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: Literal[True],
+) -> tuple[
+    dict[str, tuple[tuple[datetime, datetime], ...]],
+    tuple[Mapping[str, JsonValue], ...],
+    datetime,
+    datetime,
+]: ...
+
+
+def _provider_evidence(
+    source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: bool = False,
+) -> (
+    tuple[
+        dict[str, tuple[tuple[datetime, datetime], ...]],
+        tuple[Mapping[str, JsonValue], ...],
+    ]
+    | tuple[
+        dict[str, tuple[tuple[datetime, datetime], ...]],
+        tuple[Mapping[str, JsonValue], ...],
+        datetime,
+        datetime,
+    ]
+):
     source = source_evidence.source_artifact
     requests_by_hash = {request.request_sha256: request for request in source.plan.requests}
     results_by_hash = request_evidence_by_hash(source_evidence)
@@ -433,11 +470,20 @@ def _provider_evidence(
         resolved_results.append((request, result))
 
     accepted_starts_by_request: dict[str, set[datetime]] = defaultdict(set)
+    source_start: datetime | None = None
+    source_end: datetime | None = None
     for row in source_evidence.observations:
         request_sha256 = getattr(row, "request_sha256", None)
         interval_start = getattr(row, "interval_start", None)
+        interval_end = getattr(row, "interval_end", None)
         if isinstance(request_sha256, str) and isinstance(interval_start, datetime):
             accepted_starts_by_request[request_sha256].add(interval_start)
+        if isinstance(interval_start, datetime):
+            source_start = (
+                interval_start if source_start is None else min(source_start, interval_start)
+            )
+        if isinstance(interval_end, datetime):
+            source_end = interval_end if source_end is None else max(source_end, interval_end)
     if not accepted_starts_by_request:
         for result in getattr(source_evidence.source_artifact, "request_results", ()):
             for raw in result.accepted_rows:
@@ -516,10 +562,15 @@ def _provider_evidence(
                         result.result_sha256,
                     )
                 )
-    return (
-        {instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())},
-        tuple(gaps),
-    )
+    active_intervals = {
+        instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())
+    }
+    provider_gaps = tuple(gaps)
+    if include_bounds:
+        if source_start is None or source_end is None:
+            raise ValueError("provider-history source has no observations")
+        return active_intervals, provider_gaps, source_start, source_end
+    return active_intervals, provider_gaps
 
 
 def _gap(

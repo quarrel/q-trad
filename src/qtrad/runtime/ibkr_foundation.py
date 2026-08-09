@@ -5,11 +5,14 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import resource
 import shutil
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
+from uuid import uuid4
 
 import polars as pl
 
@@ -71,6 +74,7 @@ _EXTENSION_CHILD_KINDS = (
     "pre-holdout-target",
 )
 _CHILD_KINDS = _BASE_CHILD_KINDS + _EXTENSION_CHILD_KINDS
+_ProgressCallback = Callable[[Mapping[str, object]], None]
 _CHILD_FIELDS = {
     "contract",
     "schema_version",
@@ -216,6 +220,8 @@ def write_ibkr_foundation(
     *,
     provider_manifest: Path,
     configuration: FoundationConfig,
+    checkpoint_root: Path | None = None,
+    progress_callback: _ProgressCallback | None = None,
 ) -> IBKRFoundationBuild:
     """Build and create the source-specific bundle once."""
 
@@ -228,8 +234,27 @@ def write_ibkr_foundation(
     if child_root.exists():
         raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
 
-    source_evidence = read_provider_history_source_evidence(provider_manifest)
-    bounded = len(source_evidence.observations) > _BOUNDED_PROVIDER_HISTORY_ROWS
+    started = time.monotonic()
+    _emit_stage8_progress(progress_callback, started, "source-verification", "started")
+    try:
+        source_evidence = read_provider_history_source_evidence(provider_manifest)
+    except BaseException as error:
+        _emit_stage8_progress(
+            progress_callback,
+            started,
+            "source-verification",
+            "failed",
+            error_type=type(error).__name__,
+        )
+        raise
+    _emit_stage8_progress(
+        progress_callback,
+        started,
+        "source-verification",
+        "completed",
+        provider_row_count=source_evidence.dataset.row_count,
+    )
+    bounded = source_evidence.dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
     build: IBKRFoundationBuild | None = None
     if not bounded:
         build = build_ibkr_foundation(source_evidence, configuration)
@@ -238,20 +263,24 @@ def write_ibkr_foundation(
 
     child_root_created = False
     output_created = False
+    children: Mapping[str, JsonValue]
     try:
         child_root.mkdir()
         child_root_created = True
         if bounded:
             from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
 
-            build, children = build_bounded_provider_foundation(
+            build, bounded_children = build_bounded_provider_foundation(
                 source_evidence=source_evidence,
                 configuration=configuration,
                 child_root=child_root,
                 bundle_root=output.parent,
                 child_name=child_root.name,
                 provider_manifest_sha256=hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
+                checkpoint_root=checkpoint_root,
+                progress_callback=progress_callback,
             )
+            children = cast(Mapping[str, JsonValue], bounded_children)
         else:
             assert build is not None
             children = _write_children(
@@ -282,7 +311,67 @@ def write_ibkr_foundation(
             output.unlink()
         raise
     assert build is not None
+    _emit_stage8_progress(
+        progress_callback,
+        started,
+        "publication",
+        "completed",
+        output=str(output),
+    )
     return build
+
+
+def rehearse_ibkr_foundation(
+    *,
+    provider_manifest: Path,
+    configuration: FoundationConfig,
+    checkpoint_root: Path | None = None,
+    progress_callback: _ProgressCallback | None = None,
+) -> IBKRFoundationBuild:
+    """Exercise the real Stage 8 build while retaining no published bundle."""
+
+    provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
+    output = provider_manifest.parent / f".qtrad-stage8-rehearsal-{uuid4().hex}.json"
+    child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
+    try:
+        return write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+            progress_callback=progress_callback,
+        )
+    finally:
+        if output.exists():
+            if output.is_symlink() or not output.is_file():
+                raise ValueError("Stage 8 rehearsal output changed before cleanup")
+            output.unlink()
+        if child_root.exists():
+            if child_root.is_symlink() or not child_root.is_dir():
+                raise ValueError("Stage 8 rehearsal child root changed before cleanup")
+            shutil.rmtree(child_root)
+
+
+def _emit_stage8_progress(
+    callback: _ProgressCallback | None,
+    started: float,
+    phase: str,
+    event: str,
+    **fields: object,
+) -> None:
+    if callback is None:
+        return
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    callback(
+        {
+            "contract": "qtrad-stage8-progress-v1",
+            "phase": phase,
+            "event": event,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "maximum_rss_kib": int(usage.ru_maxrss),
+            **fields,
+        }
+    )
 
 
 def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
@@ -334,7 +423,7 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
     configuration_payload = _mapping(payload["configuration"], "IBKR foundation configuration")
     configuration = decode_foundation_config(configuration_payload)
     source_evidence = read_provider_history_source_evidence(provider_path)
-    if len(source_evidence.observations) > _BOUNDED_PROVIDER_HISTORY_ROWS:
+    if source_evidence.dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
         from qtrad.runtime.ibkr_foundation_bounded import verify_bounded_provider_foundation
 
         return verify_bounded_provider_foundation(
@@ -1136,6 +1225,8 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
     observations = cast(ObservationDataset, build.observations)
     panel = cast(PanelDataset, build.panel)
     targets = cast(TargetDataset, build.targets)
+    if build.target_index is None or build.causal_metadata is None:
+        raise ValueError("foundation outcome-blind extensions are unavailable")
     blind_observations = R2OutcomeBlindObservationView.from_dataset(
         observations,
         holdout_start=build.configuration.holdout_range[0],
@@ -1161,6 +1252,8 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
 def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
     observations = cast(ObservationDataset, build.observations)
     panel = cast(PanelDataset, build.panel)
+    if build.target_index is None or build.causal_metadata is None:
+        raise ValueError("foundation outcome-blind extensions are unavailable")
     blind_observations = R2OutcomeBlindObservationView.from_dataset(
         observations,
         holdout_start=build.configuration.holdout_range[0],
@@ -1351,6 +1444,7 @@ def _require_sha256(value: str, field: str) -> None:
 __all__ = [
     "foundation_config_payload",
     "load_ibkr_foundation",
+    "rehearse_ibkr_foundation",
     "verify_ibkr_foundation",
     "write_ibkr_foundation",
 ]
