@@ -27,6 +27,9 @@ class IbkrQualifiedContract:
             raise ValueError("qualified IBKR conId must be positive")
 
 
+_VERIFIED_IBKR_CAPTURE_QUALIFICATION_TOKEN = object()
+
+
 class VerifiedIbkrCaptureQualification:
     """Opaque immutable capability produced only by an evidence-replaying verifier."""
 
@@ -41,6 +44,7 @@ class VerifiedIbkrCaptureQualification:
         "_release_sha256",
         "_stage",
         "_universe_id",
+        "_verifier_token",
     )
 
     _artifact_sha256: str
@@ -53,6 +57,7 @@ class VerifiedIbkrCaptureQualification:
     _release_sha256: str
     _stage: IbkrQualificationStage
     _universe_id: str
+    _verifier_token: object
 
     def __init__(self) -> None:
         raise TypeError(
@@ -101,6 +106,19 @@ class VerifiedIbkrCaptureQualification:
     @property
     def qualified_at(self) -> datetime:
         return self._qualified_at
+
+
+def has_verified_ibkr_capture_qualification_provenance(value: object) -> bool:
+    """Authenticate exact capability type and the private verifier sentinel.
+
+    No production code can currently mint the sentinel. The independently
+    replayable live-evidence verifier will own that transition in a later tranche.
+    """
+
+    return (
+        type(value) is VerifiedIbkrCaptureQualification
+        and getattr(value, "_verifier_token", None) is _VERIFIED_IBKR_CAPTURE_QUALIFICATION_TOKEN
+    )
 
 
 VerifiedB3Qualification = VerifiedIbkrCaptureQualification

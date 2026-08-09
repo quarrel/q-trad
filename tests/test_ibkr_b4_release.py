@@ -15,6 +15,7 @@ from qtrad.domain.ibkr_qualification import (
     IbkrQualificationStage,
     IbkrQualifiedContract,
     VerifiedB3Qualification,
+    has_verified_ibkr_capture_qualification_provenance,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import AssetClass, ProductType, ProviderListing
@@ -243,10 +244,10 @@ def _install_authority(
     )
 
 
-def _qualification(
+def _qualification_values(
     parent: IbkrNativeCaptureConfiguration, parent_path: Path
-) -> VerifiedB3Qualification:
-    values: dict[str, object] = {
+) -> dict[str, object]:
+    return {
         "stage": IbkrQualificationStage.B3_EXACT_TWO,
         "artifact_sha256": "9" * 64,
         "release_contract": "qtrad-ibkr-native-release-v1",
@@ -265,8 +266,13 @@ def _qualification(
         ),
         "qualified_at": _NOW,
     }
+
+
+def _qualification(
+    parent: IbkrNativeCaptureConfiguration, parent_path: Path
+) -> VerifiedB3Qualification:
     capability = object.__new__(VerifiedB3Qualification)
-    for name, value in values.items():
+    for name, value in _qualification_values(parent, parent_path).items():
         object.__setattr__(capability, f"_{name}", value)
     return capability
 
@@ -313,6 +319,11 @@ def _setup(
     monkeypatch.setattr(
         ibkr_b4, "load_authenticated_b3_configuration", lambda *_args, **_kwargs: parent
     )
+    monkeypatch.setattr(
+        ibkr_b4,
+        "has_verified_ibkr_capture_qualification_provenance",
+        lambda value: type(value) is VerifiedB3Qualification,
+    )
     _install_authority(monkeypatch, source)
     return source, parent, parent_path, b4_paths, b3_paths, qualification
 
@@ -347,6 +358,61 @@ def test_b4_promotes_exact_six_only_from_verified_b3_capability(
     assert inherited == {
         (item.instrument_id, item.listing_id, item.con_id) for item in qualification.contracts
     }
+
+
+def test_b4_promotion_rejects_matching_duck_typed_qualification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, parent, parent_path, b4_paths, b3_paths, _qualification_fixture = _setup(
+        tmp_path, monkeypatch
+    )
+    forged = cast(
+        VerifiedB3Qualification,
+        SimpleNamespace(**_qualification_values(parent, parent_path)),
+    )
+    monkeypatch.setattr(
+        ibkr_b4,
+        "has_verified_ibkr_capture_qualification_provenance",
+        has_verified_ibkr_capture_qualification_provenance,
+    )
+
+    with pytest.raises(ValueError, match="verifier-minted"):
+        promote_b4_configuration(
+            source,
+            authority_paths=b4_paths,
+            parent_release_path=parent_path,
+            parent_authority_paths=b3_paths,
+            qualification=forged,
+        )
+
+
+def test_b4_release_loading_rejects_object_new_qualification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _parent, parent_path, b4_paths, b3_paths, qualification = _setup(tmp_path, monkeypatch)
+    promotion = promote_b4_configuration(
+        source,
+        authority_paths=b4_paths,
+        parent_release_path=parent_path,
+        parent_authority_paths=b3_paths,
+        qualification=qualification,
+    )
+    release_path = tmp_path / "b4-release.json"
+    write_b4_release(release_path, promotion)
+    monkeypatch.setattr(
+        ibkr_b4,
+        "has_verified_ibkr_capture_qualification_provenance",
+        has_verified_ibkr_capture_qualification_provenance,
+    )
+
+    with pytest.raises(ValueError, match="verifier-minted"):
+        load_authenticated_b4_configuration(
+            release_path,
+            authority_paths=b4_paths,
+            parent_release_path=parent_path,
+            parent_authority_paths=b3_paths,
+            qualification=qualification,
+        )
 
 
 def test_b4_rejects_changed_con_id_for_b3_inherited_contract(

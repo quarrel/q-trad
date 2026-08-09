@@ -20,6 +20,7 @@ from qtrad.domain.ibkr_qualification import (
     IbkrQualificationStage,
     IbkrQualifiedContract,
     VerifiedB3Qualification,
+    has_verified_ibkr_capture_qualification_provenance,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import AssetClass, ProductType, ProviderListing
@@ -319,6 +320,8 @@ def promote_b4_configuration(
     parent_authority_paths: IbkrAuthorityPaths,
     qualification: VerifiedB3Qualification,
 ) -> IbkrB4Promotion:
+    if not has_verified_ibkr_capture_qualification_provenance(qualification):
+        raise ValueError("B4 transition requires verifier-minted B3 qualification authority")
     parent = load_authenticated_b3_configuration(
         parent_release_path, **parent_authority_paths.as_kwargs()
     )
@@ -394,6 +397,8 @@ def load_authenticated_b4_configuration(
     parent_authority_paths: IbkrAuthorityPaths,
     qualification: VerifiedB3Qualification,
 ) -> IbkrNativeCaptureConfiguration:
+    if not has_verified_ibkr_capture_qualification_provenance(qualification):
+        raise ValueError("B4 transition requires verifier-minted B3 qualification authority")
     parent = load_authenticated_b3_configuration(
         parent_release_path, **parent_authority_paths.as_kwargs()
     )
