@@ -31,6 +31,7 @@ from qtrad.runtime.foundation_bundle import (
     persist_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
+    verify_g2_feature_source,
     verify_observation_build_evidence,
     verify_outcome_blind_foundation_bundle,
     write_foundation_bundle,
@@ -287,7 +288,13 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         self: ParquetFoundationArtifactStore, manifest_id: str
     ) -> tuple[dict[str, JsonValue], ...]:
         manifest = await self.read_manifest(manifest_id)
-        assert manifest.kind not in {"panel", "targets", "forecasts"}
+        assert manifest.kind not in {
+            "panel",
+            "targets",
+            "forecasts",
+            "r2-g2-observations",
+            "r2-g2-panel",
+        }
         return await original_read_rows(self, manifest_id)
 
     monkeypatch.setattr(ParquetFoundationArtifactStore, "read_rows", guarded_read_rows)
@@ -303,6 +310,23 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         holdout_target_source=source,
     )
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
+    assert blind.g2_feature_source is not None
+    assert all(
+        row.interval_end <= configuration.holdout_range[0] for row in blind.observations.rows
+    )
+    assert all(row.decision_time < configuration.holdout_range[0] for row in blind.panel.rows)
+
+    monkeypatch.setattr(ParquetFoundationArtifactStore, "read_rows", original_read_rows)
+    g2_source = await verify_g2_feature_source(blind.g2_feature_source, clock=clock)
+    assert any(
+        configuration.holdout_range[0] <= row.decision_time < configuration.holdout_range[1]
+        for row in g2_source.panel.rows
+    )
+    with pytest.raises(ValueError, match="authority identity is invalid"):
+        await verify_g2_feature_source(
+            replace(blind.g2_feature_source, source_id="0" * 64),
+            clock=clock,
+        )
 
     assert source.pre_holdout_target_dataset.rows
     first = source.pre_holdout_target_dataset.rows[0]

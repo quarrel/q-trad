@@ -148,9 +148,15 @@ from qtrad.domain.r2_readiness import (
     ReadinessState,
 )
 from qtrad.ports.clock import Clock
-from qtrad.runtime.foundation_bundle import verify_outcome_blind_foundation_bundle
+from qtrad.runtime.foundation_bundle import (
+    G2FeatureSourceAuthority,
+    verify_g2_feature_source,
+    verify_outcome_blind_foundation_bundle,
+)
 from qtrad.runtime.ibkr_foundation import (
-    load_ibkr_foundation_outcome_blind_with_identity,
+    IBKRG2FeatureSourceAuthority,
+    load_ibkr_foundation_outcome_blind_with_g2_authority,
+    verify_ibkr_g2_feature_source,
 )
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
@@ -168,6 +174,7 @@ from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
 CONFIRMATORY_RUN_KIND = "CONFIRMATORY"
+type ConfirmatoryG2FeatureSourceAuthority = G2FeatureSourceAuthority | IBKRG2FeatureSourceAuthority
 _IMPLEMENTATION_RUN_KINDS = frozenset({"SYNTHETIC", "REPRESENTATIVE"})
 _OOF_SELECTION_PRIMARY_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
 _OOF_SELECTION_SECONDARY_METRICS = ("RMSE",)
@@ -268,6 +275,7 @@ class VerifiedConfirmatoryF2:
         "_evaluation_policy",
         "_evaluation_report_id",
         "_experiment",
+        "_g2_feature_source_authority",
         "_holdout_comparator_configuration_ids",
         "_holdout_target_source",
         "_local_comparator_manifest_id",
@@ -289,6 +297,7 @@ class VerifiedConfirmatoryF2:
     _experiment: R2ExperimentConfig
     _holdout_comparator_configuration_ids: tuple[str, ...]
     _holdout_target_source: R2HoldoutTargetSource
+    _g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority
     _local_comparator_manifest_id: str
     _outcome_blind_foundation: R1FoundationBindings
     _readiness_report: R2ReadinessReport
@@ -310,6 +319,7 @@ class VerifiedConfirmatoryF2:
         *,
         bundle: R2OofBundle,
         holdout_target_source: R2HoldoutTargetSource,
+        g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority,
         descriptor: Mapping[str, JsonValue],
         evaluation_report_id: str,
         experiment: R2ExperimentConfig,
@@ -333,6 +343,7 @@ class VerifiedConfirmatoryF2:
         instance = object.__new__(cls)
         object.__setattr__(instance, "_bundle", bundle)
         object.__setattr__(instance, "_holdout_target_source", holdout_target_source)
+        object.__setattr__(instance, "_g2_feature_source_authority", g2_feature_source_authority)
         object.__setattr__(
             instance,
             "_descriptor",
@@ -405,6 +416,10 @@ class VerifiedConfirmatoryF2:
     @property
     def holdout_target_source(self) -> R2HoldoutTargetSource:
         return self._holdout_target_source
+
+    @property
+    def g2_feature_source_authority(self) -> ConfirmatoryG2FeatureSourceAuthority:
+        return self._g2_feature_source_authority
 
     @property
     def outcome_blind_foundation(self) -> R1FoundationBindings:
@@ -1078,6 +1093,27 @@ def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Pa
                             "observation-manifest"
                             if child_name == "observations"
                             else "foundation-child",
+                        )
+                    )
+            build_summary = payload.get("build_summary")
+            projections = (
+                build_summary.get("outcome_blind_projections")
+                if isinstance(build_summary, dict)
+                else None
+            )
+            if isinstance(projections, dict):
+                for child in projections.values():
+                    if not isinstance(child, dict):
+                        raise ValueError("foundation replay projection is malformed")
+                    pending.append(
+                        (
+                            _declared_replay_path(
+                                child.get("manifest_path"),
+                                base=source_root,
+                                source_root=source_root,
+                                field="manifest_path",
+                            ),
+                            "foundation-child",
                         )
                     )
         elif role in {"foundation-child", "observation-manifest"}:
@@ -2730,7 +2766,10 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         replayed_folds,
         replayed_source_active_intervals,
         outcome_blind_foundation,
+        g2_feature_source_authority,
     ) = _replay_confirmatory_oof(path)
+    if g2_feature_source_authority is None:
+        raise ValueError("confirmatory F2 foundation has no authenticated G2 feature source")
     readiness_report = evaluate_outcome_blind_confirmatory_readiness(
         experiment=experiment,
         target_source=source,
@@ -2849,6 +2888,7 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         _VERIFIED_CONFIRMATORY_F2_TOKEN,
         bundle=bundle,
         holdout_target_source=source,
+        g2_feature_source_authority=g2_feature_source_authority,
         descriptor=cast(Mapping[str, JsonValue], descriptor),
         evaluation_report_id=report_id,
         experiment=experiment,
@@ -3172,6 +3212,41 @@ def _build_confirmatory_g2(
     experiment = verified_f2.experiment
     target_source = verified_f2.holdout_target_source
     foundation = cast(R2OutcomeBlindFeatureInputs, verified_f2.outcome_blind_foundation)
+    g2_authority = verified_f2.g2_feature_source_authority
+    g2_source = (
+        verify_ibkr_g2_feature_source(
+            g2_authority,
+            holdout_target_source=target_source,
+        )
+        if isinstance(g2_authority, IBKRG2FeatureSourceAuthority)
+        else asyncio.run(
+            verify_g2_feature_source(
+                g2_authority,
+                clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            )
+        )
+    )
+    if (
+        g2_source.source_id != g2_authority.source_id
+        or g2_source.observations.dataset_id != experiment.observation_dataset_id
+        or g2_source.panel.dataset_id != experiment.panel_dataset_id
+        or g2_source.panel.observation_dataset_id != experiment.observation_dataset_id
+        or g2_source.panel.foundation_configuration_id != experiment.foundation_configuration_id
+        or g2_source.observations.holdout_range != experiment.holdout_range
+        or g2_source.panel.holdout_range != experiment.holdout_range
+    ):
+        raise ValueError("verified G2 feature source differs from the exact G1 experiment")
+    holdout_foundation = cast(
+        R2OutcomeBlindFeatureInputs,
+        SimpleNamespace(
+            bundle=foundation.bundle,
+            configuration=foundation.configuration,
+            observations=g2_source.observations,
+            panel=g2_source.panel,
+            folds=foundation.folds,
+            source_active_intervals=foundation.source_active_intervals,
+        ),
+    )
     opportunities = tuple(target_source.opportunities)
     feature_sets = _confirmatory_feature_sets(experiment)
     required_feature_set_ids = {
@@ -3203,7 +3278,7 @@ def _build_confirmatory_g2(
         )
         training_features[feature_set_identity] = training
         raw_rows = build_outcome_blind_holdout_feature_rows(
-            foundation,
+            holdout_foundation,
             experiment,
             target_source,
             feature_set_name=feature_set_name,
@@ -3217,8 +3292,8 @@ def _build_confirmatory_g2(
             feature_schema=schema,
             raw_rows=raw_rows,
             opportunities=opportunities,
-            observation_dataset_id=foundation.observations.dataset_id,
-            panel_dataset_id=foundation.panel.dataset_id,
+            observation_dataset_id=g2_source.observations.dataset_id,
+            panel_dataset_id=g2_source.panel.dataset_id,
         )
 
     fits: list[R2FinalFit] = []
@@ -3738,6 +3813,7 @@ async def _replay_staged_oof_async(
     FoldDataset,
     Mapping[str, tuple[tuple[datetime, datetime], ...]],
     R1FoundationBindings,
+    ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
@@ -3799,10 +3875,14 @@ async def _replay_staged_oof_async(
     if experiment.evidence_class is not expected_evidence_class:
         raise ValueError("staged OOF experiment has the wrong evidence classification")
     representative_profile = descriptor.get("representative_profile")
+    g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority | None = None
     if representative_profile == IBKR_HISTORICAL_PROFILE:
-        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
-            paths["foundation"],
-            holdout_target_source=holdout_target_source,
+        (
+            stage8_foundation,
+            foundation_bundle_id,
+            g2_feature_source_authority,
+        ) = load_ibkr_foundation_outcome_blind_with_g2_authority(
+            paths["foundation"], holdout_target_source=holdout_target_source
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
             raise ValueError("IBKR replay foundation differs from the experiment")
@@ -3846,6 +3926,7 @@ async def _replay_staged_oof_async(
             _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
         replayed_folds = verified.folds
         replayed_source_active_intervals = verified.source_active_intervals
+        g2_feature_source_authority = verified.g2_feature_source
     verify_exact_r1_bindings(cast(R1FoundationBindings, verified), experiment)
     feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
     with TemporaryDirectory() as temporary:
@@ -3870,6 +3951,7 @@ async def _replay_staged_oof_async(
         replayed_folds,
         replayed_source_active_intervals,
         cast(R1FoundationBindings, verified),
+        g2_feature_source_authority,
     )
 
 
@@ -3883,6 +3965,7 @@ async def _replay_confirmatory_oof_async(
     FoldDataset,
     Mapping[str, tuple[tuple[datetime, datetime], ...]],
     R1FoundationBindings,
+    ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
     return await _replay_staged_oof_async(path, expected_run_kind=CONFIRMATORY_RUN_KIND)
 
@@ -3897,6 +3980,7 @@ def _replay_confirmatory_oof(
     FoldDataset,
     Mapping[str, tuple[tuple[datetime, datetime], ...]],
     R1FoundationBindings,
+    ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
     return asyncio.run(_replay_confirmatory_oof_async(path))
 

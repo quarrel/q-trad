@@ -45,8 +45,10 @@ from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetV
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
+    load_ibkr_foundation_outcome_blind_with_g2_authority,
     load_ibkr_foundation_outcome_blind_with_identity,
     verify_ibkr_foundation,
+    verify_ibkr_g2_feature_source,
     write_ibkr_foundation,
 )
 from qtrad.runtime.provider_history import read_provider_history_source_evidence
@@ -244,6 +246,8 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "g2-observations",
+        "g2-panel",
         "pre-holdout-target",
     }
     assert all(
@@ -317,6 +321,21 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert isinstance(blind_build.targets, R2OutcomeBlindTargetView)
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
 
+    blind_build, build_id, g2_authority = load_ibkr_foundation_outcome_blind_with_g2_authority(
+        bundle,
+        holdout_target_source=holdout_source,
+    )
+    assert g2_authority.foundation_bundle_id == build_id
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", original_read_child_rows)
+    g2_source = verify_ibkr_g2_feature_source(
+        g2_authority,
+        holdout_target_source=holdout_source,
+    )
+    assert any(
+        configuration.holdout_range[0] <= row.decision_time < configuration.holdout_range[1]
+        for row in g2_source.panel.rows
+    )
+
 
 def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
@@ -346,6 +365,8 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "g2-observations",
+        "g2-panel",
         "pre-holdout-target",
     }
     for kind in extension_kinds:
