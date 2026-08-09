@@ -17,6 +17,7 @@ if [[ -n "${QTRAD_IBKR_ENV_FILE:-}" && "$QTRAD_IBKR_ENV_FILE" != "$canonical_env
     exit 64
 fi
 env_file="$canonical_env_file"
+backup_env_file="/etc/qtrad/ibkr-backup.env"
 if [[ -f "$env_file" ]]; then
     set -a
     # shellcheck disable=SC1090
@@ -48,6 +49,30 @@ database_url="${QTRAD_DATABASE_URL:?set QTRAD_DATABASE_URL}"
 base_image="${QTRAD_IMAGE:-$image}"
 
 fail() { echo "IBKR B3 preflight: $*" >&2; exit 64; }
+
+verify_backup_identity() {
+    [[ -f "$backup_env_file" ]] || fail "canonical backup environment is missing: $backup_env_file"
+    [[ "$(stat -c '%U:%G' "$backup_env_file")" == root:root ]] \
+        || fail "canonical backup environment must be root-owned"
+    backup_mode="$(stat -c '%a' "$backup_env_file")"
+    [[ "$backup_mode" == 600 || "$backup_mode" == 640 ]] \
+        || fail "canonical backup environment must use mode 0600 or 0640"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "$backup_env_file"
+        set +a
+        [[ "${QTRAD_IBKR_BACKUP_DIR:-}" == /srv/qtrad/postgres/backups \
+            && "${QTRAD_IBKR_STATUS_DIR:-}" == /var/lib/qtrad/ibkr \
+            && "${QTRAD_IBKR_POSTGRES_CONTAINER:-}" == qtrad-ibkr-native-postgres \
+            && "${QTRAD_IBKR_POSTGRES_DATABASE:-}" == qtrad_ibkr \
+            && "${QTRAD_IBKR_POSTGRES_USER:-}" == qtrad_ibkr \
+            && "${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-}" =~ ^[1-9][0-9]*$ ]] \
+            || fail "canonical backup environment has unexpected identities"
+        [[ -z "${QTRAD_IBKR_RESTORE_DATABASE:-}" ]] \
+            || fail "restore database identity must be generated per verification run"
+    )
+}
 
 verify_checkout_identity() {
     [[ "$application_commit" =~ ^[0-9a-f]{40}$ ]] || fail "application commit is invalid"
@@ -155,6 +180,7 @@ printf '%s\n' "$preflight_json" | jq -e \
 
 [[ -r "$env_file" ]] || fail "canonical IBKR ingest environment file is not readable"
 
+verify_backup_identity
 verify_checkout_identity
 verify_host_identity
 bash "$script_dir/postgres-provision.sh" --check

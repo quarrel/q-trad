@@ -33,7 +33,7 @@ trap cleanup EXIT
 
 docker exec "$container" \
     pg_dump --format=custom --no-owner --username="$user" --dbname="$database" > "$partial"
-docker exec "$container" pg_restore --list < "$partial" > /dev/null
+docker exec -i "$container" pg_restore --list < "$partial" > /dev/null
 mv -f "$partial" "$archive"
 sha256sum "$archive" > "$archive.sha256"
 
