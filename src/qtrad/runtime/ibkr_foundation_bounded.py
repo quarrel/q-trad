@@ -183,10 +183,15 @@ class _Stage8Checkpoint:
             if root.is_symlink() or not root.is_dir():
                 raise ValueError("Stage 8 checkpoint root must be a real directory")
             identity_path = root / "identity.json"
-            if not identity_path.is_file() or identity_path.is_symlink():
-                raise ValueError("Stage 8 checkpoint identity is missing")
-            if identity_path.read_bytes() != encoded:
-                raise ValueError("Stage 8 checkpoint identity does not match this build")
+            if identity_path.exists():
+                if not identity_path.is_file() or identity_path.is_symlink():
+                    raise ValueError("Stage 8 checkpoint identity must be a regular file")
+                if identity_path.read_bytes() != encoded:
+                    raise ValueError("Stage 8 checkpoint identity does not match this build")
+            else:
+                if any(root.iterdir()):
+                    raise ValueError("Stage 8 checkpoint identity is missing")
+                _runtime()._write_create_only(identity_path, encoded)
         else:
             root.mkdir(parents=True, exist_ok=False)
             _runtime()._write_create_only(root / "identity.json", encoded)
@@ -364,6 +369,23 @@ class _Stage8Checkpoint:
         if _checkpoint_file_payload(details) != dict(value):
             raise ValueError(f"Stage 8 checkpoint {name} content changed")
         return details
+
+
+def prepare_stage8_checkpoint(
+    root: Path | None,
+    *,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+) -> None:
+    """Initialize or authenticate build checkpoints before expensive source replay."""
+
+    _Stage8Checkpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+    )
 
 
 class _ReplayCheckpoint:

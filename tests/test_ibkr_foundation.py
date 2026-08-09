@@ -889,6 +889,65 @@ def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
         )
 
 
+def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    checkpoint_root = tmp_path / "empty-checkpoint"
+    checkpoint_root.mkdir()
+    original_verifier = foundation_runtime.read_provider_history_source_evidence
+    verifier_started = False
+
+    def assert_checkpoint_prepared(path: Path):
+        nonlocal verifier_started
+        verifier_started = True
+        assert (checkpoint_root / "identity.json").is_file()
+        return original_verifier(path)
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        assert_checkpoint_prepared,
+    )
+    write_ibkr_foundation(
+        tmp_path / "empty-checkpoint-foundation.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        workers=1,
+    )
+    assert verifier_started
+
+    junk_root = tmp_path / "junk-checkpoint"
+    junk_root.mkdir()
+    (junk_root / "unexpected").write_text("junk", encoding="utf-8")
+
+    def reject_source_verification(_path: Path):
+        raise AssertionError("source verification started before checkpoint rejection")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_source_verification,
+    )
+    rejected_output = tmp_path / "junk-checkpoint-foundation.json"
+    with pytest.raises(ValueError, match="checkpoint identity is missing"):
+        write_ibkr_foundation(
+            rejected_output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=junk_root,
+            workers=1,
+        )
+    assert not rejected_output.exists()
+
+
 def test_bounded_foundation_reuses_identity_bound_checkpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

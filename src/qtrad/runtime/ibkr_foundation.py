@@ -215,6 +215,23 @@ def _manifest_payload(
     }
 
 
+def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, str, int]:
+    manifest_bytes = _bounded_bytes(
+        provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
+    )
+    document = _mapping(_parse_json(manifest_bytes, "provider-history manifest"))
+    dataset = _mapping(document.get("dataset"), "provider-history dataset")
+    dataset_sha256 = _text(dataset.get("dataset_sha256"), "provider-history dataset identity")
+    if len(dataset_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in dataset_sha256
+    ):
+        raise ValueError("provider-history dataset identity must be lower-case SHA-256")
+    row_count = dataset.get("row_count")
+    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+        raise ValueError("provider-history dataset row count is invalid")
+    return hashlib.sha256(manifest_bytes).hexdigest(), dataset_sha256, row_count
+
+
 def write_ibkr_foundation(
     output: Path,
     *,
@@ -231,6 +248,18 @@ def write_ibkr_foundation(
         raise FileExistsError(f"IBKR foundation output already exists: {output}")
     provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
     _relative_path(output.parent, provider_manifest, "provider-history manifest")
+    provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
+        _stage8_checkpoint_source_identity(provider_manifest)
+    )
+    if checkpoint_root is not None and provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
+        from qtrad.runtime.ibkr_foundation_bounded import prepare_stage8_checkpoint
+
+        prepare_stage8_checkpoint(
+            checkpoint_root,
+            provider_manifest_sha256=provider_manifest_sha256,
+            provider_dataset_sha256=provider_dataset_sha256,
+            configuration_id=configuration.configuration_id,
+        )
     child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
     if child_root.exists():
         raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
@@ -277,7 +306,7 @@ def write_ibkr_foundation(
                 child_root=child_root,
                 bundle_root=output.parent,
                 child_name=child_root.name,
-                provider_manifest_sha256=hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
+                provider_manifest_sha256=provider_manifest_sha256,
                 checkpoint_root=checkpoint_root,
                 workers=workers,
                 progress_callback=progress_callback,
