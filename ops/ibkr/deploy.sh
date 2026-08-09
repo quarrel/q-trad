@@ -64,7 +64,7 @@ verify_host_identity() {
         QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256="$gateway_archive_sha" \
         QTRAD_IBKR_API_PACKAGE_FINGERPRINT="$api_fingerprint" \
         QTRAD_IBKR_CHECKPOINT_ROOT="$checkpoint_root" \
-        "$script_dir/verify-host.sh"
+        bash "$script_dir/verify-host.sh"
 }
 
 verify_database_head() {
@@ -142,6 +142,7 @@ printf '%s\n' "$preflight_json" | jq -e \
 
 verify_checkout_identity
 verify_host_identity
+bash "$script_dir/postgres-provision.sh" --check
 verify_database_head
 
 if [[ "$mode" == "--check" ]]; then
@@ -156,15 +157,19 @@ install -D -m 0750 "$script_dir/qtrad-ibkr-api-wrapper.example" /usr/local/sbin/
 install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healthcheck
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup
 install -D -m 0750 "$script_dir/postgres-restore-verify.sh" /usr/local/sbin/qtrad-ibkr-postgres-restore-verify
+install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
+install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
+install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop
 install -D -m 0644 "$script_dir/qtrad-ibkr-ingest.service.example" /etc/systemd/system/qtrad-ibkr-ingest.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-api.service.example" /etc/systemd/system/qtrad-ibkr-api.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-health.service.example" /etc/systemd/system/qtrad-ibkr-health.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-health.timer.example" /etc/systemd/system/qtrad-ibkr-health.timer
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.service.example" /etc/systemd/system/qtrad-ibkr-backup.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.timer.example" /etc/systemd/system/qtrad-ibkr-backup.timer
+install -D -m 0644 "$script_dir/qtrad-ibkr-postgres.service.example" /etc/systemd/system/qtrad-ibkr-postgres.service
 systemctl daemon-reload
 systemctl enable \
-    qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
+    qtrad-ibkr-postgres.service qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
     qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
 systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service
 systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer

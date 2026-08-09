@@ -1,8 +1,8 @@
 [Unit]
 Description=Back up q-trad IBKR PostgreSQL
 RequiresMountsFor=/srv/qtrad/postgres
-After=docker.service qtrad-ibkr-ingest.service
-Wants=docker.service
+Requires=qtrad-ibkr-postgres.service
+After=qtrad-ibkr-postgres.service qtrad-ibkr-ingest.service
 
 [Service]
 Type=oneshot

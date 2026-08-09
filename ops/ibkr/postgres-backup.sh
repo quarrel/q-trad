@@ -4,7 +4,7 @@ umask 077
 
 backup_dir="${QTRAD_IBKR_BACKUP_DIR:-/srv/qtrad/postgres/backups}"
 status_dir="${QTRAD_IBKR_STATUS_DIR:-/var/lib/qtrad/ibkr}"
-container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-postgres}"
+container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-native-postgres}"
 database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad_ibkr}"
 user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
 retention_days="${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-14}"

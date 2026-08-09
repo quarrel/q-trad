@@ -1,8 +1,8 @@
 [Unit]
 Description=Verify the latest q-trad IBKR PostgreSQL backup
 RequiresMountsFor=/srv/qtrad/postgres
-After=docker.service
-Wants=docker.service
+Requires=qtrad-ibkr-postgres.service
+After=qtrad-ibkr-postgres.service
 
 [Service]
 Type=oneshot

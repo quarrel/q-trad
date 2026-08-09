@@ -3,7 +3,7 @@ set -euo pipefail
 umask 077
 
 backup_dir="${QTRAD_IBKR_BACKUP_DIR:-/srv/qtrad/postgres/backups}"
-container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-postgres}"
+container="${QTRAD_IBKR_POSTGRES_CONTAINER:-qtrad-ibkr-native-postgres}"
 database="${QTRAD_IBKR_POSTGRES_DATABASE:-qtrad_ibkr}"
 restore_database="${QTRAD_IBKR_RESTORE_DATABASE:-qtrad_ibkr_restore_verify_$(date -u +%Y%m%d%H%M%S)_$$}"
 evidence_path="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only restore evidence path}"

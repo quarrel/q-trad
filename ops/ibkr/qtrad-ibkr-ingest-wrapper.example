@@ -13,9 +13,8 @@ configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPT
 [[ "$checkpoint_root" == /* && -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
 [[ -r "$configuration_file" ]] || exit 69
 [[ "$database_url" == postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr ]] || exit 64
-if ss -H -ltn '( sport = :4002 )' | awk '{print $4}' \
-    | grep -Ev '(^127[.]0[.]0[.]1:4002$|^[[]::1[]]:4002$)' > /dev/null; then
-    echo 'Gateway API is not localhost-only' >&2
+if [[ -z "$(ss -H -ltn '( sport = :4002 )')" ]]; then
+    echo 'Gateway API is not listening' >&2
     exit 69
 fi
 

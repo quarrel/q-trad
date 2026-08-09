@@ -884,6 +884,10 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         script_dir / "verify-host.sh",
         f"#!/bin/sh\nprintf '%s\\n' verify-host >> '{calls}'\n",
     )
+    _write_executable(
+        script_dir / "postgres-provision.sh",
+        f"#!/bin/sh\nprintf '%s\\n' postgres-provision >> '{calls}'\n",
+    )
 
     subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(repository), "add", "ops/ibkr"], check=True)
@@ -989,6 +993,7 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     assert result.returncode == 0, result.stderr
     recorded_calls = calls.read_text(encoding="utf-8").splitlines()
     assert "verify-host" in recorded_calls
+    assert "postgres-provision" in recorded_calls
     assert any(
         call.startswith("docker run ") and "db verify-head" in call for call in recorded_calls
     )
@@ -997,7 +1002,8 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         assert not any(call.startswith(("install ", "systemctl ")) for call in recorded_calls)
     else:
         assert (
-            "systemctl enable qtrad-ibkr-api.service qtrad-ibkr-ingest.service "
+            "systemctl enable qtrad-ibkr-postgres.service qtrad-ibkr-api.service "
+            "qtrad-ibkr-ingest.service "
             "qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
         ) in recorded_calls
         assert (

@@ -5,12 +5,13 @@ After=docker.service
 RequiresMountsFor=/srv/qtrad/postgres
 
 [Service]
-Type=oneshot
-RemainAfterExit=yes
+Type=simple
 EnvironmentFile=/etc/qtrad/ibkr-postgres.env
 ExecStart=/usr/local/sbin/qtrad-ibkr-postgres-start
 ExecStartPost=/usr/local/sbin/qtrad-ibkr-postgres-ready
 ExecStop=/usr/local/sbin/qtrad-ibkr-postgres-stop
+Restart=on-failure
+RestartSec=5
 TimeoutStartSec=120
 TimeoutStopSec=120
 
