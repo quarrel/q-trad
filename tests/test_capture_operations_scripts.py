@@ -93,6 +93,7 @@ def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
     assert "usage: deploy.sh --check|--apply" in deploy
     assert 'if [[ "$mode" == "--check" ]]' in deploy
     assert "verify_host_identity" in deploy
+    assert 'bash "$script_dir/postgres-provision.sh" --check' in deploy
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
@@ -100,6 +101,45 @@ def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in wrapper
     assert '--volume "$checkpoint_root:$checkpoint_root:rw"' in wrapper
     assert "B3" in readme
+
+
+def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    provision = (ibkr / "postgres-provision.sh").read_text()
+    start = (ibkr / "postgres-start.sh").read_text()
+    ready = (ibkr / "postgres-ready.sh").read_text()
+    backup = (ibkr / "postgres-backup.sh").read_text()
+    restore = (ibkr / "postgres-restore-verify.sh").read_text()
+
+    assert "usage: postgres-provision.sh --check|--apply" in provision
+    assert "must be root-owned and mode 0600 or 0640" in provision
+    assert "cmp --silent" in provision
+    assert "systemctl enable --now qtrad-ibkr-postgres.service" in provision
+    assert "postgres@sha256:" in start
+    assert "127.0.0.1:5432" in start
+    assert "qtrad-ibkr-native-postgres" in start
+    assert "/srv/qtrad/postgres/ibkr-native-data" in start
+    assert "POSTGRES_HOST_AUTH_METHOD=trust" in start
+    assert 'docker wait "$container"' in start
+    assert "pg_isready" in ready
+    assert "qtrad_ibkr|qtrad_ibkr" in ready
+    assert "qtrad-ibkr-native-postgres" in backup
+    assert "qtrad-ibkr-native-postgres" in restore
+    backup_service = (ibkr / "qtrad-ibkr-backup.service.example").read_text()
+    restore_service = (ibkr / "qtrad-ibkr-restore-verify.service.example").read_text()
+    assert "Requires=qtrad-ibkr-postgres.service" in backup_service
+    assert "Requires=qtrad-ibkr-postgres.service" in restore_service
+
+
+def test_ibkr_ingest_accepts_authenticated_gateway_listener_shape() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
+    host = (ibkr / "verify-host.sh").read_text()
+
+    assert "Gateway API is not listening" in wrapper
+    assert "Gateway API is not localhost-only" not in wrapper
+    assert "firewall-cmd" in host
+    assert "TrustedIPs" in host
 
 
 def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:

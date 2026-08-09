@@ -8,6 +8,24 @@ B3 now supplies the software-only exact-two native-capture release boundary: pro
 
 B3 does not run a host, Gateway, database, deployment or qualification operation. `qtrad deployment ibkr-verify` and `qtrad deployment ibkr-preflight` are offline checks; `deploy.sh --check` is non-mutating, while `deploy.sh --apply` is an explicitly invoked host mutation reserved for separately authorized operation. No B3 result is an overall IBKR capture or Stage-6 qualification claim.
 
+The dedicated native PostgreSQL service has its own earlier mutation boundary.
+Create `/etc/qtrad/ibkr-postgres.env` from the reviewed example, then run
+`postgres-provision.sh --apply`. A subsequent `--check` authenticates the
+installed lifecycle scripts and unit against the reviewed checkout, the
+immutable PostgreSQL image, the dedicated `qtrad_ibkr` database identity, the
+loopback-only host port, and `/srv/qtrad/postgres/ibkr-native-data`. Run
+`qtrad db migrate` against that empty database; never use `qtrad db upgrade`,
+which also invokes the generic capture-universe seeder. `deploy.sh --check`
+requires this database service and the expected migration head before any B3
+runtime mutation.
+
+The official Gateway may expose its API listener as a wildcard socket. That
+shape is accepted only because `verify-host.sh` independently requires the
+reviewed `TrustedIPs` configuration and a firewalld policy that prevents remote
+access to port 4002. The ingest wrapper requires the authenticated listener to
+exist; it does not contradict that host-level authority by requiring a literal
+loopback socket.
+
 ## Before running the bounded probe
 
 1. Attach and mount the OCI block device at `/srv/qtrad/postgres`; `verify-host.sh` fails closed if
