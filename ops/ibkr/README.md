@@ -23,7 +23,9 @@ The host does not install the q-trad Python application. By default,
 `deploy.sh` runs offline release preflight through `qtrad-container-cli.sh` in
 the exact immutable IBKR image, with networking disabled and only `/etc/qtrad`
 and `/srv/qtrad/ibkr` mounted read-only. This keeps the preflight executable
-identity aligned with the image that later runs the collector and API.
+identity aligned with the image that later runs the collector and API. The
+wrapper invokes the installed virtual-environment Python directly so the
+read-only preflight does not require a writable package-manager cache.
 
 The official Gateway may expose its API listener as a wildcard socket. That
 shape is accepted only because `verify-host.sh` independently requires the

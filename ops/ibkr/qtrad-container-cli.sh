@@ -21,5 +21,5 @@ exec docker run --rm --network none --user 10001:10001 \
     --read-only --cap-drop=ALL --security-opt=no-new-privileges \
     --volume /etc/qtrad:/etc/qtrad:ro \
     --volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro \
-    --entrypoint uv "$image" \
-    run --frozen --no-dev --no-sync python -m qtrad "$@"
+    --entrypoint /app/.venv/bin/python "$image" \
+    -m qtrad "$@"
