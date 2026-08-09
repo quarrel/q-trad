@@ -49,6 +49,7 @@ from qtrad.domain.foundation import (
     TargetRow,
 )
 from qtrad.domain.ibkr_foundation import IBKR_CONFIRMATORY_INSTRUMENTS
+from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.research import ObservationRow
 
@@ -303,12 +304,15 @@ def _dataset_id(
 
 
 class _SummaryRows:
-    def __init__(self, rows: Sequence[object], total_count: int) -> None:
-        self._rows = tuple(rows)
+    def __init__(self, path: Path, total_count: int) -> None:
+        self._path = path
         self._total_count = total_count
 
     def __iter__(self) -> Iterator[object]:
-        return iter(self._rows)
+        with self._path.open("r", encoding="utf-8") as stream:
+            for line in stream:
+                if line.strip():
+                    yield _TargetSummary.from_json_value(json.loads(line))
 
     def __len__(self) -> int:
         return self._total_count
@@ -340,13 +344,41 @@ class _TargetSummary:
         self.target_available_at = row.target_available_at
         self.return_disposition = row.return_disposition
 
+    def as_json_value(self) -> dict[str, object]:
+        return {
+            "decision_time": self.decision_time.isoformat(),
+            "horizon_seconds": self.horizon.total_seconds(),
+            "instrument_id": self.instrument_id,
+            "return_disposition": self.return_disposition.value,
+            "target_available_at": self.target_available_at.isoformat(),
+            "target_basis": self.target_basis.value,
+            "target_end_time": self.target_end_time.isoformat(),
+            "target_freeze_at": self.target_freeze_at.isoformat(),
+            "target_id": self.target_id,
+            "target_start_time": self.target_start_time.isoformat(),
+        }
+
+    @classmethod
+    def from_json_value(cls, value: Mapping[str, object]) -> _TargetSummary:
+        summary = cls.__new__(cls)
+        summary.instrument_id = str(value["instrument_id"])
+        summary.decision_time = datetime.fromisoformat(str(value["decision_time"]))
+        summary.horizon = timedelta(seconds=float(value["horizon_seconds"]))
+        summary.target_basis = PriceBasis(str(value["target_basis"]))
+        summary.target_id = str(value["target_id"])
+        summary.target_start_time = datetime.fromisoformat(str(value["target_start_time"]))
+        summary.target_end_time = datetime.fromisoformat(str(value["target_end_time"]))
+        summary.target_freeze_at = datetime.fromisoformat(str(value["target_freeze_at"]))
+        summary.target_available_at = datetime.fromisoformat(str(value["target_available_at"]))
+        summary.return_disposition = ReturnDisposition(str(value["return_disposition"]))
+        return summary
 
 def _fast_target_rows(
     rows: Sequence[ObservationRow],
     config: FoundationConfig,
     *,
     horizons: Sequence[timedelta],
-) -> tuple[TargetRow, ...] | None:
+) -> Iterator[TargetRow] | None:
     """Build singleton historical targets with rolling path extrema.
 
     A source with revisions must use the general builder.  The Stage 7
@@ -465,90 +497,88 @@ def _fast_target_rows(
                 )
         metric_sets.append((highs, lows, availabilities, missing, bad))
 
-    result: list[TargetRow] = []
-    for decision_index, decision_time in enumerate(decision_times):
-        start_row = values[decision_index]
-        for horizon_index, (horizon, steps) in enumerate(
-            zip(horizons, horizon_steps, strict=True)
-        ):
-            target_end = decision_time + horizon
-            freeze_at = target_end + config.target_revision_delay
-
-            start_state = (
-                "MISSING"
-                if start_row is None
-                else (
-                    "OBSERVED"
-                    if observation_availability_time(start_row, config.availability_basis)
-                    <= freeze_at
-                    else "UNAVAILABLE"
-                )
-            )
-            end_row = values[decision_index + steps]
-            end_state = (
-                "MISSING"
-                if end_row is None
-                else (
-                    "OBSERVED"
-                    if observation_availability_time(end_row, config.availability_basis)
-                    <= freeze_at
-                    else "UNAVAILABLE"
-                )
-            )
-
-            return_disposition = _return_disposition(
-                start_row,
-                start_state,
-                end_row,
-                end_state,
-            )
-            label_start = start_row.close if start_row else None
-            label_end = end_row.close if end_row else None
-            log_return = (
-                _log_ratio(label_start, label_end)
-                if return_disposition is ReturnDisposition.VALID
-                else None
-            )
-            highs, lows, max_available, path_missing, path_bad = metric_sets[horizon_index]
-            if return_disposition in {
-                ReturnDisposition.MISSING_START,
-                ReturnDisposition.UNAVAILABLE_BY_FREEZE,
-            }:
-                upper = lower = None
-                excursion_disposition = ExcursionDisposition.MISSING_START
-            elif return_disposition is ReturnDisposition.MISSING_END:
-                upper = lower = None
-                excursion_disposition = ExcursionDisposition.MISSING_END
-            elif return_disposition is ReturnDisposition.AMBIGUOUS_SOURCE:
-                upper = lower = None
-                excursion_disposition = ExcursionDisposition.AMBIGUOUS_SOURCE
-            elif (
-                start_row is None
-                or end_row is None
-                or start_row.close <= 0
-                or not start_row.close.is_finite()
-                or path_missing[decision_index]
-                or path_bad[decision_index]
-                or (
-                    max_available[decision_index] is not None
-                    and max_available[decision_index] > freeze_at
-                )
-                or highs[decision_index] is None
-                or lows[decision_index] is None
+    def _iter_rows() -> Iterator[TargetRow]:
+        for decision_index, decision_time in enumerate(decision_times):
+            start_row = values[decision_index]
+            for horizon_index, (horizon, steps) in enumerate(
+                zip(horizons, horizon_steps, strict=True)
             ):
-                upper = lower = None
-                excursion_disposition = ExcursionDisposition.INCOMPLETE_PATH
-            else:
-                try:
-                    upper = _log_ratio(highs[decision_index], start_row.close)
-                    lower = _log_ratio(lows[decision_index], start_row.close)
-                    excursion_disposition = ExcursionDisposition.VALID
-                except (ValueError, OverflowError):
+                target_end = decision_time + horizon
+                freeze_at = target_end + config.target_revision_delay
+
+                start_state = (
+                    "MISSING"
+                    if start_row is None
+                    else (
+                        "OBSERVED"
+                        if observation_availability_time(start_row, config.availability_basis)
+                        <= freeze_at
+                        else "UNAVAILABLE"
+                    )
+                )
+                end_row = values[decision_index + steps]
+                end_state = (
+                    "MISSING"
+                    if end_row is None
+                    else (
+                        "OBSERVED"
+                        if observation_availability_time(end_row, config.availability_basis)
+                        <= freeze_at
+                        else "UNAVAILABLE"
+                    )
+                )
+                return_disposition = _return_disposition(
+                    start_row,
+                    start_state,
+                    end_row,
+                    end_state,
+                )
+                label_start = start_row.close if start_row else None
+                label_end = end_row.close if end_row else None
+                log_return = (
+                    _log_ratio(label_start, label_end)
+                    if return_disposition is ReturnDisposition.VALID
+                    else None
+                )
+                highs, lows, max_available, path_missing, path_bad = metric_sets[horizon_index]
+                if return_disposition in {
+                    ReturnDisposition.MISSING_START,
+                    ReturnDisposition.UNAVAILABLE_BY_FREEZE,
+                }:
+                    upper = lower = None
+                    excursion_disposition = ExcursionDisposition.MISSING_START
+                elif return_disposition is ReturnDisposition.MISSING_END:
+                    upper = lower = None
+                    excursion_disposition = ExcursionDisposition.MISSING_END
+                elif return_disposition is ReturnDisposition.AMBIGUOUS_SOURCE:
+                    upper = lower = None
+                    excursion_disposition = ExcursionDisposition.AMBIGUOUS_SOURCE
+                elif (
+                    start_row is None
+                    or end_row is None
+                    or start_row.close <= 0
+                    or not start_row.close.is_finite()
+                    or path_missing[decision_index]
+                    or path_bad[decision_index]
+                    or (
+                        max_available[decision_index] is not None
+                        and max_available[decision_index] > freeze_at
+                    )
+                    or highs[decision_index] is None
+                    or lows[decision_index] is None
+                ):
                     upper = lower = None
                     excursion_disposition = ExcursionDisposition.INCOMPLETE_PATH
+                else:
+                    try:
+                        upper = _log_ratio(highs[decision_index], start_row.close)
+                        lower = _log_ratio(lows[decision_index], start_row.close)
+                        excursion_disposition = ExcursionDisposition.VALID
+                    except (ValueError, OverflowError):
+                        upper = lower = None
+                        excursion_disposition = ExcursionDisposition.INCOMPLETE_PATH
 
-            result.append(
-                TargetRow(
+                yield TargetRow(
                     instrument_id=target_instrument,
                     decision_time=decision_time,
                     horizon=horizon,
@@ -568,8 +598,8 @@ def _fast_target_rows(
                     lower_log_excursion=lower,
                     excursion_disposition=excursion_disposition,
                 )
-            )
-    return tuple(result)
+
+    return _iter_rows()
 
 
 def _panel_temp_key(payload: str) -> tuple[str, str, str]:
@@ -605,7 +635,7 @@ def _merge_panel_files(
 
 
 def _make_summary_target_dataset(
-    rows: Sequence[object],
+    path: Path,
     *,
     target_dataset_id: str,
     observation_dataset_id: str,
@@ -613,7 +643,7 @@ def _make_summary_target_dataset(
     total_count: int,
 ) -> Any:
     return SimpleNamespace(
-        rows=_SummaryRows(rows, total_count),
+        rows=_SummaryRows(path, total_count),
         dataset_id=target_dataset_id,
         observation_dataset_id=observation_dataset_id,
         foundation_configuration_id=foundation_configuration_id,
@@ -749,7 +779,8 @@ def build_bounded_provider_foundation(
     panel_tmp = child_root / ".panel-temp"
     panel_tmp.mkdir()
     panel_files: list[Path] = []
-    primary_summaries: list[_TargetSummary] = []
+    summary_path = panel_tmp / ".primary-target-summaries.jsonl"
+    summary_stream = summary_path.open("w", encoding="utf-8")
     target_row_count = 0
     try:
         for instrument_index, instrument in enumerate(ordered_instruments):
@@ -794,7 +825,8 @@ def build_bounded_provider_foundation(
                     local_configuration,
                     horizons=adapted_configuration.target_horizons,
                 )
-                if fast_rows is None:
+                used_general_target_builder = fast_rows is None
+                if used_general_target_builder:
                     targets = build_frozen_targets(
                         local_dataset,
                         local_configuration,
@@ -803,17 +835,20 @@ def build_bounded_provider_foundation(
                     target_rows = targets.rows
                 else:
                     target_rows = fast_rows
-                target_row_count += len(target_rows)
                 primary_horizon = adapted_configuration.primary_vertical_horizon
                 for row in target_rows:
+                    target_row_count += 1
                     payload = _canonical_row(row.as_json())
                     target_hasher.add(payload)
                     target_writer.add(payload)
                     if row.horizon == primary_horizon:
-                        primary_summaries.append(_TargetSummary(row))
+                        summary = _TargetSummary(row)
+                        summary_stream.write(_canonical_row(summary.as_json_value()))
+                        summary_stream.write("\n")
+                del target_rows, fast_rows
+                if used_general_target_builder:
+                    del targets
             del panel
-            if role is InstrumentRole.TARGET and fast_rows is None:
-                del targets
             del local_dataset, rows
             gc.collect()
 
@@ -827,9 +862,9 @@ def build_bounded_provider_foundation(
         panel_refs = panel_writer.finalize(panel_dataset_id)
         target_refs = target_writer.finalize(target_dataset_id)
 
-        summary_rows = tuple(primary_summaries)
+        summary_stream.close()
         summary_dataset = _make_summary_target_dataset(
-            summary_rows,
+            summary_path,
             target_dataset_id=target_dataset_id,
             observation_dataset_id=observation_dataset_id,
             foundation_configuration_id=adapted_configuration.configuration_id,
@@ -858,7 +893,19 @@ def build_bounded_provider_foundation(
             payload = _canonical_row(fold.as_json())
             fold_writer.add(payload)
         fold_refs = fold_writer.finalize(folds.dataset_id)
+        readiness = evaluate_ibkr_foundation_readiness(
+            source_evidence,
+            summary_dataset,
+            source_start=source_start,
+            source_end=source_end,
+            active_intervals=active_intervals,
+            provider_gaps=provider_gaps,
+            primary_horizon=adapted_configuration.primary_vertical_horizon,
+            fold_count=len(folds.folds),
+        )
     finally:
+        if not summary_stream.closed:
+            summary_stream.close()
         shutil.rmtree(panel_tmp, ignore_errors=True)
 
     observations_ref = SimpleNamespace(
@@ -889,16 +936,7 @@ def build_bounded_provider_foundation(
         provider_history=source_evidence.dataset,
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,
-        readiness=evaluate_ibkr_foundation_readiness(
-            source_evidence,
-            summary_dataset,
-            source_start=source_start,
-            source_end=source_end,
-            active_intervals=active_intervals,
-            provider_gaps=provider_gaps,
-            primary_horizon=adapted_configuration.primary_vertical_horizon,
-            fold_count=len(folds.folds),
-        ),
+        readiness=readiness,
     )
     return build, {
         "observations": tuple(observation_refs),
