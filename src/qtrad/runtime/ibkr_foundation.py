@@ -221,6 +221,7 @@ def write_ibkr_foundation(
     provider_manifest: Path,
     configuration: FoundationConfig,
     checkpoint_root: Path | None = None,
+    workers: int = 4,
     progress_callback: _ProgressCallback | None = None,
 ) -> IBKRFoundationBuild:
     """Build and create the source-specific bundle once."""
@@ -278,6 +279,7 @@ def write_ibkr_foundation(
                 child_name=child_root.name,
                 provider_manifest_sha256=hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
                 checkpoint_root=checkpoint_root,
+                workers=workers,
                 progress_callback=progress_callback,
             )
             children = cast(Mapping[str, JsonValue], bounded_children)
@@ -326,6 +328,7 @@ def rehearse_ibkr_foundation(
     provider_manifest: Path,
     configuration: FoundationConfig,
     checkpoint_root: Path | None = None,
+    workers: int = 4,
     progress_callback: _ProgressCallback | None = None,
 ) -> IBKRFoundationBuild:
     """Exercise the real Stage 8 build while retaining no published bundle."""
@@ -339,6 +342,7 @@ def rehearse_ibkr_foundation(
             provider_manifest=provider_manifest,
             configuration=configuration,
             checkpoint_root=checkpoint_root,
+            workers=workers,
             progress_callback=progress_callback,
         )
     finally:
@@ -374,7 +378,12 @@ def _emit_stage8_progress(
     )
 
 
-def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
+def verify_ibkr_foundation(
+    path: Path,
+    *,
+    replay_checkpoint_root: Path | None = None,
+    workers: int = 4,
+) -> IBKRFoundationBuild:
     """Verify the thin manifest and independently replay every Parquet child."""
 
     manifest_path = _regular_file(path, "IBKR foundation manifest")
@@ -432,6 +441,8 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
             bundle_path=manifest_path,
             document=document,
             payload=payload,
+            replay_checkpoint_root=replay_checkpoint_root,
+            workers=workers,
         )
     replay = build_ibkr_foundation(source_evidence, configuration)
 

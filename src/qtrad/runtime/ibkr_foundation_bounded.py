@@ -19,19 +19,24 @@ import shutil
 import time
 from collections import defaultdict, deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
+from multiprocessing import get_context
 from pathlib import Path, PurePosixPath
 from tempfile import mkdtemp
 from types import SimpleNamespace
 from typing import Any, cast
 
+from qtrad.adapters.parquet.observations import _observation_from_row
 from qtrad.application.foundation import (
     _log_ratio,
+    _missing_panel_row,
+    _panel_audit_disposition,
     _return_disposition,
-    build_asof_panel,
-    build_frozen_targets,
+    _revision_key,
+    _source_key,
     observation_availability_time,
 )
 from qtrad.application.ibkr_foundation import (
@@ -44,15 +49,18 @@ from qtrad.application.provider_history import (
     ProviderHistoryObservationRows,
     ProviderHistorySourceEvidence,
 )
-from qtrad.application.walk_forward import build_expanding_folds
-from qtrad.domain.folds import FoldDataset
+from qtrad.application.walk_forward import _hash_json
+from qtrad.domain.folds import FOLD_DATASET_CONTRACT, Fold, FoldDataset, membership_hash
 from qtrad.domain.foundation import (
     PANEL_DATASET_CONTRACT,
     TARGET_DATASET_CONTRACT,
     ExcursionDisposition,
     FoundationConfig,
     InstrumentRole,
+    PanelAuditDisposition,
     PanelDataset,
+    PanelRow,
+    PanelStatus,
     ReturnDisposition,
     TargetDataset,
     TargetRow,
@@ -63,7 +71,12 @@ from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.research import ObservationDataset, ObservationRow
 
 _CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-checkpoint-v1"
+_REPLAY_CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-replay-checkpoint-v1"
+_DERIVATION_CHUNK = timedelta(days=7)
+_DEFAULT_WORKERS = 4
+_MAX_WORKERS = 8
 _ProgressCallback = Callable[[Mapping[str, object]], None]
+_ReplayPartCallback = Callable[[str, int, Mapping[str, object], Path, Path], None]
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +107,33 @@ class _DerivedCheckpoint:
     panel: _CheckpointFile
     targets: _CheckpointFile
     summaries: _CheckpointFile
+
+
+@dataclass(frozen=True, slots=True)
+class _ReplayPart:
+    path: Path
+    file_sha256: str
+    row_count: int
+    rows_sha256: str
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivationJob:
+    instrument: str
+    role: InstrumentRole
+    observations: _CheckpointFile
+    configuration: FoundationConfig
+    active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]]
+    panel_path: Path
+    target_path: Path
+    summary_path: Path
+
+
+@dataclass(frozen=True, slots=True)
+class _DerivationResult:
+    instrument: str
+    panel_row_count: int
+    target_row_count: int
 
 
 class _Progress:
@@ -326,15 +366,144 @@ class _Stage8Checkpoint:
         return details
 
 
+class _ReplayCheckpoint:
+    """Identity-bound cache of child parts already matched to one published bundle."""
+
+    def __init__(
+        self,
+        root: Path | None,
+        *,
+        provider_manifest_sha256: str,
+        provider_dataset_sha256: str,
+        configuration_id: str,
+        published_bundle_sha256: str,
+    ) -> None:
+        self.root = root
+        if root is None:
+            return
+        identity = {
+            "contract": _REPLAY_CHECKPOINT_CONTRACT,
+            "provider_manifest_sha256": provider_manifest_sha256,
+            "provider_dataset_sha256": provider_dataset_sha256,
+            "configuration_id": configuration_id,
+            "implementation_sha256": _implementation_sha256(),
+            "published_bundle_sha256": published_bundle_sha256,
+        }
+        encoded = _runtime()._json_bytes(identity) + b"\n"
+        if root.exists():
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("Stage 8 replay checkpoint root must be a real directory")
+            identity_path = root / "identity.json"
+            if not identity_path.is_file() or identity_path.is_symlink():
+                raise ValueError("Stage 8 replay checkpoint identity is missing")
+            if identity_path.read_bytes() != encoded:
+                raise ValueError(
+                    "Stage 8 replay checkpoint identity does not match this verification"
+                )
+        else:
+            root.mkdir(parents=True, exist_ok=False)
+            _runtime()._write_create_only(root / "identity.json", encoded)
+
+    def part(
+        self,
+        kind: str,
+        index: int,
+        *,
+        row_count: int,
+        rows_sha256: str,
+    ) -> _ReplayPart | None:
+        directory = self._part_directory(kind, index)
+        if directory is None or not directory.exists():
+            return None
+        metadata_path = directory / "complete.json"
+        part_path = directory / "part.parquet"
+        if (
+            not metadata_path.is_file()
+            or metadata_path.is_symlink()
+            or not part_path.is_file()
+            or part_path.is_symlink()
+        ):
+            raise ValueError(f"Stage 8 replay checkpoint {kind} part {index} is incomplete")
+        metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+        if not isinstance(metadata, dict):
+            raise ValueError(f"Stage 8 replay checkpoint {kind} part {index} metadata is invalid")
+        file_sha256 = hashlib.sha256(part_path.read_bytes()).hexdigest()
+        expected = {
+            "contract": _REPLAY_CHECKPOINT_CONTRACT,
+            "kind": kind,
+            "part_index": index,
+            "row_count": row_count,
+            "rows_sha256": rows_sha256,
+            "file_sha256": file_sha256,
+        }
+        if metadata != expected:
+            raise ValueError(f"Stage 8 replay checkpoint {kind} part {index} content changed")
+        return _ReplayPart(part_path, file_sha256, row_count, rows_sha256)
+
+    def store_verified(
+        self,
+        kind: str,
+        index: int,
+        *,
+        row_count: int,
+        rows_sha256: str,
+        generated_path: Path,
+    ) -> None:
+        if self.root is None:
+            return
+        directory = self._part_directory(kind, index)
+        assert directory is not None
+        file_sha256 = hashlib.sha256(generated_path.read_bytes()).hexdigest()
+        if directory.exists():
+            cached = self.part(
+                kind,
+                index,
+                row_count=row_count,
+                rows_sha256=rows_sha256,
+            )
+            if cached is None or cached.file_sha256 != file_sha256:
+                raise ValueError(f"Stage 8 replay checkpoint {kind} part {index} diverged")
+            return
+        temporary = Path(mkdtemp(prefix=".part-", dir=str(directory.parent)))
+        try:
+            target = temporary / "part.parquet"
+            shutil.copyfile(generated_path, target)
+            metadata = {
+                "contract": _REPLAY_CHECKPOINT_CONTRACT,
+                "kind": kind,
+                "part_index": index,
+                "row_count": row_count,
+                "rows_sha256": rows_sha256,
+                "file_sha256": file_sha256,
+            }
+            _runtime()._write_create_only(
+                temporary / "complete.json", _runtime()._json_bytes(metadata) + b"\n"
+            )
+            temporary.rename(directory)
+        except BaseException:
+            shutil.rmtree(temporary, ignore_errors=True)
+            raise
+
+    def _part_directory(self, kind: str, index: int) -> Path | None:
+        if self.root is None:
+            return None
+        parent = self.root / kind
+        parent.mkdir(parents=True, exist_ok=True)
+        return parent / f"part-{index:06d}"
+
+
 def _implementation_sha256() -> str:
     hasher = hashlib.sha256()
     hasher.update(Path(__file__).read_bytes())
     for function in (
         _adapt_observation,
+        _observation_from_row,
+        _panel_audit_disposition,
         _provider_evidence,
-        build_asof_panel,
-        build_frozen_targets,
-        build_expanding_folds,
+        _revision_key,
+        _source_key,
+        _hash_json,
+        membership_hash,
     ):
         hasher.update(inspect.getsource(function).encode("utf-8"))
     return hasher.hexdigest()
@@ -417,12 +586,16 @@ class _DeferredChildWriter:
         child_name: str,
         kind: str,
         lineage: Mapping[str, object],
+        replay_checkpoint: _ReplayCheckpoint | None = None,
+        part_callback: _ReplayPartCallback | None = None,
     ) -> None:
         self.child_root = child_root
         self.bundle_root = bundle_root
         self.child_name = child_name
         self.kind = kind
         self.lineage = dict(lineage)
+        self.replay_checkpoint = replay_checkpoint
+        self.part_callback = part_callback
         self.parts: list[_Part] = []
         self._payloads: list[str] = []
         self._finalized = False
@@ -442,23 +615,42 @@ class _DeferredChildWriter:
         runtime = _runtime()
         index = len(self.parts)
         payloads = tuple(self._payloads)
-        data = runtime._parquet_bytes(payloads)
-        if not data or len(data) > runtime._MAX_CHILD_FILE_BYTES:
-            raise ValueError("IBKR foundation Parquet child exceeds its byte bound")
-        file_sha256 = hashlib.sha256(data).hexdigest()
+        rows_sha256 = runtime._sha(list(payloads))
+        cached = (
+            self.replay_checkpoint.part(
+                self.kind,
+                index,
+                row_count=len(payloads),
+                rows_sha256=rows_sha256,
+            )
+            if self.replay_checkpoint is not None
+            else None
+        )
+        if cached is None:
+            data = runtime._parquet_bytes(payloads)
+            if not data or len(data) > runtime._MAX_CHILD_FILE_BYTES:
+                raise ValueError("IBKR foundation Parquet child exceeds its byte bound")
+            file_sha256 = hashlib.sha256(data).hexdigest()
+        else:
+            data = None
+            file_sha256 = cached.file_sha256
         relative = (
             f"{self.child_name}/parquet/{self.kind}/part-{index:06d}-{file_sha256[:24]}.parquet"
         )
         path = self.bundle_root / PurePosixPath(relative)
         path.parent.mkdir(parents=True, exist_ok=True)
-        runtime._write_create_only(path, data)
+        if cached is None:
+            assert data is not None
+            runtime._write_create_only(path, data)
+        else:
+            shutil.copyfile(cached.path, path)
         self.parts.append(
             _Part(
                 index=index,
                 relative_path=relative,
                 file_sha256=file_sha256,
                 row_count=len(payloads),
-                rows_sha256=runtime._sha(list(payloads)),
+                rows_sha256=rows_sha256,
             )
         )
         self._payloads.clear()
@@ -488,22 +680,30 @@ class _DeferredChildWriter:
                 f"{self.child_name}/manifests/{self.kind}/"
                 f"part-{part.index:06d}-{manifest_sha256[:24]}.json"
             )
-            encoded = runtime._json_bytes(manifest) + b"\\n"
+            encoded = runtime._json_bytes(manifest) + b"\n"
             if len(encoded) > runtime._MAX_CHILD_MANIFEST_BYTES:
                 raise ValueError("IBKR foundation child manifest exceeds the 4 MiB limit")
-            runtime._write_create_only(self.bundle_root / PurePosixPath(relative_manifest), encoded)
-            references.append(
-                {
-                    "kind": self.kind,
-                    "dataset_id": dataset_id,
-                    "manifest_id": manifest_sha256[:24],
-                    "manifest_path": relative_manifest,
-                    "manifest_sha256": manifest_sha256,
-                    "row_count": part.row_count,
-                    "file": part.relative_path,
-                    "file_sha256": part.file_sha256,
-                }
-            )
+            manifest_path = self.bundle_root / PurePosixPath(relative_manifest)
+            runtime._write_create_only(manifest_path, encoded)
+            reference = {
+                "kind": self.kind,
+                "dataset_id": dataset_id,
+                "manifest_id": manifest_sha256[:24],
+                "manifest_path": relative_manifest,
+                "manifest_sha256": manifest_sha256,
+                "row_count": part.row_count,
+                "file": part.relative_path,
+                "file_sha256": part.file_sha256,
+            }
+            references.append(reference)
+            if self.part_callback is not None:
+                self.part_callback(
+                    self.kind,
+                    part.index,
+                    reference,
+                    manifest_path,
+                    self.bundle_root / PurePosixPath(part.relative_path),
+                )
         self._finalized = True
         return tuple(references)
 
@@ -598,19 +798,19 @@ def _adapted_instrument_rows(
     grouped: Mapping[str, Sequence[tuple[ProviderHistoricalObservation, int]]] | None,
     instrument: str,
     source_dataset_id: str,
-) -> tuple[ObservationRow, ...]:
+) -> Iterator[ObservationRow]:
     positioned = cast(
         Callable[[str], Iterator[tuple[ProviderHistoricalObservation, int]]] | None,
         getattr(rows, "iter_instrument_with_positions", None),
     )
     if positioned is not None:
-        return tuple(
+        return (
             _adapt_observation(row, source_dataset_id, position)
             for row, position in positioned(instrument)
         )
     if grouped is None:
         raise AssertionError("provider-history rows require a grouped fallback")
-    return _adapted_rows(grouped, instrument, source_dataset_id)
+    return iter(_adapted_rows(grouped, instrument, source_dataset_id))
 
 
 def _local_observation_configuration(
@@ -645,6 +845,199 @@ def _dataset_id(
     for row in rows:
         hasher.add(_canonical_row(row))
     return hasher.finish()
+
+
+def _observation_checkpoint_rows(details: _CheckpointFile) -> Iterator[ObservationRow]:
+    with details.path.open("r", encoding="utf-8") as stream:
+        for line in stream:
+            value = json.loads(line)
+            if not isinstance(value, Mapping):
+                raise ValueError("Stage 8 observation checkpoint row is invalid")
+            yield _observation_from_row(cast(Mapping[str, object], value))
+
+
+def _derivation_chunks(
+    details: _CheckpointFile,
+    config: FoundationConfig,
+) -> Iterator[tuple[datetime, datetime, tuple[ObservationRow, ...]]]:
+    if tuple(config.required_feature_bases) != (config.target_basis,):
+        raise ValueError("bounded Stage 8 requires one shared panel and target price basis")
+    rows = iter(_observation_checkpoint_rows(details))
+    buffered: deque[ObservationRow] = deque()
+    pending = next(rows, None)
+    previous_end: datetime | None = None
+    maximum_horizon = max(config.target_horizons, default=timedelta(0))
+    chunk_start = config.range_start
+    while chunk_start < config.range_end:
+        chunk_end = min(chunk_start + _DERIVATION_CHUNK, config.range_end)
+        window_start = chunk_start - config.selected_feature_lag
+        window_end = chunk_end + maximum_horizon
+        while buffered and buffered[0].interval_end < window_start:
+            buffered.popleft()
+        while pending is not None and pending.interval_end <= window_end:
+            if previous_end is not None and pending.interval_end < previous_end:
+                raise ValueError("Stage 8 observation checkpoint is not chronological")
+            previous_end = pending.interval_end
+            if pending.interval_end >= window_start:
+                buffered.append(pending)
+            pending = next(rows, None)
+        yield chunk_start, chunk_end, tuple(buffered)
+        chunk_start = chunk_end
+
+
+def _stream_panel_rows(
+    rows: Sequence[ObservationRow],
+    config: FoundationConfig,
+    *,
+    instrument: str,
+    range_start: datetime,
+    range_end: datetime,
+    active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
+) -> Iterator[PanelRow]:
+    index: dict[tuple[PriceBasis, datetime], list[ObservationRow]] = defaultdict(list)
+    for row in rows:
+        if row.instrument_id == instrument:
+            index[(row.basis, row.interval_end)].append(row)
+    decision_time = range_start
+    while decision_time < range_end:
+        feature_data_asof = decision_time
+        latest_feature_bar_end = decision_time - config.selected_feature_lag
+        interval_start = latest_feature_bar_end - config.grid_resolution
+        for basis in config.required_feature_bases:
+            candidates = tuple(index.get((basis, latest_feature_bar_end), ()))
+            eligible = tuple(
+                row
+                for row in candidates
+                if observation_availability_time(row, config.availability_basis)
+                <= feature_data_asof
+            )
+            source_keys = {_source_key(row) for row in eligible}
+            if len(source_keys) > 1:
+                yield _missing_panel_row(
+                    decision_time=decision_time,
+                    instrument_id=instrument,
+                    basis=basis,
+                    feature_data_asof=feature_data_asof,
+                    latest_feature_bar_end=latest_feature_bar_end,
+                    audit_disposition=PanelAuditDisposition.AMBIGUOUS_OR_INVALID_SOURCE,
+                )
+                continue
+            selected = max(eligible, key=_revision_key, default=None)
+            if selected is None:
+                yield _missing_panel_row(
+                    decision_time=decision_time,
+                    instrument_id=instrument,
+                    basis=basis,
+                    feature_data_asof=feature_data_asof,
+                    latest_feature_bar_end=latest_feature_bar_end,
+                    audit_disposition=_panel_audit_disposition(
+                        candidates=candidates,
+                        instrument_id=instrument,
+                        interval_start=interval_start,
+                        interval_end=latest_feature_bar_end,
+                        feature_data_asof=feature_data_asof,
+                        gaps=(),
+                        source_active_intervals=active_intervals,
+                    ),
+                )
+                continue
+            yield PanelRow(
+                decision_time=decision_time,
+                instrument_id=instrument,
+                basis=basis,
+                feature_data_asof=feature_data_asof,
+                latest_feature_bar_end=latest_feature_bar_end,
+                status=PanelStatus.OBSERVED,
+                audit_disposition=None,
+                selected_event_id=selected.event_id,
+                selected_stream_version=selected.stream_version,
+                selected_global_position=selected.global_position,
+                selected_availability_time=observation_availability_time(
+                    selected, config.availability_basis
+                ),
+                selected_revision=selected.revision,
+                interval_start=selected.interval_start,
+                interval_end=selected.interval_end,
+                open=selected.open,
+                high=selected.high,
+                low=selected.low,
+                close=selected.close,
+                sample_count=selected.sample_count,
+                quality=selected.quality,
+            )
+        decision_time += config.grid_resolution
+
+
+def _write_instrument_derivatives(
+    details: _CheckpointFile,
+    config: FoundationConfig,
+    *,
+    instrument: str,
+    role: InstrumentRole,
+    active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
+    panel_path: Path,
+    target_path: Path,
+    summary_path: Path,
+) -> tuple[int, int]:
+    panel_count = 0
+    target_count = 0
+    with (
+        panel_path.open("w", encoding="utf-8") as panel_stream,
+        target_path.open("w", encoding="utf-8") as target_stream,
+        summary_path.open("w", encoding="utf-8") as summary_stream,
+    ):
+        for chunk_start, chunk_end, rows in _derivation_chunks(details, config):
+            for row in _stream_panel_rows(
+                rows,
+                config,
+                instrument=instrument,
+                range_start=chunk_start,
+                range_end=chunk_end,
+                active_intervals=active_intervals,
+            ):
+                panel_stream.write(_canonical_row(row.as_json()))
+                panel_stream.write("\n")
+                panel_count += 1
+            if role is not InstrumentRole.TARGET:
+                continue
+            target_rows = _fast_target_rows(
+                rows,
+                config,
+                horizons=config.target_horizons,
+                range_start=chunk_start,
+                range_end=chunk_end,
+            )
+            if target_rows is None:
+                raise ValueError("bounded Stage 8 target observations are not singleton bars")
+            for row in target_rows:
+                payload = _canonical_row(row.as_json())
+                target_stream.write(payload)
+                target_stream.write("\n")
+                target_count += 1
+                if row.horizon == config.primary_vertical_horizon:
+                    summary_stream.write(_canonical_row(_TargetSummary(row).as_json_value()))
+                    summary_stream.write("\n")
+    return panel_count, target_count
+
+
+def _derive_instrument(job: _DerivationJob) -> _DerivationResult:
+    panel_count, target_count = _write_instrument_derivatives(
+        job.observations,
+        job.configuration,
+        instrument=job.instrument,
+        role=job.role,
+        active_intervals=job.active_intervals,
+        panel_path=job.panel_path,
+        target_path=job.target_path,
+        summary_path=job.summary_path,
+    )
+    return _DerivationResult(job.instrument, panel_count, target_count)
+
+
+def _validated_workers(workers: int) -> int:
+    if isinstance(workers, bool) or not 1 <= workers <= _MAX_WORKERS:
+        raise ValueError(f"Stage 8 workers must be between 1 and {_MAX_WORKERS}")
+    return workers
 
 
 class _SummaryRows:
@@ -725,6 +1118,8 @@ def _fast_target_rows(
     config: FoundationConfig,
     *,
     horizons: Sequence[timedelta],
+    range_start: datetime | None = None,
+    range_end: datetime | None = None,
 ) -> Iterator[TargetRow] | None:
     """Build singleton historical targets with rolling path extrema.
 
@@ -752,8 +1147,10 @@ def _fast_target_rows(
         rows_by_time[row.interval_end] = row
 
     decision_times: list[datetime] = []
-    current = config.range_start
-    while current < config.range_end:
+    effective_range_start = config.range_start if range_start is None else range_start
+    effective_range_end = config.range_end if range_end is None else range_end
+    current = effective_range_start
+    while current < effective_range_end:
         decision_times.append(current)
         current += config.grid_resolution
     if not decision_times:
@@ -771,9 +1168,9 @@ def _fast_target_rows(
         horizon_steps.append(int(seconds) // resolution_steps)
 
     maximum_end = decision_times[-1] + max(horizons)
-    total_steps = int((maximum_end - config.range_start).total_seconds()) // resolution_steps
+    total_steps = int((maximum_end - effective_range_start).total_seconds()) // resolution_steps
     values = [
-        rows_by_time.get(config.range_start + index * config.grid_resolution)
+        rows_by_time.get(effective_range_start + index * config.grid_resolution)
         for index in range(total_steps + 1)
     ]
     missing_prefix = [0]
@@ -1005,6 +1402,199 @@ def _empty_fold_dataset(
     )
 
 
+@dataclass(frozen=True, slots=True)
+class _FoldWindow:
+    training_cutoff: datetime
+    validation_start: datetime
+    validation_end: datetime
+
+
+def _fold_windows(config: FoundationConfig) -> tuple[_FoldWindow, ...]:
+    duration = config.minimum_validation_duration
+    if duration <= timedelta(0):
+        raise ValueError("validation duration must be positive")
+    holdout_start, holdout_end = config.holdout_range
+    if holdout_start < config.range_start or holdout_end != config.range_end:
+        raise ValueError("locked holdout must be the final foundation interval")
+    selected_horizon = config.primary_vertical_horizon
+    if selected_horizon not in config.target_horizons:
+        raise ValueError("fold builder received a horizon absent from the foundation configuration")
+
+    windows: list[_FoldWindow] = []
+    validation_start = (
+        config.range_start + config.minimum_training_duration + selected_horizon + config.embargo
+    )
+    while validation_start < holdout_start:
+        validation_end = validation_start + duration
+        if validation_end > holdout_start:
+            break
+        windows.append(
+            _FoldWindow(
+                training_cutoff=validation_start - config.embargo,
+                validation_start=validation_start,
+                validation_end=validation_end,
+            )
+        )
+        validation_start = validation_end + config.embargo
+    return tuple(windows)
+
+
+def _next_summary(stream: Any) -> _TargetSummary | None:
+    for line in stream:
+        if line.strip():
+            value = json.loads(line)
+            if not isinstance(value, Mapping):
+                raise ValueError("Stage 8 target summary row is invalid")
+            return _TargetSummary.from_json_value(value)
+    return None
+
+
+def _merged_target_summaries(paths: Sequence[Path]) -> Iterator[_TargetSummary]:
+    streams = [path.open("r", encoding="utf-8") for path in paths]
+    heap: list[tuple[datetime, str, str, int, _TargetSummary]] = []
+    previous_by_stream: dict[int, tuple[datetime, str]] = {}
+    try:
+        for index, stream in enumerate(streams):
+            row = _next_summary(stream)
+            if row is not None:
+                heapq.heappush(
+                    heap,
+                    (row.decision_time, row.instrument_id, row.target_id, index, row),
+                )
+        while heap:
+            _, _, _, index, row = heapq.heappop(heap)
+            key = (row.decision_time, row.target_id)
+            previous = previous_by_stream.get(index)
+            if previous is not None and key < previous:
+                raise ValueError("Stage 8 target summary checkpoint is not chronological")
+            previous_by_stream[index] = key
+            yield row
+            next_row = _next_summary(streams[index])
+            if next_row is not None:
+                heapq.heappush(
+                    heap,
+                    (
+                        next_row.decision_time,
+                        next_row.instrument_id,
+                        next_row.target_id,
+                        index,
+                        next_row,
+                    ),
+                )
+    finally:
+        for stream in streams:
+            stream.close()
+
+
+def _read_membership(path: Path) -> list[str]:
+    with path.open("r", encoding="ascii") as stream:
+        return [line.rstrip("\n") for line in stream if line.rstrip("\n")]
+
+
+def _build_bounded_folds(
+    summary_paths: Sequence[Path],
+    config: FoundationConfig,
+    *,
+    target_dataset_id: str,
+    temporary_root: Path,
+) -> FoldDataset:
+    windows = _fold_windows(config)
+    membership_root = temporary_root / ".fold-membership"
+    membership_root.mkdir()
+    training_paths = [
+        membership_root / f"training-{index:06d}.txt" for index in range(len(windows))
+    ]
+    validation_paths = [
+        membership_root / f"validation-{index:06d}.txt" for index in range(len(windows))
+    ]
+    training_streams = [path.open("w", encoding="ascii") for path in training_paths]
+    validation_streams = [path.open("w", encoding="ascii") for path in validation_paths]
+    seen_target_ids: set[str] = set()
+    holdout_start, holdout_end = config.holdout_range
+    try:
+        for row in _merged_target_summaries(summary_paths):
+            if (
+                row.horizon != config.primary_vertical_horizon
+                or row.target_basis is not config.target_basis
+            ):
+                raise ValueError("Stage 8 target summary identity is inconsistent")
+            if row.target_id in seen_target_ids:
+                raise ValueError("target dataset contains duplicate target identities")
+            seen_target_ids.add(row.target_id)
+            outside_holdout = not (holdout_start <= row.decision_time < holdout_end)
+            if not outside_holdout:
+                continue
+            for index, window in enumerate(windows):
+                if (
+                    window.validation_start <= row.decision_time < window.validation_end
+                    and row.target_end_time <= holdout_start
+                    and row.target_freeze_at <= holdout_start
+                    and row.target_available_at <= holdout_start
+                ):
+                    validation_streams[index].write(f"{row.target_id}\n")
+                    break
+            if (
+                row.return_disposition is ReturnDisposition.VALID
+                and config.range_start <= row.decision_time
+            ):
+                for index, window in enumerate(windows):
+                    if (
+                        row.decision_time < window.training_cutoff
+                        and row.target_available_at <= window.training_cutoff
+                        and row.target_end_time <= window.training_cutoff
+                    ):
+                        training_streams[index].write(f"{row.target_id}\n")
+                        break
+    finally:
+        for stream in (*training_streams, *validation_streams):
+            stream.close()
+
+    folds: list[Fold] = []
+    training_ids: list[str] = []
+    for index, window in enumerate(windows):
+        training_ids.extend(_read_membership(training_paths[index]))
+        training_ids.sort()
+        validation_ids = sorted(_read_membership(validation_paths[index]))
+        if not training_ids or not validation_ids:
+            continue
+        training_membership = tuple(training_ids)
+        validation_membership = tuple(validation_ids)
+        membership = membership_hash(training_membership, validation_membership)
+        fold_id = _hash_json(
+            {
+                "contract": FOLD_DATASET_CONTRACT,
+                "schema_version": 1,
+                "training_start": config.range_start,
+                "training_cutoff": window.training_cutoff,
+                "validation_start": window.validation_start,
+                "validation_end": window.validation_end,
+                "embargo_end": window.validation_start,
+                "membership_hash": membership,
+            }
+        )
+        folds.append(
+            Fold(
+                fold_id=fold_id,
+                training_start=config.range_start,
+                training_cutoff=window.training_cutoff,
+                validation_start=window.validation_start,
+                validation_end=window.validation_end,
+                embargo_end=window.validation_start,
+                training_target_ids=training_membership,
+                validation_target_ids=validation_membership,
+                holdout_excluded=True,
+                membership_hash=membership,
+            )
+        )
+    if not folds:
+        raise ValueError("no scientifically valid expanding folds are available")
+    return FoldDataset.create(
+        folds,
+        target_dataset_id=target_dataset_id,
+        foundation_configuration_id=config.configuration_id,
+    )
+
+
 def build_bounded_provider_foundation(
     *,
     source_evidence: ProviderHistorySourceEvidence,
@@ -1014,10 +1604,14 @@ def build_bounded_provider_foundation(
     child_name: str,
     provider_manifest_sha256: str,
     checkpoint_root: Path | None = None,
+    replay_checkpoint: _ReplayCheckpoint | None = None,
+    part_callback: _ReplayPartCallback | None = None,
+    workers: int = _DEFAULT_WORKERS,
     progress_callback: _ProgressCallback | None = None,
 ) -> tuple[IBKRFoundationBuild, dict[str, tuple[dict[str, object], ...]]]:
     """Build and publish a large provider-history foundation with bounded memory."""
 
+    worker_count = _validated_workers(workers)
     progress = _Progress(progress_callback)
     provider_rows = source_evidence.observations
     if not provider_rows:
@@ -1101,31 +1695,17 @@ def build_bounded_provider_foundation(
         child_name=child_name,
         kind="observations",
         lineage=lineage,
+        replay_checkpoint=replay_checkpoint,
+        part_callback=part_callback,
     )
     observation_hasher = _StreamingRowsHash(global_observation_metadata)
+    observation_files: dict[str, _CheckpointFile] = {}
     for instrument_index, instrument in enumerate(ordered_instruments, 1):
         cached_observation = checkpoint.observation(instrument)
         if cached_observation is not None:
-            payloads = _checkpoint_payloads(cached_observation.rows)
-            row_count = cached_observation.rows.row_count
+            details = cached_observation.rows
+            payloads: Iterable[str] = _checkpoint_payloads(details)
             event = "reused"
-        elif checkpoint_root is None:
-            row_count = 0
-            for row_index, row in enumerate(
-                _adapted_instrument_rows(
-                    provider_rows,
-                    grouped,
-                    instrument,
-                    source_evidence.dataset.dataset_sha256,
-                ),
-                1,
-            ):
-                payload = _canonical_row(row.as_json())
-                observation_hasher.add(payload)
-                observation_writer.add(payload)
-                row_count = row_index
-            payloads = ()
-            event = "completed"
         else:
             observation_path = panel_tmp / f"{instrument_index:05d}.observations.jsonl"
             instrument_start: datetime | None = None
@@ -1147,17 +1727,24 @@ def build_bounded_provider_foundation(
                         if instrument_end is None
                         else max(instrument_end, row.interval_end)
                     )
-                    stream.write(_canonical_row(row.as_json()))
+                    payload = _canonical_row(row.as_json())
+                    stream.write(payload)
                     stream.write("\n")
-            cached_observation = checkpoint.store_observation(
-                instrument,
-                observation_path,
-                source_start=instrument_start,
-                source_end=instrument_end,
+                    observation_hasher.add(payload)
+                    observation_writer.add(payload)
+            details = (
+                checkpoint.store_observation(
+                    instrument,
+                    observation_path,
+                    source_start=instrument_start,
+                    source_end=instrument_end,
+                ).rows
+                if checkpoint_root is not None
+                else _checkpoint_file(observation_path)
             )
-            payloads = _checkpoint_payloads(cached_observation.rows)
-            row_count = cached_observation.rows.row_count
+            payloads = ()
             event = "completed"
+        observation_files[instrument] = details
         for payload in payloads:
             observation_hasher.add(payload)
             observation_writer.add(payload)
@@ -1167,7 +1754,7 @@ def build_bounded_provider_foundation(
             instrument_id=instrument,
             instrument_index=instrument_index,
             instrument_count=len(ordered_instruments),
-            row_count=row_count,
+            row_count=details.row_count,
         )
     observation_dataset_id = observation_hasher.finish()
     observation_refs = observation_writer.finalize(observation_dataset_id)
@@ -1196,6 +1783,8 @@ def build_bounded_provider_foundation(
         child_name=child_name,
         kind="panel",
         lineage=lineage,
+        replay_checkpoint=replay_checkpoint,
+        part_callback=part_callback,
     )
     target_writer = _DeferredChildWriter(
         child_root=child_root,
@@ -1203,47 +1792,33 @@ def build_bounded_provider_foundation(
         child_name=child_name,
         kind="targets",
         lineage=lineage,
+        replay_checkpoint=replay_checkpoint,
+        part_callback=part_callback,
     )
 
     panel_files: list[Path] = []
+    summary_files: list[Path] = []
     summary_path = panel_tmp / ".primary-target-summaries.jsonl"
     summary_stream = summary_path.open("w", encoding="utf-8")
     target_row_count = 0
     try:
+        cached_derivatives: dict[str, _DerivedCheckpoint] = {}
+        jobs: list[_DerivationJob] = []
+        panel_paths: dict[str, Path] = {}
         for instrument_index, instrument in enumerate(ordered_instruments):
             role = roles[instrument]
             panel_file = panel_tmp / f"{instrument_index:05d}.jsonl"
+            target_file = panel_tmp / f"{instrument_index:05d}.targets.jsonl"
+            instrument_summary_file = panel_tmp / f"{instrument_index:05d}.summaries.jsonl"
+            panel_paths[instrument] = panel_file
             cached_derived = checkpoint.derived(
                 instrument,
                 foundation_configuration_id=adapted_configuration.configuration_id,
             )
             if cached_derived is not None:
                 shutil.copyfile(cached_derived.panel.path, panel_file)
-                panel_files.append(panel_file)
-                for payload in _checkpoint_payloads(cached_derived.targets):
-                    target_hasher.add(payload)
-                    target_writer.add(payload)
-                target_row_count += cached_derived.targets.row_count
-                for payload in _checkpoint_payloads(cached_derived.summaries):
-                    summary_stream.write(payload)
-                    summary_stream.write("\n")
-                progress.emit(
-                    "derived",
-                    "reused",
-                    instrument_id=instrument,
-                    instrument_index=instrument_index + 1,
-                    instrument_count=len(ordered_instruments),
-                    panel_row_count=cached_derived.panel.row_count,
-                    target_row_count=cached_derived.targets.row_count,
-                )
+                cached_derivatives[instrument] = cached_derived
                 continue
-
-            rows = _adapted_instrument_rows(
-                provider_rows,
-                grouped,
-                instrument,
-                source_evidence.dataset.dataset_sha256,
-            )
             local_observation_configuration = _local_observation_configuration(
                 observation_configuration, instrument
             )
@@ -1252,11 +1827,8 @@ def build_bounded_provider_foundation(
                 source_dataset_id=source_evidence.dataset.dataset_sha256,
                 selection_policies=selection_policies,
             )
-            cached_observation = checkpoint.observation(instrument)
-            local_observation_id = (
-                _dataset_id_from_checkpoint(local_observation_metadata, cached_observation.rows)
-                if cached_observation is not None
-                else _dataset_id(local_observation_metadata, (row.as_json() for row in rows))
+            local_observation_id = _dataset_id_from_checkpoint(
+                local_observation_metadata, observation_files[instrument]
             )
             local_configuration = _local_foundation_configuration(
                 adapted_configuration,
@@ -1264,95 +1836,79 @@ def build_bounded_provider_foundation(
                 role=role,
                 observation_dataset_id=local_observation_id,
             )
-            local_dataset = cast(
-                ObservationDataset,
-                SimpleNamespace(
-                    rows=rows,
-                    configuration=local_observation_configuration,
-                    dataset_id=local_observation_id,
-                ),
-            )
-            panel = build_asof_panel(
-                local_dataset,
-                local_configuration,
-                source_active_intervals=active_intervals,
-            )
-            with panel_file.open("w", encoding="utf-8") as stream:
-                panel_row_count = 0
-                for row in panel.rows:
-                    stream.write(_canonical_row(row.as_json()))
-                    stream.write("\n")
-                    panel_row_count += 1
-            panel_files.append(panel_file)
-            target_file = panel_tmp / f"{instrument_index:05d}.targets.jsonl"
-            instrument_summary_file = panel_tmp / f"{instrument_index:05d}.summaries.jsonl"
-            instrument_target_row_count = 0
-            with (
-                target_file.open("w", encoding="utf-8") as target_stream,
-                instrument_summary_file.open("w", encoding="utf-8") as instrument_summary_stream,
-            ):
-                if role is InstrumentRole.TARGET:
-                    fast_rows = _fast_target_rows(
-                        rows,
-                        local_configuration,
-                        horizons=adapted_configuration.target_horizons,
-                    )
-                    general_targets: TargetDataset | None = None
-                    if fast_rows is None:
-                        general_targets = build_frozen_targets(
-                            local_dataset,
-                            local_configuration,
-                            horizons=adapted_configuration.target_horizons,
-                        )
-                        target_rows = general_targets.rows
-                    else:
-                        target_rows = fast_rows
-                    primary_horizon = adapted_configuration.primary_vertical_horizon
-                    for row in target_rows:
-                        target_row_count += 1
-                        instrument_target_row_count += 1
-                        payload = _canonical_row(row.as_json())
-                        target_hasher.add(payload)
-                        target_writer.add(payload)
-                        target_stream.write(payload)
-                        target_stream.write("\n")
-                        if row.horizon == primary_horizon:
-                            summary = _TargetSummary(row)
-                            summary_payload = _canonical_row(summary.as_json_value())
-                            summary_stream.write(summary_payload)
-                            summary_stream.write("\n")
-                            instrument_summary_stream.write(summary_payload)
-                            instrument_summary_stream.write("\n")
-                    del target_rows, fast_rows
-                    general_targets = None
-            derived = (
-                checkpoint.store_derived(
-                    instrument,
-                    foundation_configuration_id=adapted_configuration.configuration_id,
-                    panel=panel_file,
-                    targets=target_file,
-                    summaries=instrument_summary_file,
+            jobs.append(
+                _DerivationJob(
+                    instrument=instrument,
+                    role=role,
+                    observations=observation_files[instrument],
+                    configuration=local_configuration,
+                    active_intervals=dict(active_intervals),
+                    panel_path=panel_file,
+                    target_path=target_file,
+                    summary_path=instrument_summary_file,
                 )
-                if checkpoint_root is not None
-                else None
             )
-            del panel
-            del local_dataset, rows
+
+        if worker_count == 1 or len(jobs) <= 1:
+            derivation_results = {
+                result.instrument: result for result in map(_derive_instrument, jobs)
+            }
+        else:
+            with ProcessPoolExecutor(
+                max_workers=min(worker_count, len(jobs)),
+                mp_context=get_context("spawn"),
+            ) as executor:
+                derivation_results = {
+                    result.instrument: result for result in executor.map(_derive_instrument, jobs)
+                }
+
+        jobs_by_instrument = {job.instrument: job for job in jobs}
+        for instrument_index, instrument in enumerate(ordered_instruments, 1):
+            cached_derived = cached_derivatives.get(instrument)
+            if cached_derived is not None:
+                derived = cached_derived
+                event = "reused"
+            else:
+                job = jobs_by_instrument[instrument]
+                result = derivation_results[instrument]
+                derived = (
+                    checkpoint.store_derived(
+                        instrument,
+                        foundation_configuration_id=adapted_configuration.configuration_id,
+                        panel=job.panel_path,
+                        targets=job.target_path,
+                        summaries=job.summary_path,
+                    )
+                    if checkpoint_root is not None
+                    else _DerivedCheckpoint(
+                        panel=_checkpoint_file(job.panel_path),
+                        targets=_checkpoint_file(job.target_path),
+                        summaries=_checkpoint_file(job.summary_path),
+                    )
+                )
+                event = "completed"
+                if derived.panel.row_count != result.panel_row_count:
+                    raise AssertionError("Stage 8 panel checkpoint row count changed")
+                if derived.targets.row_count != result.target_row_count:
+                    raise AssertionError("Stage 8 target checkpoint row count changed")
+            summary_files.append(derived.summaries.path)
+            panel_files.append(panel_paths[instrument])
+            for payload in _checkpoint_payloads(derived.targets):
+                target_hasher.add(payload)
+                target_writer.add(payload)
+            target_row_count += derived.targets.row_count
+            for payload in _checkpoint_payloads(derived.summaries):
+                summary_stream.write(payload)
+                summary_stream.write("\n")
             gc.collect()
             progress.emit(
                 "derived",
-                "completed",
+                event,
                 instrument_id=instrument,
-                instrument_index=instrument_index + 1,
+                instrument_index=instrument_index,
                 instrument_count=len(ordered_instruments),
-                panel_row_count=(
-                    derived.panel.row_count if derived is not None else panel_row_count
-                ),
-                target_row_count=(
-                    derived.targets.row_count
-                    if derived is not None
-                    else instrument_target_row_count
-                ),
+                panel_row_count=derived.panel.row_count,
+                target_row_count=derived.targets.row_count,
             )
 
         progress.emit("panel_merge", "started", instrument_count=len(panel_files))
@@ -1377,9 +1933,11 @@ def build_bounded_provider_foundation(
         )
         progress.emit("folds", "started")
         try:
-            folds = build_expanding_folds(
-                summary_dataset,
+            folds = _build_bounded_folds(
+                summary_files,
                 adapted_configuration,
+                target_dataset_id=target_dataset_id,
+                temporary_root=panel_tmp,
             )
         except ValueError as error:
             if str(error) != "no scientifically valid expanding folds are available":
@@ -1394,6 +1952,8 @@ def build_bounded_provider_foundation(
             child_name=child_name,
             kind="folds",
             lineage=lineage,
+            replay_checkpoint=replay_checkpoint,
+            part_callback=part_callback,
         )
         for fold in folds.folds:
             payload = _canonical_row(fold.as_json())
@@ -1472,6 +2032,92 @@ def build_bounded_provider_foundation(
     }
 
 
+class _ReplayChildComparator:
+    def __init__(
+        self,
+        *,
+        actual_child_root: Path,
+        actual_payload: Mapping[str, object],
+        replay_checkpoint: _ReplayCheckpoint,
+    ) -> None:
+        self.actual_child_root = actual_child_root
+        self.actual_payload = actual_payload
+        self.replay_checkpoint = replay_checkpoint
+        self.expected_paths: set[str] = set()
+        self.seen_parts: dict[str, int] = defaultdict(int)
+
+    def compare(
+        self,
+        kind: str,
+        index: int,
+        generated_reference: Mapping[str, object],
+        generated_manifest_path: Path,
+        generated_file_path: Path,
+    ) -> None:
+        actual_parts = self.actual_payload.get(kind)
+        if (
+            not isinstance(actual_parts, Sequence)
+            or isinstance(actual_parts, (str, bytes))
+            or index >= len(actual_parts)
+        ):
+            raise ValueError(f"child {kind} part {index} reference is missing")
+        actual_reference = actual_parts[index]
+        if not isinstance(actual_reference, Mapping):
+            raise ValueError(f"child {kind} part {index} reference is invalid")
+        if _runtime()._json_bytes(actual_reference) != _runtime()._json_bytes(generated_reference):
+            raise ValueError(f"child {kind} part {index} reference diverges from bounded replay")
+        paths = (
+            ("manifest_path", generated_manifest_path),
+            ("file", generated_file_path),
+        )
+        for key, generated_path in paths:
+            relative = generated_reference.get(key)
+            if not isinstance(relative, str):
+                raise ValueError(f"child {kind} part {index} {key} is invalid")
+            self.expected_paths.add(relative)
+            actual_path = self.actual_child_root.parent / relative
+            if (
+                not actual_path.is_file()
+                or actual_path.is_symlink()
+                or not generated_path.is_file()
+                or generated_path.is_symlink()
+            ):
+                raise ValueError(f"child {kind} part {index} {key} is missing")
+            if actual_path.read_bytes() != generated_path.read_bytes():
+                raise ValueError(f"child {kind} part {index} {key} bytes diverge from replay")
+        row_count = generated_reference.get("row_count")
+        rows_sha256 = json.loads(generated_manifest_path.read_text(encoding="utf-8")).get(
+            "rows_sha256"
+        )
+        if not isinstance(row_count, int) or not isinstance(rows_sha256, str):
+            raise ValueError(f"child {kind} part {index} replay metadata is invalid")
+        self.replay_checkpoint.store_verified(
+            kind,
+            index,
+            row_count=row_count,
+            rows_sha256=rows_sha256,
+            generated_path=generated_file_path,
+        )
+        self.seen_parts[kind] += 1
+
+    def finish(self, generated: Mapping[str, Sequence[Mapping[str, object]]]) -> None:
+        for kind, generated_parts in generated.items():
+            actual_parts = self.actual_payload.get(kind)
+            if not isinstance(actual_parts, Sequence) or isinstance(actual_parts, (str, bytes)):
+                raise ValueError(f"child references for {kind} are invalid")
+            if len(actual_parts) != len(generated_parts) or self.seen_parts[kind] != len(
+                generated_parts
+            ):
+                raise ValueError(f"child {kind} part count diverges from bounded replay")
+        actual_paths = {
+            path.relative_to(self.actual_child_root.parent).as_posix()
+            for path in self.actual_child_root.rglob("*")
+            if path.is_file()
+        }
+        if actual_paths != self.expected_paths:
+            raise ValueError("foundation child root contains an unexpected or missing file")
+
+
 def verify_bounded_provider_foundation(
     *,
     source_evidence: ProviderHistorySourceEvidence,
@@ -1479,6 +2125,8 @@ def verify_bounded_provider_foundation(
     bundle_path: Path,
     document: Mapping[str, object],
     payload: Mapping[str, object],
+    replay_checkpoint_root: Path | None = None,
+    workers: int = _DEFAULT_WORKERS,
 ) -> IBKRFoundationBuild:
     runtime = _runtime()
     child_payload = payload.get("children")
@@ -1489,6 +2137,14 @@ def verify_bounded_provider_foundation(
     if not isinstance(provider_value, str):
         raise ValueError("foundation provider manifest path is invalid")
     provider_path = bundle_path.parent / provider_value
+    provider_manifest_sha256 = hashlib.sha256(provider_path.read_bytes()).hexdigest()
+    replay_checkpoint = _ReplayCheckpoint(
+        replay_checkpoint_root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=source_evidence.dataset.dataset_sha256,
+        configuration_id=configuration.configuration_id,
+        published_bundle_sha256=hashlib.sha256(bundle_path.read_bytes()).hexdigest(),
+    )
     root_name: str | None = None
     for raw_parts in typed_child_payload.values():
         if isinstance(raw_parts, Sequence) and raw_parts:
@@ -1508,6 +2164,11 @@ def verify_bounded_provider_foundation(
         )
     )
     temp_child = temp_parent / actual_child_root.name
+    comparator = _ReplayChildComparator(
+        actual_child_root=actual_child_root,
+        actual_payload=typed_child_payload,
+        replay_checkpoint=replay_checkpoint,
+    )
     try:
         replay, generated = build_bounded_provider_foundation(
             source_evidence=source_evidence,
@@ -1515,8 +2176,12 @@ def verify_bounded_provider_foundation(
             child_root=temp_child,
             bundle_root=temp_parent,
             child_name=actual_child_root.name,
-            provider_manifest_sha256=hashlib.sha256(provider_path.read_bytes()).hexdigest(),
+            provider_manifest_sha256=provider_manifest_sha256,
+            replay_checkpoint=replay_checkpoint,
+            part_callback=comparator.compare,
+            workers=workers,
         )
+        comparator.finish(generated)
         expected_document = runtime._manifest_payload(
             replay,
             source_evidence,
@@ -1527,46 +2192,6 @@ def verify_bounded_provider_foundation(
         expected_payload = expected_document["payload"]
         if runtime._json_bytes(expected_payload) != runtime._json_bytes(payload):
             raise ValueError("bounded foundation payload identity does not match replay")
-        _compare_generated_children(
-            actual_child_root=actual_child_root,
-            generated_root=temp_child,
-            expected=generated,
-            actual_payload=typed_child_payload,
-        )
         return replay
     finally:
         shutil.rmtree(temp_parent, ignore_errors=True)
-
-
-def _compare_generated_children(
-    *,
-    actual_child_root: Path,
-    generated_root: Path,
-    expected: Mapping[str, Sequence[Mapping[str, object]]],
-    actual_payload: Mapping[str, object],
-) -> None:
-    expected_paths: set[str] = set()
-    actual_paths: set[str] = set()
-    for kind, generated_parts in expected.items():
-        actual_parts = actual_payload.get(kind)
-        if not isinstance(actual_parts, Sequence):
-            raise ValueError(f"child references for {kind} are invalid")
-        if tuple(actual_parts) != tuple(generated_parts):
-            raise ValueError(f"child references for {kind} diverge from bounded replay")
-        for part in generated_parts:
-            for key in ("manifest_path", "file"):
-                relative = part.get(key)
-                if not isinstance(relative, str):
-                    raise ValueError(f"child {kind} reference path is invalid")
-                expected_paths.add(relative)
-                actual_path = actual_child_root.parent / relative
-                generated_path = generated_root.parent / relative
-                if not actual_path.is_file() or not generated_path.is_file():
-                    raise ValueError(f"child {kind} part is missing")
-                if actual_path.read_bytes() != generated_path.read_bytes():
-                    raise ValueError(f"child {kind} part bytes diverge from replay")
-    for path in actual_child_root.rglob("*"):
-        if path.is_file():
-            actual_paths.add(path.relative_to(actual_child_root.parent).as_posix())
-    if actual_paths != expected_paths:
-        raise ValueError("foundation child root contains an unexpected or missing file")

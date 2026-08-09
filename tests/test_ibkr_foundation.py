@@ -796,6 +796,99 @@ def test_provider_history_foundation_bounded_replay(
     }
 
 
+def test_bounded_foundation_parallel_derivation_matches_generic_across_chunk_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 8, 0, 1, tzinfo=UTC),
+    )
+    generic = build_ibkr_foundation(source_evidence, configuration)
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+
+    single = write_ibkr_foundation(
+        tmp_path / "single-worker.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=1,
+    )
+    parallel = write_ibkr_foundation(
+        tmp_path / "parallel-workers.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=2,
+    )
+
+    expected_ids = (
+        generic.observations.dataset_id,
+        generic.panel.dataset_id,
+        generic.targets.dataset_id,
+        generic.folds.dataset_id,
+    )
+    assert (
+        single.observations.dataset_id,
+        single.panel.dataset_id,
+        single.targets.dataset_id,
+        single.folds.dataset_id,
+    ) == expected_ids
+    assert (
+        parallel.observations.dataset_id,
+        parallel.panel.dataset_id,
+        parallel.targets.dataset_id,
+        parallel.folds.dataset_id,
+    ) == expected_ids
+
+
+def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 3, tzinfo=UTC),
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    bundle = tmp_path / "replay-checkpoint-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=1,
+    )
+    replay_checkpoint = tmp_path / "replay-checkpoint"
+    first = verify_ibkr_foundation(
+        bundle,
+        replay_checkpoint_root=replay_checkpoint,
+        workers=1,
+    )
+
+    def reject_parquet_rebuild(_rows: object) -> bytes:
+        raise AssertionError("verified replay Parquet part was rebuilt")
+
+    monkeypatch.setattr(foundation_runtime, "_parquet_bytes", reject_parquet_rebuild)
+    second = verify_ibkr_foundation(
+        bundle,
+        replay_checkpoint_root=replay_checkpoint,
+        workers=1,
+    )
+    assert second.readiness.as_json() == first.readiness.as_json()
+
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    panel_reference = document["payload"]["children"]["panel"][0]
+    panel_path = bundle.parent / panel_reference["file"]
+    panel_path.write_bytes(panel_path.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="child panel part 0 file bytes diverge from replay"):
+        verify_ibkr_foundation(
+            bundle,
+            replay_checkpoint_root=replay_checkpoint,
+            workers=1,
+        )
+
+
 def test_bounded_foundation_reuses_identity_bound_checkpoints(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

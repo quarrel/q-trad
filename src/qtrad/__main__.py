@@ -891,10 +891,12 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify every foundation child and cross-reference"
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
+    foundation_verify.add_argument("--replay-checkpoint-root", type=Path)
     foundation_readiness = research_foundation_sub.add_parser(
         "readiness", help="report fixed IBKR historical foundation readiness"
     )
     foundation_readiness.add_argument("--bundle", type=Path, required=True)
+    foundation_readiness.add_argument("--replay-checkpoint-root", type=Path)
     foundation_build = research_foundation_sub.add_parser(
         "build", help="build an immutable causal foundation bundle from one source"
     )
@@ -904,12 +906,14 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
     foundation_build.add_argument("--checkpoint-root", type=Path)
+    foundation_build.add_argument("--workers", type=int, choices=range(1, 9), default=4)
     foundation_rehearse = research_foundation_sub.add_parser(
         "rehearse", help="exercise Stage 8 with disposable publication and reusable checkpoints"
     )
     foundation_rehearse.add_argument("--provider-history-manifest", type=Path, required=True)
     foundation_rehearse.add_argument("--configuration", type=Path, required=True)
     foundation_rehearse.add_argument("--checkpoint-root", type=Path)
+    foundation_rehearse.add_argument("--workers", type=int, choices=range(1, 9), default=4)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
     baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
     baselines_experiment_build = baselines_sub.add_parser(
@@ -1723,6 +1727,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 configuration_path=args.configuration,
                 output_path=args.output,
                 checkpoint_root_path=args.checkpoint_root,
+                workers=args.workers,
             )
         )
     elif (
@@ -1734,19 +1739,29 @@ def main(argv: Sequence[str] | None = None) -> None:
             provider_history_manifest_path=args.provider_history_manifest,
             configuration_path=args.configuration,
             checkpoint_root_path=args.checkpoint_root,
+            workers=args.workers,
         )
     elif (
         args.command == "research"
         and args.research_command == "foundation"
         and args.foundation_command == "verify"
     ):
-        asyncio.run(_verify_foundation_bundle(settings, clock, args.bundle))
+        asyncio.run(
+            _verify_foundation_bundle(
+                settings,
+                clock,
+                args.bundle,
+                replay_checkpoint_root=args.replay_checkpoint_root,
+            )
+        )
     elif (
         args.command == "research"
         and args.research_command == "foundation"
         and args.foundation_command == "readiness"
     ):
-        _report_ibkr_foundation_readiness(args.bundle)
+        _report_ibkr_foundation_readiness(
+            args.bundle, replay_checkpoint_root=args.replay_checkpoint_root
+        )
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -2515,6 +2530,7 @@ async def _build_foundation_bundle(
     configuration_path: Path,
     output_path: Path,
     checkpoint_root_path: Path | None,
+    workers: int,
 ) -> None:
     if (observations_manifest_path is None) == (provider_history_manifest_path is None):
         raise ValueError("exactly one foundation source must be provided")
@@ -2525,6 +2541,7 @@ async def _build_foundation_bundle(
             provider_manifest=provider_history_manifest_path,
             configuration=configuration,
             checkpoint_root=checkpoint_root_path,
+            workers=workers,
             progress_callback=_stage8_progress,
         )
         print(
@@ -2597,12 +2614,14 @@ def _rehearse_foundation_bundle(
     provider_history_manifest_path: Path,
     configuration_path: Path,
     checkpoint_root_path: Path | None,
+    workers: int,
 ) -> None:
     configuration = load_foundation_config(configuration_path)
     build = rehearse_ibkr_foundation(
         provider_manifest=provider_history_manifest_path,
         configuration=configuration,
         checkpoint_root=checkpoint_root_path,
+        workers=workers,
         progress_callback=_stage8_progress,
     )
     print(
@@ -2623,7 +2642,13 @@ def _stage8_progress(payload: Mapping[str, object]) -> None:
     print(json.dumps(payload, sort_keys=True), file=sys.stderr, flush=True)
 
 
-async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_path: Path) -> None:
+async def _verify_foundation_bundle(
+    settings: Settings,
+    clock: Clock,
+    bundle_path: Path,
+    *,
+    replay_checkpoint_root: Path | None = None,
+) -> None:
     if bundle_path.is_file() and not bundle_path.is_symlink():
         try:
             document = json.loads(bundle_path.read_text(encoding="utf-8"))
@@ -2633,7 +2658,9 @@ async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_pat
             isinstance(document, dict)
             and document.get("contract") == "qtrad-ibkr-historical-foundation-v1"
         ):
-            verified = verify_ibkr_foundation(bundle_path)
+            verified = verify_ibkr_foundation(
+                bundle_path, replay_checkpoint_root=replay_checkpoint_root
+            )
             print(
                 json.dumps(
                     {
@@ -2671,9 +2698,13 @@ async def _verify_foundation_bundle(settings: Settings, clock: Clock, bundle_pat
     )
 
 
-def _report_ibkr_foundation_readiness(bundle_path: Path) -> None:
+def _report_ibkr_foundation_readiness(
+    bundle_path: Path,
+    *,
+    replay_checkpoint_root: Path | None = None,
+) -> None:
     """Verify and report Stage 8 readiness only; no R2 artefact is loaded."""
-    verified = verify_ibkr_foundation(bundle_path)
+    verified = verify_ibkr_foundation(bundle_path, replay_checkpoint_root=replay_checkpoint_root)
     print(json.dumps(verified.readiness.as_json(), sort_keys=True))
 
 
