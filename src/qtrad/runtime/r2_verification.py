@@ -14,6 +14,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from enum import StrEnum
 from hashlib import sha256
 from pathlib import Path, PurePosixPath
 from tempfile import TemporaryDirectory
@@ -108,12 +109,16 @@ from qtrad.domain.r2_features import (
 from qtrad.domain.r2_holdout import (
     HoldoutDirection,
     HoldoutScope,
+    R2ConfirmatoryOpenedMarker,
     R2FinalFit,
     R2FinalFittingPolicy,
+    R2HoldoutConsumedMarker,
     R2HoldoutCoverageDataset,
+    R2HoldoutEvaluation,
     R2HoldoutFeatureDataset,
     R2HoldoutForecastDataset,
     R2HoldoutForecastSeal,
+    R2HoldoutOpenedMarker,
     R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
@@ -150,13 +155,16 @@ from qtrad.domain.r2_readiness import (
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import (
     G2FeatureSourceAuthority,
+    OutcomeBlindVerifiedFoundationBundle,
     VerifiedG2FeatureSource,
+    _verify_confirmatory_target_dataset,
     _verify_g2_feature_source,
     verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_foundation import (
     IBKRG2FeatureSourceAuthority,
     _load_ibkr_foundation_outcome_blind_with_g2_authority,
+    _verify_ibkr_confirmatory_target_dataset,
     _verify_ibkr_g2_feature_source,
 )
 from qtrad.runtime.r2_bundles import (
@@ -169,7 +177,14 @@ from qtrad.runtime.r2_bundles import (
     write_r2_oof_bundle,
     write_r2_software_bundle,
 )
-from qtrad.runtime.r2_holdout import verify_holdout_preparation, write_holdout_preparation
+from qtrad.runtime.r2_holdout import (
+    _reveal_confirmatory_holdout,
+    _verify_confirmatory_holdout_evaluation,
+    _verify_confirmatory_holdout_preparation,
+    verify_holdout_markers,
+    verify_holdout_preparation,
+    write_holdout_preparation,
+)
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
@@ -224,6 +239,9 @@ _VERIFIED_CONFIRMATORY_F2_TOKEN = object()
 _VERIFIED_CONFIRMATORY_G1_TOKEN = object()
 _VERIFIED_CONFIRMATORY_G1_PROVENANCE = object()
 _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN = object()
+_VERIFIED_CONFIRMATORY_G2_PREPARATION_PROVENANCE = object()
+_OPENED_CONFIRMATORY_HOLDOUT_TOKEN = object()
+_OPENED_CONFIRMATORY_HOLDOUT_PROVENANCE = object()
 
 
 def _deep_freeze(value: object) -> object:
@@ -573,10 +591,12 @@ class VerifiedConfirmatoryG1:
 class VerifiedConfirmatoryG2Preparation:
     """Runtime-only authority proving a sealed, unopened confirmatory preparation."""
 
-    __slots__ = ("_seal", "_verified_g1")
+    __slots__ = ("_path", "_seal", "_verified_g1", "_verifier_provenance")
 
+    _path: Path
     _seal: R2HoldoutForecastSeal
     _verified_g1: VerifiedConfirmatoryG1
+    _verifier_provenance: object
 
     def __init__(self) -> None:
         raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
@@ -591,13 +611,24 @@ class VerifiedConfirmatoryG2Preparation:
         *,
         verified_g1: VerifiedConfirmatoryG1,
         seal: R2HoldoutForecastSeal,
+        path: Path,
     ) -> VerifiedConfirmatoryG2Preparation:
         if token is not _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN:
             raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
         instance = object.__new__(cls)
         object.__setattr__(instance, "_verified_g1", verified_g1)
         object.__setattr__(instance, "_seal", seal)
+        object.__setattr__(instance, "_path", path.resolve(strict=True))
+        object.__setattr__(
+            instance,
+            "_verifier_provenance",
+            _VERIFIED_CONFIRMATORY_G2_PREPARATION_PROVENANCE,
+        )
         return instance
+
+    @property
+    def path(self) -> Path:
+        return self._path
 
     @property
     def verified_g1(self) -> VerifiedConfirmatoryG1:
@@ -606,6 +637,67 @@ class VerifiedConfirmatoryG2Preparation:
     @property
     def seal(self) -> R2HoldoutForecastSeal:
         return self._seal
+
+
+class ConfirmatoryR2HStatus(StrEnum):
+    VALID_CONSUMED_RESULT = "VALID_CONSUMED_RESULT"
+    OPENED_INCOMPLETE = "OPENED_INCOMPLETE"
+    INVALID = "INVALID"
+
+
+@dataclass(frozen=True, slots=True)
+class ConfirmatoryR2HReport:
+    status: ConfirmatoryR2HStatus
+    selection_manifest_id: str
+    seal_id: str
+    opened_marker_id: str | None
+    consumed_marker_id: str | None
+    evaluation_id: str | None
+    reason: str
+
+
+class OpenedConfirmatoryHoldout:
+    """Runtime-only authority issued after both create-only OPENED markers exist."""
+
+    __slots__ = ("_marker", "_preparation", "_verifier_provenance")
+
+    _marker: R2ConfirmatoryOpenedMarker
+    _preparation: VerifiedConfirmatoryG2Preparation
+    _verifier_provenance: object
+
+    def __init__(self) -> None:
+        raise TypeError("OpenedConfirmatoryHoldout is constructed only after durable OPENED")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("OpenedConfirmatoryHoldout is immutable")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        preparation: VerifiedConfirmatoryG2Preparation,
+        marker: R2ConfirmatoryOpenedMarker,
+    ) -> OpenedConfirmatoryHoldout:
+        if token is not _OPENED_CONFIRMATORY_HOLDOUT_TOKEN:
+            raise TypeError("OpenedConfirmatoryHoldout requires verifier-issued OPENED provenance")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_preparation", preparation)
+        object.__setattr__(instance, "_marker", marker)
+        object.__setattr__(
+            instance,
+            "_verifier_provenance",
+            _OPENED_CONFIRMATORY_HOLDOUT_PROVENANCE,
+        )
+        return instance
+
+    @property
+    def preparation(self) -> VerifiedConfirmatoryG2Preparation:
+        return self._preparation
+
+    @property
+    def marker(self) -> R2ConfirmatoryOpenedMarker:
+        return self._marker
 
 
 def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
@@ -3524,7 +3616,297 @@ def verify_confirmatory_g2_preparation(
         _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN,
         verified_g1=verified_g1,
         seal=seal,
+        path=path,
     )
+
+
+def _require_verified_confirmatory_preparation(
+    preparation: VerifiedConfirmatoryG2Preparation,
+) -> None:
+    if (
+        type(preparation) is not VerifiedConfirmatoryG2Preparation
+        or preparation._verifier_provenance is not _VERIFIED_CONFIRMATORY_G2_PREPARATION_PROVENANCE
+        or type(preparation.verified_g1) is not VerifiedConfirmatoryG1
+        or preparation.verified_g1._verifier_provenance is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
+    ):
+        raise TypeError("confirmatory reveal requires verifier-authenticated G2 preparation")
+
+
+def _verify_confirmatory_g2_lifecycle(
+    verified_g1: VerifiedConfirmatoryG1,
+    path: Path,
+) -> VerifiedConfirmatoryG2Preparation:
+    if (
+        type(verified_g1) is not VerifiedConfirmatoryG1
+        or verified_g1._verifier_provenance is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
+    ):
+        raise TypeError("confirmatory lifecycle verification requires verified G1 provenance")
+    seal = _verify_confirmatory_holdout_preparation(path)
+    if (
+        seal.selection_manifest_id != verified_g1.selection.manifest_id
+        or seal.holdout_scope is not HoldoutScope.CONFIRMATORY
+        or seal.evidence_class is not EvidenceClass.CONFIRMATORY
+        or seal.holdout_outcomes_accessed
+    ):
+        raise ValueError("confirmatory lifecycle differs from verified G1 authority")
+    persisted = R2HoldoutSelectionManifest.from_json(_load_selection(path / "selection.json"))
+    if persisted.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=seal.prepared_by,
+    )
+    if seal.as_json() != expected.seal.as_json():
+        raise ValueError("confirmatory lifecycle seal differs from independent G1 replay")
+    return VerifiedConfirmatoryG2Preparation._create(
+        _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN,
+        verified_g1=verified_g1,
+        seal=seal,
+        path=path,
+    )
+
+
+def _base_opened_marker(
+    preparation: VerifiedConfirmatoryG2Preparation,
+) -> R2HoldoutOpenedMarker:
+    payload = _load_selection(preparation.path / "opened.json")
+    try:
+        opened_at = datetime.fromisoformat(str(payload["opened_at"]))
+    except (KeyError, ValueError) as error:
+        raise ValueError("confirmatory OPENED timestamp is invalid") from error
+    marker = R2HoldoutOpenedMarker.create(
+        selection_manifest_id=preparation.verified_g1.selection.manifest_id,
+        seal_id=preparation.seal.seal_id,
+        opened_at=opened_at,
+        opened_by=str(payload.get("opened_by", "")),
+        acknowledgement=str(payload.get("acknowledgement", "")),
+        expected_selection_manifest_id=str(payload.get("expected_selection_manifest_id", "")),
+        expected_seal_id=str(payload.get("expected_seal_id", "")),
+    )
+    if marker.as_json() != payload:
+        raise ValueError("persisted OPENED marker differs from its exact authority")
+    return marker
+
+
+def _confirmatory_opened_marker(
+    preparation: VerifiedConfirmatoryG2Preparation,
+    opened: R2HoldoutOpenedMarker,
+) -> R2ConfirmatoryOpenedMarker:
+    verified_f2 = preparation.verified_g1.verified_f2
+    authority = verified_f2._g2_feature_source_authority
+    target_manifest_id = (
+        verified_f2.outcome_blind_foundation.bundle.targets.manifest_id
+        if isinstance(authority, G2FeatureSourceAuthority)
+        else authority.target_child_references_sha256
+    )
+    selection = preparation.verified_g1.selection
+    return R2ConfirmatoryOpenedMarker.create(
+        selection_manifest_id=selection.manifest_id,
+        seal_id=preparation.seal.seal_id,
+        opened_marker_id=opened.marker_id,
+        oof_bundle_id=selection.oof_bundle_id,
+        foundation_bundle_id=selection.foundation_bundle_id,
+        experiment_configuration_id=selection.experiment_configuration_id,
+        evaluation_report_id=selection.evaluation_report_id,
+        prior_selection_manifest_id=selection.prior_selection_manifest_id,
+        holdout_target_source_id=verified_f2.holdout_target_source.source_id,
+        target_dataset_id=verified_f2.holdout_target_source.source_target_dataset_id,
+        target_manifest_id=target_manifest_id,
+        holdout_range=selection.holdout_range,
+        source_class=selection.source_class,
+        runtime_identities=selection.runtime_identities,
+        opened_at=opened.opened_at,
+        opened_by=opened.opened_by,
+        acknowledgement=opened.acknowledgement,
+    )
+
+
+def _issue_opened_confirmatory_holdout(
+    preparation: VerifiedConfirmatoryG2Preparation,
+) -> OpenedConfirmatoryHoldout:
+    _require_verified_confirmatory_preparation(preparation)
+    marker = _confirmatory_opened_marker(preparation, _base_opened_marker(preparation))
+    atomic_create(
+        preparation.path / "confirmatory-opened.json",
+        canonical_bytes(marker.as_json()),
+    )
+    persisted = R2ConfirmatoryOpenedMarker.from_json(
+        _load_selection(preparation.path / "confirmatory-opened.json")
+    )
+    if persisted.as_json() != marker.as_json():
+        raise ValueError("confirmatory OPENED marker differs from verifier authority")
+    return OpenedConfirmatoryHoldout._create(
+        _OPENED_CONFIRMATORY_HOLDOUT_TOKEN,
+        preparation=preparation,
+        marker=persisted,
+    )
+
+
+def _decode_confirmatory_target(opened: OpenedConfirmatoryHoldout) -> TargetDataset:
+    if (
+        type(opened) is not OpenedConfirmatoryHoldout
+        or opened._verifier_provenance is not _OPENED_CONFIRMATORY_HOLDOUT_PROVENANCE
+    ):
+        raise TypeError("confirmatory outcome decoding requires durable OPENED provenance")
+    preparation = opened.preparation
+    _require_verified_confirmatory_preparation(preparation)
+    verified_f2 = preparation.verified_g1.verified_f2
+    authority = verified_f2._g2_feature_source_authority
+    if isinstance(authority, IBKRG2FeatureSourceAuthority):
+        targets = _verify_ibkr_confirmatory_target_dataset(
+            authority,
+            holdout_target_source=verified_f2.holdout_target_source,
+        )
+    else:
+        targets = asyncio.run(
+            _verify_confirmatory_target_dataset(
+                cast(
+                    OutcomeBlindVerifiedFoundationBundle,
+                    verified_f2.outcome_blind_foundation,
+                ),
+                authority,
+                clock=cast(
+                    Clock,
+                    SimpleNamespace(now=lambda: datetime.now(UTC)),
+                ),
+            )
+        )
+        verified_f2.holdout_target_source.verify_target_dataset(targets)
+    if targets.dataset_id != opened.marker.target_dataset_id:
+        raise ValueError("decoded confirmatory target differs from OPENED authority")
+    return targets
+
+
+def reveal_confirmatory_g2(
+    *,
+    preparation: VerifiedConfirmatoryG2Preparation,
+    expected_selection_manifest_id: str,
+    expected_seal_id: str,
+    acknowledgement: str,
+    opened_by: str,
+    consumed_by: str,
+    opened_at: datetime,
+    clock: Clock,
+) -> tuple[R2HoldoutEvaluation, R2HoldoutConsumedMarker]:
+    """Irreversibly reveal and evaluate only the science frozen by verified G1."""
+
+    _require_verified_confirmatory_preparation(preparation)
+    if (
+        expected_selection_manifest_id != preparation.verified_g1.selection.manifest_id
+        or expected_seal_id != preparation.seal.seal_id
+    ):
+        raise ValueError("confirmatory acknowledgement IDs differ from verified preparation")
+
+    def load_outcomes() -> TargetDataset:
+        return _decode_confirmatory_target(_issue_opened_confirmatory_holdout(preparation))
+
+    result = _reveal_confirmatory_holdout(
+        preparation.path,
+        expected_selection_manifest_id=expected_selection_manifest_id,
+        expected_seal_id=expected_seal_id,
+        acknowledgement=acknowledgement,
+        opened_by=opened_by,
+        consumed_by=consumed_by,
+        opened_at=opened_at,
+        consumed_at=clock.now,
+        outcome_loader=load_outcomes,
+    )
+    evaluation, consumed = result
+    if evaluation is None:
+        raise ValueError("confirmatory reveal did not produce a frozen evaluation")
+    report = verify_confirmatory_r2h(
+        verified_g1=preparation.verified_g1,
+        path=preparation.path,
+    )
+    if report.status is not ConfirmatoryR2HStatus.VALID_CONSUMED_RESULT:
+        raise ValueError("confirmatory reveal did not produce a valid consumed R2.H result")
+    return evaluation, consumed
+
+
+def _verify_confirmatory_opened(
+    preparation: VerifiedConfirmatoryG2Preparation,
+) -> tuple[R2HoldoutOpenedMarker, R2ConfirmatoryOpenedMarker]:
+    opened = _base_opened_marker(preparation)
+    marker = R2ConfirmatoryOpenedMarker.from_json(
+        _load_selection(preparation.path / "confirmatory-opened.json")
+    )
+    if marker.as_json() != _confirmatory_opened_marker(preparation, opened).as_json():
+        raise ValueError("confirmatory OPENED marker differs from verified G1/F2 authority")
+    return opened, marker
+
+
+def verify_confirmatory_r2h(
+    *,
+    verified_g1: VerifiedConfirmatoryG1,
+    path: Path,
+) -> ConfirmatoryR2HReport:
+    """Independently classify and numerically replay terminal confirmatory evidence."""
+
+    selection_id = verified_g1.selection.manifest_id
+    seal_id = ""
+    opened_id: str | None = None
+    try:
+        preparation = _verify_confirmatory_g2_lifecycle(verified_g1, path)
+        seal_id = preparation.seal.seal_id
+        opened = _base_opened_marker(preparation)
+        opened_id = opened.marker_id
+        confirmatory_opened_path = preparation.path / "confirmatory-opened.json"
+        if not confirmatory_opened_path.exists() and not confirmatory_opened_path.is_symlink():
+            return ConfirmatoryR2HReport(
+                ConfirmatoryR2HStatus.OPENED_INCOMPLETE,
+                selection_id,
+                seal_id,
+                opened_id,
+                None,
+                None,
+                "base OPENED exists without confirmatory OPENED authority",
+            )
+        _verify_confirmatory_opened(preparation)
+        consumed_path = preparation.path / "consumed.json"
+        if not consumed_path.exists() and not consumed_path.is_symlink():
+            return ConfirmatoryR2HReport(
+                ConfirmatoryR2HStatus.OPENED_INCOMPLETE,
+                selection_id,
+                seal_id,
+                opened_id,
+                None,
+                None,
+                "OPENED exists without terminal CONSUMED evidence",
+            )
+        _persisted_opened, consumed = verify_holdout_markers(preparation.path)
+        evaluation_path = preparation.path / "evaluation.json"
+        if not evaluation_path.exists() and not evaluation_path.is_symlink():
+            return ConfirmatoryR2HReport(
+                ConfirmatoryR2HStatus.OPENED_INCOMPLETE,
+                selection_id,
+                seal_id,
+                opened_id,
+                consumed.marker_id,
+                consumed.evaluation_id,
+                "post-OPENED execution failed before a valid evaluation",
+            )
+        evaluation = _verify_confirmatory_holdout_evaluation(preparation.path)
+        if evaluation.selection_manifest_id != selection_id:
+            raise ValueError("confirmatory evaluation differs from verified G1")
+        return ConfirmatoryR2HReport(
+            ConfirmatoryR2HStatus.VALID_CONSUMED_RESULT,
+            selection_id,
+            seal_id,
+            opened_id,
+            consumed.marker_id,
+            evaluation.evaluation_id,
+            "complete confirmatory lifecycle independently replayed",
+        )
+    except (FileNotFoundError, TypeError, ValueError) as error:
+        return ConfirmatoryR2HReport(
+            ConfirmatoryR2HStatus.INVALID,
+            selection_id,
+            seal_id,
+            opened_id,
+            None,
+            None,
+            str(error),
+        )
 
 
 def holdout_evaluation_policy(

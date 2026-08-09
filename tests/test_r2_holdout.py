@@ -53,6 +53,7 @@ from qtrad.domain.r2_holdout import (
     HoldoutTargetOpportunity,
     R2FinalFit,
     R2FinalFittingPolicy,
+    R2HoldoutConsumedMarker,
     R2HoldoutFeatureRow,
     R2HoldoutOpenedMarker,
     R2HoldoutOpportunityRegistry,
@@ -62,6 +63,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutTargetSource,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
+from qtrad.runtime.r2_bundles import canonical_bytes
 from qtrad.runtime.r2_holdout import (
     _target_dataset_payload,
     prepare_holdout_from_files,
@@ -924,6 +926,17 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
     assert bundle.bundle_id == verify_holdout_bundle(output).bundle_id
     assert bundle.evaluation.semantic_id == evaluation.evaluation_id
     assert consumed.evaluation_id == evaluation.evaluation_id
+    impossible_consumed = R2HoldoutConsumedMarker.create(
+        selection_manifest_id=consumed.selection_manifest_id,
+        seal_id=consumed.seal_id,
+        opened_marker_id=consumed.opened_marker_id,
+        consumed_at=NOW - timedelta(seconds=1),
+        consumed_by=consumed.consumed_by,
+        evaluation_id=consumed.evaluation_id,
+    )
+    (tmp_path / "consumed.json").write_bytes(canonical_bytes(impossible_consumed.as_json()))
+    with pytest.raises(ValueError, match="consumed time must not precede OPENED"):
+        verify_holdout_markers(tmp_path)
 
 
 def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> None:
@@ -935,6 +948,29 @@ def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> Non
         prepare_holdout_from_files(tmp_path / "source", second)
     with pytest.raises(FileExistsError, match="transferred"):
         prepare_holdout_from_files(first, second)
+
+
+def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path) -> None:
+    selection, _, _, _, _, seal = _prepared(tmp_path)
+    claim_before = (tmp_path / ".preparation-claim.json").read_bytes()
+
+    with pytest.raises(ValueError, match="consumed time must not precede OPENED"):
+        reveal_holdout(
+            tmp_path,
+            expected_selection_manifest_id=selection.manifest_id,
+            expected_seal_id=seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="test",
+            consumed_by="test",
+            opened_at=NOW,
+            consumed_at=NOW - timedelta(seconds=1),
+            outcome_loader=lambda: _target_dataset(),
+            evaluator=lambda outcomes, opened: _unexpected_evaluator("evaluator must not run"),
+        )
+
+    assert (tmp_path / ".preparation-claim.json").read_bytes() == claim_before
+    assert not (tmp_path / "opened.json").exists()
+    assert not (tmp_path / "consumed.json").exists()
 
 
 def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path) -> None:

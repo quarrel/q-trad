@@ -133,13 +133,14 @@ remains offline/replay.
   preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
   irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
   holdout, confirmatory OOF selection, or effectiveness conclusion exists.
-- The fixture-confirmatory C2a path independently replays qualifying F2 and persisted G1 authority. C2b-1
-  now derives pre-holdout training features, holdout features, selected and retained-control final fits,
-  forecasts and coverage exclusively from verified G1, persists one create-only `OWNED_UNOPENED` seal and
-  independently recomputes the complete feature/fit/forecast closure. This software path cannot use the
-  disposable reveal workflow and rejects every OPENED, outcome or CONSUMED child. C2b reveal, confirmatory
-  evaluation and R2.H evidence remain pending; no real holdout was accessed and no research or effectiveness
-  claim is made.
+- The fixture-confirmatory C2a path independently replays qualifying F2 and persisted G1 authority. C2b
+  derives the complete unopened feature/fit/forecast closure exclusively from verified G1, persists it as
+  `OWNED_UNOPENED`, and then permits outcome decoding only after create-only base and confirmatory OPENED
+  markers exist. Reveal uses the authenticated target child and exact frozen questions, support, metrics,
+  thresholds and coverage policy; successful evaluation is irreversibly CONSUMED. Independent R2.H replay
+  reports `VALID_CONSUMED_RESULT`, `OPENED_INCOMPLETE` or `INVALID`, and injected post-open failures cannot
+  reset or reuse the preparation. This remains fixture-only software evidence: no real holdout was accessed
+  and no research or effectiveness claim is made.
 - ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
   market-data-only IBKR paper source and its historical evidence boundaries. Stage 1 provides typed
   `qtrad-ibkr-contract-selection-v1` and `qtrad-ibkr-acquisition-runtime-v1` artefacts, strict
