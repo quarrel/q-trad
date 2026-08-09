@@ -138,7 +138,7 @@ from qtrad.runtime.foundation_bundle import (
 from qtrad.runtime.ibkr_b3 import (
     b3_preflight,
     promote_b3_configuration,
-    verify_b3_configuration,
+    verify_b3_release,
     write_reviewed_configuration,
 )
 from qtrad.runtime.ibkr_canary import (
@@ -570,6 +570,11 @@ def build_parser() -> argparse.ArgumentParser:
         "ibkr-verify", help="verify an exact-two B3 config offline"
     )
     verify_b3.add_argument("--configuration", type=Path, required=True)
+    verify_b3.add_argument("--capability-review", type=Path, required=True)
+    verify_b3.add_argument("--operator-selection", type=Path, required=True)
+    verify_b3.add_argument("--contract-selection", type=Path, required=True)
+    verify_b3.add_argument("--catalogue", type=Path, required=True)
+    verify_b3.add_argument("--probe-spec", type=Path, required=True)
     verify_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
     preflight_b3 = deployment_sub.add_parser(
         "ibkr-preflight", help="verify B3 release identity without host or provider I/O"
@@ -1169,7 +1174,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             catalogue_path=args.catalogue,
             probe_spec_path=args.probe_spec,
         )
-        write_reviewed_configuration(args.output, promoted)
+        write_reviewed_configuration(
+            args.output,
+            promoted,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+        )
         print(
             json.dumps(
                 {
@@ -1181,8 +1194,15 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         )
     elif args.command == "deployment" and args.deployment_command == "ibkr-verify":
-        configuration = load_reviewed_configuration(args.configuration)
-        report = verify_b3_configuration(configuration, observed_at=args.observed_at)
+        report = verify_b3_release(
+            args.configuration,
+            capability_review_path=args.capability_review,
+            operator_selection_path=args.operator_selection,
+            contract_selection_path=args.contract_selection,
+            catalogue_path=args.catalogue,
+            probe_spec_path=args.probe_spec,
+            observed_at=args.observed_at,
+        )
         print(json.dumps(report, sort_keys=True))
         if not report["valid"]:
             raise SystemExit(1)

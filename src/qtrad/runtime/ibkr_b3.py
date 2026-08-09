@@ -7,6 +7,7 @@ not discover contracts, contact IBKR, inspect a live database, or mutate a host.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import tomllib
@@ -42,6 +43,65 @@ B3_API_HOST = "127.0.0.1"
 B3_API_PORT = 8000
 B3_GATEWAY_HOSTS = frozenset({"127.0.0.1", "::1"})
 B3_SUPPORTED_IBKR_VERSIONS = frozenset({"10.45", "10.49"})
+
+_AUTHORITY_HASH_FIELDS = (
+    "capability_review_sha256",
+    "operator_selection_sha256",
+    "contract_selection_sha256",
+    "catalogue_sha256",
+    "probe_spec_sha256",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrB3PromotionAuthority:
+    """Exact immutable files whose replay authorised one B3 release."""
+
+    capability_review_sha256: str
+    operator_selection_sha256: str
+    contract_selection_sha256: str
+    catalogue_sha256: str
+    probe_spec_sha256: str
+
+    def __post_init__(self) -> None:
+        for field_name in _AUTHORITY_HASH_FIELDS:
+            _require_hash(getattr(self, field_name), f"B3 {field_name}")
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {field_name: getattr(self, field_name) for field_name in _AUTHORITY_HASH_FIELDS}
+
+    @classmethod
+    def from_json_value(cls, value: object) -> IbkrB3PromotionAuthority:
+        if not isinstance(value, Mapping) or set(value) != set(_AUTHORITY_HASH_FIELDS):
+            raise ValueError("B3 release requires exact promotion authority identities")
+        authority = cast(Mapping[str, object], value)
+        return cls(
+            **{field_name: str(authority[field_name]) for field_name in _AUTHORITY_HASH_FIELDS}
+        )
+
+
+def _sha256_file(path: Path, label: str) -> str:
+    try:
+        return hashlib.sha256(path.read_bytes()).hexdigest()
+    except OSError as error:
+        raise ValueError(f"unable to read B3 {label} authority: {path}") from error
+
+
+def _promotion_authority(
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+) -> IbkrB3PromotionAuthority:
+    return IbkrB3PromotionAuthority(
+        capability_review_sha256=_sha256_file(capability_review_path, "capability review"),
+        operator_selection_sha256=_sha256_file(operator_selection_path, "operator selection"),
+        contract_selection_sha256=_sha256_file(contract_selection_path, "contract selection"),
+        catalogue_sha256=_sha256_file(catalogue_path, "catalogue"),
+        probe_spec_sha256=_sha256_file(probe_spec_path, "probe spec"),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -297,6 +357,30 @@ def _verify_b3_provider_authority(
     return trusted_listings
 
 
+def _authenticate_b3_provider_authority(
+    source: IbkrNativeCaptureConfiguration,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+) -> tuple[dict[InstrumentId, ProviderListing], IbkrB3PromotionAuthority]:
+    paths = {
+        "capability_review_path": capability_review_path,
+        "operator_selection_path": operator_selection_path,
+        "contract_selection_path": contract_selection_path,
+        "catalogue_path": catalogue_path,
+        "probe_spec_path": probe_spec_path,
+    }
+    authority_before = _promotion_authority(**paths)
+    trusted_listings = _verify_b3_provider_authority(source, **paths)
+    authority_after = _promotion_authority(**paths)
+    if authority_after != authority_before:
+        raise ValueError("B3 promotion authority changed during authenticated replay")
+    return trusted_listings, authority_before
+
+
 def promote_b3_configuration(
     source: IbkrNativeCaptureConfiguration,
     *,
@@ -308,7 +392,7 @@ def promote_b3_configuration(
 ) -> IbkrNativeCaptureConfiguration:
     """Create the exact-two subset only from an authenticated provider closure."""
 
-    trusted_listings = _verify_b3_provider_authority(
+    trusted_listings, _ = _authenticate_b3_provider_authority(
         source,
         capability_review_path=capability_review_path,
         operator_selection_path=operator_selection_path,
@@ -348,6 +432,7 @@ def promote_b3_configuration(
 
 def _configuration_payload(
     configuration: IbkrNativeCaptureConfiguration,
+    authority: IbkrB3PromotionAuthority,
 ) -> dict[str, JsonValue]:
     listings: list[JsonValue] = []
     for listing in sorted(configuration.listings, key=lambda item: str(item.listing_id)):
@@ -386,6 +471,7 @@ def _configuration_payload(
             "capture_source_id": configuration.capture_source_id,
             "universe_id": configuration.universe_id,
             "configuration_hash": configuration.configuration_hash,
+            "promotion_authority": authority.as_json_value(),
             "listings": listings,
         },
     )
@@ -394,14 +480,90 @@ def _configuration_payload(
 def write_reviewed_configuration(
     path: Path,
     configuration: IbkrNativeCaptureConfiguration,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
 ) -> None:
-    """Write a reviewed configuration create-only, preserving old releases."""
+    """Write a create-only B3 release after replaying its complete authority."""
 
-    payload = _configuration_payload(configuration)
+    _, authority = _authenticate_b3_provider_authority(
+        configuration,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        contract_selection_path=contract_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    payload = _configuration_payload(configuration, authority)
     path.parent.mkdir(parents=True, exist_ok=True)
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
     with path.open("xb") as handle:
         handle.write(encoded)
+
+
+def _load_authenticated_b3_release(
+    path: Path,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+) -> tuple[IbkrNativeCaptureConfiguration, IbkrB3PromotionAuthority]:
+    """Load one canonical B3 envelope and replay its immutable authority closure."""
+
+    try:
+        document = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"unable to read B3 release configuration: {path}") from error
+    if not isinstance(document, Mapping):
+        raise ValueError("B3 release configuration must be an object")
+    if document.get("contract") != B3_RELEASE_CONTRACT:
+        raise ValueError("B3 release configuration contract marker is unsupported")
+    embedded_authority = IbkrB3PromotionAuthority.from_json_value(
+        document.get("promotion_authority")
+    )
+    configuration = load_reviewed_configuration(path)
+    expected_document = _configuration_payload(configuration, embedded_authority)
+    if document != expected_document:
+        raise ValueError("B3 release configuration contains non-canonical fields")
+
+    _, authenticated_authority = _authenticate_b3_provider_authority(
+        configuration,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        contract_selection_path=contract_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    if embedded_authority != authenticated_authority:
+        raise ValueError("B3 release promotion authority identity mismatch")
+    return configuration, authenticated_authority
+
+
+def load_authenticated_b3_configuration(
+    path: Path,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+) -> IbkrNativeCaptureConfiguration:
+    """Load one B3 configuration only after its complete authority replay succeeds."""
+
+    configuration, _ = _load_authenticated_b3_release(
+        path,
+        capability_review_path=capability_review_path,
+        operator_selection_path=operator_selection_path,
+        contract_selection_path=contract_selection_path,
+        catalogue_path=catalogue_path,
+        probe_spec_path=probe_spec_path,
+    )
+    return configuration
 
 
 def verify_b3_configuration(
@@ -491,6 +653,49 @@ def verify_b3_configuration(
     )
 
 
+def verify_b3_release(
+    path: Path,
+    *,
+    capability_review_path: Path,
+    operator_selection_path: Path,
+    contract_selection_path: Path,
+    catalogue_path: Path,
+    probe_spec_path: Path,
+    observed_at: datetime,
+) -> dict[str, JsonValue]:
+    """Authenticate a persisted B3 envelope before reporting release readiness."""
+
+    if observed_at.tzinfo is None or observed_at.utcoffset() is None:
+        raise ValueError("B3 verification timestamp must be timezone-aware")
+    try:
+        configuration, authority = _load_authenticated_b3_release(
+            path,
+            capability_review_path=capability_review_path,
+            operator_selection_path=operator_selection_path,
+            contract_selection_path=contract_selection_path,
+            catalogue_path=catalogue_path,
+            probe_spec_path=probe_spec_path,
+        )
+    except ValueError as error:
+        return {
+            "contract": B3_RELEASE_CONTRACT,
+            "valid": False,
+            "operational_ready": False,
+            "requires_evidence_refresh": False,
+            "source": B3_CAPTURE_SOURCE_ID,
+            "universe": B3_UNIVERSE_ID,
+            "configuration_hash": "",
+            "observed_at": observed_at.astimezone(UTC).isoformat(),
+            "instrument_count": 0,
+            "instruments": [],
+            "errors": [str(error)],
+        }
+
+    report = verify_b3_configuration(configuration, observed_at=observed_at)
+    report["promotion_authority"] = authority.as_json_value()
+    return report
+
+
 @dataclass(frozen=True, slots=True)
 class IbkrB3DeploymentDescriptor:
     """Non-secret identity required by the B3 host preflight."""
@@ -512,6 +717,11 @@ class IbkrB3DeploymentDescriptor:
     database_name: str
     database_url_environment: str
     checkpoint_root: str
+    capability_review_path: str
+    operator_selection_path: str
+    contract_selection_path: str
+    catalogue_path: str
+    probe_spec_path: str
     schema_head: str = B3_SCHEMA_HEAD
     ingest_service: str = "qtrad-ibkr-ingest.service"
     api_service: str = "qtrad-ibkr-api.service"
@@ -526,6 +736,15 @@ class IbkrB3DeploymentDescriptor:
         _require_hash(self.configuration_hash, "B3 configuration_hash")
         if not Path(self.configuration_path).is_absolute():
             raise ValueError("B3 configuration_path must be absolute")
+        authority_paths = (
+            self.capability_review_path,
+            self.operator_selection_path,
+            self.contract_selection_path,
+            self.catalogue_path,
+            self.probe_spec_path,
+        )
+        if any(not Path(authority_path).is_absolute() for authority_path in authority_paths):
+            raise ValueError("B3 promotion authority paths must be absolute")
         _require_hash(self.api_package_fingerprint, "B3 API package fingerprint")
         _require_hash(self.gateway_archive_sha256, "B3 Gateway archive")
         if (
@@ -565,6 +784,7 @@ class IbkrB3DeploymentDescriptor:
             raise ValueError(f"unable to read B3 deployment descriptor: {path}") from error
         _reject_secret_keys(document)
         release = _table(document, "release")
+        authority = _table(document, "authority")
         ibkr = _table(document, "ibkr")
         network = _table(document, "network")
         database = _table(document, "database")
@@ -575,6 +795,11 @@ class IbkrB3DeploymentDescriptor:
             configuration_path=_string(release, "configuration_path"),
             configuration_hash=_string(release, "configuration_hash"),
             api_package_fingerprint=_string(release, "api_package_fingerprint"),
+            capability_review_path=_string(authority, "capability_review_path"),
+            operator_selection_path=_string(authority, "operator_selection_path"),
+            contract_selection_path=_string(authority, "contract_selection_path"),
+            catalogue_path=_string(authority, "catalogue_path"),
+            probe_spec_path=_string(authority, "probe_spec_path"),
             gateway_archive_sha256=_string(ibkr, "gateway_archive_sha256"),
             api_version=_string(ibkr, "api_version"),
             gateway_version=_string(ibkr, "gateway_version"),
@@ -621,24 +846,20 @@ def b3_preflight(
     configuration_path = Path(descriptor.configuration_path)
     if not configuration_path.is_absolute():
         configuration_path = repository_root / configuration_path
-    try:
-        configuration = load_reviewed_configuration(configuration_path)
-    except ValueError as error:
-        configuration = None
-        errors.append(str(error))
-
-    if configuration is not None:
-        if configuration.configuration_hash != descriptor.configuration_hash:
-            errors.append("deployment descriptor/configuration hash mismatch")
-        report = verify_b3_configuration(configuration, observed_at=observed_at)
-        errors.extend(cast(list[str], report["errors"]))
-    else:
-        report = {
-            "valid": False,
-            "operational_ready": False,
-            "requires_evidence_refresh": False,
-            "instruments": [],
-        }
+    report = verify_b3_release(
+        configuration_path,
+        capability_review_path=Path(descriptor.capability_review_path),
+        operator_selection_path=Path(descriptor.operator_selection_path),
+        contract_selection_path=Path(descriptor.contract_selection_path),
+        catalogue_path=Path(descriptor.catalogue_path),
+        probe_spec_path=Path(descriptor.probe_spec_path),
+        observed_at=observed_at,
+    )
+    if report["configuration_hash"] != descriptor.configuration_hash:
+        errors.append("deployment descriptor/configuration hash mismatch")
+    errors.extend(
+        error for error in cast(list[JsonValue], report["errors"]) if isinstance(error, str)
+    )
 
     expected_units = {
         descriptor.ingest_service,

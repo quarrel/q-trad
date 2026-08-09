@@ -51,7 +51,7 @@ B3 does not run a host, Gateway, database, deployment or qualification operation
    ~~~
 ## Offline B3 release checks
 
-Use `qtrad deployment ibkr-promote` only with an already reviewed B2 configuration; it writes a new exact-two configuration create-only. Use `qtrad deployment ibkr-verify` with a reviewed UTC observation timestamp, then `qtrad deployment ibkr-preflight` against the immutable descriptor. The B3 implementation and verification boundary stops there; live Gateway, database, deployment, restart/reconnect, backup/restore and qualification evidence require separate authorization.
+Use `qtrad deployment ibkr-promote` only with an already reviewed B2 configuration and the immutable capability-review, operator-selection, contract-selection, catalogue and probe files; it replays that closure and writes their exact hashes into a new exact-two release create-only. `qtrad deployment ibkr-verify` requires the same authority files and replays them against the final persisted evidence. `qtrad deployment ibkr-preflight` reads their absolute paths from the immutable descriptor and performs the same replay. The B3 implementation and verification boundary stops there; live Gateway, database, deployment, restart/reconnect, backup/restore and qualification evidence require separate authorization.
 
 ## Running explicit historical CLI commands
 

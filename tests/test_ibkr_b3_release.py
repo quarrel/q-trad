@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from qtrad.application.ibkr_historical import build_ibkr_contract_selection
+from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_historical import IbkrContractDecision
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
@@ -27,6 +28,7 @@ from qtrad.runtime.ibkr_b3 import (
     b3_preflight,
     promote_b3_configuration,
     verify_b3_configuration,
+    verify_b3_release,
     write_reviewed_configuration,
 )
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
@@ -117,6 +119,16 @@ def _source(
             liquid_hours=australia_liquid_hours,
         )
     return IbkrNativeCaptureConfiguration.from_reviewed(listings, evidence)
+
+
+def _authority_paths(tmp_path: Path) -> tuple[Path, Path, Path, Path, Path]:
+    return (
+        tmp_path / "capability-review.json",
+        tmp_path / "operator-selection.json",
+        tmp_path / "contract-selection.json",
+        tmp_path / "authority-catalogue.toml",
+        tmp_path / "authority-probe.toml",
+    )
 
 
 def _authority_files(
@@ -310,6 +322,32 @@ def _promote(
     )
 
 
+def _write_release(path: Path, configuration: IbkrNativeCaptureConfiguration) -> None:
+    authority = _authority_paths(path.parent)
+    write_reviewed_configuration(
+        path,
+        configuration,
+        capability_review_path=authority[0],
+        operator_selection_path=authority[1],
+        contract_selection_path=authority[2],
+        catalogue_path=authority[3],
+        probe_spec_path=authority[4],
+    )
+
+
+def _verify_release(path: Path) -> dict[str, JsonValue]:
+    authority = _authority_paths(path.parent)
+    return verify_b3_release(
+        path,
+        capability_review_path=authority[0],
+        operator_selection_path=authority[1],
+        contract_selection_path=authority[2],
+        catalogue_path=authority[3],
+        probe_spec_path=authority[4],
+        observed_at=_NOW,
+    )
+
+
 def _descriptor(
     path: Path,
     configuration: IbkrNativeCaptureConfiguration,
@@ -329,6 +367,13 @@ configuration_path = "{path.parent / "capture.json"}"
 configuration_hash = "{configuration.configuration_hash}"
 api_package_fingerprint = "{"c" * 64}"
 schema_head = "0014"
+
+[authority]
+capability_review_path = "{path.parent / "capability-review.json"}"
+operator_selection_path = "{path.parent / "operator-selection.json"}"
+contract_selection_path = "{path.parent / "contract-selection.json"}"
+catalogue_path = "{path.parent / "authority-catalogue.toml"}"
+probe_spec_path = "{path.parent / "authority-probe.toml"}"
 
 [ibkr]
 gateway_archive_sha256 = "{"d" * 64}"
@@ -467,11 +512,11 @@ def test_b3_configuration_round_trip_is_create_only(tmp_path: Path) -> None:
     configuration = _promote(_source(), tmp_path)
     path = tmp_path / "capture.json"
 
-    write_reviewed_configuration(path, configuration)
+    _write_release(path, configuration)
     assert load_reviewed_configuration(path) == configuration
     assert path.read_bytes().endswith(b"\n")
     with pytest.raises(FileExistsError):
-        write_reviewed_configuration(path, configuration)
+        _write_release(path, configuration)
 
 
 def test_unknown_schedule_requires_a_new_authenticated_release(tmp_path: Path) -> None:
@@ -487,13 +532,13 @@ def test_unknown_schedule_requires_a_new_authenticated_release(tmp_path: Path) -
     assert any(item["activity"] == "UNKNOWN" for item in instruments if isinstance(item, dict))
 
     path = tmp_path / "capture.json"
-    write_reviewed_configuration(path, configuration)
+    _write_release(path, configuration)
     assert load_reviewed_configuration(path).configuration_hash == configuration.configuration_hash
 
 
 def test_b3_preflight_binds_config_identity_and_units(tmp_path: Path) -> None:
     configuration = _promote(_source(), tmp_path)
-    write_reviewed_configuration(tmp_path / "capture.json", configuration)
+    _write_release(tmp_path / "capture.json", configuration)
     descriptor_path = tmp_path / "deployment.toml"
     _descriptor(descriptor_path, configuration)
 
@@ -504,6 +549,72 @@ def test_b3_preflight_binds_config_identity_and_units(tmp_path: Path) -> None:
     assert report["operational_ready"] is True
     assert report["configuration_hash"] == configuration.configuration_hash
     assert report["database_name"] == B3_DATABASE_NAME
+
+
+def test_b3_release_requires_contract_marker(tmp_path: Path) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "capture.json"
+    _write_release(path, configuration)
+    document = json.loads(path.read_text(encoding="utf-8"))
+    document["contract"] = "self-consistent-but-unauthenticated"
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+    report = _verify_release(path)
+
+    assert report["valid"] is False
+    assert "contract marker is unsupported" in str(report["errors"])
+
+
+def test_b3_release_rejects_changed_authority_file(tmp_path: Path) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "capture.json"
+    _write_release(path, configuration)
+    capability_review_path = _authority_paths(tmp_path)[0]
+    capability_review_path.write_text(
+        capability_review_path.read_text(encoding="utf-8") + "\n",
+        encoding="utf-8",
+    )
+
+    report = _verify_release(path)
+
+    assert report["valid"] is False
+    assert "promotion authority identity mismatch" in str(report["errors"])
+
+
+def test_b3_preflight_rejects_rehashed_contract_evidence_tamper(tmp_path: Path) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "capture.json"
+    _write_release(path, configuration)
+    listing = configuration.listings[0]
+    tampered_evidence = dict(configuration.contract_evidence)
+    tampered_evidence[listing.listing_id] = replace(
+        tampered_evidence[listing.listing_id],
+        exchange="SMART",
+    )
+    tampered = IbkrNativeCaptureConfiguration.from_reviewed(
+        configuration.listings,
+        tampered_evidence,
+    )
+    document = json.loads(path.read_text(encoding="utf-8"))
+    listings = document["listings"]
+    assert isinstance(listings, list)
+    persisted_listing = next(
+        item
+        for item in listings
+        if isinstance(item, dict) and item.get("instrument_id") == str(listing.instrument_id)
+    )
+    evidence = persisted_listing["evidence"]
+    assert isinstance(evidence, dict)
+    evidence["exchange"] = "SMART"
+    document["configuration_hash"] = tampered.configuration_hash
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    descriptor_path = tmp_path / "deployment.toml"
+    _descriptor(descriptor_path, tampered)
+
+    report = b3_preflight(descriptor_path, repository_root=_REPOSITORY_ROOT, observed_at=_NOW)
+
+    assert report["valid"] is False
+    assert "provider evidence does not match the authenticated review" in str(report["errors"])
 
 
 @pytest.mark.parametrize(

@@ -8,6 +8,13 @@ configuration_hash = "RELEASE_CONFIGURATION_64_HEX"
 api_package_fingerprint = "RELEASE_API_PACKAGE_64_HEX"
 schema_head = "0014"
 
+[authority]
+capability_review_path = "/etc/qtrad/ibkr-authority/capability-review.json"
+operator_selection_path = "/etc/qtrad/ibkr-authority/operator-selection.json"
+contract_selection_path = "/etc/qtrad/ibkr-authority/contract-selection.json"
+catalogue_path = "/etc/qtrad/ibkr-authority/capture-ibkr-v1-candidates.toml"
+probe_spec_path = "/etc/qtrad/ibkr-authority/capability-probe.toml"
+
 [ibkr]
 gateway_archive_sha256 = "RELEASE_GATEWAY_ARCHIVE_64_HEX"
 api_version = "10.49"
