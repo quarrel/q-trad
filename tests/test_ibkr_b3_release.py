@@ -19,6 +19,8 @@ from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime.ibkr_b3 import (
+    B3_API_HOST,
+    B3_API_PORT,
     B3_DATABASE_NAME,
     B3_RELEASE_CONTRACT,
     IbkrB3DeploymentDescriptor,
@@ -37,6 +39,11 @@ from qtrad.runtime.universe import load_capture_candidates
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 _REPOSITORY_ROOT = Path(__file__).parents[1]
+
+
+def _write_executable(path: Path, contents: str) -> None:
+    path.write_text(contents, encoding="utf-8")
+    path.chmod(0o755)
 
 
 def _listing(instrument_id: str, external_id: str) -> ProviderListing:
@@ -308,7 +315,11 @@ def _descriptor(
     path: Path,
     configuration: IbkrNativeCaptureConfiguration,
     *,
-    api_host: str = "127.0.0.1",
+    api_host: str = B3_API_HOST,
+    api_port: int = B3_API_PORT,
+    api_version: str = "10.49",
+    gateway_version: str = "10.49",
+    gateway_host: str = "127.0.0.1",
     database_name: str = B3_DATABASE_NAME,
 ) -> None:
     path.write_text(
@@ -322,16 +333,16 @@ schema_head = "0014"
 
 [ibkr]
 gateway_archive_sha256 = "{"d" * 64}"
-api_version = "10.49"
-gateway_version = "10.49"
+api_version = "{api_version}"
+gateway_version = "{gateway_version}"
 ibc_version = "3.24.1"
 client_id = 71
 
 [network]
-gateway_host = "127.0.0.1"
+gateway_host = "{gateway_host}"
 gateway_port = 4002
 api_host = "{api_host}"
-api_port = 8000
+api_port = {api_port}
 
 [database]
 name = "{database_name}"
@@ -461,7 +472,7 @@ def test_b3_preflight_binds_config_identity_and_units(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("api_host", "database_name", "message"),
     [
-        ("0.0.0.0", B3_DATABASE_NAME, "loopback"),
+        ("0.0.0.0", B3_DATABASE_NAME, "reviewed runtime endpoint"),
         ("127.0.0.1", "qtrad", "dedicated IBKR database"),
     ],
 )
@@ -473,6 +484,52 @@ def test_b3_descriptor_rejects_public_or_shared_identity(
     _descriptor(path, configuration, api_host=api_host, database_name=database_name)
 
     with pytest.raises(ValueError, match=message):
+        IbkrB3DeploymentDescriptor.from_toml(path)
+
+
+@pytest.mark.parametrize(
+    ("api_host", "api_port"),
+    [("::1", B3_API_PORT), (B3_API_HOST, 9000)],
+)
+def test_b3_descriptor_rejects_api_runtime_endpoint_drift(
+    tmp_path: Path, api_host: str, api_port: int
+) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "deployment.toml"
+    _descriptor(path, configuration, api_host=api_host, api_port=api_port)
+
+    with pytest.raises(ValueError, match="reviewed runtime endpoint"):
+        IbkrB3DeploymentDescriptor.from_toml(path)
+
+
+def test_b3_descriptor_rejects_gateway_host_spelling_not_used_by_deploy(
+    tmp_path: Path,
+) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "deployment.toml"
+    _descriptor(path, configuration, gateway_host="localhost")
+
+    with pytest.raises(ValueError, match="Gateway host"):
+        IbkrB3DeploymentDescriptor.from_toml(path)
+
+
+@pytest.mark.parametrize(
+    ("api_version", "gateway_version"),
+    [("10.50", "10.50"), ("10.49", "10.45")],
+)
+def test_b3_descriptor_rejects_unreviewed_or_mismatched_ibkr_versions(
+    tmp_path: Path, api_version: str, gateway_version: str
+) -> None:
+    configuration = _promote(_source(), tmp_path)
+    path = tmp_path / "deployment.toml"
+    _descriptor(
+        path,
+        configuration,
+        api_version=api_version,
+        gateway_version=gateway_version,
+    )
+
+    with pytest.raises(ValueError, match="reviewed version"):
         IbkrB3DeploymentDescriptor.from_toml(path)
 
 
@@ -509,6 +566,9 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "QTRAD_IBKR_PASSWORD" not in api
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in api
     assert "usage: deploy.sh --check|--apply" in deploy
+    script_dir = 'script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"'
+    assert script_dir in deploy
+    assert deploy.index(script_dir) < deploy.index("canonical_env_file=")
     assert 'env_file="/etc/qtrad/ibkr-ingest.env"' in deploy
     assert "EnvironmentFile=/etc/qtrad/ibkr-ingest.env" in ingest_unit
     assert "--env-file /etc/qtrad/ibkr-ingest.env" in ingest
@@ -516,7 +576,9 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
-    assert "systemctl enable --now" in deploy
+    assert "systemctl enable --now" not in deploy
+    assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
+    assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
     assert "qtrad_ibkr_restore_" in restore
     assert "trap cleanup EXIT" in restore
@@ -647,3 +709,147 @@ def test_deploy_rejects_noncanonical_env_override(tmp_path: Path) -> None:
     assert result.returncode != 0
     assert "canonical" in result.stderr
     assert not preflight_marker.exists()
+
+
+@pytest.mark.parametrize("mode", ["--check", "--apply"])
+def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> None:
+    repository = tmp_path / "repository"
+    script_dir = repository / "ops" / "ibkr"
+    script_dir.mkdir(parents=True)
+    canonical_env = tmp_path / "ibkr-ingest.env"
+    calls = tmp_path / "calls"
+
+    deploy_source = (_REPOSITORY_ROOT / "ops" / "ibkr" / "deploy.sh").read_text(encoding="utf-8")
+    deploy_source = deploy_source.replace(
+        'canonical_env_file="/etc/qtrad/ibkr-ingest.env"',
+        f'canonical_env_file="{canonical_env}"',
+    )
+    deploy_path = script_dir / "deploy.sh"
+    _write_executable(deploy_path, deploy_source)
+    _write_executable(
+        script_dir / "verify-host.sh",
+        f"#!/bin/sh\nprintf '%s\\n' verify-host >> '{calls}'\n",
+    )
+
+    subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
+    subprocess.run(["git", "-C", str(repository), "add", "ops/ibkr"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=q-trad test",
+            "-c",
+            "user.email=qtrad-test@example.invalid",
+            "commit",
+            "-qm",
+            "deployment fixture",
+        ],
+        check=True,
+    )
+    application_commit = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "HEAD"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    for command in ("docker", "install", "systemctl"):
+        _write_executable(
+            fake_bin / command,
+            f"#!/bin/sh\nprintf '%s %s\\n' {command} \"$*\" >> '{calls}'\n",
+        )
+
+    image = "registry.example.invalid/qtrad@sha256:" + "b" * 64
+    configuration_hash = "a" * 64
+    api_fingerprint = "c" * 64
+    gateway_archive_sha = "d" * 64
+    configuration_path = "/srv/qtrad/ibkr/capture.json"
+    descriptor = tmp_path / "deployment.toml"
+    descriptor.write_text("[release]\n", encoding="utf-8")
+    gateway_manifest = tmp_path / "gateway-manifest.json"
+    gateway_manifest.write_text("{}\n", encoding="utf-8")
+    canonical_env.write_text(
+        f"QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH={configuration_hash}\n",
+        encoding="utf-8",
+    )
+
+    preflight = tmp_path / "qtrad-preflight"
+    preflight_report = {
+        "application_commit": application_commit,
+        "valid": True,
+        "operational_ready": True,
+        "requires_evidence_refresh": False,
+        "image": image,
+        "configuration_hash": configuration_hash,
+        "configuration_path": configuration_path,
+        "api_package_fingerprint": api_fingerprint,
+        "gateway_archive_sha256": gateway_archive_sha,
+        "api_version": "10.49",
+        "gateway_version": "10.49",
+        "ibc_version": "3.24.1",
+        "database_name": "qtrad_ibkr",
+        "database_url_environment": "QTRAD_DATABASE_URL",
+        "gateway_host": "127.0.0.1",
+        "api_host": B3_API_HOST,
+        "gateway_port": 4002,
+        "api_port": B3_API_PORT,
+        "client_id": 71,
+        "source": "ibkr-paper-v1",
+        "universe": "capture-ibkr-v1",
+    }
+    _write_executable(
+        preflight,
+        "#!/bin/sh\nprintf '%s\\n' '" + json.dumps(preflight_report) + "'\n",
+    )
+
+    environment = os.environ.copy()
+    environment.pop("QTRAD_IBKR_ENV_FILE", None)
+    environment.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+            "QTRAD_IBKR_IMAGE": image,
+            "QTRAD_IMAGE": image,
+            "QTRAD_IBKR_RELEASE_DESCRIPTOR": str(descriptor),
+            "QTRAD_B3_PREFLIGHT_BIN": str(preflight),
+            "QTRAD_IBKR_CHECKPOINT_ROOT": "/srv/qtrad/ibkr/checkpoints",
+            "QTRAD_IBKR_API_PACKAGE_FINGERPRINT": api_fingerprint,
+            "QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256": gateway_archive_sha,
+            "QTRAD_IBKR_GATEWAY_MANIFEST": str(gateway_manifest),
+            "QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH": configuration_path,
+            "QTRAD_DATABASE_URL": ("postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr"),
+            "QTRAD_IBKR_PREFLIGHT_OBSERVED_AT": "2026-08-09T02:30:00Z",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(deploy_path), mode],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    recorded_calls = calls.read_text(encoding="utf-8").splitlines()
+    assert "verify-host" in recorded_calls
+    assert any(
+        call.startswith("docker run ") and "db verify-head" in call for call in recorded_calls
+    )
+    if mode == "--check":
+        assert "no host mutation performed" in result.stdout
+        assert not any(call.startswith(("install ", "systemctl ")) for call in recorded_calls)
+    else:
+        assert (
+            "systemctl enable qtrad-ibkr-api.service qtrad-ibkr-ingest.service "
+            "qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
+        ) in recorded_calls
+        assert (
+            "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service"
+        ) in recorded_calls
+        assert (
+            "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
+        ) in recorded_calls
+        assert not any("enable --now" in call for call in recorded_calls)

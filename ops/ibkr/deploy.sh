@@ -10,6 +10,7 @@ mode="${1:-}"
 [[ "$mode" == "--check" || "$mode" == "--apply" ]] || usage
 [[ "${2:-}" == "" ]] || usage
 
+script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"
 canonical_env_file="/etc/qtrad/ibkr-ingest.env"
 if [[ -n "${QTRAD_IBKR_ENV_FILE:-}" && "$QTRAD_IBKR_ENV_FILE" != "$canonical_env_file" ]]; then
     echo "IBKR B3 preflight: QTRAD_IBKR_ENV_FILE must use canonical $canonical_env_file" >&2
@@ -55,11 +56,21 @@ verify_checkout_identity() {
 }
 
 verify_host_identity() {
-    QTRAD_IBKR_IMAGE="$image"         QTRAD_IBKR_APPLICATION_COMMIT="$application_commit"         QTRAD_IBKR_API_VERSION="$api_version"         QTRAD_IBKR_GATEWAY_VERSION="$gateway_version"         QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256="$gateway_archive_sha"         QTRAD_IBKR_API_PACKAGE_FINGERPRINT="$api_fingerprint"         QTRAD_IBKR_CHECKPOINT_ROOT="$checkpoint_root"         "$script_dir/verify-host.sh"
+    QTRAD_IBKR_IMAGE="$image" \
+        QTRAD_IBKR_APPLICATION_COMMIT="$application_commit" \
+        QTRAD_IBKR_API_VERSION="$api_version" \
+        QTRAD_IBKR_GATEWAY_VERSION="$gateway_version" \
+        QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256="$gateway_archive_sha" \
+        QTRAD_IBKR_API_PACKAGE_FINGERPRINT="$api_fingerprint" \
+        QTRAD_IBKR_CHECKPOINT_ROOT="$checkpoint_root" \
+        "$script_dir/verify-host.sh"
 }
 
 verify_database_head() {
-    docker run --rm --network host --user 10001:10001         --read-only --cap-drop=ALL --security-opt=no-new-privileges         --env-file "$env_file" --entrypoint uv "$image"         run --frozen --no-dev --no-sync python -m qtrad db verify-head
+    docker run --rm --network host --user 10001:10001 \
+        --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+        --env-file "$env_file" --entrypoint uv "$image" \
+        run --frozen --no-dev --no-sync python -m qtrad db verify-head
 }
 
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || fail "image must be immutable"
@@ -72,7 +83,7 @@ verify_database_head() {
 [[ "$database_url" == postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr ]] || fail "database URL must be dedicated and credential-free"
 [[ "$checkpoint_root" == /* ]] || fail "checkpoint root must be absolute"
 [[ "$gateway_host" == 127.0.0.1 || "$gateway_host" == ::1 ]] || fail "Gateway must be loopback"
-[[ "$api_host" == 127.0.0.1 || "$api_host" == ::1 ]] || fail "API must be loopback"
+[[ "$api_host" == 127.0.0.1 ]] || fail "API must use the reviewed runtime host"
 [[ "$gateway_port" == 4002 && "$api_port" == 8000 ]] || fail "unexpected private ports"
 [[ "$client_id" =~ ^[1-9][0-9]*$ ]] || fail "client ID must be positive"
 [[ "$database_name" == qtrad_ibkr ]] || fail "database must be dedicated qtrad_ibkr"
@@ -149,5 +160,8 @@ install -D -m 0644 "$script_dir/qtrad-ibkr-health.timer.example" /etc/systemd/sy
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.service.example" /etc/systemd/system/qtrad-ibkr-backup.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.timer.example" /etc/systemd/system/qtrad-ibkr-backup.timer
 systemctl daemon-reload
-systemctl enable --now qtrad-ibkr-api.service qtrad-ibkr-ingest.service
-systemctl enable --now qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
+systemctl enable \
+    qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
+    qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
+systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service
+systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer

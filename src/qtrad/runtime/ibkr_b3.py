@@ -38,6 +38,10 @@ B3_UNIVERSE_ID = "capture-ibkr-v1"
 B3_DATABASE_NAME = "qtrad_ibkr"
 B3_DATABASE_ENVIRONMENT = "IBKR_PAPER"
 B3_SCHEMA_HEAD = "0014"
+B3_API_HOST = "127.0.0.1"
+B3_API_PORT = 8000
+B3_GATEWAY_HOSTS = frozenset({"127.0.0.1", "::1"})
+B3_SUPPORTED_IBKR_VERSIONS = frozenset({"10.45", "10.49"})
 
 B3_TARGETS: tuple[tuple[str, str, int], ...] = (
     ("fx:aud-usd", "aud-usd", 14_433_401),
@@ -47,7 +51,6 @@ B3_TARGETS: tuple[tuple[str, str, int], ...] = (
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _COMMIT = re.compile(r"^[0-9a-f]{40}$")
 _IMAGE = re.compile(r"^.+@sha256:[0-9a-f]{64}$")
-_PRIVATE_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 _FORBIDDEN_DESCRIPTOR_WORDS = (
     "password",
     "secret",
@@ -403,16 +406,19 @@ class IbkrB3DeploymentDescriptor:
             raise ValueError("B3 configuration_path must be absolute")
         _require_hash(self.api_package_fingerprint, "B3 API package fingerprint")
         _require_hash(self.gateway_archive_sha256, "B3 Gateway archive")
-        if self.api_version != self.gateway_version:
-            raise ValueError("B3 API and Gateway versions must match")
+        if (
+            self.api_version != self.gateway_version
+            or self.api_version not in B3_SUPPORTED_IBKR_VERSIONS
+        ):
+            raise ValueError("B3 API and Gateway versions must match a reviewed version")
         if self.client_id <= 0:
             raise ValueError("B3 client_id must be positive")
-        if self.gateway_host not in _PRIVATE_HOSTS or self.api_host not in _PRIVATE_HOSTS:
-            raise ValueError("B3 Gateway and API hosts must be private loopback hosts")
+        if self.gateway_host not in B3_GATEWAY_HOSTS:
+            raise ValueError("B3 Gateway host must be a private loopback host")
         if self.gateway_port != 4002:
             raise ValueError("B3 Gateway API port must be 4002")
-        if self.api_port <= 0 or self.api_port > 65535:
-            raise ValueError("B3 API port must be valid")
+        if (self.api_host, self.api_port) != (B3_API_HOST, B3_API_PORT):
+            raise ValueError("B3 API endpoint must match the reviewed runtime endpoint")
         if self.database_name != B3_DATABASE_NAME:
             raise ValueError("B3 must use the dedicated IBKR database")
         if self.database_url_environment != "QTRAD_DATABASE_URL":
@@ -523,7 +529,7 @@ def b3_preflight(
         if not unit_path.is_file():
             errors.append(f"required B3 unit template is missing: {unit}")
 
-    if descriptor.gateway_host not in _PRIVATE_HOSTS or descriptor.api_host not in _PRIVATE_HOSTS:
+    if descriptor.gateway_host not in B3_GATEWAY_HOSTS or descriptor.api_host != B3_API_HOST:
         errors.append("B3 endpoints are not private loopback endpoints")
 
     return cast(
