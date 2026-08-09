@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -41,6 +42,222 @@ class QualificationEvidenceStore(Protocol):
     ) -> list[dict[str, Any]]: ...
 
 
+_RESTORE_EVIDENCE_CONTRACT = "qtrad-ibkr-postgres-restore-v1"
+_IBKR_BACKUP_ROOT = Path("/srv/qtrad/postgres/backups")
+_RESTORE_EVIDENCE_ROOT = Path("/var/lib/qtrad/ibkr/restore-evidence")
+_VERIFIED_RESTORE_EVIDENCE_TOKEN = object()
+
+
+class VerifiedIbkrRestoreEvidence:
+    """Opaque evidence from the hash-checked disposable restore workflow."""
+
+    __slots__ = (
+        "_archive_path",
+        "_archive_sha256",
+        "_artifact_sha256",
+        "_completed_at",
+        "_restored_database_name",
+        "_schema_head",
+        "_source_database_name",
+        "_started_at",
+        "_store",
+        "_verifier_token",
+    )
+    _archive_path: Path
+    _archive_sha256: str
+    _artifact_sha256: str
+    _completed_at: datetime
+    _restored_database_name: str
+    _schema_head: str
+    _source_database_name: str
+    _started_at: datetime
+    _store: QualificationEvidenceStore
+    _verifier_token: object
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedIbkrRestoreEvidence is constructed only by its verifier")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        archive_path: Path,
+        archive_sha256: str,
+        artifact_sha256: str,
+        source_database_name: str,
+        restored_database_name: str,
+        schema_head: str,
+        started_at: datetime,
+        completed_at: datetime,
+        store: QualificationEvidenceStore,
+    ) -> VerifiedIbkrRestoreEvidence:
+        if token is not _VERIFIED_RESTORE_EVIDENCE_TOKEN:
+            raise TypeError("VerifiedIbkrRestoreEvidence is constructed only by its verifier")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_verifier_token", token)
+        object.__setattr__(instance, "_archive_path", archive_path)
+        object.__setattr__(instance, "_archive_sha256", archive_sha256)
+        object.__setattr__(instance, "_artifact_sha256", artifact_sha256)
+        object.__setattr__(instance, "_source_database_name", source_database_name)
+        object.__setattr__(instance, "_restored_database_name", restored_database_name)
+        object.__setattr__(instance, "_schema_head", schema_head)
+        object.__setattr__(instance, "_started_at", started_at)
+        object.__setattr__(instance, "_completed_at", completed_at)
+        object.__setattr__(instance, "_store", store)
+        return instance
+
+    @property
+    def archive_sha256(self) -> str:
+        return self._archive_sha256
+
+    @property
+    def restored_database_name(self) -> str:
+        return self._restored_database_name
+
+    @property
+    def source_database_name(self) -> str:
+        return self._source_database_name
+
+    @property
+    def schema_head(self) -> str:
+        return self._schema_head
+
+    def authenticates(self, store: QualificationEvidenceStore) -> bool:
+        return (
+            type(self) is VerifiedIbkrRestoreEvidence
+            and getattr(self, "_verifier_token", None) is _VERIFIED_RESTORE_EVIDENCE_TOKEN
+            and getattr(self, "_store", None) is store
+        )
+
+    def operation_document(self) -> dict[str, JsonValue]:
+        return {
+            "contract": _RESTORE_EVIDENCE_CONTRACT,
+            "artifact_sha256": self._artifact_sha256,
+            "archive_path": str(self._archive_path),
+            "archive_sha256": self.archive_sha256,
+            "source_database_name": self.source_database_name,
+            "restored_database_name": self.restored_database_name,
+            "schema_head": self.schema_head,
+            "started_at": _iso(self._started_at),
+            "completed_at": _iso(self._completed_at),
+        }
+
+
+async def verify_ibkr_restore_evidence(
+    path: Path,
+    restored_store: QualificationEvidenceStore,
+    *,
+    expected_source_database: str,
+    expected_schema_head: str,
+) -> VerifiedIbkrRestoreEvidence:
+    """Authenticate an archive and the workflow-marked database restored from it."""
+
+    if not _has_postgres_evidence_provenance(restored_store):
+        raise TypeError("restore authority requires an exact PostgreSQL evidence store")
+    if (
+        path.is_symlink()
+        or not path.is_file()
+        or path.parent.resolve() != _RESTORE_EVIDENCE_ROOT.resolve()
+    ):
+        raise ValueError("restore evidence must be a workflow-owned regular non-symlink file")
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    document = _object(raw, "IBKR restore evidence")
+    expected_fields = {
+        "contract",
+        "archive_path",
+        "archive_sha256",
+        "source_database_name",
+        "restored_database_name",
+        "schema_head",
+        "started_at",
+        "completed_at",
+        "restore_marker",
+        "artifact_sha256",
+    }
+    if set(document) != expected_fields:
+        raise ValueError("IBKR restore evidence fields are not exact")
+    artifact_sha256 = _string(document, "artifact_sha256")
+    unsigned = {
+        key: cast(JsonValue, value) for key, value in document.items() if key != "artifact_sha256"
+    }
+    if artifact_sha256 != _sha256_json(unsigned):
+        raise ValueError("IBKR restore evidence artifact hash mismatch")
+    if _string(document, "contract") != _RESTORE_EVIDENCE_CONTRACT:
+        raise ValueError("IBKR restore evidence contract mismatch")
+
+    archive_path = Path(_string(document, "archive_path"))
+    if (
+        not archive_path.is_absolute()
+        or archive_path.is_symlink()
+        or not archive_path.is_file()
+        or archive_path.parent.resolve() != _IBKR_BACKUP_ROOT.resolve()
+        or re.fullmatch(r"qtrad-ibkr-[0-9]{8}T[0-9]{6}Z[.]dump", archive_path.name) is None
+    ):
+        raise ValueError("IBKR restore archive identity is invalid")
+    archive_sha256 = _string(document, "archive_sha256")
+    if len(archive_sha256) != 64 or any(item not in "0123456789abcdef" for item in archive_sha256):
+        raise ValueError("IBKR restore archive SHA-256 is invalid")
+    with archive_path.open("rb") as archive:
+        observed_archive_sha256 = hashlib.file_digest(archive, "sha256").hexdigest()
+    if observed_archive_sha256 != archive_sha256:
+        raise ValueError("IBKR restore archive SHA-256 mismatch")
+    checksum_path = Path(f"{archive_path}.sha256")
+    if checksum_path.is_symlink() or not checksum_path.is_file():
+        raise ValueError("IBKR restore archive checksum record is unavailable")
+    checksum_parts = checksum_path.read_text(encoding="utf-8").strip().split(maxsplit=1)
+    if (
+        len(checksum_parts) != 2
+        or checksum_parts[0] != archive_sha256
+        or Path(checksum_parts[1]).resolve() != archive_path.resolve()
+    ):
+        raise ValueError("IBKR restore archive checksum record does not authenticate the archive")
+
+    source_database = _string(document, "source_database_name")
+    restored_database = _string(document, "restored_database_name")
+    schema_head = _string(document, "schema_head")
+    if source_database != expected_source_database:
+        raise ValueError("IBKR restore source database identity mismatch")
+    if not restored_database.startswith(f"{source_database}_restore_verify_"):
+        raise ValueError("IBKR restore target identity is not disposable")
+    if schema_head != expected_schema_head:
+        raise ValueError("IBKR restore schema head mismatch")
+    started_at = _datetime(document, "started_at")
+    completed_at = _datetime(document, "completed_at")
+    if completed_at < started_at:
+        raise ValueError("IBKR restore completion chronology is invalid")
+
+    identity = await restored_store.query(
+        "SELECT current_database() AS database_name, "
+        "(SELECT version_num FROM alembic_version) AS schema_head, "
+        "shobj_description(oid, 'pg_database') AS restore_marker "
+        "FROM pg_database WHERE datname = current_database()"
+    )
+    if len(identity) != 1:
+        raise ValueError("restored database identity is unavailable")
+    marker = _string(document, "restore_marker")
+    expected_marker = f"{_RESTORE_EVIDENCE_CONTRACT}:{restored_database}:{archive_sha256}"
+    if marker != expected_marker or identity[0].get("restore_marker") != marker:
+        raise ValueError("restored database lacks authenticated workflow provenance")
+    if identity[0].get("database_name") != restored_database:
+        raise ValueError("restored database name does not match restore evidence")
+    if identity[0].get("schema_head") != schema_head:
+        raise ValueError("restored database schema does not match restore evidence")
+
+    return VerifiedIbkrRestoreEvidence._create(
+        _VERIFIED_RESTORE_EVIDENCE_TOKEN,
+        archive_path=archive_path,
+        archive_sha256=archive_sha256,
+        artifact_sha256=artifact_sha256,
+        source_database_name=source_database,
+        restored_database_name=restored_database,
+        schema_head=schema_head,
+        started_at=started_at,
+        completed_at=completed_at,
+        store=restored_store,
+    )
+
+
 def _has_postgres_evidence_provenance(value: object) -> bool:
     return (
         type(value) is PostgresAuditStore and type(getattr(value, "_engine", None)) is AsyncEngine
@@ -66,12 +283,20 @@ async def build_ibkr_qualification_snapshot(
     live_store: QualificationEvidenceStore,
     restored_store: QualificationEvidenceStore,
     *,
+    restore_evidence: VerifiedIbkrRestoreEvidence,
     expectation: IbkrQualificationExpectation,
     configuration: IbkrNativeCaptureConfiguration,
     window: IbkrQualificationWindow,
 ) -> dict[str, JsonValue]:
     """Build one deterministic qualification snapshot without changing either store."""
 
+    if not restore_evidence.authenticates(restored_store):
+        raise TypeError("qualification requires verifier-authenticated restore evidence")
+    if (
+        restore_evidence.source_database_name != expectation.database_name
+        or restore_evidence.schema_head != expectation.schema_head
+    ):
+        raise ValueError("qualification restore authority does not match the release database")
     live = await read_ibkr_qualification_evidence(
         live_store,
         configuration_hash=expectation.configuration_hash,
@@ -117,14 +342,22 @@ async def build_ibkr_qualification_snapshot(
             reason_code=_qualification_failure_code(str(error)),
             detail=str(error),
         )
+    summary["backup_restore"] = {
+        "verified": True,
+        "configuration_hash": expectation.configuration_hash,
+        "source_database_name": restore_evidence.source_database_name,
+        "archive_sha256": restore_evidence.archive_sha256,
+        "schema_head": restore_evidence.schema_head,
+        "observed_at": _iso(window.generated_at),
+    }
     evidence = {
         "capture_session_id": str(window.capture_session_id),
         "live_database_name": cast(str, live["database_name"]),
-        "restored_database_name": restored_database_name,
         "schema_head": expectation.schema_head,
         "retained_row_count": len(retained),
         "retained_rows_sha256": _sha256_json(retained),
         "restored_operations": cast(JsonValue, operations),
+        "restore_operation": restore_evidence.operation_document(),
     }
     return {
         **summary,
@@ -137,6 +370,7 @@ async def replay_ibkr_qualification_snapshot(
     live_store: QualificationEvidenceStore,
     restored_store: QualificationEvidenceStore,
     *,
+    restore_evidence: VerifiedIbkrRestoreEvidence,
     expectation: IbkrQualificationExpectation,
     configuration: IbkrNativeCaptureConfiguration,
 ) -> dict[str, JsonValue]:
@@ -153,10 +387,22 @@ async def replay_ibkr_qualification_snapshot(
     rebuilt = await build_ibkr_qualification_snapshot(
         live_store,
         restored_store,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
         window=window,
     )
+    recorded_restore = _object(evidence.get("restore_operation"), "recorded restore operation")
+    for field, expected in (
+        ("contract", _RESTORE_EVIDENCE_CONTRACT),
+        ("archive_sha256", restore_evidence.archive_sha256),
+        ("source_database_name", restore_evidence.source_database_name),
+        ("schema_head", restore_evidence.schema_head),
+    ):
+        if recorded_restore.get(field) != expected:
+            raise ValueError(f"recorded restore operation {field} does not replay")
+    rebuilt_evidence = cast(dict[str, JsonValue], rebuilt["evidence"])
+    rebuilt_evidence["restore_operation"] = cast(JsonValue, dict(recorded_restore))
     unsigned = {
         key: cast(JsonValue, value) for key, value in snapshot.items() if key != "artifact_sha256"
     }
@@ -170,6 +416,7 @@ async def verify_ibkr_qualification_evidence(
     live_store: QualificationEvidenceStore,
     restored_store: QualificationEvidenceStore,
     *,
+    restore_evidence: VerifiedIbkrRestoreEvidence,
     expectation: IbkrQualificationExpectation,
     configuration: IbkrNativeCaptureConfiguration,
 ) -> VerifiedIbkrCaptureQualification:
@@ -179,12 +426,15 @@ async def verify_ibkr_qualification_evidence(
         restored_store
     ):
         raise TypeError("qualification authority requires exact PostgreSQL evidence stores")
+    if not restore_evidence.authenticates(restored_store):
+        raise TypeError("qualification authority requires verifier-authenticated restore evidence")
 
     document, artifact_sha256, generated_at = _verify_ibkr_qualification_summary(path, expectation)
     await replay_ibkr_qualification_snapshot(
         document,
         live_store,
         restored_store,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
     )
@@ -313,6 +563,11 @@ def _derive_summary(
     generations = sorted({_integer(row, "connection_generation") for row in rows})
     if len(generations) != 2 or generations[1] != generations[0] + 1:
         raise ValueError("qualification requires one controlled generation transition")
+    transition_at = min(
+        _datetime(row, "received_time")
+        for row in rows
+        if _integer(row, "connection_generation") == generations[1]
+    )
 
     expected_ids = {str(item) for item in expectation.instruments}
     contracts = {str(item.instrument_id): item for item in expectation.contracts}
@@ -329,12 +584,13 @@ def _derive_summary(
     live_seen: set[tuple[int, str]] = set()
     request_ids: dict[tuple[int, str], set[int]] = defaultdict(set)
     side_times: dict[tuple[int, str, str], list[datetime]] = defaultdict(list)
-    first_new_generation_at: datetime | None = None
     stale_callbacks = 0
 
     for row in rows:
         generation = _integer(row, "connection_generation")
         received_at = _datetime(row, "received_time")
+        if generation == generations[0] and received_at >= transition_at:
+            stale_callbacks += 1
         payload = _object(row.get("payload"), "retained callback payload")
         listing_id = _string(payload, "listing_id")
         instrument_id = listing_to_instrument.get(listing_id)
@@ -344,14 +600,6 @@ def _derive_summary(
             raise ValueError(f"{instrument_id} retained callback conId mismatch")
         request_ids[(generation, instrument_id)].add(_integer(payload, "request_id"))
         callback_type = _string(payload, "callback_type")
-        if generation == generations[1] and first_new_generation_at is None:
-            first_new_generation_at = received_at
-        if (
-            generation == generations[0]
-            and first_new_generation_at is not None
-            and received_at >= first_new_generation_at
-        ):
-            stale_callbacks += 1
         if callback_type == "market_data_type":
             values = payload.get("callback_values")
             if isinstance(values, list) and values and values[0] == 1:
@@ -372,6 +620,10 @@ def _derive_summary(
             raise ValueError(f"{instrument_id} callback lacks authenticated ACTIVE evidence")
         side_times[(generation, instrument_id, side)].append(received_at)
 
+    if stale_callbacks:
+        raise ValueError(
+            f"{stale_callbacks} stale generation callbacks were retained after reconnect transition"
+        )
     if set(listing_to_instrument.values()) != expected_ids:
         raise ValueError("qualification configuration contract set is not exact")
     for generation in generations:
@@ -442,9 +694,14 @@ def _derive_summary(
             for generation in generations
             for time in side_times[(generation, instrument_id, "ask")]
         )
-        recent = max(bid[-1], ask[-1])
-        if window.ended_at - min(bid[-1], ask[-1]) > expectation.freshness_threshold:
-            raise ValueError(f"{instrument_id} retained quote evidence is stale")
+        terminal_bid = sorted(side_times[(generations[1], instrument_id, "bid")])
+        terminal_ask = sorted(side_times[(generations[1], instrument_id, "ask")])
+        recent = max(terminal_bid[-1], terminal_ask[-1])
+        if (
+            window.ended_at - min(terminal_bid[-1], terminal_ask[-1])
+            > expectation.freshness_threshold
+        ):
+            raise ValueError(f"{instrument_id} post-reconnect quote evidence is stale")
         instruments.append(
             {
                 "instrument_id": instrument_id,
@@ -457,9 +714,9 @@ def _derive_summary(
                 "bid_count": len(bid),
                 "ask_count": len(ask),
                 "first_bid_at": _iso(bid[0]),
-                "recent_bid_at": _iso(bid[-1]),
+                "recent_bid_at": _iso(terminal_bid[-1]),
                 "first_ask_at": _iso(ask[0]),
-                "recent_ask_at": _iso(ask[-1]),
+                "recent_ask_at": _iso(terminal_ask[-1]),
                 "recent_evidence_at": _iso(recent),
             }
         )

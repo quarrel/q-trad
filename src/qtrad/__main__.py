@@ -188,6 +188,7 @@ from qtrad.runtime.ibkr_qualification import write_qualification_artifact
 from qtrad.runtime.ibkr_qualification_evidence import (
     IbkrQualificationWindow,
     build_ibkr_qualification_snapshot,
+    verify_ibkr_restore_evidence,
 )
 from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
@@ -3373,20 +3374,29 @@ async def _verify_b3_qualification_from_databases(
     authority_paths: IbkrAuthorityPaths,
 ) -> VerifiedIbkrCaptureQualification:
     restore_url = settings.ibkr_qualification_restore_database_url
-    if restore_url is None:
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
         raise ValueError(
-            "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL is required for independent replay"
+            "hash-checked restore workflow URL and evidence are required for independent replay"
         )
     live_engine = _engine(settings)
     restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
     try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database="qtrad_ibkr",
+            expected_schema_head="0014",
+        )
         return await verify_b3_qualification_evidence_for_release(
             qualification_path,
             parent_release_path=release_path,
             parent_authority_paths=authority_paths,
             deployment=load_b3_deployment_descriptor(descriptor_path),
             live_store=PostgresAuditStore(live_engine),
-            restored_store=PostgresAuditStore(restored_engine),
+            restored_store=restored_store,
+            restore_evidence=restore_evidence,
         )
     finally:
         await live_engine.dispose()
@@ -3403,9 +3413,10 @@ async def _write_b3_qualification_snapshot(
     output_path: Path,
 ) -> dict[str, JsonValue]:
     restore_url = settings.ibkr_qualification_restore_database_url
-    if restore_url is None:
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
         raise ValueError(
-            "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL is required for snapshot replay"
+            "hash-checked restore workflow URL and evidence are required for snapshot replay"
         )
     deployment = load_b3_deployment_descriptor(descriptor_path)
     configuration, expectation = b3_qualification_expectation(
@@ -3416,9 +3427,17 @@ async def _write_b3_qualification_snapshot(
     live_engine = _engine(settings)
     restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
     try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database=expectation.database_name,
+            expected_schema_head=expectation.schema_head,
+        )
         payload = await build_ibkr_qualification_snapshot(
             PostgresAuditStore(live_engine),
-            PostgresAuditStore(restored_engine),
+            restored_store,
+            restore_evidence=restore_evidence,
             expectation=expectation,
             configuration=configuration,
             window=window,

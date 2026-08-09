@@ -61,23 +61,28 @@ and US Crude. The four new conIds and all contract fields must come from a fresh
 replayed capability-review/selection closure; the implementation does not guess them.
 
 B4 promotion, verification, and preflight remain fail-closed unless the qualification
-artifact is independently replayed against both the exact live capture database and a
-distinct disposable restore-verification database. A sealed qualification summary is
-not provenance and cannot mint the runtime-only capability. The read-only
-`ibkr-qualification-snapshot` command builds the create-only artifact from retained raw,
-canonical, run, health, persistence and reconnect evidence. The separate
-`ibkr-qualification-verify` command re-queries both databases and is the only production
-path that can mint `VerifiedIbkrCaptureQualification`.
+artifact is independently replayed against the exact live capture database and a fresh,
+hash-checked disposable restore. A sealed qualification summary, restore database name,
+API response, fake store or copied database is not provenance and cannot mint the
+runtime-only capability.
 
-Set `QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL` only for that bounded snapshot or
-verification process. It must identify a disposable database named
-`qtrad_ibkr_restore_verify_*`; the verifier compares its retained evidence byte-for-byte
-with `qtrad_ibkr` and rejects the live database, an arbitrary database, schema drift, or
-changed evidence. The qualifying collector run must be cleanly stopped before the
-backup so its final metrics and last healthy, post-reconnect snapshot are immutable in
-the run record and replay exactly after restore. The operator API exposes the same
-bounded evidence query at `/api/v1/capture/qualification-evidence`; that read-only
-endpoint never grants qualification authority.
+Run qualification commands only as the child command of
+`qtrad-ibkr-postgres-restore-verify`. The wrapper checks the selected backup's recorded
+SHA-256 before `pg_restore --exit-on-error`, marks the disposable
+`qtrad_ibkr_restore_verify_*` database with that archive identity, writes create-only
+restore evidence binding source database, restored database, schema, archive SHA and
+completion, exports the ephemeral restore URL/evidence path, executes the bounded
+qualification command while the database exists, and then drops it. The application
+re-hashes the archive, authenticates the database marker and exact evidence before any
+snapshot or verifier can proceed. The first pass selects the latest complete archive;
+set `QTRAD_IBKR_RESTORE_ARCHIVE` to the artifact's exact archive path when independently
+replaying that same snapshot.
+
+The qualifying collector run must be cleanly stopped before backup so its final metrics
+and last healthy, post-reconnect snapshot are immutable in the run record and replay
+exactly after restore. The operator API exposes the same bounded evidence query at
+`/api/v1/capture/qualification-evidence`; that read-only endpoint never grants
+qualification authority.
 
 After genuine B3 evidence is available, `qtrad deployment ibkr-promote
 --policy b4-exact-six` requires the authenticated B3 release, its five authority files,

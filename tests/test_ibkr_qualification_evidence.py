@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
@@ -18,6 +19,7 @@ from qtrad.domain.ibkr_qualification import (
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
+from qtrad.runtime import ibkr_qualification_evidence as evidence_runtime
 from qtrad.runtime.ibkr_native_capture import IbkrNativeCaptureConfiguration
 from qtrad.runtime.ibkr_qualification import (
     IbkrQualificationExpectation,
@@ -27,6 +29,7 @@ from qtrad.runtime.ibkr_qualification_evidence import (
     IbkrQualificationWindow,
     build_ibkr_qualification_snapshot,
     verify_ibkr_qualification_evidence,
+    verify_ibkr_restore_evidence,
 )
 
 _START = datetime(2026, 8, 10, 0, 0, tzinfo=UTC)
@@ -163,10 +166,24 @@ class _Store:
         market_data_type: int = 1,
         metrics_failed: int = 0,
         reconnect_completed: bool = True,
+        late_generation_one: bool = False,
+        generation_two_stale: bool = False,
+        restore_marker: str | None = None,
     ) -> None:
         self.database_name = database_name
         self.configuration = configuration
         self.rows = _retained_rows(configuration)
+        if late_generation_one:
+            self.rows[5]["received_time"] = _END - timedelta(seconds=5)
+            self.rows[5]["event_time"] = _END - timedelta(seconds=5)
+        if generation_two_stale:
+            for row in self.rows:
+                if (
+                    row["connection_generation"] == 2
+                    and cast(dict[str, Any], row["payload"])["callback_type"] == "tick_price"
+                ):
+                    row["received_time"] = _END - timedelta(minutes=2)
+                    row["event_time"] = _END - timedelta(minutes=2)
         if mutate_row:
             self.rows[-1]["payload_sha256"] = "f" * 64
         for row in self.rows:
@@ -175,13 +192,20 @@ class _Store:
                 payload["callback_values"] = [market_data_type]
         self.metrics_failed = metrics_failed
         self.reconnect_completed = reconnect_completed
+        self.restore_marker = restore_marker
 
     async def query(
         self, statement: str, parameters: Mapping[str, object] | None = None
     ) -> list[dict[str, Any]]:
         del parameters
         if "current_database()" in statement:
-            return [{"database_name": self.database_name, "schema_head": "0014"}]
+            return [
+                {
+                    "database_name": self.database_name,
+                    "schema_head": "0014",
+                    "restore_marker": self.restore_marker,
+                }
+            ]
         if "FROM raw.market_messages" in statement:
             return self.rows
         if "FROM ops.capture_session_metrics" in statement:
@@ -234,6 +258,114 @@ def _window() -> IbkrQualificationWindow:
     return IbkrQualificationWindow(_SESSION, _START, _END, _GENERATED)
 
 
+def _fixture_restore_evidence(
+    store: _Store,
+) -> evidence_runtime.VerifiedIbkrRestoreEvidence:
+    return evidence_runtime.VerifiedIbkrRestoreEvidence._create(
+        evidence_runtime._VERIFIED_RESTORE_EVIDENCE_TOKEN,
+        archive_path=Path("/srv/qtrad/postgres/backups/qtrad-ibkr-fixture.dump"),
+        archive_sha256="a" * 64,
+        artifact_sha256="b" * 64,
+        source_database_name="qtrad_ibkr",
+        restored_database_name=store.database_name,
+        schema_head="0014",
+        started_at=_END + timedelta(minutes=1),
+        completed_at=_END + timedelta(minutes=2),
+        store=store,
+    )
+
+
+def _restore_artifact(
+    tmp_path: Path,
+    *,
+    restored_database_name: str,
+) -> tuple[Path, Path, str]:
+    backup_root = tmp_path / "backups"
+    backup_root.mkdir()
+    evidence_root = tmp_path / "restore-evidence"
+    evidence_root.mkdir()
+    archive = backup_root / "qtrad-ibkr-20260810T010100Z.dump"
+    archive.write_bytes(b"fixture pg_restore archive")
+    archive_sha256 = hashlib.sha256(archive.read_bytes()).hexdigest()
+    Path(f"{archive}.sha256").write_text(
+        f"{archive_sha256}  {archive}\n",
+        encoding="utf-8",
+    )
+    marker = f"qtrad-ibkr-postgres-restore-v1:{restored_database_name}:{archive_sha256}"
+    unsigned = {
+        "contract": "qtrad-ibkr-postgres-restore-v1",
+        "archive_path": str(archive),
+        "archive_sha256": archive_sha256,
+        "source_database_name": "qtrad_ibkr",
+        "restored_database_name": restored_database_name,
+        "schema_head": "0014",
+        "started_at": (_END + timedelta(minutes=1)).isoformat(),
+        "completed_at": (_END + timedelta(minutes=2)).isoformat(),
+        "restore_marker": marker,
+    }
+    artifact_sha256 = hashlib.sha256(
+        json.dumps(unsigned, separators=(",", ":"), sort_keys=True).encode()
+    ).hexdigest()
+    evidence_path = evidence_root / "restore.json"
+    evidence_path.write_text(
+        json.dumps({**unsigned, "artifact_sha256": artifact_sha256}),
+        encoding="utf-8",
+    )
+    return evidence_path, backup_root, marker
+
+
+@pytest.mark.asyncio
+async def test_hash_checked_restore_evidence_authenticates_marked_database(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = _configuration()
+    restored_name = "qtrad_ibkr_restore_verify_fixture"
+    evidence_path, backup_root, marker = _restore_artifact(
+        tmp_path,
+        restored_database_name=restored_name,
+    )
+    restored = _Store(restored_name, configuration, restore_marker=marker)
+    monkeypatch.setattr(evidence_runtime, "_has_postgres_evidence_provenance", lambda _value: True)
+    monkeypatch.setattr(evidence_runtime, "_IBKR_BACKUP_ROOT", backup_root)
+    monkeypatch.setattr(evidence_runtime, "_RESTORE_EVIDENCE_ROOT", evidence_path.parent)
+
+    authority = await verify_ibkr_restore_evidence(
+        evidence_path,
+        restored,
+        expected_source_database="qtrad_ibkr",
+        expected_schema_head="0014",
+    )
+
+    assert authority.authenticates(restored)
+    assert authority.archive_sha256 in marker
+
+
+@pytest.mark.asyncio
+async def test_correctly_named_clone_without_restore_marker_cannot_qualify(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = _configuration()
+    restored_name = "qtrad_ibkr_restore_verify_fake"
+    evidence_path, backup_root, _marker = _restore_artifact(
+        tmp_path,
+        restored_database_name=restored_name,
+    )
+    clone = _Store(restored_name, configuration)
+    monkeypatch.setattr(evidence_runtime, "_has_postgres_evidence_provenance", lambda _value: True)
+    monkeypatch.setattr(evidence_runtime, "_IBKR_BACKUP_ROOT", backup_root)
+    monkeypatch.setattr(evidence_runtime, "_RESTORE_EVIDENCE_ROOT", evidence_path.parent)
+
+    with pytest.raises(ValueError, match="workflow provenance"):
+        await verify_ibkr_restore_evidence(
+            evidence_path,
+            clone,
+            expected_source_database="qtrad_ibkr",
+            expected_schema_head="0014",
+        )
+
+
 @pytest.mark.asyncio
 async def test_independent_live_and_restore_replay_mints_opaque_capability(
     tmp_path: Path,
@@ -243,24 +375,24 @@ async def test_independent_live_and_restore_replay_mints_opaque_capability(
     expectation = _expectation(configuration)
     live = _Store("qtrad_ibkr", configuration)
     restored = _Store("qtrad_ibkr_restore_verify_fixture", configuration)
+    restore_evidence = _fixture_restore_evidence(restored)
     payload = await build_ibkr_qualification_snapshot(
         live,
         restored,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
         window=_window(),
     )
     path = tmp_path / "qualification.json"
     write_qualification_artifact(path, payload)
-    monkeypatch.setattr(
-        "qtrad.runtime.ibkr_qualification_evidence._has_postgres_evidence_provenance",
-        lambda _value: True,
-    )
+    monkeypatch.setattr(evidence_runtime, "_has_postgres_evidence_provenance", lambda _value: True)
 
     capability = await verify_ibkr_qualification_evidence(
         path,
         live,
         restored,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
     )
@@ -271,14 +403,50 @@ async def test_independent_live_and_restore_replay_mints_opaque_capability(
 
 
 @pytest.mark.asyncio
+async def test_verifier_replays_through_a_fresh_disposable_restore(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    configuration = _configuration()
+    expectation = _expectation(configuration)
+    live = _Store("qtrad_ibkr", configuration)
+    snapshot_restore = _Store("qtrad_ibkr_restore_verify_snapshot", configuration)
+    snapshot = await build_ibkr_qualification_snapshot(
+        live,
+        snapshot_restore,
+        restore_evidence=_fixture_restore_evidence(snapshot_restore),
+        expectation=expectation,
+        configuration=configuration,
+        window=_window(),
+    )
+    path = tmp_path / "qualification.json"
+    write_qualification_artifact(path, snapshot)
+
+    verifier_restore = _Store("qtrad_ibkr_restore_verify_verifier", configuration)
+    monkeypatch.setattr(evidence_runtime, "_has_postgres_evidence_provenance", lambda _value: True)
+    capability = await verify_ibkr_qualification_evidence(
+        path,
+        live,
+        verifier_restore,
+        restore_evidence=_fixture_restore_evidence(verifier_restore),
+        expectation=expectation,
+        configuration=configuration,
+    )
+
+    assert has_verified_ibkr_capture_qualification_provenance(capability)
+
+
+@pytest.mark.asyncio
 async def test_fixture_store_cannot_mint_production_authority(tmp_path: Path) -> None:
     configuration = _configuration()
     expectation = _expectation(configuration)
     live = _Store("qtrad_ibkr", configuration)
     restored = _Store("qtrad_ibkr_restore_verify_fixture", configuration)
+    restore_evidence = _fixture_restore_evidence(restored)
     payload = await build_ibkr_qualification_snapshot(
         live,
         restored,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
         window=_window(),
@@ -291,6 +459,7 @@ async def test_fixture_store_cannot_mint_production_authority(tmp_path: Path) ->
             path,
             live,
             restored,
+            restore_evidence=restore_evidence,
             expectation=expectation,
             configuration=configuration,
         )
@@ -299,10 +468,13 @@ async def test_fixture_store_cannot_mint_production_authority(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_restore_replay_rejects_changed_retained_callback() -> None:
     configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration)
+    restored = _Store("qtrad_ibkr_restore_verify_fixture", configuration, mutate_row=True)
     with pytest.raises(ValueError, match="do not exactly replay"):
         await build_ibkr_qualification_snapshot(
-            _Store("qtrad_ibkr", configuration),
-            _Store("qtrad_ibkr_restore_verify_fixture", configuration, mutate_row=True),
+            live,
+            restored,
+            restore_evidence=_fixture_restore_evidence(restored),
             expectation=_expectation(configuration),
             configuration=configuration,
             window=_window(),
@@ -318,9 +490,11 @@ async def test_verifier_rejects_artifact_not_replayed_by_current_databases(
     expectation = _expectation(configuration)
     live = _Store("qtrad_ibkr", configuration)
     restored = _Store("qtrad_ibkr_restore_verify_fixture", configuration)
+    restore_evidence = _fixture_restore_evidence(restored)
     payload = await build_ibkr_qualification_snapshot(
         live,
         restored,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=configuration,
         window=_window(),
@@ -330,16 +504,14 @@ async def test_verifier_rejects_artifact_not_replayed_by_current_databases(
     document = json.loads(path.read_text(encoding="utf-8"))
     document["evidence"]["retained_rows_sha256"] = "9" * 64
     path.write_text(json.dumps(document), encoding="utf-8")
-    monkeypatch.setattr(
-        "qtrad.runtime.ibkr_qualification_evidence._has_postgres_evidence_provenance",
-        lambda _value: True,
-    )
+    monkeypatch.setattr(evidence_runtime, "_has_postgres_evidence_provenance", lambda _value: True)
 
     with pytest.raises(ValueError, match="artifact hash does not replay"):
         await verify_ibkr_qualification_evidence(
             path,
             live,
             restored,
+            restore_evidence=restore_evidence,
             expectation=expectation,
             configuration=configuration,
         )
@@ -348,10 +520,13 @@ async def test_verifier_rejects_artifact_not_replayed_by_current_databases(
 @pytest.mark.asyncio
 async def test_restore_replay_rejects_same_database_identity() -> None:
     configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration)
+    restored = _Store("qtrad_ibkr", configuration)
     with pytest.raises(ValueError, match="restore-verify database"):
         await build_ibkr_qualification_snapshot(
-            _Store("qtrad_ibkr", configuration),
-            _Store("qtrad_ibkr", configuration),
+            live,
+            restored,
+            restore_evidence=_fixture_restore_evidence(restored),
             expectation=_expectation(configuration),
             configuration=configuration,
             window=_window(),
@@ -361,9 +536,16 @@ async def test_restore_replay_rejects_same_database_identity() -> None:
 @pytest.mark.asyncio
 async def test_replayed_evidence_reports_delayed_market_data() -> None:
     configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration, market_data_type=3)
+    restored = _Store(
+        "qtrad_ibkr_restore_verify_fixture",
+        configuration,
+        market_data_type=3,
+    )
     snapshot = await build_ibkr_qualification_snapshot(
-        _Store("qtrad_ibkr", configuration, market_data_type=3),
-        _Store("qtrad_ibkr_restore_verify_fixture", configuration, market_data_type=3),
+        live,
+        restored,
+        restore_evidence=_fixture_restore_evidence(restored),
         expectation=_expectation(configuration),
         configuration=configuration,
         window=_window(),
@@ -375,9 +557,16 @@ async def test_replayed_evidence_reports_delayed_market_data() -> None:
 @pytest.mark.asyncio
 async def test_replayed_evidence_reports_persistence_failure() -> None:
     configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration, metrics_failed=1)
+    restored = _Store(
+        "qtrad_ibkr_restore_verify_fixture",
+        configuration,
+        metrics_failed=1,
+    )
     snapshot = await build_ibkr_qualification_snapshot(
-        _Store("qtrad_ibkr", configuration, metrics_failed=1),
-        _Store("qtrad_ibkr_restore_verify_fixture", configuration, metrics_failed=1),
+        live,
+        restored,
+        restore_evidence=_fixture_restore_evidence(restored),
         expectation=_expectation(configuration),
         configuration=configuration,
         window=_window(),
@@ -388,15 +577,64 @@ async def test_replayed_evidence_reports_persistence_failure() -> None:
 @pytest.mark.asyncio
 async def test_replayed_evidence_reports_uncontrolled_reconnect() -> None:
     configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration, reconnect_completed=False)
+    restored = _Store(
+        "qtrad_ibkr_restore_verify_fixture",
+        configuration,
+        reconnect_completed=False,
+    )
     snapshot = await build_ibkr_qualification_snapshot(
-        _Store("qtrad_ibkr", configuration, reconnect_completed=False),
-        _Store(
-            "qtrad_ibkr_restore_verify_fixture",
-            configuration,
-            reconnect_completed=False,
-        ),
+        live,
+        restored,
+        restore_evidence=_fixture_restore_evidence(restored),
         expectation=_expectation(configuration),
         configuration=configuration,
         window=_window(),
     )
     assert snapshot["reason_codes"] == ["RECONNECT_EVIDENCE_INCOMPLETE"]
+
+
+@pytest.mark.asyncio
+async def test_timestamp_interleaved_stale_generation_callback_is_rejected() -> None:
+    configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration, late_generation_one=True)
+    restored = _Store(
+        "qtrad_ibkr_restore_verify_fixture",
+        configuration,
+        late_generation_one=True,
+    )
+    snapshot = await build_ibkr_qualification_snapshot(
+        live,
+        restored,
+        restore_evidence=_fixture_restore_evidence(restored),
+        expectation=_expectation(configuration),
+        configuration=configuration,
+        window=_window(),
+    )
+
+    assert snapshot["result"] == "NOT_QUALIFIED"
+    assert snapshot["reason_codes"] == ["RECONNECT_EVIDENCE_INCOMPLETE"]
+    assert "stale generation callbacks" in cast(str, snapshot["detail"])
+
+
+@pytest.mark.asyncio
+async def test_terminal_freshness_uses_post_reconnect_generation_only() -> None:
+    configuration = _configuration()
+    live = _Store("qtrad_ibkr", configuration, generation_two_stale=True)
+    restored = _Store(
+        "qtrad_ibkr_restore_verify_fixture",
+        configuration,
+        generation_two_stale=True,
+    )
+    snapshot = await build_ibkr_qualification_snapshot(
+        live,
+        restored,
+        restore_evidence=_fixture_restore_evidence(restored),
+        expectation=_expectation(configuration),
+        configuration=configuration,
+        window=_window(),
+    )
+
+    assert snapshot["result"] == "NOT_QUALIFIED"
+    assert snapshot["reason_codes"] == ["RECONNECT_EVIDENCE_INCOMPLETE"]
+    assert "post-reconnect quote evidence is stale" in cast(str, snapshot["detail"])

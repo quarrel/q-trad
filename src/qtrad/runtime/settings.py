@@ -50,6 +50,7 @@ class Settings(BaseSettings):
     ibkr_capture_freshness_seconds: float = 60.0
     ibkr_capture_queue_capacity: int = 50_000
     ibkr_qualification_restore_database_url: str | None = None
+    ibkr_qualification_restore_evidence_path: Path | None = None
 
     @model_validator(mode="after")
     def validate_ibkr_stack(self) -> "Settings":

@@ -615,13 +615,17 @@ This is the highest-value near-term outcome of Lane B.
 ## Qualification evidence software boundary
 
 The B3-to-B4 transition uses two separate read-only steps. A snapshot builder reads one
-bounded capture session from the live `qtrad_ibkr` database and from a distinct
-`qtrad_ibkr_restore_verify_*` disposable restore. It retains raw/canonical chronology,
-durable counters, current health, run identity and controlled reconnect evidence in a
-create-only artifact. A separate verifier re-queries both databases and compares the
-entire retained evidence before it can mint the runtime-only qualification capability.
-The qualifying collector run is stopped cleanly before backup; its final counters and
-last healthy post-reconnect snapshot are retained in immutable terminal run detail.
+bounded capture session from the live `qtrad_ibkr` database and a fresh disposable
+restore created by the hash-checking restore workflow. That workflow binds the archive
+SHA-256, source database, restored database, migration head and completion in create-only
+evidence and marks the temporary database with the same archive identity. The builder
+retains raw/canonical chronology, durable counters, current health, run identity and
+controlled reconnect evidence in a create-only artifact. A separate verifier repeats the
+hash-checked restore, re-queries both databases and compares the entire retained evidence
+before it can mint the runtime-only qualification capability. A named clone or caller-
+supplied restore URL is insufficient. The qualifying collector run is stopped cleanly
+before backup; its final counters and last healthy post-reconnect snapshot are retained
+in immutable terminal run detail.
 
 The artifact hash proves content identity only. A file-only check, API response, fake
 store, closed-market connection or operator assertion cannot grant qualification. Real

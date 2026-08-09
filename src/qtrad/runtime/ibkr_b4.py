@@ -45,6 +45,7 @@ from qtrad.runtime.ibkr_qualification import (
 )
 from qtrad.runtime.ibkr_qualification_evidence import (
     QualificationEvidenceStore,
+    VerifiedIbkrRestoreEvidence,
     verify_ibkr_qualification_evidence,
 )
 from qtrad.runtime.ibkr_release import (
@@ -624,6 +625,7 @@ async def verify_b3_qualification_evidence_for_release(
     deployment: IbkrB3DeploymentDescriptor,
     live_store: QualificationEvidenceStore,
     restored_store: QualificationEvidenceStore,
+    restore_evidence: VerifiedIbkrRestoreEvidence,
 ) -> VerifiedB3Qualification:
     """Mint B3 authority only after exact live/restored PostgreSQL replay."""
 
@@ -636,6 +638,7 @@ async def verify_b3_qualification_evidence_for_release(
         qualification_path,
         live_store,
         restored_store,
+        restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=parent,
     )
