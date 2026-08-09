@@ -60,19 +60,19 @@ been frozen. The exact-six policy is AUD/USD, EUR/USD, Australia 200, US 500, Go
 and US Crude. The four new conIds and all contract fields must come from a fresh,
 replayed capability-review/selection closure; the implementation does not guess them.
 
-Use `qtrad deployment ibkr-promote --policy b4-exact-six` only with the authenticated
-B3 release, its five authority files, its immutable qualification artifact, the B3
-deployment descriptor that binds runtime identities, and a fresh exact-six authority
-closure. The qualification artifact is independently replayed into a runtime-only
-capability; no JSON, fixture, or operator flag can construct that capability in the
-production CLI. The B4 release records the B3 release and qualification hashes and is
-published create-only under `qtrad-ibkr-native-release-v2`.
+B4 promotion, verification, and preflight are intentionally fail-closed until the
+live snapshot tranche supplies independently replayable immutable evidence. A sealed
+qualification summary is not provenance and cannot mint the runtime-only capability.
+Once that evidence reader exists, `qtrad deployment ibkr-promote --policy b4-exact-six`
+will require the authenticated B3 release, its five authority files, the B3 deployment
+descriptor, and fresh exact-six authority. The B4 release will record parent release
+and qualification identities and remain create-only under
+`qtrad-ibkr-native-release-v2`.
 
-`ibkr-verify --policy b4-exact-six` replays the same parent qualification and both
-provider-authority closures. `ibkr-preflight --policy b4-exact-six` reads those
-absolute paths from `config/ibkr-b4-deployment.toml.example` and verifies the exact-six
-release while preserving the existing service, database, port, client-ID, and
-checkpoint topology.
+The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
+listing identities, conIds, and immutable listing semantics. The other four contracts
+must come from the fresh replayed authority closure. B4 continues to reuse the existing
+service, database, port, client-ID, and checkpoint topology.
 
 These commands do not create a real B4 release in this software phase and do not
 qualify B3 or B4. Closed-market connectivity is not qualification evidence. Real

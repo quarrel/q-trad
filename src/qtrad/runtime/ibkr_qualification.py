@@ -227,17 +227,9 @@ def verify_ibkr_capture_qualification(
     if not ended_at <= backup_at <= generated_at:
         raise ValueError("IBKR qualification backup/restore chronology is invalid")
 
-    return VerifiedIbkrCaptureQualification._from_verified_artifact(
-        stage=expectation.stage,
-        artifact_sha256=artifact_sha256,
-        release_contract=expectation.release_contract,
-        release_sha256=expectation.release_sha256,
-        configuration_hash=expectation.configuration_hash,
-        capture_source_id=expectation.capture_source_id,
-        universe_id=expectation.universe_id,
-        instruments=expectation.instruments,
-        contracts=expectation.contracts,
-        qualified_at=generated_at,
+    raise ValueError(
+        "IBKR qualification summaries cannot authorise promotion until independently "
+        "replayable live evidence is implemented"
     )
 
 

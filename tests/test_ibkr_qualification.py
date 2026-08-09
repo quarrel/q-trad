@@ -10,7 +10,11 @@ from typing import cast
 import pytest
 
 from qtrad.domain.events import JsonValue
-from qtrad.domain.ibkr_qualification import IbkrQualificationStage, IbkrQualifiedContract
+from qtrad.domain.ibkr_qualification import (
+    IbkrQualificationStage,
+    IbkrQualifiedContract,
+    VerifiedIbkrCaptureQualification,
+)
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.runtime.ibkr_qualification import (
     IbkrQualificationExpectation,
@@ -139,15 +143,19 @@ def _write(path: Path, payload: dict[str, JsonValue]) -> None:
     write_qualification_artifact(path, payload)
 
 
-def test_verified_b3_qualification_yields_runtime_capability(tmp_path: Path) -> None:
+def test_rehashed_self_attested_qualification_cannot_yield_runtime_capability(
+    tmp_path: Path,
+) -> None:
     path = tmp_path / "qualification.json"
     _write(path, _payload())
 
-    verified = verify_ibkr_capture_qualification(path, _expectation())
+    with pytest.raises(ValueError, match="independently replayable live evidence"):
+        verify_ibkr_capture_qualification(path, _expectation())
 
-    assert verified.stage is IbkrQualificationStage.B3_EXACT_TWO
-    assert verified.configuration_hash == "2" * 64
-    assert verified.instruments == _IDS
+
+def test_verified_qualification_rejects_ordinary_construction() -> None:
+    with pytest.raises(TypeError, match="evidence-replaying verifier"):
+        VerifiedIbkrCaptureQualification()
 
 
 @pytest.mark.parametrize(

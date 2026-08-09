@@ -285,6 +285,32 @@ def _authenticate_provider_authority(
     return trusted, before
 
 
+def _require_b3_contract_inheritance(
+    candidate: IbkrNativeCaptureConfiguration,
+    parent: IbkrNativeCaptureConfiguration,
+) -> None:
+    """Require B4 to retain the exact listings and conIds qualified in B3."""
+
+    candidate_by_instrument = {item.instrument_id: item for item in candidate.listings}
+    parent_by_instrument = {item.instrument_id: item for item in parent.listings}
+    for raw_instrument_id, _external_id, _con_id in B3_TARGETS:
+        instrument_id = InstrumentId(raw_instrument_id)
+        candidate_listing = candidate_by_instrument.get(instrument_id)
+        parent_listing = parent_by_instrument.get(instrument_id)
+        if candidate_listing is None or parent_listing is None:
+            raise ValueError(f"B4 does not preserve B3-qualified listing for {instrument_id}")
+        mismatches = listing_mismatches(candidate_listing, parent_listing)
+        if mismatches:
+            raise ValueError(
+                f"B4 does not preserve B3-qualified listing for {instrument_id}: "
+                + ", ".join(mismatches)
+            )
+        candidate_con_id = candidate.contract_evidence[candidate_listing.listing_id].con_id
+        parent_con_id = parent.contract_evidence[parent_listing.listing_id].con_id
+        if candidate_con_id != parent_con_id:
+            raise ValueError(f"B4 does not preserve B3-qualified conId for {instrument_id}")
+
+
 def promote_b4_configuration(
     source: IbkrNativeCaptureConfiguration,
     *,
@@ -334,6 +360,7 @@ def promote_b4_configuration(
     )
     if len(configuration.listings) != 6:
         raise ValueError("B4 release must contain exactly six listings")
+    _require_b3_contract_inheritance(configuration, parent)
     return IbkrB4Promotion(
         configuration=configuration,
         authority=authority,
@@ -407,6 +434,7 @@ def load_authenticated_b4_configuration(
         }
     ):
         raise ValueError("B4 parent qualification does not match authenticated B3 release")
+    _require_b3_contract_inheritance(configuration, parent)
     return configuration
 
 

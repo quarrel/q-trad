@@ -246,16 +246,16 @@ def _install_authority(
 def _qualification(
     parent: IbkrNativeCaptureConfiguration, parent_path: Path
 ) -> VerifiedB3Qualification:
-    return VerifiedB3Qualification._from_verified_artifact(
-        stage=IbkrQualificationStage.B3_EXACT_TWO,
-        artifact_sha256="9" * 64,
-        release_contract="qtrad-ibkr-native-release-v1",
-        release_sha256=sha256_path(parent_path, label="test parent"),
-        configuration_hash=parent.configuration_hash,
-        capture_source_id="ibkr-paper-v1",
-        universe_id="capture-ibkr-v1",
-        instruments=frozenset((InstrumentId("fx:aud-usd"), InstrumentId("index:australia-200"))),
-        contracts=tuple(
+    values: dict[str, object] = {
+        "stage": IbkrQualificationStage.B3_EXACT_TWO,
+        "artifact_sha256": "9" * 64,
+        "release_contract": "qtrad-ibkr-native-release-v1",
+        "release_sha256": sha256_path(parent_path, label="test parent"),
+        "configuration_hash": parent.configuration_hash,
+        "capture_source_id": "ibkr-paper-v1",
+        "universe_id": "capture-ibkr-v1",
+        "instruments": frozenset((InstrumentId("fx:aud-usd"), InstrumentId("index:australia-200"))),
+        "contracts": tuple(
             IbkrQualifiedContract(
                 instrument_id=listing.instrument_id,
                 listing_id=listing.listing_id,
@@ -263,8 +263,34 @@ def _qualification(
             )
             for listing in parent.listings
         ),
-        qualified_at=_NOW,
-    )
+        "qualified_at": _NOW,
+    }
+    capability = object.__new__(VerifiedB3Qualification)
+    for name, value in values.items():
+        object.__setattr__(capability, f"_{name}", value)
+    return capability
+
+
+def _replace_qualification(
+    qualification: VerifiedB3Qualification, **changes: object
+) -> VerifiedB3Qualification:
+    values = {
+        "stage": qualification.stage,
+        "artifact_sha256": qualification.artifact_sha256,
+        "release_contract": qualification.release_contract,
+        "release_sha256": qualification.release_sha256,
+        "configuration_hash": qualification.configuration_hash,
+        "capture_source_id": qualification.capture_source_id,
+        "universe_id": qualification.universe_id,
+        "instruments": qualification.instruments,
+        "contracts": qualification.contracts,
+        "qualified_at": qualification.qualified_at,
+    }
+    values.update(changes)
+    replacement = object.__new__(VerifiedB3Qualification)
+    for name, value in values.items():
+        object.__setattr__(replacement, f"_{name}", value)
+    return replacement
 
 
 def _setup(
@@ -309,6 +335,38 @@ def test_b4_promotes_exact_six_only_from_verified_b3_capability(
     assert {item.instrument_id for item in promotion.configuration.listings} == B4_INSTRUMENTS
     assert promotion.parent_release.qualification_artifact_sha256 == "9" * 64
     assert promotion.parent_release.artifact_sha256 == qualification.release_sha256
+    inherited = {
+        (
+            listing.instrument_id,
+            listing.listing_id,
+            promotion.configuration.contract_evidence[listing.listing_id].con_id,
+        )
+        for listing in promotion.configuration.listings
+        if listing.instrument_id in qualification.instruments
+    }
+    assert inherited == {
+        (item.instrument_id, item.listing_id, item.con_id) for item in qualification.contracts
+    }
+
+
+def test_b4_rejects_changed_con_id_for_b3_inherited_contract(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source, _parent, parent_path, b4_paths, b3_paths, qualification = _setup(tmp_path, monkeypatch)
+    aud = next(item for item in source.listings if str(item.instrument_id) == "fx:aud-usd")
+    evidence = dict(source.contract_evidence)
+    evidence[aud.listing_id] = replace(evidence[aud.listing_id], con_id=901)
+    changed_source = IbkrNativeCaptureConfiguration.from_reviewed(source.listings, evidence)
+    _install_authority(monkeypatch, changed_source)
+
+    with pytest.raises(ValueError, match="does not preserve B3-qualified conId"):
+        promote_b4_configuration(
+            changed_source,
+            authority_paths=b4_paths,
+            parent_release_path=parent_path,
+            parent_authority_paths=b3_paths,
+            qualification=qualification,
+        )
 
 
 def test_b4_rejects_mismatched_b3_qualification(
@@ -317,7 +375,7 @@ def test_b4_rejects_mismatched_b3_qualification(
     source, _parent_config, parent_path, b4_paths, b3_paths, qualification = _setup(
         tmp_path, monkeypatch
     )
-    bad = replace(qualification, configuration_hash="8" * 64)
+    bad = _replace_qualification(qualification, configuration_hash="8" * 64)
 
     with pytest.raises(ValueError, match="matching independently verified"):
         promote_b4_configuration(
@@ -336,7 +394,7 @@ def test_b4_rejects_qualification_contract_identity_mismatch(
         tmp_path, monkeypatch
     )
     first = qualification.contracts[0]
-    bad = replace(
+    bad = _replace_qualification(
         qualification,
         contracts=(replace(first, con_id=first.con_id + 1), *qualification.contracts[1:]),
     )
