@@ -190,6 +190,21 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "Requires=qtrad-ibkr-postgres.service" in restore_service
 
 
+def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    api = (ibkr / "qtrad-ibkr-api.service.example").read_text()
+    ingest = (ibkr / "qtrad-ibkr-ingest.service.example").read_text()
+
+    assert "NoNewPrivileges=true" in api
+    assert "NoNewPrivileges=true" in ingest
+    assert "ExecStop=/bin/bash -c 'exec /usr/bin/docker stop --timeout 30 qtrad-ibkr-api'" in api
+    assert (
+        "ExecStop=/bin/bash -c 'exec /usr/bin/docker stop --timeout 90 qtrad-ibkr-ingest'" in ingest
+    )
+    assert "ExecStop=/usr/bin/docker" not in api
+    assert "ExecStop=/usr/bin/docker" not in ingest
+
+
 def test_ibkr_ingest_accepts_authenticated_gateway_listener_shape() -> None:
     ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
     wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
