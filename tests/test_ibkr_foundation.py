@@ -8,12 +8,13 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
 import qtrad.runtime.ibkr_foundation as foundation_runtime
 import qtrad.runtime.provider_history as provider_history_runtime
+import qtrad.runtime.r2_verification as r2_verification_runtime
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import (
@@ -244,6 +245,8 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "g2-observations",
+        "g2-panel",
         "pre-holdout-target",
     }
     assert all(
@@ -317,6 +320,17 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert isinstance(blind_build.targets, R2OutcomeBlindTargetView)
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
 
+    _blind_build, build_id, g2_authority = (
+        foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
+            bundle,
+            holdout_target_source=holdout_source,
+        )
+    )
+    assert g2_authority.foundation_bundle_id == build_id
+    assert not hasattr(foundation_runtime, "verify_ibkr_g2_feature_source")
+    with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
+        r2_verification_runtime.verify_confirmatory_g2_feature_source(cast(Any, g2_authority))
+
 
 def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
@@ -346,6 +360,8 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
         "causal-metadata",
         "blind-observations",
         "blind-panel",
+        "g2-observations",
+        "g2-panel",
         "pre-holdout-target",
     }
     for kind in extension_kinds:

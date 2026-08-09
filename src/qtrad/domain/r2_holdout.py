@@ -1677,6 +1677,118 @@ class R2OutcomeBlindPanelView:
 
 
 @dataclass(frozen=True, slots=True)
+class R2G2ObservationView:
+    """Outcome-free market observations available to causal G2 feature building."""
+
+    dataset_id: str
+    rows: tuple[ObservationRow, ...]
+    configuration: Mapping[str, JsonValue]
+    source_dataset_ids: tuple[str, ...]
+    selection_policies: Mapping[str, JsonValue]
+    holdout_range: tuple[datetime, datetime]
+    projection_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-g2-observations-v1"
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    @classmethod
+    def compute_projection_id(
+        cls,
+        *,
+        source_dataset_id: str,
+        holdout_range: tuple[datetime, datetime],
+        rows: Sequence[ObservationRow],
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": cls.SCHEMA_VERSION,
+                "source_dataset_id": source_dataset_id,
+                "holdout_range": [item.isoformat() for item in holdout_range],
+                "rows": [row.as_json() for row in rows],
+            }
+        )
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: ObservationDataset,
+        *,
+        holdout_range: tuple[datetime, datetime],
+    ) -> R2G2ObservationView:
+        rows = tuple(row for row in dataset.rows if row.interval_end <= holdout_range[1])
+        return cls(
+            dataset_id=dataset.dataset_id,
+            rows=rows,
+            configuration=dataset.configuration,
+            source_dataset_ids=dataset.source_dataset_ids,
+            selection_policies=dataset.selection_policies,
+            holdout_range=holdout_range,
+            projection_id=cls.compute_projection_id(
+                source_dataset_id=dataset.dataset_id,
+                holdout_range=holdout_range,
+                rows=rows,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class R2G2PanelView:
+    """Outcome-free causal panel rows at frozen holdout decision times."""
+
+    dataset_id: str
+    observation_dataset_id: str
+    foundation_configuration_id: str
+    rows: tuple[PanelRow, ...]
+    holdout_range: tuple[datetime, datetime]
+    projection_id: str
+
+    CONTRACT: ClassVar[str] = "qtrad-r2-g2-panel-v1"
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    @classmethod
+    def compute_projection_id(
+        cls,
+        *,
+        source_dataset_id: str,
+        holdout_range: tuple[datetime, datetime],
+        rows: Sequence[PanelRow],
+    ) -> str:
+        return _semantic_id(
+            {
+                "contract": cls.CONTRACT,
+                "schema_version": cls.SCHEMA_VERSION,
+                "source_dataset_id": source_dataset_id,
+                "holdout_range": [item.isoformat() for item in holdout_range],
+                "rows": [row.as_json() for row in rows],
+            }
+        )
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: PanelDataset,
+        *,
+        holdout_range: tuple[datetime, datetime],
+    ) -> R2G2PanelView:
+        rows = tuple(
+            row for row in dataset.rows if holdout_range[0] <= row.decision_time < holdout_range[1]
+        )
+        return cls(
+            dataset_id=dataset.dataset_id,
+            observation_dataset_id=dataset.observation_dataset_id,
+            foundation_configuration_id=dataset.foundation_configuration_id,
+            rows=rows,
+            holdout_range=holdout_range,
+            projection_id=cls.compute_projection_id(
+                source_dataset_id=dataset.dataset_id,
+                holdout_range=holdout_range,
+                rows=rows,
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class R2HoldoutTargetSource:
     """Authenticated outcome-blind source evidence used before holdout opening.
 

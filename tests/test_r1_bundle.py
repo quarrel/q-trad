@@ -287,7 +287,13 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         self: ParquetFoundationArtifactStore, manifest_id: str
     ) -> tuple[dict[str, JsonValue], ...]:
         manifest = await self.read_manifest(manifest_id)
-        assert manifest.kind not in {"panel", "targets", "forecasts"}
+        assert manifest.kind not in {
+            "panel",
+            "targets",
+            "forecasts",
+            "r2-g2-observations",
+            "r2-g2-panel",
+        }
         return await original_read_rows(self, manifest_id)
 
     monkeypatch.setattr(ParquetFoundationArtifactStore, "read_rows", guarded_read_rows)
@@ -303,6 +309,11 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         holdout_target_source=source,
     )
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
+    assert blind.g2_feature_source is not None
+    assert all(
+        row.interval_end <= configuration.holdout_range[0] for row in blind.observations.rows
+    )
+    assert all(row.decision_time < configuration.holdout_range[0] for row in blind.panel.rows)
 
     assert source.pre_holdout_target_dataset.rows
     first = source.pre_holdout_target_dataset.rows[0]
