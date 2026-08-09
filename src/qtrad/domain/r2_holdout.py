@@ -45,6 +45,7 @@ R2_HOLDOUT_COVERAGE_CONTRACT = "qtrad-r2-holdout-coverage-v1"
 R2_HOLDOUT_FORECAST_SEAL_CONTRACT = "qtrad-r2-holdout-forecast-seal-v1"
 R2_HOLDOUT_OPENED_CONTRACT = "qtrad-r2-holdout-opened-v1"
 R2_HOLDOUT_CONSUMED_CONTRACT = "qtrad-r2-holdout-consumed-v1"
+R2_CONFIRMATORY_OPENED_CONTRACT = "qtrad-r2-confirmatory-opened-v1"
 R2_HOLDOUT_EVALUATION_CONTRACT = "qtrad-r2-holdout-evaluation-v1"
 R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT = "qtrad-r2-holdout-outcome-evidence-v1"
 R2_HOLDOUT_BUNDLE_CONTRACT = "qtrad-r2-holdout-bundle-v1"
@@ -3832,6 +3833,200 @@ class R2HoldoutOpenedMarker:
 
     def as_json(self) -> dict[str, JsonValue]:
         return {**self.semantic_json(), "marker_id": self.marker_id}
+
+
+@dataclass(frozen=True, slots=True)
+class R2ConfirmatoryOpenedMarker:
+    """Direct confirmatory lineage persisted after irreversible OPENED."""
+
+    selection_manifest_id: str
+    seal_id: str
+    opened_marker_id: str
+    oof_bundle_id: str
+    foundation_bundle_id: str
+    experiment_configuration_id: str
+    evaluation_report_id: str
+    prior_selection_manifest_id: str
+    holdout_target_source_id: str
+    target_dataset_id: str
+    target_manifest_id: str
+    holdout_range: tuple[datetime, datetime]
+    source_class: MarketDataSourceClass
+    evidence_class: EvidenceClass
+    holdout_scope: HoldoutScope
+    runtime_identities: Mapping[str, JsonValue]
+    opened_at: datetime
+    opened_by: str
+    acknowledgement: str
+    state: HoldoutMarkerState
+    marker_id: str
+
+    CONTRACT: ClassVar[str] = R2_CONFIRMATORY_OPENED_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.selection_manifest_id, "confirmatory selection ID"),
+            (self.seal_id, "confirmatory seal ID"),
+            (self.opened_marker_id, "confirmatory opened marker ID"),
+            (self.oof_bundle_id, "confirmatory OOF bundle ID"),
+            (self.foundation_bundle_id, "confirmatory foundation bundle ID"),
+            (self.experiment_configuration_id, "confirmatory experiment ID"),
+            (self.evaluation_report_id, "confirmatory F2 evaluation ID"),
+            (self.prior_selection_manifest_id, "confirmatory F2 selection ID"),
+            (self.holdout_target_source_id, "confirmatory target source ID"),
+            (self.target_dataset_id, "confirmatory target dataset ID"),
+            (self.target_manifest_id, "confirmatory target manifest ID"),
+            (self.marker_id, "confirmatory opened identity"),
+        ):
+            _require_id(value, field)
+        require_utc(self.holdout_range[0], "confirmatory holdout start")
+        require_utc(self.holdout_range[1], "confirmatory holdout end")
+        if self.holdout_range[0] >= self.holdout_range[1]:
+            raise ValueError("confirmatory holdout range must be increasing")
+        if self.evidence_class is not EvidenceClass.CONFIRMATORY:
+            raise ValueError("confirmatory opened marker requires confirmatory evidence")
+        if self.holdout_scope is not HoldoutScope.CONFIRMATORY:
+            raise ValueError("confirmatory opened marker requires confirmatory scope")
+        if self.state is not HoldoutMarkerState.OPENED:
+            raise ValueError("confirmatory opened marker must be OPENED")
+        require_utc(self.opened_at, "confirmatory opened time")
+        _require_text(self.opened_by, "confirmatory opened-by")
+        if self.acknowledgement != HOLDOUT_ACKNOWLEDGEMENT:
+            raise ValueError("exact holdout acknowledgement is required")
+        if not self.runtime_identities:
+            raise ValueError("confirmatory opened marker requires runtime identities")
+        if self.marker_id != _semantic_id(self.semantic_json()):
+            raise ValueError("confirmatory opened marker ID does not authenticate its content")
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        selection_manifest_id: str,
+        seal_id: str,
+        opened_marker_id: str,
+        oof_bundle_id: str,
+        foundation_bundle_id: str,
+        experiment_configuration_id: str,
+        evaluation_report_id: str,
+        prior_selection_manifest_id: str,
+        holdout_target_source_id: str,
+        target_dataset_id: str,
+        target_manifest_id: str,
+        holdout_range: tuple[datetime, datetime],
+        source_class: MarketDataSourceClass,
+        runtime_identities: Mapping[str, JsonValue],
+        opened_at: datetime,
+        opened_by: str,
+        acknowledgement: str,
+    ) -> R2ConfirmatoryOpenedMarker:
+        semantic: dict[str, JsonValue] = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            "selection_manifest_id": selection_manifest_id,
+            "seal_id": seal_id,
+            "opened_marker_id": opened_marker_id,
+            "oof_bundle_id": oof_bundle_id,
+            "foundation_bundle_id": foundation_bundle_id,
+            "experiment_configuration_id": experiment_configuration_id,
+            "evaluation_report_id": evaluation_report_id,
+            "prior_selection_manifest_id": prior_selection_manifest_id,
+            "holdout_target_source_id": holdout_target_source_id,
+            "target_dataset_id": target_dataset_id,
+            "target_manifest_id": target_manifest_id,
+            "holdout_range": [value.isoformat() for value in holdout_range],
+            "source_class": source_class.value,
+            "evidence_class": EvidenceClass.CONFIRMATORY.value,
+            "holdout_scope": HoldoutScope.CONFIRMATORY.value,
+            "runtime_identities": _json_object(runtime_identities),
+            "opened_at": opened_at.isoformat(),
+            "opened_by": opened_by,
+            "acknowledgement": acknowledgement,
+            "state": HoldoutMarkerState.OPENED.value,
+        }
+        return cls(
+            selection_manifest_id=selection_manifest_id,
+            seal_id=seal_id,
+            opened_marker_id=opened_marker_id,
+            oof_bundle_id=oof_bundle_id,
+            foundation_bundle_id=foundation_bundle_id,
+            experiment_configuration_id=experiment_configuration_id,
+            evaluation_report_id=evaluation_report_id,
+            prior_selection_manifest_id=prior_selection_manifest_id,
+            holdout_target_source_id=holdout_target_source_id,
+            target_dataset_id=target_dataset_id,
+            target_manifest_id=target_manifest_id,
+            holdout_range=holdout_range,
+            source_class=source_class,
+            evidence_class=EvidenceClass.CONFIRMATORY,
+            holdout_scope=HoldoutScope.CONFIRMATORY,
+            runtime_identities=_json_object(runtime_identities),
+            opened_at=opened_at,
+            opened_by=opened_by,
+            acknowledgement=acknowledgement,
+            state=HoldoutMarkerState.OPENED,
+            marker_id=_semantic_id(semantic),
+        )
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "selection_manifest_id": self.selection_manifest_id,
+            "seal_id": self.seal_id,
+            "opened_marker_id": self.opened_marker_id,
+            "oof_bundle_id": self.oof_bundle_id,
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "experiment_configuration_id": self.experiment_configuration_id,
+            "evaluation_report_id": self.evaluation_report_id,
+            "prior_selection_manifest_id": self.prior_selection_manifest_id,
+            "holdout_target_source_id": self.holdout_target_source_id,
+            "target_dataset_id": self.target_dataset_id,
+            "target_manifest_id": self.target_manifest_id,
+            "holdout_range": [value.isoformat() for value in self.holdout_range],
+            "source_class": self.source_class.value,
+            "evidence_class": self.evidence_class.value,
+            "holdout_scope": self.holdout_scope.value,
+            "runtime_identities": _json_object(self.runtime_identities),
+            "opened_at": self.opened_at.isoformat(),
+            "opened_by": self.opened_by,
+            "acknowledgement": self.acknowledgement,
+            "state": self.state.value,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "marker_id": self.marker_id}
+
+    @classmethod
+    def from_json(cls, value: Mapping[str, object]) -> R2ConfirmatoryOpenedMarker:
+        raw_range = cast(list[object], value["holdout_range"])
+        return cls(
+            selection_manifest_id=str(value["selection_manifest_id"]),
+            seal_id=str(value["seal_id"]),
+            opened_marker_id=str(value["opened_marker_id"]),
+            oof_bundle_id=str(value["oof_bundle_id"]),
+            foundation_bundle_id=str(value["foundation_bundle_id"]),
+            experiment_configuration_id=str(value["experiment_configuration_id"]),
+            evaluation_report_id=str(value["evaluation_report_id"]),
+            prior_selection_manifest_id=str(value["prior_selection_manifest_id"]),
+            holdout_target_source_id=str(value["holdout_target_source_id"]),
+            target_dataset_id=str(value["target_dataset_id"]),
+            target_manifest_id=str(value["target_manifest_id"]),
+            holdout_range=(
+                datetime.fromisoformat(str(raw_range[0])),
+                datetime.fromisoformat(str(raw_range[1])),
+            ),
+            source_class=MarketDataSourceClass(str(value["source_class"])),
+            evidence_class=EvidenceClass(str(value["evidence_class"])),
+            holdout_scope=HoldoutScope(str(value["holdout_scope"])),
+            runtime_identities=cast(Mapping[str, JsonValue], value["runtime_identities"]),
+            opened_at=datetime.fromisoformat(str(value["opened_at"])),
+            opened_by=str(value["opened_by"]),
+            acknowledgement=str(value["acknowledgement"]),
+            state=HoldoutMarkerState(str(value["state"])),
+            marker_id=str(value["marker_id"]),
+        )
 
 
 @dataclass(frozen=True, slots=True)

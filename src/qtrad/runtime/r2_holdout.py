@@ -63,6 +63,7 @@ from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 
 _MAX_BYTES = 64 * 1024 * 1024
 _FAILURE_EVALUATION_ID = sha256(b"qtrad-r2-holdout-reveal-failed").hexdigest()
+_CONFIRMATORY_G2_LIFECYCLE_TOKEN = object()
 
 
 def _load_object(path: Path) -> dict[str, object]:
@@ -1671,10 +1672,10 @@ def verify_holdout_preparation(
     )
     seal = R2HoldoutForecastSeal.from_json(seal_payload)
     selection = verify_holdout_selection(path / "selection.json")
-    if (
-        selection.holdout_scope is HoldoutScope.CONFIRMATORY
-        and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
-    ):
+    if selection.holdout_scope is HoldoutScope.CONFIRMATORY and _confirmatory_token not in {
+        _CONFIRMATORY_G2_PREPARATION_TOKEN,
+        _CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+    }:
         raise ValueError(
             "confirmatory holdout preparation requires the unsupported source-child workflow"
         )
@@ -1695,19 +1696,25 @@ def verify_holdout_preparation(
     if claim_state not in {"AVAILABLE", "TRANSFERRED", "OWNED_UNOPENED", "OWNED_OPENED"}:
         raise ValueError("preparation claim has an unsupported state")
     if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
-        if claim_state != "OWNED_UNOPENED":
-            raise ValueError("confirmatory G2 preparation must remain owned and unopened")
-        if any(
-            (path / name).exists() or (path / name).is_symlink()
-            for name in (
-                "opened.json",
-                "consumed.json",
-                "outcome-evidence.json",
-                "outcome-target.json",
-                "evaluation.json",
-            )
-        ):
-            raise ValueError("confirmatory G2 preparation contains post-open lifecycle evidence")
+        if _confirmatory_token is _CONFIRMATORY_G2_PREPARATION_TOKEN:
+            if claim_state != "OWNED_UNOPENED":
+                raise ValueError("confirmatory G2 preparation must remain owned and unopened")
+            if any(
+                (path / name).exists() or (path / name).is_symlink()
+                for name in (
+                    "opened.json",
+                    "confirmatory-opened.json",
+                    "consumed.json",
+                    "outcome-evidence.json",
+                    "outcome-target.json",
+                    "evaluation.json",
+                )
+            ):
+                raise ValueError(
+                    "confirmatory G2 preparation contains post-open lifecycle evidence"
+                )
+        elif claim_state not in {"OWNED_UNOPENED", "OWNED_OPENED"}:
+            raise ValueError("confirmatory lifecycle requires an owned preparation")
     if claim_state == "AVAILABLE":
         expected_claim = _preparation_claim(selection.manifest_id, seal.seal_id)
         if claim_payload != expected_claim:
@@ -1785,6 +1792,7 @@ def verify_holdout_preparation(
     allowed.update(f"coverage/{coverage_id}.json" for coverage_id in seal.coverage_ids)
     for lifecycle_name in (
         "opened.json",
+        "confirmatory-opened.json",
         "consumed.json",
         "outcome-evidence.json",
         "outcome-target.json",
@@ -2207,6 +2215,7 @@ def reveal_holdout(
         TargetDataset | Mapping[str, float] | Sequence[tuple[str, float]],
     ],
     evaluator: Callable[[Mapping[str, float], R2HoldoutOpenedMarker], R2HoldoutEvaluation],
+    _confirmatory_token: object | None = None,
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
 
@@ -2214,7 +2223,7 @@ def reveal_holdout(
     outcomes.  Any callback exception is re-raised after the consumed marker is
     durably created.
     """
-    seal = verify_holdout_preparation(root)
+    seal = verify_holdout_preparation(root, _confirmatory_token=_confirmatory_token)
     if (
         seal.selection_manifest_id != expected_selection_manifest_id
         or seal.seal_id != expected_seal_id
@@ -2227,7 +2236,10 @@ def reveal_holdout(
             raise ValueError("selection child differs from expected reveal selection")
     else:
         raise FileNotFoundError("prepared holdout root must contain selection.json")
-    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+    if (
+        selection.holdout_scope is HoldoutScope.CONFIRMATORY
+        and _confirmatory_token is not _CONFIRMATORY_G2_LIFECYCLE_TOKEN
+    ):
         raise ValueError(
             "confirmatory reveal requires an independently verified target dataset child"
         )
@@ -2409,7 +2421,11 @@ def verify_holdout_markers(root: Path) -> tuple[R2HoldoutOpenedMarker, R2Holdout
     return opened, consumed
 
 
-def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
+def verify_holdout_evaluation(
+    root: Path,
+    *,
+    _confirmatory_token: object | None = None,
+) -> R2HoldoutEvaluation:
     payload = _verify_child(
         root,
         "evaluation.json",
@@ -2418,7 +2434,7 @@ def verify_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
         expected_fields=_EVALUATION_FIELDS,
     )
     selection = verify_holdout_selection(root / "selection.json")
-    seal = verify_holdout_preparation(root)
+    seal = verify_holdout_preparation(root, _confirmatory_token=_confirmatory_token)
     opened, consumed = verify_holdout_markers(root)
     outcome_payload = _verify_child(
         root,
@@ -3127,4 +3143,86 @@ def reveal_holdout_from_files(
         consumed_at=consumed_at,
         outcome_loader=load_outcomes,
         evaluator=evaluate,
+    )
+
+
+def _reveal_confirmatory_holdout(
+    root: Path,
+    *,
+    expected_selection_manifest_id: str,
+    expected_seal_id: str,
+    acknowledgement: str,
+    opened_by: str,
+    consumed_by: str,
+    opened_at: datetime,
+    consumed_at: datetime,
+    outcome_loader: Callable[[], TargetDataset],
+) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
+    """Run frozen confirmatory evaluation after marker-first target decoding."""
+
+    from qtrad.application.r2_holdout import evaluate_holdout
+
+    selection = verify_holdout_selection(root / "selection.json")
+    seal = verify_holdout_preparation(
+        root,
+        _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+    )
+    if selection.holdout_scope is not HoldoutScope.CONFIRMATORY:
+        raise ValueError("confirmatory reveal requires a confirmatory selection")
+    forecast_datasets = tuple(
+        _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
+        for dataset_id in seal.forecast_dataset_ids
+    )
+    coverage_datasets = tuple(
+        _coverage_dataset_from_payload(_load_object(root / "coverage" / f"{coverage_id}.json"))
+        for coverage_id in seal.coverage_ids
+    )
+    target_dataset: TargetDataset | None = None
+
+    def load_outcomes() -> TargetDataset:
+        nonlocal target_dataset
+        target_dataset = outcome_loader()
+        return target_dataset
+
+    def evaluate(
+        outcomes: Mapping[str, float], opened: R2HoldoutOpenedMarker
+    ) -> R2HoldoutEvaluation:
+        if target_dataset is None:
+            raise RuntimeError("canonical target dataset was not loaded")
+        return evaluate_holdout(
+            selection=selection,
+            seal=seal,
+            opened_marker=opened,
+            forecast_datasets=forecast_datasets,
+            coverage_datasets=coverage_datasets,
+            outcomes=outcomes,
+            target_instruments={row.target_id: row.instrument_id for row in target_dataset.rows},
+        )
+
+    return reveal_holdout(
+        root,
+        expected_selection_manifest_id=expected_selection_manifest_id,
+        expected_seal_id=expected_seal_id,
+        acknowledgement=acknowledgement,
+        opened_by=opened_by,
+        consumed_by=consumed_by,
+        opened_at=opened_at,
+        consumed_at=consumed_at,
+        outcome_loader=load_outcomes,
+        evaluator=evaluate,
+        _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+    )
+
+
+def _verify_confirmatory_holdout_preparation(root: Path) -> R2HoldoutForecastSeal:
+    return verify_holdout_preparation(
+        root,
+        _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+    )
+
+
+def _verify_confirmatory_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
+    return verify_holdout_evaluation(
+        root,
+        _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
     )

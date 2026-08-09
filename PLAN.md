@@ -46,9 +46,10 @@ work and records only the milestone sequence needed to reach the next trustworth
   and the real locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
   (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
   implemented and tested with implementation-only fixtures. The fixture-confirmatory C2a F2/G1 authority
-  path and C2b-1 unopened G2 preparation/replay path are also implemented: all scientific inputs derive from
-  verified G1, and preparation cannot open, reveal, consume or decode holdout outcomes. C2b reveal and R2.H
-  evaluation remain pending; no real holdout, research conclusion or effectiveness evidence exists.
+  path and both C2b phases are implemented: verified G1 exclusively authorises unopened G2 preparation,
+  create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
+  and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
+  No real holdout, research conclusion or effectiveness evidence exists.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,

@@ -6,7 +6,7 @@ import asyncio
 import json
 from collections.abc import Mapping
 from dataclasses import fields, replace
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from shutil import copytree
@@ -16,6 +16,7 @@ from uuid import UUID
 
 import pytest
 
+import qtrad.application.r2_holdout as holdout_application
 import qtrad.runtime.foundation_bundle as foundation_runtime
 import qtrad.runtime.r2_holdout as holdout_runtime
 import qtrad.runtime.r2_verification as verification
@@ -40,6 +41,7 @@ from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_evaluation import ConfigurationDisposition, SelectionManifest
 from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
 from qtrad.domain.r2_holdout import (
+    HOLDOUT_ACKNOWLEDGEMENT,
     HoldoutScope,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
@@ -64,6 +66,8 @@ from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import canonical_bytes
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
+    ConfirmatoryR2HStatus,
+    OpenedConfirmatoryHoldout,
     VerifiedConfirmatoryF2,
     VerifiedConfirmatoryG1,
     VerifiedConfirmatoryG2Preparation,
@@ -73,10 +77,12 @@ from qtrad.runtime.r2_verification import (
     build_oof_bundle,
     freeze_confirmatory_selection,
     prepare_confirmatory_g2,
+    reveal_confirmatory_g2,
     verify_confirmatory_f2,
     verify_confirmatory_g1,
     verify_confirmatory_g2_feature_source,
     verify_confirmatory_g2_preparation,
+    verify_confirmatory_r2h,
 )
 
 
@@ -520,6 +526,29 @@ def test_confirmatory_run_and_evidence_classes_are_strict() -> None:
             "confirmatory-g2-preparation-verify",
             ("--selection", "selection.json", "--preparation", "prepared"),
         ),
+        (
+            "confirmatory-g2-reveal",
+            (
+                "--selection",
+                "selection.json",
+                "--preparation",
+                "prepared",
+                "--expected-selection-id",
+                "selection-id",
+                "--expected-seal-id",
+                "seal-id",
+                "--acknowledgement",
+                HOLDOUT_ACKNOWLEDGEMENT,
+                "--opened-by",
+                "fixture",
+                "--consumed-by",
+                "fixture",
+            ),
+        ),
+        (
+            "confirmatory-r2h-verify",
+            ("--selection", "selection.json", "--preparation", "prepared"),
+        ),
     ),
 )
 def test_confirmatory_g2_cli_accepts_only_authority_and_operational_inputs(
@@ -638,6 +667,10 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             path=changed_selection_path,
         )
 
+    original_target_dataset = foundation_runtime.TargetDataset
+    original_outcome_evidence = holdout_runtime._outcome_evidence_from_payload
+    original_outcome_items = holdout_runtime._outcome_items_from_source
+
     def reject_outcome_decode(*_: object, **__: object) -> Any:
         raise AssertionError("C2b-1 must not decode holdout outcomes")
 
@@ -733,6 +766,267 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     (lifecycle_root / "opened.json").write_text("{}", encoding="utf-8")
     with pytest.raises(ValueError, match="contains post-open lifecycle evidence"):
         verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=lifecycle_root)
+
+    monkeypatch.setattr(foundation_runtime, "TargetDataset", original_target_dataset)
+    monkeypatch.setattr(
+        holdout_runtime,
+        "_outcome_evidence_from_payload",
+        original_outcome_evidence,
+    )
+    monkeypatch.setattr(
+        holdout_runtime,
+        "_outcome_items_from_source",
+        original_outcome_items,
+    )
+
+    marker_failure_root = tmp_path / "marker-failure"
+    copytree(preparation_root, marker_failure_root)
+    marker_failure_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=marker_failure_root,
+    )
+    original_verification_atomic_create = verification.atomic_create
+
+    def fail_confirmatory_opened(path: Path, data: bytes) -> None:
+        if path.name == "confirmatory-opened.json":
+            raise RuntimeError("injected confirmatory OPENED failure")
+        original_verification_atomic_create(path, data)
+
+    monkeypatch.setattr(verification, "atomic_create", fail_confirmatory_opened)
+    marker_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected confirmatory OPENED failure"):
+        reveal_confirmatory_g2(
+            preparation=marker_failure_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=marker_failure_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=marker_opened_at,
+            consumed_at=marker_opened_at + timedelta(seconds=1),
+        )
+    assert (marker_failure_root / "opened.json").is_file()
+    assert not (marker_failure_root / "confirmatory-opened.json").exists()
+    assert (marker_failure_root / "consumed.json").is_file()
+    assert (
+        verify_confirmatory_r2h(
+            verified_g1=verified_g1,
+            path=marker_failure_root,
+        ).status
+        is ConfirmatoryR2HStatus.OPENED_INCOMPLETE
+    )
+    monkeypatch.setattr(verification, "atomic_create", original_verification_atomic_create)
+
+    failure_root = tmp_path / "failed-reveal"
+    copytree(preparation_root, failure_root)
+    failed_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=failure_root,
+    )
+    original_decoder = verification._decode_confirmatory_target
+
+    def fail_after_open(opened: object) -> TargetDataset:
+        assert (failure_root / "opened.json").is_file()
+        assert (failure_root / "confirmatory-opened.json").is_file()
+        original_decoder(cast(Any, opened))
+        raise RuntimeError("injected post-OPEN failure")
+
+    monkeypatch.setattr(verification, "_decode_confirmatory_target", fail_after_open)
+    failed_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected post-OPEN failure"):
+        reveal_confirmatory_g2(
+            preparation=failed_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=failed_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=failed_opened_at,
+            consumed_at=failed_opened_at + timedelta(seconds=1),
+        )
+    assert (failure_root / "opened.json").is_file()
+    assert (failure_root / "confirmatory-opened.json").is_file()
+    assert (failure_root / "consumed.json").is_file()
+    assert not (failure_root / "evaluation.json").exists()
+    failed_report = verify_confirmatory_r2h(
+        verified_g1=verified_g1,
+        path=failure_root,
+    )
+    assert failed_report.status is ConfirmatoryR2HStatus.OPENED_INCOMPLETE
+    with pytest.raises((FileExistsError, ValueError)):
+        reveal_confirmatory_g2(
+            preparation=failed_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=failed_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=failed_opened_at,
+            consumed_at=failed_opened_at + timedelta(seconds=2),
+        )
+
+    monkeypatch.setattr(verification, "_decode_confirmatory_target", original_decoder)
+
+    evaluation_failure_root = tmp_path / "evaluation-failure"
+    copytree(preparation_root, evaluation_failure_root)
+    evaluation_failure_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=evaluation_failure_root,
+    )
+    original_evaluator = holdout_application.evaluate_holdout
+
+    def fail_during_evaluation(*_: object, **__: object) -> object:
+        raise RuntimeError("injected evaluation failure")
+
+    monkeypatch.setattr(holdout_application, "evaluate_holdout", fail_during_evaluation)
+    evaluation_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected evaluation failure"):
+        reveal_confirmatory_g2(
+            preparation=evaluation_failure_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=evaluation_failure_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=evaluation_opened_at,
+            consumed_at=evaluation_opened_at + timedelta(seconds=1),
+        )
+    assert (
+        verify_confirmatory_r2h(
+            verified_g1=verified_g1,
+            path=evaluation_failure_root,
+        ).status
+        is ConfirmatoryR2HStatus.OPENED_INCOMPLETE
+    )
+    monkeypatch.setattr(holdout_application, "evaluate_holdout", original_evaluator)
+
+    result_failure_root = tmp_path / "result-persistence-failure"
+    copytree(preparation_root, result_failure_root)
+    result_failure_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=result_failure_root,
+    )
+    original_atomic_create = holdout_runtime.atomic_create
+
+    def fail_evaluation_persistence(path: Path, payload: bytes) -> None:
+        if path.name == "evaluation.json":
+            raise RuntimeError("injected result persistence failure")
+        original_atomic_create(path, payload)
+
+    monkeypatch.setattr(holdout_runtime, "atomic_create", fail_evaluation_persistence)
+    result_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected result persistence failure"):
+        reveal_confirmatory_g2(
+            preparation=result_failure_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=result_failure_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=result_opened_at,
+            consumed_at=result_opened_at + timedelta(seconds=1),
+        )
+    assert not (result_failure_root / "evaluation.json").exists()
+    assert (result_failure_root / "consumed.json").is_file()
+    assert (
+        verify_confirmatory_r2h(
+            verified_g1=verified_g1,
+            path=result_failure_root,
+        ).status
+        is ConfirmatoryR2HStatus.OPENED_INCOMPLETE
+    )
+    monkeypatch.setattr(holdout_runtime, "atomic_create", original_atomic_create)
+
+    consumed_failure_root = tmp_path / "consumed-failure"
+    copytree(preparation_root, consumed_failure_root)
+    consumed_failure_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=consumed_failure_root,
+    )
+    original_json_writer = cast(Any, holdout_runtime)._write_json
+
+    def fail_before_consumed(path: Path, payload: object) -> None:
+        if path.name == "consumed.json":
+            raise RuntimeError("injected CONSUMED failure")
+        original_json_writer(path, payload)
+
+    monkeypatch.setattr(holdout_runtime, "_write_json", fail_before_consumed)
+    consumed_opened_at = datetime.now(UTC)
+    with pytest.raises(RuntimeError, match="injected CONSUMED failure"):
+        reveal_confirmatory_g2(
+            preparation=consumed_failure_preparation,
+            expected_selection_manifest_id=verified_g1.selection.manifest_id,
+            expected_seal_id=consumed_failure_preparation.seal.seal_id,
+            acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+            opened_by="fixture-operator",
+            consumed_by="fixture-operator",
+            opened_at=consumed_opened_at,
+            consumed_at=consumed_opened_at + timedelta(seconds=1),
+        )
+    assert (consumed_failure_root / "evaluation.json").is_file()
+    assert not (consumed_failure_root / "consumed.json").exists()
+    assert (
+        verify_confirmatory_r2h(
+            verified_g1=verified_g1,
+            path=consumed_failure_root,
+        ).status
+        is ConfirmatoryR2HStatus.OPENED_INCOMPLETE
+    )
+    monkeypatch.setattr(
+        holdout_runtime,
+        "_write_json",
+        original_json_writer,
+    )
+    with pytest.raises(TypeError, match="constructed only after durable OPENED"):
+        OpenedConfirmatoryHoldout()
+    opened_at = datetime.now(UTC)
+    evaluation, consumed = reveal_confirmatory_g2(
+        preparation=verified_preparation,
+        expected_selection_manifest_id=verified_g1.selection.manifest_id,
+        expected_seal_id=verified_preparation.seal.seal_id,
+        acknowledgement=HOLDOUT_ACKNOWLEDGEMENT,
+        opened_by="fixture-operator",
+        consumed_by="fixture-operator",
+        opened_at=opened_at,
+        consumed_at=opened_at + timedelta(seconds=1),
+    )
+    assert evaluation is not None
+    assert consumed.evaluation_id == evaluation.evaluation_id
+    assert {
+        "opened.json",
+        "confirmatory-opened.json",
+        "outcome-target.json",
+        "outcome-evidence.json",
+        "evaluation.json",
+        "consumed.json",
+    }.issubset(path.name for path in preparation_root.iterdir())
+    report = verify_confirmatory_r2h(
+        verified_g1=verified_g1,
+        path=preparation_root,
+    )
+    assert report.status is ConfirmatoryR2HStatus.VALID_CONSUMED_RESULT
+    assert report.evaluation_id == evaluation.evaluation_id
+    tampered_root = tmp_path / "tampered-r2h"
+    copytree(preparation_root, tampered_root)
+    evaluation_payload = cast(
+        dict[str, object],
+        json.loads((tampered_root / "evaluation.json").read_bytes()),
+    )
+    evaluation_payload["evaluation_id"] = "0" * 64
+    (tampered_root / "evaluation.json").write_bytes(canonical_bytes(evaluation_payload))
+    assert (
+        verify_confirmatory_r2h(
+            verified_g1=verified_g1,
+            path=tampered_root,
+        ).status
+        is ConfirmatoryR2HStatus.INVALID
+    )
+
+    with pytest.raises(ValueError, match=r"owned and unopened|post-open lifecycle evidence"):
+        verify_confirmatory_g2_preparation(
+            verified_g1=verified_g1,
+            path=preparation_root,
+        )
 
 
 def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_target_decode(

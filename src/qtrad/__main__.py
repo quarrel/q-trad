@@ -241,11 +241,13 @@ from qtrad.runtime.r2_verification import (
     load_experiment_and_feature_paths,
     prepare_confirmatory_g2,
     require_ibkr_adapter_runtime_identity,
+    reveal_confirmatory_g2,
     runtime_identities,
     selection_freeze,
     verify_confirmatory_f2,
     verify_confirmatory_g1,
     verify_confirmatory_g2_preparation,
+    verify_confirmatory_r2h,
     verify_oof_bundle,
     verify_software_bundle,
     verify_software_bundle_async,
@@ -1039,6 +1041,27 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_confirmatory_g2_verify.add_argument("--f2-bundle", type=Path, required=True)
     baselines_confirmatory_g2_verify.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_g2_verify.add_argument("--preparation", type=Path, required=True)
+
+    baselines_confirmatory_reveal = baselines_sub.add_parser(
+        "confirmatory-g2-reveal",
+        help="irreversibly reveal and evaluate one verified confirmatory G2 preparation",
+    )
+    baselines_confirmatory_reveal.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--preparation", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--expected-selection-id", required=True)
+    baselines_confirmatory_reveal.add_argument("--expected-seal-id", required=True)
+    baselines_confirmatory_reveal.add_argument("--acknowledgement", required=True)
+    baselines_confirmatory_reveal.add_argument("--opened-by", required=True)
+    baselines_confirmatory_reveal.add_argument("--consumed-by", required=True)
+
+    baselines_confirmatory_r2h = baselines_sub.add_parser(
+        "confirmatory-r2h-verify",
+        help="independently verify the terminal confirmatory G2 lifecycle",
+    )
+    baselines_confirmatory_r2h.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_r2h.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_r2h.add_argument("--preparation", type=Path, required=True)
 
     baselines_selection_freeze = baselines_sub.add_parser(
         "selection-freeze", help="freeze disposable implementation selection mechanics"
@@ -2033,6 +2056,59 @@ def main(argv: Sequence[str] | None = None) -> None:
             path=args.preparation,
         )
         print(json.dumps({"seal_id": preparation.seal.seal_id}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-reveal"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        preparation = verify_confirmatory_g2_preparation(
+            verified_g1=g1,
+            path=args.preparation,
+        )
+        opened_at = datetime.now(UTC)
+        evaluation, consumed = reveal_confirmatory_g2(
+            preparation=preparation,
+            expected_selection_manifest_id=args.expected_selection_id,
+            expected_seal_id=args.expected_seal_id,
+            acknowledgement=args.acknowledgement,
+            opened_by=args.opened_by,
+            consumed_by=args.consumed_by,
+            opened_at=opened_at,
+            consumed_at=opened_at + timedelta(microseconds=1),
+        )
+        print(
+            json.dumps(
+                {
+                    "evaluation_id": evaluation.evaluation_id,
+                    "consumed_marker_id": consumed.marker_id,
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-r2h-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        report = verify_confirmatory_r2h(verified_g1=g1, path=args.preparation)
+        print(
+            json.dumps(
+                {
+                    "status": report.status.value,
+                    "selection_manifest_id": report.selection_manifest_id,
+                    "seal_id": report.seal_id,
+                    "opened_marker_id": report.opened_marker_id,
+                    "consumed_marker_id": report.consumed_marker_id,
+                    "evaluation_id": report.evaluation_id,
+                    "reason": report.reason,
+                },
+                sort_keys=True,
+            )
+        )
     elif (
         args.command == "research"
         and args.research_command == "baselines"

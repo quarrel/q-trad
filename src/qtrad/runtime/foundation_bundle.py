@@ -1692,6 +1692,46 @@ async def _verify_g2_feature_source(
     )
 
 
+async def _verify_confirmatory_target_dataset(
+    foundation: OutcomeBlindVerifiedFoundationBundle,
+    authority: G2FeatureSourceAuthority,
+    *,
+    clock: Clock,
+) -> TargetDataset:
+    """Decode the exact authenticated target child after irreversible confirmatory OPENED."""
+
+    if (
+        authority.foundation_bundle_id != foundation.bundle.bundle_id
+        or authority.foundation_configuration_id != foundation.configuration.configuration_id
+        or authority.observation_dataset_id != foundation.observations.dataset_id
+    ):
+        raise ValueError("confirmatory outcome authority differs from verified F2 foundation")
+    reference = foundation.bundle.targets
+    store = ParquetFoundationArtifactStore(authority.root, clock)
+    manifest = await store.verify(reference.manifest_id)
+    _verify_child_reference(reference, manifest)
+    _require_lineage(
+        manifest,
+        {
+            "observation_dataset_id": authority.observation_dataset_id,
+            "foundation_configuration_id": authority.foundation_configuration_id,
+        },
+    )
+    rows = tuple(
+        _target(cast(Mapping[str, object], row))
+        for row in await store.read_rows(reference.manifest_id)
+    )
+    targets = TargetDataset(
+        rows=rows,
+        observation_dataset_id=authority.observation_dataset_id,
+        foundation_configuration_id=authority.foundation_configuration_id,
+        dataset_id=manifest.dataset_id,
+    )
+    if targets.dataset_id != foundation.bundle.targets.dataset_id:
+        raise ValueError("decoded confirmatory target child differs from verified F2 authority")
+    return targets
+
+
 def _reference(name: str, value: object) -> ArtifactReference:
     payload = _mapping(value)
     expected = {
