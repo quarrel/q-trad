@@ -14,7 +14,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import uvicorn
 from alembic import command
@@ -98,6 +98,7 @@ from qtrad.domain.ibkr_historical import (
     IbkrAcquisitionRuntime,
     IbkrHistoricalPacingPolicy,
 )
+from qtrad.domain.ibkr_qualification import VerifiedIbkrCaptureQualification
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import AssetClass, ProviderListing
 from qtrad.domain.market_data import (
@@ -143,9 +144,11 @@ from qtrad.runtime.ibkr_b3 import (
     write_reviewed_configuration,
 )
 from qtrad.runtime.ibkr_b4 import (
+    IbkrB4DeploymentDescriptor,
+    b3_qualification_expectation,
     b4_preflight,
     promote_b4_configuration,
-    verify_b3_qualification_for_release,
+    verify_b3_qualification_evidence_for_release,
     verify_b4_release,
     write_b4_release,
 )
@@ -180,6 +183,11 @@ from qtrad.runtime.ibkr_historical import (
 from qtrad.runtime.ibkr_native_capture import (
     build_ibkr_native_adapter,
     load_reviewed_configuration,
+)
+from qtrad.runtime.ibkr_qualification import write_qualification_artifact
+from qtrad.runtime.ibkr_qualification_evidence import (
+    IbkrQualificationWindow,
+    build_ibkr_qualification_snapshot,
 )
 from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
@@ -632,6 +640,25 @@ def build_parser() -> argparse.ArgumentParser:
     qualification_b3.add_argument("--contract-selection", type=Path, required=True)
     qualification_b3.add_argument("--catalogue", type=Path, required=True)
     qualification_b3.add_argument("--probe-spec", type=Path, required=True)
+
+    qualification_snapshot = deployment_sub.add_parser(
+        "ibkr-qualification-snapshot",
+        help="build immutable B3 evidence from live and restored PostgreSQL stores",
+    )
+    qualification_snapshot.add_argument("--capture-session-id", type=UUID, required=True)
+    qualification_snapshot.add_argument("--started-at", type=_utc_timestamp_argument, required=True)
+    qualification_snapshot.add_argument("--ended-at", type=_utc_timestamp_argument, required=True)
+    qualification_snapshot.add_argument(
+        "--generated-at", type=_utc_timestamp_argument, required=True
+    )
+    qualification_snapshot.add_argument("--release", type=Path, required=True)
+    qualification_snapshot.add_argument("--descriptor", type=Path, required=True)
+    qualification_snapshot.add_argument("--capability-review", type=Path, required=True)
+    qualification_snapshot.add_argument("--operator-selection", type=Path, required=True)
+    qualification_snapshot.add_argument("--contract-selection", type=Path, required=True)
+    qualification_snapshot.add_argument("--catalogue", type=Path, required=True)
+    qualification_snapshot.add_argument("--probe-spec", type=Path, required=True)
+    qualification_snapshot.add_argument("--output", type=Path, required=True)
 
     runs = subparsers.add_parser("runs", help="operational run evidence")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
@@ -1272,11 +1299,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                 catalogue_path=args.parent_catalogue,
                 probe_spec_path=args.parent_probe_spec,
             )
-            qualification = verify_b3_qualification_for_release(
-                args.parent_qualification,
-                parent_release_path=args.parent_release,
-                parent_authority_paths=parent_paths,
-                deployment=load_b3_deployment_descriptor(args.parent_descriptor),
+            qualification = asyncio.run(
+                _verify_b3_qualification_from_databases(
+                    settings,
+                    qualification_path=args.parent_qualification,
+                    release_path=args.parent_release,
+                    descriptor_path=args.parent_descriptor,
+                    authority_paths=parent_paths,
+                )
             )
             promotion = promote_b4_configuration(
                 source,
@@ -1339,11 +1369,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                 catalogue_path=args.parent_catalogue,
                 probe_spec_path=args.parent_probe_spec,
             )
-            qualification = verify_b3_qualification_for_release(
-                args.parent_qualification,
-                parent_release_path=args.parent_release,
-                parent_authority_paths=parent_paths,
-                deployment=load_b3_deployment_descriptor(args.parent_descriptor),
+            qualification = asyncio.run(
+                _verify_b3_qualification_from_databases(
+                    settings,
+                    qualification_path=args.parent_qualification,
+                    release_path=args.parent_release,
+                    descriptor_path=args.parent_descriptor,
+                    authority_paths=parent_paths,
+                )
             )
             report = verify_b4_release(
                 args.configuration,
@@ -1363,12 +1396,21 @@ def main(argv: Sequence[str] | None = None) -> None:
         if not report["valid"]:
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-preflight":
-        preflight = b3_preflight if args.policy == "b3-exact-two" else b4_preflight
-        report = preflight(
-            args.descriptor,
-            repository_root=args.repository_root,
-            observed_at=args.observed_at,
-        )
+        if args.policy == "b3-exact-two":
+            report = b3_preflight(
+                args.descriptor,
+                repository_root=args.repository_root,
+                observed_at=args.observed_at,
+            )
+        else:
+            report = asyncio.run(
+                _b4_preflight_from_databases(
+                    settings,
+                    descriptor_path=args.descriptor,
+                    repository_root=args.repository_root,
+                    observed_at=args.observed_at,
+                )
+            )
         print(json.dumps(report, sort_keys=True))
         if (
             not report["valid"]
@@ -1377,17 +1419,14 @@ def main(argv: Sequence[str] | None = None) -> None:
         ):
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-verify":
-        capability = verify_b3_qualification_for_release(
-            args.qualification,
-            parent_release_path=args.release,
-            parent_authority_paths=IbkrAuthorityPaths(
-                capability_review_path=args.capability_review,
-                operator_selection_path=args.operator_selection,
-                contract_selection_path=args.contract_selection,
-                catalogue_path=args.catalogue,
-                probe_spec_path=args.probe_spec,
-            ),
-            deployment=load_b3_deployment_descriptor(args.descriptor),
+        capability = asyncio.run(
+            _verify_b3_qualification_from_databases(
+                settings,
+                qualification_path=args.qualification,
+                release_path=args.release,
+                descriptor_path=args.descriptor,
+                authority_paths=_ibkr_authority_paths(args),
+            )
         )
         print(
             json.dumps(
@@ -1399,6 +1438,33 @@ def main(argv: Sequence[str] | None = None) -> None:
                     "configuration_hash": capability.configuration_hash,
                     "instrument_count": len(capability.instruments),
                     "qualified_at": capability.qualified_at.isoformat(),
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-snapshot":
+        payload = asyncio.run(
+            _write_b3_qualification_snapshot(
+                settings,
+                release_path=args.release,
+                descriptor_path=args.descriptor,
+                authority_paths=_ibkr_authority_paths(args),
+                window=IbkrQualificationWindow(
+                    capture_session_id=args.capture_session_id,
+                    started_at=args.started_at,
+                    ended_at=args.ended_at,
+                    generated_at=args.generated_at,
+                ),
+                output_path=args.output,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": payload["contract"],
+                    "stage": payload["stage"],
+                    "result": payload["result"],
+                    "output": str(args.output),
                 },
                 sort_keys=True,
             )
@@ -3288,6 +3354,105 @@ async def _require_database_at_migration_head(settings: Settings) -> None:
         )
 
 
+def _ibkr_authority_paths(args: argparse.Namespace) -> IbkrAuthorityPaths:
+    return IbkrAuthorityPaths(
+        capability_review_path=args.capability_review,
+        operator_selection_path=args.operator_selection,
+        contract_selection_path=args.contract_selection,
+        catalogue_path=args.catalogue,
+        probe_spec_path=args.probe_spec,
+    )
+
+
+async def _verify_b3_qualification_from_databases(
+    settings: Settings,
+    *,
+    qualification_path: Path,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+) -> VerifiedIbkrCaptureQualification:
+    restore_url = settings.ibkr_qualification_restore_database_url
+    if restore_url is None:
+        raise ValueError(
+            "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL is required for independent replay"
+        )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        return await verify_b3_qualification_evidence_for_release(
+            qualification_path,
+            parent_release_path=release_path,
+            parent_authority_paths=authority_paths,
+            deployment=load_b3_deployment_descriptor(descriptor_path),
+            live_store=PostgresAuditStore(live_engine),
+            restored_store=PostgresAuditStore(restored_engine),
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
+
+
+async def _write_b3_qualification_snapshot(
+    settings: Settings,
+    *,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    window: IbkrQualificationWindow,
+    output_path: Path,
+) -> dict[str, JsonValue]:
+    restore_url = settings.ibkr_qualification_restore_database_url
+    if restore_url is None:
+        raise ValueError(
+            "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL is required for snapshot replay"
+        )
+    deployment = load_b3_deployment_descriptor(descriptor_path)
+    configuration, expectation = b3_qualification_expectation(
+        parent_release_path=release_path,
+        parent_authority_paths=authority_paths,
+        deployment=deployment,
+    )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        payload = await build_ibkr_qualification_snapshot(
+            PostgresAuditStore(live_engine),
+            PostgresAuditStore(restored_engine),
+            expectation=expectation,
+            configuration=configuration,
+            window=window,
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
+    write_qualification_artifact(output_path, payload)
+    return payload
+
+
+async def _b4_preflight_from_databases(
+    settings: Settings,
+    *,
+    descriptor_path: Path,
+    repository_root: Path,
+    observed_at: datetime,
+) -> dict[str, JsonValue]:
+    descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
+    qualification = await _verify_b3_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.qualification_path,
+        release_path=descriptor.parent_release_path,
+        descriptor_path=descriptor_path,
+        authority_paths=descriptor.parent_authority_paths,
+    )
+    return b4_preflight(
+        descriptor_path,
+        repository_root=repository_root,
+        observed_at=observed_at,
+        qualification=qualification,
+    )
+
+
 def _upgrade_database(settings: Settings) -> None:
     os.environ["QTRAD_MIGRATION_DATABASE_URL"] = settings.migration_database_url
     command.upgrade(Config("alembic.ini"), "head")
@@ -5007,6 +5172,10 @@ async def _ingest_ibkr_native(
     reconnect_error: Exception | None = None
     disconnect_error: Exception | None = None
     deadline_reached = False
+    forced_reconnect_completed = False
+    reconnect_from_generation: int | None = None
+    reconnect_to_generation: int | None = None
+    qualification_health: dict[str, JsonValue] | None = None
     try:
         # The run UUID is also the durable capture-session identity.  It is
         # created before the socket so a failed connection cannot emit an
@@ -5042,12 +5211,40 @@ async def _ingest_ibkr_native(
         worker.start()
 
         async def persist_health_snapshot() -> None:
+            nonlocal qualification_health
             composed = worker.compose_health(
                 await adapter.health(),
                 identity=identity,
                 capture_session_id=str(capture_session_id),
             )
+            reconnect_attributes = dict(composed.attributes)
+            reconnect_attributes.update(
+                {
+                    "forced_reconnect_requested": str(
+                        force_reconnect_after_seconds is not None
+                    ).lower(),
+                    "forced_reconnect_completed": str(forced_reconnect_completed).lower(),
+                }
+            )
+            if reconnect_from_generation is not None:
+                reconnect_attributes["reconnect_from_generation"] = str(reconnect_from_generation)
+            if reconnect_to_generation is not None:
+                reconnect_attributes["reconnect_to_generation"] = str(reconnect_to_generation)
+            composed = replace(composed, attributes=tuple(reconnect_attributes.items()))
             await store.record_adapter_health(composed)
+            if composed.status.value == "HEALTHY":
+                qualification_health = {
+                    "status": composed.status.value,
+                    "observed_at": composed.observed_at.isoformat(),
+                    "last_message_at": (
+                        composed.last_message_at.isoformat()
+                        if composed.last_message_at is not None
+                        else None
+                    ),
+                    "reason_codes": list(composed.reason_codes),
+                    "recovery_action": composed.recovery_action.value,
+                    "attributes": dict(composed.attributes),
+                }
             metrics = worker.snapshot()
             await store.record_capture_session_metrics(
                 capture_session_id=capture_session_id,
@@ -5065,9 +5262,19 @@ async def _ingest_ibkr_native(
         await persist_health_snapshot()
 
         async def force_reconnect() -> None:
+            nonlocal forced_reconnect_completed
+            nonlocal reconnect_from_generation, reconnect_to_generation
             assert force_reconnect_after_seconds is not None
             await asyncio.sleep(force_reconnect_after_seconds)
+            before = dict((await adapter.health()).attributes)
             await adapter.force_reconnect()
+            after = dict((await adapter.health()).attributes)
+            reconnect_from_generation = int(before["connection_generation"])
+            reconnect_to_generation = int(after["connection_generation"])
+            if reconnect_to_generation != reconnect_from_generation + 1:
+                raise RuntimeError("forced reconnect did not advance exactly one generation")
+            forced_reconnect_completed = True
+            await persist_health_snapshot()
 
         if force_reconnect_after_seconds is not None:
             reconnect_task = asyncio.create_task(force_reconnect())
@@ -5171,6 +5378,11 @@ async def _ingest_ibkr_native(
                     "persisted": metrics.persisted if metrics else 0,
                     "failed": metrics.failed if metrics else 0,
                     "dropped": metrics.dropped if metrics else 0,
+                    "forced_reconnect_requested": force_reconnect_after_seconds is not None,
+                    "forced_reconnect_completed": forced_reconnect_completed,
+                    "reconnect_from_generation": reconnect_from_generation,
+                    "reconnect_to_generation": reconnect_to_generation,
+                    "qualification_health": qualification_health,
                 },
             )
         await engine.dispose()

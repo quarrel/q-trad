@@ -43,6 +43,10 @@ from qtrad.runtime.ibkr_qualification import (
     IbkrQualificationExpectation,
     verify_ibkr_capture_qualification,
 )
+from qtrad.runtime.ibkr_qualification_evidence import (
+    QualificationEvidenceStore,
+    verify_ibkr_qualification_evidence,
+)
 from qtrad.runtime.ibkr_release import (
     IbkrAuthorityPaths,
     IbkrPromotionAuthority,
@@ -556,6 +560,45 @@ class IbkrB4DeploymentDescriptor:
         )
 
 
+def b3_qualification_expectation(
+    *,
+    parent_release_path: Path,
+    parent_authority_paths: IbkrAuthorityPaths,
+    deployment: IbkrB3DeploymentDescriptor,
+) -> tuple[IbkrNativeCaptureConfiguration, IbkrQualificationExpectation]:
+    """Authenticate the parent release and derive its exact qualification contract."""
+
+    parent = load_authenticated_b3_configuration(
+        parent_release_path, **parent_authority_paths.as_kwargs()
+    )
+    return parent, IbkrQualificationExpectation(
+        stage=IbkrQualificationStage.B3_EXACT_TWO,
+        release_contract=B3_RELEASE_CONTRACT,
+        release_sha256=sha256_path(parent_release_path, label="B3"),
+        configuration_hash=parent.configuration_hash,
+        capture_source_id=parent.capture_source_id,
+        universe_id=parent.universe_id,
+        instruments=frozenset(item.instrument_id for item in parent.listings),
+        contracts=tuple(
+            IbkrQualifiedContract(
+                instrument_id=listing.instrument_id,
+                listing_id=listing.listing_id,
+                con_id=parent.contract_evidence[listing.listing_id].con_id,
+            )
+            for listing in parent.listings
+        ),
+        application_commit=deployment.application_commit,
+        image_digest=deployment.image,
+        api_package_sha256=deployment.api_package_fingerprint,
+        gateway_archive_sha256=deployment.gateway_archive_sha256,
+        gateway_version=deployment.gateway_version,
+        ibc_version=deployment.ibc_version,
+        database_name=deployment.database_name,
+        schema_head=deployment.schema_head,
+        freshness_threshold=timedelta(seconds=60),
+    )
+
+
 def verify_b3_qualification_for_release(
     qualification_path: Path,
     *,
@@ -565,37 +608,36 @@ def verify_b3_qualification_for_release(
 ) -> VerifiedB3Qualification:
     """Authenticate one real B3 qualification; no operator-created capability is accepted."""
 
-    parent = load_authenticated_b3_configuration(
-        parent_release_path, **parent_authority_paths.as_kwargs()
+    _, expectation = b3_qualification_expectation(
+        parent_release_path=parent_release_path,
+        parent_authority_paths=parent_authority_paths,
+        deployment=deployment,
     )
-    return verify_ibkr_capture_qualification(
+    return verify_ibkr_capture_qualification(qualification_path, expectation)
+
+
+async def verify_b3_qualification_evidence_for_release(
+    qualification_path: Path,
+    *,
+    parent_release_path: Path,
+    parent_authority_paths: IbkrAuthorityPaths,
+    deployment: IbkrB3DeploymentDescriptor,
+    live_store: QualificationEvidenceStore,
+    restored_store: QualificationEvidenceStore,
+) -> VerifiedB3Qualification:
+    """Mint B3 authority only after exact live/restored PostgreSQL replay."""
+
+    parent, expectation = b3_qualification_expectation(
+        parent_release_path=parent_release_path,
+        parent_authority_paths=parent_authority_paths,
+        deployment=deployment,
+    )
+    return await verify_ibkr_qualification_evidence(
         qualification_path,
-        IbkrQualificationExpectation(
-            stage=IbkrQualificationStage.B3_EXACT_TWO,
-            release_contract=B3_RELEASE_CONTRACT,
-            release_sha256=sha256_path(parent_release_path, label="B3"),
-            configuration_hash=parent.configuration_hash,
-            capture_source_id=parent.capture_source_id,
-            universe_id=parent.universe_id,
-            instruments=frozenset(item.instrument_id for item in parent.listings),
-            contracts=tuple(
-                IbkrQualifiedContract(
-                    instrument_id=listing.instrument_id,
-                    listing_id=listing.listing_id,
-                    con_id=parent.contract_evidence[listing.listing_id].con_id,
-                )
-                for listing in parent.listings
-            ),
-            application_commit=deployment.application_commit,
-            image_digest=deployment.image,
-            api_package_sha256=deployment.api_package_fingerprint,
-            gateway_archive_sha256=deployment.gateway_archive_sha256,
-            gateway_version=deployment.gateway_version,
-            ibc_version=deployment.ibc_version,
-            database_name=deployment.database_name,
-            schema_head=deployment.schema_head,
-            freshness_threshold=timedelta(seconds=60),
-        ),
+        live_store,
+        restored_store,
+        expectation=expectation,
+        configuration=parent,
     )
 
 
@@ -637,18 +679,20 @@ def b4_preflight(
     *,
     repository_root: Path,
     observed_at: datetime,
+    qualification: VerifiedB3Qualification | None = None,
 ) -> dict[str, JsonValue]:
     """Verify B4 release, parent qualification, and unchanged topology offline."""
 
     try:
         descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
         deployment = descriptor.deployment
-        qualification = verify_b3_qualification_for_release(
-            descriptor.qualification_path,
-            parent_release_path=descriptor.parent_release_path,
-            parent_authority_paths=descriptor.parent_authority_paths,
-            deployment=deployment,
-        )
+        if qualification is None:
+            qualification = verify_b3_qualification_for_release(
+                descriptor.qualification_path,
+                parent_release_path=descriptor.parent_release_path,
+                parent_authority_paths=descriptor.parent_authority_paths,
+                deployment=deployment,
+            )
         report = verify_b4_release(
             Path(deployment.configuration_path),
             authority_paths=IbkrAuthorityPaths(

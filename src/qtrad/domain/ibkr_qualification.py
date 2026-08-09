@@ -67,6 +67,40 @@ class VerifiedIbkrCaptureQualification:
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("VerifiedIbkrCaptureQualification is immutable")
 
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        stage: IbkrQualificationStage,
+        artifact_sha256: str,
+        release_contract: str,
+        release_sha256: str,
+        configuration_hash: str,
+        capture_source_id: str,
+        universe_id: str,
+        instruments: frozenset[InstrumentId],
+        contracts: tuple[IbkrQualifiedContract, ...],
+        qualified_at: datetime,
+    ) -> VerifiedIbkrCaptureQualification:
+        """Mint authority only for the evidence-replaying verifier."""
+
+        if token is not _VERIFIED_IBKR_CAPTURE_QUALIFICATION_TOKEN:
+            raise TypeError("VerifiedIbkrCaptureQualification is constructed only by its verifier")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_verifier_token", token)
+        object.__setattr__(instance, "_stage", stage)
+        object.__setattr__(instance, "_artifact_sha256", artifact_sha256)
+        object.__setattr__(instance, "_release_contract", release_contract)
+        object.__setattr__(instance, "_release_sha256", release_sha256)
+        object.__setattr__(instance, "_configuration_hash", configuration_hash)
+        object.__setattr__(instance, "_capture_source_id", capture_source_id)
+        object.__setattr__(instance, "_universe_id", universe_id)
+        object.__setattr__(instance, "_instruments", instruments)
+        object.__setattr__(instance, "_contracts", contracts)
+        object.__setattr__(instance, "_qualified_at", qualified_at)
+        return instance
+
     @property
     def stage(self) -> IbkrQualificationStage:
         return self._stage

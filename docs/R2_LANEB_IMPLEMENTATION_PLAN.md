@@ -612,6 +612,23 @@ At this point we have started the clock on precisely the eventual `R2-IBKR-NATIV
 
 This is the highest-value near-term outcome of Lane B.
 
+## Qualification evidence software boundary
+
+The B3-to-B4 transition uses two separate read-only steps. A snapshot builder reads one
+bounded capture session from the live `qtrad_ibkr` database and from a distinct
+`qtrad_ibkr_restore_verify_*` disposable restore. It retains raw/canonical chronology,
+durable counters, current health, run identity and controlled reconnect evidence in a
+create-only artifact. A separate verifier re-queries both databases and compares the
+entire retained evidence before it can mint the runtime-only qualification capability.
+The qualifying collector run is stopped cleanly before backup; its final counters and
+last healthy post-reconnect snapshot are retained in immutable terminal run detail.
+
+The artifact hash proves content identity only. A file-only check, API response, fake
+store, closed-market connection or operator assertion cannot grant qualification. Real
+B3 qualification still waits for authenticated ACTIVE periods with LIVE bid and ask
+evidence, fresh post-reconnect callbacks, zero-loss reconciliation and an exercised
+backup/restore. No real B4 release may be promoted before that gate succeeds.
+
 ---
 
 # PR B5 / later operational step — full accepted IBKR capture universe
@@ -757,4 +774,3 @@ I would give one capable agent this exact priority:
 ```
 
 ---
-
