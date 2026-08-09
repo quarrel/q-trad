@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import threading
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
@@ -945,15 +944,11 @@ def _unique_plan() -> tuple[IbkrHistoricalPlan, IbkrHistoricalRequestProfile]:
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_store_executes_recovers_and_publishes_durably(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     audit_store = PostgresAuditStore(engine)
     await audit_store.seed_instruments()
     store = PostgresIbkrHistoricalExecutionStore(engine)
@@ -1179,17 +1174,12 @@ async def test_postgres_store_executes_recovers_and_publishes_durably() -> None:
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
 async def test_postgres_result_snapshot_bounds_callbacks_per_attempt(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_database_url: str,
 ) -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -1218,19 +1208,13 @@ async def test_postgres_result_snapshot_bounds_callbacks_per_attempt(
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
 async def test_cli_postgres_execution_recovers_before_provider_construction(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
+    postgres_database_url: str,
 ) -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-
-    engine = create_async_engine(database_url)
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -1312,7 +1296,7 @@ async def test_cli_postgres_execution_recovers_before_provider_construction(
         settings = cast(
             Settings,
             SimpleNamespace(
-                database_url=database_url,
+                database_url=postgres_database_url,
                 ibkr_gateway_version="10.49",
                 ibkr_api_version="10.49",
                 ibkr_ibc_version="3.24.1",
@@ -1466,7 +1450,7 @@ async def test_cli_postgres_execution_recovers_before_provider_construction(
         assert recovered_request.request_sha256 not in provider.delegate.calls
         assert provider.delegate.connect_count == 1
 
-        post_engine = create_async_engine(database_url)
+        post_engine = create_async_engine(postgres_database_url)
         try:
             post_store = PostgresIbkrHistoricalExecutionStore(post_engine)
             post_recovery = await post_store.read_ibkr_historical_execution(
@@ -1562,15 +1546,11 @@ async def test_execute_pending_reports_recovered_outcomes_without_provider_conne
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_execution_snapshot_rejects_request_closure_mutations() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_execution_snapshot_rejects_request_closure_mutations(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     audit_store = PostgresAuditStore(engine)
     await audit_store.seed_instruments()
     store = PostgresIbkrHistoricalExecutionStore(engine)
@@ -1822,15 +1802,11 @@ async def test_terminal_requests_are_publishable_after_execution() -> None:
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_store_publishes_terminal_attempts() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_store_publishes_terminal_attempts(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -1903,15 +1879,11 @@ async def test_postgres_store_publishes_terminal_attempts() -> None:
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_fresh_session_namespaces_restarted_request_ids() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_fresh_session_namespaces_restarted_request_ids(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -1972,15 +1944,11 @@ async def test_postgres_fresh_session_namespaces_restarted_request_ids() -> None
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_selected_attempt_cannot_be_mutated_across_requests() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_selected_attempt_cannot_be_mutated_across_requests(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -2030,15 +1998,11 @@ async def test_postgres_selected_attempt_cannot_be_mutated_across_requests() -> 
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_result_snapshot_is_repeatable_read_under_mutation() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_result_snapshot_is_repeatable_read_under_mutation(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     try:
         audit_store = PostgresAuditStore(engine)
         await audit_store.seed_instruments()
@@ -2076,7 +2040,9 @@ async def test_postgres_result_snapshot_is_repeatable_read_under_mutation() -> N
             if not mutation_done.wait(timeout=30):
                 raise RuntimeError("concurrent publication mutation did not complete")
 
-        sync_database_url = database_url.replace("postgresql+asyncpg://", "postgresql://", 1)
+        sync_database_url = postgres_database_url.replace(
+            "postgresql+asyncpg://", "postgresql://", 1
+        )
 
         def mutate_publication_state() -> None:
             try:

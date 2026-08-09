@@ -44,7 +44,7 @@ build-backend = "hatchling.build"
 packages = ["src/qtrad"]
 
 [tool.pytest.ini_options]
-addopts = "-ra"
+addopts = "-ra --strict-markers"
 asyncio_mode = "auto"
 testpaths = ["tests"]
 markers = [

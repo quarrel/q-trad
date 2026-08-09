@@ -1,5 +1,4 @@
 import asyncio
-import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
@@ -121,15 +120,11 @@ async def _reserve(
 
 
 @pytest.mark.postgres
-@pytest.mark.skipif(
-    not os.getenv("QTRAD_TEST_DATABASE_URL"),
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
 @pytest.mark.asyncio
-async def test_postgres_pacing_enforces_exact_bound_policy_atomically() -> None:
-    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
-    assert database_url is not None
-    engine = create_async_engine(database_url)
+async def test_postgres_pacing_enforces_exact_bound_policy_atomically(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     try:
         store = PostgresAuditStore(engine)
         now = datetime.now(UTC)

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,14 +27,7 @@ from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime.settings import Settings
 
-DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
-pytestmark = [
-    pytest.mark.postgres,
-    pytest.mark.skipif(
-        DATABASE_URL is None,
-        reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-    ),
-]
+pytestmark = pytest.mark.postgres
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 _CONFIGURATION_HASH = "b" * 64
@@ -200,9 +192,9 @@ def _adapter(
 @pytest.mark.asyncio
 async def test_native_callbacks_worker_projection_health_and_api(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_database_url: str,
 ) -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     listing = _listing()
     identity = _identity()
@@ -353,7 +345,7 @@ async def test_native_callbacks_worker_projection_health_and_api(
 
         app = create_app(
             Settings(
-                database_url=DATABASE_URL,
+                database_url=postgres_database_url,
                 provider="ibkr",
                 ibkr_capture_configuration_hash=_CONFIGURATION_HASH,
             )
