@@ -89,11 +89,11 @@ def write_qualification_artifact(path: Path, payload: Mapping[str, JsonValue]) -
         handle.write(_pretty_bytes(sealed))
 
 
-def verify_ibkr_capture_qualification(
+def _verify_ibkr_qualification_summary(
     path: Path,
     expectation: IbkrQualificationExpectation,
-) -> VerifiedIbkrCaptureQualification:
-    """Replay one immutable qualification artifact into a runtime-only capability."""
+) -> tuple[Mapping[str, object], str, datetime]:
+    """Structurally verify one artifact without granting qualification authority."""
 
     document = _load_object(path)
     artifact_sha256 = _string(document, "artifact_sha256")
@@ -227,9 +227,19 @@ def verify_ibkr_capture_qualification(
     if not ended_at <= backup_at <= generated_at:
         raise ValueError("IBKR qualification backup/restore chronology is invalid")
 
+    return document, artifact_sha256, generated_at
+
+
+def verify_ibkr_capture_qualification(
+    path: Path,
+    expectation: IbkrQualificationExpectation,
+) -> VerifiedIbkrCaptureQualification:
+    """Reject summary-only verification; retained database replay is mandatory."""
+
+    _verify_ibkr_qualification_summary(path, expectation)
     raise ValueError(
-        "IBKR qualification summaries cannot authorise promotion until independently "
-        "replayable live evidence is implemented"
+        "IBKR qualification summaries cannot authorise promotion without independently "
+        "replayable live evidence and restored database evidence"
     )
 
 

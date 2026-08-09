@@ -60,13 +60,34 @@ been frozen. The exact-six policy is AUD/USD, EUR/USD, Australia 200, US 500, Go
 and US Crude. The four new conIds and all contract fields must come from a fresh,
 replayed capability-review/selection closure; the implementation does not guess them.
 
-B4 promotion, verification, and preflight are intentionally fail-closed until the
-live snapshot tranche supplies independently replayable immutable evidence. A sealed
-qualification summary is not provenance and cannot mint the runtime-only capability.
-Once that evidence reader exists, `qtrad deployment ibkr-promote --policy b4-exact-six`
-will require the authenticated B3 release, its five authority files, the B3 deployment
-descriptor, and fresh exact-six authority. The B4 release will record parent release
-and qualification identities and remain create-only under
+B4 promotion, verification, and preflight remain fail-closed unless the qualification
+artifact is independently replayed against the exact live capture database and a fresh,
+hash-checked disposable restore. A sealed qualification summary, restore database name,
+API response, fake store or copied database is not provenance and cannot mint the
+runtime-only capability.
+
+Run qualification commands only as the child command of
+`qtrad-ibkr-postgres-restore-verify`. The wrapper checks the selected backup's recorded
+SHA-256 before `pg_restore --exit-on-error`, marks the disposable
+`qtrad_ibkr_restore_verify_*` database with that archive identity, writes create-only
+restore evidence binding source database, restored database, schema, archive SHA and
+completion, exports the ephemeral restore URL/evidence path, executes the bounded
+qualification command while the database exists, and then drops it. The application
+re-hashes the archive, authenticates the database marker and exact evidence before any
+snapshot or verifier can proceed. The first pass selects the latest complete archive;
+set `QTRAD_IBKR_RESTORE_ARCHIVE` to the artifact's exact archive path when independently
+replaying that same snapshot.
+
+The qualifying collector run must be cleanly stopped before backup so its final metrics
+and last healthy, post-reconnect snapshot are immutable in the run record and replay
+exactly after restore. The operator API exposes the same bounded evidence query at
+`/api/v1/capture/qualification-evidence`; that read-only endpoint never grants
+qualification authority.
+
+After genuine B3 evidence is available, `qtrad deployment ibkr-promote
+--policy b4-exact-six` requires the authenticated B3 release, its five authority files,
+the B3 deployment descriptor, and fresh exact-six authority. The B4 release records
+parent release and qualification identities and remains create-only under
 `qtrad-ibkr-native-release-v2`.
 
 The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
@@ -74,11 +95,11 @@ listing identities, conIds, and immutable listing semantics. The other four cont
 must come from the fresh replayed authority closure. B4 continues to reuse the existing
 service, database, port, client-ID, and checkpoint topology.
 
-These commands do not create a real B4 release in this software phase and do not
-qualify B3 or B4. Closed-market connectivity is not qualification evidence. Real
-qualification still requires LIVE bid and ask evidence during authenticated ACTIVE
-periods, zero-loss persistence, controlled reconnect with fresh post-reconnect data,
-and verified backup/restore.
+This software phase did not create a qualification artifact or real B4 release and did
+not query either database. Closed-market connectivity is not qualification evidence.
+Real qualification still requires LIVE bid and ask evidence during authenticated
+ACTIVE periods, zero-loss persistence, controlled reconnect with fresh post-reconnect
+data, and verified backup/restore.
 
 ## Running explicit historical CLI commands
 

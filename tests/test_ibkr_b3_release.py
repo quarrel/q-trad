@@ -728,7 +728,13 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
     assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
-    assert "qtrad_ibkr_restore_" in restore
+    assert "qtrad_ibkr_restore_verify_" in restore
+    assert "sha256sum --check" in restore
+    assert "pg_restore --exit-on-error" in restore
+    assert "COMMENT ON DATABASE" in restore
+    assert "restore-evidence" in restore
+    assert "QTRAD_IBKR_RESTORE_ARCHIVE" in restore
+    assert '"$@"' in restore
     assert "trap cleanup EXIT" in restore
     assert "QTRAD_IBKR_PASSWORD" not in backup + restore
 

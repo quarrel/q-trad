@@ -371,6 +371,22 @@ async def test_native_callbacks_worker_projection_health_and_api(
             assert api_reconciliation.status_code == 200
             assert api_reconciliation.json()["adapter_accepted"] == 5
 
+            qualification_evidence = await http_client.get(
+                "/api/v1/capture/qualification-evidence",
+                params={
+                    "capture_session_id": str(run_id),
+                    "started_at": _NOW.isoformat(),
+                    "ended_at": (_NOW + timedelta(seconds=4)).isoformat(),
+                    "generated_at": (_NOW + timedelta(seconds=5)).isoformat(),
+                },
+            )
+            assert qualification_evidence.status_code == 200
+            qualification_body = qualification_evidence.json()
+            assert qualification_body["retained_row_count"] == 5
+            assert len(qualification_body["retained_rows_sha256"]) == 64
+            assert "retained_rows" not in qualification_body
+            assert "operations" not in qualification_body
+
             instruments = await http_client.get("/api/v1/instruments")
             assert instruments.status_code == 200
             assert instruments.json()[0]["configuration_hash"] == _CONFIGURATION_HASH
