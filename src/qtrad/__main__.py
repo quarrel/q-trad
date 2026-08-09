@@ -230,10 +230,13 @@ from qtrad.runtime.r2_verification import (
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
+    prepare_confirmatory_g2,
     require_ibkr_adapter_runtime_identity,
     runtime_identities,
     selection_freeze,
     verify_confirmatory_f2,
+    verify_confirmatory_g1,
+    verify_confirmatory_g2_preparation,
     verify_oof_bundle,
     verify_software_bundle,
     verify_software_bundle_async,
@@ -965,6 +968,30 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_confirmatory_selection.add_argument("--f2-bundle", type=Path, required=True)
     baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
     baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
+
+    baselines_confirmatory_g1_verify = baselines_sub.add_parser(
+        "confirmatory-g1-verify",
+        help="independently replay persisted confirmatory G1 against verified F2",
+    )
+    baselines_confirmatory_g1_verify.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g1_verify.add_argument("--selection", type=Path, required=True)
+
+    baselines_confirmatory_g2_prepare = baselines_sub.add_parser(
+        "confirmatory-g2-prepare",
+        help="prepare and seal outcome-blind confirmatory G2 evidence",
+    )
+    baselines_confirmatory_g2_prepare.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--prepared-by", required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--output", type=Path, required=True)
+
+    baselines_confirmatory_g2_verify = baselines_sub.add_parser(
+        "confirmatory-g2-preparation-verify",
+        help="independently replay an unopened confirmatory G2 preparation",
+    )
+    baselines_confirmatory_g2_verify.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g2_verify.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_g2_verify.add_argument("--preparation", type=Path, required=True)
 
     baselines_selection_freeze = baselines_sub.add_parser(
         "selection-freeze", help="freeze disposable implementation selection mechanics"
@@ -1806,6 +1833,39 @@ def main(argv: Sequence[str] | None = None) -> None:
             frozen_by=args.frozen_by,
         )
         print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g1-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        print(json.dumps({"selection_manifest_id": g1.selection.manifest_id}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-prepare"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        manifest = prepare_confirmatory_g2(
+            verified_g1=g1,
+            output=args.output,
+            prepared_by=args.prepared_by,
+        )
+        print(json.dumps({"preparation": str(manifest)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-preparation-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        preparation = verify_confirmatory_g2_preparation(
+            verified_g1=g1,
+            path=args.preparation,
+        )
+        print(json.dumps({"seal_id": preparation.seal.seal_id}, sort_keys=True))
     elif (
         args.command == "research"
         and args.research_command == "baselines"

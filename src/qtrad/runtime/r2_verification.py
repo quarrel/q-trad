@@ -11,7 +11,7 @@ import json
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -34,14 +34,23 @@ from qtrad.application.r2_evaluation import (
 )
 from qtrad.application.r2_features import (
     R2FoundationInputs,
+    R2OutcomeBlindFeatureInputs,
+    build_outcome_blind_holdout_feature_rows,
     feature_schema_for_set,
+    materialise_outcome_blind_training_features,
     verify_raw_feature_manifest_bindings,
     verify_raw_feature_rows,
 )
 from qtrad.application.r2_holdout import (
+    _CONFIRMATORY_G2_PREPARATION_TOKEN,
     _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN,
     VerifiedConfirmatoryHoldoutAuthority,
+    build_holdout_coverage,
+    build_holdout_forecasts,
+    fit_final_ridge,
     freeze_holdout_selection,
+    materialise_confirmatory_holdout_features,
+    seal_holdout_forecasts,
 )
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_historical_experiment,
@@ -90,6 +99,7 @@ from qtrad.domain.r2_evaluation import (
     SelectionManifest,
 )
 from qtrad.domain.r2_features import (
+    FeatureDefinition,
     R2FeatureDataset,
     RawFeatureRow,
     RawFeatureValue,
@@ -98,9 +108,15 @@ from qtrad.domain.r2_features import (
 from qtrad.domain.r2_holdout import (
     HoldoutDirection,
     HoldoutScope,
+    R2FinalFit,
     R2FinalFittingPolicy,
+    R2HoldoutCoverageDataset,
+    R2HoldoutFeatureDataset,
+    R2HoldoutForecastDataset,
+    R2HoldoutForecastSeal,
     R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
+    R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
 )
@@ -146,6 +162,7 @@ from qtrad.runtime.r2_bundles import (
     write_r2_oof_bundle,
     write_r2_software_bundle,
 )
+from qtrad.runtime.r2_holdout import verify_holdout_preparation, write_holdout_preparation
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
@@ -196,6 +213,8 @@ _DEPLOYMENT_IMAGE_IDENTITY_PATH = Path("/run/qtrad/image-identity.json")
 
 
 _VERIFIED_CONFIRMATORY_F2_TOKEN = object()
+_VERIFIED_CONFIRMATORY_G1_TOKEN = object()
+_VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN = object()
 
 
 def _deep_freeze(value: object) -> object:
@@ -252,6 +271,7 @@ class VerifiedConfirmatoryF2:
         "_holdout_comparator_configuration_ids",
         "_holdout_target_source",
         "_local_comparator_manifest_id",
+        "_outcome_blind_foundation",
         "_readiness_report",
         "_runtime_identities",
         "_selected_configuration_ids",
@@ -270,6 +290,7 @@ class VerifiedConfirmatoryF2:
     _holdout_comparator_configuration_ids: tuple[str, ...]
     _holdout_target_source: R2HoldoutTargetSource
     _local_comparator_manifest_id: str
+    _outcome_blind_foundation: R1FoundationBindings
     _readiness_report: R2ReadinessReport
     _runtime_identities: Mapping[str, str]
     _selection_policy: Mapping[str, JsonValue]
@@ -293,6 +314,7 @@ class VerifiedConfirmatoryF2:
         evaluation_report_id: str,
         experiment: R2ExperimentConfig,
         local_comparator_manifest_id: str,
+        outcome_blind_foundation: R1FoundationBindings,
         evaluated_configurations: tuple[ConfigurationRecord, ...],
         selection_decisions: tuple[SelectionDecision, ...],
         selected_configuration_ids: tuple[str, ...],
@@ -319,6 +341,7 @@ class VerifiedConfirmatoryF2:
         object.__setattr__(instance, "_evaluation_report_id", evaluation_report_id)
         object.__setattr__(instance, "_experiment", _immutable_experiment(experiment))
         object.__setattr__(instance, "_local_comparator_manifest_id", local_comparator_manifest_id)
+        object.__setattr__(instance, "_outcome_blind_foundation", outcome_blind_foundation)
         object.__setattr__(instance, "_evaluated_configurations", evaluated_configurations)
         object.__setattr__(instance, "_selection_decisions", selection_decisions)
         object.__setattr__(instance, "_selected_configuration_ids", selected_configuration_ids)
@@ -384,6 +407,12 @@ class VerifiedConfirmatoryF2:
         return self._holdout_target_source
 
     @property
+    def outcome_blind_foundation(self) -> R1FoundationBindings:
+        """Return independently verified R1 projections that contain no holdout outcomes."""
+
+        return self._outcome_blind_foundation
+
+    @property
     def descriptor(self) -> Mapping[str, JsonValue]:
         return self._descriptor
 
@@ -432,6 +461,82 @@ class VerifiedConfirmatoryF2:
     @property
     def selection_policy(self) -> Mapping[str, JsonValue]:
         return self._selection_policy
+
+
+class VerifiedConfirmatoryG1:
+    """Runtime-only authority proving an exact persisted confirmatory G1 freeze."""
+
+    __slots__ = ("_selection", "_verified_f2")
+
+    _selection: R2HoldoutSelectionManifest
+    _verified_f2: VerifiedConfirmatoryF2
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedConfirmatoryG1 is constructed only by verify_confirmatory_g1")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("VerifiedConfirmatoryG1 is immutable")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        verified_f2: VerifiedConfirmatoryF2,
+        selection: R2HoldoutSelectionManifest,
+    ) -> VerifiedConfirmatoryG1:
+        if token is not _VERIFIED_CONFIRMATORY_G1_TOKEN:
+            raise TypeError("VerifiedConfirmatoryG1 is constructed only by its verifier")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_verified_f2", verified_f2)
+        object.__setattr__(instance, "_selection", selection)
+        return instance
+
+    @property
+    def verified_f2(self) -> VerifiedConfirmatoryF2:
+        return self._verified_f2
+
+    @property
+    def selection(self) -> R2HoldoutSelectionManifest:
+        return self._selection
+
+
+class VerifiedConfirmatoryG2Preparation:
+    """Runtime-only authority proving a sealed, unopened confirmatory preparation."""
+
+    __slots__ = ("_seal", "_verified_g1")
+
+    _seal: R2HoldoutForecastSeal
+    _verified_g1: VerifiedConfirmatoryG1
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("VerifiedConfirmatoryG2Preparation is immutable")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        verified_g1: VerifiedConfirmatoryG1,
+        seal: R2HoldoutForecastSeal,
+    ) -> VerifiedConfirmatoryG2Preparation:
+        if token is not _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN:
+            raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
+        instance = object.__new__(cls)
+        object.__setattr__(instance, "_verified_g1", verified_g1)
+        object.__setattr__(instance, "_seal", seal)
+        return instance
+
+    @property
+    def verified_g1(self) -> VerifiedConfirmatoryG1:
+        return self._verified_g1
+
+    @property
+    def seal(self) -> R2HoldoutForecastSeal:
+        return self._seal
 
 
 def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
@@ -2621,7 +2726,11 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         if descriptor.get(key) != expected:
             raise ValueError(f"confirmatory F2 descriptor differs for {key}")
 
-    replayed_folds, replayed_source_active_intervals = _replay_confirmatory_oof(path)
+    (
+        replayed_folds,
+        replayed_source_active_intervals,
+        outcome_blind_foundation,
+    ) = _replay_confirmatory_oof(path)
     readiness_report = evaluate_outcome_blind_confirmatory_readiness(
         experiment=experiment,
         target_source=source,
@@ -2744,6 +2853,7 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         evaluation_report_id=report_id,
         experiment=experiment,
         local_comparator_manifest_id=local_comparator_manifest_id,
+        outcome_blind_foundation=outcome_blind_foundation,
         evaluated_configurations=configurations,
         selection_decisions=decisions,
         selected_configuration_ids=selected_ids,
@@ -2757,13 +2867,13 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     )
 
 
-def freeze_confirmatory_selection(
+def _build_confirmatory_selection(
     *,
     verified_f2: VerifiedConfirmatoryF2,
-    output: Path,
+    frozen_at: datetime,
     frozen_by: str,
-) -> Path:
-    """Derive and persist confirmatory G1 from one verified F2 authority only."""
+) -> R2HoldoutSelectionManifest:
+    """Derive the only confirmatory G1 permitted by one verified F2 authority."""
     if type(verified_f2) is not VerifiedConfirmatoryF2:
         raise TypeError("confirmatory selection requires VerifiedConfirmatoryF2")
     if not frozen_by.strip():
@@ -2908,7 +3018,6 @@ def freeze_confirmatory_selection(
             "solver_identity": dict(final_fitting_policy.solver_identity),
         }
     )
-    frozen_at = datetime.now(UTC)
     prior_selection = SelectionManifest.create(
         experiment_configuration_id=verified_f2.experiment_configuration_id,
         evidence_class=verified_f2.evidence_class,
@@ -2969,8 +3078,295 @@ def freeze_confirmatory_selection(
         holdout_opportunity_registry=opportunity_registry,
         pre_holdout_projection=projection,
     )
+    return selection
+
+
+def freeze_confirmatory_selection(
+    *,
+    verified_f2: VerifiedConfirmatoryF2,
+    output: Path,
+    frozen_by: str,
+) -> Path:
+    """Derive and persist confirmatory G1 from one verified F2 authority only."""
+
+    selection = _build_confirmatory_selection(
+        verified_f2=verified_f2,
+        frozen_at=datetime.now(UTC),
+        frozen_by=frozen_by,
+    )
     atomic_create(output, canonical_bytes(cast(dict[str, object], selection.as_json())))
     return output
+
+
+def verify_confirmatory_g1(
+    *,
+    verified_f2: VerifiedConfirmatoryF2,
+    path: Path,
+) -> VerifiedConfirmatoryG1:
+    """Independently replay a persisted G1 freeze against its verified F2 authority."""
+
+    if type(verified_f2) is not VerifiedConfirmatoryF2:
+        raise TypeError("confirmatory G1 verification requires VerifiedConfirmatoryF2")
+    selection = R2HoldoutSelectionManifest.from_json(_load_selection(path))
+    if (
+        selection.holdout_scope is not HoldoutScope.CONFIRMATORY
+        or selection.evidence_class is not EvidenceClass.CONFIRMATORY
+        or selection.holdout_outcomes_accessed
+    ):
+        raise ValueError("confirmatory G1 is not outcome-blind confirmatory evidence")
+    expected = _build_confirmatory_selection(
+        verified_f2=verified_f2,
+        frozen_at=selection.frozen_at,
+        frozen_by=selection.frozen_by,
+    )
+    if selection.as_json() != expected.as_json():
+        raise ValueError(
+            "persisted confirmatory G1 differs from independently replayed F2 authority"
+        )
+    return VerifiedConfirmatoryG1._create(
+        _VERIFIED_CONFIRMATORY_G1_TOKEN,
+        verified_f2=verified_f2,
+        selection=selection,
+    )
+
+
+def _confirmatory_feature_sets(
+    experiment: R2ExperimentConfig,
+) -> Mapping[str, tuple[str, tuple[FeatureDefinition, ...]]]:
+    result: dict[str, tuple[str, tuple[FeatureDefinition, ...]]] = {}
+    for declared in experiment.feature_sets:
+        schema = feature_schema_for_set(experiment, declared.name)
+        identity = feature_set_id(
+            experiment.configuration_id,
+            declared.name,
+            schema,
+            experiment.market_data_source_class,
+        )
+        if identity in result:
+            raise ValueError("confirmatory experiment contains duplicate feature-set identities")
+        result[identity] = (declared.name, tuple(schema))
+    return MappingProxyType(result)
+
+
+@dataclass(frozen=True, slots=True)
+class _ConfirmatoryG2Build:
+    training_features: Mapping[str, R2FeatureDataset]
+    holdout_features: Mapping[str, R2HoldoutFeatureDataset]
+    fits: tuple[R2FinalFit, ...]
+    forecasts: tuple[R2HoldoutForecastDataset, ...]
+    coverage: tuple[R2HoldoutCoverageDataset, ...]
+    seal: R2HoldoutForecastSeal
+
+
+def _build_confirmatory_g2(
+    *,
+    verified_g1: VerifiedConfirmatoryG1,
+    prepared_by: str,
+) -> _ConfirmatoryG2Build:
+    """Replay every scientific preparation child from verified G1 authority."""
+
+    if type(verified_g1) is not VerifiedConfirmatoryG1:
+        raise TypeError("confirmatory G2 preparation requires VerifiedConfirmatoryG1")
+    selection = verified_g1.selection
+    verified_f2 = verified_g1.verified_f2
+    experiment = verified_f2.experiment
+    target_source = verified_f2.holdout_target_source
+    foundation = cast(R2OutcomeBlindFeatureInputs, verified_f2.outcome_blind_foundation)
+    opportunities = tuple(target_source.opportunities)
+    feature_sets = _confirmatory_feature_sets(experiment)
+    required_feature_set_ids = {
+        feature_set
+        for (
+            configuration,
+            family,
+            feature_set,
+            _dataset,
+            _manifest,
+        ) in selection.configuration_registry
+        if configuration in selection.holdout_configuration_ids
+        and family is not ModelFamily.ZERO_RETURN
+        and feature_set is not None
+    }
+    if required_feature_set_ids - set(feature_sets):
+        raise ValueError("confirmatory G1 references an unknown feature-set identity")
+
+    training_features: dict[str, R2FeatureDataset] = {}
+    holdout_features: dict[str, R2HoldoutFeatureDataset] = {}
+    for feature_set_identity in sorted(required_feature_set_ids):
+        feature_set_name, raw_schema = feature_sets[feature_set_identity]
+        schema = tuple(raw_schema)
+        training = materialise_outcome_blind_training_features(
+            foundation,
+            experiment,
+            target_source,
+            feature_set_name=feature_set_name,
+        )
+        training_features[feature_set_identity] = training
+        raw_rows = build_outcome_blind_holdout_feature_rows(
+            foundation,
+            experiment,
+            target_source,
+            feature_set_name=feature_set_name,
+            opportunities=opportunities,
+        )
+        holdout_features[feature_set_identity] = materialise_confirmatory_holdout_features(
+            selection=selection,
+            authority=verified_f2.confirmatory_holdout_authority,
+            target_source=target_source,
+            feature_set_id=feature_set_identity,
+            feature_schema=schema,
+            raw_rows=raw_rows,
+            opportunities=opportunities,
+            observation_dataset_id=foundation.observations.dataset_id,
+            panel_dataset_id=foundation.panel.dataset_id,
+        )
+
+    fits: list[R2FinalFit] = []
+    for (
+        configuration_id,
+        family,
+        feature_set_identity,
+        expected_training_dataset_id,
+        _manifest_id,
+    ) in selection.configuration_registry:
+        if (
+            configuration_id not in selection.holdout_configuration_ids
+            or family is ModelFamily.ZERO_RETURN
+        ):
+            continue
+        if feature_set_identity is None or expected_training_dataset_id is None:
+            raise ValueError("fitted confirmatory configuration lacks feature authority")
+        training = training_features[feature_set_identity]
+        if training.dataset_id != expected_training_dataset_id:
+            raise ValueError("replayed training features differ from authenticated F2 evidence")
+        prepared_features = holdout_features[feature_set_identity]
+        target_instruments: tuple[str | None, ...] = (
+            tuple(target_source.target_instruments)
+            if family is ModelFamily.LOCAL_RIDGE
+            else (None,)
+        )
+        for target_instrument in target_instruments:
+            fits.append(
+                fit_final_ridge(
+                    selection=selection,
+                    configuration_id=configuration_id,
+                    model_family=family,
+                    target_instrument_id=target_instrument,
+                    feature_dataset_id=prepared_features.dataset_id,
+                    feature_schema_id=training.raw_feature_schema_id,
+                    training_feature_dataset=training,
+                    training_target_dataset=target_source.pre_holdout_target_dataset,
+                    training_target_source_dataset_id=target_source.source_target_dataset_id,
+                    training_cutoff=selection.holdout_range[0],
+                    policy=selection.final_fitting_policy,
+                    _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+                )
+            )
+    forecasts = build_holdout_forecasts(
+        selection=selection,
+        feature_datasets=holdout_features,
+        final_fits=tuple(fits),
+        opportunities=opportunities,
+    )
+    coverage = tuple(
+        build_holdout_coverage(
+            selection=selection,
+            feature_datasets=holdout_features,
+            final_fit=None,
+            final_fits=tuple(
+                fit for fit in fits if fit.configuration_id == forecast.configuration_id
+            ),
+            forecast_dataset=forecast,
+            opportunities=opportunities,
+        )
+        for forecast in forecasts
+    )
+    seal = seal_holdout_forecasts(
+        selection=selection,
+        feature_datasets=holdout_features,
+        final_fits=tuple(fits),
+        forecast_datasets=forecasts,
+        coverage_datasets=coverage,
+        prepared_at=selection.frozen_at,
+        prepared_by=prepared_by,
+    )
+    return _ConfirmatoryG2Build(
+        training_features=MappingProxyType(training_features),
+        holdout_features=MappingProxyType(holdout_features),
+        fits=tuple(fits),
+        forecasts=forecasts,
+        coverage=coverage,
+        seal=seal,
+    )
+
+
+def prepare_confirmatory_g2(
+    *,
+    verified_g1: VerifiedConfirmatoryG1,
+    output: Path,
+    prepared_by: str,
+) -> Path:
+    """Create one sealed confirmatory G2 preparation without reading holdout outcomes."""
+
+    built = _build_confirmatory_g2(verified_g1=verified_g1, prepared_by=prepared_by)
+    target_source = verified_g1.verified_f2.holdout_target_source
+    pre_holdout_targets = target_source.pre_holdout_target_dataset
+    write_holdout_preparation(
+        output,
+        selection=verified_g1.selection,
+        feature_datasets={child.dataset_id: child for child in built.holdout_features.values()},
+        final_fits={fit.fit_id: fit for fit in built.fits},
+        forecasts={forecast.dataset_id: forecast for forecast in built.forecasts},
+        coverage={child.coverage_id: child for child in built.coverage},
+        seal=built.seal,
+        training_feature_datasets={
+            child.dataset_id: child for child in built.training_features.values()
+        },
+        training_target_datasets={pre_holdout_targets.dataset_id: pre_holdout_targets},
+        _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+    )
+    return output / "manifest.json"
+
+
+def verify_confirmatory_g2_preparation(
+    *,
+    verified_g1: VerifiedConfirmatoryG1,
+    path: Path,
+) -> VerifiedConfirmatoryG2Preparation:
+    """Independently replay one sealed preparation against exact verified G1 authority."""
+
+    if type(verified_g1) is not VerifiedConfirmatoryG1:
+        raise TypeError("confirmatory preparation verification requires VerifiedConfirmatoryG1")
+    seal = verify_holdout_preparation(
+        path,
+        _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+    )
+    if (
+        seal.selection_manifest_id != verified_g1.selection.manifest_id
+        or seal.holdout_scope is not HoldoutScope.CONFIRMATORY
+        or seal.evidence_class is not EvidenceClass.CONFIRMATORY
+        or seal.holdout_outcomes_accessed
+    ):
+        raise ValueError("confirmatory preparation differs from verified G1 authority")
+    persisted_selection = R2HoldoutSelectionManifest.from_json(
+        _load_selection(path / "selection.json")
+    )
+    if persisted_selection.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory preparation contains a substituted G1 selection")
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=seal.prepared_by,
+    )
+    if seal.as_json() != expected.seal.as_json():
+        raise ValueError(
+            "confirmatory preparation differs from independently replayed "
+            "G1 feature and fit authority"
+        )
+    return VerifiedConfirmatoryG2Preparation._create(
+        _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN,
+        verified_g1=verified_g1,
+        seal=seal,
+    )
 
 
 def holdout_evaluation_policy(
@@ -3338,7 +3734,11 @@ async def _replay_staged_oof_async(
     path: Path,
     *,
     expected_run_kind: str = "REPRESENTATIVE",
-) -> tuple[FoldDataset, Mapping[str, tuple[tuple[datetime, datetime], ...]]]:
+) -> tuple[
+    FoldDataset,
+    Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    R1FoundationBindings,
+]:
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
         raise ValueError("staged OOF bundle has no authenticated holdout target source")
@@ -3466,7 +3866,11 @@ async def _replay_staged_oof_async(
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError("staged OOF bundle does not replay to the authenticated pipeline")
-    return replayed_folds, replayed_source_active_intervals
+    return (
+        replayed_folds,
+        replayed_source_active_intervals,
+        cast(R1FoundationBindings, verified),
+    )
 
 
 async def _replay_representative_oof_async(path: Path) -> None:
@@ -3475,7 +3879,11 @@ async def _replay_representative_oof_async(path: Path) -> None:
 
 async def _replay_confirmatory_oof_async(
     path: Path,
-) -> tuple[FoldDataset, Mapping[str, tuple[tuple[datetime, datetime], ...]]]:
+) -> tuple[
+    FoldDataset,
+    Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    R1FoundationBindings,
+]:
     return await _replay_staged_oof_async(path, expected_run_kind=CONFIRMATORY_RUN_KIND)
 
 
@@ -3485,7 +3893,11 @@ def _replay_representative_oof(path: Path) -> None:
 
 def _replay_confirmatory_oof(
     path: Path,
-) -> tuple[FoldDataset, Mapping[str, tuple[tuple[datetime, datetime], ...]]]:
+) -> tuple[
+    FoldDataset,
+    Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    R1FoundationBindings,
+]:
     return asyncio.run(_replay_confirmatory_oof_async(path))
 
 

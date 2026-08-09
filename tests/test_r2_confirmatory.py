@@ -1,20 +1,24 @@
-"""Fixture-only regression tests for the confirmatory F2-to-G1 boundary."""
+"""Fixture-only regressions for confirmatory F2 through unopened G2 preparation."""
 
 from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from dataclasses import replace
+from dataclasses import fields, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from shutil import copytree
 from types import SimpleNamespace
 from typing import Any, cast
 from uuid import UUID
 
 import pytest
 
+import qtrad.runtime.foundation_bundle as foundation_runtime
+import qtrad.runtime.r2_holdout as holdout_runtime
 import qtrad.runtime.r2_verification as verification
+from qtrad.__main__ import build_parser
 from qtrad.application.r2_features import build_raw_feature_rows, feature_schema_for_set
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
@@ -43,12 +47,17 @@ from qtrad.runtime.r2_bundles import canonical_bytes
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
     VerifiedConfirmatoryF2,
+    VerifiedConfirmatoryG1,
+    VerifiedConfirmatoryG2Preparation,
     _build_synthetic_oof,
     _materialise_synthetic_feature_manifests,
     _synthetic_pipeline_inputs,
     build_oof_bundle,
     freeze_confirmatory_selection,
+    prepare_confirmatory_g2,
     verify_confirmatory_f2,
+    verify_confirmatory_g1,
+    verify_confirmatory_g2_preparation,
 )
 
 
@@ -261,6 +270,18 @@ def _build_confirmatory_fixture(
     )
 
 
+def _rebuild_g1_selection(
+    selection: R2HoldoutSelectionManifest,
+    **changes: object,
+) -> R2HoldoutSelectionManifest:
+    values = {
+        item.name: getattr(selection, item.name)
+        for item in fields(selection)
+        if item.name != "manifest_id"
+    }
+    return R2HoldoutSelectionManifest.create(**{**values, **changes})
+
+
 def test_confirmatory_run_and_evidence_classes_are_strict() -> None:
     verified, implementation, _ = _synthetic_pipeline_inputs()
     with pytest.raises(ValueError, match="CONFIRMATORY OOF runs require CONFIRMATORY evidence"):
@@ -286,6 +307,39 @@ def test_confirmatory_run_and_evidence_classes_are_strict() -> None:
             output=Path("unused"),
             run_kind="REPRESENTATIVE",
         )
+
+
+@pytest.mark.parametrize(
+    ("command", "tail"),
+    (
+        ("confirmatory-g1-verify", ("--selection", "selection.json")),
+        (
+            "confirmatory-g2-prepare",
+            ("--selection", "selection.json", "--prepared-by", "fixture", "--output", "prepared"),
+        ),
+        (
+            "confirmatory-g2-preparation-verify",
+            ("--selection", "selection.json", "--preparation", "prepared"),
+        ),
+    ),
+)
+def test_confirmatory_g2_cli_accepts_only_authority_and_operational_inputs(
+    command: str,
+    tail: tuple[str, ...],
+) -> None:
+    parsed = build_parser().parse_args(
+        ("research", "baselines", command, "--f2-bundle", "f2", *tail)
+    )
+
+    assert parsed.baselines_command == command
+    assert not {
+        "questions",
+        "metric_policy",
+        "threshold_policy",
+        "feature_set",
+        "configuration",
+        "alpha_grid",
+    }.intersection(vars(parsed))
 
 
 def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
@@ -320,6 +374,120 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     assert authority.readiness_report.confirmatory_oof_ready is ReadinessState.READY
     assert authority.readiness_report.usable_common_week_count == 16
 
+    selection_path = tmp_path / "selection.json"
+    freeze_confirmatory_selection(
+        verified_f2=authority,
+        output=selection_path,
+        frozen_by="fixture-operator",
+    )
+    verified_g1 = verify_confirmatory_g1(
+        verified_f2=authority,
+        path=selection_path,
+    )
+    assert type(verified_g1) is VerifiedConfirmatoryG1
+    with pytest.raises(TypeError, match="constructed only by verify_confirmatory_g1"):
+        VerifiedConfirmatoryG1()
+
+    changed_policy = _rebuild_g1_selection(
+        verified_g1.selection,
+        metric_policy={
+            **verified_g1.selection.metric_policy,
+            "primary_metric": "RMSE",
+        },
+    )
+    changed_selection_path = tmp_path / "changed-selection.json"
+    changed_selection_path.write_bytes(
+        canonical_bytes(cast(dict[str, object], changed_policy.as_json()))
+    )
+    with pytest.raises(ValueError, match="differs from independently replayed F2 authority"):
+        verify_confirmatory_g1(
+            verified_f2=authority,
+            path=changed_selection_path,
+        )
+
+    def reject_outcome_decode(*_: object, **__: object) -> Any:
+        raise AssertionError("C2b-1 must not decode holdout outcomes")
+
+    monkeypatch.setattr(foundation_runtime, "TargetDataset", reject_outcome_decode)
+    monkeypatch.setattr(holdout_runtime, "_outcome_evidence_from_payload", reject_outcome_decode)
+    monkeypatch.setattr(holdout_runtime, "_outcome_items_from_source", reject_outcome_decode)
+
+    preparation_root = tmp_path / "preparation"
+    manifest_path = prepare_confirmatory_g2(
+        verified_g1=verified_g1,
+        output=preparation_root,
+        prepared_by="fixture-operator",
+    )
+    verified_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=preparation_root,
+    )
+    with pytest.raises(ValueError, match="unsupported source-child workflow"):
+        holdout_runtime.verify_holdout_preparation(preparation_root)
+    assert manifest_path == preparation_root / "manifest.json"
+    assert type(verified_preparation) is VerifiedConfirmatoryG2Preparation
+    assert verified_preparation.seal.holdout_outcomes_accessed is False
+    assert verified_preparation.seal.holdout_scope is HoldoutScope.CONFIRMATORY
+    assert {item[0] for item in verified_preparation.seal.configuration_feature_dataset_ids} == set(
+        verified_g1.selection.holdout_configuration_ids
+    )
+    assert not {
+        "opened.json",
+        "consumed.json",
+        "outcome-evidence.json",
+        "outcome-target.json",
+        "evaluation.json",
+    }.intersection(path.name for path in preparation_root.iterdir())
+    with pytest.raises(TypeError, match="constructed only by its verifier"):
+        VerifiedConfirmatoryG2Preparation()
+    with pytest.raises(AttributeError, match="immutable"):
+        cast(Any, verified_preparation).seal = None
+    with pytest.raises(FileExistsError):
+        prepare_confirmatory_g2(
+            verified_g1=verified_g1,
+            output=preparation_root,
+            prepared_by="fixture-operator",
+        )
+
+    repeated_root = tmp_path / "repeated-preparation"
+    prepare_confirmatory_g2(
+        verified_g1=verified_g1,
+        output=repeated_root,
+        prepared_by="fixture-operator",
+    )
+    repeated = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=repeated_root,
+    )
+    assert repeated.seal.seal_id == verified_preparation.seal.seal_id
+
+    missing_root = tmp_path / "missing-preparation"
+    copytree(preparation_root, missing_root)
+    next((missing_root / "forecasts").iterdir()).unlink()
+    with pytest.raises((FileNotFoundError, ValueError)):
+        verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=missing_root)
+
+    altered_root = tmp_path / "altered-preparation"
+    copytree(preparation_root, altered_root)
+    fit_path = next((altered_root / "fits").iterdir())
+    fit_payload = cast(dict[str, object], json.loads(fit_path.read_text(encoding="utf-8")))
+    fit_payload["fit_id"] = "0" * 64
+    fit_path.write_text(json.dumps(fit_payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=altered_root)
+
+    extra_root = tmp_path / "extra-preparation"
+    copytree(preparation_root, extra_root)
+    (extra_root / "unexpected.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="file closure differs"):
+        verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=extra_root)
+
+    lifecycle_root = tmp_path / "lifecycle-preparation"
+    copytree(preparation_root, lifecycle_root)
+    (lifecycle_root / "opened.json").write_text("{}", encoding="utf-8")
+    with pytest.raises(ValueError, match="contains post-open lifecycle evidence"):
+        verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=lifecycle_root)
+
 
 def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_target_decode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -335,11 +503,13 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             "sklearn_identity": "fixture-sklearn",
         },
     )
-    bundle_path, _, fixture_folds, active_intervals = _build_confirmatory_fixture(tmp_path)
+    bundle_path, fixture_verified, fixture_folds, active_intervals = _build_confirmatory_fixture(
+        tmp_path
+    )
     monkeypatch.setattr(
         verification,
         "_replay_confirmatory_oof",
-        lambda _: (fixture_folds, active_intervals),
+        lambda _: (fixture_folds, active_intervals, fixture_verified),
     )
 
     def ready_report(**kwargs: object) -> R2ReadinessReport:

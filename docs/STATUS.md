@@ -1,6 +1,6 @@
 # Current status
 
-**Updated:** 2026-08-06
+**Updated:** 2026-08-09
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** IBKR Stages 1–8 software contracts, verifiers and CLI paths are implemented on `main`; capability review, host deployment and the Stage 5 canary are complete, and the registered full acquisition is executing
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
@@ -133,6 +133,13 @@ remains offline/replay.
   preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
   irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
   holdout, confirmatory OOF selection, or effectiveness conclusion exists.
+- The fixture-confirmatory C2a path independently replays qualifying F2 and persisted G1 authority. C2b-1
+  now derives pre-holdout training features, holdout features, selected and retained-control final fits,
+  forecasts and coverage exclusively from verified G1, persists one create-only `OWNED_UNOPENED` seal and
+  independently recomputes the complete feature/fit/forecast closure. This software path cannot use the
+  disposable reveal workflow and rejects every OPENED, outcome or CONSUMED child. C2b reveal, confirmatory
+  evaluation and R2.H evidence remain pending; no real holdout was accessed and no research or effectiveness
+  claim is made.
 - ADR 0028 and ADR 0029 plus `docs/IBKR-HISTORICAL-ACQUISITION.md` define the independent,
   market-data-only IBKR paper source and its historical evidence boundaries. Stage 1 provides typed
   `qtrad-ibkr-contract-selection-v1` and `qtrad-ibkr-acquisition-runtime-v1` artefacts, strict

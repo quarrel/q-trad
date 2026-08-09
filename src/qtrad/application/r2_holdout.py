@@ -22,7 +22,12 @@ from qtrad.domain.foundation import TARGET_DATASET_CONTRACT, TargetDataset, Targ
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_bundles import R2OofBundle
 from qtrad.domain.r2_evaluation import SelectionDecision, SelectionManifest
-from qtrad.domain.r2_features import R2FeatureDataset
+from qtrad.domain.r2_features import (
+    FeatureDefinition,
+    R2FeatureDataset,
+    RawFeatureRow,
+    feature_schema_id,
+)
 from qtrad.domain.r2_holdout import (
     FinalFitDisposition,
     HoldoutConclusion,
@@ -58,6 +63,7 @@ from qtrad.domain.r2_readiness import EvidenceClass, ModelFamily, R2ExperimentCo
 from qtrad.domain.time import require_utc
 
 _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN = object()
+_CONFIRMATORY_G2_PREPARATION_TOKEN = object()
 
 
 class VerifiedConfirmatoryHoldoutAuthority:
@@ -1027,6 +1033,7 @@ def materialise_r2_holdout_features(
     raw_feature_dataset: R2FeatureDataset | None = None,
     target_dataset: TargetDataset | None = None,
     allow_disposable_projection: bool = False,
+    _confirmatory_token: object | None = None,
 ) -> R2HoldoutFeatureDataset:
     """Materialise R2.B features, with projection callbacks limited to disposable fixtures."""
 
@@ -1061,7 +1068,10 @@ def materialise_r2_holdout_features(
         }
         if registry_feature_sets and feature_set_id not in registry_feature_sets:
             raise ValueError("holdout feature set is absent from the authenticated OOF registry")
-    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+    if (
+        selection.holdout_scope is HoldoutScope.CONFIRMATORY
+        and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
+    ):
         raise ValueError(
             "confirmatory holdout features require an independently verified R2.B feature child"
         )
@@ -1085,8 +1095,8 @@ def materialise_r2_holdout_features(
         if projection is None:
             raise ValueError("holdout feature materialisation requires an authenticated R2.B child")
         if (
-            not allow_disposable_projection
-            and selection.holdout_scope is not HoldoutScope.DISPOSABLE_FIXTURE
+            selection.holdout_scope is not HoldoutScope.DISPOSABLE_FIXTURE
+            and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
         ):
             raise ValueError(
                 "arbitrary feature projections are permitted only for explicit disposable fixtures"
@@ -1141,6 +1151,68 @@ def materialise_r2_holdout_features(
 
 
 build_outcome_blind_holdout_features = materialise_r2_holdout_features
+
+
+def materialise_confirmatory_holdout_features(
+    *,
+    selection: R2HoldoutSelectionManifest,
+    authority: VerifiedConfirmatoryHoldoutAuthority,
+    target_source: R2HoldoutTargetSource,
+    feature_set_id: str,
+    feature_schema: Sequence[FeatureDefinition],
+    raw_rows: Sequence[RawFeatureRow | None],
+    opportunities: Sequence[HoldoutTargetOpportunity],
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+) -> R2HoldoutFeatureDataset:
+    """Materialise confirmatory holdout features from verifier-authorised R2.B rows."""
+
+    if type(authority) is not VerifiedConfirmatoryHoldoutAuthority:
+        raise TypeError("confirmatory holdout features require verified F2 authority")
+    if (
+        selection.holdout_scope is not HoldoutScope.CONFIRMATORY
+        or selection.evidence_class is not EvidenceClass.CONFIRMATORY
+        or tuple(selection.configuration_registry) != authority.configuration_registry
+        or selection.oof_bundle_id != authority.oof_bundle_id
+        or selection.evaluation_report_id != authority.evaluation_report_id
+    ):
+        raise ValueError("confirmatory holdout selection differs from verified F2 authority")
+    ordered = _require_shared_opportunities(selection, opportunities)
+    if len(raw_rows) != len(ordered):
+        raise ValueError("confirmatory R2.B rows do not cover the frozen opportunities")
+    schema_id = feature_schema_id(feature_schema)
+    projected: dict[str, R2HoldoutFeatureRow | None] = {}
+    for opportunity, raw in zip(ordered, raw_rows, strict=True):
+        if opportunity.disposition is not HoldoutOpportunityDisposition.ELIGIBLE or raw is None:
+            projected[opportunity.opportunity_id] = None
+            continue
+        values = tuple(item.value for item in raw.values)
+        if any(value is None for value in values):
+            projected[opportunity.opportunity_id] = None
+            continue
+        if raw.feature_set_id != feature_set_id:
+            raise ValueError("confirmatory R2.B row has the wrong feature-set identity")
+        projected[opportunity.opportunity_id] = R2HoldoutFeatureRow.create(
+            opportunity_id=opportunity.opportunity_id,
+            target_id=opportunity.target_id,
+            instrument_id=opportunity.instrument_id,
+            decision_time=opportunity.decision_time,
+            feature_cutoff=raw.feature_data_asof,
+            latest_feature_bar_end=raw.latest_feature_bar_end,
+            feature_schema_id=schema_id,
+            values=cast(tuple[float, ...], values),
+        )
+    return materialise_r2_holdout_features(
+        selection=selection,
+        feature_schema_id=schema_id,
+        feature_set_id=feature_set_id,
+        observation_dataset_id=observation_dataset_id,
+        panel_dataset_id=panel_dataset_id,
+        target_dataset_id=target_source.source_target_dataset_id,
+        opportunities=ordered,
+        projection=lambda item: projected[item.opportunity_id],
+        _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+    )
 
 
 def _failed_final_fit(
@@ -1327,6 +1399,7 @@ def fit_final_ridge(
     purged_target_ids: Sequence[str] = (),
     forced_disposition: FinalFitDisposition | None = None,
     forced_failure_reason: str | None = None,
+    _confirmatory_token: object | None = None,
 ) -> R2FinalFit:
     """Fit through the authenticated R2 preprocessing and Ridge primitives."""
     from qtrad.application.r2_preprocessing import (
@@ -1336,7 +1409,10 @@ def fit_final_ridge(
     )
 
     _ensure_selection_lineage(selection)
-    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+    if (
+        selection.holdout_scope is HoldoutScope.CONFIRMATORY
+        and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
+    ):
         raise ValueError(
             "confirmatory final fits require independently verified pre-holdout "
             "feature and target children"

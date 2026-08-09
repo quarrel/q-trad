@@ -13,6 +13,7 @@ from tempfile import TemporaryDirectory
 from typing import Any, cast
 from uuid import UUID
 
+from qtrad.application.r2_holdout import _CONFIRMATORY_G2_PREPARATION_TOKEN
 from qtrad.domain.foundation import (
     TARGET_DATASET_CONTRACT,
     ExcursionDisposition,
@@ -1048,6 +1049,11 @@ def _replay_final_fit(
         forced_failure_reason=(
             str(payload["failure_reason"]) if forced_fit_disposition is not None else None
         ),
+        _confirmatory_token=(
+            _CONFIRMATORY_G2_PREPARATION_TOKEN
+            if selection.holdout_scope is HoldoutScope.CONFIRMATORY
+            else None
+        ),
     )
     if replayed.as_json() != dict(payload):
         raise ValueError("final fit does not replay from its authenticated training children")
@@ -1521,9 +1527,13 @@ def write_holdout_preparation(
     seal: R2HoldoutForecastSeal,
     training_feature_datasets: Mapping[str, object] | None = None,
     training_target_datasets: Mapping[str, object] | None = None,
+    _confirmatory_token: object | None = None,
 ) -> Path:
     """Persist all PR B children and the seal without overwriting any path."""
-    if seal.holdout_scope is HoldoutScope.CONFIRMATORY:
+    if (
+        seal.holdout_scope is HoldoutScope.CONFIRMATORY
+        and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
+    ):
         raise ValueError("G2 preparation is restricted to disposable fixtures")
     if selection.manifest_id != seal.selection_manifest_id:
         raise ValueError("selection and seal lineage differs")
@@ -1647,7 +1657,11 @@ def write_holdout_preparation(
     return output / "manifest.json"
 
 
-def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
+def verify_holdout_preparation(
+    path: Path,
+    *,
+    _confirmatory_token: object | None = None,
+) -> R2HoldoutForecastSeal:
     seal_payload = _verify_child(
         path,
         "manifest.json",
@@ -1657,7 +1671,10 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     )
     seal = R2HoldoutForecastSeal.from_json(seal_payload)
     selection = verify_holdout_selection(path / "selection.json")
-    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+    if (
+        selection.holdout_scope is HoldoutScope.CONFIRMATORY
+        and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
+    ):
         raise ValueError(
             "confirmatory holdout preparation requires the unsupported source-child workflow"
         )
@@ -1677,6 +1694,20 @@ def verify_holdout_preparation(path: Path) -> R2HoldoutForecastSeal:
     claim_state = claim_payload.get("state")
     if claim_state not in {"AVAILABLE", "TRANSFERRED", "OWNED_UNOPENED", "OWNED_OPENED"}:
         raise ValueError("preparation claim has an unsupported state")
+    if selection.holdout_scope is HoldoutScope.CONFIRMATORY:
+        if claim_state != "OWNED_UNOPENED":
+            raise ValueError("confirmatory G2 preparation must remain owned and unopened")
+        if any(
+            (path / name).exists() or (path / name).is_symlink()
+            for name in (
+                "opened.json",
+                "consumed.json",
+                "outcome-evidence.json",
+                "outcome-target.json",
+                "evaluation.json",
+            )
+        ):
+            raise ValueError("confirmatory G2 preparation contains post-open lifecycle evidence")
     if claim_state == "AVAILABLE":
         expected_claim = _preparation_claim(selection.manifest_id, seal.seal_id)
         if claim_payload != expected_claim:

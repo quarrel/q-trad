@@ -149,6 +149,13 @@ Walk-forward folds fit transformations and models only on permitted history. Pur
 derived from target, feature and update dependency windows. A locked final holdout is unavailable to
 feature, model, calibration, risk and solver selection.
 
+Confirmatory preparation is capability-gated. A persisted G1 selection is independently replayed from
+verified F2 before it can authorise final fitting. The resulting G2 preparation derives every scientific
+choice and R2.B feature row from that authority, fits the exact selected-plus-retained dependency set,
+and seals forecasts and explicit opportunity coverage as `OWNED_UNOPENED`. Independent verification
+recomputes the complete feature, fit, forecast and coverage closure. The preparation capability has no
+reveal operation; outcome decoding, OPENED and CONSUMED evidence belong to a later lifecycle boundary.
+
 Forecast, economic and portfolio gates remain separate. Reports bind dataset, code, configuration,
 folds and outputs and retain failed/rejected experiments. A negative result is valid; Rank IC alone
 is never described as profitability.
