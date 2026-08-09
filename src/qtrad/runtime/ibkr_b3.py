@@ -1,9 +1,8 @@
 """B3 exact-two IBKR release promotion and offline deployment checks.
 
-This module consumes an already reviewed B2 native-capture configuration.  It
-does not discover contracts, contact IBKR, inspect a live database, or mutate a
-host.  B3 promotion is a deterministic subset operation over immutable B2
-evidence.
+This module independently authenticates B2 contract evidence and promotes only
+listings that exactly match the immutable B3 exact-two listing policy.  It does
+not discover contracts, contact IBKR, inspect a live database, or mutate a host.
 """
 
 from __future__ import annotations
@@ -21,7 +20,7 @@ from typing import cast
 from qtrad.adapters.ibkr.market_hours import IbkrMarketActivity
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.instruments import ProviderListing
+from qtrad.domain.instruments import AssetClass, ProductType, ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime.ibkr_historical import (
     load_ibkr_capability_review,
@@ -31,6 +30,7 @@ from qtrad.runtime.ibkr_native_capture import (
     IbkrNativeCaptureConfiguration,
     load_reviewed_configuration,
 )
+from qtrad.runtime.universe import load_capture_candidates
 
 B3_RELEASE_CONTRACT = "qtrad-ibkr-native-release-v1"
 B3_CAPTURE_SOURCE_ID = "ibkr-paper-v1"
@@ -43,9 +43,51 @@ B3_API_PORT = 8000
 B3_GATEWAY_HOSTS = frozenset({"127.0.0.1", "::1"})
 B3_SUPPORTED_IBKR_VERSIONS = frozenset({"10.45", "10.49"})
 
-B3_TARGETS: tuple[tuple[str, str, int], ...] = (
-    ("fx:aud-usd", "aud-usd", 14_433_401),
-    ("index:australia-200", "australia-200", 111_987_484),
+
+@dataclass(frozen=True, slots=True)
+class _B3ListingPolicy:
+    instrument_id: str
+    external_id: str
+    con_id: int
+    display_name: str
+    asset_class: AssetClass
+    base_currency: str | None
+    currency: str
+    security_type: str
+    product_type: ProductType
+
+
+B3_LISTING_VALID_FROM = datetime(2026, 8, 8, tzinfo=UTC)
+B3_LISTING_METADATA_VERSION = "ibkr-b3-review-v1"
+B3_LISTING_MINIMUM_DEAL_SIZE = Decimal("1")
+
+_B3_LISTING_POLICIES = (
+    _B3ListingPolicy(
+        instrument_id="fx:aud-usd",
+        external_id="aud-usd",
+        con_id=14_433_401,
+        display_name="AUD/USD",
+        asset_class=AssetClass.FX,
+        base_currency="AUD",
+        currency="USD",
+        security_type="CASH",
+        product_type=ProductType.SPOT_FX,
+    ),
+    _B3ListingPolicy(
+        instrument_id="index:australia-200",
+        external_id="australia-200",
+        con_id=111_987_484,
+        display_name="Australia 200",
+        asset_class=AssetClass.INDEX,
+        base_currency=None,
+        currency="AUD",
+        security_type="CFD",
+        product_type=ProductType.ROLLING_CFD,
+    ),
+)
+
+B3_TARGETS: tuple[tuple[str, str, int], ...] = tuple(
+    (policy.instrument_id, policy.external_id, policy.con_id) for policy in _B3_LISTING_POLICIES
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -129,6 +171,60 @@ def _review_contract_evidence(
     )
 
 
+def _expected_b3_listing(
+    policy: _B3ListingPolicy,
+    contract: IbkrContractEvidence,
+) -> ProviderListing:
+    instrument_id = InstrumentId(policy.instrument_id)
+    if contract.security_type != policy.security_type:
+        raise ValueError(
+            f"B3 authenticated security type does not match listing policy for {instrument_id}"
+        )
+    if contract.currency != policy.currency:
+        raise ValueError(
+            f"B3 authenticated currency does not match listing policy for {instrument_id}"
+        )
+    if contract.minimum_tick is None:
+        raise ValueError(f"B3 authenticated minimum tick is missing for {instrument_id}")
+    return ProviderListing(
+        listing_id=ProviderListingId("ibkr", "IBKR_PAPER", policy.external_id),
+        instrument_id=instrument_id,
+        display_name=policy.display_name,
+        product_type=policy.product_type,
+        currency=policy.currency,
+        minimum_deal_size=B3_LISTING_MINIMUM_DEAL_SIZE,
+        price_increment=contract.minimum_tick,
+        valid_from=B3_LISTING_VALID_FROM,
+        valid_to=None,
+        metadata_version=B3_LISTING_METADATA_VERSION,
+        economics={},
+    )
+
+
+def _listing_policy_mismatches(
+    listing: ProviderListing,
+    expected: ProviderListing,
+) -> tuple[str, ...]:
+    fields = (
+        "listing_id",
+        "instrument_id",
+        "display_name",
+        "product_type",
+        "currency",
+        "minimum_deal_size",
+        "price_increment",
+        "valid_from",
+        "valid_to",
+        "metadata_version",
+        "economics",
+    )
+    return tuple(
+        field_name
+        for field_name in fields
+        if getattr(listing, field_name) != getattr(expected, field_name)
+    )
+
+
 def _verify_b3_provider_authority(
     source: IbkrNativeCaptureConfiguration,
     *,
@@ -137,7 +233,7 @@ def _verify_b3_provider_authority(
     contract_selection_path: Path,
     catalogue_path: Path,
     probe_spec_path: Path,
-) -> None:
+) -> dict[InstrumentId, ProviderListing]:
     selection = verify_ibkr_contract_selection(
         contract_selection_path,
         capability_review_path=capability_review_path,
@@ -150,20 +246,37 @@ def _verify_b3_provider_authority(
         catalogue_path=catalogue_path,
         probe_spec_path=probe_spec_path,
     )
+    candidates = load_capture_candidates(catalogue_path)
+    if candidates.configuration_hash != selection.catalogue_hash:
+        raise ValueError("B3 catalogue changed while authenticating listing policy")
+    canonical_instruments = {
+        instrument.instrument_id: instrument for instrument in candidates.instruments
+    }
     decisions = {decision.instrument_id: decision for decision in selection.decisions}
-    for instrument_id_text, _, expected_con_id in B3_TARGETS:
-        instrument_id = InstrumentId(instrument_id_text)
+    trusted_listings: dict[InstrumentId, ProviderListing] = {}
+    for policy in _B3_LISTING_POLICIES:
+        instrument_id = InstrumentId(policy.instrument_id)
         decision = decisions.get(instrument_id)
         if decision is None or not decision.acquisition_eligible or decision.fingerprint is None:
             raise ValueError(f"B3 authority does not accept the exact contract for {instrument_id}")
-        if decision.fingerprint.con_id != expected_con_id:
+        if decision.fingerprint.con_id != policy.con_id:
             raise ValueError(f"B3 authority conId mismatch for {instrument_id}")
-        listing = next(
-            (item for item in source.listings if item.instrument_id == instrument_id),
-            None,
-        )
-        if listing is None:
+        canonical = canonical_instruments.get(instrument_id)
+        if canonical is None:
+            raise ValueError(f"B3 authority catalogue is missing {instrument_id}")
+        if (
+            canonical.display_name != policy.display_name
+            or canonical.asset_class is not policy.asset_class
+            or canonical.base_currency != policy.base_currency
+            or canonical.quote_currency != policy.currency
+        ):
+            raise ValueError(
+                f"B3 canonical instrument does not match listing policy for {instrument_id}"
+            )
+        matches = [item for item in source.listings if item.instrument_id == instrument_id]
+        if len(matches) != 1:
             raise ValueError(f"B3 source is missing the authority instrument {instrument_id}")
+        listing = matches[0]
         contract = source.contract_evidence.get(listing.listing_id)
         if contract is None:
             raise ValueError(f"B3 source is missing provider evidence for {instrument_id}")
@@ -173,21 +286,15 @@ def _verify_b3_provider_authority(
                 f"B3 source provider evidence does not match the authenticated "
                 f"review for {instrument_id}"
             )
-        if listing.currency != authenticated.currency:
+        expected_listing = _expected_b3_listing(policy, authenticated)
+        mismatches = _listing_policy_mismatches(listing, expected_listing)
+        if mismatches:
             raise ValueError(
-                f"B3 source listing currency does not match authenticated review "
-                f"for {instrument_id}"
+                f"B3 source listing does not match trusted policy for {instrument_id}: "
+                + ", ".join(mismatches)
             )
-        if listing.price_increment != authenticated.minimum_tick:
-            raise ValueError(
-                f"B3 source listing price increment does not match authenticated "
-                f"minimum tick for {instrument_id}"
-            )
-        if listing.economics:
-            raise ValueError(
-                f"B3 source listing economics are not independently authenticated "
-                f"for {instrument_id}"
-            )
+        trusted_listings[instrument_id] = expected_listing
+    return trusted_listings
 
 
 def promote_b3_configuration(
@@ -201,7 +308,7 @@ def promote_b3_configuration(
 ) -> IbkrNativeCaptureConfiguration:
     """Create the exact-two subset only from an authenticated provider closure."""
 
-    _verify_b3_provider_authority(
+    trusted_listings = _verify_b3_provider_authority(
         source,
         capability_review_path=capability_review_path,
         operator_selection_path=operator_selection_path,
@@ -216,10 +323,13 @@ def promote_b3_configuration(
         matching = [item for item in source.listings if item.instrument_id == instrument_id]
         if len(matching) != 1:
             raise ValueError(f"B3 requires exactly one reviewed listing for {instrument_id}")
-        listing = matching[0]
-        if listing.listing_id != ProviderListingId("ibkr", "IBKR_PAPER", expected_external_id):
+        source_listing = matching[0]
+        listing = trusted_listings[instrument_id]
+        if source_listing.listing_id != ProviderListingId(
+            "ibkr", "IBKR_PAPER", expected_external_id
+        ):
             raise ValueError(f"B3 listing identity is not reviewed for {instrument_id}")
-        contract = source.contract_evidence.get(listing.listing_id)
+        contract = source.contract_evidence.get(source_listing.listing_id)
         if contract is None:
             raise ValueError(f"B3 exact contract evidence is missing for {instrument_id}")
         if contract.con_id != expected_con_id:
@@ -330,6 +440,18 @@ def verify_b3_configuration(
                     f"conId mismatch: {instrument_id} expected {expected_con_id}, "
                     f"got {contract.con_id}"
                 )
+            else:
+                policy = next(
+                    item
+                    for item in _B3_LISTING_POLICIES
+                    if item.instrument_id == instrument_id_text
+                )
+                expected_listing = _expected_b3_listing(policy, contract)
+                mismatches = _listing_policy_mismatches(listing, expected_listing)
+                if mismatches:
+                    errors.append(
+                        f"listing policy mismatch: {instrument_id}: " + ", ".join(mismatches)
+                    )
     except (KeyError, TypeError, ValueError) as error:
         errors.append(str(error))
 

@@ -136,7 +136,6 @@ def _authority_files(
         'id = "index:australia-200"\n'
         'display_name = "Australia 200"\n'
         'asset_class = "INDEX"\n'
-        'base_currency = "AUD"\n'
         'quote_currency = "AUD"\n'
         'search_aliases = ["Australia 200"]\n',
         encoding="utf-8",
@@ -387,17 +386,55 @@ def test_b3_promotion_rejects_non_con_id_provider_tamper(tmp_path: Path) -> None
         _promote(tampered, tmp_path, authority_source=source)
 
 
-def test_b3_promotion_rejects_unauthenticated_listing_economics(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("field_name", "replacement"),
+    [
+        ("display_name", "Tampered AUD/USD"),
+        ("product_type", ProductType.ROLLING_CFD),
+        ("currency", "EUR"),
+        ("minimum_deal_size", Decimal("2")),
+        ("price_increment", Decimal("0.0001")),
+        ("valid_from", datetime(2026, 8, 7, tzinfo=UTC)),
+        ("valid_to", datetime(2026, 8, 9, tzinfo=UTC)),
+        ("metadata_version", "tampered-metadata"),
+        ("economics", {"contract_size": "tampered"}),
+    ],
+)
+def test_b3_promotion_rejects_mutable_listing_semantics(
+    tmp_path: Path,
+    field_name: str,
+    replacement: object,
+) -> None:
     source = _source()
     listing = source.listings[0]
-    tampered_listing = replace(listing, economics={"contract_size": "tampered"})
+    tampered_listing = replace(listing, **{field_name: replacement})
     tampered = IbkrNativeCaptureConfiguration.from_reviewed(
         (tampered_listing, *source.listings[1:]),
         source.contract_evidence,
     )
 
-    with pytest.raises(ValueError, match="listing economics"):
+    with pytest.raises(ValueError, match=rf"trusted policy.*{field_name}"):
         _promote(tampered, tmp_path, authority_source=source)
+
+
+def test_b3_verification_rejects_rehashed_product_type_tamper() -> None:
+    source = _source()
+    listing = source.listings[0]
+    tampered_listing = replace(listing, product_type=ProductType.ROLLING_CFD)
+    tampered = IbkrNativeCaptureConfiguration.from_reviewed(
+        (tampered_listing, *source.listings[1:]),
+        source.contract_evidence,
+    )
+
+    report = verify_b3_configuration(tampered, observed_at=_NOW)
+
+    assert report["valid"] is False
+    errors = report["errors"]
+    assert isinstance(errors, list)
+    assert any(
+        isinstance(error, str) and "listing policy mismatch" in error and "product_type" in error
+        for error in errors
+    )
 
 
 @pytest.mark.parametrize(
