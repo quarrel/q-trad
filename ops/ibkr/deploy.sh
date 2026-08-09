@@ -27,7 +27,7 @@ fi
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
 descriptor="${QTRAD_IBKR_RELEASE_DESCRIPTOR:?set QTRAD_IBKR_RELEASE_DESCRIPTOR}"
 repository_root="${QTRAD_IBKR_REPOSITORY_ROOT:-$script_dir/../..}"
-preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-qtrad}"
+preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-}"
 release_policy="${QTRAD_IBKR_RELEASE_POLICY:-b3-exact-two}"
 checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
@@ -93,14 +93,29 @@ verify_database_head() {
 [[ -r "$descriptor" ]] || fail "release descriptor is not readable"
 [[ -r "$gateway_manifest" ]] || fail "Gateway identity manifest is not readable"
 [[ -d "$repository_root" ]] || fail "repository root is not readable"
-command -v "$preflight_bin" >/dev/null || fail "qtrad offline preflight command is unavailable"
+if [[ -n "$preflight_bin" ]]; then
+    command -v "$preflight_bin" >/dev/null || fail "qtrad offline preflight command is unavailable"
+else
+    [[ -r "$script_dir/qtrad-container-cli.sh" ]] || fail "reviewed container CLI wrapper is unavailable"
+fi
 command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
-preflight_json="$("$preflight_bin" deployment ibkr-preflight \
-    --policy "$release_policy" --descriptor "$descriptor" \
-    --repository-root "$repository_root" \
-    --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}")"
+preflight_args=(
+    deployment ibkr-preflight
+    --policy "$release_policy" --descriptor "$descriptor"
+    --repository-root "$repository_root"
+    --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}"
+)
+if [[ -n "$preflight_bin" ]]; then
+    preflight_json="$("$preflight_bin" "${preflight_args[@]}")"
+else
+    preflight_json="$(
+        QTRAD_IBKR_IMAGE="$image" \
+            QTRAD_IBKR_REPOSITORY_ROOT="$repository_root" \
+            bash "$script_dir/qtrad-container-cli.sh" "${preflight_args[@]}"
+    )"
+fi
 application_commit="$(jq -er '.application_commit' <<<"$preflight_json")"
 printf '%s\n' "$preflight_json" | jq -e \
     --arg image "$image" \

@@ -695,6 +695,7 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     ingest_unit = (ops / "qtrad-ibkr-ingest.service.example").read_text(encoding="utf-8")
     api = (ops / "qtrad-ibkr-api-wrapper.example").read_text(encoding="utf-8")
     deploy = (ops / "deploy.sh").read_text(encoding="utf-8")
+    container_cli = (ops / "qtrad-container-cli.sh").read_text(encoding="utf-8")
     backup = (ops / "postgres-backup.sh").read_text(encoding="utf-8")
     restore = (ops / "postgres-restore-verify.sh").read_text(encoding="utf-8")
 
@@ -721,6 +722,16 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "EnvironmentFile=/etc/qtrad/ibkr-ingest.env" in ingest_unit
     assert "--env-file /etc/qtrad/ibkr-ingest.env" in ingest
     assert "verify_host_identity" in deploy
+    assert 'preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-}"' in deploy
+    assert 'bash "$script_dir/qtrad-container-cli.sh"' in deploy
+    assert "--network none" in container_cli
+    assert "--user 10001:10001" in container_cli
+    assert "--read-only" in container_cli
+    assert "--cap-drop=ALL" in container_cli
+    assert "--volume /etc/qtrad:/etc/qtrad:ro" in container_cli
+    assert "--volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro" in container_cli
+    assert '--entrypoint uv "$image"' in container_cli
+    assert 'python -m qtrad "$@"' in container_cli
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
