@@ -11,7 +11,7 @@ The implemented pieces are:
   under `ops/ibkr`; and
 * a distinct IBKR runtime/store with no fabricated sides, trade-volume semantics or broker-order surface.
 
-The next promotion is B4 exact-six, not another collector architecture.
+The next promotion is B5 full accepted universe, not another collector architecture.
 
 # Lane B — IBKR native collector
 
@@ -29,9 +29,9 @@ using the q-trad ingest/canonical-event infrastructure, official direct TWS API,
 PostgreSQL storage, read-only health API and the independent `ops/ibkr` host runtime.
 
 The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy
-two-instrument native IBKR collector running continuously and preserving every callback needed for
-later replay. That exact-two B3 boundary qualified on 2026-08-10. B4 exact-six, full-universe
-qualification, a complete weekly reauthentication boundary and R2-IBKR-NATIVE remain later gates.
+native IBKR collector preserving every callback needed for later replay. Exact-two B3 and fixed-six B4
+qualified on 2026-08-10. Full-universe qualification, a complete weekly reauthentication boundary and
+R2-IBKR-NATIVE remain later gates.
 
 ---
 
@@ -585,7 +585,7 @@ Do **not** wait a week before expanding to six if the two-instrument path is beh
 
 # PR B4 / operational step — six target instruments
 
-Then promote capture to the fixed six:
+The fixed six promoted and qualified on 2026-08-10:
 
 ```text
 AUD/USD
@@ -615,26 +615,24 @@ This is the highest-value near-term outcome of Lane B.
 
 ## Qualification evidence software boundary
 
-The B3-to-B4 transition uses two separate read-only steps. A snapshot builder reads one
-bounded capture session from the live `qtrad_ibkr` database and a fresh disposable
-restore created by the hash-checking restore workflow. That workflow binds the archive
-SHA-256, source database, restored database, migration head and completion in create-only
-evidence and marks the temporary database with the same archive identity. The builder
-retains raw/canonical chronology, durable counters, current health, run identity and
-controlled reconnect evidence in a create-only artifact. A separate verifier repeats the
-hash-checked restore, re-queries both databases and compares the entire retained evidence
-before it can mint the runtime-only qualification capability. A named clone or caller-
-supplied restore URL is insufficient. The qualifying collector run is stopped cleanly
-before backup; its final counters and last healthy post-reconnect snapshot are retained
-in immutable terminal run detail.
+The B3-to-B4 transition uses separate read-only snapshot and verification steps. For B4, each step
+restores both the qualification-bound B3 parent archive and the current B4 archive into simultaneous,
+independently owned disposable databases through the hardened dual-restore wrapper. The workflow binds
+each archive SHA-256, source database, restored database, migration head and completion in create-only
+evidence. The builder retains raw/canonical chronology, durable counters, current health, run identity and
+controlled reconnect evidence in a create-only artifact. A separate verifier repeats both hash-checked
+restores, re-queries the retained evidence and compares it with the snapshot before it can mint the
+runtime-only qualification capability. A named clone or caller-supplied restore URL is insufficient. The
+qualifying collector run is stopped cleanly before backup; its final counters and last healthy
+post-reconnect snapshot are retained in immutable terminal run detail.
 
 The artifact hash proves content identity only. A file-only check, API response, fake store,
-closed-market connection or operator assertion cannot grant qualification. The real B3 gate passed
-on 2026-08-10 through authenticated ACTIVE periods in controlled session
-`e2c6fe9d-f2f5-4354-bb26-d4c661d0d061`: 766 callbacks were received and persisted with zero failed,
-dropped or reconciliation-loss callbacks; generation 1 to 2 reconnect retained fresh LIVE bid and
-ask; terminal health was `HEALTHY`; and fresh-backup restore plus independent verification minted
-`B3_EXACT_TWO`. No B4 release was promoted. Exact-six remains the next separately authorised gate.
+closed-market connection or operator assertion cannot grant qualification. Final-image B3 session
+`1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks with zero failed, dropped
+or reconciliation-loss callbacks and passed independent restored replay. B4 session
+`c014d0e5-1f71-42fe-b99a-007390c83ede` received and persisted 3,636 callbacks with the same zero-loss
+boundary; generation 1 to 2 retained fresh LIVE bid and ask; and two independent dual-restore replays
+minted `B4_EXACT_SIX`. Full accepted universe remains the next separately authorised gate.
 
 ---
 
@@ -762,12 +760,17 @@ Completed through 2026-08-10:
 7. Qualified the controlled active-session reconnect, zero-loss, backup and restore boundary.
 ```
 
+Completed on 2026-08-10:
+
+```text
+8. Refreshed and independently reverified exact-two B3 on the final main image.
+9. Promoted through B4 exact-six and repeated the controlled reconnect, zero-loss and dual-restore boundary.
+```
+
 Next:
 
 ```text
-8. Continue exact-two native evidence accumulation and recheck current runtime state before mutation.
-9. With separate authority, promote through B4 exact-six and repeat the qualification boundary.
-10. Later: full accepted universe and complete weekly-reauthentication qualification.
+10. With separate authority: full accepted universe and complete weekly-reauthentication qualification.
 ```
 
 ---

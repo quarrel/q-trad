@@ -3,7 +3,7 @@
 **Updated:** 2026-08-10
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** IBKR Stages 1–8 software contracts, verifiers and CLI paths are implemented on `main`; capability review, host deployment and the Stage 5 canary are complete, and the registered full acquisition is executing
-**Native capture:** exact-two B3 deployment and qualification are complete; B4 exact-six promotion remains separately authorised and pending
+**Native capture:** fixed-six B4 deployment and qualification are complete; the full accepted universe remains separately authorised and pending
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -166,14 +166,18 @@ remains offline/replay.
   A 280-request Stage 6 plan is registered and executing. Result publication, verified provider-history
   data and a qualifying readiness disposition remain pending. IBKR history stays provenance-distinct
   and cannot substantiate native IG fills, spreads or slippage.
-- The independent IBKR native top-of-book collector reached its exact-two B3 boundary on 2026-08-10.
-  Controlled session `e2c6fe9d-f2f5-4354-bb26-d4c661d0d061` received and persisted 766 callbacks with
-  zero failed, dropped or reconciliation-loss callbacks; crossed connection generation 1 to 2; retained
-  fresh LIVE bid/ask evidence after reconnect; and ended `HEALTHY`. A fresh hash-authenticated backup,
-  disposable restore qualification and independent restore verification passed, minting the scope-bound
-  `B3_EXACT_TWO` capability. Continuous exact-two capture was healthy when resumed after qualification.
-  PR #91 subsequently put maintenance-stop dependency direction, runtime-group-readable evidence,
-  bounded reconnect capture and qualification composition behind the supported `ops/ibkr` interfaces.
+- The independent IBKR native top-of-book collector reached its fixed-six B4 boundary on 2026-08-10.
+  Final-image B3 session `1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks
+  with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh
+  post-reconnect LIVE bid/ask evidence, and passed snapshot plus independent restored replay to mint the
+  parent `B3_EXACT_TWO` capability.
+- B4 session `c014d0e5-1f71-42fe-b99a-007390c83ede` then received and persisted 3,636 callbacks with zero
+  failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, and retained fresh
+  post-reconnect LIVE bid/ask evidence. Backup `qtrad-ibkr-20260810T111758Z.dump` has SHA-256
+  `7392610f...d6cb0`; two independent dual-restore replays authenticated both it and the qualification-bound
+  B3 parent before minting `B4_EXACT_SIX` with canonical artifact SHA-256 `9412ea9f...9b51`. Continuous
+  exact-six capture resumed healthy with 6/6 active LIVE subscriptions on application commit
+  `08a94052575db39004fe4d249538781e6926837e` and image digest `a45f8025...367f5`.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -204,9 +208,9 @@ remains offline/replay.
   acquisition is still executing, so no verified provider-history or qualifying foundation is retained.
   Any future IBKR history stays provenance-distinct and cannot substantiate native IG fills, spreads or
   slippage.
-- `B3_EXACT_TWO` qualifies only the retained two-instrument session. It does not qualify B4 exact-six,
-  the full accepted universe, a complete weekly reauthentication boundary, downstream research use or
-  effectiveness. Current runtime health must be rechecked before any authorised operation.
+- `B4_EXACT_SIX` qualifies only the retained fixed-six session. It does not qualify the full accepted
+  universe, a complete weekly reauthentication boundary, downstream research use or effectiveness.
+  Current runtime health must be rechecked before any authorised operation.
 
 ## Next actions
 
@@ -216,8 +220,8 @@ remains offline/replay.
 3. Use the source-specific file-only IBKR path to build and independently verify the implementation-only
    R2.H bundle once an independently verified Stage 8 foundation and representative feature children exist;
    keep confirmatory and locked-holdout evidence pending.
-4. Separately, with explicit operational authority, promote the native collector only through the B4
-   exact-six gate and retain the same reconnect, zero-loss, backup and independent-restore evidence.
+4. Separately, with explicit operational authority, expand the native collector only through the B5
+   full-accepted-universe gate and retain the same reconnect, zero-loss, backup and independent-restore evidence.
 5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 6. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.

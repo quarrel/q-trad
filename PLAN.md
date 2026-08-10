@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B3 exact-two qualification complete, B4 exact-six pending
+**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B4 exact-six qualification complete, full accepted universe pending
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
@@ -30,9 +30,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   were unavailable; both are quarantined. The immutable 23-market `capture-v4` was activated on
   2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
   historical-source decision and restore verification are complete.
-- The independent IBKR native collector reached its first useful boundary on 2026-08-10: the
-  exact-two B3 release was deployed and qualified on `q-trad-2`, and continuous capture resumed
-  healthy after the bounded qualification session.
+- The independent IBKR native collector reached its fixed-six B4 boundary on 2026-08-10: exact-two
+  B3 was refreshed and independently reverified on the final `main` image, B4 was promoted and
+  qualified, and continuous exact-six capture resumed healthy.
 - R1.A–R1.E now provide the causal foundation path: isolated-snapshot observation build/verify,
   separate initial-availability and correction-maturity evidence, aligned panels with retained
   gap/source-activity audit evidence, frozen multi-horizon targets, chronological folds,
@@ -165,15 +165,16 @@ chronology ambiguity before those contracts are fixed.
   readiness disposition.
 - No qualifying IBKR readiness disposition or downstream R2 artifact has been created; keep
   `R2-IBKR-HISTORICAL` source-specific and do not combine its evidence with IG-native data.
-- The independent IBKR native top-of-book collector is deployed at the exact-two B3 scope. Controlled
-  session `e2c6fe9d-f2f5-4354-bb26-d4c661d0d061` received and persisted 766 callbacks with zero
-  failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh
-  post-reconnect bid/ask evidence, ended `HEALTHY`, and passed fresh-backup restore plus independent
-  verification before minting `B3_EXACT_TWO`.
-- This is scope-bound B3 evidence, not capture completion. B4 exact-six promotion is the next native
-  gate and remains a separately authorised operation; full-universe and weekly-reauthentication
-  qualification remain later. Continuous exact-two capture was healthy when resumed after the
-  qualification, but current runtime state must be rechecked before any operation.
+- The independent IBKR native top-of-book collector is deployed at the fixed-six B4 scope. Final-image
+  B3 session `1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks with zero
+  failed, dropped or reconciliation-loss callbacks and passed independent restored replay before minting
+  the parent `B3_EXACT_TWO` capability.
+- Controlled B4 session `c014d0e5-1f71-42fe-b99a-007390c83ede` received and persisted 3,636 callbacks
+  with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh
+  post-reconnect LIVE bid/ask evidence, and passed two independent dual-restore replays before minting
+  `B4_EXACT_SIX`. This remains scope-bound evidence: full-universe and complete weekly-reauthentication
+  qualification are later, separately authorised gates. Continuous exact-six capture was healthy when
+  resumed, but current runtime state must be rechecked before any operation.
 - Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,
   qualification and restore verification; do not reconstruct those Docker/systemd paths ad hoc.
 - The adapter remains market-data-only. Account access, acquisition, deployment and publication are
