@@ -3,8 +3,10 @@ set -euo pipefail
 umask 077
 
 [[ "$#" -ge 2 && "$1" == deployment \
-    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) ]] || {
-    echo "qualification wrapper accepts only IBKR snapshot or verification commands" >&2
+    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify \
+        || ("$2" == ibkr-promote && "${3:-}" == --policy \
+            && "${4:-}" == b4-exact-six)) ]] || {
+    echo "qualification wrapper accepts only IBKR qualification or exact B4 promotion" >&2
     exit 64
 }
 
