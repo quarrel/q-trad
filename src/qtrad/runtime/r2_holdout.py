@@ -1690,7 +1690,6 @@ def verify_holdout_preparation(
         raise ValueError(
             "confirmatory holdout preparation requires the unsupported source-child workflow"
         )
-    _verify_prepare_children(path, seal, selection)
     claim_payload = _verify_child(
         path,
         _PREPARATION_CLAIM_FILE,
@@ -1812,6 +1811,7 @@ def verify_holdout_preparation(
         if (path / lifecycle_name).is_file():
             allowed.add(lifecycle_name)
     _reject_orphans(path, allowed)
+    _verify_prepare_children(path, seal, selection)
     return seal
 
 

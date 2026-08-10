@@ -3558,6 +3558,9 @@ def prepare_confirmatory_g2(
 ) -> Path:
     """Create one sealed confirmatory G2 preparation without reading holdout outcomes."""
 
+    manifest_path = output / "manifest.json"
+    if manifest_path.exists() or manifest_path.is_symlink():
+        raise FileExistsError(manifest_path)
     built = _build_confirmatory_g2(verified_g1=verified_g1, prepared_by=prepared_by)
     target_source = verified_g1.verified_f2.holdout_target_source
     pre_holdout_targets = target_source.pre_holdout_target_dataset
@@ -3575,7 +3578,7 @@ def prepare_confirmatory_g2(
         training_target_datasets={pre_holdout_targets.dataset_id: pre_holdout_targets},
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
     )
-    return output / "manifest.json"
+    return manifest_path
 
 
 def verify_confirmatory_g2_preparation(

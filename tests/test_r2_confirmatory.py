@@ -90,6 +90,7 @@ def _build_confirmatory_fixture(
     root: Path,
     *,
     qualifying: bool = False,
+    compact: bool = False,
 ) -> tuple[
     Path,
     Any,
@@ -97,6 +98,7 @@ def _build_confirmatory_fixture(
     FoldDataset,
     dict[str, tuple[tuple[datetime, datetime], ...]],
 ]:
+    qualifying_shape = qualifying and not compact
     target_names = (
         tuple(f"index:synthetic-{index}" for index in range(6))
         if qualifying
@@ -110,8 +112,8 @@ def _build_confirmatory_fixture(
             else None
         ),
         evidence_class=EvidenceClass.CONFIRMATORY,
-        include_holdout_target=not qualifying,
-        qualifying_confirmatory=qualifying,
+        include_holdout_target=compact or not qualifying,
+        qualifying_confirmatory=qualifying_shape,
         market_data_source_class=(
             MarketDataSourceClass.IG_NATIVE_CAPTURE
             if qualifying
@@ -119,6 +121,30 @@ def _build_confirmatory_fixture(
         ),
     )
     fixture_verified = cast(Any, verified)
+    # Keep the qualifying selection hierarchy without its 16-week readiness shape.
+    if compact:
+        decision_order = {
+            decision: index
+            for index, decision in enumerate(
+                sorted({row.decision_time for row in fixture_verified.targets.rows})
+            )
+        }
+        instrument_order = {
+            instrument: index for index, instrument in enumerate(experiment.target_instruments)
+        }
+        fixture_verified.targets = TargetDataset.create(
+            tuple(
+                replace(
+                    row,
+                    log_return=0.01
+                    * (decision_order[row.decision_time] + 1)
+                    * (instrument_order[row.instrument_id] + 1),
+                )
+                for row in fixture_verified.targets.rows
+            ),
+            observation_dataset_id=fixture_verified.targets.observation_dataset_id,
+            foundation_configuration_id=fixture_verified.targets.foundation_configuration_id,
+        )
     start: datetime = (
         cast(datetime, fixture_verified.bundle.range_start)
         if qualifying
@@ -290,8 +316,10 @@ def _build_confirmatory_fixture(
         fold_policy="EXPANDING_WALK_FORWARD",
         holdout_range=experiment.holdout_range,
         embargo=timedelta(minutes=1),
-        minimum_training_duration=timedelta(weeks=6) - experiment.primary_horizon,
-        minimum_validation_duration=timedelta(weeks=2),
+        minimum_training_duration=(
+            timedelta(minutes=75) if compact else timedelta(weeks=6) - experiment.primary_horizon
+        ),
+        minimum_validation_duration=(timedelta(minutes=30) if compact else timedelta(weeks=2)),
     )
     full_targets = TargetDataset.create(
         fixture_verified.targets.rows,
@@ -723,12 +751,18 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         VerifiedConfirmatoryG2Preparation()
     with pytest.raises(AttributeError, match="immutable"):
         cast(Any, verified_preparation).seal = None
-    with pytest.raises(FileExistsError):
-        prepare_confirmatory_g2(
-            verified_g1=verified_g1,
-            output=preparation_root,
-            prepared_by="fixture-operator",
-        )
+
+    def unexpected_g2_rebuild(**_: object) -> None:
+        raise AssertionError("completed preparation must fail before rebuilding G2")
+
+    with monkeypatch.context() as context:
+        context.setattr(verification, "_build_confirmatory_g2", unexpected_g2_rebuild)
+        with pytest.raises(FileExistsError):
+            prepare_confirmatory_g2(
+                verified_g1=verified_g1,
+                output=preparation_root,
+                prepared_by="fixture-operator",
+            )
 
     missing_root = tmp_path / "missing-preparation"
     copytree(preparation_root, missing_root)
@@ -748,8 +782,14 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     extra_root = tmp_path / "extra-preparation"
     copytree(preparation_root, extra_root)
     (extra_root / "unexpected.json").write_text("{}", encoding="utf-8")
-    with pytest.raises(ValueError, match="file closure differs"):
-        verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=extra_root)
+
+    def unexpected_child_replay(*_: object, **__: object) -> None:
+        raise AssertionError("invalid closure must fail before numerical replay")
+
+    with monkeypatch.context() as context:
+        context.setattr(holdout_runtime, "_verify_prepare_children", unexpected_child_replay)
+        with pytest.raises(ValueError, match="file closure differs"):
+            verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=extra_root)
 
     lifecycle_root = tmp_path / "lifecycle-preparation"
     copytree(preparation_root, lifecycle_root)
@@ -1061,13 +1101,25 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     )
     evaluation_payload["evaluation_id"] = "0" * 64
     (tampered_root / "evaluation.json").write_bytes(canonical_bytes(evaluation_payload))
-    assert (
-        verify_confirmatory_r2h(
-            verified_g1=verified_g1,
-            path=tampered_root,
-        ).status
-        is ConfirmatoryR2HStatus.INVALID
-    )
+    # Reveal verified the preparation; isolate evaluation tamper classification.
+    with monkeypatch.context() as tamper_context:
+        tamper_context.setattr(
+            verification,
+            "_verify_confirmatory_holdout_preparation",
+            lambda *args, **kwargs: verified_preparation.seal,
+        )
+        tamper_context.setattr(
+            verification,
+            "_build_confirmatory_g2",
+            lambda **kwargs: verified_preparation,
+        )
+        assert (
+            verify_confirmatory_r2h(
+                verified_g1=verified_g1,
+                path=tampered_root,
+            ).status
+            is ConfirmatoryR2HStatus.INVALID
+        )
 
     with pytest.raises(ValueError, match=r"owned and unopened|post-open lifecycle evidence"):
         verify_confirmatory_g2_preparation(
@@ -1093,6 +1145,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
     bundle_path, fixture_verified, _, fixture_folds, active_intervals = _build_confirmatory_fixture(
         tmp_path,
         qualifying=True,
+        compact=True,
     )
     oof_bundle = verification.verify_r2_oof_bundle(bundle_path)
     assert oof_bundle.holdout_target_source is not None
