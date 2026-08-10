@@ -11,6 +11,9 @@ import tempfile
 from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
+from multiprocessing import get_context
+from multiprocessing.connection import Connection
+from multiprocessing.process import BaseProcess
 from pathlib import Path
 from typing import cast
 
@@ -35,6 +38,7 @@ from qtrad.domain.ibkr_results import (
     MAX_IBKR_RESULT_CHILDREN,
     MAX_IBKR_RESULT_REQUEST_BYTES,
     IbkrHistoricalAggregateResult,
+    IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalRequestResult,
     canonical_json_bytes,
     sha256_bytes,
@@ -67,6 +71,7 @@ _SOURCE_MANIFEST_PATH = f"{_SOURCE_DIRECTORY}/manifest.json"
 _MAX_FILE_BYTES = 256 * 1024 * 1024
 _MAX_CLOSURE_FILES = 20_100
 _READ_BATCH_ROWS = 8_192
+_SOURCE_VERIFICATION_RECEIPT_CONTRACT = "qtrad-provider-history-source-verification-v1"
 
 _OBSERVATION_FIELDS = (
     "contract",
@@ -351,6 +356,99 @@ class _ProviderHistoryVerification:
     observation_summary: ProviderHistoryObservationSummary | None
 
 
+_ProviderHistoryReplayPayload = tuple[
+    ProviderHistoricalDataset,
+    tuple[ProviderHistoryRequestEvidence, ...],
+]
+
+
+def _replay_provider_history_source(
+    source: ProviderHistoryResultSource,
+    *,
+    availability_delay: timedelta,
+) -> _ProviderHistoryReplayPayload:
+    captured_source = _RequestEvidenceCapturingSource(source)
+    expected = build_provider_history_dataset(
+        captured_source,
+        availability_delay=availability_delay,
+    )
+    return expected, tuple(captured_source.request_evidence)
+
+
+def _replay_provider_history_source_worker(
+    connection: Connection,
+    source_manifest: Path,
+    availability_delay: timedelta,
+) -> None:
+    try:
+        source = verify_ibkr_historical_result_stream(source_manifest)
+        payload = _replay_provider_history_source(
+            source,
+            availability_delay=availability_delay,
+        )
+        connection.send(("completed", payload))
+    except BaseException as error:
+        connection.send(("failed", type(error).__name__, str(error)))
+    finally:
+        connection.close()
+
+
+@dataclass(slots=True)
+class _ProviderHistoryReplayProcess:
+    process: BaseProcess
+    connection: Connection
+
+    def result(self) -> _ProviderHistoryReplayPayload:
+        try:
+            message = self.connection.recv()
+        except EOFError as error:
+            self.process.join()
+            raise RuntimeError(
+                "parallel provider-history source replay exited without a result"
+            ) from error
+        finally:
+            self.connection.close()
+        self.process.join()
+        if self.process.exitcode != 0:
+            raise RuntimeError(
+                "parallel provider-history source replay process failed "
+                f"with exit code {self.process.exitcode}"
+            )
+        if (
+            not isinstance(message, tuple)
+            or not message
+            or message[0] not in {"completed", "failed"}
+        ):
+            raise RuntimeError("parallel provider-history source replay returned an invalid result")
+        if message[0] == "failed":
+            raise ValueError(
+                f"parallel provider-history source replay failed: {message[1]}: {message[2]}"
+            )
+        return cast(_ProviderHistoryReplayPayload, message[1])
+
+    def abort(self) -> None:
+        self.connection.close()
+        if self.process.is_alive():
+            self.process.terminate()
+        self.process.join()
+
+
+def _start_provider_history_source_replay(
+    source_manifest: Path,
+    availability_delay: timedelta,
+) -> _ProviderHistoryReplayProcess:
+    context = get_context("spawn")
+    receiver, sender = context.Pipe(duplex=False)
+    process = context.Process(
+        target=_replay_provider_history_source_worker,
+        args=(sender, source_manifest, availability_delay),
+        name="qtrad-provider-history-source-replay",
+    )
+    process.start()
+    sender.close()
+    return _ProviderHistoryReplayProcess(process=process, connection=receiver)
+
+
 class _ObservationSummaryBuilder:
     def __init__(self) -> None:
         self._accepted: dict[str, list[tuple[datetime, datetime]]] = {}
@@ -400,7 +498,10 @@ def _verify_provider_history(
     path: Path,
     *,
     verified_partition_callback: _VerifiedPartitionCallback | None = None,
+    source_replay_workers: int = 1,
 ) -> _ProviderHistoryVerification:
+    if source_replay_workers not in {1, 2}:
+        raise ValueError("provider-history source replay workers must be one or two")
     manifest_path = _require_file(path, "provider-history manifest")
     root = manifest_path.parent
     manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
@@ -444,14 +545,6 @@ def _verify_provider_history(
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
     source_stream = verify_ibkr_historical_result_stream(source_path)
-    captured_source = _RequestEvidenceCapturingSource(source_stream)
-    expected = build_provider_history_dataset(
-        captured_source,
-        availability_delay=policy.delay,
-    )
-    request_evidence = tuple(captured_source.request_evidence)
-    if expected.dataset_sha256 != dataset.dataset_sha256:
-        raise ValueError("provider-history dataset does not replay from request-result children")
     if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
         raise ValueError("embedded IBKR result identity does not match provider history")
     if source_stream.plan.plan_sha256 != source_reference["plan_sha256"]:
@@ -482,53 +575,83 @@ def _verify_provider_history(
     seen_keys: set[tuple[str, date]] = set()
     summary_builder = _ObservationSummaryBuilder()
     row_offset = 0
-    for item in files:
-        reference = _file_reference(item)
-        relative_path = _string(reference["path"], "provider-history partition path")
-        if relative_path not in expected_bound_by_path:
-            raise ValueError("provider-history partition path is absent from the source plan")
-        if paths and relative_path <= paths[-1]:
-            raise ValueError("provider-history partition references are not canonical")
-        paths.append(relative_path)
-        expected_row_bound = expected_bound_by_path[relative_path]
-        declared_row_bound = _int(
-            reference["row_upper_bound"],
-            "provider-history partition row upper bound",
+    replay_process = (
+        _start_provider_history_source_replay(source_path, policy.delay)
+        if source_replay_workers > 1
+        else None
+    )
+    replay_result = (
+        _replay_provider_history_source(
+            source_stream,
+            availability_delay=policy.delay,
         )
-        if declared_row_bound != expected_row_bound:
-            raise ValueError(
-                "provider-history partition row upper bound differs from its source plan"
+        if replay_process is None
+        else None
+    )
+    try:
+        for item in files:
+            reference = _file_reference(item)
+            relative_path = _string(reference["path"], "provider-history partition path")
+            if relative_path not in expected_bound_by_path:
+                raise ValueError("provider-history partition path is absent from the source plan")
+            if paths and relative_path <= paths[-1]:
+                raise ValueError("provider-history partition references are not canonical")
+            paths.append(relative_path)
+            expected_row_bound = expected_bound_by_path[relative_path]
+            declared_row_bound = _int(
+                reference["row_upper_bound"],
+                "provider-history partition row upper bound",
             )
-        row_count = _int(reference["row_count"], "provider-history partition row count")
-        partition_path = _safe_child(root, relative_path, "provider-history partition")
-        parquet_bytes = _read_bounded(partition_path, "provider-history Parquet partition")
-        if sha256_bytes(parquet_bytes) != str(reference["bytes_sha256"]):
-            raise ValueError("provider-history Parquet partition bytes do not match its reference")
-        partition = _read_parquet_rows(
-            partition_path,
-            expected_row_count=row_count,
-            row_upper_bound=expected_row_bound,
-        )
-        key = partition.key
-        if key != expected_key_by_path[relative_path]:
-            raise ValueError("provider-history partition content differs from its canonical path")
-        if key in seen_keys:
-            raise ValueError("provider-history partition references are duplicated")
-        expected_partition = expected_refs.get(key)
-        actual_partition = ProviderHistoricalPartitionReference.from_partition(partition)
-        if expected_partition is None or actual_partition != expected_partition:
-            raise ValueError(
-                "provider-history partition identity differs from its dataset reference"
+            if declared_row_bound != expected_row_bound:
+                raise ValueError(
+                    "provider-history partition row upper bound differs from its source plan"
+                )
+            row_count = _int(reference["row_count"], "provider-history partition row count")
+            partition_path = _safe_child(root, relative_path, "provider-history partition")
+            parquet_bytes = _read_bounded(partition_path, "provider-history Parquet partition")
+            if sha256_bytes(parquet_bytes) != str(reference["bytes_sha256"]):
+                raise ValueError(
+                    "provider-history Parquet partition bytes do not match its reference"
+                )
+            partition = _read_parquet_rows(
+                partition_path,
+                expected_row_count=row_count,
+                row_upper_bound=expected_row_bound,
             )
-        if actual_partition.partition_sha256 != str(reference["partition_sha256"]):
-            raise ValueError("provider-history partition identity differs from its file reference")
-        summary_builder.add(partition.rows)
-        if verified_partition_callback is not None:
-            verified_partition_callback(partition.rows, row_offset)
-        row_offset += len(partition.rows)
-        seen_keys.add(key)
-        observed_refs.append(actual_partition)
-        expected_paths.add(relative_path)
+            key = partition.key
+            if key != expected_key_by_path[relative_path]:
+                raise ValueError(
+                    "provider-history partition content differs from its canonical path"
+                )
+            if key in seen_keys:
+                raise ValueError("provider-history partition references are duplicated")
+            expected_partition = expected_refs.get(key)
+            actual_partition = ProviderHistoricalPartitionReference.from_partition(partition)
+            if expected_partition is None or actual_partition != expected_partition:
+                raise ValueError(
+                    "provider-history partition identity differs from its dataset reference"
+                )
+            if actual_partition.partition_sha256 != str(reference["partition_sha256"]):
+                raise ValueError(
+                    "provider-history partition identity differs from its file reference"
+                )
+            summary_builder.add(partition.rows)
+            if verified_partition_callback is not None:
+                verified_partition_callback(partition.rows, row_offset)
+            row_offset += len(partition.rows)
+            seen_keys.add(key)
+            observed_refs.append(actual_partition)
+            expected_paths.add(relative_path)
+    except BaseException:
+        if replay_process is not None:
+            replay_process.abort()
+        raise
+    if replay_process is not None:
+        replay_result = replay_process.result()
+    assert replay_result is not None
+    expected, request_evidence = replay_result
+    if expected.dataset_sha256 != dataset.dataset_sha256:
+        raise ValueError("provider-history dataset does not replay from request-result children")
 
     if row_offset != dataset.row_count:
         raise ValueError("provider-history verified row count differs from its dataset")
@@ -1122,16 +1245,285 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
     return dataset
 
 
+def provider_history_verifier_sha256() -> str:
+    """Return the implementation identity that invalidates semantic receipts."""
+
+    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+
+
+def provider_history_source_verification_receipt(
+    evidence: ProviderHistorySourceEvidence,
+) -> dict[str, JsonValue]:
+    """Encode compact results from one complete semantic source verification."""
+
+    summary = evidence.observation_summary
+    return {
+        "contract": _SOURCE_VERIFICATION_RECEIPT_CONTRACT,
+        "provider_verifier_sha256": provider_history_verifier_sha256(),
+        "dataset_sha256": evidence.dataset.dataset_sha256,
+        "request_evidence": [
+            {
+                "request_sha256": item.request_sha256,
+                "result_sha256": item.result_sha256,
+                "evidence_disposition": item.evidence_disposition.value,
+                "accepted_row_count": item.accepted_row_count,
+                "sessions": [dict(session) for session in item.sessions],
+            }
+            for item in evidence.request_evidence
+        ],
+        "observation_summary": (
+            None
+            if summary is None
+            else {
+                "accepted_intervals_by_request": [
+                    {
+                        "request_sha256": request_sha256,
+                        "intervals": [
+                            [start.isoformat(), end.isoformat()] for start, end in intervals
+                        ],
+                    }
+                    for request_sha256, intervals in summary.accepted_intervals_by_request
+                ],
+                "source_start": summary.source_start.isoformat(),
+                "source_end": summary.source_end.isoformat(),
+            }
+        ),
+    }
+
+
+def _receipt_timestamp(value: object, field: str) -> datetime:
+    raw = _string(value, field)
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as error:
+        raise ValueError(f"{field} is not an ISO-8601 timestamp") from error
+    if parsed.utcoffset() != timedelta(0):
+        raise ValueError(f"{field} must be UTC")
+    return parsed
+
+
+def read_provider_history_source_verification_receipt(
+    path: Path,
+    receipt: Mapping[str, object],
+) -> ProviderHistorySourceEvidence:
+    """Reauthenticate unchanged bytes and restore prior compact semantic results."""
+
+    dataset = verify_provider_history_file_only(path)
+    _require_exact_keys(
+        receipt,
+        {
+            "contract",
+            "provider_verifier_sha256",
+            "dataset_sha256",
+            "request_evidence",
+            "observation_summary",
+        },
+        "provider-history source-verification receipt",
+    )
+    if receipt["contract"] != _SOURCE_VERIFICATION_RECEIPT_CONTRACT:
+        raise ValueError("provider-history source-verification receipt contract is unsupported")
+    verifier_sha256 = _string(
+        receipt["provider_verifier_sha256"],
+        "provider-history receipt verifier identity",
+    )
+    _require_digest(verifier_sha256, "provider-history receipt verifier identity")
+    if verifier_sha256 != provider_history_verifier_sha256():
+        raise ValueError("provider-history source-verification receipt implementation changed")
+    dataset_sha256 = _string(
+        receipt["dataset_sha256"],
+        "provider-history receipt dataset identity",
+    )
+    _require_digest(dataset_sha256, "provider-history receipt dataset identity")
+    if dataset_sha256 != dataset.dataset_sha256:
+        raise ValueError("provider-history source-verification receipt dataset changed")
+
+    manifest_path = _require_file(path, "provider-history manifest")
+    root = manifest_path.parent
+    document = _mapping(
+        _parse_json(
+            _read_bounded(manifest_path, "provider-history manifest"),
+            "provider-history manifest",
+        ),
+        "provider-history manifest",
+    )
+    source_reference = _source_reference(document["source_result"])
+    source_path = _safe_child(root, str(source_reference["path"]), "source result")
+    source_stream = verify_ibkr_historical_result_stream(source_path)
+    result_sha256_by_request: dict[str, str] = {}
+    for reference in source_stream.aggregate.request_results:
+        if not reference.path.startswith("requests/") or not reference.path.endswith(".json"):
+            raise ValueError("embedded IBKR request-result path is not canonical")
+        request_sha256 = reference.path[len("requests/") : -len(".json")]
+        _require_digest(request_sha256, "embedded IBKR request identity")
+        if reference.path != f"requests/{request_sha256}.json":
+            raise ValueError("embedded IBKR request-result path is not canonical")
+        result_sha256_by_request[request_sha256] = reference.semantic_sha256
+
+    raw_evidence = receipt["request_evidence"]
+    if not isinstance(raw_evidence, list) or len(raw_evidence) > MAX_IBKR_RESULT_CHILDREN:
+        raise ValueError(
+            "provider-history receipt request evidence is invalid or exceeds its bound"
+        )
+    request_evidence: list[ProviderHistoryRequestEvidence] = []
+    seen_requests: set[str] = set()
+    accepted_row_count = 0
+    for position, raw_item in enumerate(raw_evidence):
+        item = _mapping(raw_item, f"provider-history receipt request evidence {position}")
+        _require_exact_keys(
+            item,
+            {
+                "request_sha256",
+                "result_sha256",
+                "evidence_disposition",
+                "accepted_row_count",
+                "sessions",
+            },
+            f"provider-history receipt request evidence {position}",
+        )
+        request_sha256 = _string(
+            item["request_sha256"],
+            "provider-history receipt request identity",
+        )
+        result_sha256 = _string(
+            item["result_sha256"],
+            "provider-history receipt result identity",
+        )
+        _require_digest(request_sha256, "provider-history receipt request identity")
+        _require_digest(result_sha256, "provider-history receipt result identity")
+        if request_sha256 in seen_requests:
+            raise ValueError("provider-history receipt request identities are duplicated")
+        if result_sha256_by_request.get(request_sha256) != result_sha256:
+            raise ValueError("provider-history receipt result identity differs from its source")
+        row_count = _int(
+            item["accepted_row_count"],
+            "provider-history receipt accepted row count",
+        )
+        if row_count < 0:
+            raise ValueError("provider-history receipt accepted row count is negative")
+        raw_sessions = item["sessions"]
+        if not isinstance(raw_sessions, list):
+            raise TypeError("provider-history receipt sessions must be a list")
+        sessions: list[dict[str, JsonValue]] = []
+        for raw_session in raw_sessions:
+            converted = to_json_value(raw_session)
+            if not isinstance(converted, dict):
+                raise TypeError("provider-history receipt session must be an object")
+            sessions.append(converted)
+        try:
+            disposition = IbkrHistoricalEvidenceDisposition(
+                _string(
+                    item["evidence_disposition"],
+                    "provider-history receipt evidence disposition",
+                )
+            )
+        except ValueError as error:
+            raise ValueError(
+                "provider-history receipt evidence disposition is unsupported"
+            ) from error
+        request_evidence.append(
+            ProviderHistoryRequestEvidence(
+                request_sha256=request_sha256,
+                result_sha256=result_sha256,
+                evidence_disposition=disposition,
+                accepted_row_count=row_count,
+                sessions=tuple(sessions),
+            )
+        )
+        seen_requests.add(request_sha256)
+        accepted_row_count += row_count
+
+    expected_requests = {request.request_sha256 for request in source_stream.plan.requests}
+    if seen_requests != expected_requests or seen_requests != set(result_sha256_by_request):
+        raise ValueError("provider-history receipt request closure differs from its source")
+    if accepted_row_count != dataset.row_count:
+        raise ValueError("provider-history receipt accepted row count differs from its dataset")
+
+    raw_summary = receipt["observation_summary"]
+    observation_summary: ProviderHistoryObservationSummary | None
+    if raw_summary is None:
+        if dataset.row_count != 0:
+            raise ValueError("provider-history receipt observation summary is missing")
+        observation_summary = None
+    else:
+        summary = _mapping(raw_summary, "provider-history receipt observation summary")
+        _require_exact_keys(
+            summary,
+            {"accepted_intervals_by_request", "source_start", "source_end"},
+            "provider-history receipt observation summary",
+        )
+        raw_entries = summary["accepted_intervals_by_request"]
+        if not isinstance(raw_entries, list) or len(raw_entries) > len(expected_requests):
+            raise ValueError("provider-history receipt observation intervals are invalid")
+        accepted_intervals: list[tuple[str, tuple[tuple[datetime, datetime], ...]]] = []
+        for position, raw_entry in enumerate(raw_entries):
+            entry = _mapping(
+                raw_entry,
+                f"provider-history receipt observation intervals {position}",
+            )
+            _require_exact_keys(
+                entry,
+                {"request_sha256", "intervals"},
+                f"provider-history receipt observation intervals {position}",
+            )
+            request_sha256 = _string(
+                entry["request_sha256"],
+                "provider-history receipt observation request identity",
+            )
+            if request_sha256 not in seen_requests:
+                raise ValueError("provider-history receipt observation request is absent")
+            raw_intervals = entry["intervals"]
+            if not isinstance(raw_intervals, list):
+                raise TypeError("provider-history receipt observation intervals must be a list")
+            intervals: list[tuple[datetime, datetime]] = []
+            for raw_interval in raw_intervals:
+                if not isinstance(raw_interval, list) or len(raw_interval) != 2:
+                    raise TypeError("provider-history receipt observation interval is invalid")
+                intervals.append(
+                    (
+                        _receipt_timestamp(
+                            raw_interval[0],
+                            "provider-history receipt interval start",
+                        ),
+                        _receipt_timestamp(
+                            raw_interval[1],
+                            "provider-history receipt interval end",
+                        ),
+                    )
+                )
+            accepted_intervals.append((request_sha256, tuple(intervals)))
+        observation_summary = ProviderHistoryObservationSummary(
+            accepted_intervals_by_request=tuple(accepted_intervals),
+            source_start=_receipt_timestamp(
+                summary["source_start"],
+                "provider-history receipt source start",
+            ),
+            source_end=_receipt_timestamp(
+                summary["source_end"],
+                "provider-history receipt source end",
+            ),
+        )
+
+    return ProviderHistorySourceEvidence(
+        dataset=dataset,
+        observations=_provider_history_rows(path, dataset),
+        source_artifact=source_stream,
+        request_evidence=tuple(request_evidence),
+        observation_summary=observation_summary,
+    )
+
+
 def read_provider_history_source_evidence(
     path: Path,
     *,
     verified_partition_callback: _VerifiedPartitionCallback | None = None,
+    source_replay_workers: int = 1,
 ) -> ProviderHistorySourceEvidence:
     """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
 
     verification = _verify_provider_history(
         path,
         verified_partition_callback=verified_partition_callback,
+        source_replay_workers=source_replay_workers,
     )
     return ProviderHistorySourceEvidence(
         dataset=verification.dataset,

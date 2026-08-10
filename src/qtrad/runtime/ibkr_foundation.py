@@ -252,18 +252,30 @@ def write_ibkr_foundation(
     provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
         _stage8_checkpoint_source_identity(provider_manifest)
     )
+    bounded = provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
+    source_evidence = None
     observation_capture = None
-    if checkpoint_root is not None and provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
+    if checkpoint_root is not None and bounded:
         from qtrad.runtime.ibkr_foundation_bounded import (
             prepare_stage8_observation_capture,
+            read_stage8_source_verification,
         )
 
-        observation_capture = prepare_stage8_observation_capture(
+        source_evidence = read_stage8_source_verification(
             checkpoint_root,
+            provider_manifest=provider_manifest,
             provider_manifest_sha256=provider_manifest_sha256,
             provider_dataset_sha256=provider_dataset_sha256,
             configuration_id=configuration.configuration_id,
         )
+        if source_evidence is None:
+            observation_capture = prepare_stage8_observation_capture(
+                checkpoint_root,
+                provider_manifest_sha256=provider_manifest_sha256,
+                provider_dataset_sha256=provider_dataset_sha256,
+                configuration_id=configuration.configuration_id,
+            )
+    source_reused = source_evidence is not None
     child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
     if child_root.exists():
         raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
@@ -271,14 +283,28 @@ def write_ibkr_foundation(
     started = time.monotonic()
     _emit_stage8_progress(progress_callback, started, "source-verification", "started")
     try:
-        source_evidence = read_provider_history_source_evidence(
-            provider_manifest,
-            verified_partition_callback=(
-                observation_capture.add_partition if observation_capture is not None else None
-            ),
-        )
-        if observation_capture is not None:
-            observation_capture.complete()
+        if source_evidence is None:
+            source_evidence = read_provider_history_source_evidence(
+                provider_manifest,
+                verified_partition_callback=(
+                    observation_capture.add_partition if observation_capture is not None else None
+                ),
+                source_replay_workers=2 if bounded and workers > 1 else 1,
+            )
+            if observation_capture is not None:
+                observation_capture.complete()
+                assert checkpoint_root is not None
+                from qtrad.runtime.ibkr_foundation_bounded import (
+                    store_stage8_source_verification as store_source_verification,
+                )
+
+                store_source_verification(
+                    checkpoint_root,
+                    source_evidence=source_evidence,
+                    provider_manifest_sha256=provider_manifest_sha256,
+                    provider_dataset_sha256=provider_dataset_sha256,
+                    configuration_id=configuration.configuration_id,
+                )
     except BaseException as error:
         if observation_capture is not None:
             observation_capture.abort()
@@ -294,10 +320,9 @@ def write_ibkr_foundation(
         progress_callback,
         started,
         "source-verification",
-        "completed",
+        "reused" if source_reused else "completed",
         provider_row_count=source_evidence.dataset.row_count,
     )
-    bounded = source_evidence.dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
     build: IBKRFoundationBuild | None = None
     if not bounded:
         build = build_ibkr_foundation(source_evidence, configuration)

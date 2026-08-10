@@ -69,9 +69,15 @@ from qtrad.domain.ibkr_foundation import IBKR_CONFIRMATORY_INSTRUMENTS
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.research import ObservationDataset, ObservationRow
+from qtrad.runtime.provider_history import (
+    provider_history_source_verification_receipt,
+    read_provider_history_source_verification_receipt,
+)
 
 _CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-checkpoint-v1"
 _REPLAY_CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-replay-checkpoint-v1"
+_SOURCE_VERIFICATION_NAME = "source-verification.json"
+_MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
 _DEFAULT_WORKERS = 4
 _MAX_WORKERS = 8
@@ -195,6 +201,40 @@ class _Stage8Checkpoint:
         else:
             root.mkdir(parents=True, exist_ok=False)
             _runtime()._write_create_only(root / "identity.json", encoded)
+
+    def source_verification(self) -> dict[str, object] | None:
+        if self.root is None:
+            return None
+        path = self.root / _SOURCE_VERIFICATION_NAME
+        if not path.exists():
+            return None
+        if not path.is_file() or path.is_symlink():
+            raise ValueError("Stage 8 source-verification checkpoint must be a regular file")
+        if path.stat().st_size > _MAX_SOURCE_VERIFICATION_BYTES:
+            raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
+        encoded = path.read_bytes()
+        try:
+            value = json.loads(encoded)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ValueError("Stage 8 source-verification checkpoint is invalid JSON") from error
+        if not isinstance(value, dict):
+            raise ValueError("Stage 8 source-verification checkpoint must be an object")
+        if encoded != _runtime()._json_bytes(value) + b"\n":
+            raise ValueError("Stage 8 source-verification checkpoint is not canonical")
+        return value
+
+    def store_source_verification(self, receipt: Mapping[str, object]) -> None:
+        if self.root is None:
+            return
+        encoded = _runtime()._json_bytes(receipt) + b"\n"
+        if len(encoded) > _MAX_SOURCE_VERIFICATION_BYTES:
+            raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
+        path = self.root / _SOURCE_VERIFICATION_NAME
+        if path.exists():
+            if self.source_verification() != dict(receipt):
+                raise ValueError("Stage 8 source-verification checkpoint content changed")
+            return
+        _runtime()._write_create_only(path, encoded)
 
     def observation(self, instrument: str) -> _ObservationCheckpoint | None:
         directory = self._instrument_directory("observations", instrument)
@@ -498,6 +538,63 @@ def prepare_stage8_observation_capture(
     return _Stage8ObservationCapture(
         checkpoint,
         provider_dataset_sha256=provider_dataset_sha256,
+    )
+
+
+def read_stage8_source_verification(
+    root: Path,
+    *,
+    provider_manifest: Path,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+) -> ProviderHistorySourceEvidence | None:
+    """Restore a completed semantic pass only after byte-level reauthentication."""
+
+    checkpoint = _Stage8Checkpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+    )
+    receipt = checkpoint.source_verification()
+    if receipt is None:
+        return None
+    evidence = read_provider_history_source_verification_receipt(provider_manifest, receipt)
+    observation_row_count = 0
+    instruments = tuple(
+        dict.fromkeys(partition.key[0] for partition in evidence.dataset.partitions)
+    )
+    for instrument in instruments:
+        observation = checkpoint.observation(instrument)
+        if observation is None:
+            raise ValueError("Stage 8 source-verification checkpoint observations are incomplete")
+        observation_row_count += observation.rows.row_count
+    if observation_row_count != evidence.dataset.row_count:
+        raise ValueError(
+            "Stage 8 source-verification checkpoint observation count differs from its dataset"
+        )
+    return evidence
+
+
+def store_stage8_source_verification(
+    root: Path,
+    *,
+    source_evidence: ProviderHistorySourceEvidence,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+) -> None:
+    """Publish a receipt only after semantic verification and observation capture complete."""
+
+    checkpoint = _Stage8Checkpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+    )
+    checkpoint.store_source_verification(
+        provider_history_source_verification_receipt(source_evidence)
     )
 
 

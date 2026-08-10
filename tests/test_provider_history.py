@@ -754,6 +754,18 @@ def test_source_evidence_decodes_request_result_children_once(
     assert result_iterations == 1
 
 
+def test_source_evidence_parallel_replay_matches_serial(tmp_path: Path) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+
+    serial = read_provider_history_source_evidence(manifest, source_replay_workers=1)
+    parallel = read_provider_history_source_evidence(manifest, source_replay_workers=2)
+
+    assert parallel.dataset == serial.dataset
+    assert parallel.request_evidence == serial.request_evidence
+    assert parallel.observation_summary == serial.observation_summary
+    assert tuple(parallel.observations) == tuple(serial.observations)
+
+
 def test_provider_history_publishes_without_prebuilt_dataset(tmp_path: Path) -> None:
     artifact = _build_stage6_artifact(day_count=2)
     result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)

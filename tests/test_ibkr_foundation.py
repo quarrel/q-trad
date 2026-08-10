@@ -1051,11 +1051,16 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
             [tuple[ProviderHistoricalObservation, ...], int], None
         ]
         | None = None,
+        source_replay_workers: int = 1,
     ) -> ProviderHistorySourceEvidence:
         nonlocal verifier_started
         verifier_started = True
         assert (checkpoint_root / "identity.json").is_file()
-        return original_verifier(path, verified_partition_callback=verified_partition_callback)
+        return original_verifier(
+            path,
+            verified_partition_callback=verified_partition_callback,
+            source_replay_workers=source_replay_workers,
+        )
 
     monkeypatch.setattr(
         foundation_runtime,
@@ -1114,8 +1119,13 @@ def test_stage8_observation_capture_aborts_before_publication(
             [tuple[ProviderHistoricalObservation, ...], int], None
         ]
         | None = None,
+        source_replay_workers: int = 1,
     ) -> ProviderHistorySourceEvidence:
-        original_verifier(path, verified_partition_callback=verified_partition_callback)
+        original_verifier(
+            path,
+            verified_partition_callback=verified_partition_callback,
+            source_replay_workers=source_replay_workers,
+        )
         raise ValueError("forced failure after source verification")
 
     monkeypatch.setattr(
@@ -1152,6 +1162,7 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         end=datetime(2026, 2, 3, tzinfo=UTC),
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    original_source_verifier = foundation_runtime.read_provider_history_source_evidence
 
     global_iterations = 0
 
@@ -1177,6 +1188,10 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     assert global_iterations == 0
     global_iterations = 0
     assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "completed"
+        for event in first_progress
+    )
+    assert any(
         event.get("phase") == "observations" and event.get("event") == "reused"
         for event in first_progress
     )
@@ -1185,6 +1200,16 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         for event in first_progress
     )
 
+    def reject_repeated_semantic_verification(
+        _path: Path, **_kwargs: object
+    ) -> ProviderHistorySourceEvidence:
+        raise AssertionError("completed Stage 8 source verification was repeated")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_repeated_semantic_verification,
+    )
     second_progress: list[Mapping[str, object]] = []
     second_bundle = tmp_path / "second-foundation.json"
     second = write_ibkr_foundation(
@@ -1195,6 +1220,10 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         progress_callback=second_progress.append,
     )
     assert global_iterations == 0
+    assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "reused"
+        for event in second_progress
+    )
     assert any(
         event.get("phase") == "observations" and event.get("event") == "reused"
         for event in second_progress
@@ -1208,9 +1237,28 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     assert second.targets.dataset_id == first.targets.dataset_id
     assert second.folds.dataset_id == first.folds.dataset_id
     global_iterations = 0
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        original_source_verifier,
+    )
     verified = verify_ibkr_foundation(second_bundle)
     assert global_iterations == 0
     assert verified.readiness.as_json() == second.readiness.as_json()
+
+    receipt_path = checkpoint_root / "source-verification.json"
+    assert receipt_path.is_file()
+    receipt_path.write_bytes(receipt_path.read_bytes() + b" ")
+    tampered_output = tmp_path / "tampered-receipt-foundation.json"
+    with pytest.raises(ValueError, match="source-verification checkpoint is not canonical"):
+        write_ibkr_foundation(
+            tampered_output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+        )
+    assert not tampered_output.exists()
+    assert not tampered_output.with_name(f"{tampered_output.name}.children").exists()
 
     changed = replace(configuration, name="changed-checkpoint-identity")
     rejected_output = tmp_path / "rejected-foundation.json"
