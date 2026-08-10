@@ -177,7 +177,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._last_message_at: datetime | None = None
         self._connected_once = False
         self._terminal_error: IbkrConnectionIntegrityError | None = None
-        self._superseded_callbacks = 0
         self._unknown_request_callbacks = 0
         self._cancelled_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
@@ -293,7 +292,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                     except TimeoutError:
                         continue
                     if not self._session.accept_callback(callback.generation):
-                        self._superseded_callbacks += 1
                         continue
                     self._update_last_message_at(self._callback_received_time(callback))
                     if callback.kind == "current_time":
@@ -440,7 +438,7 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                 or "none",
             ),
             ("callback_queue_capacity", "50000"),
-            ("superseded_callbacks", str(self._superseded_callbacks)),
+            ("superseded_callbacks", str(snapshot.superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
             ("cancelled_request_callbacks", str(self._cancelled_request_callbacks)),
             ("retired_request_tombstones", str(len(self._retired_bindings))),
@@ -560,7 +558,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                     callbacks,
                 ) from error
             if not self._session.accept_callback(callback.generation):
-                self._superseded_callbacks += 1
                 continue
             callbacks.append(callback)
             if not _is_global_error(callback):
@@ -606,7 +603,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
                     "IBKR server-time revalidation timed out", callbacks
                 ) from error
             if not self._session.accept_callback(callback.generation):
-                self._superseded_callbacks += 1
                 continue
             callbacks.append(callback)
             if callback.kind == "current_time" and callback.request_id == -1:
@@ -956,7 +952,6 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._reset_subscription_evidence()
         self._last_message_at = None
         self._terminal_error = None
-        self._superseded_callbacks = 0
         self._unknown_request_callbacks = 0
         self._cancelled_request_callbacks = 0
         self._pending_records.clear()

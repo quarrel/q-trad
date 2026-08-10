@@ -214,6 +214,17 @@ async def test_forced_reconnect_reserves_callback_queue_for_handshake(
     client = _FakeClient(Queue())
     listing = _listing()
 
+    run_count = 0
+
+    def run_with_trailing_stale_callback() -> None:
+        nonlocal run_count
+        run_count += 1
+        if run_count == 2:
+            client.callbacks.put(capability._Callback("tick_price", 1, (1, 1.1), generation=1))
+        client.callbacks.put(capability._Callback("next_valid_id", -1, (1,)))
+
+    monkeypatch.setattr(client, "run", run_with_trailing_stale_callback)
+
     async def settle_immediately(seconds: float) -> None:
         assert seconds == 5.0
 
@@ -232,7 +243,10 @@ async def test_forced_reconnect_reserves_callback_queue_for_handshake(
 
     assert not streaming_record.done()
     assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
-    assert dict((await adapter.health()).attributes)["connection_generation"] == "2"
+    health = await adapter.health()
+    assert dict(health.attributes)["connection_generation"] == "2"
+    assert dict(health.attributes)["superseded_callbacks"] == "1"
+    assert "SUPERSEDED_GENERATION" not in health.reason_codes
     streaming_record.cancel()
     with pytest.raises(asyncio.CancelledError):
         await streaming_record
@@ -393,7 +407,8 @@ async def test_superseded_generation_is_rejected_without_cross_generation_state(
     health = await adapter.health()
     assert record.raw_payload["raw_value"] == 1.2
     assert record.arrival_sequence == 4
-    assert "SUPERSEDED_GENERATION" in health.reason_codes
+    assert "SUPERSEDED_GENERATION" not in health.reason_codes
+    assert dict(health.attributes)["superseded_callbacks"] == "1"
     assert health.attributes[0] == ("connection_generation", "1")
 
 

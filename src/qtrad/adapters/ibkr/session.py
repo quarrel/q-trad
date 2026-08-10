@@ -134,6 +134,7 @@ class IbkrSessionSnapshot:
     farms: tuple[tuple[str, str], ...]
     desired_subscriptions: int
     active_subscriptions: int
+    superseded_callbacks: int
     reason_codes: tuple[str, ...]
     recovery_action: IbkrRecoveryAction = IbkrRecoveryAction.NONE
 
@@ -168,6 +169,7 @@ class IbkrSession:
         self._desired: dict[str, IbkrSubscription] = {}
         self._active: set[str] = set()
         self._reason_codes: set[str] = set()
+        self._superseded_callbacks = 0
 
     @property
     def generation(self) -> int:
@@ -187,6 +189,7 @@ class IbkrSession:
         for farm in self._farms:
             self._farms[farm] = "UNKNOWN"
         self._reason_codes = {"CONNECTING"}
+        self._superseded_callbacks = 0
         return self._generation
 
     def stop(self) -> None:
@@ -274,7 +277,9 @@ class IbkrSession:
     def accept_callback(self, generation: int) -> bool:
         """Accept only callbacks from the current socket generation."""
         if generation == self._generation:
+            self._reason_codes.discard("SUPERSEDED_GENERATION")
             return True
+        self._superseded_callbacks += 1
         self._reason_codes.add("SUPERSEDED_GENERATION")
         return False
 
@@ -302,13 +307,16 @@ class IbkrSession:
         now: float | None = None,
     ) -> IbkrRecoveryDecision:
         observed_at = self._clock() if now is None else now
-        if generation is not None and generation != self._generation:
-            self._reason_codes.add("SUPERSEDED_GENERATION")
-            return IbkrRecoveryDecision(
-                IbkrRecoveryAction.NONE,
-                "SUPERSEDED_GENERATION",
-                code=code,
-            )
+        if generation is not None:
+            if generation != self._generation:
+                self._superseded_callbacks += 1
+                self._reason_codes.add("SUPERSEDED_GENERATION")
+                return IbkrRecoveryDecision(
+                    IbkrRecoveryAction.NONE,
+                    "SUPERSEDED_GENERATION",
+                    code=code,
+                )
+            self._reason_codes.discard("SUPERSEDED_GENERATION")
         if request_id >= 0:
             return IbkrRecoveryDecision(
                 IbkrRecoveryAction.NONE,
@@ -500,6 +508,7 @@ class IbkrSession:
             farms=tuple(sorted(self._farms.items())),
             desired_subscriptions=len(self._desired),
             active_subscriptions=len(self._active),
+            superseded_callbacks=self._superseded_callbacks,
             reason_codes=tuple(sorted(self._reason_codes)),
             recovery_action=recovery_action,
         )

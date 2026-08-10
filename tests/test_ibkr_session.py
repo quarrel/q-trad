@@ -245,7 +245,16 @@ def test_old_generation_callbacks_are_not_accepted() -> None:
 
     snapshot = session.snapshot()
     assert snapshot.active_subscriptions == 0
+    assert snapshot.superseded_callbacks == 1
     assert "SUPERSEDED_GENERATION" in snapshot.reason_codes
+
+    session.on_system_message(
+        IbkrSystemCode.MARKET_DATA_FARM_CONNECTED,
+        generation=session.generation,
+    )
+    recovered = session.snapshot()
+    assert recovered.superseded_callbacks == 1
+    assert "SUPERSEDED_GENERATION" not in recovered.reason_codes
 
 
 def test_reconnect_delay_is_full_jitter_with_cap() -> None:
@@ -281,4 +290,5 @@ def test_system_message_from_superseded_generation_is_ignored() -> None:
     assert decision.action == IbkrRecoveryAction.NONE
     assert decision.reason_code == "SUPERSEDED_GENERATION"
     assert session.state == IbkrSessionState.CONNECTED
+    assert session.snapshot().superseded_callbacks == 1
     assert session.snapshot().reason_codes == ("SUPERSEDED_GENERATION",)
