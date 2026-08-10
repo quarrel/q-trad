@@ -10,6 +10,24 @@ umask 077
     exit 64
 }
 
+parent_restore_args=()
+if [[ "$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify ]] \
+    && [[ "${3:-}" == --policy && "${4:-}" == b4-exact-six ]]; then
+    parent_restore_url="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL:?run B4 qualification through the dual restore wrapper}"
+    parent_restore_evidence="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run B4 qualification through the dual restore wrapper}"
+    [[ "$parent_restore_url" =~ ^postgresql\+asyncpg://qtrad_ibkr@127[.]0[.]0[.]1:5432/qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || exit 64
+    [[ "$parent_restore_evidence" == /var/lib/qtrad/ibkr/restore-evidence/*.json \
+        && -f "$parent_restore_evidence" && ! -L "$parent_restore_evidence" \
+        && "$(stat -c '%u:%g:%a' "$parent_restore_evidence")" == 0:10001:640 ]] || {
+        echo "parent restore evidence is not authenticated for the unprivileged qualification runtime" >&2
+        exit 64
+    }
+    parent_restore_args=(
+        --env "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL=$parent_restore_url"
+        --env "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH=$parent_restore_evidence"
+    )
+fi
+
 # These identities exist only while postgres-restore-verify.sh owns the disposable database.
 restore_url="${QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL:?run through postgres-restore-verify.sh}"
 restore_evidence="${QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run through postgres-restore-verify.sh}"
@@ -36,6 +54,7 @@ exec docker run --rm --network host --user 10001:10001 \
     --env-file /etc/qtrad/ibkr-ingest.env \
     --env "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL=$restore_url" \
     --env "QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH=$restore_evidence" \
+    "${parent_restore_args[@]}" \
     --volume /etc/qtrad:/etc/qtrad:ro \
     --volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro \
     --volume "$qualification_root:$qualification_root:rw" \

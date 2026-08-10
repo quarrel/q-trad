@@ -223,6 +223,8 @@ else
 fi
 [[ -r "$script_dir/qtrad-ibkr-qualification-wrapper.example" ]] \
     || fail "reviewed qualification wrapper is unavailable"
+[[ -r "$script_dir/qtrad-ibkr-dual-restore-qualification.example" ]] \
+    || fail "reviewed dual-restore qualification wrapper is unavailable"
 command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
@@ -304,6 +306,7 @@ install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healt
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup
 install -D -m 0750 "$script_dir/postgres-restore-verify.sh" /usr/local/sbin/qtrad-ibkr-postgres-restore-verify
 install -D -m 0750 "$script_dir/qtrad-ibkr-qualification-wrapper.example" /usr/local/sbin/qtrad-ibkr-qualification
+install -D -m 0750 "$script_dir/qtrad-ibkr-dual-restore-qualification.example" /usr/local/sbin/qtrad-ibkr-dual-restore-qualification
 install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
 install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
 install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop

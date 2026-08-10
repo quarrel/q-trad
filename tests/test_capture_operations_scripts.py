@@ -168,6 +168,7 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     backup = (ibkr / "postgres-backup.sh").read_text()
     restore = (ibkr / "postgres-restore-verify.sh").read_text()
     qualification = (ibkr / "qtrad-ibkr-qualification-wrapper.example").read_text()
+    dual_restore = (ibkr / "qtrad-ibkr-dual-restore-qualification.example").read_text()
     health_service = (ibkr / "qtrad-ibkr-health.service.example").read_text()
 
     assert "usage: postgres-provision.sh --check|--apply" in provision
@@ -194,6 +195,10 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "--cap-drop=ALL" in qualification
     assert "ibkr-qualification-snapshot" in qualification
     assert "ibkr-qualification-verify" in qualification
+    assert "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL" in qualification
+    assert dual_restore.count("qtrad-ibkr-postgres-restore-verify") == 1
+    assert "QTRAD_IBKR_PARENT_RESTORE_ARCHIVE" in dual_restore
+    assert "QTRAD_IBKR_CURRENT_RESTORE_ARCHIVE" in dual_restore
     assert "Wants=qtrad-ibkr-ingest.service" not in health_service
     assert "Requires=qtrad-ibkr-ingest.service" not in health_service
     assert "After=qtrad-ibkr-ingest.service" in health_service

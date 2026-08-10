@@ -174,7 +174,7 @@ Real qualification still requires LIVE bid and ask evidence during authenticated
 ACTIVE periods, zero-loss persistence, controlled reconnect with fresh post-reconnect
 data, and verified backup/restore.
 
-The bounded restore interface is:
+The bounded single-restore interface remains the B3 snapshot/verification path:
 
 ```bash
 QTRAD_IBKR_RESTORE_ARCHIVE=/srv/qtrad/postgres/backups/qtrad-ibkr-YYYYMMDDTHHMMSSZ.dump \
@@ -184,10 +184,21 @@ QTRAD_IBKR_RESTORE_EVIDENCE_PATH=/var/lib/qtrad/ibkr/restore-evidence/<new-name>
   deployment ibkr-qualification-snapshot <snapshot arguments>
 ```
 
-Use the same composition with `ibkr-qualification-verify` and a fresh restore-evidence
-path for independent replay. Pass `--policy b4-exact-six` to both commands for B4;
-omitting `--policy` retains the B3 exact-two contract. Never decompose the wrapper's
-Docker mounts, user identity or archive selection into an ad-hoc operator command.
+B4 snapshot and verification require two simultaneous, independently owned restores: the
+qualification-bound parent B3 archive and the new B4 archive. Use the nested hardened wrapper:
+
+```bash
+QTRAD_IBKR_PARENT_RESTORE_ARCHIVE=<parent-B3-archive> \
+QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH=<new-parent-evidence-path> \
+QTRAD_IBKR_RESTORE_ARCHIVE=<current-B4-archive> \
+QTRAD_IBKR_RESTORE_EVIDENCE_PATH=<new-B4-evidence-path> \
+  /usr/local/sbin/qtrad-ibkr-dual-restore-qualification \
+  deployment ibkr-qualification-snapshot --policy b4-exact-six <snapshot arguments>
+```
+
+Use the same composition with `ibkr-qualification-verify` and two fresh evidence paths
+for independent replay. Never decompose the wrappers' database lifecycles, Docker mounts,
+user identity, or archive selection into an ad-hoc operator command.
 
 ## Running explicit historical CLI commands
 

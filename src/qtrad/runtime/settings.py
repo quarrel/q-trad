@@ -52,6 +52,8 @@ class Settings(BaseSettings):
     ibkr_capture_queue_capacity: int = 50_000
     ibkr_qualification_restore_database_url: str | None = None
     ibkr_qualification_restore_evidence_path: Path | None = None
+    ibkr_parent_qualification_restore_database_url: str | None = None
+    ibkr_parent_qualification_restore_evidence_path: Path | None = None
 
     @model_validator(mode="after")
     def validate_ibkr_stack(self) -> "Settings":
@@ -103,7 +105,10 @@ class Settings(BaseSettings):
             raise ValueError("database URL must use postgresql+asyncpg")
         return value
 
-    @field_validator("ibkr_qualification_restore_database_url")
+    @field_validator(
+        "ibkr_qualification_restore_database_url",
+        "ibkr_parent_qualification_restore_database_url",
+    )
     @classmethod
     def qualification_restore_async_postgres_only(cls, value: str | None) -> str | None:
         if value is not None and not value.startswith("postgresql+asyncpg://"):
