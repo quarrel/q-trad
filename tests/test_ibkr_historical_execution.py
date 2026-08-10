@@ -1303,6 +1303,7 @@ async def test_cli_postgres_execution_recovers_before_provider_construction(
                 ibkr_gateway_host="127.0.0.1",
                 ibkr_gateway_port=4002,
                 ibkr_client_id=7,
+                require_ibkr_historical_client_id=lambda: 8,
                 ibkr_client_id_policy="DEDICATED_NONZERO_CLIENT_ID",
                 ibkr_api_package_fingerprint="d" * 64,
                 ibkr_upstream_recovery_timeout_seconds=180,

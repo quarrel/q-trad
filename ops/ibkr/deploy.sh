@@ -42,6 +42,7 @@ gateway_port="${QTRAD_IBKR_GATEWAY_PORT:-4002}"
 api_host="${QTRAD_IBKR_API_HOST:-127.0.0.1}"
 api_port="${QTRAD_IBKR_API_PORT:-8000}"
 client_id="${QTRAD_IBKR_CLIENT_ID:-71}"
+historical_client_id="${QTRAD_IBKR_HISTORICAL_CLIENT_ID:-}"
 database_name="${QTRAD_IBKR_DATABASE_NAME:-qtrad_ibkr}"
 configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH}"
 capture_configuration_path="${QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH}"
@@ -276,6 +277,9 @@ printf '%s\n' "$preflight_json" | jq -e \
      and .client_id == ($client_id|tonumber)
      and .source == "ibkr-paper-v1"
      and .universe == "capture-ibkr-v1"' >/dev/null || fail "release identity does not match the reviewed descriptor"
+
+[[ "$historical_client_id" =~ ^[1-9][0-9]*$ ]] || fail "historical client ID must be positive"
+[[ "$historical_client_id" != "$client_id" ]] || fail "historical client ID must differ from capture client ID"
 
 [[ -r "$env_file" ]] || fail "canonical IBKR ingest environment file is not readable"
 

@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     ibkr_gateway_host: str = "127.0.0.1"
     ibkr_gateway_port: int = 4002
     ibkr_client_id: int = 71
+    ibkr_historical_client_id: int | None = None
     ibkr_client_id_policy: str = "DEDICATED_NONZERO_CLIENT_ID"
     ibkr_api_version: Literal["10.49", "10.45"] = "10.49"
     ibkr_gateway_version: Literal["10.49", "10.45"] = "10.49"
@@ -56,6 +57,11 @@ class Settings(BaseSettings):
     def validate_ibkr_stack(self) -> "Settings":
         if self.ibkr_api_version != self.ibkr_gateway_version:
             raise ValueError("IBKR Gateway and API versions must match")
+        if (
+            self.ibkr_historical_client_id is not None
+            and self.ibkr_historical_client_id == self.ibkr_client_id
+        ):
+            raise ValueError("IBKR historical client ID must differ from the capture client ID")
         timeouts = (
             self.ibkr_connect_timeout_seconds,
             self.ibkr_handshake_timeout_seconds,
@@ -158,12 +164,24 @@ class Settings(BaseSettings):
             raise ValueError("IBKR client ID must be positive; client ID zero is not permitted")
         return value
 
+    @field_validator("ibkr_historical_client_id")
+    @classmethod
+    def valid_ibkr_historical_client_id(cls, value: int | None) -> int | None:
+        if value is not None and value <= 0:
+            raise ValueError("IBKR historical client ID must be positive")
+        return value
+
     @field_validator("image")
     @classmethod
     def valid_image_identity(cls, value: str) -> str:
         if not value or len(value) > 500 or any(character.isspace() for character in value):
             raise ValueError("application image identity must be a bounded non-whitespace value")
         return value
+
+    def require_ibkr_historical_client_id(self) -> int:
+        if self.ibkr_historical_client_id is None:
+            raise ValueError("IBKR historical operations require QTRAD_IBKR_HISTORICAL_CLIENT_ID")
+        return self.ibkr_historical_client_id
 
     def require_ig_credentials(self) -> tuple[str, str, str, str | None]:
         if self.ig_username is None or self.ig_password is None or self.ig_api_key is None:

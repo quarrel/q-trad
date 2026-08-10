@@ -719,6 +719,7 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "QTRAD_IBKR_PASSWORD" not in api
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in api
     assert "usage: deploy.sh --check|--apply" in deploy
+    assert '[[ "$historical_client_id" != "$client_id" ]]' in deploy
     assert '--entrypoint /app/.venv/bin/python "$image"' in deploy
     assert "run --frozen --no-dev --no-sync python -m qtrad db verify-head" not in deploy
     script_dir = 'script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"'
@@ -1122,6 +1123,7 @@ esac
             "QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256": gateway_archive_sha,
             "QTRAD_IBKR_GATEWAY_MANIFEST": str(gateway_manifest),
             "QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH": configuration_path,
+            "QTRAD_IBKR_HISTORICAL_CLIENT_ID": "72",
             "QTRAD_DATABASE_URL": ("postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr"),
             "QTRAD_IBKR_PREFLIGHT_OBSERVED_AT": "2026-08-09T02:30:00Z",
         }
