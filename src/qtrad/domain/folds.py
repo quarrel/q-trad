@@ -42,7 +42,7 @@ class Fold:
         if not (
             self.training_start
             <= self.training_cutoff
-            < self.validation_start
+            <= self.validation_start
             < self.validation_end
         ):
             raise ValueError("fold chronology is invalid")

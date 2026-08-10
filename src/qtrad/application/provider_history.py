@@ -53,13 +53,81 @@ class ProviderHistoryResultSource(Protocol):
 ProviderHistorySource = IbkrHistoricalResultArtifact | ProviderHistoryResultSource
 
 
+class ProviderHistoryObservationRows(Protocol):
+    """Re-iterable provider rows without requiring one in-memory tuple."""
+
+    def __iter__(self) -> Iterator[ProviderHistoricalObservation]: ...
+
+    def __len__(self) -> int: ...
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoryObservationSummary:
+    """Compact accepted-row coverage captured during authoritative verification."""
+
+    accepted_intervals_by_request: tuple[
+        tuple[str, tuple[tuple[datetime, datetime], ...]],
+        ...,
+    ]
+    source_start: datetime
+    source_end: datetime
+
+    def __post_init__(self) -> None:
+        require_utc(self.source_start, "provider-history source start")
+        require_utc(self.source_end, "provider-history source end")
+        if self.source_end <= self.source_start:
+            raise ValueError("provider-history source bounds are invalid")
+        previous_request: str | None = None
+        for request_sha256, intervals in self.accepted_intervals_by_request:
+            if not request_sha256 or (
+                previous_request is not None and request_sha256 <= previous_request
+            ):
+                raise ValueError("provider-history summary requests are not canonical")
+            previous_request = request_sha256
+            previous_end: datetime | None = None
+            for interval_start, interval_end in intervals:
+                require_utc(interval_start, "provider-history accepted interval start")
+                require_utc(interval_end, "provider-history accepted interval end")
+                if interval_end <= interval_start or (
+                    previous_end is not None and interval_start <= previous_end
+                ):
+                    raise ValueError("provider-history accepted intervals are not canonical")
+                previous_end = interval_end
+
+    def intervals_by_request(self) -> dict[str, tuple[tuple[datetime, datetime], ...]]:
+        return dict(self.accepted_intervals_by_request)
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoryRequestEvidence:
+    """Compact request evidence retained by the foundation builder."""
+
+    request_sha256: str
+    result_sha256: str
+    evidence_disposition: IbkrHistoricalEvidenceDisposition
+    accepted_row_count: int
+    sessions: tuple[dict[str, JsonValue], ...]
+
+    @classmethod
+    def from_result(cls, result: IbkrHistoricalRequestResult) -> ProviderHistoryRequestEvidence:
+        return cls(
+            request_sha256=result.request_sha256,
+            result_sha256=result.result_sha256,
+            evidence_disposition=result.evidence_disposition,
+            accepted_row_count=len(result.accepted_rows),
+            sessions=tuple(dict(session) for session in result.sessions),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
 
     dataset: ProviderHistoricalDataset
-    observations: tuple[ProviderHistoricalObservation, ...]
-    source_artifact: IbkrHistoricalResultArtifact
+    observations: ProviderHistoryObservationRows
+    source_artifact: ProviderHistorySource
+    request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
+    observation_summary: ProviderHistoryObservationSummary | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -75,6 +143,25 @@ class ProviderHistorySourceEvidence:
             raise ValueError("provider-history source aggregate differs from its dataset")
         if len(self.observations) != self.dataset.row_count:
             raise ValueError("provider-history source observation count differs from its dataset")
+
+
+def request_evidence_by_hash(
+    source_evidence: ProviderHistorySourceEvidence,
+) -> dict[str, ProviderHistoryRequestEvidence]:
+    """Return compact request evidence without forcing a streaming source to materialise."""
+
+    explicit_evidence = getattr(source_evidence, "request_evidence", ())
+    if explicit_evidence:
+        evidence = explicit_evidence
+    else:
+        request_results = getattr(source_evidence.source_artifact, "request_results", ())
+        evidence = tuple(
+            ProviderHistoryRequestEvidence.from_result(result) for result in request_results
+        )
+    result = {item.request_sha256: item for item in evidence}
+    if len(result) != len(evidence):
+        raise ValueError("provider-history request evidence identities are not unique")
+    return result
 
 
 def build_provider_history_dataset(

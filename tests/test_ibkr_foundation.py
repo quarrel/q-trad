@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shutil
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -13,6 +13,7 @@ from typing import Any, cast
 import pytest
 
 import qtrad.runtime.ibkr_foundation as foundation_runtime
+import qtrad.runtime.ibkr_foundation_bounded as bounded_foundation_runtime
 import qtrad.runtime.provider_history as provider_history_runtime
 import qtrad.runtime.r2_verification as r2_verification_runtime
 from qtrad import __main__ as cli
@@ -29,6 +30,7 @@ from qtrad.application.r2_ibkr_historical import (
     ibkr_availability_evidence,
 )
 from qtrad.domain.events import JsonValue
+from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_CANDIDATES,
@@ -42,17 +44,24 @@ from qtrad.domain.ibkr_historical import IbkrHistoricalRequestKind
 from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance
+from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
     load_ibkr_foundation_outcome_blind_with_identity,
+    rehearse_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
-from qtrad.runtime.provider_history import read_provider_history_source_evidence
+from qtrad.runtime.provider_history import (
+    VerifiedProviderHistoryRows,
+    read_provider_history_source_evidence,
+)
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
+
+_SHORT_STAGE8_END = datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30)
 
 
 def _canonical_json(value: object) -> bytes:
@@ -62,6 +71,116 @@ def _canonical_json(value: object) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+
+def _variable_fold_rows() -> tuple[dict[str, JsonValue], ...]:
+    start = datetime(2026, 2, 1, tzinfo=UTC)
+    rows: list[dict[str, JsonValue]] = []
+    for fold_index in range(3):
+        training_ids = tuple(
+            hashlib.sha256(f"training:{fold_index}:{index}".encode()).hexdigest()
+            for index in range(300)
+        )
+        validation_ids = tuple(
+            hashlib.sha256(f"validation:{fold_index}:{index}".encode()).hexdigest()
+            for index in range(100)
+        )
+        fold = Fold(
+            fold_id=f"fold-{fold_index}",
+            training_start=start,
+            training_cutoff=start + timedelta(days=fold_index + 1),
+            validation_start=start + timedelta(days=fold_index + 1),
+            validation_end=start + timedelta(days=fold_index + 2),
+            embargo_end=start + timedelta(days=fold_index + 1),
+            training_target_ids=training_ids,
+            validation_target_ids=validation_ids,
+            holdout_excluded=True,
+            membership_hash=membership_hash(training_ids, validation_ids),
+        )
+        rows.append(fold.as_json())
+    return tuple(rows)
+
+
+def test_variable_fold_payloads_split_before_child_byte_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = _variable_fold_rows()
+    payloads = tuple(foundation_runtime._canonical_row(row) for row in rows)
+    single_sizes = tuple(len(foundation_runtime._parquet_bytes((payload,))) for payload in payloads)
+    combined_size = len(foundation_runtime._parquet_bytes(payloads))
+    file_limit = (max(single_sizes) + combined_size) // 2
+    assert max(single_sizes) < file_limit < combined_size
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", file_limit)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_CHILD_PAYLOAD_BYTES",
+        max(foundation_runtime._payload_byte_count(payload) for payload in payloads),
+    )
+    dataset_id = hashlib.sha256(b"fold-dataset").hexdigest()
+    lineage = {
+        "provider_manifest_sha256": "1" * 64,
+        "provider_dataset_sha256": "2" * 64,
+        "plan_sha256": "3" * 64,
+        "aggregate_sha256": "4" * 64,
+    }
+
+    for mode in ("generic", "bounded"):
+        bundle_root = tmp_path / mode
+        bundle_root.mkdir()
+        child_root = bundle_root / "foundation.children"
+        if mode == "generic":
+            references = foundation_runtime._write_child_parts(
+                child_root,
+                bundle_root,
+                "folds",
+                rows,
+                dataset_id,
+                lineage,
+            )
+        else:
+            writer = bounded_foundation_runtime._DeferredChildWriter(
+                child_root=child_root,
+                bundle_root=bundle_root,
+                child_name=child_root.name,
+                kind="folds",
+                lineage=lineage,
+            )
+            for payload in payloads:
+                writer.add(payload)
+            references = list(writer.finalize(dataset_id))
+        assert len(references) == len(rows)
+        reference_files = tuple(
+            cast(str, cast(Mapping[str, object], reference)["file"]) for reference in references
+        )
+        assert all(
+            (bundle_root / reference_file).stat().st_size <= file_limit
+            for reference_file in reference_files
+        )
+        foundation_runtime._verify_children(
+            bundle_root,
+            {"folds": references},
+            {"folds": rows},
+            {"folds": dataset_id},
+            lineage,
+            child_kinds=("folds",),
+        )
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_CHILD_FILE_BYTES",
+        min(single_sizes) - 1,
+    )
+    oversized_root = tmp_path / "oversized"
+    oversized_root.mkdir()
+    with pytest.raises(ValueError, match="Parquet child exceeds its byte bound"):
+        foundation_runtime._write_child_parts(
+            oversized_root / "foundation.children",
+            oversized_root,
+            "folds",
+            rows[:1],
+            dataset_id,
+            lineage,
+        )
 
 
 def _rewrite_payload_reference(bundle: Path, field: str, value: object) -> None:
@@ -104,7 +223,7 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30),
     )
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(
@@ -113,6 +232,16 @@ def _foundation_bundle_fixture(tmp_path: Path) -> Path:
         configuration=configuration,
     )
     return bundle
+
+
+@pytest.fixture(scope="module")
+def _authenticated_foundation_template(
+    tmp_path_factory: pytest.TempPathFactory,
+) -> Path:
+    template_root = tmp_path_factory.mktemp("authenticated-stage8-foundation")
+    bundle = _foundation_bundle_fixture(template_root)
+    verify_ibkr_foundation(bundle)
+    return template_root
 
 
 def _holdout_source_for_build(build: IBKRFoundationBuild) -> R2HoldoutTargetSource:
@@ -149,7 +278,7 @@ def test_stage8_writer_preserves_racing_output_on_child_failure(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     output = tmp_path / "racing-foundation.json"
     child_root = tmp_path / "racing-foundation.json.children"
@@ -194,7 +323,7 @@ def test_provider_history_foundation_round_trips_and_replays_children(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
 
     source_evidence = read_provider_history_source_evidence(provider_manifest)
@@ -272,7 +401,7 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     source_evidence = read_provider_history_source_evidence(provider_manifest)
     full_build = build_ibkr_foundation(source_evidence, configuration)
@@ -337,7 +466,7 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(
@@ -373,12 +502,36 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
     assert verified.targets.rows
 
 
+def test_stage8_source_evidence_keeps_request_results_streaming(
+    tmp_path: Path,
+) -> None:
+    artifact, _, provider_manifest = _published_provider_history(tmp_path)
+
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+
+    assert isinstance(source_evidence.observations, VerifiedProviderHistoryRows)
+    assert len(source_evidence.observations) == source_evidence.dataset.row_count
+    instrument = source_evidence.observations.instruments[0]
+    positioned = tuple(source_evidence.observations.iter_instrument_with_positions(instrument))
+    assert positioned
+    assert all(row.instrument_id == instrument for row, _ in positioned)
+    assert [position for _, position in positioned] == sorted(
+        position for _, position in positioned
+    )
+    assert not hasattr(source_evidence.source_artifact, "request_results")
+    assert len(source_evidence.request_evidence) == len(artifact.request_results)
+    assert all(not hasattr(item, "accepted_rows") for item in source_evidence.request_evidence)
+    assert sum(item.accepted_row_count for item in source_evidence.request_evidence) == sum(
+        len(result.accepted_rows) for result in artifact.request_results
+    )
+
+
 def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     extra_instrument = "fx:nzd-usd"
     extra_configuration = replace(
@@ -409,7 +562,7 @@ def test_stage8_zero_valid_folds_remains_insufficient(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
 
     def no_valid_folds(*args: object, **kwargs: object) -> object:
@@ -441,7 +594,7 @@ def _session_aware_source_evidence(
     source_end = datetime(2026, 3, 5, tzinfo=UTC)
     requests: list[object] = []
     results: list[object] = []
-    observations: list[object] = []
+    observations: list[SimpleNamespace] = []
     target_rows: list[object] = []
     contracts: list[object] = []
 
@@ -560,11 +713,25 @@ def _session_aware_source_evidence(
         aggregate=aggregate,
         request_results=tuple(results),
     )
+    partition_instruments = sorted({str(row.instrument_id) for row in observations})
     source_evidence = cast(
         ProviderHistorySourceEvidence,
         SimpleNamespace(
             observations=tuple(observations),
+            observation_summary=None,
             source_artifact=source_artifact,
+            dataset=SimpleNamespace(
+                row_count=len(observations),
+                partitions=tuple(
+                    SimpleNamespace(
+                        instrument_id=instrument,
+                        row_count=sum(
+                            1 for row in observations if str(row.instrument_id) == instrument
+                        ),
+                    )
+                    for instrument in partition_instruments
+                ),
+            ),
         ),
     )
     targets = cast(TargetDataset, SimpleNamespace(rows=tuple(target_rows)))
@@ -638,11 +805,14 @@ def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() ->
 )
 def test_stage8_rejects_child_manifest_lineage_and_part_drift(
     tmp_path: Path,
+    _authenticated_foundation_template: Path,
     field: str,
     value: object,
     message: str,
 ) -> None:
-    bundle = _foundation_bundle_fixture(tmp_path)
+    clone_root = tmp_path / "authenticated-stage8-foundation"
+    shutil.copytree(_authenticated_foundation_template, clone_root)
+    bundle = clone_root / "foundation.json"
     _rewrite_child_manifest(bundle, field, value)
 
     with pytest.raises(ValueError, match=message):
@@ -700,7 +870,7 @@ def test_stage8_cli_build_and_verify_round_trip(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     configuration_path = tmp_path / "configuration.json"
     configuration_path.write_text(
@@ -731,3 +901,428 @@ def test_stage8_cli_build_and_verify_round_trip(
     cli.main(["research", "foundation", "readiness", "--bundle", str(bundle)])
     readiness_output = json.loads(capsys.readouterr().out)
     assert readiness_output["state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
+
+
+def test_provider_history_foundation_bounded_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    full = build_ibkr_foundation(source_evidence, configuration)
+    import qtrad.runtime.ibkr_foundation as foundation_runtime
+
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    bundle = tmp_path / "bounded-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    verified = verify_ibkr_foundation(bundle)
+    assert verified.readiness.as_json() == full.readiness.as_json()
+    assert verified.observations.dataset_id == full.observations.dataset_id
+    assert verified.panel.dataset_id == full.panel.dataset_id
+    assert verified.targets.dataset_id == full.targets.dataset_id
+    assert verified.folds.dataset_id == full.folds.dataset_id
+    assert verified.observations.dataset_id
+    assert verified.target_index is None
+    assert verified.causal_metadata is None
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    assert set(document["payload"]["children"]) == {
+        "observations",
+        "panel",
+        "targets",
+        "folds",
+    }
+
+
+def test_bounded_foundation_parallel_derivation_matches_generic_across_chunk_seam(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    monkeypatch.setattr(
+        bounded_foundation_runtime,
+        "_DERIVATION_CHUNK",
+        timedelta(minutes=15),
+    )
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END + timedelta(minutes=1),
+    )
+    generic = build_ibkr_foundation(source_evidence, configuration)
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+
+    single = write_ibkr_foundation(
+        tmp_path / "single-worker.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=1,
+    )
+    parallel = write_ibkr_foundation(
+        tmp_path / "parallel-workers.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=2,
+    )
+
+    expected_ids = (
+        generic.observations.dataset_id,
+        generic.panel.dataset_id,
+        generic.targets.dataset_id,
+        generic.folds.dataset_id,
+    )
+    assert (
+        single.observations.dataset_id,
+        single.panel.dataset_id,
+        single.targets.dataset_id,
+        single.folds.dataset_id,
+    ) == expected_ids
+    assert (
+        parallel.observations.dataset_id,
+        parallel.panel.dataset_id,
+        parallel.targets.dataset_id,
+        parallel.folds.dataset_id,
+    ) == expected_ids
+
+
+def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    bundle = tmp_path / "replay-checkpoint-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        workers=1,
+    )
+    replay_checkpoint = tmp_path / "replay-checkpoint"
+    first = verify_ibkr_foundation(
+        bundle,
+        replay_checkpoint_root=replay_checkpoint,
+        workers=1,
+    )
+
+    def reject_parquet_rebuild(_rows: object) -> bytes:
+        raise AssertionError("verified replay Parquet part was rebuilt")
+
+    monkeypatch.setattr(foundation_runtime, "_parquet_bytes", reject_parquet_rebuild)
+    second = verify_ibkr_foundation(
+        bundle,
+        replay_checkpoint_root=replay_checkpoint,
+        workers=1,
+    )
+    assert second.readiness.as_json() == first.readiness.as_json()
+
+    document = json.loads(bundle.read_text(encoding="utf-8"))
+    panel_reference = document["payload"]["children"]["panel"][0]
+    panel_path = bundle.parent / panel_reference["file"]
+    panel_path.write_bytes(panel_path.read_bytes() + b"changed")
+    with pytest.raises(ValueError, match="child panel part 0 file bytes diverge from replay"):
+        verify_ibkr_foundation(
+            bundle,
+            replay_checkpoint_root=replay_checkpoint,
+            workers=1,
+        )
+
+
+def test_compact_provider_observation_summary_matches_row_replay(tmp_path: Path) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+
+    assert source_evidence.observation_summary is not None
+    summarized = _provider_evidence(source_evidence, include_bounds=True)
+    replayed = _provider_evidence(
+        replace(source_evidence, observation_summary=None), include_bounds=True
+    )
+
+    assert summarized == replayed
+
+
+def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_early(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    checkpoint_root = tmp_path / "empty-checkpoint"
+    checkpoint_root.mkdir()
+    original_verifier = foundation_runtime.read_provider_history_source_evidence
+    verifier_started = False
+
+    def assert_checkpoint_prepared(
+        path: Path,
+        *,
+        verified_partition_callback: Callable[
+            [tuple[ProviderHistoricalObservation, ...], int], None
+        ]
+        | None = None,
+        source_replay_workers: int = 1,
+    ) -> ProviderHistorySourceEvidence:
+        nonlocal verifier_started
+        verifier_started = True
+        assert (checkpoint_root / "identity.json").is_file()
+        return original_verifier(
+            path,
+            verified_partition_callback=verified_partition_callback,
+            source_replay_workers=source_replay_workers,
+        )
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        assert_checkpoint_prepared,
+    )
+    write_ibkr_foundation(
+        tmp_path / "empty-checkpoint-foundation.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        workers=1,
+    )
+    assert verifier_started
+
+    junk_root = tmp_path / "junk-checkpoint"
+    junk_root.mkdir()
+    (junk_root / "unexpected").write_text("junk", encoding="utf-8")
+
+    def reject_source_verification(_path: Path, **_kwargs: object) -> ProviderHistorySourceEvidence:
+        raise AssertionError("source verification started before checkpoint rejection")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_source_verification,
+    )
+    rejected_output = tmp_path / "junk-checkpoint-foundation.json"
+    with pytest.raises(ValueError, match="checkpoint identity is missing"):
+        write_ibkr_foundation(
+            rejected_output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=junk_root,
+            workers=1,
+        )
+    assert not rejected_output.exists()
+
+
+def test_stage8_observation_capture_aborts_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    original_verifier = foundation_runtime.read_provider_history_source_evidence
+
+    def fail_after_verification(
+        path: Path,
+        *,
+        verified_partition_callback: Callable[
+            [tuple[ProviderHistoricalObservation, ...], int], None
+        ]
+        | None = None,
+        source_replay_workers: int = 1,
+    ) -> ProviderHistorySourceEvidence:
+        original_verifier(
+            path,
+            verified_partition_callback=verified_partition_callback,
+            source_replay_workers=source_replay_workers,
+        )
+        raise ValueError("forced failure after source verification")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        fail_after_verification,
+    )
+    checkpoint_root = tmp_path / "aborted-checkpoint"
+    output = tmp_path / "aborted-foundation.json"
+
+    with pytest.raises(ValueError, match="forced failure after source verification"):
+        write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+            workers=1,
+        )
+
+    assert {
+        path.relative_to(checkpoint_root) for path in checkpoint_root.rglob("*") if path.is_file()
+    } == {Path("identity.json")}
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}.children").exists()
+
+
+def test_bounded_foundation_reuses_identity_bound_checkpoints(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    original_source_verifier = foundation_runtime.read_provider_history_source_evidence
+
+    global_iterations = 0
+
+    def reject_global_provider_row_iteration(_rows: VerifiedProviderHistoryRows):
+        nonlocal global_iterations
+        global_iterations += 1
+        raise AssertionError("checkpointed Stage 8 rescanned all provider rows")
+
+    monkeypatch.setattr(
+        VerifiedProviderHistoryRows,
+        "__iter__",
+        reject_global_provider_row_iteration,
+    )
+    checkpoint_root = tmp_path / "stage8-checkpoint"
+    first_progress: list[Mapping[str, object]] = []
+    first = write_ibkr_foundation(
+        tmp_path / "first-foundation.json",
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        progress_callback=first_progress.append,
+    )
+    assert global_iterations == 0
+    global_iterations = 0
+    assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "completed"
+        for event in first_progress
+    )
+    assert any(
+        event.get("phase") == "observations" and event.get("event") == "reused"
+        for event in first_progress
+    )
+    assert any(
+        event.get("phase") == "derived" and event.get("event") == "completed"
+        for event in first_progress
+    )
+
+    def reject_repeated_semantic_verification(
+        _path: Path, **_kwargs: object
+    ) -> ProviderHistorySourceEvidence:
+        raise AssertionError("completed Stage 8 source verification was repeated")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_repeated_semantic_verification,
+    )
+    second_progress: list[Mapping[str, object]] = []
+    second_bundle = tmp_path / "second-foundation.json"
+    second = write_ibkr_foundation(
+        second_bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        progress_callback=second_progress.append,
+    )
+    assert global_iterations == 0
+    assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "reused"
+        for event in second_progress
+    )
+    assert any(
+        event.get("phase") == "observations" and event.get("event") == "reused"
+        for event in second_progress
+    )
+    assert any(
+        event.get("phase") == "derived" and event.get("event") == "reused"
+        for event in second_progress
+    )
+    assert second.observations.dataset_id == first.observations.dataset_id
+    assert second.panel.dataset_id == first.panel.dataset_id
+    assert second.targets.dataset_id == first.targets.dataset_id
+    assert second.folds.dataset_id == first.folds.dataset_id
+    global_iterations = 0
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        original_source_verifier,
+    )
+    verified = verify_ibkr_foundation(second_bundle)
+    assert global_iterations == 0
+    assert verified.readiness.as_json() == second.readiness.as_json()
+
+    receipt_path = checkpoint_root / "source-verification.json"
+    assert receipt_path.is_file()
+    receipt_path.write_bytes(receipt_path.read_bytes() + b" ")
+    tampered_output = tmp_path / "tampered-receipt-foundation.json"
+    with pytest.raises(ValueError, match="source-verification checkpoint is not canonical"):
+        write_ibkr_foundation(
+            tampered_output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+        )
+    assert not tampered_output.exists()
+    assert not tampered_output.with_name(f"{tampered_output.name}.children").exists()
+
+    changed = replace(configuration, name="changed-checkpoint-identity")
+    rejected_output = tmp_path / "rejected-foundation.json"
+    with pytest.raises(ValueError, match="checkpoint identity does not match"):
+        write_ibkr_foundation(
+            rejected_output,
+            provider_manifest=provider_manifest,
+            configuration=changed,
+            checkpoint_root=checkpoint_root,
+        )
+    assert not rejected_output.exists()
+    assert not rejected_output.with_name(f"{rejected_output.name}.children").exists()
+
+
+def test_stage8_rehearsal_is_non_publishing_and_reports_progress(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    before = set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*"))
+    progress: list[Mapping[str, object]] = []
+
+    build = rehearse_ibkr_foundation(
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=tmp_path / "rehearsal-checkpoint",
+        progress_callback=progress.append,
+    )
+
+    assert build.provider_history.dataset_sha256
+    assert set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*")) == before
+    assert any(
+        event.get("phase") == "source-verification" and event.get("event") == "completed"
+        for event in progress
+    )
+    assert any(
+        event.get("phase") == "publication" and event.get("event") == "completed"
+        for event in progress
+    )

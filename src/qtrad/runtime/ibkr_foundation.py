@@ -5,12 +5,15 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import resource
 import shutil
-from collections.abc import Mapping, Sequence
+import time
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
+from uuid import uuid4
 
 import polars as pl
 
@@ -62,9 +65,11 @@ _FOUNDATION_CHILD_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
+_MAX_CHILD_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
+_BOUNDED_PROVIDER_HISTORY_ROWS = 500_000
 _BASE_CHILD_KINDS = (
     "observations",
     "panel",
@@ -81,6 +86,7 @@ _LEGACY_EXTENSION_CHILD_KINDS = (
 _G2_EXTENSION_CHILD_KINDS = ("g2-observations", "g2-panel")
 _LEGACY_CHILD_KINDS = _BASE_CHILD_KINDS + _LEGACY_EXTENSION_CHILD_KINDS
 _CHILD_KINDS = _LEGACY_CHILD_KINDS + _G2_EXTENSION_CHILD_KINDS
+_ProgressCallback = Callable[[Mapping[str, object]], None]
 _CHILD_FIELDS = {
     "contract",
     "schema_version",
@@ -260,11 +266,31 @@ def _manifest_payload(
     }
 
 
+def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, str, int]:
+    manifest_bytes = _bounded_bytes(
+        provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
+    )
+    document = _mapping(_parse_json(manifest_bytes, "provider-history manifest"))
+    dataset = _mapping(document.get("dataset"), "provider-history dataset")
+    dataset_sha256 = _text(dataset.get("dataset_sha256"), "provider-history dataset identity")
+    if len(dataset_sha256) != 64 or any(
+        character not in "0123456789abcdef" for character in dataset_sha256
+    ):
+        raise ValueError("provider-history dataset identity must be lower-case SHA-256")
+    row_count = dataset.get("row_count")
+    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
+        raise ValueError("provider-history dataset row count is invalid")
+    return hashlib.sha256(manifest_bytes).hexdigest(), dataset_sha256, row_count
+
+
 def write_ibkr_foundation(
     output: Path,
     *,
     provider_manifest: Path,
     configuration: FoundationConfig,
+    checkpoint_root: Path | None = None,
+    workers: int = 4,
+    progress_callback: _ProgressCallback | None = None,
 ) -> IBKRFoundationBuild:
     """Build and create the source-specific bundle once."""
 
@@ -273,27 +299,117 @@ def write_ibkr_foundation(
         raise FileExistsError(f"IBKR foundation output already exists: {output}")
     provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
     _relative_path(output.parent, provider_manifest, "provider-history manifest")
+    provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
+        _stage8_checkpoint_source_identity(provider_manifest)
+    )
+    bounded = provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
+    source_evidence = None
+    observation_capture = None
+    if checkpoint_root is not None and bounded:
+        from qtrad.runtime.ibkr_foundation_bounded import (
+            prepare_stage8_observation_capture,
+            read_stage8_source_verification,
+        )
+
+        source_evidence = read_stage8_source_verification(
+            checkpoint_root,
+            provider_manifest=provider_manifest,
+            provider_manifest_sha256=provider_manifest_sha256,
+            provider_dataset_sha256=provider_dataset_sha256,
+            configuration_id=configuration.configuration_id,
+        )
+        if source_evidence is None:
+            observation_capture = prepare_stage8_observation_capture(
+                checkpoint_root,
+                provider_manifest_sha256=provider_manifest_sha256,
+                provider_dataset_sha256=provider_dataset_sha256,
+                configuration_id=configuration.configuration_id,
+            )
+    source_reused = source_evidence is not None
     child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
     if child_root.exists():
         raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
 
-    source_evidence = read_provider_history_source_evidence(provider_manifest)
-    build = build_ibkr_foundation(source_evidence, configuration)
-    if build.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
-        raise ValueError("provider history changed during foundation construction")
+    started = time.monotonic()
+    _emit_stage8_progress(progress_callback, started, "source-verification", "started")
+    try:
+        if source_evidence is None:
+            source_evidence = read_provider_history_source_evidence(
+                provider_manifest,
+                verified_partition_callback=(
+                    observation_capture.add_partition if observation_capture is not None else None
+                ),
+                source_replay_workers=2 if bounded and workers > 1 else 1,
+            )
+            if observation_capture is not None:
+                observation_capture.complete()
+                assert checkpoint_root is not None
+                from qtrad.runtime.ibkr_foundation_bounded import (
+                    store_stage8_source_verification as store_source_verification,
+                )
+
+                store_source_verification(
+                    checkpoint_root,
+                    source_evidence=source_evidence,
+                    provider_manifest_sha256=provider_manifest_sha256,
+                    provider_dataset_sha256=provider_dataset_sha256,
+                    configuration_id=configuration.configuration_id,
+                )
+    except BaseException as error:
+        if observation_capture is not None:
+            observation_capture.abort()
+        _emit_stage8_progress(
+            progress_callback,
+            started,
+            "source-verification",
+            "failed",
+            error_type=type(error).__name__,
+        )
+        raise
+    _emit_stage8_progress(
+        progress_callback,
+        started,
+        "source-verification",
+        "reused" if source_reused else "completed",
+        provider_row_count=source_evidence.dataset.row_count,
+    )
+    build: IBKRFoundationBuild | None = None
+    if not bounded:
+        build = build_ibkr_foundation(source_evidence, configuration)
+        if build.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
+            raise ValueError("provider history changed during foundation construction")
 
     child_root_created = False
     output_created = False
+    children: Mapping[str, JsonValue]
     try:
         child_root.mkdir()
         child_root_created = True
-        children = _write_children(
-            child_root,
-            output.parent,
-            build,
-            source_evidence,
-            provider_manifest,
-        )
+        if bounded:
+            from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
+
+            build, bounded_children = build_bounded_provider_foundation(
+                source_evidence=source_evidence,
+                configuration=configuration,
+                child_root=child_root,
+                bundle_root=output.parent,
+                child_name=child_root.name,
+                provider_manifest_sha256=provider_manifest_sha256,
+                checkpoint_root=checkpoint_root,
+                workers=workers,
+                progress_callback=progress_callback,
+            )
+            children = cast(Mapping[str, JsonValue], bounded_children)
+        else:
+            assert build is not None
+            children = _write_children(
+                child_root,
+                output.parent,
+                build,
+                source_evidence,
+                provider_manifest,
+            )
+        assert build is not None
         document = _manifest_payload(
             build,
             source_evidence,
@@ -313,10 +429,78 @@ def write_ibkr_foundation(
         if output_created:
             output.unlink()
         raise
+    assert build is not None
+    _emit_stage8_progress(
+        progress_callback,
+        started,
+        "publication",
+        "completed",
+        output=str(output),
+    )
     return build
 
 
-def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
+def rehearse_ibkr_foundation(
+    *,
+    provider_manifest: Path,
+    configuration: FoundationConfig,
+    checkpoint_root: Path | None = None,
+    workers: int = 4,
+    progress_callback: _ProgressCallback | None = None,
+) -> IBKRFoundationBuild:
+    """Exercise the real Stage 8 build while retaining no published bundle."""
+
+    provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
+    output = provider_manifest.parent / f".qtrad-stage8-rehearsal-{uuid4().hex}.json"
+    child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
+    try:
+        return write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            checkpoint_root=checkpoint_root,
+            workers=workers,
+            progress_callback=progress_callback,
+        )
+    finally:
+        if output.exists():
+            if output.is_symlink() or not output.is_file():
+                raise ValueError("Stage 8 rehearsal output changed before cleanup")
+            output.unlink()
+        if child_root.exists():
+            if child_root.is_symlink() or not child_root.is_dir():
+                raise ValueError("Stage 8 rehearsal child root changed before cleanup")
+            shutil.rmtree(child_root)
+
+
+def _emit_stage8_progress(
+    callback: _ProgressCallback | None,
+    started: float,
+    phase: str,
+    event: str,
+    **fields: object,
+) -> None:
+    if callback is None:
+        return
+    usage = resource.getrusage(resource.RUSAGE_SELF)
+    callback(
+        {
+            "contract": "qtrad-stage8-progress-v1",
+            "phase": phase,
+            "event": event,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "maximum_rss_kib": int(usage.ru_maxrss),
+            **fields,
+        }
+    )
+
+
+def verify_ibkr_foundation(
+    path: Path,
+    *,
+    replay_checkpoint_root: Path | None = None,
+    workers: int = 4,
+) -> IBKRFoundationBuild:
     """Verify the thin manifest and independently replay every Parquet child."""
 
     manifest_path = _regular_file(path, "IBKR foundation manifest")
@@ -365,6 +549,18 @@ def verify_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
     configuration_payload = _mapping(payload["configuration"], "IBKR foundation configuration")
     configuration = decode_foundation_config(configuration_payload)
     source_evidence = read_provider_history_source_evidence(provider_path)
+    if source_evidence.dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
+        from qtrad.runtime.ibkr_foundation_bounded import verify_bounded_provider_foundation
+
+        return verify_bounded_provider_foundation(
+            source_evidence=source_evidence,
+            configuration=configuration,
+            bundle_path=manifest_path,
+            document=document,
+            payload=payload,
+            replay_checkpoint_root=replay_checkpoint_root,
+            workers=workers,
+        )
     replay = build_ibkr_foundation(source_evidence, configuration)
 
     children = cast(dict[str, JsonValue], _mapping(payload["children"], "IBKR foundation children"))
@@ -989,6 +1185,35 @@ def _write_children(
     return children
 
 
+def _payload_byte_count(payload: str) -> int:
+    return len(payload.encode("utf-8"))
+
+
+def _child_payload_chunks(
+    rows: Sequence[Mapping[str, JsonValue]],
+) -> Iterator[tuple[str, ...]]:
+    """Partition variable-sized rows deterministically before Parquet encoding."""
+
+    payloads: list[str] = []
+    payload_bytes = 0
+    emitted = False
+    for row in rows:
+        payload = _canonical_row(row)
+        encoded_bytes = _payload_byte_count(payload)
+        if payloads and (
+            len(payloads) >= _MAX_CHILD_ROWS
+            or payload_bytes + encoded_bytes > _MAX_CHILD_PAYLOAD_BYTES
+        ):
+            yield tuple(payloads)
+            emitted = True
+            payloads.clear()
+            payload_bytes = 0
+        payloads.append(payload)
+        payload_bytes += encoded_bytes
+    if payloads or not emitted:
+        yield tuple(payloads)
+
+
 def _write_child_parts(
     child_root: Path,
     bundle_root: Path,
@@ -1000,14 +1225,7 @@ def _write_child_parts(
     if kind not in _CHILD_KINDS:
         raise ValueError(f"unsupported IBKR foundation child kind: {kind}")
     parts: list[JsonValue] = []
-    chunks = (
-        tuple(rows[index : index + _MAX_CHILD_ROWS])
-        for index in range(0, len(rows), _MAX_CHILD_ROWS)
-    )
-    if not rows:
-        chunks = iter(((),))
-    for part_index, chunk in enumerate(chunks):
-        payloads = tuple(_canonical_row(row) for row in chunk)
+    for part_index, payloads in enumerate(_child_payload_chunks(rows)):
         parquet_bytes = _parquet_bytes(payloads)
         if not parquet_bytes or len(parquet_bytes) > _MAX_CHILD_FILE_BYTES:
             raise ValueError("IBKR foundation Parquet child exceeds its byte bound")
@@ -1023,7 +1241,7 @@ def _write_child_parts(
             "kind": kind,
             "dataset_id": dataset_id,
             "part_index": part_index,
-            "row_count": len(chunk),
+            "row_count": len(payloads),
             "file": relative_file,
             "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
             "rows_sha256": _sha(list(payloads)),
@@ -1049,7 +1267,7 @@ def _write_child_parts(
                 "manifest_id": manifest_sha256[:24],
                 "manifest_path": relative_manifest,
                 "manifest_sha256": manifest_sha256,
-                "row_count": len(chunk),
+                "row_count": len(payloads),
                 "file": relative_file,
                 "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
             }
@@ -1326,6 +1544,8 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
     observations = cast(ObservationDataset, build.observations)
     panel = cast(PanelDataset, build.panel)
     targets = cast(TargetDataset, build.targets)
+    if build.target_index is None or build.causal_metadata is None:
+        raise ValueError("foundation outcome-blind extensions are unavailable")
     blind_observations = R2OutcomeBlindObservationView.from_dataset(
         observations,
         holdout_start=build.configuration.holdout_range[0],
@@ -1361,6 +1581,8 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
 def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
     observations = cast(ObservationDataset, build.observations)
     panel = cast(PanelDataset, build.panel)
+    if build.target_index is None or build.causal_metadata is None:
+        raise ValueError("foundation outcome-blind extensions are unavailable")
     blind_observations = R2OutcomeBlindObservationView.from_dataset(
         observations,
         holdout_start=build.configuration.holdout_range[0],
@@ -1561,6 +1783,7 @@ def _require_sha256(value: str, field: str) -> None:
 __all__ = [
     "foundation_config_payload",
     "load_ibkr_foundation",
+    "rehearse_ibkr_foundation",
     "verify_ibkr_foundation",
     "write_ibkr_foundation",
 ]

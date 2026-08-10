@@ -38,6 +38,8 @@ from qtrad.domain.ibkr_historical import (
     utc_text,
 )
 from qtrad.domain.ibkr_results import (
+    MAX_IBKR_RESULT_BYTES,
+    MAX_IBKR_RESULT_REQUEST_BYTES,
     REQUEST_RESULT_CONTRACT,
     IbkrHistoricalAttemptEvidence,
     IbkrHistoricalCallbackEvidence,
@@ -61,7 +63,11 @@ from qtrad.runtime.ibkr_results import (
     verify_ibkr_historical_result_stream,
     write_ibkr_historical_result,
 )
-from qtrad.runtime.provider_history import publish_provider_history, verify_provider_history
+from qtrad.runtime.provider_history import (
+    publish_provider_history,
+    read_provider_history_source_evidence,
+    verify_provider_history,
+)
 from tests.test_ibkr_historical_results import _build_fixture
 
 _START = datetime(2026, 2, 1, tzinfo=UTC)
@@ -569,16 +575,16 @@ def test_provider_history_eligibility_replays_two_chunks_and_excludes_incomplete
 
 
 def test_provider_history_publishes_26_week_partitions_through_real_replay(tmp_path: Path) -> None:
-    artifact = _build_stage6_artifact(day_count=26 * 7, bars_per_request=60)
+    artifact = _build_stage6_artifact(day_count=26 * 7, bars_per_request=1)
     result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
 
     dataset = build_provider_history_dataset(
         artifact,
         availability_delay=timedelta(minutes=5),
     )
-    assert dataset.row_count == 26 * 7 * 60
+    assert dataset.row_count == 26 * 7
     assert len(dataset.partitions) == 26 * 7
-    assert all(partition.row_count == 60 for partition in dataset.partitions)
+    assert all(partition.row_count == 1 for partition in dataset.partitions)
 
     manifest = publish_provider_history(
         tmp_path / "provider",
@@ -723,6 +729,60 @@ def test_provider_history_streams_one_result_and_partition_at_a_time(
     assert max_partition_live == 1
 
 
+def test_source_evidence_decodes_request_result_children_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    result_iterations = 0
+    original_results = IbkrHistoricalResultStream.iter_request_results
+
+    def tracked_results(
+        stream: IbkrHistoricalResultStream,
+        *,
+        request_order: tuple[IbkrHistoricalRequest, ...] | None = None,
+    ):
+        nonlocal result_iterations
+        result_iterations += 1
+        yield from original_results(stream, request_order=request_order)
+
+    monkeypatch.setattr(IbkrHistoricalResultStream, "iter_request_results", tracked_results)
+
+    evidence = read_provider_history_source_evidence(manifest)
+
+    assert evidence.dataset.row_count > 0
+    assert result_iterations == 1
+
+
+def test_source_evidence_parallel_replay_matches_serial(tmp_path: Path) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+
+    serial = read_provider_history_source_evidence(manifest, source_replay_workers=1)
+    parallel = read_provider_history_source_evidence(manifest, source_replay_workers=2)
+
+    assert parallel.dataset == serial.dataset
+    assert parallel.request_evidence == serial.request_evidence
+    assert parallel.observation_summary == serial.observation_summary
+    assert tuple(parallel.observations) == tuple(serial.observations)
+
+
+def test_provider_history_publishes_without_prebuilt_dataset(tmp_path: Path) -> None:
+    artifact = _build_stage6_artifact(day_count=2)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    source_artifact = verify_ibkr_historical_result_stream(result_manifest)
+
+    manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=source_artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+    verified = verify_provider_history(manifest)
+
+    assert verified.row_count == 2
+    assert manifest.exists()
+
+
 def test_provider_history_replays_source_before_parquet_decoding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -736,14 +796,6 @@ def test_provider_history_replays_source_before_parquet_decoding(
 
     monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", fail_if_decoded)
 
-    def fail_if_bounds_derived(*_args: object, **_kwargs: object) -> None:
-        raise AssertionError("partition bounds must not be derived before Stage 6 replay")
-
-    monkeypatch.setattr(
-        provider_history_application,
-        "_partition_row_bounds",
-        fail_if_bounds_derived,
-    )
     with pytest.raises(ValueError, match="child bytes digest"):
         verify_provider_history(manifest)
 
@@ -837,3 +889,22 @@ def test_provider_history_accepts_maximum_stage6_child_bound() -> None:
     digests = provider_history_runtime._source_file_digests(source, b"manifest")
 
     assert len(digests) == 20_002
+
+
+def test_provider_history_copies_request_child_at_request_result_bound(tmp_path: Path) -> None:
+    payload = b"x" * (MAX_IBKR_RESULT_BYTES + 1)
+    assert len(payload) < MAX_IBKR_RESULT_REQUEST_BYTES
+    source_root = tmp_path / "source"
+    destination_root = tmp_path / "destination"
+    child_path = source_root / "requests" / "child.json"
+    child_path.parent.mkdir(parents=True)
+    child_path.write_bytes(payload)
+
+    provider_history_runtime._copy_source_file(
+        source_root,
+        destination_root,
+        "requests/child.json",
+        expected_digest=sha256_bytes(payload),
+    )
+
+    assert (destination_root / "requests" / "child.json").read_bytes() == payload

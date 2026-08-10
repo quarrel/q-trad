@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
-from typing import cast
+from typing import Literal, cast, overload
 from uuid import UUID, uuid5
 
 from qtrad.application.foundation import build_asof_panel, build_frozen_targets
-from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.application.provider_history import (
+    ProviderHistoryRequestEvidence,
+    ProviderHistorySourceEvidence,
+    request_evidence_by_hash,
+)
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import FoldDataset
@@ -29,10 +34,7 @@ from qtrad.domain.ibkr_foundation import (
     IBKRFoundationReadinessState,
 )
 from qtrad.domain.ibkr_historical import IbkrHistoricalRequest, IbkrHistoricalRequestKind
-from qtrad.domain.ibkr_results import (
-    IbkrHistoricalEvidenceDisposition,
-    IbkrHistoricalRequestResult,
-)
+from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.provider_history import (
     ProviderHistoricalDataset,
@@ -59,8 +61,8 @@ class IBKRFoundationBuild:
     panel: PanelDataset | R2OutcomeBlindPanelView
     targets: TargetDataset | R2OutcomeBlindTargetView
     folds: FoldDataset
-    target_index: R2HoldoutTargetIndex
-    causal_metadata: R2HoldoutCausalMetadata
+    target_index: R2HoldoutTargetIndex | None
+    causal_metadata: R2HoldoutCausalMetadata | None
     provider_history: ProviderHistoricalDataset
     active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     provider_gaps: tuple[Mapping[str, JsonValue], ...]
@@ -203,14 +205,13 @@ def evaluate_ibkr_foundation_readiness(
     """Replay fixed history gates from the verified Stage 6/7 evidence."""
 
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
-    provider_rows = source_evidence.observations
     source_artifact = source_evidence.source_artifact
     plan = source_artifact.plan
     aggregate = source_artifact.aggregate
-    results_by_hash = {result.request_sha256: result for result in source_artifact.request_results}
+    results_by_hash = request_evidence_by_hash(source_evidence)
     requests_by_instrument: dict[
         str,
-        list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]],
+        list[tuple[IbkrHistoricalRequest, ProviderHistoryRequestEvidence]],
     ] = {}
     for request in plan.requests:
         result = results_by_hash.get(request.request_sha256)
@@ -219,7 +220,11 @@ def evaluate_ibkr_foundation_readiness(
         requests_by_instrument.setdefault(str(request.instrument_id), []).append((request, result))
 
     rows_by_candidate = {
-        candidate: sum(1 for row in provider_rows if row.instrument_id == candidate)
+        candidate: sum(
+            partition.row_count
+            for partition in source_evidence.dataset.partitions
+            if partition.instrument_id == candidate
+        )
         for candidate in sorted(candidate_names)
     }
     valid_target_times = {
@@ -294,7 +299,7 @@ def evaluate_ibkr_foundation_readiness(
                 "schedule_dispositions": schedule_dispositions,
                 "eligible": candidate in eligible_instruments,
                 "contract_ids": contract_ids,
-                "bar_row_count": sum(len(result.accepted_rows) for result in bar_results),
+                "bar_row_count": sum(result.accepted_row_count for result in bar_results),
                 "schedule_session_count": sum(len(result.sessions) for result in schedule_results),
             },
         )
@@ -304,7 +309,7 @@ def evaluate_ibkr_foundation_readiness(
             or not bar_results
             or not any(
                 result.evidence_disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED
-                and result.accepted_rows
+                and result.accepted_row_count > 0
                 for result in bar_results
             )
         ):
@@ -360,7 +365,7 @@ def evaluate_ibkr_foundation_readiness(
         common_support_rows=len(common_times),
         rows_by_candidate=rows_by_candidate,
         evidence={
-            "provider_row_count": len(provider_rows),
+            "provider_row_count": source_evidence.dataset.row_count,
             "provider_gap_count": len(confirmatory_gaps),
             "total_provider_gap_count": len(provider_gaps),
             "target_row_count": len(targets.rows),
@@ -414,20 +419,87 @@ def _adapt_observation(
     )
 
 
+@overload
 def _provider_evidence(
     source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: Literal[False] = False,
 ) -> tuple[
     dict[str, tuple[tuple[datetime, datetime], ...]],
     tuple[Mapping[str, JsonValue], ...],
-]:
+]: ...
+
+
+@overload
+def _provider_evidence(
+    source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: Literal[True],
+) -> tuple[
+    dict[str, tuple[tuple[datetime, datetime], ...]],
+    tuple[Mapping[str, JsonValue], ...],
+    datetime,
+    datetime,
+]: ...
+
+
+def _provider_evidence(
+    source_evidence: ProviderHistorySourceEvidence,
+    *,
+    include_bounds: bool = False,
+) -> (
+    tuple[
+        dict[str, tuple[tuple[datetime, datetime], ...]],
+        tuple[Mapping[str, JsonValue], ...],
+    ]
+    | tuple[
+        dict[str, tuple[tuple[datetime, datetime], ...]],
+        tuple[Mapping[str, JsonValue], ...],
+        datetime,
+        datetime,
+    ]
+):
     source = source_evidence.source_artifact
     requests_by_hash = {request.request_sha256: request for request in source.plan.requests}
-    resolved_results: list[tuple[IbkrHistoricalRequest, IbkrHistoricalRequestResult]] = []
-    for result in source.request_results:
-        request = requests_by_hash.get(result.request_sha256)
+    results_by_hash = request_evidence_by_hash(source_evidence)
+    resolved_results: list[tuple[IbkrHistoricalRequest, ProviderHistoryRequestEvidence]] = []
+    for request_hash, result in results_by_hash.items():
+        request = requests_by_hash.get(request_hash)
         if request is None:
             raise ValueError("IBKR source result request is absent from the verified plan")
         resolved_results.append((request, result))
+
+    observation_summary = source_evidence.observation_summary
+    accepted_starts_by_request: dict[str, set[datetime]] = defaultdict(set)
+    accepted_intervals_by_request: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
+    source_start: datetime | None = None
+    source_end: datetime | None = None
+    if observation_summary is not None:
+        accepted_intervals_by_request = observation_summary.intervals_by_request()
+        source_start = observation_summary.source_start
+        source_end = observation_summary.source_end
+    else:
+        for row in source_evidence.observations:
+            request_sha256 = getattr(row, "request_sha256", None)
+            interval_start = getattr(row, "interval_start", None)
+            interval_end = getattr(row, "interval_end", None)
+            if isinstance(request_sha256, str) and isinstance(interval_start, datetime):
+                accepted_starts_by_request[request_sha256].add(interval_start)
+            if isinstance(interval_start, datetime):
+                source_start = (
+                    interval_start if source_start is None else min(source_start, interval_start)
+                )
+            if isinstance(interval_end, datetime):
+                source_end = interval_end if source_end is None else max(source_end, interval_end)
+        if not accepted_starts_by_request:
+            for result in getattr(source_evidence.source_artifact, "request_results", ()):
+                for raw in result.accepted_rows:
+                    accepted_starts_by_request[result.request_sha256].add(
+                        _evidence_time(
+                            cast(Mapping[str, object], raw)["bar_start"],
+                            "bar_start",
+                        )
+                    )
 
     intervals: dict[str, set[tuple[datetime, datetime]]] = {}
     for request, result in resolved_results:
@@ -470,10 +542,25 @@ def _provider_evidence(
                     )
                 )
             continue
-        accepted_starts = {
-            _evidence_time(cast(Mapping[str, object], raw)["bar_start"], "bar_start")
-            for raw in result.accepted_rows
-        }
+        if observation_summary is not None:
+            accepted_intervals = accepted_intervals_by_request.get(request.request_sha256, ())
+            for expected_start, expected_end in expected_intervals:
+                for missing_start, missing_end in _missing_provider_intervals(
+                    expected_start,
+                    expected_end,
+                    accepted_intervals,
+                ):
+                    gaps.append(
+                        _gap(
+                            instrument_id,
+                            missing_start,
+                            missing_end,
+                            request.request_sha256,
+                            result.result_sha256,
+                        )
+                    )
+            continue
+        accepted_starts = accepted_starts_by_request.get(request.request_sha256, set())
         for expected_start, expected_end in expected_intervals:
             missing_start: datetime | None = None
             cursor = expected_start
@@ -503,10 +590,37 @@ def _provider_evidence(
                         result.result_sha256,
                     )
                 )
-    return (
-        {instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())},
-        tuple(gaps),
-    )
+    active_intervals = {
+        instrument: tuple(sorted(values)) for instrument, values in sorted(intervals.items())
+    }
+    provider_gaps = tuple(gaps)
+    if include_bounds:
+        if source_start is None or source_end is None:
+            raise ValueError("provider-history source has no observations")
+        return active_intervals, provider_gaps, source_start, source_end
+    return active_intervals, provider_gaps
+
+
+def _missing_provider_intervals(
+    expected_start: datetime,
+    expected_end: datetime,
+    accepted_intervals: Sequence[tuple[datetime, datetime]],
+) -> tuple[tuple[datetime, datetime], ...]:
+    missing: list[tuple[datetime, datetime]] = []
+    cursor = expected_start
+    for accepted_start, accepted_end in accepted_intervals:
+        if accepted_end <= cursor:
+            continue
+        if accepted_start >= expected_end:
+            break
+        if accepted_start > cursor:
+            missing.append((cursor, min(accepted_start, expected_end)))
+        cursor = max(cursor, min(accepted_end, expected_end))
+        if cursor >= expected_end:
+            break
+    if cursor < expected_end:
+        missing.append((cursor, expected_end))
+    return tuple(missing)
 
 
 def _gap(

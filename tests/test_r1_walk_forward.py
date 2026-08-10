@@ -171,6 +171,18 @@ def test_expanding_folds_require_maturity_and_exclude_holdout() -> None:
     assert rebuilt.folds == folds.folds
 
 
+def test_zero_embargo_keeps_nonoverlapping_fold_boundaries_valid() -> None:
+    config = replace(_config(), embargo=timedelta(0))
+    targets = _targets(config)
+
+    folds = build_expanding_folds(targets, config)
+
+    assert folds.folds
+    assert all(fold.training_cutoff == fold.validation_start for fold in folds.folds)
+    for fold in folds.folds:
+        assert set(fold.training_target_ids).isdisjoint(fold.validation_target_ids)
+
+
 def test_locked_holdout_must_be_the_final_foundation_interval() -> None:
     config = _config()
     with pytest.raises(ValueError, match="final interval"):
