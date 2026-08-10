@@ -203,6 +203,41 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "Requires=qtrad-ibkr-postgres.service" in restore_service
 
 
+def test_ibkr_qualification_wrapper_allows_only_exact_b4_promotion() -> None:
+    wrapper = REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-qualification-wrapper.example"
+    accepted = subprocess.run(
+        [
+            "bash",
+            str(wrapper),
+            "deployment",
+            "ibkr-promote",
+            "--policy",
+            "b4-exact-six",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    rejected = subprocess.run(
+        [
+            "bash",
+            str(wrapper),
+            "deployment",
+            "ibkr-promote",
+            "--policy",
+            "b3-exact-two",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert accepted.returncode != 64
+    assert "run through postgres-restore-verify.sh" in accepted.stderr
+    assert rejected.returncode == 64
+    assert "accepts only IBKR qualification or exact B4 promotion" in rejected.stderr
+
+
 def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> None:
     ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
     api = (ibkr / "qtrad-ibkr-api.service.example").read_text()

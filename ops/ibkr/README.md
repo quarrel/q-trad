@@ -148,7 +148,14 @@ After genuine B3 evidence is available, `qtrad deployment ibkr-promote
 --policy b4-exact-six` requires the authenticated B3 release, its five authority files,
 the B3 deployment descriptor, and fresh exact-six authority. The B4 release records
 parent release and qualification identities and remains create-only under
-`qtrad-ibkr-native-release-v2`.
+`qtrad-ibkr-native-release-v2`. Run promotion through the same bounded restore
+composition shown below, using `qtrad-ibkr-qualification deployment ibkr-promote
+--policy b4-exact-six ...`; the wrapper rejects other promotion policies.
+
+Before the first B4 deployment installs that wrapper revision, invoke the same executable
+wrapper directly from the immutable, clean repository for the exact application commit that
+will be recorded in the B4 release and descriptor. Keep it as the restore verifier's child;
+do not copy, edit, or hand-compose the container command on the host.
 
 The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
 listing identities, conIds, and immutable listing semantics. The other four contracts
