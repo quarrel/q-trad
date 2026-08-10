@@ -698,6 +698,7 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     container_cli = (ops / "qtrad-container-cli.sh").read_text(encoding="utf-8")
     backup = (ops / "postgres-backup.sh").read_text(encoding="utf-8")
     restore = (ops / "postgres-restore-verify.sh").read_text(encoding="utf-8")
+    qualification = (ops / "qtrad-ibkr-qualification-wrapper.example").read_text(encoding="utf-8")
 
     assert "qtrad ingest --provider ibkr" in ingest
     assert '--entrypoint /app/.venv/bin/python "$image"' in ingest
@@ -758,8 +759,71 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "restore-evidence" in restore
     assert "QTRAD_IBKR_RESTORE_ARCHIVE" in restore
     assert '"$@"' in restore
+    assert "qtrad-ibkr-qualification-wrapper.example" in deploy
+    assert "reviewed qualification wrapper is unavailable" in deploy
+    assert "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL" in qualification
+    assert "--user 10001:10001" in qualification
+    assert "--read-only" in qualification
+    assert "--cap-drop=ALL" in qualification
+    assert "placeOrder" not in qualification
     assert "trap cleanup EXIT" in restore
     assert "QTRAD_IBKR_PASSWORD" not in backup + restore
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_returncode"),
+    [
+        (("--max-seconds", "180", "--force-reconnect-after-seconds", "60"), 0),
+        (("--force-reconnect-after-seconds", "60", "--max-seconds", "180"), 64),
+        (("--max-seconds", "60", "--force-reconnect-after-seconds", "60"), 64),
+    ],
+)
+def test_ingest_wrapper_bounds_qualification_arguments(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    expected_returncode: int,
+) -> None:
+    wrapper = _REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-ingest-wrapper.example"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_calls = tmp_path / "docker-calls"
+    _write_executable(fake_bin / "ss", "#!/bin/sh\nprintf 'LISTEN\\n'\n")
+    _write_executable(
+        fake_bin / "docker",
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{docker_calls}'\n",
+    )
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    configuration = tmp_path / "capture.json"
+    configuration.write_text("{}\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+            "QTRAD_IBKR_IMAGE": "registry.example.invalid/qtrad@sha256:" + "a" * 64,
+            "QTRAD_IBKR_CHECKPOINT_ROOT": str(checkpoint_root),
+            "QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH": str(configuration),
+            "QTRAD_DATABASE_URL": "postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr",
+            "QTRAD_IBKR_API_PACKAGE_FINGERPRINT": "b" * 64,
+            "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH": "c" * 64,
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(wrapper), *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    if expected_returncode == 0:
+        call = docker_calls.read_text(encoding="utf-8")
+        assert "--max-seconds 180 --force-reconnect-after-seconds 60" in call
+        assert call.count("--provider ibkr") == 1
+    else:
+        assert not docker_calls.exists()
 
 
 @pytest.mark.parametrize("mode", ["--check", "--apply"])
@@ -916,7 +980,10 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         script_dir / "postgres-provision.sh",
         f"#!/bin/sh\nprintf '%s\\n' postgres-provision >> '{calls}'\n",
     )
-
+    _write_executable(
+        script_dir / "qtrad-ibkr-qualification-wrapper.example",
+        "#!/bin/sh\n",
+    )
     subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(repository), "add", "ops/ibkr"], check=True)
     subprocess.run(
@@ -1006,7 +1073,8 @@ esac
         "QTRAD_IBKR_POSTGRES_CONTAINER=qtrad-ibkr-native-postgres\n"
         "QTRAD_IBKR_POSTGRES_DATABASE=qtrad_ibkr\n"
         "QTRAD_IBKR_POSTGRES_USER=qtrad_ibkr\n"
-        "QTRAD_IBKR_BACKUP_RETENTION_DAYS=14\n",
+        "QTRAD_IBKR_BACKUP_RETENTION_DAYS=14\n"
+        "QTRAD_IBKR_RUNTIME_GID=10001\n",
         encoding="utf-8",
     )
     backup_env.chmod(0o600)

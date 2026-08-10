@@ -167,6 +167,8 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     ready = (ibkr / "postgres-ready.sh").read_text()
     backup = (ibkr / "postgres-backup.sh").read_text()
     restore = (ibkr / "postgres-restore-verify.sh").read_text()
+    qualification = (ibkr / "qtrad-ibkr-qualification-wrapper.example").read_text()
+    health_service = (ibkr / "qtrad-ibkr-health.service.example").read_text()
 
     assert "usage: postgres-provision.sh --check|--apply" in provision
     assert "must be root-owned and mode 0600 or 0640" in provision
@@ -184,6 +186,17 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "qtrad-ibkr-native-postgres" in restore
     assert 'docker exec -i "$container" pg_restore --list' in backup
     assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
+    assert "QTRAD_IBKR_RUNTIME_GID:?" in backup
+    assert "QTRAD_IBKR_RUNTIME_GID:?" in restore
+    assert 'chmod 0640 "$archive" "$archive.sha256"' in backup
+    assert 'chmod 0640 "$evidence_path"' in restore
+    assert "--user 10001:10001" in qualification
+    assert "--cap-drop=ALL" in qualification
+    assert "ibkr-qualification-snapshot" in qualification
+    assert "ibkr-qualification-verify" in qualification
+    assert "Wants=qtrad-ibkr-ingest.service" not in health_service
+    assert "Requires=qtrad-ibkr-ingest.service" not in health_service
+    assert "After=qtrad-ibkr-ingest.service" in health_service
     backup_service = (ibkr / "qtrad-ibkr-backup.service.example").read_text()
     restore_service = (ibkr / "qtrad-ibkr-restore-verify.service.example").read_text()
     assert "Requires=qtrad-ibkr-postgres.service" in backup_service

@@ -8,6 +8,21 @@ database_url="${QTRAD_DATABASE_URL:?set QTRAD_DATABASE_URL}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
 configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH}"
 
+bounded_args=()
+if (($# > 0)); then
+    [[ "$#" == 4 && "$1" == --max-seconds && "$3" == --force-reconnect-after-seconds ]] || {
+        echo "bounded ingest accepts only --max-seconds N --force-reconnect-after-seconds N" >&2
+        exit 64
+    }
+    max_seconds="$2"
+    reconnect_seconds="$4"
+    [[ "$max_seconds" =~ ^[1-9][0-9]*$ && "$reconnect_seconds" =~ ^[1-9][0-9]*$ \
+        && "$reconnect_seconds" -lt "$max_seconds" ]] || {
+        echo "bounded ingest requires positive integer seconds with reconnect before completion" >&2
+        exit 64
+    }
+    bounded_args=("$@")
+fi
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
 [[ "$api_fingerprint" =~ ^[0-9a-f]{64}$ && "$configuration_hash" =~ ^[0-9a-f]{64}$ ]] || exit 64
 [[ "$checkpoint_root" == /* && -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
@@ -27,4 +42,4 @@ exec docker run --rm --name qtrad-ibkr-ingest --network host \
     --volume "$checkpoint_root:$checkpoint_root:rw" \
     --volume "$configuration_file:$configuration_file:ro" \
     --entrypoint /app/.venv/bin/python "$image" -m qtrad ingest --provider ibkr --environment ibkr-paper \
-    --ibkr-configuration "$configuration_file"
+    --ibkr-configuration "$configuration_file" "${bounded_args[@]}"
