@@ -627,7 +627,7 @@ async def test_read_only_api_reports_seeded_instruments(
     assert health.status_code == 200
     assert health.json()["mode"] == "data-only"
     assert instruments.status_code == 200
-    assert len(instruments.json()) == 7
+    assert len(instruments.json()) == len(INITIAL_INSTRUMENTS)
     assert instrument.status_code == 200
     assert instrument.json()["instrument"]["instrument_id"] == "fx:aud-usd"
     assert production_probe.status_code == 404
