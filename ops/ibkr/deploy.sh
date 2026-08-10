@@ -50,6 +50,102 @@ base_image="${QTRAD_IMAGE:-$image}"
 
 fail() { echo "IBKR B3 preflight: $*" >&2; exit 64; }
 
+declare -a image_retention_remove_references=()
+
+plan_image_retention() {
+    local image_repository deployed_image_id container_output container_id referenced_image_id
+    local image_rows repository digest image_id rollback_image_id references
+    local deployed_seen=0
+    local -a repository_image_ids=()
+    local -A protected_image_ids=()
+    local -A repository_image_seen=()
+    local -A repository_references=()
+
+    image_retention_remove_references=()
+    image_repository="${image%@sha256:*}"
+    deployed_image_id="$(docker image inspect "$image" --format '{{.Id}}')" \
+        || fail "deployed image identity cannot be resolved"
+    [[ "$deployed_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || fail "deployed image ID is invalid"
+    protected_image_ids["$deployed_image_id"]=1
+
+    container_output="$(docker container ls -aq)" \
+        || fail "container image references cannot be listed"
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        referenced_image_id="$(
+            docker container inspect --format '{{.Image}}' "$container_id"
+        )" || fail "container image reference cannot be resolved: $container_id"
+        [[ "$referenced_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fail "container image ID is invalid: $container_id"
+        protected_image_ids["$referenced_image_id"]=1
+    done <<<"$container_output"
+
+    image_rows="$(
+        docker image ls --digests --no-trunc \
+            --format '{{.Repository}}|{{.Digest}}|{{.ID}}' "$image_repository"
+    )" || fail "IBKR repository images cannot be listed"
+    while IFS='|' read -r repository digest image_id; do
+        [[ -n "$repository" ]] || continue
+        [[ "$repository" == "$image_repository" ]] || continue
+        [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fail "IBKR repository returned an invalid image ID"
+        if [[ -z "${repository_image_seen[$image_id]:-}" ]]; then
+            repository_image_ids+=("$image_id")
+            repository_image_seen["$image_id"]=1
+        fi
+        if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            repository_references["$image_id"]+="$repository@$digest"$'\n'
+        fi
+        if [[ "$image_id" == "$deployed_image_id" ]]; then
+            deployed_seen=1
+        fi
+    done <<<"$image_rows"
+    ((deployed_seen == 1)) || fail "deployed image is absent from its IBKR repository listing"
+
+    rollback_image_id=""
+    for image_id in "${repository_image_ids[@]}"; do
+        if [[ -n "${protected_image_ids[$image_id]:-}" ]]; then
+            continue
+        fi
+        rollback_image_id="$image_id"
+        break
+    done
+
+    printf 'IBKR image retention plan: repository=%s\n' "$image_repository"
+    for image_id in "${repository_image_ids[@]}"; do
+        if [[ "$image_id" == "$deployed_image_id" ]]; then
+            printf 'keep %s reason=deployed\n' "$image_id"
+            continue
+        fi
+        if [[ -n "${protected_image_ids[$image_id]:-}" ]]; then
+            printf 'keep %s reason=container-referenced\n' "$image_id"
+            continue
+        fi
+        if [[ "$image_id" == "$rollback_image_id" ]]; then
+            printf 'keep %s reason=most-recent-unreferenced-rollback\n' "$image_id"
+            continue
+        fi
+        references="${repository_references[$image_id]:-}"
+        if [[ -z "$references" ]]; then
+            printf 'keep %s reason=no-immutable-repository-reference\n' "$image_id"
+            continue
+        fi
+        while IFS= read -r reference; do
+            [[ -n "$reference" ]] || continue
+            image_retention_remove_references+=("$reference")
+            printf 'remove %s reference=%s\n' "$image_id" "$reference"
+        done <<<"$references"
+    done
+}
+
+apply_image_retention() {
+    if (("${#image_retention_remove_references[@]}" == 0)); then
+        return
+    fi
+    docker image rm "${image_retention_remove_references[@]}" >/dev/null
+}
+
 verify_backup_identity() {
     [[ -f "$backup_env_file" ]] || fail "canonical backup environment is missing: $backup_env_file"
     [[ "$(stat -c '%U:%G' "$backup_env_file")" == root:root ]] \
@@ -187,9 +283,11 @@ bash "$script_dir/postgres-provision.sh" --check
 verify_database_head
 
 if [[ "$mode" == "--check" ]]; then
+    plan_image_retention
     echo "IBKR B3 preflight passed; no host mutation performed"
     exit 0
 fi
+
 # Database schema changes require the explicit, migration-only qtrad db migrate command.
 install -d -o 10001 -g 10001 -m 0750 "$checkpoint_root"
 
@@ -214,3 +312,5 @@ systemctl enable \
     qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
 systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service
 systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
+plan_image_retention
+apply_image_retention
