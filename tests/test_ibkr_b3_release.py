@@ -981,10 +981,11 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         script_dir / "postgres-provision.sh",
         f"#!/bin/sh\nprintf '%s\\n' postgres-provision >> '{calls}'\n",
     )
-    _write_executable(
-        script_dir / "qtrad-ibkr-qualification-wrapper.example",
-        "#!/bin/sh\n",
-    )
+    for wrapper in (
+        "qtrad-ibkr-qualification-wrapper.example",
+        "qtrad-ibkr-dual-restore-qualification.example",
+    ):
+        _write_executable(script_dir / wrapper, "#!/bin/sh\n")
     subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(repository), "add", "ops/ibkr"], check=True)
     subprocess.run(

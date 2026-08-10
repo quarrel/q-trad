@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+[[ "$#" -ge 4 && "$1" == deployment \
+    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
+    && "$3" == --policy && "$4" == b4-exact-six ]] || {
+    echo "dual restore accepts only exact B4 qualification snapshot or verification" >&2
+    exit 64
+}
+
+restore_verify=/usr/local/sbin/qtrad-ibkr-postgres-restore-verify
+qualification=/usr/local/sbin/qtrad-ibkr-qualification
+
+if [[ "${QTRAD_IBKR_DUAL_RESTORE_STAGE:-}" == parent-ready ]]; then
+    parent_url="${QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL:?parent restore URL unavailable}"
+    parent_evidence="${QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH:?parent restore evidence unavailable}"
+    current_archive="${QTRAD_IBKR_CURRENT_RESTORE_ARCHIVE:?current restore archive unavailable}"
+    current_evidence="${QTRAD_IBKR_CURRENT_RESTORE_EVIDENCE_PATH:?current restore evidence unavailable}"
+    export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL="$parent_url"
+    export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH="$parent_evidence"
+    exec env \
+        QTRAD_IBKR_RESTORE_ARCHIVE="$current_archive" \
+        QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$current_evidence" \
+        "$restore_verify" "$qualification" "$@"
+fi
+
+parent_archive="${QTRAD_IBKR_PARENT_RESTORE_ARCHIVE:?set the qualification-bound parent archive}"
+parent_evidence="${QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH:?set a create-only parent restore evidence path}"
+current_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:?set the B4 qualification archive}"
+current_evidence="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only B4 restore evidence path}"
+
+exec env \
+    QTRAD_IBKR_DUAL_RESTORE_STAGE=parent-ready \
+    QTRAD_IBKR_CURRENT_RESTORE_ARCHIVE="$current_archive" \
+    QTRAD_IBKR_CURRENT_RESTORE_EVIDENCE_PATH="$current_evidence" \
+    QTRAD_IBKR_RESTORE_ARCHIVE="$parent_archive" \
+    QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$parent_evidence" \
+    "$restore_verify" "$0" "$@"

@@ -150,7 +150,6 @@ from qtrad.runtime.ibkr_b4 import (
     b4_qualification_expectation,
     promote_b4_configuration,
     verify_b3_qualification_evidence_for_release,
-    verify_b3_qualification_for_release,
     verify_b4_qualification_evidence_for_release,
     verify_b4_release,
     write_b4_release,
@@ -3608,9 +3607,13 @@ async def _verify_b3_qualification_from_databases(
     release_path: Path,
     descriptor_path: Path,
     authority_paths: IbkrAuthorityPaths,
+    restore_url: str | None = None,
+    restore_evidence_path: Path | None = None,
 ) -> VerifiedIbkrCaptureQualification:
-    restore_url = settings.ibkr_qualification_restore_database_url
-    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    restore_url = restore_url or settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = (
+        restore_evidence_path or settings.ibkr_qualification_restore_evidence_path
+    )
     if restore_url is None or restore_evidence_path is None:
         raise ValueError(
             "hash-checked restore workflow URL and evidence are required for independent replay"
@@ -3672,11 +3675,18 @@ async def _write_b4_qualification_snapshot(
     output_path: Path,
 ) -> dict[str, JsonValue]:
     descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
-    parent_qualification = verify_b3_qualification_for_release(
-        descriptor.qualification_path,
-        parent_release_path=descriptor.parent_release_path,
-        parent_authority_paths=descriptor.parent_authority_paths,
-        deployment=descriptor.deployment,
+    parent_restore_url = settings.ibkr_parent_qualification_restore_database_url
+    parent_restore_evidence = settings.ibkr_parent_qualification_restore_evidence_path
+    if parent_restore_url is None or parent_restore_evidence is None:
+        raise ValueError("B4 qualification requires a qualification-bound parent restore")
+    parent_qualification = await _verify_b3_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.qualification_path,
+        release_path=descriptor.parent_release_path,
+        descriptor_path=descriptor_path,
+        authority_paths=descriptor.parent_authority_paths,
+        restore_url=parent_restore_url,
+        restore_evidence_path=parent_restore_evidence,
     )
     configuration, expectation = b4_qualification_expectation(
         release_path=release_path,
@@ -3741,11 +3751,18 @@ async def _verify_b4_qualification_from_databases(
     authority_paths: IbkrAuthorityPaths,
 ) -> VerifiedIbkrCaptureQualification:
     descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
-    parent_qualification = verify_b3_qualification_for_release(
-        descriptor.qualification_path,
-        parent_release_path=descriptor.parent_release_path,
-        parent_authority_paths=descriptor.parent_authority_paths,
-        deployment=descriptor.deployment,
+    parent_restore_url = settings.ibkr_parent_qualification_restore_database_url
+    parent_restore_evidence = settings.ibkr_parent_qualification_restore_evidence_path
+    if parent_restore_url is None or parent_restore_evidence is None:
+        raise ValueError("B4 qualification requires a qualification-bound parent restore")
+    parent_qualification = await _verify_b3_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.qualification_path,
+        release_path=descriptor.parent_release_path,
+        descriptor_path=descriptor_path,
+        authority_paths=descriptor.parent_authority_paths,
+        restore_url=parent_restore_url,
+        restore_evidence_path=parent_restore_evidence,
     )
     restore_url = settings.ibkr_qualification_restore_database_url
     restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
