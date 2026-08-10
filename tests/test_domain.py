@@ -20,6 +20,8 @@ def test_initial_universe_is_exact_and_stable() -> None:
         "index:australia-200",
         "index:us-500",
         "index:ftse-100",
+        "commodity:spot-gold",
+        "commodity:us-crude",
     )
 
 

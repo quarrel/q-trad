@@ -124,6 +124,22 @@ INITIAL_INSTRUMENTS: tuple[Instrument, ...] = (
         "GBP",
         ("FTSE 100", "UK 100"),
     ),
+    Instrument(
+        InstrumentId("commodity:spot-gold"),
+        "Gold",
+        AssetClass.COMMODITY,
+        "XAU",
+        "USD",
+        ("Gold", "Spot Gold", "XAU/USD", "XAUUSD"),
+    ),
+    Instrument(
+        InstrumentId("commodity:us-crude"),
+        "US Crude",
+        AssetClass.COMMODITY,
+        None,
+        "USD",
+        ("US Crude", "WTI", "Crude Oil"),
+    ),
 )
 
 INSTRUMENTS_BY_ID = {instrument.instrument_id: instrument for instrument in INITIAL_INSTRUMENTS}

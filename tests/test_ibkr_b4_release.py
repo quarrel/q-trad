@@ -18,7 +18,7 @@ from qtrad.domain.ibkr_qualification import (
     has_verified_ibkr_capture_qualification_provenance,
 )
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
-from qtrad.domain.instruments import AssetClass, ProductType, ProviderListing
+from qtrad.domain.instruments import INSTRUMENTS_BY_ID, AssetClass, ProductType, ProviderListing
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime import ibkr_b4
 from qtrad.runtime.ibkr_b4 import (
@@ -326,6 +326,17 @@ def _setup(
     )
     _install_authority(monkeypatch, source)
     return source, parent, parent_path, b4_paths, b3_paths, qualification
+
+
+def test_b4_exact_six_are_registered_canonical_instruments() -> None:
+    for instrument_id, _external, display, asset, base, currency, _security_type, _con_id in _SPECS:
+        instrument = INSTRUMENTS_BY_ID[InstrumentId(instrument_id)]
+        assert (
+            instrument.display_name,
+            instrument.asset_class,
+            instrument.base_currency,
+            instrument.quote_currency,
+        ) == (display, asset, base, currency)
 
 
 def test_b4_promotes_exact_six_only_from_verified_b3_capability(
