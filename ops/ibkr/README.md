@@ -92,8 +92,8 @@ hash-checked disposable restore. A sealed qualification summary, restore databas
 API response, fake store or copied database is not provenance and cannot mint the
 runtime-only capability.
 
-Run qualification commands only as the child command of
-`qtrad-ibkr-postgres-restore-verify`, through the installed
+Run qualification commands, exact B4 promotion, and exact B4 preflight only as the
+child command of `qtrad-ibkr-postgres-restore-verify`, through the installed
 `qtrad-ibkr-qualification` wrapper. Set the selected archive with
 `QTRAD_IBKR_RESTORE_ARCHIVE` and the new provenance path with
 `QTRAD_IBKR_RESTORE_EVIDENCE_PATH`; the archive is never a positional argument.
@@ -156,6 +156,12 @@ Before the first B4 deployment installs that wrapper revision, invoke the same e
 wrapper directly from the immutable, clean repository for the exact application commit that
 will be recorded in the B4 release and descriptor. Keep it as the restore verifier's child;
 do not copy, edit, or hand-compose the container command on the host.
+
+B4 `deploy.sh --check` and `--apply` must themselves run as the restore verifier's child,
+with `QTRAD_B3_PREFLIGHT_BIN` set to that qualification wrapper. The existing deployer then
+routes its exact `deployment ibkr-preflight --policy b4-exact-six` invocation through the
+live/restore composition while the disposable database exists; the wrapper rejects B3 or
+other preflight policies.
 
 The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
 listing identities, conIds, and immutable listing semantics. The other four contracts
