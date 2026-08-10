@@ -748,7 +748,10 @@ Four-week chunks may be selected if demonstrated reliable. They are not assumed 
 On the authorised paper-account host, after the runtime lock and contract selection have been
 independently verified, run `ops/ibkr/verify-host.sh` first. Set
 `QTRAD_IMAGE_DIGEST` to the exact immutable IBKR image reference verified by that command, then
-execute the canary from that same image:
+set `QTRAD_IBKR_CLIENT_ID` to the ID reserved for continuous native capture and set
+`QTRAD_IBKR_HISTORICAL_CLIENT_ID` to a different positive ID. Account probes, canaries and Stage 6
+execution use only the historical ID and share one PostgreSQL advisory lock, so only one of those
+operations can use it at a time. Execute the canary from that same image:
 
 ~~~bash
 export QTRAD_IMAGE_DIGEST="${QTRAD_IBKR_IMAGE:?set the verified qtrad-ibkr@sha256 image reference}"

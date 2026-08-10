@@ -937,6 +937,14 @@ async def test_listing_review_writes_new_non_authoritative_manifest_without_data
     assert adapter.connect_count == 1
 
 
+def test_ibkr_historical_endpoint_uses_dedicated_client_id() -> None:
+    endpoint = cli._ibkr_historical_endpoint(
+        Settings(ibkr_client_id=71, ibkr_historical_client_id=72)
+    )
+
+    assert endpoint.client_id == 72
+
+
 @pytest.mark.asyncio
 async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
@@ -950,6 +958,7 @@ async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
         ibkr_gateway_host="127.0.0.1",
         ibkr_gateway_port=4002,
         ibkr_client_id=71,
+        ibkr_historical_client_id=72,
         ibkr_api_package_fingerprint="a" * 64,
     )
     output = tmp_path / "ibkr-preflight.json"
@@ -968,6 +977,7 @@ async def test_ibkr_review_preflight_stops_before_adapter_or_database_io(
     assert payload["status"] == "OPERATOR_AUTHENTICATION_REQUIRED"
     assert payload["candidate_count"] == 20
     assert payload["external_io_performed"] is False
+    assert payload["gateway"]["client_id"] == 72
 
     with pytest.raises(RuntimeError, match="account-gated"):
         await cli._review_instruments(
@@ -1039,6 +1049,11 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
 
     adapter = FakeAdapter()
     monkeypatch.setattr(cli, "_ibkr_capability_adapter", lambda settings, **kwargs: adapter)
+    execution_lock = object()
+    acquire_lock = AsyncMock(return_value=execution_lock)
+    release_lock = AsyncMock()
+    monkeypatch.setattr(cli, "_acquire_ibkr_historical_execution_lock", acquire_lock)
+    monkeypatch.setattr(cli, "_release_ibkr_historical_execution_lock", release_lock)
     catalogue = cli.load_capture_candidates(Path("config/capture-ibkr-v1-candidates.toml"))
     probe_spec = tmp_path / "operator-probe.toml"
     probe_spec.write_text(
@@ -1061,6 +1076,7 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
         ibkr_gateway_host="127.0.0.1",
         ibkr_gateway_port=4002,
         ibkr_client_id=71,
+        ibkr_historical_client_id=72,
         ibkr_api_package_fingerprint="a" * 64,
         ibkr_checkpoint_root=tmp_path / "checkpoints",
     )
@@ -1082,6 +1098,8 @@ async def test_ibkr_account_probe_requires_explicit_execution_and_writes_review(
     assert payload["external_io_performed"] is True
     assert payload["selection_authority"] is False
     assert len(payload["instruments"]) == 20
+    acquire_lock.assert_awaited_once()
+    release_lock.assert_awaited_once_with(execution_lock)
 
 
 @pytest.mark.asyncio
@@ -1991,6 +2009,9 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
     writer = Mock()
     disposed = False
     adapter = object()
+    execution_lock = object()
+    acquire_lock = AsyncMock(return_value=execution_lock)
+    release_lock = AsyncMock()
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -2034,6 +2055,8 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
     monkeypatch.setattr(cli, "_require_database_at_migration_head", AsyncMock())
     monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: object())
+    monkeypatch.setattr(cli, "_acquire_ibkr_historical_execution_lock", acquire_lock)
+    monkeypatch.setattr(cli, "_release_ibkr_historical_execution_lock", release_lock)
     monkeypatch.setattr(
         "qtrad.adapters.ibkr.pacing.IbkrPostgresPacing",
         FakePacing,
@@ -2049,6 +2072,7 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
 
     settings = Settings(
         ibkr_api_package_fingerprint="b" * 64,
+        ibkr_historical_client_id=72,
         ibkr_checkpoint_root=tmp_path,
     )
     clock = cast(Clock, SimpleNamespace(now=lambda: anchor_end))
@@ -2077,6 +2101,8 @@ async def test_canary_run_composes_twelve_cases_with_anchor_and_immutable_hashes
     assert writer_call.args == (tmp_path / "canary.json", evidence)
     assert writer_call.kwargs["reservation"].path == tmp_path / "canary.json"
     assert disposed is True
+    acquire_lock.assert_awaited_once()
+    release_lock.assert_awaited_once_with(execution_lock)
 
 
 @pytest.mark.asyncio
@@ -2101,6 +2127,9 @@ async def test_canary_run_composition_failure_writes_no_evidence(
     output = tmp_path / "failed-canary.json"
     writer = Mock()
     engine_disposed = False
+    execution_lock = object()
+    acquire_lock = AsyncMock(return_value=execution_lock)
+    release_lock = AsyncMock()
 
     class FakeEngine:
         async def dispose(self) -> None:
@@ -2132,6 +2161,8 @@ async def test_canary_run_composition_failure_writes_no_evidence(
     monkeypatch.setattr(cli, "_require_database_at_migration_head", AsyncMock())
     monkeypatch.setattr(cli, "_engine", lambda settings: FakeEngine())
     monkeypatch.setattr(cli, "PostgresAuditStore", lambda engine: object())
+    monkeypatch.setattr(cli, "_acquire_ibkr_historical_execution_lock", acquire_lock)
+    monkeypatch.setattr(cli, "_release_ibkr_historical_execution_lock", release_lock)
     monkeypatch.setattr(
         "qtrad.adapters.ibkr.pacing.IbkrPostgresPacing",
         lambda *args, **kwargs: SimpleNamespace(reserve=AsyncMock(return_value=0.0)),
@@ -2150,6 +2181,7 @@ async def test_canary_run_composition_failure_writes_no_evidence(
 
     settings = Settings(
         ibkr_api_package_fingerprint="b" * 64,
+        ibkr_historical_client_id=72,
         ibkr_checkpoint_root=tmp_path,
     )
     with pytest.raises(RuntimeError, match="provider composition failed"):
@@ -2169,6 +2201,8 @@ async def test_canary_run_composition_failure_writes_no_evidence(
     writer.assert_not_called()
     assert not output.exists()
     assert engine_disposed is True
+    acquire_lock.assert_awaited_once()
+    release_lock.assert_awaited_once_with(execution_lock)
 
 
 def test_canary_runbook_invokes_installed_console_script_directly() -> None:

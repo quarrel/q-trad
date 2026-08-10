@@ -3847,21 +3847,23 @@ def _ig_review_adapter(
     )
 
 
+def _ibkr_historical_endpoint(settings: Settings):
+    from qtrad.adapters.ibkr.capability import IbkrGatewayEndpoint
+
+    return IbkrGatewayEndpoint(
+        host=settings.ibkr_gateway_host,
+        port=settings.ibkr_gateway_port,
+        client_id=settings.require_ibkr_historical_client_id(),
+    )
+
+
 def _ibkr_capability_adapter(settings: Settings, *, checkpoint=None, pacing_reserver=None):
     """Compose the isolated market-data-only Stage 1 adapter on explicit account-probe execution."""
 
-    from qtrad.adapters.ibkr.capability import (
-        IbkrApiIdentity,
-        IbkrGatewayEndpoint,
-        OfficialIbkrCapabilityAdapter,
-    )
+    from qtrad.adapters.ibkr.capability import IbkrApiIdentity, OfficialIbkrCapabilityAdapter
 
     return OfficialIbkrCapabilityAdapter(
-        IbkrGatewayEndpoint(
-            host=settings.ibkr_gateway_host,
-            port=settings.ibkr_gateway_port,
-            client_id=settings.ibkr_client_id,
-        ),
+        _ibkr_historical_endpoint(settings),
         request_timeout_seconds=settings.ibkr_historical_timeout_seconds,
         upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
         connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
@@ -3890,7 +3892,7 @@ def _ibkr_historical_canary_adapter(
 ):
     """Compose the bounded official Stage 5 historical adapter."""
 
-    from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint
+    from qtrad.adapters.ibkr.capability import IbkrApiIdentity
     from qtrad.adapters.ibkr.historical import OfficialIbkrHistoricalAdapter
 
     api_package_fingerprint = settings.ibkr_api_package_fingerprint
@@ -3899,11 +3901,7 @@ def _ibkr_historical_canary_adapter(
             "IBKR canary execution requires the verified official API package fingerprint"
         )
     return OfficialIbkrHistoricalAdapter(
-        IbkrGatewayEndpoint(
-            host=settings.ibkr_gateway_host,
-            port=settings.ibkr_gateway_port,
-            client_id=settings.ibkr_client_id,
-        ),
+        _ibkr_historical_endpoint(settings),
         request_timeout_seconds=settings.ibkr_historical_timeout_seconds,
         upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
         connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
@@ -4557,17 +4555,13 @@ async def _execute_ibkr_historical_plan(
             maximum_attempts=request_profile.retry_count + 1,
         )
 
-        from qtrad.adapters.ibkr.capability import IbkrApiIdentity, IbkrGatewayEndpoint
+        from qtrad.adapters.ibkr.capability import IbkrApiIdentity
         from qtrad.adapters.ibkr.historical import OfficialIbkrHistoricalAdapter
         from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
         from qtrad.application.ibkr_execution import IbkrHistoricalExecutor
 
         provider = OfficialIbkrHistoricalAdapter(
-            IbkrGatewayEndpoint(
-                host=settings.ibkr_gateway_host,
-                port=settings.ibkr_gateway_port,
-                client_id=settings.ibkr_client_id,
-            ),
+            _ibkr_historical_endpoint(settings),
             request_timeout_seconds=request_profile.request_timeout_seconds,
             upstream_recovery_timeout_seconds=settings.ibkr_upstream_recovery_timeout_seconds,
             connect_timeout_seconds=settings.ibkr_connect_timeout_seconds,
@@ -4778,6 +4772,11 @@ async def _run_ibkr_historical_canary(
         await _require_database_at_migration_head(settings)
         engine = _engine(settings)
         try:
+            execution_lock = await _acquire_ibkr_historical_execution_lock(engine)
+        except BaseException:
+            await engine.dispose()
+            raise
+        try:
             from qtrad.adapters.ibkr.pacing import IbkrPostgresPacing
 
             pacing = IbkrPostgresPacing(
@@ -4805,7 +4804,10 @@ async def _run_ibkr_historical_canary(
                 output_path, evidence, reservation=output_reservation
             )
         finally:
-            await engine.dispose()
+            try:
+                await _release_ibkr_historical_execution_lock(execution_lock)
+            finally:
+                await engine.dispose()
     print(
         json.dumps(
             {
@@ -4970,7 +4972,7 @@ async def _review_instruments(
                 candidate_count=len(candidates.instruments),
                 gateway_host=settings.ibkr_gateway_host,
                 gateway_port=settings.ibkr_gateway_port,
-                client_id=settings.ibkr_client_id,
+                client_id=settings.require_ibkr_historical_client_id(),
             )
             _emit_json_artifact(result.as_json_value(), output_path)
             return
@@ -5001,7 +5003,7 @@ async def _review_instruments(
                 {
                     "gateway_host": settings.ibkr_gateway_host,
                     "gateway_port": settings.ibkr_gateway_port,
-                    "client_id": settings.ibkr_client_id,
+                    "client_id": settings.require_ibkr_historical_client_id(),
                     "api_fingerprint": settings.ibkr_api_package_fingerprint,
                 },
                 sort_keys=True,
@@ -5026,6 +5028,11 @@ async def _review_instruments(
         from qtrad.domain.ibkr_historical import IbkrHistoricalPacingPolicy
 
         engine = _engine(settings)
+        try:
+            execution_lock = await _acquire_ibkr_historical_execution_lock(engine)
+        except BaseException:
+            await engine.dispose()
+            raise
         adapter = None
         try:
             pacing = IbkrPostgresPacing(
@@ -5053,9 +5060,14 @@ async def _review_instruments(
             )
             _emit_json_artifact(review.as_json_value(), output_path, review.review_hash)
         finally:
-            if adapter is not None:
-                await adapter.disconnect()
-            await engine.dispose()
+            try:
+                if adapter is not None:
+                    await adapter.disconnect()
+            finally:
+                try:
+                    await _release_ibkr_historical_execution_lock(execution_lock)
+                finally:
+                    await engine.dispose()
         return
     if provider != "ig":
         raise ValueError(f"unsupported listing-review provider: {provider}")
