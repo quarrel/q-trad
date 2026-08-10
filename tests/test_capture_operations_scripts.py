@@ -169,6 +169,7 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     restore = (ibkr / "postgres-restore-verify.sh").read_text()
     qualification = (ibkr / "qtrad-ibkr-qualification-wrapper.example").read_text()
     dual_restore = (ibkr / "qtrad-ibkr-dual-restore-qualification.example").read_text()
+    triple_restore = (ibkr / "qtrad-ibkr-triple-restore-qualification.example").read_text()
     health_service = (ibkr / "qtrad-ibkr-health.service.example").read_text()
 
     assert "usage: postgres-provision.sh --check|--apply" in provision
@@ -196,9 +197,14 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "ibkr-qualification-snapshot" in qualification
     assert "ibkr-qualification-verify" in qualification
     assert "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL" in qualification
+    assert "QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_DATABASE_URL" in qualification
     assert dual_restore.count("qtrad-ibkr-postgres-restore-verify") == 1
     assert "QTRAD_IBKR_PARENT_RESTORE_ARCHIVE" in dual_restore
     assert "QTRAD_IBKR_CURRENT_RESTORE_ARCHIVE" in dual_restore
+    assert triple_restore.count("qtrad-ibkr-postgres-restore-verify") == 1
+    assert "QTRAD_IBKR_GRANDPARENT_RESTORE_ARCHIVE" in triple_restore
+    assert "QTRAD_IBKR_B4_RESTORE_ARCHIVE" in triple_restore
+    assert "QTRAD_IBKR_B5_RESTORE_ARCHIVE" in triple_restore
     assert "Wants=qtrad-ibkr-ingest.service" not in health_service
     assert "Requires=qtrad-ibkr-ingest.service" not in health_service
     assert "After=qtrad-ibkr-ingest.service" in health_service
@@ -208,40 +214,61 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "Requires=qtrad-ibkr-postgres.service" in restore_service
 
 
-def test_ibkr_qualification_wrapper_allows_only_exact_b4_operations() -> None:
+def test_ibkr_qualification_wrapper_allows_only_exact_b4_and_b5_operations() -> None:
     wrapper = REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-qualification-wrapper.example"
     for operation in ("ibkr-promote", "ibkr-preflight"):
-        accepted = subprocess.run(
-            [
-                "bash",
-                str(wrapper),
-                "deployment",
-                operation,
-                "--policy",
-                "b4-exact-six",
-            ],
+        for policy in ("b4-exact-six", "b5-full-universe"):
+            accepted = subprocess.run(
+                ["bash", str(wrapper), "deployment", operation, "--policy", policy],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            assert accepted.returncode != 64
+        rejected = subprocess.run(
+            ["bash", str(wrapper), "deployment", operation, "--policy", "b3-exact-two"],
             check=False,
             capture_output=True,
             text=True,
         )
-        rejected = subprocess.run(
-            [
-                "bash",
-                str(wrapper),
-                "deployment",
-                operation,
-                "--policy",
-                "b3-exact-two",
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
+        assert rejected.returncode == 64
+        assert (
+            "accepts only IBKR qualification or exact B4/B5 promotion/preflight" in rejected.stderr
         )
 
-        assert accepted.returncode != 64
-        assert "run through postgres-restore-verify.sh" in accepted.stderr
-        assert rejected.returncode == 64
-        assert "accepts only IBKR qualification or exact B4 promotion/preflight" in rejected.stderr
+
+def test_ibkr_triple_restore_accepts_only_b5_qualification() -> None:
+    wrapper = REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-triple-restore-qualification.example"
+    accepted = subprocess.run(
+        [
+            "bash",
+            str(wrapper),
+            "deployment",
+            "ibkr-qualification-snapshot",
+            "--policy",
+            "b5-full-universe",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    rejected = subprocess.run(
+        [
+            "bash",
+            str(wrapper),
+            "deployment",
+            "ibkr-qualification-snapshot",
+            "--policy",
+            "b4-exact-six",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert accepted.returncode != 64
+    assert "set the qualification-bound B3 archive" in accepted.stderr
+    assert rejected.returncode == 64
+    assert "accepts only exact B5 qualification" in rejected.stderr
 
 
 def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> None:

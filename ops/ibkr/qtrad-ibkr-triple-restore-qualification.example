@@ -1,0 +1,57 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+[[ "$#" -ge 4 && "$1" == deployment \
+    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
+    && "$3" == --policy && "$4" == b5-full-universe ]] || {
+    echo "triple restore accepts only exact B5 qualification snapshot or verification" >&2
+    exit 64
+}
+
+restore_verify=/usr/local/sbin/qtrad-ibkr-postgres-restore-verify
+qualification=/usr/local/sbin/qtrad-ibkr-qualification
+
+if [[ "${QTRAD_IBKR_TRIPLE_RESTORE_STAGE:-}" == b4-ready ]]; then
+    parent_url="${QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL:?B4 restore URL unavailable}"
+    parent_evidence="${QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH:?B4 restore evidence unavailable}"
+    current_archive="${QTRAD_IBKR_B5_RESTORE_ARCHIVE:?B5 restore archive unavailable}"
+    current_evidence="${QTRAD_IBKR_B5_RESTORE_EVIDENCE_PATH:?B5 restore evidence unavailable}"
+    export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL="$parent_url"
+    export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH="$parent_evidence"
+    exec env \
+        QTRAD_IBKR_RESTORE_ARCHIVE="$current_archive" \
+        QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$current_evidence" \
+        "$restore_verify" "$qualification" "$@"
+fi
+
+if [[ "${QTRAD_IBKR_TRIPLE_RESTORE_STAGE:-}" == b3-ready ]]; then
+    grandparent_url="${QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL:?B3 restore URL unavailable}"
+    grandparent_evidence="${QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH:?B3 restore evidence unavailable}"
+    parent_archive="${QTRAD_IBKR_B4_RESTORE_ARCHIVE:?B4 restore archive unavailable}"
+    parent_evidence="${QTRAD_IBKR_B4_RESTORE_EVIDENCE_PATH:?B4 restore evidence unavailable}"
+    export QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_DATABASE_URL="$grandparent_url"
+    export QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH="$grandparent_evidence"
+    exec env \
+        QTRAD_IBKR_TRIPLE_RESTORE_STAGE=b4-ready \
+        QTRAD_IBKR_RESTORE_ARCHIVE="$parent_archive" \
+        QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$parent_evidence" \
+        "$restore_verify" "$0" "$@"
+fi
+
+grandparent_archive="${QTRAD_IBKR_GRANDPARENT_RESTORE_ARCHIVE:?set the qualification-bound B3 archive}"
+grandparent_evidence="${QTRAD_IBKR_GRANDPARENT_RESTORE_EVIDENCE_PATH:?set a create-only B3 restore evidence path}"
+parent_archive="${QTRAD_IBKR_PARENT_RESTORE_ARCHIVE:?set the qualification-bound B4 archive}"
+parent_evidence="${QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH:?set a create-only B4 restore evidence path}"
+current_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:?set the B5 qualification archive}"
+current_evidence="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only B5 restore evidence path}"
+
+exec env \
+    QTRAD_IBKR_TRIPLE_RESTORE_STAGE=b3-ready \
+    QTRAD_IBKR_B4_RESTORE_ARCHIVE="$parent_archive" \
+    QTRAD_IBKR_B4_RESTORE_EVIDENCE_PATH="$parent_evidence" \
+    QTRAD_IBKR_B5_RESTORE_ARCHIVE="$current_archive" \
+    QTRAD_IBKR_B5_RESTORE_EVIDENCE_PATH="$current_evidence" \
+    QTRAD_IBKR_RESTORE_ARCHIVE="$grandparent_archive" \
+    QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$grandparent_evidence" \
+    "$restore_verify" "$0" "$@"

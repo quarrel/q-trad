@@ -5,16 +5,17 @@ umask 077
 [[ "$#" -ge 2 && "$1" == deployment \
     && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify \
         || (("$2" == ibkr-promote || "$2" == ibkr-preflight) \
-            && "${3:-}" == --policy && "${4:-}" == b4-exact-six)) ]] || {
-    echo "qualification wrapper accepts only IBKR qualification or exact B4 promotion/preflight" >&2
+            && "${3:-}" == --policy \
+            && ("${4:-}" == b4-exact-six || "${4:-}" == b5-full-universe))) ]] || {
+    echo "qualification wrapper accepts only IBKR qualification or exact B4/B5 promotion/preflight" >&2
     exit 64
 }
 
 parent_restore_args=()
-if [[ "$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify ]] \
-    && [[ "${3:-}" == --policy && "${4:-}" == b4-exact-six ]]; then
-    parent_restore_url="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL:?run B4 qualification through the dual restore wrapper}"
-    parent_restore_evidence="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run B4 qualification through the dual restore wrapper}"
+if [[ "${3:-}" == --policy \
+    && ("${4:-}" == b4-exact-six || "${4:-}" == b5-full-universe) ]]; then
+    parent_restore_url="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL:?run through the reviewed multi-restore wrapper}"
+    parent_restore_evidence="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run through the reviewed multi-restore wrapper}"
     [[ "$parent_restore_url" =~ ^postgresql\+asyncpg://qtrad_ibkr@127[.]0[.]0[.]1:5432/qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || exit 64
     [[ "$parent_restore_evidence" == /var/lib/qtrad/ibkr/restore-evidence/*.json \
         && -f "$parent_restore_evidence" && ! -L "$parent_restore_evidence" \
@@ -25,6 +26,24 @@ if [[ "$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify ]
     parent_restore_args=(
         --env "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL=$parent_restore_url"
         --env "QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH=$parent_restore_evidence"
+    )
+fi
+
+grandparent_restore_args=()
+if [[ "$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify ]] \
+    && [[ "${3:-}" == --policy && "${4:-}" == b5-full-universe ]]; then
+    grandparent_restore_url="${QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_DATABASE_URL:?run B5 qualification through the triple restore wrapper}"
+    grandparent_restore_evidence="${QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run B5 qualification through the triple restore wrapper}"
+    [[ "$grandparent_restore_url" =~ ^postgresql\+asyncpg://qtrad_ibkr@127[.]0[.]0[.]1:5432/qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || exit 64
+    [[ "$grandparent_restore_evidence" == /var/lib/qtrad/ibkr/restore-evidence/*.json \
+        && -f "$grandparent_restore_evidence" && ! -L "$grandparent_restore_evidence" \
+        && "$(stat -c '%u:%g:%a' "$grandparent_restore_evidence")" == 0:10001:640 ]] || {
+        echo "grandparent restore evidence is not authenticated for the unprivileged qualification runtime" >&2
+        exit 64
+    }
+    grandparent_restore_args=(
+        --env "QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_DATABASE_URL=$grandparent_restore_url"
+        --env "QTRAD_IBKR_GRANDPARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH=$grandparent_restore_evidence"
     )
 fi
 
@@ -55,6 +74,7 @@ exec docker run --rm --network host --user 10001:10001 \
     --env "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL=$restore_url" \
     --env "QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH=$restore_evidence" \
     "${parent_restore_args[@]}" \
+    "${grandparent_restore_args[@]}" \
     --volume /etc/qtrad:/etc/qtrad:ro \
     --volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro \
     --volume "$qualification_root:$qualification_root:rw" \

@@ -154,6 +154,15 @@ from qtrad.runtime.ibkr_b4 import (
     verify_b4_release,
     write_b4_release,
 )
+from qtrad.runtime.ibkr_b5 import (
+    IbkrB5DeploymentDescriptor,
+    b5_preflight,
+    b5_qualification_expectation,
+    promote_b5_configuration,
+    verify_b5_qualification_evidence_for_release,
+    verify_b5_release,
+    write_b5_release,
+)
 from qtrad.runtime.ibkr_canary import (
     verify_ibkr_historical_canary_evidence,
     write_ibkr_historical_canary_evidence,
@@ -590,9 +599,9 @@ def build_parser() -> argparse.ArgumentParser:
     deployment_inspect.add_argument("--repository-root", type=Path, default=Path.cwd())
 
     promote_b3 = deployment_sub.add_parser(
-        "ibkr-promote", help="create the exact-two B3 config from reviewed evidence"
+        "ibkr-promote", help="create a reviewed IBKR native-capture release"
     )
-    promote_b3.add_argument("--source-configuration", type=Path, required=True)
+    promote_b3.add_argument("--source-configuration", type=Path)
     promote_b3.add_argument("--capability-review", type=Path, required=True)
     promote_b3.add_argument("--operator-selection", type=Path, required=True)
     promote_b3.add_argument("--contract-selection", type=Path, required=True)
@@ -600,7 +609,9 @@ def build_parser() -> argparse.ArgumentParser:
     promote_b3.add_argument("--probe-spec", type=Path, required=True)
     promote_b3.add_argument("--output", type=Path, required=True)
     promote_b3.add_argument(
-        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+        "--policy",
+        choices=("b3-exact-two", "b4-exact-six", "b5-full-universe"),
+        default="b3-exact-two",
     )
     promote_b3.add_argument("--parent-release", type=Path)
     promote_b3.add_argument("--parent-descriptor", type=Path)
@@ -621,7 +632,9 @@ def build_parser() -> argparse.ArgumentParser:
     verify_b3.add_argument("--probe-spec", type=Path, required=True)
     verify_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
     verify_b3.add_argument(
-        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+        "--policy",
+        choices=("b3-exact-two", "b4-exact-six", "b5-full-universe"),
+        default="b3-exact-two",
     )
     verify_b3.add_argument("--parent-release", type=Path)
     verify_b3.add_argument("--parent-descriptor", type=Path)
@@ -635,7 +648,9 @@ def build_parser() -> argparse.ArgumentParser:
         "ibkr-preflight", help="verify B3 release identity without host or provider I/O"
     )
     preflight_b3.add_argument(
-        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+        "--policy",
+        choices=("b3-exact-two", "b4-exact-six", "b5-full-universe"),
+        default="b3-exact-two",
     )
     preflight_b3.add_argument("--descriptor", type=Path, required=True)
     preflight_b3.add_argument("--repository-root", type=Path, default=Path.cwd())
@@ -646,7 +661,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="verify immutable IBKR qualification evidence without provider I/O",
     )
     qualification_b3.add_argument(
-        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+        "--policy",
+        choices=("b3-exact-two", "b4-exact-six", "b5-full-universe"),
+        default="b3-exact-two",
     )
     qualification_b3.add_argument("--qualification", type=Path, required=True)
     qualification_b3.add_argument("--release", type=Path, required=True)
@@ -662,7 +679,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="build immutable IBKR evidence from live and restored PostgreSQL stores",
     )
     qualification_snapshot.add_argument(
-        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+        "--policy",
+        choices=("b3-exact-two", "b4-exact-six", "b5-full-universe"),
+        default="b3-exact-two",
     )
     qualification_snapshot.add_argument("--capture-session-id", type=UUID, required=True)
     qualification_snapshot.add_argument("--started-at", type=_utc_timestamp_argument, required=True)
@@ -1331,8 +1350,15 @@ def main(argv: Sequence[str] | None = None) -> None:
         )
         print(descriptor.to_json())
     elif args.command == "deployment" and args.deployment_command == "ibkr-promote":
-        source = load_reviewed_configuration(args.source_configuration)
+        source = (
+            load_reviewed_configuration(args.source_configuration)
+            if args.source_configuration is not None
+            else None
+        )
+        if args.policy in {"b3-exact-two", "b4-exact-six"} and source is None:
+            raise SystemExit("source-configuration is required for B3 and B4 promotion")
         if args.policy == "b3-exact-two":
+            assert source is not None
             configuration = promote_b3_configuration(
                 source,
                 capability_review_path=args.capability_review,
@@ -1365,7 +1391,8 @@ def main(argv: Sequence[str] | None = None) -> None:
             missing = [name for name in required if getattr(args, name) is None]
             if missing:
                 raise SystemExit(
-                    "B4 promotion requires " + ", ".join(name.replace("_", "-") for name in missing)
+                    f"{args.policy} promotion requires "
+                    + ", ".join(name.replace("_", "-") for name in missing)
                 )
             parent_paths = IbkrAuthorityPaths(
                 capability_review_path=args.parent_capability_review,
@@ -1374,31 +1401,60 @@ def main(argv: Sequence[str] | None = None) -> None:
                 catalogue_path=args.parent_catalogue,
                 probe_spec_path=args.parent_probe_spec,
             )
-            qualification = asyncio.run(
-                _verify_b3_qualification_from_databases(
-                    settings,
-                    qualification_path=args.parent_qualification,
-                    release_path=args.parent_release,
-                    descriptor_path=args.parent_descriptor,
-                    authority_paths=parent_paths,
+            if args.policy == "b4-exact-six":
+                assert source is not None
+                qualification = asyncio.run(
+                    _verify_b3_qualification_from_databases(
+                        settings,
+                        qualification_path=args.parent_qualification,
+                        release_path=args.parent_release,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_paths,
+                    )
                 )
-            )
-            promotion = promote_b4_configuration(
-                source,
-                authority_paths=IbkrAuthorityPaths(
-                    capability_review_path=args.capability_review,
-                    operator_selection_path=args.operator_selection,
-                    contract_selection_path=args.contract_selection,
-                    catalogue_path=args.catalogue,
-                    probe_spec_path=args.probe_spec,
-                ),
-                parent_release_path=args.parent_release,
-                parent_authority_paths=parent_paths,
-                qualification=qualification,
-            )
-            write_b4_release(args.output, promotion)
-            configuration = promotion.configuration
-            contract = "qtrad-ibkr-native-release-v2"
+                promotion = promote_b4_configuration(
+                    source,
+                    authority_paths=_ibkr_authority_paths(args),
+                    parent_release_path=args.parent_release,
+                    parent_authority_paths=parent_paths,
+                    qualification=qualification,
+                )
+                write_b4_release(args.output, promotion)
+                configuration = promotion.configuration
+                contract = "qtrad-ibkr-native-release-v2"
+            else:
+                parent_descriptor = IbkrB4DeploymentDescriptor.from_toml(args.parent_descriptor)
+                b3_qualification = asyncio.run(
+                    _verify_b3_qualification_from_databases(
+                        settings,
+                        qualification_path=parent_descriptor.qualification_path,
+                        release_path=parent_descriptor.parent_release_path,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_descriptor.parent_authority_paths,
+                        restore_url=settings.ibkr_parent_qualification_restore_database_url,
+                        restore_evidence_path=settings.ibkr_parent_qualification_restore_evidence_path,
+                    )
+                )
+                b4_qualification = asyncio.run(
+                    _verify_b4_qualification_from_databases(
+                        settings,
+                        qualification_path=args.parent_qualification,
+                        release_path=args.parent_release,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_paths,
+                    )
+                )
+                promotion = promote_b5_configuration(
+                    authority_paths=_ibkr_authority_paths(args),
+                    parent_release_path=args.parent_release,
+                    parent_authority_paths=parent_paths,
+                    parent_descriptor=parent_descriptor,
+                    b3_qualification=b3_qualification,
+                    b4_qualification=b4_qualification,
+                )
+                write_b5_release(args.output, promotion)
+                configuration = promotion.configuration
+                contract = "qtrad-ibkr-native-release-v3"
         print(
             json.dumps(
                 {
@@ -1434,7 +1490,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             missing = [name for name in required if getattr(args, name) is None]
             if missing:
                 raise SystemExit(
-                    "B4 verification requires "
+                    f"{args.policy} verification requires "
                     + ", ".join(name.replace("_", "-") for name in missing)
                 )
             parent_paths = IbkrAuthorityPaths(
@@ -1444,29 +1500,56 @@ def main(argv: Sequence[str] | None = None) -> None:
                 catalogue_path=args.parent_catalogue,
                 probe_spec_path=args.parent_probe_spec,
             )
-            qualification = asyncio.run(
-                _verify_b3_qualification_from_databases(
-                    settings,
-                    qualification_path=args.parent_qualification,
-                    release_path=args.parent_release,
-                    descriptor_path=args.parent_descriptor,
-                    authority_paths=parent_paths,
+            if args.policy == "b4-exact-six":
+                qualification = asyncio.run(
+                    _verify_b3_qualification_from_databases(
+                        settings,
+                        qualification_path=args.parent_qualification,
+                        release_path=args.parent_release,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_paths,
+                    )
                 )
-            )
-            report = verify_b4_release(
-                args.configuration,
-                authority_paths=IbkrAuthorityPaths(
-                    capability_review_path=args.capability_review,
-                    operator_selection_path=args.operator_selection,
-                    contract_selection_path=args.contract_selection,
-                    catalogue_path=args.catalogue,
-                    probe_spec_path=args.probe_spec,
-                ),
-                parent_release_path=args.parent_release,
-                parent_authority_paths=parent_paths,
-                qualification=qualification,
-                observed_at=args.observed_at,
-            )
+                report = verify_b4_release(
+                    args.configuration,
+                    authority_paths=_ibkr_authority_paths(args),
+                    parent_release_path=args.parent_release,
+                    parent_authority_paths=parent_paths,
+                    qualification=qualification,
+                    observed_at=args.observed_at,
+                )
+            else:
+                parent_descriptor = IbkrB4DeploymentDescriptor.from_toml(args.parent_descriptor)
+                b3_qualification = asyncio.run(
+                    _verify_b3_qualification_from_databases(
+                        settings,
+                        qualification_path=parent_descriptor.qualification_path,
+                        release_path=parent_descriptor.parent_release_path,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_descriptor.parent_authority_paths,
+                        restore_url=settings.ibkr_parent_qualification_restore_database_url,
+                        restore_evidence_path=settings.ibkr_parent_qualification_restore_evidence_path,
+                    )
+                )
+                b4_qualification = asyncio.run(
+                    _verify_b4_qualification_from_databases(
+                        settings,
+                        qualification_path=args.parent_qualification,
+                        release_path=args.parent_release,
+                        descriptor_path=args.parent_descriptor,
+                        authority_paths=parent_paths,
+                    )
+                )
+                report = verify_b5_release(
+                    args.configuration,
+                    authority_paths=_ibkr_authority_paths(args),
+                    parent_release_path=args.parent_release,
+                    parent_authority_paths=parent_paths,
+                    parent_descriptor=parent_descriptor,
+                    b3_qualification=b3_qualification,
+                    b4_qualification=b4_qualification,
+                    observed_at=args.observed_at,
+                )
         print(json.dumps(report, sort_keys=True))
         if not report["valid"]:
             raise SystemExit(1)
@@ -1477,9 +1560,18 @@ def main(argv: Sequence[str] | None = None) -> None:
                 repository_root=args.repository_root,
                 observed_at=args.observed_at,
             )
-        else:
+        elif args.policy == "b4-exact-six":
             report = asyncio.run(
                 _b4_preflight_from_databases(
+                    settings,
+                    descriptor_path=args.descriptor,
+                    repository_root=args.repository_root,
+                    observed_at=args.observed_at,
+                )
+            )
+        else:
+            report = asyncio.run(
+                _b5_preflight_from_databases(
                     settings,
                     descriptor_path=args.descriptor,
                     repository_root=args.repository_root,
@@ -1494,11 +1586,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         ):
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-verify":
-        verify_qualification = (
-            _verify_b3_qualification_from_databases
-            if args.policy == "b3-exact-two"
-            else _verify_b4_qualification_from_databases
-        )
+        verify_qualification = {
+            "b3-exact-two": _verify_b3_qualification_from_databases,
+            "b4-exact-six": _verify_b4_qualification_from_databases,
+            "b5-full-universe": _verify_b5_qualification_from_databases,
+        }[args.policy]
         capability = asyncio.run(
             verify_qualification(
                 settings,
@@ -1523,11 +1615,11 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         )
     elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-snapshot":
-        write_snapshot = (
-            _write_b3_qualification_snapshot
-            if args.policy == "b3-exact-two"
-            else _write_b4_qualification_snapshot
-        )
+        write_snapshot = {
+            "b3-exact-two": _write_b3_qualification_snapshot,
+            "b4-exact-six": _write_b4_qualification_snapshot,
+            "b5-full-universe": _write_b5_qualification_snapshot,
+        }[args.policy]
         payload = asyncio.run(
             write_snapshot(
                 settings,
@@ -3703,6 +3795,40 @@ async def _write_b4_qualification_snapshot(
     )
 
 
+async def _write_b5_qualification_snapshot(
+    settings: Settings,
+    *,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    window: IbkrQualificationWindow,
+    output_path: Path,
+) -> dict[str, JsonValue]:
+    descriptor = IbkrB5DeploymentDescriptor.from_toml(descriptor_path)
+    b3_qualification, b4_qualification = await _verify_b5_parent_qualifications(
+        settings,
+        descriptor=descriptor,
+        b3_restore_url=settings.ibkr_grandparent_qualification_restore_database_url,
+        b3_restore_evidence_path=settings.ibkr_grandparent_qualification_restore_evidence_path,
+        b4_restore_url=settings.ibkr_parent_qualification_restore_database_url,
+        b4_restore_evidence_path=settings.ibkr_parent_qualification_restore_evidence_path,
+    )
+    configuration, expectation = b5_qualification_expectation(
+        release_path=release_path,
+        authority_paths=authority_paths,
+        descriptor=descriptor,
+        b3_qualification=b3_qualification,
+        b4_qualification=b4_qualification,
+    )
+    return await _write_ibkr_qualification_snapshot(
+        settings,
+        configuration=configuration,
+        expectation=expectation,
+        window=window,
+        output_path=output_path,
+    )
+
+
 async def _write_ibkr_qualification_snapshot(
     settings: Settings,
     *,
@@ -3749,23 +3875,35 @@ async def _verify_b4_qualification_from_databases(
     release_path: Path,
     descriptor_path: Path,
     authority_paths: IbkrAuthorityPaths,
+    restore_url: str | None = None,
+    restore_evidence_path: Path | None = None,
+    parent_restore_url: str | None = None,
+    parent_restore_evidence_path: Path | None = None,
+    parent_qualification: VerifiedIbkrCaptureQualification | None = None,
 ) -> VerifiedIbkrCaptureQualification:
     descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
-    parent_restore_url = settings.ibkr_parent_qualification_restore_database_url
-    parent_restore_evidence = settings.ibkr_parent_qualification_restore_evidence_path
-    if parent_restore_url is None or parent_restore_evidence is None:
-        raise ValueError("B4 qualification requires a qualification-bound parent restore")
-    parent_qualification = await _verify_b3_qualification_from_databases(
-        settings,
-        qualification_path=descriptor.qualification_path,
-        release_path=descriptor.parent_release_path,
-        descriptor_path=descriptor_path,
-        authority_paths=descriptor.parent_authority_paths,
-        restore_url=parent_restore_url,
-        restore_evidence_path=parent_restore_evidence,
+    if parent_qualification is None:
+        parent_restore_url = (
+            parent_restore_url or settings.ibkr_parent_qualification_restore_database_url
+        )
+        parent_restore_evidence_path = (
+            parent_restore_evidence_path or settings.ibkr_parent_qualification_restore_evidence_path
+        )
+        if parent_restore_url is None or parent_restore_evidence_path is None:
+            raise ValueError("B4 qualification requires a qualification-bound parent restore")
+        parent_qualification = await _verify_b3_qualification_from_databases(
+            settings,
+            qualification_path=descriptor.qualification_path,
+            release_path=descriptor.parent_release_path,
+            descriptor_path=descriptor_path,
+            authority_paths=descriptor.parent_authority_paths,
+            restore_url=parent_restore_url,
+            restore_evidence_path=parent_restore_evidence_path,
+        )
+    restore_url = restore_url or settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = (
+        restore_evidence_path or settings.ibkr_qualification_restore_evidence_path
     )
-    restore_url = settings.ibkr_qualification_restore_database_url
-    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
     if restore_url is None or restore_evidence_path is None:
         raise ValueError(
             "hash-checked restore workflow URL and evidence are required for independent replay"
@@ -3793,6 +3931,115 @@ async def _verify_b4_qualification_from_databases(
     finally:
         await live_engine.dispose()
         await restored_engine.dispose()
+
+
+async def _verify_b5_parent_qualifications(
+    settings: Settings,
+    *,
+    descriptor: IbkrB5DeploymentDescriptor,
+    b3_restore_url: str | None,
+    b3_restore_evidence_path: Path | None,
+    b4_restore_url: str | None,
+    b4_restore_evidence_path: Path | None,
+) -> tuple[VerifiedIbkrCaptureQualification, VerifiedIbkrCaptureQualification]:
+    if b3_restore_url is None or b3_restore_evidence_path is None:
+        raise ValueError("B5 qualification requires a qualification-bound B3 restore")
+    if b4_restore_url is None or b4_restore_evidence_path is None:
+        raise ValueError("B5 qualification requires a qualification-bound B4 restore")
+    b3_qualification = await _verify_b3_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.parent_descriptor.qualification_path,
+        release_path=descriptor.parent_descriptor.parent_release_path,
+        descriptor_path=descriptor.parent_descriptor_path,
+        authority_paths=descriptor.parent_descriptor.parent_authority_paths,
+        restore_url=b3_restore_url,
+        restore_evidence_path=b3_restore_evidence_path,
+    )
+    b4_qualification = await _verify_b4_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.qualification_path,
+        release_path=descriptor.parent_release_path,
+        descriptor_path=descriptor.parent_descriptor_path,
+        authority_paths=descriptor.parent_authority_paths,
+        restore_url=b4_restore_url,
+        restore_evidence_path=b4_restore_evidence_path,
+        parent_qualification=b3_qualification,
+    )
+    return b3_qualification, b4_qualification
+
+
+async def _verify_b5_qualification_from_databases(
+    settings: Settings,
+    *,
+    qualification_path: Path,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+) -> VerifiedIbkrCaptureQualification:
+    descriptor = IbkrB5DeploymentDescriptor.from_toml(descriptor_path)
+    b3_qualification, b4_qualification = await _verify_b5_parent_qualifications(
+        settings,
+        descriptor=descriptor,
+        b3_restore_url=settings.ibkr_grandparent_qualification_restore_database_url,
+        b3_restore_evidence_path=settings.ibkr_grandparent_qualification_restore_evidence_path,
+        b4_restore_url=settings.ibkr_parent_qualification_restore_database_url,
+        b4_restore_evidence_path=settings.ibkr_parent_qualification_restore_evidence_path,
+    )
+    restore_url = settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
+        raise ValueError(
+            "hash-checked restore workflow URL and evidence are required for independent replay"
+        )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database=descriptor.deployment.database_name,
+            expected_schema_head=descriptor.deployment.schema_head,
+        )
+        return await verify_b5_qualification_evidence_for_release(
+            qualification_path,
+            release_path=release_path,
+            authority_paths=authority_paths,
+            descriptor=descriptor,
+            b3_qualification=b3_qualification,
+            b4_qualification=b4_qualification,
+            live_store=PostgresAuditStore(live_engine),
+            restored_store=restored_store,
+            restore_evidence=restore_evidence,
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
+
+
+async def _b5_preflight_from_databases(
+    settings: Settings,
+    *,
+    descriptor_path: Path,
+    repository_root: Path,
+    observed_at: datetime,
+) -> dict[str, JsonValue]:
+    descriptor = IbkrB5DeploymentDescriptor.from_toml(descriptor_path)
+    b3_qualification, b4_qualification = await _verify_b5_parent_qualifications(
+        settings,
+        descriptor=descriptor,
+        b3_restore_url=settings.ibkr_parent_qualification_restore_database_url,
+        b3_restore_evidence_path=settings.ibkr_parent_qualification_restore_evidence_path,
+        b4_restore_url=settings.ibkr_qualification_restore_database_url,
+        b4_restore_evidence_path=settings.ibkr_qualification_restore_evidence_path,
+    )
+    return b5_preflight(
+        descriptor_path,
+        repository_root=repository_root,
+        observed_at=observed_at,
+        b3_qualification=b3_qualification,
+        b4_qualification=b4_qualification,
+    )
 
 
 async def _b4_preflight_from_databases(
