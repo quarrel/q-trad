@@ -12,8 +12,9 @@ umask 077
 }
 
 parent_restore_args=()
-if [[ "${3:-}" == --policy \
-    && ("${4:-}" == b4-exact-six || "${4:-}" == b5-full-universe) ]]; then
+if [[ "${3:-}" == --policy && "${4:-}" == b5-full-universe ]] \
+    || [[ ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
+        && "${3:-}" == --policy && "${4:-}" == b4-exact-six ]]; then
     parent_restore_url="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL:?run through the reviewed multi-restore wrapper}"
     parent_restore_evidence="${QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run through the reviewed multi-restore wrapper}"
     [[ "$parent_restore_url" =~ ^postgresql\+asyncpg://qtrad_ibkr@127[.]0[.]0[.]1:5432/qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || exit 64
