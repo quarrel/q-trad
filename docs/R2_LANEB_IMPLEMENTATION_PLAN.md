@@ -1,6 +1,4 @@
-Lane B is through its first useful outcome. B1–B3 are implemented and merged, the exact-two
-`capture-ibkr-v1` release is deployed on the independent IBKR runtime, and its bounded qualification
-passed on 2026-08-10. This plan now records the achieved boundary and the remaining B4/later work.
+Lane B has reached its full reviewed native-capture universe. B1–B5 are implemented and merged, the twenty-contract `capture-ibkr-v1` release is deployed on the independent IBKR runtime, and its bounded qualification passed on 2026-08-10. This plan records the achieved boundary and the remaining lifecycle evidence.
 
 The implemented pieces are:
 
@@ -11,7 +9,7 @@ The implemented pieces are:
   under `ops/ibkr`; and
 * a distinct IBKR runtime/store with no fabricated sides, trade-volume semantics or broker-order surface.
 
-The next promotion is B5 full accepted universe, not another collector architecture.
+The next native-capture gate is the complete weekly Gateway reauthentication lifecycle, not another collector architecture or universe expansion.
 
 # Lane B — IBKR native collector
 
@@ -28,10 +26,7 @@ capture_source_id = "ibkr-paper-v1"
 using the q-trad ingest/canonical-event infrastructure, official direct TWS API, `IbkrSession`,
 PostgreSQL storage, read-only health API and the independent `ops/ibkr` host runtime.
 
-The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy
-native IBKR collector preserving every callback needed for later replay. Exact-two B3 and fixed-six B4
-qualified on 2026-08-10. Full-universe qualification, a complete weekly reauthentication boundary and
-R2-IBKR-NATIVE remain later gates.
+The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy native IBKR collector preserving every callback needed for later replay. Exact-two B3, fixed-six B4 and full-universe B5 qualified on 2026-08-10. A complete weekly reauthentication boundary and R2-IBKR-NATIVE remain later gates.
 
 ---
 
@@ -628,19 +623,13 @@ post-reconnect snapshot are retained in immutable terminal run detail.
 
 The artifact hash proves content identity only. A file-only check, API response, fake store,
 closed-market connection or operator assertion cannot grant qualification. Final-image B3 session
-`1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks with zero failed, dropped
-or reconciliation-loss callbacks and passed independent restored replay. B4 session
-`c014d0e5-1f71-42fe-b99a-007390c83ede` received and persisted 3,636 callbacks with the same zero-loss
-boundary; generation 1 to 2 retained fresh LIVE bid and ask; and two independent dual-restore replays
-minted `B4_EXACT_SIX`. Full accepted universe remains the next separately authorised gate.
+`1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks with zero failed, dropped or reconciliation-loss callbacks and passed independent restored replay. B4 session `c014d0e5-1f71-42fe-b99a-007390c83ede` received and persisted 3,636 callbacks with the same zero-loss boundary; generation 1 to 2 retained fresh LIVE bid and ask; and two independent dual-restore replays minted `B4_EXACT_SIX`. B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` then received and persisted 24,056 callbacks with zero loss, crossed generation 1 to 2 with fresh LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
 
 ---
 
-# PR B5 / later operational step — full accepted IBKR capture universe
+# PR B5 / completed operational step — full accepted IBKR capture universe
 
-Don't make this the first goal.
-
-Once six-target collection has run cleanly, expand to the full reviewed accepted universe.
+Completed on 2026-08-10 after clean six-target collection: the collector expanded to the full reviewed accepted universe.
 
 The original qualification contains twenty selected mappings across FX, indices and commodities.
 
@@ -655,7 +644,7 @@ bounded queues
 reasonable persistence lag
 ```
 
-If one product is problematic, quarantine it visibly rather than delaying the useful six.
+If one product becomes problematic, quarantine it visibly rather than hiding unavailability or weakening the qualified useful set.
 
 ---
 
@@ -765,12 +754,13 @@ Completed on 2026-08-10:
 ```text
 8. Refreshed and independently reverified exact-two B3 on the final main image.
 9. Promoted through B4 exact-six and repeated the controlled reconnect, zero-loss and dual-restore boundary.
+10. Promoted through B5 full universe and repeated the controlled reconnect, zero-loss and three-restore boundary.
 ```
 
 Next:
 
 ```text
-10. With separate authority: full accepted universe and complete weekly-reauthentication qualification.
+11. With separate authority: complete weekly Gateway reauthentication qualification.
 ```
 
 ---
