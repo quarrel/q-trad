@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -28,11 +27,7 @@ from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.runtime.settings import Settings
 
-DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(
-    DATABASE_URL is None,
-    reason="QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration",
-)
+pytestmark = pytest.mark.postgres
 
 _NOW = datetime(2026, 8, 8, 12, 0, tzinfo=UTC)
 _CONFIGURATION_HASH = "b" * 64
@@ -197,9 +192,9 @@ def _adapter(
 @pytest.mark.asyncio
 async def test_native_callbacks_worker_projection_health_and_api(
     monkeypatch: pytest.MonkeyPatch,
+    postgres_database_url: str,
 ) -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     listing = _listing()
     identity = _identity()
@@ -350,7 +345,7 @@ async def test_native_callbacks_worker_projection_health_and_api(
 
         app = create_app(
             Settings(
-                database_url=DATABASE_URL,
+                database_url=postgres_database_url,
                 provider="ibkr",
                 ibkr_capture_configuration_hash=_CONFIGURATION_HASH,
             )
@@ -370,6 +365,22 @@ async def test_native_callbacks_worker_projection_health_and_api(
             api_reconciliation = await http_client.get("/api/v1/capture/reconciliation")
             assert api_reconciliation.status_code == 200
             assert api_reconciliation.json()["adapter_accepted"] == 5
+
+            qualification_evidence = await http_client.get(
+                "/api/v1/capture/qualification-evidence",
+                params={
+                    "capture_session_id": str(run_id),
+                    "started_at": _NOW.isoformat(),
+                    "ended_at": (_NOW + timedelta(seconds=4)).isoformat(),
+                    "generated_at": (_NOW + timedelta(seconds=5)).isoformat(),
+                },
+            )
+            assert qualification_evidence.status_code == 200
+            qualification_body = qualification_evidence.json()
+            assert qualification_body["retained_row_count"] == 5
+            assert len(qualification_body["retained_rows_sha256"]) == 64
+            assert "retained_rows" not in qualification_body
+            assert "operations" not in qualification_body
 
             instruments = await http_client.get("/api/v1/instruments")
             assert instruments.status_code == 200

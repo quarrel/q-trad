@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition
+**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B3 exact-two qualification complete, B4 exact-six pending
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
@@ -30,6 +30,9 @@ work and records only the milestone sequence needed to reach the next trustworth
   were unavailable; both are quarantined. The immutable 23-market `capture-v4` was activated on
   2026-07-22 after exact release, backup, rollback and readiness gates. R0's native audit,
   historical-source decision and restore verification are complete.
+- The independent IBKR native collector reached its first useful boundary on 2026-08-10: the
+  exact-two B3 release was deployed and qualified on `q-trad-2`, and continuous capture resumed
+  healthy after the bounded qualification session.
 - R1.A–R1.E now provide the causal foundation path: isolated-snapshot observation build/verify,
   separate initial-availability and correction-maturity evidence, aligned panels with retained
   gap/source-activity audit evidence, frozen multi-horizon targets, chronological folds,
@@ -43,9 +46,13 @@ work and records only the milestone sequence needed to reach the next trustworth
   contracts plus CLI operations and mutation-tested independent authentication. The source-specific IBKR
   representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
   replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
-  and the locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
-  (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption)
-  are implemented and tested with implementation-only fixtures; no real holdout or effectiveness evidence exists.
+  and the real locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
+  (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
+  implemented and tested with implementation-only fixtures. The fixture-confirmatory C2a F2/G1 authority
+  path and both C2b phases are implemented: verified G1 exclusively authorises unopened G2 preparation,
+  create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
+  and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
+  No real holdout, research conclusion or effectiveness evidence exists.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,
@@ -158,8 +165,17 @@ chronology ambiguity before those contracts are fixed.
   readiness disposition.
 - No qualifying IBKR readiness disposition or downstream R2 artifact has been created; keep
   `R2-IBKR-HISTORICAL` source-specific and do not combine its evidence with IG-native data.
-- Add live IBKR top-of-book capture only as an independent runtime and canonical store with
-  operator-authenticated Gateway lifecycle, truthful health, recovery, backups and restore evidence.
+- The independent IBKR native top-of-book collector is deployed at the exact-two B3 scope. Controlled
+  session `e2c6fe9d-f2f5-4354-bb26-d4c661d0d061` received and persisted 766 callbacks with zero
+  failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh
+  post-reconnect bid/ask evidence, ended `HEALTHY`, and passed fresh-backup restore plus independent
+  verification before minting `B3_EXACT_TWO`.
+- This is scope-bound B3 evidence, not capture completion. B4 exact-six promotion is the next native
+  gate and remains a separately authorised operation; full-universe and weekly-reauthentication
+  qualification remain later. Continuous exact-two capture was healthy when resumed after the
+  qualification, but current runtime state must be rechecked before any operation.
+- Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,
+  qualification and restore verification; do not reconstruct those Docker/systemd paths ad hoc.
 - The adapter remains market-data-only. Account access, acquisition, deployment and publication are
   separately authorised operations.
 

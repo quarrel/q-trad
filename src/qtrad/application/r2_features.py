@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from itertools import pairwise
 from math import cos, log, pi, sin, sqrt
 from types import MappingProxyType
-from typing import Protocol
+from typing import Protocol, cast
 
 from qtrad.application.foundation import observation_availability_time
 from qtrad.application.r2_readiness import (
@@ -35,6 +35,11 @@ from qtrad.domain.r2_features import (
     RawFeatureValue,
     feature_registry,
     feature_set_id,
+)
+from qtrad.domain.r2_holdout import (
+    HoldoutOpportunityDisposition,
+    HoldoutTargetOpportunity,
+    R2HoldoutTargetSource,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2ExperimentConfig
 from qtrad.domain.research import ObservationDataset, ObservationRow
@@ -112,6 +117,30 @@ class R2FoundationInputs:
     def source_active_intervals(self) -> Mapping[str, tuple[tuple[datetime, datetime], ...]]:
         """Return the parsed activity evidence derived from the authenticated payload."""
         return self._authenticated_source_active_intervals
+
+
+class R2OutcomeBlindFeatureInputs(Protocol):
+    """Outcome-blind R1 children required to compute holdout features."""
+
+    @property
+    def bundle(self) -> FoundationBundle: ...
+
+    @property
+    def configuration(self) -> FoundationConfig: ...
+
+    @property
+    def observations(self) -> ObservationDataset: ...
+
+    @property
+    def panel(self) -> PanelDataset: ...
+
+    @property
+    def folds(self) -> FoldDataset: ...
+
+    @property
+    def source_active_intervals(
+        self,
+    ) -> Mapping[str, tuple[tuple[datetime, datetime], ...]]: ...
 
 
 class FeatureLineageError(ValueError):
@@ -259,6 +288,143 @@ def build_raw_feature_rows(
             experiment,
             feature_set_name=feature_set_name,
         )
+    )
+
+
+def build_outcome_blind_holdout_feature_rows(
+    foundation: R2OutcomeBlindFeatureInputs,
+    experiment: R2ExperimentConfig,
+    target_source: R2HoldoutTargetSource,
+    *,
+    feature_set_name: str,
+    opportunities: Sequence[HoldoutTargetOpportunity],
+) -> tuple[RawFeatureRow | None, ...]:
+    """Run the canonical R2.B builder for frozen holdout opportunities without labels."""
+
+    if experiment.evidence_class is not EvidenceClass.CONFIRMATORY:
+        raise ValueError("outcome-blind holdout features require confirmatory evidence")
+    if (
+        foundation.bundle.bundle_id != experiment.r1_bundle_id
+        or foundation.configuration.configuration_id != experiment.foundation_configuration_id
+        or foundation.observations.dataset_id != experiment.observation_dataset_id
+        or foundation.panel.dataset_id != experiment.panel_dataset_id
+        or foundation.folds.dataset_id != experiment.fold_dataset_id
+        or target_source.source_target_dataset_id != experiment.target_dataset_id
+        or target_source.observation_dataset_id != foundation.observations.dataset_id
+        or target_source.foundation_configuration_id != foundation.configuration.configuration_id
+    ):
+        raise ValueError("outcome-blind holdout feature inputs differ from the experiment")
+    if tuple(foundation.configuration.ordered_instruments) != tuple(experiment.ordered_instruments):
+        raise ValueError("outcome-blind holdout feature universe differs from the experiment")
+    if set(foundation.source_active_intervals) != set(foundation.configuration.ordered_instruments):
+        raise ValueError("outcome-blind holdout feature activity evidence is incomplete")
+    expected_opportunities = tuple(
+        sorted(target_source.opportunities, key=lambda item: item.opportunity_id)
+    )
+    supplied_opportunities = tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
+    if supplied_opportunities != expected_opportunities:
+        raise ValueError(
+            "holdout feature opportunities differ from the authenticated target source"
+        )
+
+    schema = feature_schema_for_set(experiment, feature_set_name)
+    feature_set_identity = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
+    panels: dict[tuple[str, datetime], PanelRow] = {}
+    for panel in foundation.panel.rows:
+        if panel.basis is not PriceBasis.MID or panel.status not in {
+            PanelStatus.OBSERVED,
+            PanelStatus.MISSING_AS_OF_CUTOFF,
+        }:
+            continue
+        key = (panel.instrument_id, panel.decision_time)
+        if key in panels:
+            raise ValueError("outcome-blind holdout panel contains duplicate MID opportunities")
+        panels[key] = panel
+    indexed = _index(foundation.observations.rows)
+    rows: list[RawFeatureRow | None] = []
+    for opportunity in supplied_opportunities:
+        if opportunity.disposition is not HoldoutOpportunityDisposition.ELIGIBLE:
+            rows.append(None)
+            continue
+        panel = panels.get((opportunity.instrument_id, opportunity.decision_time))
+        if panel is None:
+            rows.append(None)
+            continue
+        row = _build_row(
+            panel,
+            indexed,
+            schema,
+            experiment,
+            cast(R2FoundationInputs, foundation),
+            feature_set_identity,
+        )
+        if (
+            row.feature_data_asof != opportunity.feature_data_asof
+            or row.latest_feature_bar_end != opportunity.latest_feature_bar_end
+        ):
+            raise ValueError("holdout feature timing differs from authenticated causal evidence")
+        rows.append(row)
+    return tuple(rows)
+
+
+def materialise_outcome_blind_training_features(
+    foundation: R2OutcomeBlindFeatureInputs,
+    experiment: R2ExperimentConfig,
+    target_source: R2HoldoutTargetSource,
+    *,
+    feature_set_name: str,
+) -> R2FeatureDataset:
+    """Materialise pre-holdout R2.B features from independently verified blind R1 inputs."""
+
+    # The holdout helper performs the complete outcome-blind lineage check.  An
+    # empty opportunity sequence is not valid there, so authenticate through the
+    # same source and experiment fields before using the established OOF iterator.
+    if (
+        experiment.evidence_class is not EvidenceClass.CONFIRMATORY
+        or foundation.bundle.bundle_id != experiment.r1_bundle_id
+        or foundation.configuration.configuration_id != experiment.foundation_configuration_id
+        or foundation.observations.dataset_id != experiment.observation_dataset_id
+        or foundation.panel.dataset_id != experiment.panel_dataset_id
+        or foundation.folds.dataset_id != experiment.fold_dataset_id
+        or target_source.source_target_dataset_id != experiment.target_dataset_id
+        or target_source.observation_dataset_id != foundation.observations.dataset_id
+        or target_source.foundation_configuration_id != foundation.configuration.configuration_id
+    ):
+        raise ValueError("outcome-blind training feature inputs differ from the experiment")
+    if tuple(foundation.configuration.ordered_instruments) != tuple(experiment.ordered_instruments):
+        raise ValueError("outcome-blind training feature universe differs from the experiment")
+    schema = feature_schema_for_set(experiment, feature_set_name)
+    feature_set_identity = feature_set_id(
+        experiment.configuration_id,
+        feature_set_name,
+        schema,
+        experiment.market_data_source_class,
+    )
+    rows = tuple(
+        _iter_raw_feature_rows(
+            cast(R2FoundationInputs, foundation),
+            experiment,
+            schema=schema,
+            feature_set_name=feature_set_name,
+            feature_set_identity=feature_set_identity,
+        )
+    )
+    return R2FeatureDataset.create(
+        rows,
+        feature_schema=schema,
+        feature_set_name=feature_set_name,
+        observation_dataset_id=foundation.observations.dataset_id,
+        panel_dataset_id=foundation.panel.dataset_id,
+        target_dataset_id=target_source.source_target_dataset_id,
+        fold_dataset_id=foundation.folds.dataset_id,
+        experiment_configuration_id=experiment.configuration_id,
+        evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
     )
 
 

@@ -93,13 +93,140 @@ def test_ibkr_operations_expose_explicit_check_apply_boundary() -> None:
     assert "usage: deploy.sh --check|--apply" in deploy
     assert 'if [[ "$mode" == "--check" ]]' in deploy
     assert "verify_host_identity" in deploy
+    assert 'bash "$script_dir/postgres-provision.sh" --check' in deploy
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
-    assert '"$preflight_bin" deployment ibkr-preflight' in deploy
+    assert "deployment ibkr-preflight" in deploy
+    assert 'bash "$script_dir/qtrad-container-cli.sh"' in deploy
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in wrapper
     assert '--volume "$checkpoint_root:$checkpoint_root:rw"' in wrapper
     assert "B3" in readme
+
+
+def test_ibkr_offline_preflight_runs_through_the_immutable_container(
+    tmp_path: Path,
+) -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    etc_root = tmp_path / "etc-qtrad"
+    authority_root = tmp_path / "srv-qtrad-ibkr"
+    repository_root = authority_root / "repository"
+    repository_root.mkdir(parents=True)
+    etc_root.mkdir()
+
+    wrapper = (ibkr / "qtrad-container-cli.sh").read_text()
+    wrapper = wrapper.replace("/etc/qtrad", str(etc_root)).replace(
+        "/srv/qtrad/ibkr", str(authority_root)
+    )
+    wrapper_path = tmp_path / "qtrad-container-cli.sh"
+    wrapper_path.write_text(wrapper)
+
+    calls = tmp_path / "docker-calls"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker = fake_bin / "docker"
+    docker.write_text(
+        '#!/bin/sh\nprintf \'%s\\n\' "$*" > "$QTRAD_TEST_DOCKER_CALLS"\n'
+        "printf '{\"valid\":true}\\n'\n"
+    )
+    docker.chmod(0o755)
+
+    image = "registry.example.invalid/qtrad-ibkr@sha256:" + "a" * 64
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+            "QTRAD_IBKR_IMAGE": image,
+            "QTRAD_IBKR_REPOSITORY_ROOT": str(repository_root),
+            "QTRAD_TEST_DOCKER_CALLS": str(calls),
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(wrapper_path), "deployment", "ibkr-preflight", "--help"],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout == '{"valid":true}\n'
+    call = calls.read_text()
+    assert "--network none" in call
+    assert "--user 10001:10001" in call
+    assert f"--volume {etc_root}:{etc_root}:ro" in call
+    assert f"--volume {authority_root}:{authority_root}:ro" in call
+    assert f"--entrypoint /app/.venv/bin/python {image}" in call
+    assert "-m qtrad deployment ibkr-preflight --help" in call
+
+
+def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    provision = (ibkr / "postgres-provision.sh").read_text()
+    start = (ibkr / "postgres-start.sh").read_text()
+    ready = (ibkr / "postgres-ready.sh").read_text()
+    backup = (ibkr / "postgres-backup.sh").read_text()
+    restore = (ibkr / "postgres-restore-verify.sh").read_text()
+    qualification = (ibkr / "qtrad-ibkr-qualification-wrapper.example").read_text()
+    health_service = (ibkr / "qtrad-ibkr-health.service.example").read_text()
+
+    assert "usage: postgres-provision.sh --check|--apply" in provision
+    assert "must be root-owned and mode 0600 or 0640" in provision
+    assert "cmp --silent" in provision
+    assert "systemctl enable --now qtrad-ibkr-postgres.service" in provision
+    assert "postgres@sha256:" in start
+    assert "127.0.0.1:5432" in start
+    assert "qtrad-ibkr-native-postgres" in start
+    assert "/srv/qtrad/postgres/ibkr-native-data" in start
+    assert "POSTGRES_HOST_AUTH_METHOD=trust" in start
+    assert 'docker wait "$container"' in start
+    assert "pg_isready" in ready
+    assert "qtrad_ibkr|qtrad_ibkr" in ready
+    assert "qtrad-ibkr-native-postgres" in backup
+    assert "qtrad-ibkr-native-postgres" in restore
+    assert 'docker exec -i "$container" pg_restore --list' in backup
+    assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
+    assert "QTRAD_IBKR_RUNTIME_GID:?" in backup
+    assert "QTRAD_IBKR_RUNTIME_GID:?" in restore
+    assert 'chmod 0640 "$archive" "$archive.sha256"' in backup
+    assert 'chmod 0640 "$evidence_path"' in restore
+    assert "--user 10001:10001" in qualification
+    assert "--cap-drop=ALL" in qualification
+    assert "ibkr-qualification-snapshot" in qualification
+    assert "ibkr-qualification-verify" in qualification
+    assert "Wants=qtrad-ibkr-ingest.service" not in health_service
+    assert "Requires=qtrad-ibkr-ingest.service" not in health_service
+    assert "After=qtrad-ibkr-ingest.service" in health_service
+    backup_service = (ibkr / "qtrad-ibkr-backup.service.example").read_text()
+    restore_service = (ibkr / "qtrad-ibkr-restore-verify.service.example").read_text()
+    assert "Requires=qtrad-ibkr-postgres.service" in backup_service
+    assert "Requires=qtrad-ibkr-postgres.service" in restore_service
+
+
+def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    api = (ibkr / "qtrad-ibkr-api.service.example").read_text()
+    ingest = (ibkr / "qtrad-ibkr-ingest.service.example").read_text()
+
+    assert "NoNewPrivileges=true" in api
+    assert "NoNewPrivileges=true" in ingest
+    assert "ExecStop=/bin/bash -c 'exec /usr/bin/docker stop --timeout 30 qtrad-ibkr-api'" in api
+    assert (
+        "ExecStop=/bin/bash -c 'exec /usr/bin/docker stop --timeout 90 qtrad-ibkr-ingest'" in ingest
+    )
+    assert "ExecStop=/usr/bin/docker" not in api
+    assert "ExecStop=/usr/bin/docker" not in ingest
+
+
+def test_ibkr_ingest_accepts_authenticated_gateway_listener_shape() -> None:
+    ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
+    wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
+    host = (ibkr / "verify-host.sh").read_text()
+
+    assert "Gateway API is not listening" in wrapper
+    assert "Gateway API is not localhost-only" not in wrapper
+    assert "firewall-cmd" in host
+    assert "TrustedIPs" in host
 
 
 def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:

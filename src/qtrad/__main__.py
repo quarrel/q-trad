@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import cast
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import uvicorn
 from alembic import command
@@ -98,6 +98,7 @@ from qtrad.domain.ibkr_historical import (
     IbkrAcquisitionRuntime,
     IbkrHistoricalPacingPolicy,
 )
+from qtrad.domain.ibkr_qualification import VerifiedIbkrCaptureQualification
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId, RunId
 from qtrad.domain.instruments import AssetClass, ProviderListing
 from qtrad.domain.market_data import (
@@ -137,9 +138,19 @@ from qtrad.runtime.foundation_bundle import (
 )
 from qtrad.runtime.ibkr_b3 import (
     b3_preflight,
+    load_b3_deployment_descriptor,
     promote_b3_configuration,
     verify_b3_release,
     write_reviewed_configuration,
+)
+from qtrad.runtime.ibkr_b4 import (
+    IbkrB4DeploymentDescriptor,
+    b3_qualification_expectation,
+    b4_preflight,
+    promote_b4_configuration,
+    verify_b3_qualification_evidence_for_release,
+    verify_b4_release,
+    write_b4_release,
 )
 from qtrad.runtime.ibkr_canary import (
     verify_ibkr_historical_canary_evidence,
@@ -174,6 +185,13 @@ from qtrad.runtime.ibkr_native_capture import (
     build_ibkr_native_adapter,
     load_reviewed_configuration,
 )
+from qtrad.runtime.ibkr_qualification import write_qualification_artifact
+from qtrad.runtime.ibkr_qualification_evidence import (
+    IbkrQualificationWindow,
+    build_ibkr_qualification_snapshot,
+    verify_ibkr_restore_evidence,
+)
+from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
@@ -231,10 +249,15 @@ from qtrad.runtime.r2_verification import (
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
+    prepare_confirmatory_g2,
     require_ibkr_adapter_runtime_identity,
+    reveal_confirmatory_g2,
     runtime_identities,
     selection_freeze,
     verify_confirmatory_f2,
+    verify_confirmatory_g1,
+    verify_confirmatory_g2_preparation,
+    verify_confirmatory_r2h,
     verify_oof_bundle,
     verify_software_bundle,
     verify_software_bundle_async,
@@ -570,6 +593,17 @@ def build_parser() -> argparse.ArgumentParser:
     promote_b3.add_argument("--catalogue", type=Path, required=True)
     promote_b3.add_argument("--probe-spec", type=Path, required=True)
     promote_b3.add_argument("--output", type=Path, required=True)
+    promote_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+    )
+    promote_b3.add_argument("--parent-release", type=Path)
+    promote_b3.add_argument("--parent-descriptor", type=Path)
+    promote_b3.add_argument("--parent-qualification", type=Path)
+    promote_b3.add_argument("--parent-capability-review", type=Path)
+    promote_b3.add_argument("--parent-operator-selection", type=Path)
+    promote_b3.add_argument("--parent-contract-selection", type=Path)
+    promote_b3.add_argument("--parent-catalogue", type=Path)
+    promote_b3.add_argument("--parent-probe-spec", type=Path)
     verify_b3 = deployment_sub.add_parser(
         "ibkr-verify", help="verify an exact-two B3 config offline"
     )
@@ -580,12 +614,58 @@ def build_parser() -> argparse.ArgumentParser:
     verify_b3.add_argument("--catalogue", type=Path, required=True)
     verify_b3.add_argument("--probe-spec", type=Path, required=True)
     verify_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
+    verify_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
+    )
+    verify_b3.add_argument("--parent-release", type=Path)
+    verify_b3.add_argument("--parent-descriptor", type=Path)
+    verify_b3.add_argument("--parent-qualification", type=Path)
+    verify_b3.add_argument("--parent-capability-review", type=Path)
+    verify_b3.add_argument("--parent-operator-selection", type=Path)
+    verify_b3.add_argument("--parent-contract-selection", type=Path)
+    verify_b3.add_argument("--parent-catalogue", type=Path)
+    verify_b3.add_argument("--parent-probe-spec", type=Path)
     preflight_b3 = deployment_sub.add_parser(
         "ibkr-preflight", help="verify B3 release identity without host or provider I/O"
+    )
+    preflight_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
     )
     preflight_b3.add_argument("--descriptor", type=Path, required=True)
     preflight_b3.add_argument("--repository-root", type=Path, default=Path.cwd())
     preflight_b3.add_argument("--observed-at", type=_utc_timestamp_argument, required=True)
+
+    qualification_b3 = deployment_sub.add_parser(
+        "ibkr-qualification-verify",
+        help="verify an immutable B3 qualification artifact without provider I/O",
+    )
+    qualification_b3.add_argument("--qualification", type=Path, required=True)
+    qualification_b3.add_argument("--release", type=Path, required=True)
+    qualification_b3.add_argument("--descriptor", type=Path, required=True)
+    qualification_b3.add_argument("--capability-review", type=Path, required=True)
+    qualification_b3.add_argument("--operator-selection", type=Path, required=True)
+    qualification_b3.add_argument("--contract-selection", type=Path, required=True)
+    qualification_b3.add_argument("--catalogue", type=Path, required=True)
+    qualification_b3.add_argument("--probe-spec", type=Path, required=True)
+
+    qualification_snapshot = deployment_sub.add_parser(
+        "ibkr-qualification-snapshot",
+        help="build immutable B3 evidence from live and restored PostgreSQL stores",
+    )
+    qualification_snapshot.add_argument("--capture-session-id", type=UUID, required=True)
+    qualification_snapshot.add_argument("--started-at", type=_utc_timestamp_argument, required=True)
+    qualification_snapshot.add_argument("--ended-at", type=_utc_timestamp_argument, required=True)
+    qualification_snapshot.add_argument(
+        "--generated-at", type=_utc_timestamp_argument, required=True
+    )
+    qualification_snapshot.add_argument("--release", type=Path, required=True)
+    qualification_snapshot.add_argument("--descriptor", type=Path, required=True)
+    qualification_snapshot.add_argument("--capability-review", type=Path, required=True)
+    qualification_snapshot.add_argument("--operator-selection", type=Path, required=True)
+    qualification_snapshot.add_argument("--contract-selection", type=Path, required=True)
+    qualification_snapshot.add_argument("--catalogue", type=Path, required=True)
+    qualification_snapshot.add_argument("--probe-spec", type=Path, required=True)
+    qualification_snapshot.add_argument("--output", type=Path, required=True)
 
     runs = subparsers.add_parser("runs", help="operational run evidence")
     runs_sub = runs.add_subparsers(dest="runs_command", required=True)
@@ -978,6 +1058,51 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
     baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
 
+    baselines_confirmatory_g1_verify = baselines_sub.add_parser(
+        "confirmatory-g1-verify",
+        help="independently replay persisted confirmatory G1 against verified F2",
+    )
+    baselines_confirmatory_g1_verify.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g1_verify.add_argument("--selection", type=Path, required=True)
+
+    baselines_confirmatory_g2_prepare = baselines_sub.add_parser(
+        "confirmatory-g2-prepare",
+        help="prepare and seal outcome-blind confirmatory G2 evidence",
+    )
+    baselines_confirmatory_g2_prepare.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--prepared-by", required=True)
+    baselines_confirmatory_g2_prepare.add_argument("--output", type=Path, required=True)
+
+    baselines_confirmatory_g2_verify = baselines_sub.add_parser(
+        "confirmatory-g2-preparation-verify",
+        help="independently replay an unopened confirmatory G2 preparation",
+    )
+    baselines_confirmatory_g2_verify.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_g2_verify.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_g2_verify.add_argument("--preparation", type=Path, required=True)
+
+    baselines_confirmatory_reveal = baselines_sub.add_parser(
+        "confirmatory-g2-reveal",
+        help="irreversibly reveal and evaluate one verified confirmatory G2 preparation",
+    )
+    baselines_confirmatory_reveal.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--preparation", type=Path, required=True)
+    baselines_confirmatory_reveal.add_argument("--expected-selection-id", required=True)
+    baselines_confirmatory_reveal.add_argument("--expected-seal-id", required=True)
+    baselines_confirmatory_reveal.add_argument("--acknowledgement", required=True)
+    baselines_confirmatory_reveal.add_argument("--opened-by", required=True)
+    baselines_confirmatory_reveal.add_argument("--consumed-by", required=True)
+
+    baselines_confirmatory_r2h = baselines_sub.add_parser(
+        "confirmatory-r2h-verify",
+        help="independently verify the terminal confirmatory G2 lifecycle",
+    )
+    baselines_confirmatory_r2h.add_argument("--f2-bundle", type=Path, required=True)
+    baselines_confirmatory_r2h.add_argument("--selection", type=Path, required=True)
+    baselines_confirmatory_r2h.add_argument("--preparation", type=Path, required=True)
+
     baselines_selection_freeze = baselines_sub.add_parser(
         "selection-freeze", help="freeze disposable implementation selection mechanics"
     )
@@ -1195,52 +1320,160 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(descriptor.to_json())
     elif args.command == "deployment" and args.deployment_command == "ibkr-promote":
         source = load_reviewed_configuration(args.source_configuration)
-        promoted = promote_b3_configuration(
-            source,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-        )
-        write_reviewed_configuration(
-            args.output,
-            promoted,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-        )
+        if args.policy == "b3-exact-two":
+            configuration = promote_b3_configuration(
+                source,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+            )
+            write_reviewed_configuration(
+                args.output,
+                configuration,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+            )
+            contract = "qtrad-ibkr-native-release-v1"
+        else:
+            required = (
+                "parent_release",
+                "parent_descriptor",
+                "parent_qualification",
+                "parent_capability_review",
+                "parent_operator_selection",
+                "parent_contract_selection",
+                "parent_catalogue",
+                "parent_probe_spec",
+            )
+            missing = [name for name in required if getattr(args, name) is None]
+            if missing:
+                raise SystemExit(
+                    "B4 promotion requires " + ", ".join(name.replace("_", "-") for name in missing)
+                )
+            parent_paths = IbkrAuthorityPaths(
+                capability_review_path=args.parent_capability_review,
+                operator_selection_path=args.parent_operator_selection,
+                contract_selection_path=args.parent_contract_selection,
+                catalogue_path=args.parent_catalogue,
+                probe_spec_path=args.parent_probe_spec,
+            )
+            qualification = asyncio.run(
+                _verify_b3_qualification_from_databases(
+                    settings,
+                    qualification_path=args.parent_qualification,
+                    release_path=args.parent_release,
+                    descriptor_path=args.parent_descriptor,
+                    authority_paths=parent_paths,
+                )
+            )
+            promotion = promote_b4_configuration(
+                source,
+                authority_paths=IbkrAuthorityPaths(
+                    capability_review_path=args.capability_review,
+                    operator_selection_path=args.operator_selection,
+                    contract_selection_path=args.contract_selection,
+                    catalogue_path=args.catalogue,
+                    probe_spec_path=args.probe_spec,
+                ),
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                qualification=qualification,
+            )
+            write_b4_release(args.output, promotion)
+            configuration = promotion.configuration
+            contract = "qtrad-ibkr-native-release-v2"
         print(
             json.dumps(
                 {
-                    "contract": "qtrad-ibkr-native-release-v1",
-                    "configuration_hash": promoted.configuration_hash,
-                    "instrument_count": len(promoted.listings),
+                    "contract": contract,
+                    "configuration_hash": configuration.configuration_hash,
+                    "instrument_count": len(configuration.listings),
                 },
                 sort_keys=True,
             )
         )
     elif args.command == "deployment" and args.deployment_command == "ibkr-verify":
-        report = verify_b3_release(
-            args.configuration,
-            capability_review_path=args.capability_review,
-            operator_selection_path=args.operator_selection,
-            contract_selection_path=args.contract_selection,
-            catalogue_path=args.catalogue,
-            probe_spec_path=args.probe_spec,
-            observed_at=args.observed_at,
-        )
+        if args.policy == "b3-exact-two":
+            report = verify_b3_release(
+                args.configuration,
+                capability_review_path=args.capability_review,
+                operator_selection_path=args.operator_selection,
+                contract_selection_path=args.contract_selection,
+                catalogue_path=args.catalogue,
+                probe_spec_path=args.probe_spec,
+                observed_at=args.observed_at,
+            )
+        else:
+            required = (
+                "parent_release",
+                "parent_descriptor",
+                "parent_qualification",
+                "parent_capability_review",
+                "parent_operator_selection",
+                "parent_contract_selection",
+                "parent_catalogue",
+                "parent_probe_spec",
+            )
+            missing = [name for name in required if getattr(args, name) is None]
+            if missing:
+                raise SystemExit(
+                    "B4 verification requires "
+                    + ", ".join(name.replace("_", "-") for name in missing)
+                )
+            parent_paths = IbkrAuthorityPaths(
+                capability_review_path=args.parent_capability_review,
+                operator_selection_path=args.parent_operator_selection,
+                contract_selection_path=args.parent_contract_selection,
+                catalogue_path=args.parent_catalogue,
+                probe_spec_path=args.parent_probe_spec,
+            )
+            qualification = asyncio.run(
+                _verify_b3_qualification_from_databases(
+                    settings,
+                    qualification_path=args.parent_qualification,
+                    release_path=args.parent_release,
+                    descriptor_path=args.parent_descriptor,
+                    authority_paths=parent_paths,
+                )
+            )
+            report = verify_b4_release(
+                args.configuration,
+                authority_paths=IbkrAuthorityPaths(
+                    capability_review_path=args.capability_review,
+                    operator_selection_path=args.operator_selection,
+                    contract_selection_path=args.contract_selection,
+                    catalogue_path=args.catalogue,
+                    probe_spec_path=args.probe_spec,
+                ),
+                parent_release_path=args.parent_release,
+                parent_authority_paths=parent_paths,
+                qualification=qualification,
+                observed_at=args.observed_at,
+            )
         print(json.dumps(report, sort_keys=True))
         if not report["valid"]:
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-preflight":
-        report = b3_preflight(
-            args.descriptor,
-            repository_root=args.repository_root,
-            observed_at=args.observed_at,
-        )
+        if args.policy == "b3-exact-two":
+            report = b3_preflight(
+                args.descriptor,
+                repository_root=args.repository_root,
+                observed_at=args.observed_at,
+            )
+        else:
+            report = asyncio.run(
+                _b4_preflight_from_databases(
+                    settings,
+                    descriptor_path=args.descriptor,
+                    repository_root=args.repository_root,
+                    observed_at=args.observed_at,
+                )
+            )
         print(json.dumps(report, sort_keys=True))
         if (
             not report["valid"]
@@ -1248,6 +1481,57 @@ def main(argv: Sequence[str] | None = None) -> None:
             or report["requires_evidence_refresh"]
         ):
             raise SystemExit(1)
+    elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-verify":
+        capability = asyncio.run(
+            _verify_b3_qualification_from_databases(
+                settings,
+                qualification_path=args.qualification,
+                release_path=args.release,
+                descriptor_path=args.descriptor,
+                authority_paths=_ibkr_authority_paths(args),
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": "qtrad-ibkr-native-qualification-v1",
+                    "stage": capability.stage,
+                    "artifact_sha256": capability.artifact_sha256,
+                    "release_sha256": capability.release_sha256,
+                    "configuration_hash": capability.configuration_hash,
+                    "instrument_count": len(capability.instruments),
+                    "qualified_at": capability.qualified_at.isoformat(),
+                },
+                sort_keys=True,
+            )
+        )
+    elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-snapshot":
+        payload = asyncio.run(
+            _write_b3_qualification_snapshot(
+                settings,
+                release_path=args.release,
+                descriptor_path=args.descriptor,
+                authority_paths=_ibkr_authority_paths(args),
+                window=IbkrQualificationWindow(
+                    capture_session_id=args.capture_session_id,
+                    started_at=args.started_at,
+                    ended_at=args.ended_at,
+                    generated_at=args.generated_at,
+                ),
+                output_path=args.output,
+            )
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": payload["contract"],
+                    "stage": payload["stage"],
+                    "result": payload["result"],
+                    "output": str(args.output),
+                },
+                sort_keys=True,
+            )
+        )
     elif args.command == "runs" and args.runs_command == "reconcile-plan":
         asyncio.run(
             _plan_run_reconciliation(
@@ -1576,7 +1860,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         if args.ibkr_configuration is not None:
             ingest_kwargs["ibkr_configuration_path"] = args.ibkr_configuration
         asyncio.run(
-            _ingest(
+            _run_ingest(
                 ingest_settings,
                 clock,
                 **ingest_kwargs,
@@ -1840,6 +2124,92 @@ def main(argv: Sequence[str] | None = None) -> None:
             frozen_by=args.frozen_by,
         )
         print(json.dumps({"selection": str(args.output)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g1-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        print(json.dumps({"selection_manifest_id": g1.selection.manifest_id}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-prepare"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        manifest = prepare_confirmatory_g2(
+            verified_g1=g1,
+            output=args.output,
+            prepared_by=args.prepared_by,
+        )
+        print(json.dumps({"preparation": str(manifest)}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-preparation-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        preparation = verify_confirmatory_g2_preparation(
+            verified_g1=g1,
+            path=args.preparation,
+        )
+        print(json.dumps({"seal_id": preparation.seal.seal_id}, sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-g2-reveal"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        preparation = verify_confirmatory_g2_preparation(
+            verified_g1=g1,
+            path=args.preparation,
+        )
+        opened_at = datetime.now(UTC)
+        evaluation, consumed = reveal_confirmatory_g2(
+            preparation=preparation,
+            expected_selection_manifest_id=args.expected_selection_id,
+            expected_seal_id=args.expected_seal_id,
+            acknowledgement=args.acknowledgement,
+            opened_by=args.opened_by,
+            consumed_by=args.consumed_by,
+            opened_at=opened_at,
+            clock=clock,
+        )
+        print(
+            json.dumps(
+                {
+                    "evaluation_id": evaluation.evaluation_id,
+                    "consumed_marker_id": consumed.marker_id,
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-r2h-verify"
+    ):
+        f2 = verify_confirmatory_f2(args.f2_bundle)
+        g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
+        report = verify_confirmatory_r2h(verified_g1=g1, path=args.preparation)
+        print(
+            json.dumps(
+                {
+                    "status": report.status.value,
+                    "selection_manifest_id": report.selection_manifest_id,
+                    "seal_id": report.seal_id,
+                    "opened_marker_id": report.opened_marker_id,
+                    "consumed_marker_id": report.consumed_marker_id,
+                    "evaluation_id": report.evaluation_id,
+                    "reason": report.reason,
+                },
+                sort_keys=True,
+            )
+        )
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -3196,6 +3566,123 @@ async def _require_database_at_migration_head(settings: Settings) -> None:
             "isolated research database is not at the reviewed migration head: "
             f"expected {migration_head}"
         )
+
+
+def _ibkr_authority_paths(args: argparse.Namespace) -> IbkrAuthorityPaths:
+    return IbkrAuthorityPaths(
+        capability_review_path=args.capability_review,
+        operator_selection_path=args.operator_selection,
+        contract_selection_path=args.contract_selection,
+        catalogue_path=args.catalogue,
+        probe_spec_path=args.probe_spec,
+    )
+
+
+async def _verify_b3_qualification_from_databases(
+    settings: Settings,
+    *,
+    qualification_path: Path,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+) -> VerifiedIbkrCaptureQualification:
+    restore_url = settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
+        raise ValueError(
+            "hash-checked restore workflow URL and evidence are required for independent replay"
+        )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database="qtrad_ibkr",
+            expected_schema_head="0014",
+        )
+        return await verify_b3_qualification_evidence_for_release(
+            qualification_path,
+            parent_release_path=release_path,
+            parent_authority_paths=authority_paths,
+            deployment=load_b3_deployment_descriptor(descriptor_path),
+            live_store=PostgresAuditStore(live_engine),
+            restored_store=restored_store,
+            restore_evidence=restore_evidence,
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
+
+
+async def _write_b3_qualification_snapshot(
+    settings: Settings,
+    *,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    window: IbkrQualificationWindow,
+    output_path: Path,
+) -> dict[str, JsonValue]:
+    restore_url = settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
+        raise ValueError(
+            "hash-checked restore workflow URL and evidence are required for snapshot replay"
+        )
+    deployment = load_b3_deployment_descriptor(descriptor_path)
+    configuration, expectation = b3_qualification_expectation(
+        parent_release_path=release_path,
+        parent_authority_paths=authority_paths,
+        deployment=deployment,
+    )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database=expectation.database_name,
+            expected_schema_head=expectation.schema_head,
+        )
+        payload = await build_ibkr_qualification_snapshot(
+            PostgresAuditStore(live_engine),
+            restored_store,
+            restore_evidence=restore_evidence,
+            expectation=expectation,
+            configuration=configuration,
+            window=window,
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
+    write_qualification_artifact(output_path, payload)
+    return payload
+
+
+async def _b4_preflight_from_databases(
+    settings: Settings,
+    *,
+    descriptor_path: Path,
+    repository_root: Path,
+    observed_at: datetime,
+) -> dict[str, JsonValue]:
+    descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
+    qualification = await _verify_b3_qualification_from_databases(
+        settings,
+        qualification_path=descriptor.qualification_path,
+        release_path=descriptor.parent_release_path,
+        descriptor_path=descriptor_path,
+        authority_paths=descriptor.parent_authority_paths,
+    )
+    return b4_preflight(
+        descriptor_path,
+        repository_root=repository_root,
+        observed_at=observed_at,
+        qualification=qualification,
+    )
 
 
 def _upgrade_database(settings: Settings) -> None:
@@ -4670,6 +5157,44 @@ async def _synchronise_capture_universe(
     return tuple(by_instrument[instrument_id] for instrument_id in instrument_ids)
 
 
+async def _run_ingest(
+    settings: Settings,
+    clock: Clock,
+    *,
+    maximum_seconds: float | None = None,
+    force_reconnect_after_seconds: float | None = None,
+    ibkr_configuration_path: Path | None = None,
+) -> None:
+    """Run ingestion with process termination translated to orderly cancellation."""
+
+    loop = asyncio.get_running_loop()
+    ingest_task = asyncio.create_task(
+        _ingest(
+            settings,
+            clock,
+            maximum_seconds=maximum_seconds,
+            force_reconnect_after_seconds=force_reconnect_after_seconds,
+            ibkr_configuration_path=ibkr_configuration_path,
+        )
+    )
+    signal_installed = False
+
+    def request_shutdown() -> None:
+        if not ingest_task.done():
+            ingest_task.cancel()
+
+    try:
+        try:
+            loop.add_signal_handler(signal.SIGTERM, request_shutdown)
+            signal_installed = True
+        except (NotImplementedError, RuntimeError):
+            LOGGER.warning("ingest_termination_signal_unavailable")
+        await ingest_task
+    finally:
+        if signal_installed:
+            loop.remove_signal_handler(signal.SIGTERM)
+
+
 async def _ingest(
     settings: Settings,
     clock: Clock,
@@ -4917,6 +5442,10 @@ async def _ingest_ibkr_native(
     reconnect_error: Exception | None = None
     disconnect_error: Exception | None = None
     deadline_reached = False
+    forced_reconnect_completed = False
+    reconnect_from_generation: int | None = None
+    reconnect_to_generation: int | None = None
+    qualification_health: dict[str, JsonValue] | None = None
     try:
         # The run UUID is also the durable capture-session identity.  It is
         # created before the socket so a failed connection cannot emit an
@@ -4952,12 +5481,40 @@ async def _ingest_ibkr_native(
         worker.start()
 
         async def persist_health_snapshot() -> None:
+            nonlocal qualification_health
             composed = worker.compose_health(
                 await adapter.health(),
                 identity=identity,
                 capture_session_id=str(capture_session_id),
             )
+            reconnect_attributes = dict(composed.attributes)
+            reconnect_attributes.update(
+                {
+                    "forced_reconnect_requested": str(
+                        force_reconnect_after_seconds is not None
+                    ).lower(),
+                    "forced_reconnect_completed": str(forced_reconnect_completed).lower(),
+                }
+            )
+            if reconnect_from_generation is not None:
+                reconnect_attributes["reconnect_from_generation"] = str(reconnect_from_generation)
+            if reconnect_to_generation is not None:
+                reconnect_attributes["reconnect_to_generation"] = str(reconnect_to_generation)
+            composed = replace(composed, attributes=tuple(reconnect_attributes.items()))
             await store.record_adapter_health(composed)
+            if composed.status.value == "HEALTHY":
+                qualification_health = {
+                    "status": composed.status.value,
+                    "observed_at": composed.observed_at.isoformat(),
+                    "last_message_at": (
+                        composed.last_message_at.isoformat()
+                        if composed.last_message_at is not None
+                        else None
+                    ),
+                    "reason_codes": list(composed.reason_codes),
+                    "recovery_action": composed.recovery_action.value,
+                    "attributes": dict(composed.attributes),
+                }
             metrics = worker.snapshot()
             await store.record_capture_session_metrics(
                 capture_session_id=capture_session_id,
@@ -4975,9 +5532,19 @@ async def _ingest_ibkr_native(
         await persist_health_snapshot()
 
         async def force_reconnect() -> None:
+            nonlocal forced_reconnect_completed
+            nonlocal reconnect_from_generation, reconnect_to_generation
             assert force_reconnect_after_seconds is not None
             await asyncio.sleep(force_reconnect_after_seconds)
+            before = dict((await adapter.health()).attributes)
             await adapter.force_reconnect()
+            after = dict((await adapter.health()).attributes)
+            reconnect_from_generation = int(before["connection_generation"])
+            reconnect_to_generation = int(after["connection_generation"])
+            if reconnect_to_generation != reconnect_from_generation + 1:
+                raise RuntimeError("forced reconnect did not advance exactly one generation")
+            forced_reconnect_completed = True
+            await persist_health_snapshot()
 
         if force_reconnect_after_seconds is not None:
             reconnect_task = asyncio.create_task(force_reconnect())
@@ -5081,6 +5648,11 @@ async def _ingest_ibkr_native(
                     "persisted": metrics.persisted if metrics else 0,
                     "failed": metrics.failed if metrics else 0,
                     "dropped": metrics.dropped if metrics else 0,
+                    "forced_reconnect_requested": force_reconnect_after_seconds is not None,
+                    "forced_reconnect_completed": forced_reconnect_completed,
+                    "reconnect_from_generation": reconnect_from_generation,
+                    "reconnect_to_generation": reconnect_to_generation,
+                    "qualification_health": qualification_health,
                 },
             )
         await engine.dispose()

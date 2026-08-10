@@ -1,7 +1,6 @@
 [Unit]
 Description=q-trad IBKR recovery health action
 After=qtrad-ibkr-ingest.service
-Wants=qtrad-ibkr-ingest.service
 
 [Service]
 Type=oneshot

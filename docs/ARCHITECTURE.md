@@ -149,6 +149,16 @@ Walk-forward folds fit transformations and models only on permitted history. Pur
 derived from target, feature and update dependency windows. A locked final holdout is unavailable to
 feature, model, calibration, risk and solver selection.
 
+Confirmatory preparation and reveal are capability-gated. A persisted G1 selection is independently replayed
+from verified F2 before it can authorise final fitting. The resulting G2 preparation derives every scientific
+choice and R2.B feature row from that authority, fits the exact selected-plus-retained dependency set, and
+seals forecasts and explicit opportunity coverage as `OWNED_UNOPENED`. Independent verification recomputes
+the complete feature, fit, forecast and coverage closure. Reveal first publishes create-only base and
+confirmatory OPENED markers, then issues a runtime-only opened capability; only that capability may decode
+the exact authenticated target child. Evaluation inherits every scientific policy from G1, successful output
+is irreversibly CONSUMED, and independent R2.H replay classifies valid consumed, opened-incomplete and invalid
+terminal states without reset or reopen operations.
+
 Forecast, economic and portfolio gates remain separate. Reports bind dataset, code, configuration,
 folds and outputs and retain failed/rejected experiments. A negative result is valid; Rank IC alone
 is never described as profitability.

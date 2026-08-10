@@ -8,6 +8,32 @@ B3 now supplies the software-only exact-two native-capture release boundary: pro
 
 B3 does not run a host, Gateway, database, deployment or qualification operation. `qtrad deployment ibkr-verify` and `qtrad deployment ibkr-preflight` are offline checks; `deploy.sh --check` is non-mutating, while `deploy.sh --apply` is an explicitly invoked host mutation reserved for separately authorized operation. No B3 result is an overall IBKR capture or Stage-6 qualification claim.
 
+The dedicated native PostgreSQL service has its own earlier mutation boundary.
+Create `/etc/qtrad/ibkr-postgres.env` from the reviewed example, then run
+`postgres-provision.sh --apply`. A subsequent `--check` authenticates the
+installed lifecycle scripts and unit against the reviewed checkout, the
+immutable PostgreSQL image, the dedicated `qtrad_ibkr` database identity, the
+loopback-only host port, and `/srv/qtrad/postgres/ibkr-native-data`. Run
+`qtrad db migrate` against that empty database; never use `qtrad db upgrade`,
+which also invokes the generic capture-universe seeder. `deploy.sh --check`
+requires this database service and the expected migration head before any B3
+runtime mutation.
+
+The host does not install the q-trad Python application. By default,
+`deploy.sh` runs offline release preflight through `qtrad-container-cli.sh` in
+the exact immutable IBKR image, with networking disabled and only `/etc/qtrad`
+and `/srv/qtrad/ibkr` mounted read-only. This keeps the preflight executable
+identity aligned with the image that later runs the collector and API. The
+wrapper invokes the installed virtual-environment Python directly so the
+read-only preflight does not require a writable package-manager cache.
+
+The official Gateway may expose its API listener as a wildcard socket. That
+shape is accepted only because `verify-host.sh` independently requires the
+reviewed `TrustedIPs` configuration and a firewalld policy that prevents remote
+access to port 4002. The ingest wrapper requires the authenticated listener to
+exist; it does not contradict that host-level authority by requiring a literal
+loopback socket.
+
 ## Before running the bounded probe
 
 1. Attach and mount the OCI block device at `/srv/qtrad/postgres`; `verify-host.sh` fails closed if
@@ -53,6 +79,102 @@ B3 does not run a host, Gateway, database, deployment or qualification operation
 
 Use `qtrad deployment ibkr-promote` only with an already reviewed B2 configuration and the immutable capability-review, operator-selection, contract-selection, catalogue and probe files; it replays that closure and writes their exact hashes into a new exact-two release create-only. `qtrad deployment ibkr-verify` requires the same authority files and replays them against the final persisted evidence. `qtrad deployment ibkr-preflight` reads their absolute paths from the immutable descriptor and performs the same replay. The B3 implementation and verification boundary stops there; live Gateway, database, deployment, restart/reconnect, backup/restore and qualification evidence require separate authorization.
 
+## Offline B4 software boundary
+
+B4 remains offline software until a separately authorized, real B3 qualification has
+been frozen. The exact-six policy is AUD/USD, EUR/USD, Australia 200, US 500, Gold,
+and US Crude. The four new conIds and all contract fields must come from a fresh,
+replayed capability-review/selection closure; the implementation does not guess them.
+
+B4 promotion, verification, and preflight remain fail-closed unless the qualification
+artifact is independently replayed against the exact live capture database and a fresh,
+hash-checked disposable restore. A sealed qualification summary, restore database name,
+API response, fake store or copied database is not provenance and cannot mint the
+runtime-only capability.
+
+Run qualification commands only as the child command of
+`qtrad-ibkr-postgres-restore-verify`, through the installed
+`qtrad-ibkr-qualification` wrapper. Set the selected archive with
+`QTRAD_IBKR_RESTORE_ARCHIVE` and the new provenance path with
+`QTRAD_IBKR_RESTORE_EVIDENCE_PATH`; the archive is never a positional argument.
+The restore wrapper checks the selected backup's recorded SHA-256 before
+`pg_restore --exit-on-error`, marks the disposable `qtrad_ibkr_restore_verify_*`
+database with that archive identity, writes create-only restore evidence binding
+source database, restored database, schema, archive SHA and completion, exports
+the ephemeral restore URL/evidence path, executes the bounded qualification
+command while the database exists, and then drops it. The qualification wrapper
+is the single runtime composition: it preserves UID/GID 10001, read-only/cap-drop
+hardening, exact live/restore database identities, and the narrowly writable
+qualification-evidence directory. The application re-hashes the archive,
+authenticates the database marker and exact evidence before any snapshot or
+verifier can proceed.
+
+The qualifying collector run must be cleanly stopped before backup so its final metrics
+and last healthy, post-reconnect snapshot are immutable in the run record and replay
+exactly after restore. Before that deliberate stop, stop `qtrad-ibkr-health.timer` and
+any active `qtrad-ibkr-health.service`, then stop `qtrad-ibkr-ingest.service`. The health
+unit no longer has a `Wants=` or `Requires=` activation edge to ingest, so a timer firing
+cannot pull the collector up merely through dependency resolution. It can still execute
+an explicit recovery action; quiescing the timer remains part of the qualification
+boundary.
+
+Run the bounded collector through the installed hardened ingest wrapper, not a rebuilt
+Docker command. It accepts either no arguments for the continuous systemd service or
+exactly the bounded qualification pair:
+
+```bash
+set -a
+. /etc/qtrad/ibkr-ingest.env
+set +a
+/usr/local/sbin/qtrad-ibkr-ingest \
+  --max-seconds 180 \
+  --force-reconnect-after-seconds 60
+```
+
+Keep continuous ingest stopped until the qualifying backup has completed. On every
+success or failure path, restore `qtrad-ibkr-ingest.service` and
+`qtrad-ibkr-health.timer`; verify readiness before leaving the boundary.
+
+Fresh backup archives, sidecars and restore evidence are root-owned mode `0640` with
+runtime group `10001`; their containing directories are mode `0750` with that group.
+This grants the hardened verifier read-only access without running its container as root
+or applying operator ACLs. `QTRAD_IBKR_RUNTIME_GID=10001` is a required authenticated
+backup-environment identity, not a default. Archives created before this contract require
+a fresh backup rather than manual permission repair. The operator API exposes the same
+bounded evidence query at `/api/v1/capture/qualification-evidence`; that read-only
+endpoint never grants qualification authority.
+
+After genuine B3 evidence is available, `qtrad deployment ibkr-promote
+--policy b4-exact-six` requires the authenticated B3 release, its five authority files,
+the B3 deployment descriptor, and fresh exact-six authority. The B4 release records
+parent release and qualification identities and remains create-only under
+`qtrad-ibkr-native-release-v2`.
+
+The B4 exact-six authority must preserve the B3-qualified AUD/USD and Australia 200
+listing identities, conIds, and immutable listing semantics. The other four contracts
+must come from the fresh replayed authority closure. B4 continues to reuse the existing
+service, database, port, client-ID, and checkpoint topology.
+
+This software phase did not create a qualification artifact or real B4 release and did
+not query either database. Closed-market connectivity is not qualification evidence.
+Real qualification still requires LIVE bid and ask evidence during authenticated
+ACTIVE periods, zero-loss persistence, controlled reconnect with fresh post-reconnect
+data, and verified backup/restore.
+
+The bounded restore interface is:
+
+```bash
+QTRAD_IBKR_RESTORE_ARCHIVE=/srv/qtrad/postgres/backups/qtrad-ibkr-YYYYMMDDTHHMMSSZ.dump \
+QTRAD_IBKR_RESTORE_EVIDENCE_PATH=/var/lib/qtrad/ibkr/restore-evidence/<new-name>.json \
+  /usr/local/sbin/qtrad-ibkr-postgres-restore-verify \
+  /usr/local/sbin/qtrad-ibkr-qualification \
+  deployment ibkr-qualification-snapshot <snapshot arguments>
+```
+
+Use the same composition with `ibkr-qualification-verify` and a fresh restore-evidence
+path for independent replay. Never decompose its Docker mounts, user identity or archive
+selection into an ad-hoc operator command.
+
 ## Running explicit historical CLI commands
 
 The published IBKR image has an `uv` entrypoint. To invoke a q-trad subcommand, override that
@@ -67,9 +189,11 @@ docker run --rm --network host --user 10001:10001 --entrypoint uv \
   python -m qtrad historical ibkr <command> ...
 ```
 
-The published IBKR image has an explicit `uv` entrypoint. The B3 ingest wrapper invokes the
-same frozen command as an unprivileged, read-only container and binds the reviewed configuration
-and persistent checkpoint paths; it is installed only by an explicitly authorized `deploy.sh --apply`.
+The B3 deployment, ingest, and API wrappers invoke the installed virtual-environment Python
+directly. This preserves the frozen image dependency set without requiring a writable package-manager
+cache inside their unprivileged, read-only containers. The ingest wrapper binds the reviewed
+configuration and persistent checkpoint paths and is installed only by an explicitly authorized
+`deploy.sh --apply`.
 
 ## OCIR repository setup
 
@@ -103,10 +227,14 @@ closed when another run is active; preserve the failed container and its logs fo
 starting a second run. `QTRAD_IMAGE_DIGEST` may be a full immutable `qtrad-ibkr@sha256:` reference for
 canary binding; execution closure verification normalizes it to the locked bare `sha256:` digest.
 
-Retain the current image digest, runtime lock, evidence and approved rollback material. Review
-after `docker system df`, exited probe containers and historical qtrad-app/qtrad-ibkr-probe image tags
-before any cleanup; remove only targeted, unreferenced feasibility artefacts after their evidence is
-preserved. Never use a broad `docker system prune` on this host.
+Image retention is part of the normal deployment lifecycle. `deploy.sh --check` reports the
+repository-scoped keep/remove plan without mutation. After a successful `--apply` restart,
+the deployer recalculates that plan, preserves the exact deployed image and every image referenced
+by any container, retains the most-recent additional unreferenced qtrad-ibkr image for rollback,
+and removes only older unreferenced immutable digests from that repository. Images lacking an
+immutable repository digest are retained for explicit review. It never invokes broad image or
+system pruning and does not touch unrelated repositories, containers, build cache, volumes,
+databases, backups, checkpoints or evidence.
 
 PostgreSQL dumps and checksums belong under `/srv/qtrad/postgres/backups`; the backup script rejects
 other locations. Rollout rollback archives must have an explicit retention/location decision rather than

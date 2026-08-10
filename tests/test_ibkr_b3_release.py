@@ -695,11 +695,14 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     ingest_unit = (ops / "qtrad-ibkr-ingest.service.example").read_text(encoding="utf-8")
     api = (ops / "qtrad-ibkr-api-wrapper.example").read_text(encoding="utf-8")
     deploy = (ops / "deploy.sh").read_text(encoding="utf-8")
+    container_cli = (ops / "qtrad-container-cli.sh").read_text(encoding="utf-8")
     backup = (ops / "postgres-backup.sh").read_text(encoding="utf-8")
     restore = (ops / "postgres-restore-verify.sh").read_text(encoding="utf-8")
+    qualification = (ops / "qtrad-ibkr-qualification-wrapper.example").read_text(encoding="utf-8")
 
     assert "qtrad ingest --provider ibkr" in ingest
-    assert "--entrypoint uv" in ingest
+    assert '--entrypoint /app/.venv/bin/python "$image"' in ingest
+    assert "run --frozen" not in ingest
     assert "--user 10001:10001" in ingest
     assert "--read-only" in ingest
     assert "--cap-drop=ALL" in ingest
@@ -708,12 +711,16 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "QTRAD_IBKR_PASSWORD" not in ingest
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in ingest
     assert "qtrad api --host 127.0.0.1 --port 8000" in api
+    assert '--entrypoint /app/.venv/bin/python "$image"' in api
+    assert "run --frozen" not in api
     assert "--user 10001:10001" in api
     assert "--read-only" in api
     assert "--publish" not in api
     assert "QTRAD_IBKR_PASSWORD" not in api
     assert "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH" in api
     assert "usage: deploy.sh --check|--apply" in deploy
+    assert '--entrypoint /app/.venv/bin/python "$image"' in deploy
+    assert "run --frozen --no-dev --no-sync python -m qtrad db verify-head" not in deploy
     script_dir = 'script_dir="$(cd -- "$(dirname -- "$0")" && pwd)"'
     assert script_dir in deploy
     assert deploy.index(script_dir) < deploy.index("canonical_env_file=")
@@ -721,16 +728,102 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "EnvironmentFile=/etc/qtrad/ibkr-ingest.env" in ingest_unit
     assert "--env-file /etc/qtrad/ibkr-ingest.env" in ingest
     assert "verify_host_identity" in deploy
+    assert 'preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-}"' in deploy
+    assert 'bash "$script_dir/qtrad-container-cli.sh"' in deploy
+    assert "--network none" in container_cli
+    assert "--user 10001:10001" in container_cli
+    assert "--read-only" in container_cli
+    assert "--cap-drop=ALL" in container_cli
+    assert "--volume /etc/qtrad:/etc/qtrad:ro" in container_cli
+    assert "--volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro" in container_cli
+    assert '--entrypoint /app/.venv/bin/python "$image"' in container_cli
+    assert '-m qtrad "$@"' in container_cli
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
+    assert "docker system prune" not in deploy
+    assert "docker image prune" not in deploy
+    assert "docker container ls -aq" in deploy
+    assert "docker image rm" in deploy
+    assert 'backup_env_file="/etc/qtrad/ibkr-backup.env"' in deploy
+    assert "verify_backup_identity" in deploy
     assert "systemctl enable --now" not in deploy
     assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
     assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
-    assert "qtrad_ibkr_restore_" in restore
+    assert "qtrad_ibkr_restore_verify_" in restore
+    assert "sha256sum --check" in restore
+    assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
+    assert 'docker exec -i "$container" pg_restore --list' in backup
+    assert "COMMENT ON DATABASE" in restore
+    assert "restore-evidence" in restore
+    assert "QTRAD_IBKR_RESTORE_ARCHIVE" in restore
+    assert '"$@"' in restore
+    assert "qtrad-ibkr-qualification-wrapper.example" in deploy
+    assert "reviewed qualification wrapper is unavailable" in deploy
+    assert "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL" in qualification
+    assert "--user 10001:10001" in qualification
+    assert "--read-only" in qualification
+    assert "--cap-drop=ALL" in qualification
+    assert "placeOrder" not in qualification
     assert "trap cleanup EXIT" in restore
     assert "QTRAD_IBKR_PASSWORD" not in backup + restore
+
+
+@pytest.mark.parametrize(
+    ("arguments", "expected_returncode"),
+    [
+        (("--max-seconds", "180", "--force-reconnect-after-seconds", "60"), 0),
+        (("--force-reconnect-after-seconds", "60", "--max-seconds", "180"), 64),
+        (("--max-seconds", "60", "--force-reconnect-after-seconds", "60"), 64),
+    ],
+)
+def test_ingest_wrapper_bounds_qualification_arguments(
+    tmp_path: Path,
+    arguments: tuple[str, ...],
+    expected_returncode: int,
+) -> None:
+    wrapper = _REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-ingest-wrapper.example"
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    docker_calls = tmp_path / "docker-calls"
+    _write_executable(fake_bin / "ss", "#!/bin/sh\nprintf 'LISTEN\\n'\n")
+    _write_executable(
+        fake_bin / "docker",
+        f"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{docker_calls}'\n",
+    )
+    checkpoint_root = tmp_path / "checkpoints"
+    checkpoint_root.mkdir()
+    configuration = tmp_path / "capture.json"
+    configuration.write_text("{}\n", encoding="utf-8")
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "PATH": str(fake_bin) + os.pathsep + environment["PATH"],
+            "QTRAD_IBKR_IMAGE": "registry.example.invalid/qtrad@sha256:" + "a" * 64,
+            "QTRAD_IBKR_CHECKPOINT_ROOT": str(checkpoint_root),
+            "QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH": str(configuration),
+            "QTRAD_DATABASE_URL": "postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr",
+            "QTRAD_IBKR_API_PACKAGE_FINGERPRINT": "b" * 64,
+            "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH": "c" * 64,
+        }
+    )
+
+    result = subprocess.run(
+        ["bash", str(wrapper), *arguments],
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert result.returncode == expected_returncode, result.stderr
+    if expected_returncode == 0:
+        call = docker_calls.read_text(encoding="utf-8")
+        assert "--max-seconds 180 --force-reconnect-after-seconds 60" in call
+        assert call.count("--provider ibkr") == 1
+    else:
+        assert not docker_calls.exists()
 
 
 @pytest.mark.parametrize("mode", ["--check", "--apply"])
@@ -865,6 +958,7 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     script_dir = repository / "ops" / "ibkr"
     script_dir.mkdir(parents=True)
     canonical_env = tmp_path / "ibkr-ingest.env"
+    backup_env = tmp_path / "ibkr-backup.env"
     calls = tmp_path / "calls"
 
     deploy_source = (_REPOSITORY_ROOT / "ops" / "ibkr" / "deploy.sh").read_text(encoding="utf-8")
@@ -872,13 +966,24 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         'canonical_env_file="/etc/qtrad/ibkr-ingest.env"',
         f'canonical_env_file="{canonical_env}"',
     )
+    deploy_source = deploy_source.replace(
+        'backup_env_file="/etc/qtrad/ibkr-backup.env"',
+        f'backup_env_file="{backup_env}"',
+    )
     deploy_path = script_dir / "deploy.sh"
     _write_executable(deploy_path, deploy_source)
     _write_executable(
         script_dir / "verify-host.sh",
         f"#!/bin/sh\nprintf '%s\\n' verify-host >> '{calls}'\n",
     )
-
+    _write_executable(
+        script_dir / "postgres-provision.sh",
+        f"#!/bin/sh\nprintf '%s\\n' postgres-provision >> '{calls}'\n",
+    )
+    _write_executable(
+        script_dir / "qtrad-ibkr-qualification-wrapper.example",
+        "#!/bin/sh\n",
+    )
     subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)
     subprocess.run(["git", "-C", str(repository), "add", "ops/ibkr"], check=True)
     subprocess.run(
@@ -903,18 +1008,56 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         text=True,
     ).stdout.strip()
 
+    image_repository = "registry.example.invalid/qtrad"
+    image_digest = "b" * 64
+    image = f"{image_repository}@sha256:{image_digest}"
+    deployed_image_id = "sha256:" + "b" * 64
+    referenced_image_id = "sha256:" + "c" * 64
+    rollback_image_id = "sha256:" + "d" * 64
+    removable_image_id = "sha256:" + "e" * 64
+    unrelated_image_id = "sha256:" + "f" * 64
+    configuration_hash = "a" * 64
+    api_fingerprint = "c" * 64
+    gateway_archive_sha = "d" * 64
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    for command in ("docker", "install", "systemctl"):
+    docker_script = f"""#!/bin/sh
+printf '%s %s\\n' docker "$*" >> '{calls}'
+case "$1 $2" in
+    "image inspect")
+        printf '%s\\n' '{deployed_image_id}'
+        ;;
+    "container ls")
+        printf '%s\\n' current-container retained-container
+        ;;
+    "container inspect")
+        case "$5" in
+            current-container) printf '%s\\n' '{deployed_image_id}' ;;
+            retained-container) printf '%s\\n' '{referenced_image_id}' ;;
+            *) exit 88 ;;
+        esac
+        ;;
+    "image ls")
+        printf '%s\\n' \
+            '{image_repository}|sha256:{image_digest}|{deployed_image_id}' \
+            '{image_repository}|sha256:{"c" * 64}|{referenced_image_id}' \
+            '{image_repository}|sha256:{"d" * 64}|{rollback_image_id}' \
+            '{image_repository}|sha256:{"e" * 64}|{removable_image_id}' \
+            'registry.example.invalid/unrelated|sha256:{"f" * 64}|{unrelated_image_id}'
+        ;;
+esac
+"""
+    _write_executable(fake_bin / "docker", docker_script)
+    for command in ("install", "systemctl"):
         _write_executable(
             fake_bin / command,
             f"#!/bin/sh\nprintf '%s %s\\n' {command} \"$*\" >> '{calls}'\n",
         )
-
-    image = "registry.example.invalid/qtrad@sha256:" + "b" * 64
-    configuration_hash = "a" * 64
-    api_fingerprint = "c" * 64
-    gateway_archive_sha = "d" * 64
+    _write_executable(
+        fake_bin / "stat",
+        "#!/bin/sh\ncase \"$*\" in *%U:%G*) printf 'root:root\\n' ;; *) printf '600\\n' ;; esac\n",
+    )
     configuration_path = "/srv/qtrad/ibkr/capture.json"
     descriptor = tmp_path / "deployment.toml"
     descriptor.write_text("[release]\n", encoding="utf-8")
@@ -924,6 +1067,17 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         f"QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH={configuration_hash}\n",
         encoding="utf-8",
     )
+    backup_env.write_text(
+        "QTRAD_IBKR_BACKUP_DIR=/srv/qtrad/postgres/backups\n"
+        "QTRAD_IBKR_STATUS_DIR=/var/lib/qtrad/ibkr\n"
+        "QTRAD_IBKR_POSTGRES_CONTAINER=qtrad-ibkr-native-postgres\n"
+        "QTRAD_IBKR_POSTGRES_DATABASE=qtrad_ibkr\n"
+        "QTRAD_IBKR_POSTGRES_USER=qtrad_ibkr\n"
+        "QTRAD_IBKR_BACKUP_RETENTION_DAYS=14\n"
+        "QTRAD_IBKR_RUNTIME_GID=10001\n",
+        encoding="utf-8",
+    )
+    backup_env.chmod(0o600)
 
     preflight = tmp_path / "qtrad-preflight"
     preflight_report = {
@@ -983,21 +1137,32 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     assert result.returncode == 0, result.stderr
     recorded_calls = calls.read_text(encoding="utf-8").splitlines()
     assert "verify-host" in recorded_calls
+    assert "postgres-provision" in recorded_calls
     assert any(
         call.startswith("docker run ") and "db verify-head" in call for call in recorded_calls
     )
+    assert f"keep {deployed_image_id} reason=deployed" in result.stdout
+    assert f"keep {referenced_image_id} reason=container-referenced" in result.stdout
+    assert f"keep {rollback_image_id} reason=most-recent-unreferenced-rollback" in result.stdout
+    removable_reference = f"{image_repository}@sha256:{'e' * 64}"
+    assert f"remove {removable_image_id} reference={removable_reference}" in result.stdout
+    assert unrelated_image_id not in result.stdout
+    image_remove_call = f"docker image rm {removable_reference}"
     if mode == "--check":
         assert "no host mutation performed" in result.stdout
         assert not any(call.startswith(("install ", "systemctl ")) for call in recorded_calls)
+        assert image_remove_call not in recorded_calls
     else:
         assert (
-            "systemctl enable qtrad-ibkr-api.service qtrad-ibkr-ingest.service "
+            "systemctl enable qtrad-ibkr-postgres.service qtrad-ibkr-api.service "
+            "qtrad-ibkr-ingest.service "
             "qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
         ) in recorded_calls
-        assert (
-            "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service"
-        ) in recorded_calls
+        ingest_restart = "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service"
+        assert ingest_restart in recorded_calls
         assert (
             "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
         ) in recorded_calls
+        assert image_remove_call in recorded_calls
+        assert recorded_calls.index(ingest_restart) < recorded_calls.index(image_remove_call)
         assert not any("enable --now" in call for call in recorded_calls)

@@ -21,6 +21,11 @@ from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.modes import BrokerEnvironment
 from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.runtime.ibkr_native_capture import load_reviewed_configuration
+from qtrad.runtime.ibkr_qualification_evidence import (
+    IbkrQualificationWindow,
+    compact_ibkr_qualification_evidence,
+    read_ibkr_qualification_evidence,
+)
 from qtrad.runtime.settings import Settings
 from qtrad.runtime.universe import load_capture_universe
 
@@ -273,6 +278,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 capture_session_id=(str(capture_session_id) if capture_session_id else None),
             )
         )
+
+    @app.get("/api/v1/capture/qualification-evidence")
+    async def capture_qualification_evidence(
+        capture_session_id: UUID,
+        started_at: datetime,
+        ended_at: datetime,
+        generated_at: datetime,
+    ) -> Any:
+        """Return bounded retained evidence; this endpoint never grants qualification."""
+
+        identity, _ = current_identity()
+        if identity.source_class is not MarketDataSourceClass.IBKR_NATIVE_CAPTURE:
+            raise HTTPException(status_code=404, detail="IBKR qualification evidence unavailable")
+        evidence = await read_ibkr_qualification_evidence(
+            store,
+            configuration_hash=identity.configuration_hash,
+            window=IbkrQualificationWindow(
+                capture_session_id=capture_session_id,
+                started_at=started_at,
+                ended_at=ended_at,
+                generated_at=generated_at,
+            ),
+            include_operations=False,
+        )
+        return jsonable_encoder(compact_ibkr_qualification_evidence(evidence))
 
     @app.get("/api/v1/instruments")
     async def instruments() -> Any:

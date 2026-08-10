@@ -41,7 +41,8 @@
         "esbenp.prettier-vscode",
         "ms-python.python",
         "ms-python.vscode-python-envs",
-        "mechatroner.rainbow-csv"
+        "mechatroner.rainbow-csv",
+        "hiztam.codex-history-viewer"
       ]
     }
   }

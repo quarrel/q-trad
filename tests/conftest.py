@@ -71,6 +71,33 @@ _manifest_path.chmod(0o444)
 _production_loader = _verification._image_identity_manifest
 
 
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    unmarked = sorted(
+        item.nodeid
+        for item in items
+        if isinstance(item, pytest.Function)
+        and "postgres_database_url" in item.fixturenames
+        and item.get_closest_marker("postgres") is None
+    )
+    if unmarked:
+        raise pytest.UsageError(
+            "tests using postgres_database_url must carry pytest.mark.postgres: "
+            + ", ".join(unmarked)
+        )
+
+
+@pytest.fixture
+def postgres_database_url() -> str:
+    database_url = os.getenv("QTRAD_TEST_DATABASE_URL")
+    if database_url is None:
+        skip_reason = (
+            "QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration; "
+            "run ops/dev/verify.sh for the complete local gate"
+        )
+        pytest.skip(skip_reason)  # ty: ignore[too-many-positional-arguments]
+    return database_url
+
+
 @pytest.fixture(autouse=True)
 def _test_image_identity_manifest(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(

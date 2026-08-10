@@ -17,6 +17,7 @@ if [[ -n "${QTRAD_IBKR_ENV_FILE:-}" && "$QTRAD_IBKR_ENV_FILE" != "$canonical_env
     exit 64
 fi
 env_file="$canonical_env_file"
+backup_env_file="/etc/qtrad/ibkr-backup.env"
 if [[ -f "$env_file" ]]; then
     set -a
     # shellcheck disable=SC1090
@@ -27,7 +28,8 @@ fi
 image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
 descriptor="${QTRAD_IBKR_RELEASE_DESCRIPTOR:?set QTRAD_IBKR_RELEASE_DESCRIPTOR}"
 repository_root="${QTRAD_IBKR_REPOSITORY_ROOT:-$script_dir/../..}"
-preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-qtrad}"
+preflight_bin="${QTRAD_B3_PREFLIGHT_BIN:-}"
+release_policy="${QTRAD_IBKR_RELEASE_POLICY:-b3-exact-two}"
 checkpoint_root="${QTRAD_IBKR_CHECKPOINT_ROOT:?set QTRAD_IBKR_CHECKPOINT_ROOT}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
 gateway_archive_sha="${QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256:?set QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256}"
@@ -48,6 +50,127 @@ base_image="${QTRAD_IMAGE:-$image}"
 
 fail() { echo "IBKR B3 preflight: $*" >&2; exit 64; }
 
+declare -a image_retention_remove_references=()
+
+plan_image_retention() {
+    local image_repository deployed_image_id container_output container_id referenced_image_id
+    local image_rows repository digest image_id rollback_image_id references
+    local deployed_seen=0
+    local -a repository_image_ids=()
+    local -A protected_image_ids=()
+    local -A repository_image_seen=()
+    local -A repository_references=()
+
+    image_retention_remove_references=()
+    image_repository="${image%@sha256:*}"
+    deployed_image_id="$(docker image inspect "$image" --format '{{.Id}}')" \
+        || fail "deployed image identity cannot be resolved"
+    [[ "$deployed_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+        || fail "deployed image ID is invalid"
+    protected_image_ids["$deployed_image_id"]=1
+
+    container_output="$(docker container ls -aq)" \
+        || fail "container image references cannot be listed"
+    while IFS= read -r container_id; do
+        [[ -n "$container_id" ]] || continue
+        referenced_image_id="$(
+            docker container inspect --format '{{.Image}}' "$container_id"
+        )" || fail "container image reference cannot be resolved: $container_id"
+        [[ "$referenced_image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fail "container image ID is invalid: $container_id"
+        protected_image_ids["$referenced_image_id"]=1
+    done <<<"$container_output"
+
+    image_rows="$(
+        docker image ls --digests --no-trunc \
+            --format '{{.Repository}}|{{.Digest}}|{{.ID}}' "$image_repository"
+    )" || fail "IBKR repository images cannot be listed"
+    while IFS='|' read -r repository digest image_id; do
+        [[ -n "$repository" ]] || continue
+        [[ "$repository" == "$image_repository" ]] || continue
+        [[ "$image_id" =~ ^sha256:[0-9a-f]{64}$ ]] \
+            || fail "IBKR repository returned an invalid image ID"
+        if [[ -z "${repository_image_seen[$image_id]:-}" ]]; then
+            repository_image_ids+=("$image_id")
+            repository_image_seen["$image_id"]=1
+        fi
+        if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            repository_references["$image_id"]+="$repository@$digest"$'\n'
+        fi
+        if [[ "$image_id" == "$deployed_image_id" ]]; then
+            deployed_seen=1
+        fi
+    done <<<"$image_rows"
+    ((deployed_seen == 1)) || fail "deployed image is absent from its IBKR repository listing"
+
+    rollback_image_id=""
+    for image_id in "${repository_image_ids[@]}"; do
+        if [[ -n "${protected_image_ids[$image_id]:-}" ]]; then
+            continue
+        fi
+        rollback_image_id="$image_id"
+        break
+    done
+
+    printf 'IBKR image retention plan: repository=%s\n' "$image_repository"
+    for image_id in "${repository_image_ids[@]}"; do
+        if [[ "$image_id" == "$deployed_image_id" ]]; then
+            printf 'keep %s reason=deployed\n' "$image_id"
+            continue
+        fi
+        if [[ -n "${protected_image_ids[$image_id]:-}" ]]; then
+            printf 'keep %s reason=container-referenced\n' "$image_id"
+            continue
+        fi
+        if [[ "$image_id" == "$rollback_image_id" ]]; then
+            printf 'keep %s reason=most-recent-unreferenced-rollback\n' "$image_id"
+            continue
+        fi
+        references="${repository_references[$image_id]:-}"
+        if [[ -z "$references" ]]; then
+            printf 'keep %s reason=no-immutable-repository-reference\n' "$image_id"
+            continue
+        fi
+        while IFS= read -r reference; do
+            [[ -n "$reference" ]] || continue
+            image_retention_remove_references+=("$reference")
+            printf 'remove %s reference=%s\n' "$image_id" "$reference"
+        done <<<"$references"
+    done
+}
+
+apply_image_retention() {
+    if (("${#image_retention_remove_references[@]}" == 0)); then
+        return
+    fi
+    docker image rm "${image_retention_remove_references[@]}" >/dev/null
+}
+
+verify_backup_identity() {
+    [[ -f "$backup_env_file" ]] || fail "canonical backup environment is missing: $backup_env_file"
+    [[ "$(stat -c '%U:%G' "$backup_env_file")" == root:root ]] \
+        || fail "canonical backup environment must be root-owned"
+    backup_mode="$(stat -c '%a' "$backup_env_file")"
+    [[ "$backup_mode" == 600 || "$backup_mode" == 640 ]] \
+        || fail "canonical backup environment must use mode 0600 or 0640"
+    (
+        set -a
+        # shellcheck disable=SC1090
+        . "$backup_env_file"
+        set +a
+        [[ "${QTRAD_IBKR_BACKUP_DIR:-}" == /srv/qtrad/postgres/backups \
+            && "${QTRAD_IBKR_STATUS_DIR:-}" == /var/lib/qtrad/ibkr \
+            && "${QTRAD_IBKR_POSTGRES_CONTAINER:-}" == qtrad-ibkr-native-postgres \
+            && "${QTRAD_IBKR_POSTGRES_DATABASE:-}" == qtrad_ibkr \
+            && "${QTRAD_IBKR_POSTGRES_USER:-}" == qtrad_ibkr \
+            && "${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-}" =~ ^[1-9][0-9]*$ \
+            && "${QTRAD_IBKR_RUNTIME_GID:-}" == 10001 ]] \
+            || fail "canonical backup environment has unexpected identities"
+        [[ -z "${QTRAD_IBKR_RESTORE_DATABASE:-}" ]] \
+            || fail "restore database identity must be generated per verification run"
+    )
+}
+
 verify_checkout_identity() {
     [[ "$application_commit" =~ ^[0-9a-f]{40}$ ]] || fail "application commit is invalid"
     checkout_commit="$(git -C "$repository_root" rev-parse --verify HEAD 2>/dev/null)" || fail "checkout commit cannot be resolved"
@@ -63,14 +186,14 @@ verify_host_identity() {
         QTRAD_IBKR_GATEWAY_ARCHIVE_SHA256="$gateway_archive_sha" \
         QTRAD_IBKR_API_PACKAGE_FINGERPRINT="$api_fingerprint" \
         QTRAD_IBKR_CHECKPOINT_ROOT="$checkpoint_root" \
-        "$script_dir/verify-host.sh"
+        bash "$script_dir/verify-host.sh"
 }
 
 verify_database_head() {
     docker run --rm --network host --user 10001:10001 \
         --read-only --cap-drop=ALL --security-opt=no-new-privileges \
-        --env-file "$env_file" --entrypoint uv "$image" \
-        run --frozen --no-dev --no-sync python -m qtrad db verify-head
+        --env-file "$env_file" --entrypoint /app/.venv/bin/python "$image" \
+        -m qtrad db verify-head
 }
 
 [[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || fail "image must be immutable"
@@ -86,18 +209,37 @@ verify_database_head() {
 [[ "$api_host" == 127.0.0.1 ]] || fail "API must use the reviewed runtime host"
 [[ "$gateway_port" == 4002 && "$api_port" == 8000 ]] || fail "unexpected private ports"
 [[ "$client_id" =~ ^[1-9][0-9]*$ ]] || fail "client ID must be positive"
+[[ "$release_policy" == b3-exact-two || "$release_policy" == b4-exact-six ]] || fail "release policy is invalid"
 [[ "$database_name" == qtrad_ibkr ]] || fail "database must be dedicated qtrad_ibkr"
 [[ "$api_version" == "$gateway_version" && ( "$api_version" == 10.49 || "$api_version" == 10.45 ) ]] || fail "API/Gateway versions mismatch"
 [[ -r "$descriptor" ]] || fail "release descriptor is not readable"
 [[ -r "$gateway_manifest" ]] || fail "Gateway identity manifest is not readable"
 [[ -d "$repository_root" ]] || fail "repository root is not readable"
-command -v "$preflight_bin" >/dev/null || fail "qtrad offline preflight command is unavailable"
+if [[ -n "$preflight_bin" ]]; then
+    command -v "$preflight_bin" >/dev/null || fail "qtrad offline preflight command is unavailable"
+else
+    [[ -r "$script_dir/qtrad-container-cli.sh" ]] || fail "reviewed container CLI wrapper is unavailable"
+fi
+[[ -r "$script_dir/qtrad-ibkr-qualification-wrapper.example" ]] \
+    || fail "reviewed qualification wrapper is unavailable"
 command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
-preflight_json="$("$preflight_bin" deployment ibkr-preflight \
-    --descriptor "$descriptor" --repository-root "$repository_root" \
-    --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}")"
+preflight_args=(
+    deployment ibkr-preflight
+    --policy "$release_policy" --descriptor "$descriptor"
+    --repository-root "$repository_root"
+    --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}"
+)
+if [[ -n "$preflight_bin" ]]; then
+    preflight_json="$("$preflight_bin" "${preflight_args[@]}")"
+else
+    preflight_json="$(
+        QTRAD_IBKR_IMAGE="$image" \
+            QTRAD_IBKR_REPOSITORY_ROOT="$repository_root" \
+            bash "$script_dir/qtrad-container-cli.sh" "${preflight_args[@]}"
+    )"
+fi
 application_commit="$(jq -er '.application_commit' <<<"$preflight_json")"
 printf '%s\n' "$preflight_json" | jq -e \
     --arg image "$image" \
@@ -137,14 +279,18 @@ printf '%s\n' "$preflight_json" | jq -e \
 
 [[ -r "$env_file" ]] || fail "canonical IBKR ingest environment file is not readable"
 
+verify_backup_identity
 verify_checkout_identity
 verify_host_identity
+bash "$script_dir/postgres-provision.sh" --check
 verify_database_head
 
 if [[ "$mode" == "--check" ]]; then
+    plan_image_retention
     echo "IBKR B3 preflight passed; no host mutation performed"
     exit 0
 fi
+
 # Database schema changes require the explicit, migration-only qtrad db migrate command.
 install -d -o 10001 -g 10001 -m 0750 "$checkpoint_root"
 
@@ -153,15 +299,22 @@ install -D -m 0750 "$script_dir/qtrad-ibkr-api-wrapper.example" /usr/local/sbin/
 install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healthcheck
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup
 install -D -m 0750 "$script_dir/postgres-restore-verify.sh" /usr/local/sbin/qtrad-ibkr-postgres-restore-verify
+install -D -m 0750 "$script_dir/qtrad-ibkr-qualification-wrapper.example" /usr/local/sbin/qtrad-ibkr-qualification
+install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
+install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
+install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop
 install -D -m 0644 "$script_dir/qtrad-ibkr-ingest.service.example" /etc/systemd/system/qtrad-ibkr-ingest.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-api.service.example" /etc/systemd/system/qtrad-ibkr-api.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-health.service.example" /etc/systemd/system/qtrad-ibkr-health.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-health.timer.example" /etc/systemd/system/qtrad-ibkr-health.timer
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.service.example" /etc/systemd/system/qtrad-ibkr-backup.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.timer.example" /etc/systemd/system/qtrad-ibkr-backup.timer
+install -D -m 0644 "$script_dir/qtrad-ibkr-postgres.service.example" /etc/systemd/system/qtrad-ibkr-postgres.service
 systemctl daemon-reload
 systemctl enable \
-    qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
+    qtrad-ibkr-postgres.service qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
     qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
 systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service
 systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
+plan_image_retention
+apply_image_retention

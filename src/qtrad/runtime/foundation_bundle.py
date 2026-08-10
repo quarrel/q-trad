@@ -54,6 +54,8 @@ from qtrad.domain.foundation_bundle import (
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import DataGap, DataQuality, MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_holdout import (
+    R2G2ObservationView,
+    R2G2PanelView,
     R2HoldoutCausalMetadata,
     R2HoldoutTargetIndex,
     R2HoldoutTargetSource,
@@ -138,6 +140,64 @@ class OutcomeBlindVerifiedFoundationBundle:
     folds: FoldDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
+    g2_feature_source: "G2FeatureSourceAuthority | None" = None
+
+
+@dataclass(frozen=True, slots=True)
+class G2FeatureSourceAuthority:
+    """Opaque, outcome-free R1 child authority decoded only after verified G1."""
+
+    root: Path
+    foundation_bundle_id: str
+    foundation_configuration_id: str
+    observation_dataset_id: str
+    panel_dataset_id: str
+    observation_configuration: Mapping[str, JsonValue]
+    observation_source_dataset_ids: tuple[str, ...]
+    observation_selection_policies: Mapping[str, JsonValue]
+    holdout_range: tuple[datetime, datetime]
+    observation_reference: ArtifactReference
+    panel_reference: ArtifactReference
+    source_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedG2FeatureSource:
+    """Independently verified market-data and panel projection with no target child."""
+
+    observations: R2G2ObservationView
+    panel: R2G2PanelView
+    source_id: str
+
+
+def _g2_feature_source_id(
+    *,
+    foundation_bundle_id: str,
+    foundation_configuration_id: str,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    observation_configuration: Mapping[str, JsonValue],
+    observation_source_dataset_ids: tuple[str, ...],
+    observation_selection_policies: Mapping[str, JsonValue],
+    holdout_range: tuple[datetime, datetime],
+    observation_reference: ArtifactReference,
+    panel_reference: ArtifactReference,
+) -> str:
+    return _hash_json(
+        {
+            "contract": "qtrad-r2-g2-feature-source-authority-v1",
+            "foundation_bundle_id": foundation_bundle_id,
+            "foundation_configuration_id": foundation_configuration_id,
+            "observation_dataset_id": observation_dataset_id,
+            "panel_dataset_id": panel_dataset_id,
+            "observation_configuration": observation_configuration,
+            "observation_source_dataset_ids": list(observation_source_dataset_ids),
+            "observation_selection_policies": observation_selection_policies,
+            "holdout_range": [item.isoformat() for item in holdout_range],
+            "observation_reference": observation_reference.as_json(),
+            "panel_reference": panel_reference.as_json(),
+        }
+    )
 
 
 def write_foundation_bundle(path: Path, bundle: FoundationBundle) -> None:
@@ -618,6 +678,10 @@ async def persist_foundation_bundle(
     blind_panel = R2OutcomeBlindPanelView.from_dataset(
         panel, holdout_start=configuration.holdout_range[0]
     )
+    g2_observations = R2G2ObservationView.from_dataset(
+        observations, holdout_range=configuration.holdout_range
+    )
+    g2_panel = R2G2PanelView.from_dataset(panel, holdout_range=configuration.holdout_range)
     target_instruments = tuple(
         instrument_id
         for instrument_id in configuration.ordered_instruments
@@ -685,6 +749,37 @@ async def persist_foundation_bundle(
         application_version=application_version,
         image_identity=image_identity,
     )
+    g2_observations_manifest = await store.write(
+        kind="r2-g2-observations",
+        contract=R2G2ObservationView.CONTRACT,
+        schema_version=R2G2ObservationView.SCHEMA_VERSION,
+        dataset_id=g2_observations.projection_id,
+        rows=tuple(row.as_json() for row in g2_observations.rows),
+        lineage={
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+            "holdout_end": configuration.holdout_range[1].isoformat(),
+        },
+        application_version=application_version,
+        image_identity=image_identity,
+    )
+    g2_panel_manifest = await store.write(
+        kind="r2-g2-panel",
+        contract=R2G2PanelView.CONTRACT,
+        schema_version=R2G2PanelView.SCHEMA_VERSION,
+        dataset_id=g2_panel.projection_id,
+        rows=tuple(row.as_json() for row in g2_panel.rows),
+        lineage={
+            "panel_dataset_id": panel.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+            "holdout_end": configuration.holdout_range[1].isoformat(),
+        },
+        application_version=application_version,
+        image_identity=image_identity,
+    )
     pre_holdout_target_manifest = await store.write(
         kind="r2-pre-holdout-target",
         contract=R2PreHoldoutTargetProjection.CONTRACT,
@@ -719,6 +814,10 @@ async def persist_foundation_bundle(
                 "blind-observations", blind_observations_manifest
             ).as_json(),
             "panel": _child_reference("blind-panel", blind_panel_manifest).as_json(),
+            "g2_observations": _child_reference(
+                "g2-observations", g2_observations_manifest
+            ).as_json(),
+            "g2_panel": _child_reference("g2-panel", g2_panel_manifest).as_json(),
             "pre_holdout_target": _child_reference(
                 "pre-holdout-target", pre_holdout_target_manifest
             ).as_json(),
@@ -939,7 +1038,13 @@ async def verify_foundation_bundle(
             "panel": "blind-panel",
             "pre_holdout_target": "pre-holdout-target",
         }
-        if set(projection_payload) != set(projection_names):
+        g2_projection_names = {
+            "g2_observations": "g2-observations",
+            "g2_panel": "g2-panel",
+        }
+        if set(projection_payload) == set(projection_names) | set(g2_projection_names):
+            projection_names.update(g2_projection_names)
+        elif set(projection_payload) != set(projection_names):
             raise ValueError("foundation outcome-blind projection set is incomplete")
         projection_manifests: dict[str, FoundationChildManifest] = {}
         projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
@@ -1045,6 +1150,54 @@ async def verify_foundation_bundle(
         )
         if actual_blind_panel != expected_blind_panel:
             raise ValueError("foundation blind panel projection differs from full replay")
+        if "g2_observations" in projection_manifests:
+            _require_lineage(
+                projection_manifests["g2_observations"],
+                {
+                    "observation_dataset_id": observations.dataset_id,
+                    "foundation_configuration_id": configuration.configuration_id,
+                    "holdout_start": configuration.holdout_range[0].isoformat(),
+                    "holdout_end": configuration.holdout_range[1].isoformat(),
+                },
+            )
+            _require_lineage(
+                projection_manifests["g2_panel"],
+                {
+                    "panel_dataset_id": panel.dataset_id,
+                    "observation_dataset_id": observations.dataset_id,
+                    "foundation_configuration_id": configuration.configuration_id,
+                    "holdout_start": configuration.holdout_range[0].isoformat(),
+                    "holdout_end": configuration.holdout_range[1].isoformat(),
+                },
+            )
+            actual_g2_observations = R2G2ObservationView(
+                dataset_id=observations.dataset_id,
+                rows=tuple(
+                    _observation_from_row(cast(Mapping[str, object], row))
+                    for row in projection_rows["g2_observations"]
+                ),
+                configuration=observations.configuration,
+                source_dataset_ids=observations.source_dataset_ids,
+                selection_policies=observations.selection_policies,
+                holdout_range=configuration.holdout_range,
+                projection_id=projection_manifests["g2_observations"].dataset_id,
+            )
+            actual_g2_panel = R2G2PanelView(
+                dataset_id=panel.dataset_id,
+                observation_dataset_id=observations.dataset_id,
+                foundation_configuration_id=configuration.configuration_id,
+                rows=tuple(_panel_row(row) for row in projection_rows["g2_panel"]),
+                holdout_range=configuration.holdout_range,
+                projection_id=projection_manifests["g2_panel"].dataset_id,
+            )
+            if actual_g2_observations != R2G2ObservationView.from_dataset(
+                observations, holdout_range=configuration.holdout_range
+            ):
+                raise ValueError("foundation G2 observation projection differs from full replay")
+            if actual_g2_panel != R2G2PanelView.from_dataset(
+                panel, holdout_range=configuration.holdout_range
+            ):
+                raise ValueError("foundation G2 panel projection differs from full replay")
         pre_holdout_target = R2PreHoldoutTargetProjection.from_json(
             _single_row(projection_rows, "pre_holdout_target")
         )
@@ -1154,16 +1307,32 @@ async def verify_outcome_blind_foundation_bundle(
         "panel": "blind-panel",
         "pre_holdout_target": "pre-holdout-target",
     }
-    if set(projection_payload) != set(projection_names):
+    g2_projection_names = {
+        "g2_observations": "g2-observations",
+        "g2_panel": "g2-panel",
+    }
+    has_g2_feature_source = set(projection_payload) == set(projection_names) | set(
+        g2_projection_names
+    )
+    if has_g2_feature_source:
+        projection_names.update(g2_projection_names)
+    elif set(projection_payload) != set(projection_names):
         raise ValueError("foundation outcome-blind projection set is incomplete")
     projection_manifests: dict[str, FoundationChildManifest] = {}
     projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    projection_references: dict[str, ArtifactReference] = {}
     for key, name in projection_names.items():
         reference = _reference(name, projection_payload[key])
-        manifest = await store.verify(reference.manifest_id)
+        manifest = (
+            await store.verify_file(reference.manifest_id)
+            if key in g2_projection_names
+            else await store.verify(reference.manifest_id)
+        )
         _verify_child_reference(reference, manifest)
         projection_manifests[key] = manifest
-        projection_rows[key] = await store.read_rows(reference.manifest_id)
+        projection_references[key] = reference
+        if key not in g2_projection_names:
+            projection_rows[key] = await store.read_rows(reference.manifest_id)
 
     configuration = decode_foundation_config(_single_row(rows, "configuration"))
     availability = cast(Mapping[str, JsonValue], _single_row(rows, "availability"))
@@ -1280,6 +1449,55 @@ async def verify_outcome_blind_foundation_bundle(
             "holdout_start": configuration.holdout_range[0].isoformat(),
         },
     )
+    g2_feature_source: G2FeatureSourceAuthority | None = None
+    if has_g2_feature_source:
+        _require_lineage(
+            projection_manifests["g2_observations"],
+            {
+                "observation_dataset_id": observation_manifest.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+                "holdout_end": configuration.holdout_range[1].isoformat(),
+            },
+        )
+        _require_lineage(
+            projection_manifests["g2_panel"],
+            {
+                "panel_dataset_id": manifests["panel"].dataset_id,
+                "observation_dataset_id": observation_manifest.dataset_id,
+                "foundation_configuration_id": configuration.configuration_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+                "holdout_end": configuration.holdout_range[1].isoformat(),
+            },
+        )
+        observation_reference = projection_references["g2_observations"]
+        panel_reference = projection_references["g2_panel"]
+        source_id = _g2_feature_source_id(
+            foundation_bundle_id=bundle.bundle_id,
+            foundation_configuration_id=configuration.configuration_id,
+            observation_dataset_id=observation_manifest.dataset_id,
+            panel_dataset_id=manifests["panel"].dataset_id,
+            observation_configuration=observation_manifest.configuration,
+            observation_source_dataset_ids=observation_manifest.source_dataset_ids,
+            observation_selection_policies=observation_manifest.selection_policies,
+            holdout_range=configuration.holdout_range,
+            observation_reference=observation_reference,
+            panel_reference=panel_reference,
+        )
+        g2_feature_source = G2FeatureSourceAuthority(
+            root=root,
+            foundation_bundle_id=bundle.bundle_id,
+            foundation_configuration_id=configuration.configuration_id,
+            observation_dataset_id=observation_manifest.dataset_id,
+            panel_dataset_id=manifests["panel"].dataset_id,
+            observation_configuration=dict(observation_manifest.configuration),
+            observation_source_dataset_ids=observation_manifest.source_dataset_ids,
+            observation_selection_policies=dict(observation_manifest.selection_policies),
+            holdout_range=configuration.holdout_range,
+            observation_reference=observation_reference,
+            panel_reference=panel_reference,
+            source_id=source_id,
+        )
     for manifest in (*manifests.values(), *projection_manifests.values()):
         if (
             manifest.application_version != application_version
@@ -1373,7 +1591,145 @@ async def verify_outcome_blind_foundation_bundle(
         folds=folds,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
+        g2_feature_source=g2_feature_source,
     )
+
+
+async def _verify_g2_feature_source(
+    authority: G2FeatureSourceAuthority,
+    *,
+    clock: Clock,
+) -> VerifiedG2FeatureSource:
+    """Decode exact G2-safe children only after the confirmatory G1 gate."""
+
+    expected_source_id = _g2_feature_source_id(
+        foundation_bundle_id=authority.foundation_bundle_id,
+        foundation_configuration_id=authority.foundation_configuration_id,
+        observation_dataset_id=authority.observation_dataset_id,
+        panel_dataset_id=authority.panel_dataset_id,
+        observation_configuration=authority.observation_configuration,
+        observation_source_dataset_ids=authority.observation_source_dataset_ids,
+        observation_selection_policies=authority.observation_selection_policies,
+        holdout_range=authority.holdout_range,
+        observation_reference=authority.observation_reference,
+        panel_reference=authority.panel_reference,
+    )
+    if authority.source_id != expected_source_id:
+        raise ValueError("G2 feature source authority identity is invalid")
+
+    store = ParquetFoundationArtifactStore(authority.root, clock)
+    observation_manifest = await store.verify(authority.observation_reference.manifest_id)
+    panel_manifest = await store.verify(authority.panel_reference.manifest_id)
+    _verify_child_reference(authority.observation_reference, observation_manifest)
+    _verify_child_reference(authority.panel_reference, panel_manifest)
+    _require_lineage(
+        observation_manifest,
+        {
+            "observation_dataset_id": authority.observation_dataset_id,
+            "foundation_configuration_id": authority.foundation_configuration_id,
+            "holdout_start": authority.holdout_range[0].isoformat(),
+            "holdout_end": authority.holdout_range[1].isoformat(),
+        },
+    )
+    _require_lineage(
+        panel_manifest,
+        {
+            "panel_dataset_id": authority.panel_dataset_id,
+            "observation_dataset_id": authority.observation_dataset_id,
+            "foundation_configuration_id": authority.foundation_configuration_id,
+            "holdout_start": authority.holdout_range[0].isoformat(),
+            "holdout_end": authority.holdout_range[1].isoformat(),
+        },
+    )
+    observation_rows = tuple(
+        _observation_from_row(cast(Mapping[str, object], row))
+        for row in await store.read_rows(authority.observation_reference.manifest_id)
+    )
+    panel_rows = tuple(
+        _panel_row(row) for row in await store.read_rows(authority.panel_reference.manifest_id)
+    )
+    observations = R2G2ObservationView(
+        dataset_id=authority.observation_dataset_id,
+        rows=observation_rows,
+        configuration=authority.observation_configuration,
+        source_dataset_ids=authority.observation_source_dataset_ids,
+        selection_policies=authority.observation_selection_policies,
+        holdout_range=authority.holdout_range,
+        projection_id=observation_manifest.dataset_id,
+    )
+    panel = R2G2PanelView(
+        dataset_id=authority.panel_dataset_id,
+        observation_dataset_id=authority.observation_dataset_id,
+        foundation_configuration_id=authority.foundation_configuration_id,
+        rows=panel_rows,
+        holdout_range=authority.holdout_range,
+        projection_id=panel_manifest.dataset_id,
+    )
+    if observations.projection_id != R2G2ObservationView.compute_projection_id(
+        source_dataset_id=authority.observation_dataset_id,
+        holdout_range=authority.holdout_range,
+        rows=observation_rows,
+    ):
+        raise ValueError("G2 observation projection identity is invalid")
+    if panel.projection_id != R2G2PanelView.compute_projection_id(
+        source_dataset_id=authority.panel_dataset_id,
+        holdout_range=authority.holdout_range,
+        rows=panel_rows,
+    ):
+        raise ValueError("G2 panel projection identity is invalid")
+    if any(row.interval_end > authority.holdout_range[1] for row in observation_rows):
+        raise ValueError("G2 observations exceed the frozen holdout boundary")
+    if any(
+        row.decision_time < authority.holdout_range[0]
+        or row.decision_time >= authority.holdout_range[1]
+        for row in panel_rows
+    ):
+        raise ValueError("G2 panel row lies outside the frozen holdout range")
+    return VerifiedG2FeatureSource(
+        observations=observations,
+        panel=panel,
+        source_id=expected_source_id,
+    )
+
+
+async def _verify_confirmatory_target_dataset(
+    foundation: OutcomeBlindVerifiedFoundationBundle,
+    authority: G2FeatureSourceAuthority,
+    *,
+    clock: Clock,
+) -> TargetDataset:
+    """Decode the exact authenticated target child after irreversible confirmatory OPENED."""
+
+    if (
+        authority.foundation_bundle_id != foundation.bundle.bundle_id
+        or authority.foundation_configuration_id != foundation.configuration.configuration_id
+        or authority.observation_dataset_id != foundation.observations.dataset_id
+    ):
+        raise ValueError("confirmatory outcome authority differs from verified F2 foundation")
+    reference = foundation.bundle.targets
+    store = ParquetFoundationArtifactStore(authority.root, clock)
+    manifest = await store.verify(reference.manifest_id)
+    _verify_child_reference(reference, manifest)
+    _require_lineage(
+        manifest,
+        {
+            "observation_dataset_id": authority.observation_dataset_id,
+            "foundation_configuration_id": authority.foundation_configuration_id,
+        },
+    )
+    rows = tuple(
+        _target(cast(Mapping[str, object], row))
+        for row in await store.read_rows(reference.manifest_id)
+    )
+    targets = TargetDataset(
+        rows=rows,
+        observation_dataset_id=authority.observation_dataset_id,
+        foundation_configuration_id=authority.foundation_configuration_id,
+        dataset_id=manifest.dataset_id,
+    )
+    if targets.dataset_id != foundation.bundle.targets.dataset_id:
+        raise ValueError("decoded confirmatory target child differs from verified F2 authority")
+    return targets
 
 
 def _reference(name: str, value: object) -> ArtifactReference:

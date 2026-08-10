@@ -1,5 +1,4 @@
 import dataclasses
-import os
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from uuid import uuid4
@@ -39,20 +38,14 @@ from qtrad.ports.storage import ResearchManifest
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, decode_capture_feed_page
 from qtrad.runtime.settings import Settings
 
-DATABASE_URL = os.getenv("QTRAD_TEST_DATABASE_URL")
-pytestmark = pytest.mark.skipif(
-    not DATABASE_URL,
-    reason=(
-        "QTRAD_TEST_DATABASE_URL is required for PostgreSQL integration; "
-        "run ops/dev/verify.sh for the complete local gate"
-    ),
-)
+pytestmark = pytest.mark.postgres
 
 
 @pytest.mark.asyncio
-async def test_quote_derived_observation_query_joins_every_revision_to_canonical_lineage() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_quote_derived_observation_query_joins_every_revision_to_canonical_lineage(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     await store.seed_instruments()
     offset = int(uuid4().hex[:8], 16) % 1_000_000
@@ -129,9 +122,10 @@ async def test_quote_derived_observation_query_joins_every_revision_to_canonical
 
 
 @pytest.mark.asyncio
-async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_atomic_ingestion_idempotency_projection_and_rebuild(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     await store.seed_instruments()
     unique = uuid4().hex
@@ -210,9 +204,10 @@ async def test_atomic_ingestion_idempotency_projection_and_rebuild() -> None:
 
 
 @pytest.mark.asyncio
-async def test_raw_payload_representation_is_backward_compatible_and_bounded() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_raw_payload_representation_is_backward_compatible_and_bounded(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     unique = uuid4().hex
     async with engine.begin() as connection:
         legacy = await connection.execute(
@@ -261,9 +256,10 @@ async def test_raw_payload_representation_is_backward_compatible_and_bounded() -
 
 
 @pytest.mark.asyncio
-async def test_listing_validation_atomically_supersedes_epics_and_rebuilds() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_listing_validation_atomically_supersedes_epics_and_rebuilds(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     suffix = uuid4().hex
     instrument = INITIAL_INSTRUMENTS[0]
@@ -396,9 +392,10 @@ async def test_listing_validation_atomically_supersedes_epics_and_rebuilds() -> 
 
 
 @pytest.mark.asyncio
-async def test_stream_version_conflict_fails_closed() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_stream_version_conflict_fails_closed(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     now = datetime.now(UTC)
     stream = f"conflict:{uuid4().hex}"
@@ -431,9 +428,10 @@ async def test_stream_version_conflict_fails_closed() -> None:
 
 
 @pytest.mark.asyncio
-async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_canonical_event_feed_is_bounded_and_cursor_driven(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     now = datetime.now(UTC)
     suffix = uuid4().hex
@@ -466,7 +464,10 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
     assert first.global_position is not None
     assert second.global_position is not None
 
-    settings = Settings(database_url=DATABASE_URL, capture_source_id="integration-capture")
+    settings = Settings(
+        database_url=postgres_database_url,
+        capture_source_id="integration-capture",
+    )
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -534,9 +535,10 @@ async def test_canonical_event_feed_is_bounded_and_cursor_driven() -> None:
 
 
 @pytest.mark.asyncio
-async def test_historical_bar_append_is_idempotent_and_appends_corrections() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_historical_bar_append_is_idempotent_and_appends_corrections(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     await store.seed_instruments()
     external_id = f"AUDUSD-HIST-{uuid4().hex}"
@@ -610,9 +612,10 @@ async def test_historical_bar_append_is_idempotent_and_appends_corrections() -> 
 
 
 @pytest.mark.asyncio
-async def test_read_only_api_reports_seeded_instruments() -> None:
-    assert DATABASE_URL is not None
-    settings = Settings(database_url=DATABASE_URL)
+async def test_read_only_api_reports_seeded_instruments(
+    postgres_database_url: str,
+) -> None:
+    settings = Settings(database_url=postgres_database_url)
     app = create_app(settings)
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
@@ -632,9 +635,10 @@ async def test_read_only_api_reports_seeded_instruments() -> None:
 
 
 @pytest.mark.asyncio
-async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
 
     async with engine.connect() as connection:
         attributes = (
@@ -678,9 +682,10 @@ async def test_capture_reader_can_query_approved_schemas_but_not_raw_or_write() 
 
 
 @pytest.mark.asyncio
-async def test_version_two_manifests_are_immutable_and_legacy_writer_remains_compatible() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_version_two_manifests_are_immutable_and_legacy_writer_remains_compatible(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     created_at = datetime(2026, 7, 14, tzinfo=UTC)
     manifest = ResearchManifest(
@@ -758,9 +763,10 @@ async def test_version_two_manifests_are_immutable_and_legacy_writer_remains_com
 
 
 @pytest.mark.asyncio
-async def test_registered_backfill_plan_projects_and_closes_exact_historical_coverage() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_registered_backfill_plan_projects_and_closes_exact_historical_coverage(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     await store.seed_instruments()
     instrument = INITIAL_INSTRUMENTS[0]
@@ -939,7 +945,7 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
         (repeat_plan.plan_hash, None),
     }
 
-    app = create_app(Settings(database_url=DATABASE_URL))
+    app = create_app(Settings(database_url=postgres_database_url))
     transport = httpx.ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         bounded_response = await client.get("/api/v1/historical-coverage", params={"limit": 1})
@@ -1000,9 +1006,10 @@ async def test_registered_backfill_plan_projects_and_closes_exact_historical_cov
 
 
 @pytest.mark.asyncio
-async def test_storage_inspector_is_bounded_and_reports_capture_relations() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_storage_inspector_is_bounded_and_reports_capture_relations(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
 
     measurement = await PostgresStorageInspector(engine).measure()
 
@@ -1024,9 +1031,10 @@ async def test_storage_inspector_is_bounded_and_reports_capture_relations() -> N
 
 
 @pytest.mark.asyncio
-async def test_configuration_identity_constraints_are_validated_and_reject_bad_new_rows() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_configuration_identity_constraints_are_validated_and_reject_bad_new_rows(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     await store.seed_instruments()
 
@@ -1138,9 +1146,10 @@ async def test_configuration_identity_constraints_are_validated_and_reject_bad_n
 
 
 @pytest.mark.asyncio
-async def test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run() -> None:
-    assert DATABASE_URL is not None
-    engine = create_async_engine(DATABASE_URL)
+async def test_stale_run_reconciliation_is_exact_atomic_and_preserves_current_run(
+    postgres_database_url: str,
+) -> None:
+    engine = create_async_engine(postgres_database_url)
     store = PostgresAuditStore(engine)
     cutoff = datetime(2026, 7, 14, 3, 5, 33, 653928, tzinfo=UTC)
     configuration_hash = uuid4().hex * 2

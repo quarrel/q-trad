@@ -9,6 +9,7 @@ import resource
 import shutil
 import time
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -36,6 +37,8 @@ from qtrad.domain.ibkr_foundation import (
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.r2_holdout import (
+    R2G2ObservationView,
+    R2G2PanelView,
     R2HoldoutCausalMetadata,
     R2HoldoutTargetIndex,
     R2HoldoutTargetSource,
@@ -45,7 +48,13 @@ from qtrad.domain.r2_holdout import (
     R2PreHoldoutTargetProjection,
 )
 from qtrad.domain.research import ObservationDataset
-from qtrad.runtime.foundation_bundle import _fold, _panel_row, decode_foundation_config
+from qtrad.runtime.foundation_bundle import (
+    VerifiedG2FeatureSource,
+    _fold,
+    _panel_row,
+    _target,
+    decode_foundation_config,
+)
 from qtrad.runtime.provider_history import (
     read_provider_history_source_evidence,
     verify_provider_history_file_only,
@@ -67,14 +76,16 @@ _BASE_CHILD_KINDS = (
     "targets",
     "folds",
 )
-_EXTENSION_CHILD_KINDS = (
+_LEGACY_EXTENSION_CHILD_KINDS = (
     "target-index",
     "causal-metadata",
     "blind-observations",
     "blind-panel",
     "pre-holdout-target",
 )
-_CHILD_KINDS = _BASE_CHILD_KINDS + _EXTENSION_CHILD_KINDS
+_G2_EXTENSION_CHILD_KINDS = ("g2-observations", "g2-panel")
+_LEGACY_CHILD_KINDS = _BASE_CHILD_KINDS + _LEGACY_EXTENSION_CHILD_KINDS
+_CHILD_KINDS = _LEGACY_CHILD_KINDS + _G2_EXTENSION_CHILD_KINDS
 _ProgressCallback = Callable[[Mapping[str, object]], None]
 _CHILD_FIELDS = {
     "contract",
@@ -99,6 +110,45 @@ _REFERENCE_FIELDS = {
     "file",
     "file_sha256",
 }
+
+
+@dataclass(frozen=True, slots=True)
+class IBKRG2FeatureSourceAuthority:
+    """Opaque authority for exact outcome-free IBKR G2 feature children."""
+
+    path: Path
+    foundation_bundle_id: str
+    foundation_configuration_id: str
+    observation_dataset_id: str
+    panel_dataset_id: str
+    holdout_range: tuple[datetime, datetime]
+    child_references_sha256: str
+    target_child_references_sha256: str
+    source_id: str
+
+
+def _ibkr_g2_feature_source_id(
+    *,
+    foundation_bundle_id: str,
+    foundation_configuration_id: str,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    holdout_range: tuple[datetime, datetime],
+    child_references_sha256: str,
+    target_child_references_sha256: str,
+) -> str:
+    return _sha(
+        {
+            "contract": "qtrad-r2-ibkr-g2-feature-source-authority-v1",
+            "foundation_bundle_id": foundation_bundle_id,
+            "foundation_configuration_id": foundation_configuration_id,
+            "observation_dataset_id": observation_dataset_id,
+            "panel_dataset_id": panel_dataset_id,
+            "holdout_range": [item.isoformat() for item in holdout_range],
+            "child_references_sha256": child_references_sha256,
+            "target_child_references_sha256": target_child_references_sha256,
+        }
+    )
 
 
 def foundation_config_payload(configuration: FoundationConfig) -> dict[str, JsonValue]:
@@ -527,6 +577,8 @@ def verify_ibkr_foundation(
     child_set = set(children)
     if child_set == set(_BASE_CHILD_KINDS):
         child_kinds = _BASE_CHILD_KINDS
+    elif child_set == set(_LEGACY_CHILD_KINDS):
+        child_kinds = _LEGACY_CHILD_KINDS
     elif child_set == set(_CHILD_KINDS):
         child_kinds = _CHILD_KINDS
     else:
@@ -565,11 +617,19 @@ def load_ibkr_foundation_with_identity(path: Path) -> tuple[IBKRFoundationBuild,
     return build, _text(document["build_sha256"], "IBKR foundation build hash")
 
 
-def load_ibkr_foundation_outcome_blind_with_identity(
+def _load_ibkr_foundation_outcome_blind(
     path: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
-) -> tuple[IBKRFoundationBuild, str]:
+    decode_g2: bool,
+    decode_target: bool = False,
+) -> tuple[
+    IBKRFoundationBuild,
+    str,
+    IBKRG2FeatureSourceAuthority,
+    VerifiedG2FeatureSource | None,
+    TargetDataset | None,
+]:
     """Load the IBKR foundation without decoding outcome-bearing children.
 
     The normal loader above is intentionally complete and is used after the
@@ -644,6 +704,8 @@ def load_ibkr_foundation_outcome_blind_with_identity(
         children,
         child_ids,
         expected_lineage,
+        decode_g2=decode_g2,
+        decode_target=decode_target,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
         raise ValueError("IBKR foundation observation child differs from configuration")
@@ -723,6 +785,87 @@ def load_ibkr_foundation_outcome_blind_with_identity(
         rows=tuple(_panel_row(row) for row in decoded["blind-panel"]),
         projection_id=child_ids["blind-panel"],
     )
+    build_id = _text(document["build_sha256"], "IBKR foundation build hash")
+    child_references_sha256 = _sha({kind: children[kind] for kind in _G2_EXTENSION_CHILD_KINDS})
+    target_child_references_sha256 = _sha(children["targets"])
+    g2_source_id = _ibkr_g2_feature_source_id(
+        foundation_bundle_id=build_id,
+        foundation_configuration_id=configuration.configuration_id,
+        observation_dataset_id=child_ids["observations"],
+        panel_dataset_id=child_ids["panel"],
+        holdout_range=configuration.holdout_range,
+        child_references_sha256=child_references_sha256,
+        target_child_references_sha256=target_child_references_sha256,
+    )
+    g2_authority = IBKRG2FeatureSourceAuthority(
+        path=manifest_path,
+        foundation_bundle_id=build_id,
+        foundation_configuration_id=configuration.configuration_id,
+        observation_dataset_id=child_ids["observations"],
+        panel_dataset_id=child_ids["panel"],
+        holdout_range=configuration.holdout_range,
+        child_references_sha256=child_references_sha256,
+        target_child_references_sha256=target_child_references_sha256,
+        source_id=g2_source_id,
+    )
+    g2_source: VerifiedG2FeatureSource | None = None
+    if decode_g2:
+        g2_observation_rows = tuple(
+            _observation_from_row(row) for row in decoded["g2-observations"]
+        )
+        g2_panel_rows = tuple(_panel_row(row) for row in decoded["g2-panel"])
+        g2_observations = R2G2ObservationView(
+            dataset_id=child_ids["observations"],
+            rows=g2_observation_rows,
+            configuration=blind_observations.configuration,
+            source_dataset_ids=blind_observations.source_dataset_ids,
+            selection_policies=blind_observations.selection_policies,
+            holdout_range=configuration.holdout_range,
+            projection_id=child_ids["g2-observations"],
+        )
+        g2_panel = R2G2PanelView(
+            dataset_id=child_ids["panel"],
+            observation_dataset_id=child_ids["observations"],
+            foundation_configuration_id=configuration.configuration_id,
+            rows=g2_panel_rows,
+            holdout_range=configuration.holdout_range,
+            projection_id=child_ids["g2-panel"],
+        )
+        if g2_observations.projection_id != R2G2ObservationView.compute_projection_id(
+            source_dataset_id=child_ids["observations"],
+            holdout_range=configuration.holdout_range,
+            rows=g2_observation_rows,
+        ):
+            raise ValueError("IBKR G2 observation projection identity is invalid")
+        if g2_panel.projection_id != R2G2PanelView.compute_projection_id(
+            source_dataset_id=child_ids["panel"],
+            holdout_range=configuration.holdout_range,
+            rows=g2_panel_rows,
+        ):
+            raise ValueError("IBKR G2 panel projection identity is invalid")
+        if any(row.interval_end > configuration.holdout_range[1] for row in g2_observation_rows):
+            raise ValueError("IBKR G2 observations exceed the holdout boundary")
+        if any(
+            row.decision_time < configuration.holdout_range[0]
+            or row.decision_time >= configuration.holdout_range[1]
+            for row in g2_panel_rows
+        ):
+            raise ValueError("IBKR G2 panel row lies outside the holdout range")
+        g2_source = VerifiedG2FeatureSource(
+            observations=g2_observations,
+            panel=g2_panel,
+            source_id=g2_source_id,
+        )
+    full_targets: TargetDataset | None = None
+    if decode_target:
+        full_targets = TargetDataset(
+            rows=tuple(_target(row) for row in decoded["targets"]),
+            observation_dataset_id=child_ids["observations"],
+            foundation_configuration_id=configuration.configuration_id,
+            dataset_id=child_ids["targets"],
+        )
+        holdout_target_source.verify_target_dataset(full_targets)
+
     blind_targets = R2OutcomeBlindTargetView.from_source(holdout_target_source)
     if (
         holdout_target_source.source_target_dataset_id != child_ids["targets"]
@@ -781,7 +924,76 @@ def load_ibkr_foundation_outcome_blind_with_identity(
         )
     if provisional.folds != expected_folds:
         raise ValueError("IBKR foundation folds differ from deterministic blind replay")
-    return provisional, _text(document["build_sha256"], "IBKR foundation build hash")
+    return provisional, build_id, g2_authority, g2_source, full_targets
+
+
+def load_ibkr_foundation_outcome_blind_with_identity(
+    path: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> tuple[IBKRFoundationBuild, str]:
+    """Load F2-safe IBKR evidence while authenticating but not decoding G2 rows."""
+
+    build, build_id, _authority, _source, _targets = _load_ibkr_foundation_outcome_blind(
+        path,
+        holdout_target_source=holdout_target_source,
+        decode_g2=False,
+    )
+    return build, build_id
+
+
+def _load_ibkr_foundation_outcome_blind_with_g2_authority(
+    path: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> tuple[IBKRFoundationBuild, str, IBKRG2FeatureSourceAuthority]:
+    """Return the verifier-created G2 feature authority without decoding its rows."""
+
+    build, build_id, authority, _source, _targets = _load_ibkr_foundation_outcome_blind(
+        path,
+        holdout_target_source=holdout_target_source,
+        decode_g2=False,
+    )
+    return build, build_id, authority
+
+
+def _verify_ibkr_g2_feature_source(
+    authority: IBKRG2FeatureSourceAuthority,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> VerifiedG2FeatureSource:
+    """Decode exact IBKR G2 children only after the confirmatory G1 gate."""
+
+    _build, build_id, replayed_authority, source, _targets = _load_ibkr_foundation_outcome_blind(
+        authority.path,
+        holdout_target_source=holdout_target_source,
+        decode_g2=True,
+    )
+    if build_id != authority.foundation_bundle_id or replayed_authority != authority:
+        raise ValueError("IBKR G2 feature source differs from verified F2 authority")
+    if source is None:
+        raise ValueError("IBKR G2 feature source was not decoded")
+    return source
+
+
+def _verify_ibkr_confirmatory_target_dataset(
+    authority: IBKRG2FeatureSourceAuthority,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> TargetDataset:
+    """Decode the exact IBKR target child only after irreversible confirmatory OPENED."""
+
+    _build, build_id, replayed_authority, _source, targets = _load_ibkr_foundation_outcome_blind(
+        authority.path,
+        holdout_target_source=holdout_target_source,
+        decode_g2=False,
+        decode_target=True,
+    )
+    if build_id != authority.foundation_bundle_id or replayed_authority != authority:
+        raise ValueError("IBKR outcome target differs from verified F2 authority")
+    if targets is None:
+        raise ValueError("IBKR outcome target was not decoded")
+    return targets
 
 
 def _child_reference_dataset_ids(children: Mapping[str, object]) -> dict[str, str]:
@@ -1199,6 +1411,9 @@ def _verify_children_blind(
     children: Mapping[str, object],
     expected_dataset_ids: Mapping[str, str],
     expected_lineage: Mapping[str, JsonValue],
+    *,
+    decode_g2: bool = False,
+    decode_target: bool = False,
 ) -> dict[str, tuple[dict[str, JsonValue], ...]]:
     """Verify child bytes while decoding only outcome-blind projections and folds."""
 
@@ -1212,6 +1427,10 @@ def _verify_children_blind(
         "blind-panel",
         "pre-holdout-target",
     }
+    if decode_g2:
+        decoded_kinds.update(_G2_EXTENSION_CHILD_KINDS)
+    if decode_target:
+        decoded_kinds.add("targets")
     decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
@@ -1335,6 +1554,14 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
         panel,
         holdout_start=build.configuration.holdout_range[0],
     )
+    g2_observations = R2G2ObservationView.from_dataset(
+        observations,
+        holdout_range=build.configuration.holdout_range,
+    )
+    g2_panel = R2G2PanelView.from_dataset(
+        panel,
+        holdout_range=build.configuration.holdout_range,
+    )
     pre_holdout_target = _pre_holdout_target_projection(build, targets)
     return {
         "observations": tuple(row.as_json() for row in observations.rows),
@@ -1345,6 +1572,8 @@ def _child_rows(build: IBKRFoundationBuild) -> dict[str, tuple[dict[str, JsonVal
         "causal-metadata": tuple(item.as_json() for item in build.causal_metadata.rows),
         "blind-observations": tuple(row.as_json() for row in blind_observations.rows),
         "blind-panel": tuple(row.as_json() for row in blind_panel.rows),
+        "g2-observations": tuple(row.as_json() for row in g2_observations.rows),
+        "g2-panel": tuple(row.as_json() for row in g2_panel.rows),
         "pre-holdout-target": (pre_holdout_target.as_json(),),
     }
 
@@ -1362,6 +1591,14 @@ def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
         panel,
         holdout_start=build.configuration.holdout_range[0],
     )
+    g2_observations = R2G2ObservationView.from_dataset(
+        observations,
+        holdout_range=build.configuration.holdout_range,
+    )
+    g2_panel = R2G2PanelView.from_dataset(
+        panel,
+        holdout_range=build.configuration.holdout_range,
+    )
     pre_holdout_target = _pre_holdout_target_projection(build, cast(TargetDataset, build.targets))
     return {
         "observations": observations.dataset_id,
@@ -1372,6 +1609,8 @@ def _child_dataset_ids(build: IBKRFoundationBuild) -> dict[str, str]:
         "causal-metadata": build.causal_metadata.dataset_id,
         "blind-observations": blind_observations.projection_id,
         "blind-panel": blind_panel.projection_id,
+        "g2-observations": g2_observations.projection_id,
+        "g2-panel": g2_panel.projection_id,
         "pre-holdout-target": pre_holdout_target.projection_id,
     }
 

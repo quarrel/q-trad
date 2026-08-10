@@ -200,7 +200,12 @@ Run checks in proportion to the change:
 - focused tests and static checks while iterating;
 - `ops/dev/verify.sh` for the complete clean PostgreSQL, formatting, lint, typing and test gate at a
   milestone, schema or release boundary; do not substitute raw `uv run pytest`, which skips PostgreSQL
-  integration unless a guarded `QTRAD_TEST_DATABASE_URL` has already been provisioned; and
+  integration unless a guarded `QTRAD_TEST_DATABASE_URL` has already been provisioned;
+- the complete gate runs non-PostgreSQL tests concurrently with xdist and PostgreSQL tests serially.
+  Non-PostgreSQL tests must be process-isolated and order-independent. Any test using
+  `QTRAD_TEST_DATABASE_URL` or the shared test database must carry `pytest.mark.postgres`; do not
+  parallelise that lane without per-worker database isolation. Use `ops/dev/verify.sh` rather than
+  reproducing its selections manually; and
 - credential-gated or endurance checks only when their behaviour is under review.
 
 Update active documents only when their current claims change. Add or supersede an ADR for a durable

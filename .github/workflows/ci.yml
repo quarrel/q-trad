@@ -73,5 +73,35 @@ jobs:
       - name: Migrate isolated database to head
         run: uv run alembic upgrade head
 
-      - name: Test
-        run: uv run pytest
+      - name: Test without PostgreSQL
+        run: >-
+          env -u QTRAD_DATABASE_URL
+          -u QTRAD_TEST_DATABASE_URL
+          -u QTRAD_MIGRATION_DATABASE_URL
+          uv run pytest
+          -m "not postgres"
+          -n 2
+          --dist worksteal
+          --durations=25
+          --durations-min=0.5
+          --junitxml=pytest-non-postgres.xml
+
+      - name: Test PostgreSQL integration
+        run: >-
+          uv run pytest
+          -m postgres
+          -n 0
+          --durations=25
+          --durations-min=0.5
+          --junitxml=pytest-postgres.xml
+
+      - name: Upload pytest timing reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: pytest-timing-${{ github.run_attempt }}
+          path: |
+            pytest-non-postgres.xml
+            pytest-postgres.xml
+          if-no-files-found: warn
+          retention-days: 7

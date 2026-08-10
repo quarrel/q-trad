@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -169,6 +170,89 @@ async def _take(iterator: Any, count: int) -> list[native.MarketDataRecord]:
     return [await anext(iterator) for _ in range(count)]
 
 
+def _expire_when_callback_queue_is_empty(
+    monkeypatch: pytest.MonkeyPatch,
+    adapter: native.IbkrNativeMarketDataAdapter,
+) -> None:
+    next_queued_callback = adapter._next_queued_callback
+
+    async def next_callback(deadline: float) -> capability._Callback:
+        del deadline
+        if adapter._callbacks.empty():
+            raise TimeoutError("fixture callback queue exhausted")
+        return await next_queued_callback(capability.monotonic() + 1.0)
+
+    monkeypatch.setattr(adapter, "_next_queued_callback", next_callback)
+
+
+@pytest.mark.asyncio
+async def test_forced_reconnect_waits_for_gateway_to_release_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    listing = _listing()
+    settle_observations: list[tuple[float, bool, int]] = []
+
+    async def sleep(seconds: float) -> None:
+        settle_observations.append((seconds, client.disconnected, len(client.market_data_requests)))
+
+    adapter = _adapter(monkeypatch, client, sleep=sleep)
+    await _connect_and_subscribe(adapter, listing)
+
+    await adapter.force_reconnect()
+
+    assert settle_observations == [(5.0, True, 1)]
+    assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
+    assert dict((await adapter.health()).attributes)["connection_generation"] == "2"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_forced_reconnect_reserves_callback_queue_for_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    listing = _listing()
+
+    run_count = 0
+
+    def run_with_trailing_stale_callback() -> None:
+        nonlocal run_count
+        run_count += 1
+        if run_count == 2:
+            client.callbacks.put(capability._Callback("tick_price", 1, (1, 1.1), generation=1))
+        client.callbacks.put(capability._Callback("next_valid_id", -1, (1,)))
+
+    monkeypatch.setattr(client, "run", run_with_trailing_stale_callback)
+
+    async def settle_immediately(seconds: float) -> None:
+        assert seconds == 5.0
+
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        sleep=settle_immediately,
+        request_timeout_seconds=0.01,
+        handshake_timeout_seconds=0.05,
+    )
+    await _connect_and_subscribe(adapter, listing)
+    streaming_record = asyncio.ensure_future(anext(adapter.records()))
+    await asyncio.sleep(0)
+
+    await adapter.force_reconnect()
+
+    assert not streaming_record.done()
+    assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
+    health = await adapter.health()
+    assert dict(health.attributes)["connection_generation"] == "2"
+    assert dict(health.attributes)["superseded_callbacks"] == "1"
+    assert "SUPERSEDED_GENERATION" not in health.reason_codes
+    streaming_record.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await streaming_record
+    await adapter.disconnect()
+
+
 @pytest.mark.asyncio
 async def test_exact_mapping_and_one_sided_callbacks_are_identity_bearing(
     monkeypatch: pytest.MonkeyPatch,
@@ -323,7 +407,8 @@ async def test_superseded_generation_is_rejected_without_cross_generation_state(
     health = await adapter.health()
     assert record.raw_payload["raw_value"] == 1.2
     assert record.arrival_sequence == 4
-    assert "SUPERSEDED_GENERATION" in health.reason_codes
+    assert "SUPERSEDED_GENERATION" not in health.reason_codes
+    assert dict(health.attributes)["superseded_callbacks"] == "1"
     assert health.attributes[0] == ("connection_generation", "1")
 
 
@@ -479,13 +564,9 @@ async def test_recovery_timeout_retains_intervening_callbacks_in_arrival_order(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient(Queue())
-    adapter = _adapter(
-        monkeypatch,
-        client,
-        request_timeout_seconds=0.001,
-        upstream_recovery_timeout_seconds=0.001,
-    )
+    adapter = _adapter(monkeypatch, client)
     await _connect_and_subscribe(adapter, _listing())
+    _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     stream = adapter.records()
     trigger_received = _NOW + timedelta(seconds=1)
     intervening_received = _NOW + timedelta(seconds=3)
@@ -522,13 +603,9 @@ async def test_server_time_recovery_timeout_retains_intervening_callbacks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     client = _FakeClient(Queue())
-    adapter = _adapter(
-        monkeypatch,
-        client,
-        request_timeout_seconds=0.001,
-        server_time_timeout_seconds=0.001,
-    )
+    adapter = _adapter(monkeypatch, client)
     await _connect_and_subscribe(adapter, _listing())
+    _expire_when_callback_queue_is_empty(monkeypatch, adapter)
     client.emit_current_time = False
     stream = adapter.records()
     client.callbacks.put(
