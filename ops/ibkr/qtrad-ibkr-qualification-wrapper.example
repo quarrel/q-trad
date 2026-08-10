@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+set -euo pipefail
+umask 077
+
+[[ "$#" -ge 2 && "$1" == deployment \
+    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) ]] || {
+    echo "qualification wrapper accepts only IBKR snapshot or verification commands" >&2
+    exit 64
+}
+
+# These identities exist only while postgres-restore-verify.sh owns the disposable database.
+restore_url="${QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL:?run through postgres-restore-verify.sh}"
+restore_evidence="${QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH:?run through postgres-restore-verify.sh}"
+[[ "$restore_url" =~ ^postgresql\+asyncpg://qtrad_ibkr@127[.]0[.]0[.]1:5432/qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || exit 64
+[[ "$restore_evidence" == /var/lib/qtrad/ibkr/restore-evidence/*.json \
+    && -f "$restore_evidence" && ! -L "$restore_evidence" \
+    && "$(stat -c '%u:%g:%a' "$restore_evidence")" == 0:10001:640 ]] || {
+    echo "restore evidence is not authenticated for the unprivileged qualification runtime" >&2
+    exit 64
+}
+
+# shellcheck disable=SC1091
+. /etc/qtrad/ibkr-ingest.env
+image="${QTRAD_IBKR_IMAGE:?set QTRAD_IBKR_IMAGE}"
+qualification_root=/srv/qtrad/ibkr/qualification-evidence
+backup_root=/srv/qtrad/postgres/backups
+restore_evidence_root=/var/lib/qtrad/ibkr/restore-evidence
+[[ "$image" =~ @sha256:[0-9a-f]{64}$ ]] || exit 64
+install -d -o 10001 -g 10001 -m 0750 "$qualification_root"
+
+exec docker run --rm --network host --user 10001:10001 \
+    --read-only --cap-drop=ALL --security-opt=no-new-privileges --pids-limit 256 \
+    --tmpfs /tmp:rw,noexec,nosuid,size=64m \
+    --env-file /etc/qtrad/ibkr-ingest.env \
+    --env "QTRAD_IBKR_QUALIFICATION_RESTORE_DATABASE_URL=$restore_url" \
+    --env "QTRAD_IBKR_QUALIFICATION_RESTORE_EVIDENCE_PATH=$restore_evidence" \
+    --volume /etc/qtrad:/etc/qtrad:ro \
+    --volume /srv/qtrad/ibkr:/srv/qtrad/ibkr:ro \
+    --volume "$qualification_root:$qualification_root:rw" \
+    --volume "$backup_root:$backup_root:ro" \
+    --volume "$restore_evidence_root:$restore_evidence_root:ro" \
+    --entrypoint /app/.venv/bin/python "$image" -m qtrad "$@"

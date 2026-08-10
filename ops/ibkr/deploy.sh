@@ -163,7 +163,8 @@ verify_backup_identity() {
             && "${QTRAD_IBKR_POSTGRES_CONTAINER:-}" == qtrad-ibkr-native-postgres \
             && "${QTRAD_IBKR_POSTGRES_DATABASE:-}" == qtrad_ibkr \
             && "${QTRAD_IBKR_POSTGRES_USER:-}" == qtrad_ibkr \
-            && "${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-}" =~ ^[1-9][0-9]*$ ]] \
+            && "${QTRAD_IBKR_BACKUP_RETENTION_DAYS:-}" =~ ^[1-9][0-9]*$ \
+            && "${QTRAD_IBKR_RUNTIME_GID:-}" == 10001 ]] \
             || fail "canonical backup environment has unexpected identities"
         [[ -z "${QTRAD_IBKR_RESTORE_DATABASE:-}" ]] \
             || fail "restore database identity must be generated per verification run"
@@ -219,6 +220,8 @@ if [[ -n "$preflight_bin" ]]; then
 else
     [[ -r "$script_dir/qtrad-container-cli.sh" ]] || fail "reviewed container CLI wrapper is unavailable"
 fi
+[[ -r "$script_dir/qtrad-ibkr-qualification-wrapper.example" ]] \
+    || fail "reviewed qualification wrapper is unavailable"
 command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
@@ -296,6 +299,7 @@ install -D -m 0750 "$script_dir/qtrad-ibkr-api-wrapper.example" /usr/local/sbin/
 install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healthcheck
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup
 install -D -m 0750 "$script_dir/postgres-restore-verify.sh" /usr/local/sbin/qtrad-ibkr-postgres-restore-verify
+install -D -m 0750 "$script_dir/qtrad-ibkr-qualification-wrapper.example" /usr/local/sbin/qtrad-ibkr-qualification
 install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
 install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
 install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop

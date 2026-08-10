@@ -9,6 +9,7 @@ restore_database="${QTRAD_IBKR_RESTORE_DATABASE:-qtrad_ibkr_restore_verify_$(dat
 evidence_path="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only restore evidence path}"
 requested_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:-}"
 user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
+runtime_gid="${QTRAD_IBKR_RUNTIME_GID:?set QTRAD_IBKR_RUNTIME_GID}"
 
 [[ "$database" == qtrad_ibkr && "$restore_database" != "$database" ]] || {
     echo "restore target must be separate from qtrad_ibkr" >&2
@@ -16,6 +17,10 @@ user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
 }
 [[ "$restore_database" =~ ^qtrad_ibkr_restore_verify_[a-z0-9_]+$ ]] || {
     echo "restore target name is not a dedicated disposable IBKR database" >&2
+    exit 64
+}
+[[ "$runtime_gid" == 10001 ]] || {
+    echo "QTRAD_IBKR_RUNTIME_GID must match the unprivileged runtime group 10001" >&2
     exit 64
 }
 [[ "$evidence_path" == /var/lib/qtrad/ibkr/restore-evidence/*.json && ! -e "$evidence_path" ]] || {
@@ -53,6 +58,12 @@ fi
     echo "no complete IBKR PostgreSQL backup is available" >&2
     exit 69
 }
+for runtime_readable in "$latest" "$latest.sha256"; do
+    [[ "$(stat -c '%u:%g:%a' "$runtime_readable")" == "0:$runtime_gid:640" ]] || {
+        echo "IBKR backup evidence is not root-owned and runtime-group-readable: $runtime_readable" >&2
+        exit 64
+    }
+done
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sha256sum --check "$latest.sha256"
 archive_sha256="$(sha256sum "$latest" | cut -d ' ' -f 1)"
@@ -75,7 +86,7 @@ docker exec "$container" psql --username="$user" --dbname="$restore_database" \
     --command 'SELECT 1' > /dev/null
 completed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
-install -d -m 0750 "$(dirname -- "$evidence_path")"
+install -d -o root -g "$runtime_gid" -m 0750 "$(dirname -- "$evidence_path")"
 unsigned="$(jq -cS -n \
     --arg contract "qtrad-ibkr-postgres-restore-v1" \
     --arg archive_path "$latest" \
@@ -92,6 +103,8 @@ temporary_evidence="$(mktemp "$(dirname -- "$evidence_path")/.restore-evidence.X
 printf '%s' "$unsigned" | jq -cS --arg artifact_sha256 "$artifact_sha256" \
     '. + {artifact_sha256:$artifact_sha256}' > "$temporary_evidence"
 ln "$temporary_evidence" "$evidence_path"
+chown "0:$runtime_gid" "$evidence_path"
+chmod 0640 "$evidence_path"
 rm -f "$temporary_evidence"
 temporary_evidence=""
 

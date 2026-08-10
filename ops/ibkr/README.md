@@ -93,22 +93,56 @@ API response, fake store or copied database is not provenance and cannot mint th
 runtime-only capability.
 
 Run qualification commands only as the child command of
-`qtrad-ibkr-postgres-restore-verify`. The wrapper checks the selected backup's recorded
-SHA-256 before `pg_restore --exit-on-error`, marks the disposable
-`qtrad_ibkr_restore_verify_*` database with that archive identity, writes create-only
-restore evidence binding source database, restored database, schema, archive SHA and
-completion, exports the ephemeral restore URL/evidence path, executes the bounded
-qualification command while the database exists, and then drops it. The application
-re-hashes the archive, authenticates the database marker and exact evidence before any
-snapshot or verifier can proceed. The first pass selects the latest complete archive;
-set `QTRAD_IBKR_RESTORE_ARCHIVE` to the artifact's exact archive path when independently
-replaying that same snapshot.
+`qtrad-ibkr-postgres-restore-verify`, through the installed
+`qtrad-ibkr-qualification` wrapper. Set the selected archive with
+`QTRAD_IBKR_RESTORE_ARCHIVE` and the new provenance path with
+`QTRAD_IBKR_RESTORE_EVIDENCE_PATH`; the archive is never a positional argument.
+The restore wrapper checks the selected backup's recorded SHA-256 before
+`pg_restore --exit-on-error`, marks the disposable `qtrad_ibkr_restore_verify_*`
+database with that archive identity, writes create-only restore evidence binding
+source database, restored database, schema, archive SHA and completion, exports
+the ephemeral restore URL/evidence path, executes the bounded qualification
+command while the database exists, and then drops it. The qualification wrapper
+is the single runtime composition: it preserves UID/GID 10001, read-only/cap-drop
+hardening, exact live/restore database identities, and the narrowly writable
+qualification-evidence directory. The application re-hashes the archive,
+authenticates the database marker and exact evidence before any snapshot or
+verifier can proceed.
 
 The qualifying collector run must be cleanly stopped before backup so its final metrics
 and last healthy, post-reconnect snapshot are immutable in the run record and replay
-exactly after restore. The operator API exposes the same bounded evidence query at
-`/api/v1/capture/qualification-evidence`; that read-only endpoint never grants
-qualification authority.
+exactly after restore. Before that deliberate stop, stop `qtrad-ibkr-health.timer` and
+any active `qtrad-ibkr-health.service`, then stop `qtrad-ibkr-ingest.service`. The health
+unit no longer has a `Wants=` or `Requires=` activation edge to ingest, so a timer firing
+cannot pull the collector up merely through dependency resolution. It can still execute
+an explicit recovery action; quiescing the timer remains part of the qualification
+boundary.
+
+Run the bounded collector through the installed hardened ingest wrapper, not a rebuilt
+Docker command. It accepts either no arguments for the continuous systemd service or
+exactly the bounded qualification pair:
+
+```bash
+set -a
+. /etc/qtrad/ibkr-ingest.env
+set +a
+/usr/local/sbin/qtrad-ibkr-ingest \
+  --max-seconds 180 \
+  --force-reconnect-after-seconds 60
+```
+
+Keep continuous ingest stopped until the qualifying backup has completed. On every
+success or failure path, restore `qtrad-ibkr-ingest.service` and
+`qtrad-ibkr-health.timer`; verify readiness before leaving the boundary.
+
+Fresh backup archives, sidecars and restore evidence are root-owned mode `0640` with
+runtime group `10001`; their containing directories are mode `0750` with that group.
+This grants the hardened verifier read-only access without running its container as root
+or applying operator ACLs. `QTRAD_IBKR_RUNTIME_GID=10001` is a required authenticated
+backup-environment identity, not a default. Archives created before this contract require
+a fresh backup rather than manual permission repair. The operator API exposes the same
+bounded evidence query at `/api/v1/capture/qualification-evidence`; that read-only
+endpoint never grants qualification authority.
 
 After genuine B3 evidence is available, `qtrad deployment ibkr-promote
 --policy b4-exact-six` requires the authenticated B3 release, its five authority files,
@@ -126,6 +160,20 @@ not query either database. Closed-market connectivity is not qualification evide
 Real qualification still requires LIVE bid and ask evidence during authenticated
 ACTIVE periods, zero-loss persistence, controlled reconnect with fresh post-reconnect
 data, and verified backup/restore.
+
+The bounded restore interface is:
+
+```bash
+QTRAD_IBKR_RESTORE_ARCHIVE=/srv/qtrad/postgres/backups/qtrad-ibkr-YYYYMMDDTHHMMSSZ.dump \
+QTRAD_IBKR_RESTORE_EVIDENCE_PATH=/var/lib/qtrad/ibkr/restore-evidence/<new-name>.json \
+  /usr/local/sbin/qtrad-ibkr-postgres-restore-verify \
+  /usr/local/sbin/qtrad-ibkr-qualification \
+  deployment ibkr-qualification-snapshot <snapshot arguments>
+```
+
+Use the same composition with `ibkr-qualification-verify` and a fresh restore-evidence
+path for independent replay. Never decompose its Docker mounts, user identity or archive
+selection into an ad-hoc operator command.
 
 ## Running explicit historical CLI commands
 
