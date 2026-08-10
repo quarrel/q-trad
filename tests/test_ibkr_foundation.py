@@ -60,6 +60,8 @@ from qtrad.runtime.provider_history import (
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
 
+_SHORT_STAGE8_END = datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30)
+
 
 def _canonical_json(value: object) -> bytes:
     return json.dumps(
@@ -275,7 +277,7 @@ def test_stage8_writer_preserves_racing_output_on_child_failure(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     output = tmp_path / "racing-foundation.json"
     child_root = tmp_path / "racing-foundation.json.children"
@@ -320,7 +322,7 @@ def test_provider_history_foundation_round_trips_and_replays_children(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
 
     source_evidence = read_provider_history_source_evidence(provider_manifest)
@@ -396,7 +398,7 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     source_evidence = read_provider_history_source_evidence(provider_manifest)
     full_build = build_ibkr_foundation(source_evidence, configuration)
@@ -450,7 +452,7 @@ def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> 
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(
@@ -513,7 +515,7 @@ def test_stage8_forces_non_confirmatory_targets_to_context(tmp_path: Path) -> No
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     extra_instrument = "fx:nzd-usd"
     extra_configuration = replace(
@@ -544,7 +546,7 @@ def test_stage8_zero_valid_folds_remains_insufficient(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
 
     def no_valid_folds(*args: object, **kwargs: object) -> object:
@@ -852,7 +854,7 @@ def test_stage8_cli_build_and_verify_round_trip(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     configuration_path = tmp_path / "configuration.json"
     configuration_path.write_text(
@@ -893,7 +895,7 @@ def test_provider_history_foundation_bounded_replay(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     full = build_ibkr_foundation(source_evidence, configuration)
     import qtrad.runtime.ibkr_foundation as foundation_runtime
@@ -928,10 +930,15 @@ def test_bounded_foundation_parallel_derivation_matches_generic_across_chunk_sea
 ) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
     source_evidence = read_provider_history_source_evidence(provider_manifest)
+    monkeypatch.setattr(
+        bounded_foundation_runtime,
+        "_DERIVATION_CHUNK",
+        timedelta(minutes=15),
+    )
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 8, 0, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END + timedelta(minutes=1),
     )
     generic = build_ibkr_foundation(source_evidence, configuration)
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
@@ -976,7 +983,7 @@ def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
     bundle = tmp_path / "replay-checkpoint-foundation.json"
@@ -1036,7 +1043,7 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
     checkpoint_root = tmp_path / "empty-checkpoint"
@@ -1107,7 +1114,7 @@ def test_stage8_observation_capture_aborts_before_publication(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
     original_verifier = foundation_runtime.read_provider_history_source_evidence
@@ -1159,7 +1166,7 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
     original_source_verifier = foundation_runtime.read_provider_history_source_evidence
@@ -1280,7 +1287,7 @@ def test_stage8_rehearsal_is_non_publishing_and_reports_progress(
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=datetime(2026, 2, 3, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
     before = set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*"))
