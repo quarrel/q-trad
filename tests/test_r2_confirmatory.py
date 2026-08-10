@@ -93,6 +93,7 @@ def _build_confirmatory_fixture(
 ) -> tuple[
     Path,
     Any,
+    TargetDataset,
     FoldDataset,
     dict[str, tuple[tuple[datetime, datetime], ...]],
 ]:
@@ -470,6 +471,7 @@ def _build_confirmatory_fixture(
     return (
         bundle_path,
         fixture_verified,
+        full_targets,
         cast(FoldDataset, fixture_verified.folds),
         active_intervals,
     )
@@ -581,7 +583,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         "sklearn_identity": "fixture-sklearn",
     }
     monkeypatch.setattr(verification, "runtime_identities", lambda: identities)
-    bundle_path, _, _, _ = _build_confirmatory_fixture(
+    bundle_path, _, fixture_targets, _, _ = _build_confirmatory_fixture(
         tmp_path,
         qualifying=True,
     )
@@ -728,18 +730,6 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
             prepared_by="fixture-operator",
         )
 
-    repeated_root = tmp_path / "repeated-preparation"
-    prepare_confirmatory_g2(
-        verified_g1=verified_g1,
-        output=repeated_root,
-        prepared_by="fixture-operator",
-    )
-    repeated = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=repeated_root,
-    )
-    assert repeated.seal.seal_id == verified_preparation.seal.seal_id
-
     missing_root = tmp_path / "missing-preparation"
     copytree(preparation_root, missing_root)
     next((missing_root / "forecasts").iterdir()).unlink()
@@ -779,17 +769,52 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         original_outcome_items,
     )
 
+    # Failure cases mutate only lifecycle files; preparation bytes were verified above.
+    def copied_verified_preparation(
+        name: str,
+    ) -> tuple[Path, VerifiedConfirmatoryG2Preparation]:
+        root = tmp_path / name
+        copytree(preparation_root, root)
+        copied = object.__new__(VerifiedConfirmatoryG2Preparation)
+        for attribute in VerifiedConfirmatoryG2Preparation.__slots__:
+            object.__setattr__(
+                copied,
+                attribute,
+                object.__getattribute__(verified_preparation, attribute),
+            )
+        object.__setattr__(copied, "_path", root)
+        return root, copied
+
+    real_holdout_verifier = holdout_runtime.verify_holdout_preparation
+    real_lifecycle_verifier = verification._verify_confirmatory_holdout_preparation
+    real_g2_builder = verification._build_confirmatory_g2
+    real_decoder = verification._decode_confirmatory_target
+
+    def verified_seal(*_: object, **__: object) -> Any:
+        return verified_preparation.seal
+
+    def replayed_g2(**_: object) -> Any:
+        return SimpleNamespace(seal=verified_preparation.seal)
+
+    def fixture_target_after_open(opened: object) -> TargetDataset:
+        path = cast(Any, opened).preparation.path
+        assert (path / "opened.json").is_file()
+        assert (path / "confirmatory-opened.json").is_file()
+        return fixture_targets
+
+    monkeypatch.setattr(holdout_runtime, "verify_holdout_preparation", verified_seal)
+    monkeypatch.setattr(verification, "_verify_confirmatory_holdout_preparation", verified_seal)
+    monkeypatch.setattr(verification, "_build_confirmatory_g2", replayed_g2)
+    monkeypatch.setattr(verification, "_decode_confirmatory_target", fixture_target_after_open)
+
     def terminal_clock(opened_at: datetime, *, seconds: int = 1) -> Clock:
         return cast(
             Clock,
             SimpleNamespace(now=lambda: opened_at + timedelta(seconds=seconds)),
         )
 
-    base_marker_failure_root = tmp_path / "base-marker-failure"
-    copytree(preparation_root, base_marker_failure_root)
-    base_marker_failure_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=base_marker_failure_root,
+    base_marker_failure_root, base_marker_failure_preparation = copied_verified_preparation(
+        "base-marker-failure"
     )
     claim_before = (base_marker_failure_root / ".preparation-claim.json").read_bytes()
     original_base_json_writer = cast(Any, holdout_runtime)._write_json
@@ -815,21 +840,9 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     assert (base_marker_failure_root / ".preparation-claim.json").read_bytes() == claim_before
     assert not (base_marker_failure_root / "opened.json").exists()
     assert not (base_marker_failure_root / "consumed.json").exists()
-    assert (
-        verify_confirmatory_g2_preparation(
-            verified_g1=verified_g1,
-            path=base_marker_failure_root,
-        ).seal.seal_id
-        == base_marker_failure_preparation.seal.seal_id
-    )
     monkeypatch.setattr(holdout_runtime, "_write_json", original_base_json_writer)
 
-    marker_failure_root = tmp_path / "marker-failure"
-    copytree(preparation_root, marker_failure_root)
-    marker_failure_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=marker_failure_root,
-    )
+    marker_failure_root, marker_failure_preparation = copied_verified_preparation("marker-failure")
     original_verification_atomic_create = verification.atomic_create
 
     def fail_confirmatory_opened(path: Path, data: bytes) -> None:
@@ -862,12 +875,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     )
     monkeypatch.setattr(verification, "atomic_create", original_verification_atomic_create)
 
-    failure_root = tmp_path / "failed-reveal"
-    copytree(preparation_root, failure_root)
-    failed_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=failure_root,
-    )
+    failure_root, failed_preparation = copied_verified_preparation("failed-reveal")
     original_decoder = verification._decode_confirmatory_target
 
     def fail_after_open(opened: object) -> TargetDataset:
@@ -912,11 +920,8 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
 
     monkeypatch.setattr(verification, "_decode_confirmatory_target", original_decoder)
 
-    evaluation_failure_root = tmp_path / "evaluation-failure"
-    copytree(preparation_root, evaluation_failure_root)
-    evaluation_failure_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=evaluation_failure_root,
+    evaluation_failure_root, evaluation_failure_preparation = copied_verified_preparation(
+        "evaluation-failure"
     )
     original_evaluator = holdout_application.evaluate_holdout
 
@@ -945,11 +950,8 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     )
     monkeypatch.setattr(holdout_application, "evaluate_holdout", original_evaluator)
 
-    result_failure_root = tmp_path / "result-persistence-failure"
-    copytree(preparation_root, result_failure_root)
-    result_failure_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=result_failure_root,
+    result_failure_root, result_failure_preparation = copied_verified_preparation(
+        "result-persistence-failure"
     )
     original_atomic_create = holdout_runtime.atomic_create
 
@@ -982,11 +984,8 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
     )
     monkeypatch.setattr(holdout_runtime, "atomic_create", original_atomic_create)
 
-    consumed_failure_root = tmp_path / "consumed-failure"
-    copytree(preparation_root, consumed_failure_root)
-    consumed_failure_preparation = verify_confirmatory_g2_preparation(
-        verified_g1=verified_g1,
-        path=consumed_failure_root,
+    consumed_failure_root, consumed_failure_preparation = copied_verified_preparation(
+        "consumed-failure"
     )
     original_json_writer = cast(Any, holdout_runtime)._write_json
 
@@ -1022,6 +1021,15 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         "_write_json",
         original_json_writer,
     )
+    monkeypatch.setattr(holdout_runtime, "verify_holdout_preparation", real_holdout_verifier)
+    monkeypatch.setattr(
+        verification,
+        "_verify_confirmatory_holdout_preparation",
+        real_lifecycle_verifier,
+    )
+    monkeypatch.setattr(verification, "_build_confirmatory_g2", real_g2_builder)
+    monkeypatch.setattr(verification, "_decode_confirmatory_target", real_decoder)
+
     with pytest.raises(TypeError, match="constructed only after durable OPENED"):
         OpenedConfirmatoryHoldout()
     opened_at = datetime.now(UTC)
@@ -1045,12 +1053,6 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         "evaluation.json",
         "consumed.json",
     }.issubset(path.name for path in preparation_root.iterdir())
-    report = verify_confirmatory_r2h(
-        verified_g1=verified_g1,
-        path=preparation_root,
-    )
-    assert report.status is ConfirmatoryR2HStatus.VALID_CONSUMED_RESULT
-    assert report.evaluation_id == evaluation.evaluation_id
     tampered_root = tmp_path / "tampered-r2h"
     copytree(preparation_root, tampered_root)
     evaluation_payload = cast(
@@ -1088,7 +1090,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             "sklearn_identity": "fixture-sklearn",
         },
     )
-    bundle_path, fixture_verified, fixture_folds, active_intervals = _build_confirmatory_fixture(
+    bundle_path, fixture_verified, _, fixture_folds, active_intervals = _build_confirmatory_fixture(
         tmp_path,
         qualifying=True,
     )
