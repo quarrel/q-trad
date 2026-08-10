@@ -65,7 +65,7 @@ for runtime_readable in "$latest" "$latest.sha256"; do
     }
 done
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-sha256sum --check "$latest.sha256"
+sha256sum --check --status "$latest.sha256"
 archive_sha256="$(sha256sum "$latest" | cut -d ' ' -f 1)"
 
 docker exec "$container" psql --username="$user" --dbname=postgres \
