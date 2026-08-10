@@ -181,6 +181,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         self._unknown_request_callbacks = 0
         self._cancelled_request_callbacks = 0
         self._pending_records: deque[MarketDataRecord] = deque()
+        self._streaming_callbacks_enabled = asyncio.Event()
+        self._streaming_callbacks_enabled.set()
+        self._callback_consumer_lock = asyncio.Lock()
 
     def _market_activity(
         self, binding: _SubscriptionBinding, observed_at: datetime
@@ -214,12 +217,20 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         listings = tuple(binding.listing for binding in self._current_binding_values())
         if not listings:
             raise RuntimeError("IBKR native capture has no active subscriptions to reconnect")
-        await self.disconnect()
-        # TWS can retain the authenticated client ID briefly after socket close.
-        # Reusing it immediately produced error 326 in live qualification.
-        await self._sleep(_RECONNECT_SETTLE_SECONDS)
-        await self.connect()
-        await self.subscribe(listings)
+        self._streaming_callbacks_enabled.clear()
+        try:
+            # The streaming iterator and handshake consume one official callback
+            # queue. Reserve it for disconnect/connect so nextValidId cannot be
+            # mistaken for ordinary market-data evidence by the active stream.
+            async with self._callback_consumer_lock:
+                await self.disconnect()
+                # TWS can retain the authenticated client ID briefly after socket close.
+                # Reusing it immediately produced error 326 in live qualification.
+                await self._sleep(_RECONNECT_SETTLE_SECONDS)
+                await self.connect()
+                await self.subscribe(listings)
+        finally:
+            self._streaming_callbacks_enabled.set()
 
     async def discover_listings(
         self, instrument_ids: Sequence[InstrumentId]
@@ -263,43 +274,50 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if self._client is None:
             raise RuntimeError("IBKR native capture is not connected")
         while True:
-            if self._pending_records:
-                yield self._pending_records.popleft()
-                continue
-            self._raise_if_terminal()
-            try:
-                callback = await self._next_callback(monotonic() + self._request_timeout_seconds)
-            except IbkrConnectionIntegrityError as error:
-                self._terminal_error = error
-                raise
-            except TimeoutError:
-                continue
-            if not self._session.accept_callback(callback.generation):
-                self._superseded_callbacks += 1
-                continue
-            self._update_last_message_at(self._callback_received_time(callback))
-            if callback.kind == "current_time":
-                if self._session.state is IbkrSessionState.WAITING_SERVER_TIME:
-                    self._session.mark_server_time()
-                continue
-            if _is_global_error(callback):
-                record = await self._handle_global_callback(callback)
-                if record is not None:
-                    yield record
-                continue
-            binding = self._current_bindings.get(callback.request_id)
-            if binding is None:
-                binding = self._retired_binding(callback)
-                if binding is not None:
-                    yield self._normalise_cancelled_request_callback(callback, binding)
+            await self._streaming_callbacks_enabled.wait()
+            record: MarketDataRecord | None = None
+            async with self._callback_consumer_lock:
+                if not self._streaming_callbacks_enabled.is_set():
                     continue
-                yield self._normalise_unknown_request_callback(callback)
-                continue
-            if callback.kind == "error":
-                yield self._normalise_error_callback(callback, binding)
-                continue
-            record = self._normalise_level1_callback(callback, binding)
-            yield record
+                if self._pending_records:
+                    record = self._pending_records.popleft()
+                else:
+                    self._raise_if_terminal()
+                    try:
+                        callback = await self._next_callback(
+                            monotonic() + self._request_timeout_seconds
+                        )
+                    except IbkrConnectionIntegrityError as error:
+                        self._terminal_error = error
+                        raise
+                    except TimeoutError:
+                        continue
+                    if not self._session.accept_callback(callback.generation):
+                        self._superseded_callbacks += 1
+                        continue
+                    self._update_last_message_at(self._callback_received_time(callback))
+                    if callback.kind == "current_time":
+                        if self._session.state is IbkrSessionState.WAITING_SERVER_TIME:
+                            self._session.mark_server_time()
+                        continue
+                    if _is_global_error(callback):
+                        record = await self._handle_global_callback(callback)
+                    else:
+                        binding = self._current_bindings.get(callback.request_id)
+                        if binding is None:
+                            binding = self._retired_binding(callback)
+                            if binding is not None:
+                                record = self._normalise_cancelled_request_callback(
+                                    callback, binding
+                                )
+                            else:
+                                record = self._normalise_unknown_request_callback(callback)
+                        elif callback.kind == "error":
+                            record = self._normalise_error_callback(callback, binding)
+                        else:
+                            record = self._normalise_level1_callback(callback, binding)
+            if record is not None:
+                yield record
 
     async def backfill(self, request: BackfillRequest) -> AsyncIterator[MarketBar]:
         raise NotImplementedError("IBKR native capture does not provide historical backfill")
