@@ -188,7 +188,9 @@ def _authenticate_provider_authority(
         listings.append(listing)
         evidence[listing.listing_id] = contract
 
-    trusted = IbkrNativeCaptureConfiguration.from_reviewed(listings, evidence)
+    trusted = IbkrNativeCaptureConfiguration.from_reviewed(
+        sorted(listings, key=lambda item: str(item.listing_id)), evidence
+    )
     if configuration is not None:
         supplied = {item.instrument_id: item for item in configuration.listings}
         if len(supplied) != B5_INSTRUMENT_COUNT or set(supplied) != set(canonical):
