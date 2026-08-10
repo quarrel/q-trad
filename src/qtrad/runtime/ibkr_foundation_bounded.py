@@ -733,13 +733,22 @@ class _DeferredChildWriter:
         self.part_callback = part_callback
         self.parts: list[_Part] = []
         self._payloads: list[str] = []
+        self._payload_bytes = 0
         self._finalized = False
 
     def add(self, payload: str) -> None:
         if self._finalized:
             raise RuntimeError("child writer is already finalized")
+        runtime = _runtime()
+        payload_bytes = runtime._payload_byte_count(payload)
+        if self._payloads and (
+            len(self._payloads) >= runtime._MAX_CHILD_ROWS
+            or self._payload_bytes + payload_bytes > runtime._MAX_CHILD_PAYLOAD_BYTES
+        ):
+            self._flush()
         self._payloads.append(payload)
-        if len(self._payloads) >= _runtime()._MAX_CHILD_ROWS:
+        self._payload_bytes += payload_bytes
+        if len(self._payloads) >= runtime._MAX_CHILD_ROWS:
             self._flush()
 
     def close(self) -> None:
@@ -789,6 +798,7 @@ class _DeferredChildWriter:
             )
         )
         self._payloads.clear()
+        self._payload_bytes = 0
 
     def finalize(self, dataset_id: str) -> tuple[dict[str, object], ...]:
         if self._finalized:

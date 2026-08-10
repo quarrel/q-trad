@@ -13,6 +13,7 @@ from typing import cast
 import pytest
 
 import qtrad.runtime.ibkr_foundation as foundation_runtime
+import qtrad.runtime.ibkr_foundation_bounded as bounded_foundation_runtime
 import qtrad.runtime.provider_history as provider_history_runtime
 from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
@@ -28,6 +29,7 @@ from qtrad.application.r2_ibkr_historical import (
     ibkr_availability_evidence,
 )
 from qtrad.domain.events import JsonValue
+from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_CANDIDATES,
@@ -66,6 +68,116 @@ def _canonical_json(value: object) -> bytes:
         separators=(",", ":"),
         ensure_ascii=True,
     ).encode("utf-8")
+
+
+def _variable_fold_rows() -> tuple[dict[str, JsonValue], ...]:
+    start = datetime(2026, 2, 1, tzinfo=UTC)
+    rows: list[dict[str, JsonValue]] = []
+    for fold_index in range(3):
+        training_ids = tuple(
+            hashlib.sha256(f"training:{fold_index}:{index}".encode()).hexdigest()
+            for index in range(300)
+        )
+        validation_ids = tuple(
+            hashlib.sha256(f"validation:{fold_index}:{index}".encode()).hexdigest()
+            for index in range(100)
+        )
+        fold = Fold(
+            fold_id=f"fold-{fold_index}",
+            training_start=start,
+            training_cutoff=start + timedelta(days=fold_index + 1),
+            validation_start=start + timedelta(days=fold_index + 1),
+            validation_end=start + timedelta(days=fold_index + 2),
+            embargo_end=start + timedelta(days=fold_index + 1),
+            training_target_ids=training_ids,
+            validation_target_ids=validation_ids,
+            holdout_excluded=True,
+            membership_hash=membership_hash(training_ids, validation_ids),
+        )
+        rows.append(fold.as_json())
+    return tuple(rows)
+
+
+def test_variable_fold_payloads_split_before_child_byte_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = _variable_fold_rows()
+    payloads = tuple(foundation_runtime._canonical_row(row) for row in rows)
+    single_sizes = tuple(len(foundation_runtime._parquet_bytes((payload,))) for payload in payloads)
+    combined_size = len(foundation_runtime._parquet_bytes(payloads))
+    file_limit = (max(single_sizes) + combined_size) // 2
+    assert max(single_sizes) < file_limit < combined_size
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", file_limit)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_CHILD_PAYLOAD_BYTES",
+        max(foundation_runtime._payload_byte_count(payload) for payload in payloads),
+    )
+    dataset_id = hashlib.sha256(b"fold-dataset").hexdigest()
+    lineage = {
+        "provider_manifest_sha256": "1" * 64,
+        "provider_dataset_sha256": "2" * 64,
+        "plan_sha256": "3" * 64,
+        "aggregate_sha256": "4" * 64,
+    }
+
+    for mode in ("generic", "bounded"):
+        bundle_root = tmp_path / mode
+        bundle_root.mkdir()
+        child_root = bundle_root / "foundation.children"
+        if mode == "generic":
+            references = foundation_runtime._write_child_parts(
+                child_root,
+                bundle_root,
+                "folds",
+                rows,
+                dataset_id,
+                lineage,
+            )
+        else:
+            writer = bounded_foundation_runtime._DeferredChildWriter(
+                child_root=child_root,
+                bundle_root=bundle_root,
+                child_name=child_root.name,
+                kind="folds",
+                lineage=lineage,
+            )
+            for payload in payloads:
+                writer.add(payload)
+            references = list(writer.finalize(dataset_id))
+        assert len(references) == len(rows)
+        reference_files = tuple(
+            cast(str, cast(Mapping[str, object], reference)["file"]) for reference in references
+        )
+        assert all(
+            (bundle_root / reference_file).stat().st_size <= file_limit
+            for reference_file in reference_files
+        )
+        foundation_runtime._verify_children(
+            bundle_root,
+            {"folds": references},
+            {"folds": rows},
+            {"folds": dataset_id},
+            lineage,
+            child_kinds=("folds",),
+        )
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_CHILD_FILE_BYTES",
+        min(single_sizes) - 1,
+    )
+    oversized_root = tmp_path / "oversized"
+    oversized_root.mkdir()
+    with pytest.raises(ValueError, match="Parquet child exceeds its byte bound"):
+        foundation_runtime._write_child_parts(
+            oversized_root / "foundation.children",
+            oversized_root,
+            "folds",
+            rows[:1],
+            dataset_id,
+            lineage,
+        )
 
 
 def _rewrite_payload_reference(bundle: Path, field: str, value: object) -> None:

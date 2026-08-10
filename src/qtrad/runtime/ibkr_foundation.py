@@ -8,7 +8,7 @@ import json
 import resource
 import shutil
 import time
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
@@ -56,6 +56,7 @@ _FOUNDATION_CHILD_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
+_MAX_CHILD_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
@@ -947,6 +948,35 @@ def _write_children(
     return children
 
 
+def _payload_byte_count(payload: str) -> int:
+    return len(payload.encode("utf-8"))
+
+
+def _child_payload_chunks(
+    rows: Sequence[Mapping[str, JsonValue]],
+) -> Iterator[tuple[str, ...]]:
+    """Partition variable-sized rows deterministically before Parquet encoding."""
+
+    payloads: list[str] = []
+    payload_bytes = 0
+    emitted = False
+    for row in rows:
+        payload = _canonical_row(row)
+        encoded_bytes = _payload_byte_count(payload)
+        if payloads and (
+            len(payloads) >= _MAX_CHILD_ROWS
+            or payload_bytes + encoded_bytes > _MAX_CHILD_PAYLOAD_BYTES
+        ):
+            yield tuple(payloads)
+            emitted = True
+            payloads.clear()
+            payload_bytes = 0
+        payloads.append(payload)
+        payload_bytes += encoded_bytes
+    if payloads or not emitted:
+        yield tuple(payloads)
+
+
 def _write_child_parts(
     child_root: Path,
     bundle_root: Path,
@@ -958,14 +988,7 @@ def _write_child_parts(
     if kind not in _CHILD_KINDS:
         raise ValueError(f"unsupported IBKR foundation child kind: {kind}")
     parts: list[JsonValue] = []
-    chunks = (
-        tuple(rows[index : index + _MAX_CHILD_ROWS])
-        for index in range(0, len(rows), _MAX_CHILD_ROWS)
-    )
-    if not rows:
-        chunks = iter(((),))
-    for part_index, chunk in enumerate(chunks):
-        payloads = tuple(_canonical_row(row) for row in chunk)
+    for part_index, payloads in enumerate(_child_payload_chunks(rows)):
         parquet_bytes = _parquet_bytes(payloads)
         if not parquet_bytes or len(parquet_bytes) > _MAX_CHILD_FILE_BYTES:
             raise ValueError("IBKR foundation Parquet child exceeds its byte bound")
@@ -981,7 +1004,7 @@ def _write_child_parts(
             "kind": kind,
             "dataset_id": dataset_id,
             "part_index": part_index,
-            "row_count": len(chunk),
+            "row_count": len(payloads),
             "file": relative_file,
             "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
             "rows_sha256": _sha(list(payloads)),
@@ -1007,7 +1030,7 @@ def _write_child_parts(
                 "manifest_id": manifest_sha256[:24],
                 "manifest_path": relative_manifest,
                 "manifest_sha256": manifest_sha256,
-                "row_count": len(chunk),
+                "row_count": len(payloads),
                 "file": relative_file,
                 "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
             }
