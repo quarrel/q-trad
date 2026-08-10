@@ -70,7 +70,6 @@ services:
       QTRAD_TEST_POSTGRES_PORT: "5432"
       QTRAD_TEST_POSTGRES_USER: qtrad_test_admin
       QTRAD_TEST_POSTGRES_PASSWORD: qtrad-test-only
-      TMPDIR: /workspace/tmp
       UV_CACHE_DIR: /home/vscode/.cache/uv
     depends_on:
       db:
