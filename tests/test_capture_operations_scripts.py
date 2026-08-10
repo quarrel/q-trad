@@ -237,6 +237,18 @@ def test_ibkr_qualification_wrapper_allows_only_exact_b4_and_b5_operations() -> 
         )
 
 
+def test_ibkr_b4_promotion_requires_only_its_single_parent_restore() -> None:
+    wrapper = REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-qualification-wrapper.example"
+    result = subprocess.run(
+        ["bash", str(wrapper), "deployment", "ibkr-promote", "--policy", "b4-exact-six"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert "multi-restore wrapper" not in result.stderr
+    assert "run through postgres-restore-verify.sh" in result.stderr
+
+
 def test_ibkr_triple_restore_accepts_only_b5_qualification() -> None:
     wrapper = REPOSITORY_ROOT / "ops" / "ibkr" / "qtrad-ibkr-triple-restore-qualification.example"
     accepted = subprocess.run(
