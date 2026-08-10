@@ -1726,6 +1726,60 @@ def _canary_run_arguments(*, safety_flag: bool = True) -> list[str]:
     return arguments
 
 
+@pytest.mark.parametrize(
+    ("command", "command_arguments"),
+    (
+        (
+            "ibkr-qualification-verify",
+            ["--qualification", "qualification.json"],
+        ),
+        (
+            "ibkr-qualification-snapshot",
+            [
+                "--capture-session-id",
+                "50838048-5590-4a77-9844-b50cbe8baf81",
+                "--started-at",
+                "2026-08-10T09:23:52Z",
+                "--ended-at",
+                "2026-08-10T09:25:53Z",
+                "--generated-at",
+                "2026-08-10T09:26:55Z",
+                "--output",
+                "qualification.json",
+            ],
+        ),
+    ),
+)
+def test_ibkr_qualification_parser_accepts_exact_b4_policy(
+    command: str, command_arguments: list[str]
+) -> None:
+    parsed = cli.build_parser().parse_args(
+        [
+            "deployment",
+            command,
+            "--policy",
+            "b4-exact-six",
+            *command_arguments,
+            "--release",
+            "release.json",
+            "--descriptor",
+            "descriptor.toml",
+            "--capability-review",
+            "review.json",
+            "--operator-selection",
+            "operator.json",
+            "--contract-selection",
+            "contracts.json",
+            "--catalogue",
+            "catalogue.toml",
+            "--probe-spec",
+            "probe.toml",
+        ]
+    )
+
+    assert parsed.policy == "b4-exact-six"
+
+
 def test_canary_run_parser_requires_explicit_inputs() -> None:
     parser = cli.build_parser()
     with pytest.raises(SystemExit):

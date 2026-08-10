@@ -600,6 +600,51 @@ def b3_qualification_expectation(
     )
 
 
+def b4_qualification_expectation(
+    *,
+    release_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    descriptor: IbkrB4DeploymentDescriptor,
+    parent_qualification: VerifiedB3Qualification,
+) -> tuple[IbkrNativeCaptureConfiguration, IbkrQualificationExpectation]:
+    """Authenticate the B4 release and derive its exact qualification contract."""
+
+    deployment = descriptor.deployment
+    configuration = load_authenticated_b4_configuration(
+        release_path,
+        authority_paths=authority_paths,
+        parent_release_path=descriptor.parent_release_path,
+        parent_authority_paths=descriptor.parent_authority_paths,
+        qualification=parent_qualification,
+    )
+    return configuration, IbkrQualificationExpectation(
+        stage=IbkrQualificationStage.B4_EXACT_SIX,
+        release_contract=B4_RELEASE_CONTRACT,
+        release_sha256=sha256_path(release_path, label="B4"),
+        configuration_hash=configuration.configuration_hash,
+        capture_source_id=configuration.capture_source_id,
+        universe_id=configuration.universe_id,
+        instruments=frozenset(item.instrument_id for item in configuration.listings),
+        contracts=tuple(
+            IbkrQualifiedContract(
+                instrument_id=listing.instrument_id,
+                listing_id=listing.listing_id,
+                con_id=configuration.contract_evidence[listing.listing_id].con_id,
+            )
+            for listing in configuration.listings
+        ),
+        application_commit=deployment.application_commit,
+        image_digest=deployment.image,
+        api_package_sha256=deployment.api_package_fingerprint,
+        gateway_archive_sha256=deployment.gateway_archive_sha256,
+        gateway_version=deployment.gateway_version,
+        ibc_version=deployment.ibc_version,
+        database_name=deployment.database_name,
+        schema_head=deployment.schema_head,
+        freshness_threshold=timedelta(seconds=60),
+    )
+
+
 def verify_b3_qualification_for_release(
     qualification_path: Path,
     *,
@@ -641,6 +686,35 @@ async def verify_b3_qualification_evidence_for_release(
         restore_evidence=restore_evidence,
         expectation=expectation,
         configuration=parent,
+    )
+
+
+async def verify_b4_qualification_evidence_for_release(
+    qualification_path: Path,
+    *,
+    release_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    descriptor: IbkrB4DeploymentDescriptor,
+    parent_qualification: VerifiedB3Qualification,
+    live_store: QualificationEvidenceStore,
+    restored_store: QualificationEvidenceStore,
+    restore_evidence: VerifiedIbkrRestoreEvidence,
+) -> VerifiedB3Qualification:
+    """Mint B4 authority only after exact live/restored PostgreSQL replay."""
+
+    configuration, expectation = b4_qualification_expectation(
+        release_path=release_path,
+        authority_paths=authority_paths,
+        descriptor=descriptor,
+        parent_qualification=parent_qualification,
+    )
+    return await verify_ibkr_qualification_evidence(
+        qualification_path,
+        live_store,
+        restored_store,
+        restore_evidence=restore_evidence,
+        expectation=expectation,
+        configuration=configuration,
     )
 
 

@@ -185,8 +185,9 @@ QTRAD_IBKR_RESTORE_EVIDENCE_PATH=/var/lib/qtrad/ibkr/restore-evidence/<new-name>
 ```
 
 Use the same composition with `ibkr-qualification-verify` and a fresh restore-evidence
-path for independent replay. Never decompose its Docker mounts, user identity or archive
-selection into an ad-hoc operator command.
+path for independent replay. Pass `--policy b4-exact-six` to both commands for B4;
+omitting `--policy` retains the B3 exact-two contract. Never decompose the wrapper's
+Docker mounts, user identity or archive selection into an ad-hoc operator command.
 
 ## Running explicit historical CLI commands
 

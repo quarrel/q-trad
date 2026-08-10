@@ -147,8 +147,11 @@ from qtrad.runtime.ibkr_b4 import (
     IbkrB4DeploymentDescriptor,
     b3_qualification_expectation,
     b4_preflight,
+    b4_qualification_expectation,
     promote_b4_configuration,
     verify_b3_qualification_evidence_for_release,
+    verify_b3_qualification_for_release,
+    verify_b4_qualification_evidence_for_release,
     verify_b4_release,
     write_b4_release,
 )
@@ -182,10 +185,14 @@ from qtrad.runtime.ibkr_historical import (
     write_ibkr_runtime_lock,
 )
 from qtrad.runtime.ibkr_native_capture import (
+    IbkrNativeCaptureConfiguration,
     build_ibkr_native_adapter,
     load_reviewed_configuration,
 )
-from qtrad.runtime.ibkr_qualification import write_qualification_artifact
+from qtrad.runtime.ibkr_qualification import (
+    IbkrQualificationExpectation,
+    write_qualification_artifact,
+)
 from qtrad.runtime.ibkr_qualification_evidence import (
     IbkrQualificationWindow,
     build_ibkr_qualification_snapshot,
@@ -637,7 +644,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     qualification_b3 = deployment_sub.add_parser(
         "ibkr-qualification-verify",
-        help="verify an immutable B3 qualification artifact without provider I/O",
+        help="verify immutable IBKR qualification evidence without provider I/O",
+    )
+    qualification_b3.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
     )
     qualification_b3.add_argument("--qualification", type=Path, required=True)
     qualification_b3.add_argument("--release", type=Path, required=True)
@@ -650,7 +660,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     qualification_snapshot = deployment_sub.add_parser(
         "ibkr-qualification-snapshot",
-        help="build immutable B3 evidence from live and restored PostgreSQL stores",
+        help="build immutable IBKR evidence from live and restored PostgreSQL stores",
+    )
+    qualification_snapshot.add_argument(
+        "--policy", choices=("b3-exact-two", "b4-exact-six"), default="b3-exact-two"
     )
     qualification_snapshot.add_argument("--capture-session-id", type=UUID, required=True)
     qualification_snapshot.add_argument("--started-at", type=_utc_timestamp_argument, required=True)
@@ -1482,8 +1495,13 @@ def main(argv: Sequence[str] | None = None) -> None:
         ):
             raise SystemExit(1)
     elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-verify":
+        verify_qualification = (
+            _verify_b3_qualification_from_databases
+            if args.policy == "b3-exact-two"
+            else _verify_b4_qualification_from_databases
+        )
         capability = asyncio.run(
-            _verify_b3_qualification_from_databases(
+            verify_qualification(
                 settings,
                 qualification_path=args.qualification,
                 release_path=args.release,
@@ -1506,8 +1524,13 @@ def main(argv: Sequence[str] | None = None) -> None:
             )
         )
     elif args.command == "deployment" and args.deployment_command == "ibkr-qualification-snapshot":
+        write_snapshot = (
+            _write_b3_qualification_snapshot
+            if args.policy == "b3-exact-two"
+            else _write_b4_qualification_snapshot
+        )
         payload = asyncio.run(
-            _write_b3_qualification_snapshot(
+            write_snapshot(
                 settings,
                 release_path=args.release,
                 descriptor_path=args.descriptor,
@@ -3625,18 +3648,65 @@ async def _write_b3_qualification_snapshot(
     window: IbkrQualificationWindow,
     output_path: Path,
 ) -> dict[str, JsonValue]:
+    configuration, expectation = b3_qualification_expectation(
+        parent_release_path=release_path,
+        parent_authority_paths=authority_paths,
+        deployment=load_b3_deployment_descriptor(descriptor_path),
+    )
+    return await _write_ibkr_qualification_snapshot(
+        settings,
+        configuration=configuration,
+        expectation=expectation,
+        window=window,
+        output_path=output_path,
+    )
+
+
+async def _write_b4_qualification_snapshot(
+    settings: Settings,
+    *,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+    window: IbkrQualificationWindow,
+    output_path: Path,
+) -> dict[str, JsonValue]:
+    descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
+    parent_qualification = verify_b3_qualification_for_release(
+        descriptor.qualification_path,
+        parent_release_path=descriptor.parent_release_path,
+        parent_authority_paths=descriptor.parent_authority_paths,
+        deployment=descriptor.deployment,
+    )
+    configuration, expectation = b4_qualification_expectation(
+        release_path=release_path,
+        authority_paths=authority_paths,
+        descriptor=descriptor,
+        parent_qualification=parent_qualification,
+    )
+    return await _write_ibkr_qualification_snapshot(
+        settings,
+        configuration=configuration,
+        expectation=expectation,
+        window=window,
+        output_path=output_path,
+    )
+
+
+async def _write_ibkr_qualification_snapshot(
+    settings: Settings,
+    *,
+    configuration: IbkrNativeCaptureConfiguration,
+    expectation: IbkrQualificationExpectation,
+    window: IbkrQualificationWindow,
+    output_path: Path,
+) -> dict[str, JsonValue]:
     restore_url = settings.ibkr_qualification_restore_database_url
     restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
     if restore_url is None or restore_evidence_path is None:
         raise ValueError(
             "hash-checked restore workflow URL and evidence are required for snapshot replay"
         )
-    deployment = load_b3_deployment_descriptor(descriptor_path)
-    configuration, expectation = b3_qualification_expectation(
-        parent_release_path=release_path,
-        parent_authority_paths=authority_paths,
-        deployment=deployment,
-    )
     live_engine = _engine(settings)
     restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
     try:
@@ -3660,6 +3730,52 @@ async def _write_b3_qualification_snapshot(
         await restored_engine.dispose()
     write_qualification_artifact(output_path, payload)
     return payload
+
+
+async def _verify_b4_qualification_from_databases(
+    settings: Settings,
+    *,
+    qualification_path: Path,
+    release_path: Path,
+    descriptor_path: Path,
+    authority_paths: IbkrAuthorityPaths,
+) -> VerifiedIbkrCaptureQualification:
+    descriptor = IbkrB4DeploymentDescriptor.from_toml(descriptor_path)
+    parent_qualification = verify_b3_qualification_for_release(
+        descriptor.qualification_path,
+        parent_release_path=descriptor.parent_release_path,
+        parent_authority_paths=descriptor.parent_authority_paths,
+        deployment=descriptor.deployment,
+    )
+    restore_url = settings.ibkr_qualification_restore_database_url
+    restore_evidence_path = settings.ibkr_qualification_restore_evidence_path
+    if restore_url is None or restore_evidence_path is None:
+        raise ValueError(
+            "hash-checked restore workflow URL and evidence are required for independent replay"
+        )
+    live_engine = _engine(settings)
+    restored_engine = create_async_engine(restore_url, pool_pre_ping=True)
+    try:
+        restored_store = PostgresAuditStore(restored_engine)
+        restore_evidence = await verify_ibkr_restore_evidence(
+            restore_evidence_path,
+            restored_store,
+            expected_source_database=descriptor.deployment.database_name,
+            expected_schema_head=descriptor.deployment.schema_head,
+        )
+        return await verify_b4_qualification_evidence_for_release(
+            qualification_path,
+            release_path=release_path,
+            authority_paths=authority_paths,
+            descriptor=descriptor,
+            parent_qualification=parent_qualification,
+            live_store=PostgresAuditStore(live_engine),
+            restored_store=restored_store,
+            restore_evidence=restore_evidence,
+        )
+    finally:
+        await live_engine.dispose()
+        await restored_engine.dispose()
 
 
 async def _b4_preflight_from_databases(
