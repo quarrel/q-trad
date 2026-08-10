@@ -179,10 +179,14 @@ closed when another run is active; preserve the failed container and its logs fo
 starting a second run. `QTRAD_IMAGE_DIGEST` may be a full immutable `qtrad-ibkr@sha256:` reference for
 canary binding; execution closure verification normalizes it to the locked bare `sha256:` digest.
 
-Retain the current image digest, runtime lock, evidence and approved rollback material. Review
-after `docker system df`, exited probe containers and historical qtrad-app/qtrad-ibkr-probe image tags
-before any cleanup; remove only targeted, unreferenced feasibility artefacts after their evidence is
-preserved. Never use a broad `docker system prune` on this host.
+Image retention is part of the normal deployment lifecycle. `deploy.sh --check` reports the
+repository-scoped keep/remove plan without mutation. After a successful `--apply` restart,
+the deployer recalculates that plan, preserves the exact deployed image and every image referenced
+by any container, retains the most-recent additional unreferenced qtrad-ibkr image for rollback,
+and removes only older unreferenced immutable digests from that repository. Images lacking an
+immutable repository digest are retained for explicit review. It never invokes broad image or
+system pruning and does not touch unrelated repositories, containers, build cache, volumes,
+databases, backups, checkpoints or evidence.
 
 PostgreSQL dumps and checksums belong under `/srv/qtrad/postgres/backups`; the backup script rejects
 other locations. Rollout rollback archives must have an explicit retention/location decision rather than

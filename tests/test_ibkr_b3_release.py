@@ -740,6 +740,10 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "verify_database_head" in deploy
     assert "db verify-head" in deploy
     assert "qtrad db upgrade" not in deploy
+    assert "docker system prune" not in deploy
+    assert "docker image prune" not in deploy
+    assert "docker container ls -aq" in deploy
+    assert "docker image rm" in deploy
     assert 'backup_env_file="/etc/qtrad/ibkr-backup.env"' in deploy
     assert "verify_backup_identity" in deploy
     assert "systemctl enable --now" not in deploy
@@ -937,9 +941,48 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         text=True,
     ).stdout.strip()
 
+    image_repository = "registry.example.invalid/qtrad"
+    image_digest = "b" * 64
+    image = f"{image_repository}@sha256:{image_digest}"
+    deployed_image_id = "sha256:" + "b" * 64
+    referenced_image_id = "sha256:" + "c" * 64
+    rollback_image_id = "sha256:" + "d" * 64
+    removable_image_id = "sha256:" + "e" * 64
+    unrelated_image_id = "sha256:" + "f" * 64
+    configuration_hash = "a" * 64
+    api_fingerprint = "c" * 64
+    gateway_archive_sha = "d" * 64
+
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
-    for command in ("docker", "install", "systemctl"):
+    docker_script = f"""#!/bin/sh
+printf '%s %s\\n' docker "$*" >> '{calls}'
+case "$1 $2" in
+    "image inspect")
+        printf '%s\\n' '{deployed_image_id}'
+        ;;
+    "container ls")
+        printf '%s\\n' current-container retained-container
+        ;;
+    "container inspect")
+        case "$5" in
+            current-container) printf '%s\\n' '{deployed_image_id}' ;;
+            retained-container) printf '%s\\n' '{referenced_image_id}' ;;
+            *) exit 88 ;;
+        esac
+        ;;
+    "image ls")
+        printf '%s\\n' \
+            '{image_repository}|sha256:{image_digest}|{deployed_image_id}' \
+            '{image_repository}|sha256:{"c" * 64}|{referenced_image_id}' \
+            '{image_repository}|sha256:{"d" * 64}|{rollback_image_id}' \
+            '{image_repository}|sha256:{"e" * 64}|{removable_image_id}' \
+            'registry.example.invalid/unrelated|sha256:{"f" * 64}|{unrelated_image_id}'
+        ;;
+esac
+"""
+    _write_executable(fake_bin / "docker", docker_script)
+    for command in ("install", "systemctl"):
         _write_executable(
             fake_bin / command,
             f"#!/bin/sh\nprintf '%s %s\\n' {command} \"$*\" >> '{calls}'\n",
@@ -948,11 +991,6 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
         fake_bin / "stat",
         "#!/bin/sh\ncase \"$*\" in *%U:%G*) printf 'root:root\\n' ;; *) printf '600\\n' ;; esac\n",
     )
-
-    image = "registry.example.invalid/qtrad@sha256:" + "b" * 64
-    configuration_hash = "a" * 64
-    api_fingerprint = "c" * 64
-    gateway_archive_sha = "d" * 64
     configuration_path = "/srv/qtrad/ibkr/capture.json"
     descriptor = tmp_path / "deployment.toml"
     descriptor.write_text("[release]\n", encoding="utf-8")
@@ -1035,19 +1073,28 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     assert any(
         call.startswith("docker run ") and "db verify-head" in call for call in recorded_calls
     )
+    assert f"keep {deployed_image_id} reason=deployed" in result.stdout
+    assert f"keep {referenced_image_id} reason=container-referenced" in result.stdout
+    assert f"keep {rollback_image_id} reason=most-recent-unreferenced-rollback" in result.stdout
+    removable_reference = f"{image_repository}@sha256:{'e' * 64}"
+    assert f"remove {removable_image_id} reference={removable_reference}" in result.stdout
+    assert unrelated_image_id not in result.stdout
+    image_remove_call = f"docker image rm {removable_reference}"
     if mode == "--check":
         assert "no host mutation performed" in result.stdout
         assert not any(call.startswith(("install ", "systemctl ")) for call in recorded_calls)
+        assert image_remove_call not in recorded_calls
     else:
         assert (
             "systemctl enable qtrad-ibkr-postgres.service qtrad-ibkr-api.service "
             "qtrad-ibkr-ingest.service "
             "qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
         ) in recorded_calls
-        assert (
-            "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service"
-        ) in recorded_calls
+        ingest_restart = "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service"
+        assert ingest_restart in recorded_calls
         assert (
             "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer"
         ) in recorded_calls
+        assert image_remove_call in recorded_calls
+        assert recorded_calls.index(ingest_restart) < recorded_calls.index(image_remove_call)
         assert not any("enable --now" in call for call in recorded_calls)
