@@ -1,20 +1,23 @@
-Yes. Lane B is unusually well isolated from A/C now, because the repository already contains most of the IBKR lifecycle and host scaffolding; what is missing is the actual **continuous native Level-1 market-data adapter and its composition into the existing ingest path**.
+Lane B is through its first useful outcome. B1–B3 are implemented and merged, the exact-two
+`capture-ibkr-v1` release is deployed on the independent IBKR runtime, and its bounded qualification
+passed on 2026-08-10. This plan now records the achieved boundary and the remaining B4/later work.
 
-The key existing pieces are:
+The implemented pieces are:
 
-* `adapters/ibkr` already has capability, historical, pacing, checkpoint and `session.py`, but no continuous market-data adapter.
-* `IbkrSession` was explicitly written to drive either the capability probe **or the continuous collector**, and already owns generations, desired/active subscriptions, farm state, 1100/1101/1102/1300 recovery and resubscription semantics.
-* the provider-neutral `MarketDataAdapter` interface already has exactly the basic continuous shape we need: `connect`, `subscribe`, `records`, `health`, etc.
-* the host scaffolding already exists under `ops/ibkr`, including ingest configuration, healthcheck, deployment, backup and restore-verification pieces.
-* the durable architecture requires a distinct IBKR runtime/store, callback arrival ordering, generation identity, no invented sides, and no broker-order surface.
+* the continuous Level-1 adapter and its provider-neutral ingest composition;
+* `IbkrSession` generation, subscription, farm-state, recovery and resubscription ownership;
+* generation/arrival-aware canonical persistence and truthful health/reconciliation;
+* hardened deployment, maintenance-stop, bounded-capture, backup, qualification and restore interfaces
+  under `ops/ibkr`; and
+* a distinct IBKR runtime/store with no fabricated sides, trade-volume semantics or broker-order surface.
 
-So I would give the agent the following programme.
+The next promotion is B4 exact-six, not another collector architecture.
 
 # Lane B — IBKR native collector
 
 ## Objective
 
-Implement and begin accumulating:
+Operate and progressively qualify:
 
 ```text
 MarketDataSourceClass.IBKR_NATIVE_CAPTURE
@@ -22,15 +25,13 @@ capture-ibkr-v1
 capture_source_id = "ibkr-paper-v1"
 ```
 
-using the existing q-trad ingest/canonical-event infrastructure, official direct TWS API, existing `IbkrSession`, existing PostgreSQL storage, existing health API and existing `ops/ibkr` host.
+using the q-trad ingest/canonical-event infrastructure, official direct TWS API, `IbkrSession`,
+PostgreSQL storage, read-only health API and the independent `ops/ibkr` host runtime.
 
-The first useful outcome is **not “capture complete.”**
-
-The first useful outcome is:
-
-> a trustworthy two-instrument native IBKR collector running continuously and preserving every callback needed for later replay.
-
-Weekly reauthentication, full-universe qualification and R2-IBKR-NATIVE come later.
+The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy
+two-instrument native IBKR collector running continuously and preserving every callback needed for
+later replay. That exact-two B3 boundary qualified on 2026-08-10. B4 exact-six, full-universe
+qualification, a complete weekly reauthentication boundary and R2-IBKR-NATIVE remain later gates.
 
 ---
 
@@ -627,11 +628,13 @@ supplied restore URL is insufficient. The qualifying collector run is stopped cl
 before backup; its final counters and last healthy post-reconnect snapshot are retained
 in immutable terminal run detail.
 
-The artifact hash proves content identity only. A file-only check, API response, fake
-store, closed-market connection or operator assertion cannot grant qualification. Real
-B3 qualification still waits for authenticated ACTIVE periods with LIVE bid and ask
-evidence, fresh post-reconnect callbacks, zero-loss reconciliation and an exercised
-backup/restore. No real B4 release may be promoted before that gate succeeds.
+The artifact hash proves content identity only. A file-only check, API response, fake store,
+closed-market connection or operator assertion cannot grant qualification. The real B3 gate passed
+on 2026-08-10 through authenticated ACTIVE periods in controlled session
+`e2c6fe9d-f2f5-4354-bb26-d4c661d0d061`: 766 callbacks were received and persisted with zero failed,
+dropped or reconciliation-loss callbacks; generation 1 to 2 reconnect retained fresh LIVE bid and
+ask; terminal health was `HEALTHY`; and fresh-backup restore plus independent verification minted
+`B3_EXACT_TWO`. No B4 release was promoted. Exact-six remains the next separately authorised gate.
 
 ---
 
@@ -745,36 +748,26 @@ The current architecture explicitly says to reuse the provider-neutral ingestion
 
 ---
 
-# Suggested agent execution order
+# Status-aware execution order
 
-I would give one capable agent this exact priority:
+Completed through 2026-08-10:
 
 ```text
-1. Audit current continuous-ingest seam and IBKR session/capability adapter.
-2. Implement PR B1:
-      continuous Level-1 adapter + chronology/recovery fixture tests.
-3. Stop for review.
+1. Audited the continuous-ingest seam and IBKR session/capability adapter.
+2. Implemented and merged B1 continuous Level-1 capture and recovery chronology.
+3. Implemented and merged B2 composition, canonical persistence, health and PostgreSQL coverage.
+4. Implemented and merged B3 immutable exact-two release/deployment wiring.
+5. Added independently replayable qualification evidence and hardened operational interfaces.
+6. With explicit operational authority, deployed exact two on the independent IBKR runtime.
+7. Qualified the controlled active-session reconnect, zero-loss, backup and restore boundary.
+```
 
-4. Rebase main.
-5. Implement PR B2:
-      provider composition + canonical persistence + health + PostgreSQL tests.
-6. Stop for review.
+Next:
 
-7. Rebase main.
-8. Implement PR B3:
-      immutable 2-instrument capture-ibkr-v1 config and deployment wiring.
-9. Stop before any external mutation.
-
-10. With explicit operational authority:
-      deploy 2 instruments.
-11. Observe active sessions.
-12. Promote to fixed six.
-13. Begin long-running native evidence accumulation.
-
-14. Later:
-      full universe,
-      restore verification,
-      weekly-auth qualification.
+```text
+8. Continue exact-two native evidence accumulation and recheck current runtime state before mutation.
+9. With separate authority, promote through B4 exact-six and repeat the qualification boundary.
+10. Later: full accepted universe and complete weekly-reauthentication qualification.
 ```
 
 ---
