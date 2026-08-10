@@ -21,7 +21,11 @@ from qtrad.runtime.ibkr_b4 import (
     B4_RELEASE_CONTRACT,
     IbkrB4DeploymentDescriptor,
 )
-from qtrad.runtime.ibkr_b5 import promote_b5_configuration
+from qtrad.runtime.ibkr_b5 import (
+    load_authenticated_b5_configuration,
+    promote_b5_configuration,
+    write_b5_release,
+)
 from qtrad.runtime.ibkr_native_capture import IbkrNativeCaptureConfiguration
 from qtrad.runtime.ibkr_release import IbkrAuthorityPaths, sha256_path
 from qtrad.runtime.universe import load_capture_candidates
@@ -176,3 +180,22 @@ def test_b5_promotes_reviewed_twenty_and_preserves_b4_listings(
         for instrument_id, listing in promoted.items()
         if instrument_id not in B4_INSTRUMENTS
     )
+
+    release_path = tmp_path / "b5-release.json"
+    write_b5_release(release_path, promotion)
+    loaded = load_authenticated_b5_configuration(
+        release_path,
+        authority_paths=authority_paths,
+        parent_release_path=parent_path,
+        parent_authority_paths=authority_paths,
+        parent_descriptor=cast(
+            IbkrB4DeploymentDescriptor,
+            SimpleNamespace(
+                parent_release_path=parent_path,
+                parent_authority_paths=authority_paths,
+            ),
+        ),
+        b3_qualification=qualification,
+        b4_qualification=qualification,
+    )
+    assert loaded.configuration_hash == promotion.configuration.configuration_hash
