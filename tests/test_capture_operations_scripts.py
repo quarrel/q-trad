@@ -188,6 +188,7 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "qtrad-ibkr-native-postgres" in restore
     assert 'docker exec -i "$container" pg_restore --list' in backup
     assert 'docker exec -i "$container" pg_restore --exit-on-error' in restore
+    assert 'sha256sum --check --status "$latest.sha256"' in restore
     assert "QTRAD_IBKR_RUNTIME_GID:?" in backup
     assert "QTRAD_IBKR_RUNTIME_GID:?" in restore
     assert 'chmod 0640 "$archive" "$archive.sha256"' in backup
