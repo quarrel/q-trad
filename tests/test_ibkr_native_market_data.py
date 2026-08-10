@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -203,6 +204,38 @@ async def test_forced_reconnect_waits_for_gateway_to_release_client_id(
     assert settle_observations == [(5.0, True, 1)]
     assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
     assert dict((await adapter.health()).attributes)["connection_generation"] == "2"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
+async def test_forced_reconnect_reserves_callback_queue_for_handshake(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    listing = _listing()
+
+    async def settle_immediately(seconds: float) -> None:
+        assert seconds == 5.0
+
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        sleep=settle_immediately,
+        request_timeout_seconds=0.01,
+        handshake_timeout_seconds=0.05,
+    )
+    await _connect_and_subscribe(adapter, listing)
+    streaming_record = asyncio.ensure_future(anext(adapter.records()))
+    await asyncio.sleep(0)
+
+    await adapter.force_reconnect()
+
+    assert not streaming_record.done()
+    assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
+    assert dict((await adapter.health()).attributes)["connection_generation"] == "2"
+    streaming_record.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await streaming_record
     await adapter.disconnect()
 
 
