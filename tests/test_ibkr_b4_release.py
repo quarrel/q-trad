@@ -25,6 +25,8 @@ from qtrad.runtime.ibkr_b4 import (
     B4_INSTRUMENTS,
     B4_RELEASE_CONTRACT,
     B4_RELEASE_STAGE,
+    IbkrB4DeploymentDescriptor,
+    b4_qualification_expectation,
     load_authenticated_b4_configuration,
     promote_b4_configuration,
     verify_b4_configuration,
@@ -594,6 +596,35 @@ def test_b4_release_round_trip_replays_parent_qualification_and_authority(
         parent_authority_paths=b3_paths,
         qualification=qualification,
     )
+    descriptor = cast(
+        IbkrB4DeploymentDescriptor,
+        SimpleNamespace(
+            deployment=SimpleNamespace(
+                application_commit="1" * 40,
+                image="registry/qtrad-ibkr@sha256:" + "2" * 64,
+                api_package_fingerprint="3" * 64,
+                gateway_archive_sha256="4" * 64,
+                gateway_version="10.49",
+                ibc_version="3.24.1",
+                database_name="qtrad_ibkr",
+                schema_head="0014",
+            ),
+            parent_release_path=parent_path,
+            parent_authority_paths=b3_paths,
+        ),
+    )
+    qualified_configuration, expectation = b4_qualification_expectation(
+        release_path=release_path,
+        authority_paths=b4_paths,
+        descriptor=descriptor,
+        parent_qualification=qualification,
+    )
+    assert qualified_configuration == loaded
+    assert expectation.stage is IbkrQualificationStage.B4_EXACT_SIX
+    assert expectation.release_contract == B4_RELEASE_CONTRACT
+    assert expectation.instruments == B4_INSTRUMENTS
+    assert len(expectation.contracts) == 6
+
     report = verify_b4_configuration(loaded, observed_at=_NOW)
 
     document = cast(dict[str, JsonValue], json.loads(release_path.read_text()))
