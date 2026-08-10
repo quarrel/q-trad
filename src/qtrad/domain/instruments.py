@@ -69,36 +69,28 @@ class ProviderListing:
 
 INITIAL_INSTRUMENTS: tuple[Instrument, ...] = (
     Instrument(
-        InstrumentId("fx:aud-usd"),
-        "AUD/USD",
-        AssetClass.FX,
-        "AUD",
-        "USD",
-        ("AUD/USD", "AUDUSD"),
+        InstrumentId("fx:aud-usd"), "AUD/USD", AssetClass.FX, "AUD", "USD", ("AUD/USD", "AUDUSD")
     ),
     Instrument(
-        InstrumentId("fx:eur-usd"),
-        "EUR/USD",
-        AssetClass.FX,
-        "EUR",
-        "USD",
-        ("EUR/USD", "EURUSD"),
+        InstrumentId("fx:eur-usd"), "EUR/USD", AssetClass.FX, "EUR", "USD", ("EUR/USD", "EURUSD")
     ),
     Instrument(
-        InstrumentId("fx:usd-jpy"),
-        "USD/JPY",
-        AssetClass.FX,
-        "USD",
-        "JPY",
-        ("USD/JPY", "USDJPY"),
+        InstrumentId("fx:usd-jpy"), "USD/JPY", AssetClass.FX, "USD", "JPY", ("USD/JPY", "USDJPY")
     ),
     Instrument(
-        InstrumentId("fx:gbp-usd"),
-        "GBP/USD",
-        AssetClass.FX,
-        "GBP",
-        "USD",
-        ("GBP/USD", "GBPUSD"),
+        InstrumentId("fx:gbp-usd"), "GBP/USD", AssetClass.FX, "GBP", "USD", ("GBP/USD", "GBPUSD")
+    ),
+    Instrument(
+        InstrumentId("fx:usd-chf"), "USD/CHF", AssetClass.FX, "USD", "CHF", ("USD/CHF", "USDCHF")
+    ),
+    Instrument(
+        InstrumentId("fx:usd-cad"), "USD/CAD", AssetClass.FX, "USD", "CAD", ("USD/CAD", "USDCAD")
+    ),
+    Instrument(
+        InstrumentId("fx:nzd-usd"), "NZD/USD", AssetClass.FX, "NZD", "USD", ("NZD/USD", "NZDUSD")
+    ),
+    Instrument(
+        InstrumentId("fx:eur-jpy"), "EUR/JPY", AssetClass.FX, "EUR", "JPY", ("EUR/JPY", "EURJPY")
     ),
     Instrument(
         InstrumentId("index:australia-200"),
@@ -109,12 +101,23 @@ INITIAL_INSTRUMENTS: tuple[Instrument, ...] = (
         ("Australia 200", "ASX 200"),
     ),
     Instrument(
-        InstrumentId("index:us-500"),
-        "US 500",
+        InstrumentId("index:us-500"), "US 500", AssetClass.INDEX, None, "USD", ("US 500", "S&P 500")
+    ),
+    Instrument(
+        InstrumentId("index:wall-street"),
+        "US 30",
         AssetClass.INDEX,
         None,
         "USD",
-        ("US 500", "S&P 500"),
+        ("US 30", "Dow Jones"),
+    ),
+    Instrument(
+        InstrumentId("index:us-tech-100"),
+        "US Tech 100",
+        AssetClass.INDEX,
+        None,
+        "USD",
+        ("US Tech 100", "Nasdaq 100"),
     ),
     Instrument(
         InstrumentId("index:ftse-100"),
@@ -125,12 +128,52 @@ INITIAL_INSTRUMENTS: tuple[Instrument, ...] = (
         ("FTSE 100", "UK 100"),
     ),
     Instrument(
+        InstrumentId("index:germany-40"),
+        "Germany 40",
+        AssetClass.INDEX,
+        None,
+        "EUR",
+        ("Germany 40", "DAX"),
+    ),
+    Instrument(
+        InstrumentId("index:japan-225"),
+        "Japan 225",
+        AssetClass.INDEX,
+        None,
+        "JPY",
+        ("Japan 225", "Nikkei 225"),
+    ),
+    Instrument(
+        InstrumentId("index:eu-stocks-50"),
+        "EU Stocks 50",
+        AssetClass.INDEX,
+        None,
+        "EUR",
+        ("EU Stocks 50", "Euro Stoxx 50"),
+    ),
+    Instrument(
+        InstrumentId("index:hong-kong-hs50"),
+        "Hong Kong HS50",
+        AssetClass.INDEX,
+        None,
+        "HKD",
+        ("Hong Kong HS50", "Hang Seng 50"),
+    ),
+    Instrument(
         InstrumentId("commodity:spot-gold"),
         "Gold",
         AssetClass.COMMODITY,
         "XAU",
         "USD",
         ("Gold", "Spot Gold", "XAU/USD", "XAUUSD"),
+    ),
+    Instrument(
+        InstrumentId("commodity:spot-silver"),
+        "Silver",
+        AssetClass.COMMODITY,
+        "XAG",
+        "USD",
+        ("Silver", "Spot Silver", "XAG/USD", "XAGUSD"),
     ),
     Instrument(
         InstrumentId("commodity:us-crude"),
