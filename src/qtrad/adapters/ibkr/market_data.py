@@ -77,6 +77,7 @@ _DELAYED_PRICE_TICKS = frozenset({_DELAYED_BID, _DELAYED_ASK})
 _DELAYED_SIZE_TICKS = frozenset({_DELAYED_BID_SIZE, _DELAYED_ASK_SIZE})
 _VALID_TICKS = _LIVE_PRICE_TICKS | _LIVE_SIZE_TICKS | _DELAYED_PRICE_TICKS | _DELAYED_SIZE_TICKS
 _MAX_RETIRED_REQUESTS = 1024
+_RECONNECT_SETTLE_SECONDS = 5.0
 
 
 def _always_expected_active(_: ProviderListing, __: datetime) -> IbkrMarketActivity:
@@ -214,6 +215,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
         if not listings:
             raise RuntimeError("IBKR native capture has no active subscriptions to reconnect")
         await self.disconnect()
+        # TWS can retain the authenticated client ID briefly after socket close.
+        # Reusing it immediately produced error 326 in live qualification.
+        await self._sleep(_RECONNECT_SETTLE_SECONDS)
         await self.connect()
         await self.subscribe(listings)
 

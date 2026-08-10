@@ -185,6 +185,28 @@ def _expire_when_callback_queue_is_empty(
 
 
 @pytest.mark.asyncio
+async def test_forced_reconnect_waits_for_gateway_to_release_client_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    listing = _listing()
+    settle_observations: list[tuple[float, bool, int]] = []
+
+    async def sleep(seconds: float) -> None:
+        settle_observations.append((seconds, client.disconnected, len(client.market_data_requests)))
+
+    adapter = _adapter(monkeypatch, client, sleep=sleep)
+    await _connect_and_subscribe(adapter, listing)
+
+    await adapter.force_reconnect()
+
+    assert settle_observations == [(5.0, True, 1)]
+    assert [request_id for request_id, _ in client.market_data_requests] == [1, 2]
+    assert dict((await adapter.health()).attributes)["connection_generation"] == "2"
+    await adapter.disconnect()
+
+
+@pytest.mark.asyncio
 async def test_exact_mapping_and_one_sided_callbacks_are_identity_bearing(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
