@@ -210,7 +210,8 @@ verify_database_head() {
 [[ "$api_host" == 127.0.0.1 ]] || fail "API must use the reviewed runtime host"
 [[ "$gateway_port" == 4002 && "$api_port" == 8000 ]] || fail "unexpected private ports"
 [[ "$client_id" =~ ^[1-9][0-9]*$ ]] || fail "client ID must be positive"
-[[ "$release_policy" == b3-exact-two || "$release_policy" == b4-exact-six ]] || fail "release policy is invalid"
+[[ "$release_policy" == b3-exact-two || "$release_policy" == b4-exact-six \
+    || "$release_policy" == b5-full-universe ]] || fail "release policy is invalid"
 [[ "$database_name" == qtrad_ibkr ]] || fail "database must be dedicated qtrad_ibkr"
 [[ "$api_version" == "$gateway_version" && ( "$api_version" == 10.49 || "$api_version" == 10.45 ) ]] || fail "API/Gateway versions mismatch"
 [[ -r "$descriptor" ]] || fail "release descriptor is not readable"
@@ -225,6 +226,8 @@ fi
     || fail "reviewed qualification wrapper is unavailable"
 [[ -r "$script_dir/qtrad-ibkr-dual-restore-qualification.example" ]] \
     || fail "reviewed dual-restore qualification wrapper is unavailable"
+[[ -r "$script_dir/qtrad-ibkr-triple-restore-qualification.example" ]] \
+    || fail "reviewed triple-restore qualification wrapper is unavailable"
 command -v jq >/dev/null || fail "jq is required to compare release identities"
 command -v git >/dev/null || fail "git is required to authenticate the reviewed checkout"
 
@@ -307,6 +310,7 @@ install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-p
 install -D -m 0750 "$script_dir/postgres-restore-verify.sh" /usr/local/sbin/qtrad-ibkr-postgres-restore-verify
 install -D -m 0750 "$script_dir/qtrad-ibkr-qualification-wrapper.example" /usr/local/sbin/qtrad-ibkr-qualification
 install -D -m 0750 "$script_dir/qtrad-ibkr-dual-restore-qualification.example" /usr/local/sbin/qtrad-ibkr-dual-restore-qualification
+install -D -m 0750 "$script_dir/qtrad-ibkr-triple-restore-qualification.example" /usr/local/sbin/qtrad-ibkr-triple-restore-qualification
 install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
 install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
 install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop

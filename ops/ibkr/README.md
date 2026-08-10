@@ -197,7 +197,25 @@ QTRAD_IBKR_RESTORE_EVIDENCE_PATH=<new-B4-evidence-path> \
 ```
 
 Use the same composition with `ibkr-qualification-verify` and two fresh evidence paths
-for independent replay. Never decompose the wrappers' database lifecycles, Docker mounts,
+for independent replay.
+
+B5 promotion and deployment preflight use that dual-restore wrapper with B3 as the parent
+and the qualified B4 archive as the current restore. B5 snapshot and verification require
+three simultaneous, independently owned restores:
+
+```bash
+QTRAD_IBKR_GRANDPARENT_RESTORE_ARCHIVE=<qualified-B3-archive> \
+QTRAD_IBKR_GRANDPARENT_RESTORE_EVIDENCE_PATH=<new-B3-evidence-path> \
+QTRAD_IBKR_PARENT_RESTORE_ARCHIVE=<qualified-B4-archive> \
+QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH=<new-B4-evidence-path> \
+QTRAD_IBKR_RESTORE_ARCHIVE=<current-B5-archive> \
+QTRAD_IBKR_RESTORE_EVIDENCE_PATH=<new-B5-evidence-path> \
+  /usr/local/sbin/qtrad-ibkr-triple-restore-qualification \
+  deployment ibkr-qualification-snapshot --policy b5-full-universe <snapshot arguments>
+```
+
+Use the same composition with `ibkr-qualification-verify` and three fresh evidence paths
+for independent B5 replay. Never decompose the wrappers' database lifecycles, Docker mounts,
 user identity, or archive selection into an ad-hoc operator command.
 
 ## Running explicit historical CLI commands

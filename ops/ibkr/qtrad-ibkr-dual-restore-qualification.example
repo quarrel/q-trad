@@ -2,10 +2,12 @@
 set -euo pipefail
 umask 077
 
-[[ "$#" -ge 4 && "$1" == deployment \
-    && ("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
-    && "$3" == --policy && "$4" == b4-exact-six ]] || {
-    echo "dual restore accepts only exact B4 qualification snapshot or verification" >&2
+[[ "$#" -ge 4 && "$1" == deployment && "$3" == --policy \
+    && ((("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
+            && "$4" == b4-exact-six) \
+        || (("$2" == ibkr-promote || "$2" == ibkr-preflight) \
+            && "$4" == b5-full-universe)) ]] || {
+    echo "dual restore accepts only B4 qualification or exact B5 promotion/preflight" >&2
     exit 64
 }
 
@@ -27,8 +29,8 @@ fi
 
 parent_archive="${QTRAD_IBKR_PARENT_RESTORE_ARCHIVE:?set the qualification-bound parent archive}"
 parent_evidence="${QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH:?set a create-only parent restore evidence path}"
-current_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:?set the B4 qualification archive}"
-current_evidence="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only B4 restore evidence path}"
+current_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:?set the qualification-bound current archive}"
+current_evidence="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only current restore evidence path}"
 
 exec env \
     QTRAD_IBKR_DUAL_RESTORE_STAGE=parent-ready \

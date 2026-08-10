@@ -984,6 +984,7 @@ def test_deploy_successful_mocked_release_path(tmp_path: Path, mode: str) -> Non
     for wrapper in (
         "qtrad-ibkr-qualification-wrapper.example",
         "qtrad-ibkr-dual-restore-qualification.example",
+        "qtrad-ibkr-triple-restore-qualification.example",
     ):
         _write_executable(script_dir / wrapper, "#!/bin/sh\n")
     subprocess.run(["git", "-C", str(repository), "init", "-q"], check=True)

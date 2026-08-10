@@ -54,6 +54,8 @@ class Settings(BaseSettings):
     ibkr_qualification_restore_evidence_path: Path | None = None
     ibkr_parent_qualification_restore_database_url: str | None = None
     ibkr_parent_qualification_restore_evidence_path: Path | None = None
+    ibkr_grandparent_qualification_restore_database_url: str | None = None
+    ibkr_grandparent_qualification_restore_evidence_path: Path | None = None
 
     @model_validator(mode="after")
     def validate_ibkr_stack(self) -> "Settings":
@@ -108,6 +110,7 @@ class Settings(BaseSettings):
     @field_validator(
         "ibkr_qualification_restore_database_url",
         "ibkr_parent_qualification_restore_database_url",
+        "ibkr_grandparent_qualification_restore_database_url",
     )
     @classmethod
     def qualification_restore_async_postgres_only(cls, value: str | None) -> str | None:

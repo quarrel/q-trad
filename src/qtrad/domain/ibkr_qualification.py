@@ -14,6 +14,7 @@ IBKR_QUALIFICATION_CONTRACT = "qtrad-ibkr-native-qualification-v1"
 class IbkrQualificationStage(StrEnum):
     B3_EXACT_TWO = "B3_EXACT_TWO"
     B4_EXACT_SIX = "B4_EXACT_SIX"
+    B5_FULL_UNIVERSE = "B5_FULL_UNIVERSE"
 
 
 @dataclass(frozen=True, slots=True)
