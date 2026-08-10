@@ -2,7 +2,7 @@
 
 **Status:** ACTIVE
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B4 exact-six qualification complete, full accepted universe pending
+**Parallel track:** independent IBKR paper-market-data qualification and historical acquisition; native B5 full-universe qualification complete, weekly Gateway lifecycle pending
 **Objective:** determine, with locked chronological evidence, whether multi-horizon local and
 cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
@@ -165,16 +165,8 @@ chronology ambiguity before those contracts are fixed.
   readiness disposition.
 - No qualifying IBKR readiness disposition or downstream R2 artifact has been created; keep
   `R2-IBKR-HISTORICAL` source-specific and do not combine its evidence with IG-native data.
-- The independent IBKR native top-of-book collector is deployed at the fixed-six B4 scope. Final-image
-  B3 session `1dfa5a7a-fee2-40b2-8900-13359a0977e9` received and persisted 1,010 callbacks with zero
-  failed, dropped or reconciliation-loss callbacks and passed independent restored replay before minting
-  the parent `B3_EXACT_TWO` capability.
-- Controlled B4 session `c014d0e5-1f71-42fe-b99a-007390c83ede` received and persisted 3,636 callbacks
-  with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh
-  post-reconnect LIVE bid/ask evidence, and passed two independent dual-restore replays before minting
-  `B4_EXACT_SIX`. This remains scope-bound evidence: full-universe and complete weekly-reauthentication
-  qualification are later, separately authorised gates. Continuous exact-six capture was healthy when
-  resumed, but current runtime state must be rechecked before any operation.
+- The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Exact-main controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
+- The qualifying backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`. Continuous full-universe capture resumed healthy with 20/20 active LIVE subscriptions on application commit `af8037dff4e5557462eb359f962eb32f20cd0d7a` and image digest `c5524fb3...d392a`. Complete weekly Gateway reauthentication remains a separate qualification gate; current runtime state must be rechecked before any operation.
 - Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,
   qualification and restore verification; do not reconstruct those Docker/systemd paths ad hoc.
 - The adapter remains market-data-only. Account access, acquisition, deployment and publication are
