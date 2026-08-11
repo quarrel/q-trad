@@ -2,6 +2,9 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-02
+- **Amended:** 2026-08-11 by Amendment 1
+- **Amendment 1 status:** Proposed
+- **Amendment authority:** Where Amendment 1 conflicts with the original decision, Amendment 1 controls.
 
 ## Context
 
@@ -32,6 +35,10 @@ errors and schedules, availability claims, child manifests and summary fields. E
 artefacts become authenticated inputs to the next boundary, but only for the claims their contracts
 make.
 
+> **Amendment 1:** Earlier verified artefacts are consumed through authenticated
+> verification evidence. Ordinary downstream boundaries do not recursively
+> repeat unchanged ancestor replay.
+
 The named boundaries are:
 
 | Artefact or layer | Untrusted input | Acceptance boundary |
@@ -49,6 +56,10 @@ The named boundaries are:
 | Source-specific foundation and readiness | Verified observations, selector and foundation configuration | Foundation verifier replays panels, targets, folds, support and source/availability lineage; readiness recomputes the fixed six-target, three-group gate |
 
 ### Digest claims
+
+> **Amendment 1:** Repository commits and image digests remain execution
+> provenance. Claim-scoped semantic verifier identities govern ordinary receipt
+> and checkpoint reuse.
 
 A SHA-256 proves equality of exact bytes to the bytes that were hashed. It does not prove correctness,
 origin, completeness, semantic validity or absence of another file.
@@ -122,6 +133,10 @@ retry. Once the first independently valid terminal outcome is selected, it is ne
 
 ### Independent replay and absence claims
 
+> **Amendment 1:** The cumulative-replay requirement in this section now applies
+> to confirmatory promotion and explicit deep audit. Ordinary boundary
+> verification is immediate-input and claim scoped.
+
 Independent replay means loading the original files in a new verifier path, authenticating their
 complete closure, deriving expected identities and outputs from lower-layer children and fixed policy,
 and comparing recomputed results. Re-reading builder summaries, trusting a pass flag, querying a
@@ -148,6 +163,10 @@ Absence has three disjoint meanings:
 Native measured availability remains separate and provider-history artefacts must not contain
 fabricated `received_at` or `persisted_at` values.
 
+> **Amendment 1:** Artefact validity, execution provenance, scientific readiness
+> and confirmatory authority are separate outcomes. The matrix is read subject
+> to that separation.
+
 ## Invariant matrix
 
 | Invariant | Required authenticated proof | Failure behaviour |
@@ -161,7 +180,7 @@ fabricated `received_at` or `persisted_at` values.
 | File closure | Safe relative regular-file references binding contract, semantic ID and SHA-256; independently derived exact bounded child set | Traversal, ancestor or child symlink, missing/duplicate/substituted/oversized child or orphan fails closed |
 | Availability semantics | Source class and selector bind `BAR_END_PLUS_DECLARED_PROVIDER_DELAY`, exact delay and recomputed `available_at` | Unknown selector, native/provider mixing, fabricated native timestamps or changed delay changes identity or fails |
 | Session semantics | Verified schedule callback closure and provider-declared intervals kept separate from observed bars | Failed or absent schedule is `UNKNOWN`, never inactive; schedule does not imply quote continuity |
-| Foundation lineage | Verified aggregate result, contract selection, provider observations, selector, source class, configuration, panels, targets and folds | Mixed source, altered child, unsupported target/group or incomplete replay blocks readiness and downstream R2 registration |
+| Foundation lineage | Verified aggregate result, contract selection, provider observations, selector, source class, configuration, panels, targets and folds | Altered or unauthenticated source evidence or children fail foundation verification. Authenticated gaps and insufficiencies remain valid evidence and affect readiness only through the frozen readiness policy |
 
 ## Consequences
 
@@ -173,3 +192,245 @@ as research evidence.
 
 This ADR adds no production code, provider request or dataset. Stages 1–8 remain separately reviewed
 and authorised.
+
+## Amendment 1 — Reusable verification evidence, claim-scoped invalidation,
+and confirmatory promotion
+
+- **Status:** Proposed
+- **Date:** 2026-08-11
+- **Amends:** Trust model, digest claims, mutable operation and immutable
+  evidence, independent replay, invariant matrix and consequences
+- **Approval:** PR #108
+
+### Context
+
+The first full-scale Stage 7 and Stage 8 executions demonstrated that the
+original decision's cumulative-replay wording could be interpreted as requiring
+every downstream process to repeat complete semantic verification of unchanged
+ancestor artefacts.
+
+That interpretation caused multi-hour repeated processing of immutable data,
+made operationally irrelevant implementation changes invalidate expensive work,
+and allowed a failure of execution provenance or readiness policy to be treated
+as invalidation of otherwise unchanged evidence.
+
+The ordinary local research threat model is non-adversarial with respect to the
+operator. It must protect against implementation defects, accidental mutation,
+corruption, stale or mismatched inputs, unsupported claims, look-ahead,
+holdout leakage and false provenance. It is not required to resist an operator
+deliberately forging both evidence and its verification records in order to
+mislead themselves.
+
+Confirmatory evidence retains a stronger boundary: before an artefact may
+authorise confirmatory research or holdout use, the required semantic chain is
+independently replayed from an immutable runtime and recorded by a confirmatory
+promotion attestation.
+
+### Decision
+
+#### 1. Claims remain separate
+
+The following are distinct claims:
+
+1. **Artefact validity:** the exact immutable artefact satisfies its contract.
+2. **Execution provenance:** the artefact or verification was produced by the
+   claimed source revision, image or runtime.
+3. **Scientific readiness:** the authenticated data satisfy a separately frozen
+   experiment or promotion policy.
+4. **Confirmatory authority:** the exact artefact has completed the required
+   immutable-runtime promotion procedure.
+
+Failure or uncertainty in one claim invalidates only that claim unless it can
+causally affect another.
+
+A checkout movement, provenance mismatch, reporting error or readiness failure
+does not by itself alter immutable artefact bytes or revoke an already
+established artefact-validity claim.
+
+#### 2. Verification evidence is reusable
+
+A complete boundary verifier may issue a create-only semantic-verification
+receipt.
+
+The receipt must bind at least:
+
+- the artefact contract and semantic identity;
+- the exact manifest identity and authenticated closure identity;
+- immediate input artefact identities;
+- the verifier contract and version;
+- a claim-scoped semantic implementation identity;
+- the verification procedure or check set completed; and
+- the verification result.
+
+A later consumer may restore the established semantic result when it:
+
+1. independently authenticates the exact artefact bytes and complete file tree;
+2. independently authenticates the receipt;
+3. confirms that the receipt names the exact artefact and immediate inputs; and
+4. confirms that the verifier contract and semantic implementation identity
+   remain accepted and have not been revoked.
+
+This is not equivalent to trusting a caller-supplied pass flag. The receipt is
+immutable evidence whose applicability is re-established against the unchanged
+artefact closure.
+
+#### 3. Independent replay is boundary-local by default
+
+At an ordinary build or verification boundary, independent replay means:
+
+- authenticate the immediate input artefacts or their accepted verification
+  receipts;
+- independently derive and verify the transformation and claims introduced by
+  the current boundary; and
+- reject altered, missing, additional, malformed or mismatched current-boundary
+  evidence.
+
+It does not require recursively repeating complete semantic replay of every
+unchanged ancestor on every descendant invocation.
+
+The complete cumulative replay remains required when:
+
+- an artefact is promoted for confirmatory authority;
+- an accepted verifier identity has been revoked;
+- a defect may have affected a previously established semantic result; or
+- an operator explicitly requests a fresh deep audit.
+
+After successful confirmatory promotion, descendants consume the promotion
+attestation rather than repeating the same ancestor replay again.
+
+#### 4. Confirmatory promotion is separate from ordinary iteration
+
+Ordinary exploratory and implementation-evidence work may consume authenticated
+immutable artefacts through accepted semantic-verification receipts.
+
+Before an artefact may support `CONFIRMATORY` evidence, irreversible holdout
+access or a confirmatory conclusion:
+
+- the exact artefact and required ancestry must be replayed from a detached
+  immutable worktree or immutable image;
+- the complete replay must use accepted verifier contracts; and
+- the resulting promotion attestation must bind the exact artefact roots,
+  verifier identities and runtime provenance.
+
+Promotion reuses the existing immutable artefacts. It does not require a data
+rebuild unless producer semantics were defective or the authenticated bytes
+changed.
+
+#### 5. Invalidation is claim-scoped
+
+Invalidation follows these rules:
+
+| Event | Required action | Does not require |
+|---|---|---|
+| Artefact bytes or closure tree changed | Reject the receipt and establish a new artefact identity | Treating the changed and original artefacts as the same |
+| Producer semantics changed or were defective | Rebuild affected artefacts and semantic descendants | Reacquiring unrelated source evidence |
+| Verifier semantics changed or were defective | Reverify the same immutable artefact under the new verifier | Rebuilding unchanged data |
+| Downstream experiment configuration changed | Rebuild configuration-dependent descendants | Reverify source history |
+| Logging, progress, presentation, CLI text or unrelated code changed | Rerun only the affected operational or presentation step | Rebuilding or semantically reverifying data |
+| Documentation changed without a semantic contract amendment | No runtime invalidation | Any data-scale work |
+| Mutable checkout moved after publication | Mark exact execution provenance unbound until re-attested | Declaring unchanged immutable bytes invalid |
+| Backup or reporting failed | Retry that operation | Rebuilding or reverifying the foundation |
+
+Cache and receipt identities must therefore be based on the code and policy
+that can affect their protected claim. A whole source-file hash or repository
+commit may be retained as provenance, but must not be the sole semantic
+invalidation key when unrelated changes can alter it.
+
+#### 6. Validity, publication and readiness are separate
+
+A successfully constructed and verified foundation is publishable evidence
+whether its readiness state is qualifying or nonqualifying.
+
+Readiness gates downstream authority. It does not determine whether the
+foundation exists or whether its authenticated historical facts may be
+retained.
+
+Provider gaps, entitlement failures, unavailable schedules and other
+data-quality facts remain explicit evidence. Their scientific effect is
+evaluated under a separately frozen readiness policy. The mere presence of one
+or more authenticated provider gaps does not make the foundation artefact
+invalid and is not, by itself, a universal readiness failure.
+
+Exact numerical readiness thresholds and denominator rules belong to the
+versioned experiment/readiness policy, not this durable acquisition-boundary
+ADR.
+
+#### 7. Rehearsal is not a required data-scale stage
+
+Cheap preflight may authenticate configuration, inputs, output reservations,
+checkpoint compatibility and resource bounds.
+
+A disposable full-scale build may be used deliberately for performance or
+fault-injection testing, but it is not a normative prerequisite for publication
+and must not be presented as adding assurance merely because its useful output
+is deleted.
+
+Where a full deterministic build has completed successfully, the normal
+workflow should retain or publish its evidence rather than repeat the same work
+solely because the invocation was named a rehearsal.
+
+### Original and revised requirements
+
+| Amendment ID | Original requirement or interpretation | Revised requirement |
+|---|---|---|
+| A1.1 | Later verification was implemented as cumulative semantic replay of unchanged ancestors | Later boundaries consume authenticated immediate inputs and replay their own transformation; cumulative replay occurs at confirmatory promotion or explicit revocation |
+| A1.2 | Verification authority existed only transiently in a process | Complete semantic verification may issue reusable create-only evidence |
+| A1.3 | Exact source revision or whole-module identity could invalidate all cached work | Exact revision remains provenance; semantic invalidation is scoped to code and policy capable of changing the protected claim |
+| A1.4 | A provenance failure could block use of an otherwise unchanged artefact without distinguishing the failed claim | Artefact validity, provenance, readiness and confirmatory authority are reported separately |
+| A1.5 | A nonqualifying readiness result could prevent retention of a valid foundation | Every valid foundation is publishable; readiness gates only downstream authority |
+| A1.6 | Any confirmatory-instrument provider gap could be interpreted as automatic invalidity or insufficiency | Gaps remain visible and affect readiness according to the separately frozen coverage policy |
+| A1.7 | Full disposable rehearsal could become an expected operational stage | Preflight is cheap; full disposable execution is optional test activity, not a production research prerequisite |
+
+### Invariant-matrix additions
+
+| Invariant | Required authenticated proof | Failure behaviour |
+|---|---|---|
+| Verification receipt | Exact artefact and closure identities, immediate inputs, accepted verifier contract/version and claim-scoped semantic implementation identity | Reject or reverify the receipt's exact artefact; do not rebuild unchanged data solely because verifier authority changed |
+| Claim-scoped invalidation | Causal relationship between the changed input, code or policy and the protected claim | Invalidate only affected claims and descendants; unrelated operational or provenance changes do not revoke artefact validity |
+
+### Evidence and migration impact
+
+- Existing Stage 6 and Stage 7 immutable artefacts are not invalidated by this
+  amendment.
+- Existing artefacts may be reverified or promoted without rebuilding when
+  their exact bytes and producer semantics remain unchanged.
+- Existing operational checkpoints are disposable caches rather than research
+  evidence. They may be adopted when their relevant semantic identities can be
+  authenticated; otherwise their invalidation does not invalidate the source
+  artefacts.
+- Existing nonqualifying or failed runs remain retained evidence.
+- This amendment does not declare any current Stage 8 foundation qualifying and
+  does not authorise holdout access.
+- The current Stage 8 readiness disposition must be recomputed under the
+  separately frozen readiness policy before downstream authority is granted.
+
+### Requirements preserved unchanged
+
+This amendment does not weaken:
+
+- create-only publication;
+- canonical serialization and semantic identities;
+- exact bounded file-tree closure;
+- byte hashing and safe path requirements;
+- mutation testing;
+- source-class separation;
+- declared provider-history availability;
+- provider-session versus observed-bar distinctions;
+- prohibition on fabricated or forward-filled observations;
+- chronological folds, purging and embargo;
+- holdout isolation;
+- explicit failure and gap evidence; and
+- immutable Stage 6 acquisition outcomes and correction policy.
+
+### Consequences
+
+Ordinary local research can reuse authenticated immutable history and
+deterministic derived work without recursively repeating unchanged semantic
+verification.
+
+Confirmatory promotion remains deliberately expensive, but its cost is paid
+once per exact promoted artefact and accepted verifier contract rather than at
+every downstream boundary.
+
+The system must maintain explicit verifier-version and revocation policy.
+Ordinary local iteration does not claim resistance to deliberate self-forgery.
