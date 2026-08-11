@@ -4298,7 +4298,10 @@ async def _replay_staged_oof_async(
     if raw_inputs.get("root") != "." or not isinstance(raw_children_value, dict):
         raise ValueError("staged replay inputs are malformed")
     raw_children = cast(dict[object, object], raw_children_value)
+    representative_profile = descriptor.get("representative_profile")
     expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
+    if representative_profile == IBKR_HISTORICAL_PROFILE:
+        expected_names.add("foundation_receipt")
     if set(raw_children) != expected_names:
         raise ValueError("representative replay inputs have incomplete children")
     paths: dict[str, Path] = {}
@@ -4342,7 +4345,6 @@ async def _replay_staged_oof_async(
     )
     if experiment.evidence_class is not expected_evidence_class:
         raise ValueError("staged OOF experiment has the wrong evidence classification")
-    representative_profile = descriptor.get("representative_profile")
     g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority | None = None
     if representative_profile == IBKR_HISTORICAL_PROFILE:
         (
@@ -4350,7 +4352,9 @@ async def _replay_staged_oof_async(
             foundation_bundle_id,
             g2_feature_source_authority,
         ) = _load_ibkr_foundation_outcome_blind_with_g2_authority(
-            paths["foundation"], holdout_target_source=holdout_target_source
+            paths["foundation"],
+            receipt=paths["foundation_receipt"],
+            holdout_target_source=holdout_target_source,
         )
         if foundation_bundle_id != experiment.r1_bundle_id:
             raise ValueError("IBKR replay foundation differs from the experiment")

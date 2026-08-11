@@ -1118,6 +1118,22 @@ receipt nor qualifying readiness alone authorises real F2: that boundary additio
 accepted confirmatory-promotion attestation. Implementation-only fixture work remains explicitly
 separate.
 
+The retained Stage 8 handoff is therefore:
+
+```bash
+uv run qtrad research foundation verify \
+  --bundle <foundation.json> \
+  --receipt-output <new-verification-receipt.json>
+uv run qtrad research foundation authenticate \
+  --bundle <foundation.json> \
+  --receipt <verification-receipt.json>
+```
+
+Pass that same receipt as `--foundation-receipt` to IBKR historical experiment and
+R2 commands. Ordinary authentication rehashes the exact provider/foundation child
+closure; it does not replay Stage 7 rows or Stage 8 derivation and cannot be used as
+confirmatory authority.
+
 # 7. Explicitly deferred work
 
 The following remain outside this plan:

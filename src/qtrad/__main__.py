@@ -169,6 +169,8 @@ from qtrad.runtime.ibkr_canary import (
 )
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
+    authenticate_ibkr_foundation,
+    load_ibkr_foundation,
     load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
     preflight_ibkr_foundation,
@@ -1002,12 +1004,18 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify every foundation child and cross-reference"
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
+    foundation_verify.add_argument("--receipt-output", type=Path)
     foundation_verify.add_argument("--replay-checkpoint-root", type=Path)
+    foundation_authenticate = research_foundation_sub.add_parser(
+        "authenticate", help="authenticate a verified Stage 8 foundation without replay"
+    )
+    foundation_authenticate.add_argument("--bundle", type=Path, required=True)
+    foundation_authenticate.add_argument("--receipt", type=Path, required=True)
     foundation_readiness = research_foundation_sub.add_parser(
-        "readiness", help="report fixed IBKR historical foundation readiness"
+        "readiness", help="report authenticated IBKR historical foundation readiness"
     )
     foundation_readiness.add_argument("--bundle", type=Path, required=True)
-    foundation_readiness.add_argument("--replay-checkpoint-root", type=Path)
+    foundation_readiness.add_argument("--receipt", type=Path, required=True)
     foundation_build = research_foundation_sub.add_parser(
         "build", help="build an immutable causal foundation bundle from one source"
     )
@@ -1032,6 +1040,7 @@ def build_parser() -> argparse.ArgumentParser:
         "experiment-build", help="build an R2 experiment from a verified Stage 8 foundation"
     )
     baselines_experiment_build.add_argument("--foundation", type=Path, required=True)
+    baselines_experiment_build.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_experiment_build.add_argument(
         "--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,), required=True
     )
@@ -1040,6 +1049,7 @@ def build_parser() -> argparse.ArgumentParser:
         "readiness", help="verify R2 experiment bindings and report independent readiness gates"
     )
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_readiness.add_argument("--foundation-receipt", type=Path)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
     baselines_readiness.add_argument("--software-bundle", type=Path)
     baselines_readiness.add_argument("--output", type=Path, required=True)
@@ -1050,10 +1060,12 @@ def build_parser() -> argparse.ArgumentParser:
         "features-verify", help="independently verify a persisted R2 raw-feature child"
     )
     baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_features_verify.add_argument("--foundation-receipt", type=Path)
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
     baselines_features_verify.add_argument("--feature-set", required=True)
     baselines_features_verify.add_argument("--manifest", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_features.add_argument("--foundation-receipt", type=Path)
     baselines_features.add_argument("--experiment", type=Path, required=True)
     baselines_features.add_argument("--feature-set", required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
@@ -1062,6 +1074,7 @@ def build_parser() -> argparse.ArgumentParser:
         "oof-build", help="authenticate R2 feature children and build an OOF bundle"
     )
     baselines_oof_build.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_oof_build.add_argument("--foundation-receipt", type=Path)
     baselines_oof_build.add_argument("--experiment", type=Path, required=True)
     baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
     baselines_oof_build.add_argument(
@@ -2151,17 +2164,22 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 args.bundle,
+                receipt_output=args.receipt_output,
                 replay_checkpoint_root=args.replay_checkpoint_root,
             )
         )
     elif (
         args.command == "research"
         and args.research_command == "foundation"
+        and args.foundation_command == "authenticate"
+    ):
+        _authenticate_foundation_bundle(args.bundle, args.receipt)
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
         and args.foundation_command == "readiness"
     ):
-        _report_ibkr_foundation_readiness(
-            args.bundle, replay_checkpoint_root=args.replay_checkpoint_root
-        )
+        _report_ibkr_foundation_readiness(args.bundle, receipt_path=args.receipt)
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -2170,6 +2188,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         _build_ibkr_historical_experiment_cli(
             profile=args.profile,
             foundation_path=args.foundation,
+            foundation_receipt_path=args.foundation_receipt,
             output_path=args.output,
         )
     elif (
@@ -2182,6 +2201,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
+                foundation_receipt_path=args.foundation_receipt,
                 experiment_path=args.experiment,
                 software_bundle_path=args.software_bundle,
                 output_path=args.output,
@@ -2197,6 +2217,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
+                foundation_receipt_path=args.foundation_receipt,
                 experiment_path=args.experiment,
                 feature_arguments=args.feature_manifest,
                 output_path=args.output,
@@ -2415,6 +2436,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
+                foundation_receipt_path=args.foundation_receipt,
                 experiment_path=args.experiment,
                 feature_set_name=args.feature_set,
                 output_path=args.output,
@@ -2430,6 +2452,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
+                foundation_receipt_path=args.foundation_receipt,
                 experiment_path=args.experiment,
                 feature_set_name=args.feature_set,
                 manifest_path=args.manifest,
@@ -2489,11 +2512,14 @@ def _build_ibkr_historical_experiment_cli(
     *,
     profile: str,
     foundation_path: Path,
+    foundation_receipt_path: Path,
     output_path: Path,
 ) -> None:
     if profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
         raise ValueError("experiment-build supports only the fixed IBKR historical profile")
-    foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(foundation_path)
+    foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
+        foundation_path, receipt=foundation_receipt_path
+    )
     identities = runtime_identities()
     adapter_identity = IBKRHistoricalAdapterIdentity.create(
         foundation_bundle_id=foundation_bundle_id,
@@ -2517,12 +2543,14 @@ async def _report_r2_readiness(
     experiment_path: Path,
     software_bundle_path: Path | None,
     output_path: Path,
+    foundation_receipt_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
         settings,
         clock,
         foundation_bundle_path=foundation_bundle_path,
+        foundation_receipt_path=foundation_receipt_path,
         experiment=experiment,
     )
     software_verified = False
@@ -2557,6 +2585,7 @@ async def _load_r2_foundation_inputs(
     experiment: R2ExperimentConfig,
     outcome_blind: bool = False,
     holdout_target_source: object | None = None,
+    foundation_receipt_path: Path | None = None,
 ) -> VerifiedFoundation | R2FoundationInputs:
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         return await verify_foundation_bundle(
@@ -2565,6 +2594,8 @@ async def _load_r2_foundation_inputs(
             clock=clock,
         )
 
+    if foundation_receipt_path is None:
+        raise ValueError("IBKR historical R2 work requires a Stage 8 verification receipt")
     if outcome_blind:
         from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
@@ -2572,11 +2603,13 @@ async def _load_r2_foundation_inputs(
             raise ValueError("blind IBKR foundation loading requires a holdout target source")
         stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
             foundation_bundle_path,
+            receipt=foundation_receipt_path,
             holdout_target_source=holdout_target_source,
         )
     else:
         stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-            foundation_bundle_path
+            foundation_bundle_path,
+            receipt=foundation_receipt_path,
         )
     if experiment.r1_bundle_id != foundation_bundle_id:
         raise ValueError("IBKR experiment does not bind the verified Stage 8 foundation")
@@ -2610,6 +2643,7 @@ async def _build_r2_oof(
     feature_arguments: list[str],
     output_path: Path,
     holdout_target_source_path: Path | None,
+    foundation_receipt_path: Path | None = None,
 ) -> None:
     from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
@@ -2634,6 +2668,7 @@ async def _build_r2_oof(
             settings,
             clock,
             foundation_bundle_path=foundation_bundle_path,
+            foundation_receipt_path=foundation_receipt_path,
             experiment=experiment,
             outcome_blind=True,
             holdout_target_source=holdout_target_source,
@@ -2657,6 +2692,11 @@ async def _build_r2_oof(
         ),
         replay_inputs={
             "foundation": foundation_bundle_path,
+            **(
+                {"foundation_receipt": foundation_receipt_path}
+                if foundation_receipt_path is not None
+                else {}
+            ),
             "experiment": experiment_path,
             **feature_paths,
         },
@@ -2673,12 +2713,14 @@ async def _materialise_r2_features(
     experiment_path: Path,
     feature_set_name: str,
     output_path: Path,
+    foundation_receipt_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
         settings,
         clock,
         foundation_bundle_path=foundation_bundle_path,
+        foundation_receipt_path=foundation_receipt_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
@@ -2735,12 +2777,14 @@ async def _verify_persisted_r2_features(
     experiment_path: Path,
     feature_set_name: str,
     manifest_path: Path,
+    foundation_receipt_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
         settings,
         clock,
         foundation_bundle_path=foundation_bundle_path,
+        foundation_receipt_path=foundation_receipt_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
@@ -3136,6 +3180,7 @@ async def _verify_foundation_bundle(
     clock: Clock,
     bundle_path: Path,
     *,
+    receipt_output: Path | None = None,
     replay_checkpoint_root: Path | None = None,
 ) -> None:
     if bundle_path.is_file() and not bundle_path.is_symlink():
@@ -3147,15 +3192,22 @@ async def _verify_foundation_bundle(
             isinstance(document, dict)
             and document.get("contract") == "qtrad-ibkr-historical-foundation-v1"
         ):
+            if receipt_output is None:
+                raise ValueError("IBKR foundation verification requires --receipt-output")
             verified = verify_ibkr_foundation(
-                bundle_path, replay_checkpoint_root=replay_checkpoint_root
+                bundle_path,
+                replay_checkpoint_root=replay_checkpoint_root,
+                receipt_output=receipt_output,
             )
             print(
                 json.dumps(
                     {
-                        "contract": verified.readiness.CONTRACT,
-                        "bundle": str(bundle_path),
-                        "source_class": "IBKR_HISTORICAL_RESEARCH",
+                        "contract": "qtrad-ibkr-foundation-verification-v1",
+                        "bundle": str(bundle_path.resolve()),
+                        "receipt": str(receipt_output.resolve()),
+                        "build_sha256": json.loads(bundle_path.read_text(encoding="utf-8"))[
+                            "build_sha256"
+                        ],
                         "readiness": verified.readiness.as_json(),
                     },
                     sort_keys=True,
@@ -3187,13 +3239,23 @@ async def _verify_foundation_bundle(
     )
 
 
+def _authenticate_foundation_bundle(bundle_path: Path, receipt_path: Path) -> None:
+    print(
+        json.dumps(
+            authenticate_ibkr_foundation(bundle_path, receipt=receipt_path),
+            sort_keys=True,
+        )
+    )
+
+
 def _report_ibkr_foundation_readiness(
     bundle_path: Path,
     *,
-    replay_checkpoint_root: Path | None = None,
+    receipt_path: Path,
 ) -> None:
-    """Verify and report Stage 8 readiness only; no R2 artefact is loaded."""
-    verified = verify_ibkr_foundation(bundle_path, replay_checkpoint_root=replay_checkpoint_root)
+    """Report receipt-authenticated Stage 8 readiness; no semantic replay."""
+
+    verified = load_ibkr_foundation(bundle_path, receipt=receipt_path)
     print(json.dumps(verified.readiness.as_json(), sort_keys=True))
 
 

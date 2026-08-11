@@ -41,6 +41,7 @@ from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
     PROVIDER_HISTORY_SCHEMA_VERSION,
     ProviderHistoricalAvailabilityPolicy,
+    ProviderHistoricalDataset,
     sha256_json,
 )
 from qtrad.domain.r2_holdout import (
@@ -54,6 +55,7 @@ from qtrad.domain.r2_holdout import (
     R2OutcomeBlindTargetView,
     R2PreHoldoutTargetProjection,
 )
+from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.foundation_bundle import (
     VerifiedG2FeatureSource,
@@ -78,6 +80,38 @@ _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
 _BOUNDED_PROVIDER_HISTORY_ROWS = 500_000
+_FOUNDATION_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v1"
+_FOUNDATION_VERIFICATION_SCHEMA_VERSION = 1
+_FOUNDATION_AUTHENTICATION_CONTRACT = "qtrad-ibkr-foundation-authentication-v1"
+_FOUNDATION_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v1"
+_FOUNDATION_VERIFIER_VERSION = 1
+_FOUNDATION_VERIFIER_COMPLETED_CHECKS = (
+    "provider-history-independent-replay",
+    "stage8-independent-derivation",
+    "foundation-metadata-equivalence",
+    "child-byte-closure",
+    "child-semantic-equivalence",
+    "readiness-equivalence",
+)
+_VERIFICATION_RECEIPT_FIELDS = {
+    "contract",
+    "schema_version",
+    "foundation_contract",
+    "foundation_schema_version",
+    "foundation_manifest_sha256",
+    "foundation_build_sha256",
+    "provider_history_manifest_sha256",
+    "provider_history_dataset_sha256",
+    "child_references_sha256",
+    "configuration_id",
+    "verifier_contract",
+    "verifier_version",
+    "verifier_identity",
+    "completed_checks",
+    "readiness_sha256",
+    "evidence_class",
+    "receipt_sha256",
+}
 _BASE_CHILD_KINDS = (
     "observations",
     "panel",
@@ -125,6 +159,7 @@ class IBKRG2FeatureSourceAuthority:
     """Opaque authority for exact outcome-free IBKR G2 feature children."""
 
     path: Path
+    receipt: Path
     foundation_bundle_id: str
     foundation_configuration_id: str
     observation_dataset_id: str
@@ -133,6 +168,20 @@ class IBKRG2FeatureSourceAuthority:
     child_references_sha256: str
     target_child_references_sha256: str
     source_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedFoundationManifest:
+    path: Path
+    manifest_bytes: bytes
+    document: dict[str, object]
+    payload: dict[str, object]
+    configuration: FoundationConfig
+    provider_path: Path
+    provider_manifest_sha256: str
+    provider_dataset: ProviderHistoricalDataset
+    children: Mapping[str, JsonValue]
+    expected_lineage: dict[str, JsonValue]
 
 
 def _ibkr_g2_feature_source_id(
@@ -274,7 +323,9 @@ def _manifest_payload(
     }
 
 
-def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, str, int]:
+def _provider_history_manifest_identity(
+    provider_manifest: Path,
+) -> tuple[str, ProviderHistoricalDataset]:
     manifest_bytes = _bounded_bytes(
         provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
     )
@@ -307,11 +358,12 @@ def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, st
     dataset = _dataset_from_manifest(
         _mapping(document["dataset"], "provider-history dataset"), policy
     )
-    return (
-        hashlib.sha256(manifest_bytes).hexdigest(),
-        dataset.dataset_sha256,
-        dataset.row_count,
-    )
+    return hashlib.sha256(manifest_bytes).hexdigest(), dataset
+
+
+def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, str, int]:
+    manifest_sha256, dataset = _provider_history_manifest_identity(provider_manifest)
+    return manifest_sha256, dataset.dataset_sha256, dataset.row_count
 
 
 def _prepare_ibkr_foundation_preflight(
@@ -595,14 +647,28 @@ def _emit_stage8_progress(
     )
 
 
-def verify_ibkr_foundation(
+def ibkr_foundation_verifier_identity() -> str:
+    """Return the claim-scoped semantic identity for complete Stage 8 replay."""
+
+    return _sha(
+        {
+            "contract": _FOUNDATION_VERIFIER_CONTRACT,
+            "version": _FOUNDATION_VERIFIER_VERSION,
+            "completed_checks": list(_FOUNDATION_VERIFIER_COMPLETED_CHECKS),
+        }
+    )
+
+
+def _verify_provider_history_closure(path: Path, expected: ProviderHistoricalDataset) -> None:
+    if verify_provider_history_file_only(path) != expected:
+        raise ValueError("provider-history file closure differs from its manifest")
+
+
+def _authenticate_foundation_manifest(
     path: Path,
     *,
-    replay_checkpoint_root: Path | None = None,
-    workers: int = 4,
-) -> IBKRFoundationBuild:
-    """Verify the thin manifest and independently replay every Parquet child."""
-
+    provider_closure: bool,
+) -> _AuthenticatedFoundationManifest:
     manifest_path = _regular_file(path, "IBKR foundation manifest")
     manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
     document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
@@ -625,101 +691,351 @@ def verify_ibkr_foundation(
     if manifest_bytes != _json_bytes(document) + b"\n":
         raise ValueError("IBKR foundation manifest bytes are not canonical")
 
-    root = manifest_path.parent
     provider_path = _safe_child(
-        root,
+        manifest_path.parent,
         _text(document["provider_history_manifest"], "provider-history manifest path"),
         "provider-history manifest",
     )
-    provider_bytes = _bounded_bytes(
-        provider_path,
-        _MAX_MANIFEST_BYTES,
-        "provider-history manifest",
-    )
-    provider_manifest_sha256 = hashlib.sha256(provider_bytes).hexdigest()
+    provider_manifest_sha256, provider_dataset = _provider_history_manifest_identity(provider_path)
     if provider_manifest_sha256 != _text(
-        document["provider_history_sha256"],
-        "provider-history manifest hash",
+        document["provider_history_sha256"], "provider-history manifest hash"
     ):
         raise ValueError("provider-history manifest bytes changed")
+    if provider_closure:
+        _verify_provider_history_closure(provider_path, provider_dataset)
 
     payload = _mapping(document["payload"], "IBKR foundation payload")
     if _sha(payload) != _text(document["build_sha256"], "IBKR foundation build hash"):
         raise ValueError("IBKR foundation payload identity does not match")
-    configuration_payload = _mapping(payload["configuration"], "IBKR foundation configuration")
-    configuration = decode_foundation_config(configuration_payload)
-    source_evidence = read_provider_history_source_evidence(provider_path)
+    configuration = decode_foundation_config(
+        _mapping(payload["configuration"], "IBKR foundation configuration")
+    )
+    expected_provider = {
+        "dataset_sha256": provider_dataset.dataset_sha256,
+        "row_count": provider_dataset.row_count,
+        "contract_selection_sha256": provider_dataset.contract_selection_sha256,
+        "plan_sha256": provider_dataset.plan_sha256,
+        "runtime_sha256": provider_dataset.runtime_sha256,
+        "aggregate_sha256": provider_dataset.aggregate_sha256,
+    }
+    if _mapping(payload["provider_history"]) != expected_provider:
+        raise ValueError("IBKR foundation provider-history metadata differs from its child")
+    children = _mapping(payload["children"], "IBKR foundation children")
+    return _AuthenticatedFoundationManifest(
+        path=manifest_path,
+        manifest_bytes=manifest_bytes,
+        document=document,
+        payload=payload,
+        configuration=configuration,
+        provider_path=provider_path,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset=provider_dataset,
+        children=cast(dict[str, JsonValue], children),
+        expected_lineage={
+            "provider_manifest_sha256": provider_manifest_sha256,
+            "provider_dataset_sha256": provider_dataset.dataset_sha256,
+            "plan_sha256": provider_dataset.plan_sha256,
+            "aggregate_sha256": provider_dataset.aggregate_sha256,
+        },
+    )
+
+
+def _verification_receipt_document(
+    authenticated: _AuthenticatedFoundationManifest,
+) -> dict[str, JsonValue]:
+    identity: dict[str, JsonValue] = {
+        "contract": _FOUNDATION_VERIFICATION_CONTRACT,
+        "schema_version": _FOUNDATION_VERIFICATION_SCHEMA_VERSION,
+        "foundation_contract": IBKR_FOUNDATION_CONTRACT,
+        "foundation_schema_version": IBKR_FOUNDATION_SCHEMA_VERSION,
+        "foundation_manifest_sha256": hashlib.sha256(authenticated.manifest_bytes).hexdigest(),
+        "foundation_build_sha256": _text(
+            authenticated.document["build_sha256"], "IBKR foundation build hash"
+        ),
+        "provider_history_manifest_sha256": authenticated.provider_manifest_sha256,
+        "provider_history_dataset_sha256": authenticated.provider_dataset.dataset_sha256,
+        "child_references_sha256": _sha(authenticated.children),
+        "configuration_id": authenticated.configuration.configuration_id,
+        "verifier_contract": _FOUNDATION_VERIFIER_CONTRACT,
+        "verifier_version": _FOUNDATION_VERIFIER_VERSION,
+        "verifier_identity": ibkr_foundation_verifier_identity(),
+        "completed_checks": list(_FOUNDATION_VERIFIER_COMPLETED_CHECKS),
+        "readiness_sha256": _sha(authenticated.payload["readiness"]),
+        "evidence_class": EvidenceClass.IMPLEMENTATION.value,
+    }
+    return {**identity, "receipt_sha256": _sha(identity)}
+
+
+def _authenticate_verification_receipt(
+    authenticated: _AuthenticatedFoundationManifest,
+    receipt: Path,
+) -> tuple[Path, bytes, dict[str, object]]:
+    receipt_path = _regular_file(receipt, "IBKR foundation verification receipt")
+    receipt_bytes = _bounded_bytes(
+        receipt_path, _MAX_MANIFEST_BYTES, "IBKR foundation verification receipt"
+    )
+    document = _mapping(_parse_json(receipt_bytes, "IBKR foundation verification receipt"))
+    if set(document) != _VERIFICATION_RECEIPT_FIELDS:
+        raise ValueError("IBKR foundation verification receipt fields are not exact")
+    if receipt_bytes != _json_bytes(document) + b"\n":
+        raise ValueError("IBKR foundation verification receipt bytes are not canonical")
+    identity = dict(document)
+    receipt_sha256 = _text(identity.pop("receipt_sha256"), "verification receipt identity")
+    if receipt_sha256 != _sha(identity):
+        raise ValueError("IBKR foundation verification receipt identity does not match")
+    if document != _verification_receipt_document(authenticated):
+        raise ValueError("IBKR foundation verification receipt does not match the foundation")
+    return receipt_path, receipt_bytes, document
+
+
+def _authentication_result(
+    authenticated: _AuthenticatedFoundationManifest,
+    receipt_path: Path,
+    receipt_bytes: bytes,
+    receipt_document: Mapping[str, object],
+) -> dict[str, JsonValue]:
+    return {
+        "contract": _FOUNDATION_AUTHENTICATION_CONTRACT,
+        "schema_version": 1,
+        "foundation": str(authenticated.path),
+        "foundation_build_sha256": _text(
+            receipt_document["foundation_build_sha256"], "IBKR foundation build hash"
+        ),
+        "verification_receipt": str(receipt_path),
+        "verification_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "verification_receipt_id": _text(
+            receipt_document["receipt_sha256"], "verification receipt identity"
+        ),
+        "verifier_identity": _text(
+            receipt_document["verifier_identity"], "Stage 8 verifier identity"
+        ),
+        "readiness": cast(JsonValue, authenticated.payload["readiness"]),
+        "evidence_class": EvidenceClass.IMPLEMENTATION.value,
+    }
+
+
+def authenticate_ibkr_foundation(
+    path: Path,
+    *,
+    receipt: Path,
+) -> dict[str, JsonValue]:
+    """Authenticate a verified Stage 8 closure without semantic replay."""
+
+    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
+    receipt_path, receipt_bytes, receipt_document = _authenticate_verification_receipt(
+        authenticated, receipt
+    )
+    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
+    child_ids = _child_reference_dataset_ids(authenticated.children)
+    _verify_children_blind(
+        authenticated.path.parent,
+        authenticated.children,
+        child_ids,
+        authenticated.expected_lineage,
+        decode_rows=False,
+    )
+    return _authentication_result(authenticated, receipt_path, receipt_bytes, receipt_document)
+
+
+def verify_ibkr_foundation(
+    path: Path,
+    *,
+    replay_checkpoint_root: Path | None = None,
+    workers: int = 4,
+    receipt_output: Path | None = None,
+) -> IBKRFoundationBuild:
+    """Independently replay every child and optionally persist its receipt."""
+
+    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
+    receipt_path: Path | None = None
+    if receipt_output is not None:
+        if set(authenticated.children) != set(_CHILD_KINDS):
+            raise ValueError("verification receipts require the complete Stage 8 child closure")
+        receipt_path = _output_path(receipt_output).resolve()
+        immutable_roots = (
+            (authenticated.path.parent / f"{authenticated.path.name}.children").resolve(),
+            authenticated.provider_path.parent.resolve(),
+        )
+        if any(receipt_path.is_relative_to(root) for root in immutable_roots):
+            raise ValueError(
+                "verification receipt cannot be written inside an authenticated closure"
+            )
+    source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
     if source_evidence.dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
         from qtrad.runtime.ibkr_foundation_bounded import verify_bounded_provider_foundation
 
-        return verify_bounded_provider_foundation(
+        replay = verify_bounded_provider_foundation(
             source_evidence=source_evidence,
-            configuration=configuration,
-            bundle_path=manifest_path,
-            document=document,
-            payload=payload,
+            configuration=authenticated.configuration,
+            bundle_path=authenticated.path,
+            document=authenticated.document,
+            payload=authenticated.payload,
             replay_checkpoint_root=replay_checkpoint_root,
             workers=workers,
         )
-    replay = build_ibkr_foundation(source_evidence, configuration)
-
-    children = cast(dict[str, JsonValue], _mapping(payload["children"], "IBKR foundation children"))
-    expected_payload = _build_payload(replay, source_evidence, children)
-    if expected_payload != payload:
-        raise ValueError("IBKR foundation metadata differs from independent replay")
-    expected_rows = _child_rows(replay)
-    expected_dataset_ids = _child_dataset_ids(replay)
-    expected_lineage = _child_lineage(
-        replay,
-        source_evidence,
-        provider_manifest_sha256,
-    )
-    child_set = set(children)
-    if child_set == set(_BASE_CHILD_KINDS):
-        child_kinds = _BASE_CHILD_KINDS
-    elif child_set == set(_LEGACY_CHILD_KINDS):
-        child_kinds = _LEGACY_CHILD_KINDS
-    elif child_set == set(_CHILD_KINDS):
-        child_kinds = _CHILD_KINDS
     else:
-        raise ValueError("IBKR foundation child set is incomplete or unsupported")
-    _verify_children(
-        root,
-        children,
-        expected_rows,
-        expected_dataset_ids,
-        expected_lineage,
-        child_kinds=child_kinds,
-    )
+        replay = build_ibkr_foundation(source_evidence, authenticated.configuration)
+        expected_payload = _build_payload(replay, source_evidence, authenticated.children)
+        if expected_payload != authenticated.payload:
+            raise ValueError("IBKR foundation metadata differs from independent replay")
+        expected_rows = _child_rows(replay)
+        expected_dataset_ids = _child_dataset_ids(replay)
+        expected_lineage = _child_lineage(
+            replay,
+            source_evidence,
+            authenticated.provider_manifest_sha256,
+        )
+        child_set = set(authenticated.children)
+        if child_set == set(_BASE_CHILD_KINDS):
+            child_kinds = _BASE_CHILD_KINDS
+        elif child_set == set(_LEGACY_CHILD_KINDS):
+            child_kinds = _LEGACY_CHILD_KINDS
+        elif child_set == set(_CHILD_KINDS):
+            child_kinds = _CHILD_KINDS
+        else:
+            raise ValueError("IBKR foundation child set is incomplete or unsupported")
+        _verify_children(
+            authenticated.path.parent,
+            authenticated.children,
+            expected_rows,
+            expected_dataset_ids,
+            expected_lineage,
+            child_kinds=child_kinds,
+        )
+        if replay.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
+            raise ValueError("IBKR foundation source dataset differs from provider history")
 
-    if replay.provider_history.dataset_sha256 != source_evidence.dataset.dataset_sha256:
-        raise ValueError("IBKR foundation source dataset differs from provider history")
+    if receipt_path is not None:
+        _write_create_only(
+            receipt_path,
+            _json_bytes(_verification_receipt_document(authenticated)) + b"\n",
+        )
     return replay
 
 
-def load_ibkr_foundation(path: Path) -> IBKRFoundationBuild:
-    """Load only after complete independent verification."""
-
-    return verify_ibkr_foundation(path)
-
-
-def load_ibkr_foundation_with_identity(path: Path) -> tuple[IBKRFoundationBuild, str]:
-    """Load a verified foundation and return its authenticated build identity."""
-
-    build = verify_ibkr_foundation(path)
-    manifest_path = _regular_file(path, "IBKR foundation manifest")
-    document = _mapping(
-        _parse_json(
-            _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest"),
-            "IBKR foundation manifest",
-        )
+def _load_authenticated_ibkr_foundation(
+    path: Path,
+    *,
+    receipt: Path,
+) -> tuple[IBKRFoundationBuild, str]:
+    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
+    _authenticate_verification_receipt(authenticated, receipt)
+    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
+    child_ids = _child_reference_dataset_ids(authenticated.children)
+    decoded = _verify_children_blind(
+        authenticated.path.parent,
+        authenticated.children,
+        child_ids,
+        authenticated.expected_lineage,
+        decode_rows=False,
+        decode_base=True,
     )
-    return build, _text(document["build_sha256"], "IBKR foundation build hash")
+
+    configuration = authenticated.configuration
+    observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
+    source_start = (
+        min(row.interval_start for row in observation_rows)
+        if observation_rows
+        else configuration.range_start
+    )
+    source_end = (
+        max(row.interval_end for row in observation_rows)
+        if observation_rows
+        else configuration.range_end
+    )
+    observations = ObservationDataset(
+        rows=observation_rows,
+        configuration={
+            "contract": "qtrad-ibkr-historical-observation-adapter-v1",
+            "source_class": "IBKR_HISTORICAL_RESEARCH",
+            "provider": "ibkr",
+            "environment": "paper",
+            "ordered_instruments": list(configuration.ordered_instruments),
+            "interval_start": configuration.required_observation_start.isoformat(),
+            "interval_end": configuration.required_observation_end.isoformat(),
+            "observed_interval_start": source_start.isoformat() if observation_rows else None,
+            "observed_interval_end": source_end.isoformat() if observation_rows else None,
+            "grid_resolution_seconds": int(configuration.grid_resolution.total_seconds()),
+            "availability_basis": configuration.availability_basis.value,
+            "source_dataset_id": authenticated.provider_dataset.dataset_sha256,
+        },
+        source_dataset_ids=(authenticated.provider_dataset.dataset_sha256,),
+        selection_policies={
+            "source_class": "IBKR_HISTORICAL_RESEARCH",
+            "availability_policy": (
+                authenticated.provider_dataset.availability_policy.as_json_value()
+            ),
+            "correction_policy": "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE",
+        },
+        dataset_id=child_ids["observations"],
+    )
+    panel = PanelDataset(
+        rows=tuple(_panel_row(row) for row in decoded["panel"]),
+        observation_dataset_id=observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+        dataset_id=child_ids["panel"],
+    )
+    targets = TargetDataset(
+        rows=tuple(_target(row) for row in decoded["targets"]),
+        observation_dataset_id=observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+        dataset_id=child_ids["targets"],
+    )
+    target_index = R2HoldoutTargetIndex.from_rows(
+        source_target_dataset_id=targets.dataset_id,
+        observation_dataset_id=observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+        rows=decoded["target-index"],
+    )
+    causal_metadata = R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=panel.dataset_id,
+        rows=decoded["causal-metadata"],
+    )
+    build = IBKRFoundationBuild(
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=FoldDataset(
+            folds=tuple(_fold(row) for row in decoded["folds"]),
+            target_dataset_id=targets.dataset_id,
+            foundation_configuration_id=configuration.configuration_id,
+            dataset_id=child_ids["folds"],
+        ),
+        target_index=target_index,
+        causal_metadata=causal_metadata,
+        provider_history=authenticated.provider_dataset,
+        active_intervals=_decode_active_intervals(authenticated.payload["active_intervals"]),
+        provider_gaps=tuple(
+            cast(Mapping[str, JsonValue], _mapping(item, "IBKR provider gap"))
+            for item in _sequence(authenticated.payload["provider_gaps"])
+        ),
+        readiness=_decode_readiness(authenticated.payload["readiness"]),
+    )
+    return build, _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
+
+
+def load_ibkr_foundation(path: Path, *, receipt: Path) -> IBKRFoundationBuild:
+    """Load a foundation authenticated by a completed Stage 8 receipt."""
+
+    build, _build_id = _load_authenticated_ibkr_foundation(path, receipt=receipt)
+    return build
+
+
+def load_ibkr_foundation_with_identity(
+    path: Path,
+    *,
+    receipt: Path,
+) -> tuple[IBKRFoundationBuild, str]:
+    """Load an authenticated foundation and return its build identity."""
+
+    return _load_authenticated_ibkr_foundation(path, receipt=receipt)
 
 
 def _load_ibkr_foundation_outcome_blind(
     path: Path,
     *,
+    receipt: Path,
     holdout_target_source: R2HoldoutTargetSource,
     decode_g2: bool,
     decode_target: bool = False,
@@ -738,72 +1054,23 @@ def _load_ibkr_foundation_outcome_blind(
     while only the persisted outcome-blind projections and folds are decoded.
     """
 
-    manifest_path = _regular_file(path, "IBKR foundation manifest")
-    manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
-    document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
-    if set(document) != {
-        "contract",
-        "schema_version",
-        "source_class",
-        "provider_history_manifest",
-        "provider_history_sha256",
-        "build_sha256",
-        "payload",
-    }:
-        raise ValueError("IBKR foundation bundle has unknown or missing fields")
-    if document["contract"] != IBKR_FOUNDATION_CONTRACT:
-        raise ValueError("IBKR foundation bundle contract is unsupported")
-    if document["schema_version"] != IBKR_FOUNDATION_SCHEMA_VERSION:
-        raise ValueError("IBKR foundation bundle schema is unsupported")
-    if document["source_class"] != "IBKR_HISTORICAL_RESEARCH":
-        raise ValueError("IBKR foundation bundle source class is unsupported")
-    if manifest_bytes != _json_bytes(document) + b"\n":
-        raise ValueError("IBKR foundation manifest bytes are not canonical")
-
+    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
+    receipt_path, _receipt_bytes, _receipt_document = _authenticate_verification_receipt(
+        authenticated, receipt
+    )
+    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
+    manifest_path = authenticated.path
     root = manifest_path.parent
-    provider_path = _safe_child(
-        root,
-        _text(document["provider_history_manifest"], "provider-history manifest path"),
-        "provider-history manifest",
-    )
-    provider_bytes = _bounded_bytes(provider_path, _MAX_MANIFEST_BYTES, "provider-history manifest")
-    provider_manifest_sha256 = hashlib.sha256(provider_bytes).hexdigest()
-    if provider_manifest_sha256 != _text(
-        document["provider_history_sha256"], "provider-history manifest hash"
-    ):
-        raise ValueError("provider-history manifest bytes changed")
-    provider_dataset = verify_provider_history_file_only(provider_path)
-
-    payload = _mapping(document["payload"], "IBKR foundation payload")
-    if _sha(payload) != _text(document["build_sha256"], "IBKR foundation build hash"):
-        raise ValueError("IBKR foundation payload identity does not match")
-    configuration = decode_foundation_config(
-        _mapping(payload["configuration"], "IBKR foundation configuration")
-    )
-    expected_provider = {
-        "dataset_sha256": provider_dataset.dataset_sha256,
-        "row_count": provider_dataset.row_count,
-        "contract_selection_sha256": provider_dataset.contract_selection_sha256,
-        "plan_sha256": provider_dataset.plan_sha256,
-        "runtime_sha256": provider_dataset.runtime_sha256,
-        "aggregate_sha256": provider_dataset.aggregate_sha256,
-    }
-    if _mapping(payload["provider_history"]) != expected_provider:
-        raise ValueError("IBKR foundation provider-history metadata differs from its child")
-
-    children = _mapping(payload["children"], "IBKR foundation children")
+    provider_dataset = authenticated.provider_dataset
+    payload = authenticated.payload
+    configuration = authenticated.configuration
+    children = authenticated.children
     child_ids = _child_reference_dataset_ids(children)
-    expected_lineage = {
-        "provider_manifest_sha256": provider_manifest_sha256,
-        "provider_dataset_sha256": provider_dataset.dataset_sha256,
-        "plan_sha256": provider_dataset.plan_sha256,
-        "aggregate_sha256": provider_dataset.aggregate_sha256,
-    }
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
-        expected_lineage,
+        authenticated.expected_lineage,
         decode_g2=decode_g2,
         decode_target=decode_target,
     )
@@ -885,7 +1152,7 @@ def _load_ibkr_foundation_outcome_blind(
         rows=tuple(_panel_row(row) for row in decoded["blind-panel"]),
         projection_id=child_ids["blind-panel"],
     )
-    build_id = _text(document["build_sha256"], "IBKR foundation build hash")
+    build_id = _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
     child_references_sha256 = _sha({kind: children[kind] for kind in _G2_EXTENSION_CHILD_KINDS})
     target_child_references_sha256 = _sha(children["targets"])
     g2_source_id = _ibkr_g2_feature_source_id(
@@ -899,6 +1166,7 @@ def _load_ibkr_foundation_outcome_blind(
     )
     g2_authority = IBKRG2FeatureSourceAuthority(
         path=manifest_path,
+        receipt=receipt_path,
         foundation_bundle_id=build_id,
         foundation_configuration_id=configuration.configuration_id,
         observation_dataset_id=child_ids["observations"],
@@ -1030,12 +1298,14 @@ def _load_ibkr_foundation_outcome_blind(
 def load_ibkr_foundation_outcome_blind_with_identity(
     path: Path,
     *,
+    receipt: Path,
     holdout_target_source: R2HoldoutTargetSource,
 ) -> tuple[IBKRFoundationBuild, str]:
     """Load F2-safe IBKR evidence while authenticating but not decoding G2 rows."""
 
     build, build_id, _authority, _source, _targets = _load_ibkr_foundation_outcome_blind(
         path,
+        receipt=receipt,
         holdout_target_source=holdout_target_source,
         decode_g2=False,
     )
@@ -1045,12 +1315,14 @@ def load_ibkr_foundation_outcome_blind_with_identity(
 def _load_ibkr_foundation_outcome_blind_with_g2_authority(
     path: Path,
     *,
+    receipt: Path,
     holdout_target_source: R2HoldoutTargetSource,
 ) -> tuple[IBKRFoundationBuild, str, IBKRG2FeatureSourceAuthority]:
     """Return the verifier-created G2 feature authority without decoding its rows."""
 
     build, build_id, authority, _source, _targets = _load_ibkr_foundation_outcome_blind(
         path,
+        receipt=receipt,
         holdout_target_source=holdout_target_source,
         decode_g2=False,
     )
@@ -1068,6 +1340,7 @@ def _verify_ibkr_g2_feature_source(
 
     _build, build_id, replayed_authority, source, _targets = _load_ibkr_foundation_outcome_blind(
         authority.path,
+        receipt=authority.receipt,
         holdout_target_source=holdout_target_source,
         decode_g2=True,
     )
@@ -1087,6 +1360,7 @@ def _verify_ibkr_confirmatory_target_dataset(
 
     _build, build_id, replayed_authority, _source, targets = _load_ibkr_foundation_outcome_blind(
         authority.path,
+        receipt=authority.receipt,
         holdout_target_source=holdout_target_source,
         decode_g2=False,
         decode_target=True,
@@ -1516,19 +1790,27 @@ def _verify_children_blind(
     *,
     decode_g2: bool = False,
     decode_target: bool = False,
+    decode_rows: bool = True,
+    decode_base: bool = False,
 ) -> dict[str, tuple[dict[str, JsonValue], ...]]:
-    """Verify child bytes while decoding only outcome-blind projections and folds."""
+    """Verify child bytes while decoding only explicitly requested rows."""
 
     if set(children) != set(_CHILD_KINDS):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
-    decoded_kinds = {
-        "folds",
-        "target-index",
-        "causal-metadata",
-        "blind-observations",
-        "blind-panel",
-        "pre-holdout-target",
-    }
+    decoded_kinds = (
+        {
+            "folds",
+            "target-index",
+            "causal-metadata",
+            "blind-observations",
+            "blind-panel",
+            "pre-holdout-target",
+        }
+        if decode_rows
+        else set()
+    )
+    if decode_base:
+        decoded_kinds.update((*_BASE_CHILD_KINDS, "target-index", "causal-metadata"))
     if decode_g2:
         decoded_kinds.update(_G2_EXTENSION_CHILD_KINDS)
     if decode_target:
@@ -1883,7 +2165,9 @@ def _require_sha256(value: str, field: str) -> None:
 
 
 __all__ = [
+    "authenticate_ibkr_foundation",
     "foundation_config_payload",
+    "ibkr_foundation_verifier_identity",
     "load_ibkr_foundation",
     "preflight_ibkr_foundation",
     "verify_ibkr_foundation",
