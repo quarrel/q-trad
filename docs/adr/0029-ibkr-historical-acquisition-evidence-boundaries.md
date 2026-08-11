@@ -196,7 +196,7 @@ and authorised.
 ## Amendment 1 — Reusable verification evidence, claim-scoped invalidation,
 and confirmatory promotion
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-11
 - **Amends:** Trust model, digest claims, mutable operation and immutable
   evidence, independent replay, invariant matrix and consequences

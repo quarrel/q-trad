@@ -4,7 +4,20 @@
 
 **Planning date:** 2026-08-11  
 **Repository:** `quarrel/q-trad`  
-**Starting authority:** current `main`, including the merged ADR 0029 amendment on reusable verification evidence, claim-scoped invalidation, separate validity/readiness/provenance/confirmatory authority, and confirmatory promotion.
+**Starting authority:** current `main`, including the merged ADR 0029 amendment on reusable
+verification evidence, claim-scoped invalidation, separate
+validity/readiness/provenance/confirmatory authority, and confirmatory promotion.
+**Status:** Active remediation plan until the retirement criteria below are met.
+**Documentation handoff:** Each PR must update `docs/ARCHITECTURE.md` in the same PR when it makes a
+durable implemented flow true. S8.3 records Stage 8 receipts and cheap authentication; S8.4 records
+confirmatory promotion; S7.1/S7.2 record the Stage 7 receipt and single-verification publication flow;
+and S7.3 records semantic-versus-physical identity and prunable consumption.
+`docs/IBKR-HISTORICAL-ACQUISITION.md` remains the operator workflow authority.
+**Retirement criteria:** Move this plan to `docs/archive/` only after S8.1–S8.4 and S7.1–S7.3 have
+landed, or any deliberately deferred remainder has a named active owner; exact-head operational
+handoffs are complete; durable contracts are folded into `docs/ARCHITECTURE.md`,
+`docs/IBKR-HISTORICAL-ACQUISITION.md` and the relevant R2 documents; `PLAN.md` and `docs/STATUS.md`
+record the verified state; and no active authority depends on this file.
 
 ---
 
@@ -970,7 +983,10 @@ For every PR:
    - whether current Stage 8 checkpoint compatibility is preserved;
    - focused/full validation results;
    - no provider calls / no holdout / no effectiveness claim.
-7. Do not merge a PR with an unexplained data-scale regression, receipt bypass, or broader invalidation key.
+7. Update `docs/ARCHITECTURE.md` in the same PR when the change makes one of this plan's durable
+   implemented flows true; do not leave architecture consolidation to the final archival PR.
+8. Do not merge a PR with an unexplained data-scale regression, receipt bypass, broader invalidation
+   key, or missing required architecture update.
 
 ---
 

@@ -1,12 +1,20 @@
 # Agent implementation plan: source-specific `R2-IBKR-HISTORICAL` representative integration
 
+**Status:** Implemented; retained temporarily for the Stage 8 confirmatory-promotion handoff.
+**Retirement criteria:** Move this plan to `docs/archive/` after S8.4 has landed; the real-F2
+promotion-attestation gate is recorded in `docs/IBKR-HISTORICAL-ACQUISITION.md`,
+`docs/R2_IMPLEMENTATION_PLAN.md` and `docs/ARCHITECTURE.md`; current evidence claims are recorded in
+`PLAN.md` and `docs/STATUS.md`; and no active authority depends on this file.
+
 ## Objective
 
-Implement the missing source-specific representative-integration path that allows a verified IBKR Stage 8 historical foundation to exercise the existing R2.A–R2.F1 pipeline and produce an independently replayable **R2.H software-verification bundle**.
+This plan implemented the source-specific representative-integration path that allows authenticated
+IBKR Stage 8 historical foundation evidence to exercise the existing R2.A–R2.F1 pipeline and produce
+an independently replayable **R2.H software-verification bundle**.
 
-This work must be implementable and testable while the live Stage 6 acquisition continues. It must not depend on partial Stage 6 results, create real research evidence prematurely, or access a real holdout.
-
-The repository currently records R2.A–R2.F1 as implemented, with fresh representative integration and the corresponding R2.H software bundle still pending.  The R2 plan explicitly permits software and representative-integration work before a qualifying frozen dataset exists.
+An ordinary accepted Stage 8 verification receipt may support explicitly implementation-only work.
+It is not confirmatory authority: real IBKR F2 additionally requires the qualifying,
+immutable-runtime confirmatory-promotion attestation defined by ADR 0029 and S8.4.
 
 ---
 
@@ -156,11 +164,15 @@ Do not implement one permissive validator containing optional source-dependent c
 
 ---
 
-### 2. Build configuration from verified Stage 8 evidence
+### 2. Build configuration from authenticated Stage 8 evidence
 
-Add a builder that consumes the existing independently verified Stage 8 foundation rather than requiring operators to copy semantic IDs manually.
+The existing builder derives identity-bearing configuration fields rather than requiring operators to
+copy semantic IDs manually. After S8.3, ordinary setup must authenticate the exact Stage 8 foundation
+and accepted receipt without deep replay. After S8.4, real F2 must also authenticate the separate
+confirmatory-promotion attestation; an ordinary receipt remains sufficient only for an explicitly
+implementation-only path.
 
-Suggested CLI shape:
+Existing CLI shape:
 
 ```text
 qtrad research baselines experiment-build \
@@ -169,7 +181,8 @@ qtrad research baselines experiment-build \
   --output <new-experiment.json>
 ```
 
-Use existing Stage 8 loaders and verifiers. Do not add an alternate foundation parser.
+Use the Stage 8 authentication boundary as it lands. Do not add an alternate foundation parser or let
+an ordinary verification receipt masquerade as confirmatory authority.
 
 The builder must derive and bind:
 
@@ -513,19 +526,22 @@ Complete now, independently of the ongoing Stage 6 capture:
 
 ### Real evidence phase
 
-After Stage 6 completes:
+After the revised Stage 7/8 handoff is complete:
 
-1. independently publish and verify Stage 6 result closure;
-2. build and verify Stage 7 provider-history observations;
-3. build and verify Stage 8 IBKR foundation;
-4. run the new `IBKR_HISTORICAL_V1` experiment builder;
-5. produce real implementation-only L0/L1/P0/P1 feature evidence;
-6. run representative OOF integration;
+1. authenticate the retained Stage 6 closure and accepted Stage 7 receipt;
+2. authenticate the published Stage 8 foundation and accepted verification receipt;
+3. retain a nonqualifying foundation without downstream confirmatory work; or, if readiness qualifies
+   and the operation is separately authorised, create and authenticate the confirmatory-promotion
+   attestation before real F2;
+4. run the `IBKR_HISTORICAL_V1` experiment builder under the applicable evidence class;
+5. produce implementation-only L0/L1/P0/P1 feature evidence where explicitly intended;
+6. run representative OOF integration only under its authorised boundary;
 7. independently verify the OOF bundle;
-8. build and verify the source-specific R2.H software bundle;
+8. build and verify the source-specific R2.H software bundle; and
 9. retain the resulting readiness disposition.
 
-The real evidence run should ideally be a separate evidence/operations PR or retained execution record, not mixed into the software implementation PR.
+The real evidence run should be a separate evidence/operations PR or retained execution record, not
+mixed into a software implementation PR.
 
 ---
 
@@ -535,14 +551,15 @@ The PR is complete when:
 
 * the exact fixed six-instrument IBKR profile is implemented;
 * the existing IG representative path is unchanged;
-* a verified Stage 8 foundation can deterministically produce an IBKR experiment configuration;
+* an authenticated Stage 8 foundation can deterministically produce an IBKR experiment configuration;
 * the full L0/L1/P0/P1 implementation-only OOF path works from authenticated fixture files;
 * the resulting OOF bundle is explicitly `IBKR_HISTORICAL_RESEARCH`;
 * the resulting software bundle is source-specific and independently replayable;
 * mixed-source and holdout-contaminated closures fail closed;
 * no real holdout is materialised;
 * no Stage 6 provider or database access occurs;
+* an ordinary Stage 8 receipt cannot authorise real F2, which requires the S8.4 confirmatory promotion;
 * all focused tests pass;
 * `ops/dev/verify.sh` passes;
-* exact-head CI passes;
+* exact-head CI passes; and
 * documentation makes no research-effectiveness claim.
