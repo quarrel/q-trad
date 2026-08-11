@@ -2,8 +2,9 @@
 
 import json
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from hashlib import sha256
 from types import SimpleNamespace
 from typing import Protocol, cast
@@ -32,7 +33,7 @@ _WEEK = timedelta(weeks=1)
 _INITIAL_TRAINING_DURATION = timedelta(weeks=6)
 _VALIDATION_DURATION = timedelta(weeks=2)
 _HOLDOUT_DURATION = timedelta(weeks=4)
-_MINIMUM_COVERAGE = 0.90
+R2_MINIMUM_COVERAGE = Fraction(9, 10)
 
 
 class R1FoundationBindings(Protocol):
@@ -96,8 +97,7 @@ def evaluate_r2_readiness(
     )
     coverage_passes = all(
         cell.expected_active_opportunities > 0
-        and cell.coverage is not None
-        and cell.coverage >= _MINIMUM_COVERAGE
+        and Fraction(cell.valid_targets, cell.expected_active_opportunities) >= R2_MINIMUM_COVERAGE
         for cells in coverage_matrix.values()
         for cell in cells
     )
@@ -322,8 +322,7 @@ def evaluate_outcome_blind_confirmatory_readiness(
     group_counts = Counter(experiment.market_groups.values())
     coverage_passes = all(
         cell.expected_active_opportunities > 0
-        and cell.coverage is not None
-        and cell.coverage >= _MINIMUM_COVERAGE
+        and Fraction(cell.valid_targets, cell.expected_active_opportunities) >= R2_MINIMUM_COVERAGE
         for cells in coverage.values()
         for cell in cells
     )
@@ -622,14 +621,7 @@ def _coverage_matrix(
     folds: tuple[Fold, ...],
     source_active: Mapping[str, tuple[tuple[datetime, datetime], ...]],
 ) -> dict[str, tuple[CoverageCell, ...]]:
-    blocks: list[tuple[str, datetime, datetime]] = []
-    if folds:
-        blocks.append(("initial_training", folds[0].training_start, folds[0].training_cutoff))
-    blocks.extend(
-        (f"validation_{index}", fold.validation_start, fold.validation_end)
-        for index, fold in enumerate(folds, start=1)
-    )
-    blocks.append(("holdout", experiment.holdout_range[0], experiment.holdout_range[1]))
+    blocks = r2_research_blocks(folds, experiment.holdout_range)
     rows_by_instrument = {
         instrument: tuple(
             row
@@ -667,6 +659,22 @@ def _coverage_matrix(
             )
         matrix[instrument] = tuple(cells)
     return matrix
+
+
+def r2_research_blocks(
+    folds: Sequence[Fold], holdout_range: tuple[datetime, datetime]
+) -> tuple[tuple[str, datetime, datetime], ...]:
+    """Return the identity-bearing R2 training, validation, and holdout blocks."""
+
+    blocks: list[tuple[str, datetime, datetime]] = []
+    if folds:
+        blocks.append(("initial_training", folds[0].training_start, folds[0].training_cutoff))
+    blocks.extend(
+        (f"validation_{index}", fold.validation_start, fold.validation_end)
+        for index, fold in enumerate(folds, start=1)
+    )
+    blocks.append(("holdout", holdout_range[0], holdout_range[1]))
+    return tuple(blocks)
 
 
 def _membership_counts(

@@ -20,6 +20,7 @@ from qtrad import __main__ as cli
 from qtrad.__main__ import build_parser
 from qtrad.application.ibkr_foundation import (
     IBKRFoundationBuild,
+    _ibkr_opportunity_coverage,
     _provider_evidence,
     build_ibkr_foundation,
     evaluate_ibkr_foundation_readiness,
@@ -31,7 +32,12 @@ from qtrad.application.r2_ibkr_historical import (
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, membership_hash
-from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
+from qtrad.domain.foundation import (
+    InstrumentRole,
+    PanelDataset,
+    ReturnDisposition,
+    TargetDataset,
+)
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_CANDIDATES,
     IBKR_CONFIRMATORY_GROUPS,
@@ -385,12 +391,9 @@ def test_provider_history_foundation_round_trips_and_replays_children(
     )
     assert document["payload"]["readiness"]["evidence"]["fold_count"] == 0
     assert "INSUFFICIENT_COMMON_SUPPORT" in document["payload"]["readiness"]["causes"]
-    document["payload"]["readiness"]["state"] = "QUALIFYING_HISTORY_READY"
-    bundle.write_text(json.dumps(document), encoding="utf-8")
-    with pytest.raises(
-        ValueError,
-        match=r"manifest bytes are not canonical|payload identity",
-    ):
+    document["payload"]["readiness"]["evidence"]["coverage_cells"][0]["threshold"] = "89/100"
+    bundle.write_bytes(_canonical_json(document) + b"\n")
+    with pytest.raises(ValueError, match="payload identity"):
         verify_ibkr_foundation(bundle)
 
 
@@ -636,21 +639,27 @@ def _session_aware_source_evidence(
                 if not no_data:
                     for minute in range(65):
                         bar_start = session_start + timedelta(minutes=minute)
-                        if (
+                        missing = (
                             missing_active_bar
                             and instrument == str(IBKR_CONFIRMATORY_INSTRUMENTS[0])
                             and day == source_start + timedelta(days=1)
                             and minute == 10
-                        ):
-                            continue
-                        accepted_rows.append({"bar_start": bar_start.isoformat()})
-                        observations.append(SimpleNamespace(instrument_id=instrument))
+                        )
+                        if not missing:
+                            accepted_rows.append({"bar_start": bar_start.isoformat()})
+                            observations.append(SimpleNamespace(instrument_id=instrument))
                         target_rows.append(
                             SimpleNamespace(
                                 instrument_id=instrument,
                                 decision_time=bar_start,
+                                target_start_time=bar_start,
+                                target_end_time=bar_start + timedelta(minutes=15),
                                 horizon=timedelta(minutes=15),
-                                return_disposition=SimpleNamespace(value="VALID"),
+                                return_disposition=(
+                                    ReturnDisposition.MISSING_START
+                                    if missing
+                                    else ReturnDisposition.VALID
+                                ),
                             )
                         )
             else:
@@ -742,12 +751,51 @@ def _evaluate_session_aware_readiness(
     *,
     context_failure: bool = False,
     missing_active_bar: bool = False,
+    wide_confirmatory_gap: bool = False,
 ) -> tuple[IBKRFoundationReadiness, tuple[Mapping[str, JsonValue], ...]]:
     source_evidence, targets, source_start, source_end = _session_aware_source_evidence(
         context_failure=context_failure,
         missing_active_bar=missing_active_bar,
     )
     active_intervals, provider_gaps = _provider_evidence(source_evidence)
+    if wide_confirmatory_gap:
+        instrument = str(IBKR_CONFIRMATORY_INSTRUMENTS[0])
+        gap_start = source_start + timedelta(days=1)
+        gap_end = source_start + timedelta(days=6)
+        for row in targets.rows:
+            if (
+                row.instrument_id == instrument
+                and gap_start < row.target_end_time
+                and row.target_start_time < gap_end
+            ):
+                cast(Any, row).return_disposition = ReturnDisposition.MISSING_START
+        provider_gaps = (
+            *provider_gaps,
+            {
+                "instrument_id": instrument,
+                "interval_start": gap_start.isoformat(),
+                "interval_end": gap_end.isoformat(),
+                "disposition": "MISSING_BAR",
+                "request_sha256": "1" * 64,
+                "result_sha256": "2" * 64,
+            },
+        )
+    validation_start = source_start + timedelta(days=14)
+    validation_end = validation_start + timedelta(days=7)
+    folds = (
+        Fold(
+            fold_id="fold-1",
+            training_start=source_start,
+            training_cutoff=validation_start,
+            validation_start=validation_start,
+            validation_end=validation_end,
+            embargo_end=validation_start,
+            training_target_ids=(),
+            validation_target_ids=(),
+            holdout_excluded=True,
+            membership_hash=membership_hash((), ()),
+        ),
+    )
     readiness = evaluate_ibkr_foundation_readiness(
         source_evidence,
         targets,
@@ -756,7 +804,8 @@ def _evaluate_session_aware_readiness(
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,
         primary_horizon=timedelta(minutes=15),
-        fold_count=1,
+        folds=folds,
+        holdout_range=(validation_end, source_end),
     )
     return readiness, tuple(provider_gaps)
 
@@ -768,12 +817,14 @@ def test_stage8_session_aware_gaps_allow_qualifying_history() -> None:
     assert provider_gaps == ()
 
 
-def test_stage8_active_session_gap_is_insufficient_even_when_bar_result_precedes_schedule() -> None:
+def test_stage8_isolated_active_session_gap_uses_block_coverage() -> None:
     readiness, provider_gaps = _evaluate_session_aware_readiness(missing_active_bar=True)
 
-    assert readiness.state is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
-    assert IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT in readiness.causes
+    assert readiness.state is IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY
+    assert IBKRFoundationReadinessCause.INSUFFICIENT_BLOCK_COVERAGE not in readiness.causes
+    assert readiness.evidence["blocking_coverage_cells"] == []
     assert any(gap["disposition"] == "MISSING_BAR" for gap in provider_gaps)
+    assert readiness.evidence["raw_provider_gaps"]
 
 
 def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() -> None:
@@ -783,6 +834,240 @@ def test_stage8_context_instrument_gaps_do_not_block_confirmatory_readiness() ->
     assert readiness.evidence["provider_gap_count"] == 0
     assert cast(int, readiness.evidence["total_provider_gap_count"]) > 0
     assert any(gap["instrument_id"] == "fx:nzd-usd" for gap in provider_gaps)
+    assert readiness.evidence["raw_provider_gaps"]
+
+
+def test_stage8_below_block_coverage_uses_specific_cause() -> None:
+    readiness, _ = _evaluate_session_aware_readiness(wide_confirmatory_gap=True)
+
+    assert readiness.state is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+    assert IBKRFoundationReadinessCause.INSUFFICIENT_BLOCK_COVERAGE in readiness.causes
+    assert IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT not in readiness.causes
+    assert readiness.evidence["blocking_coverage_cells"]
+
+
+def _synthetic_coverage(
+    gap_count: int,
+    *,
+    duplicate_gap: bool = False,
+    reverse_inputs: bool = False,
+    active_count: int = 100,
+    row_count: int = 100,
+    other_ineligible_index: int | None = None,
+    interior_gap_index: int | None = None,
+    missing_end_gap_index: int | None = None,
+) -> tuple[
+    dict[str, JsonValue],
+    tuple[dict[str, JsonValue], ...],
+    tuple[str, ...],
+]:
+    start = datetime(2026, 2, 1, tzinfo=UTC)
+    instrument = str(IBKR_CONFIRMATORY_INSTRUMENTS[0])
+    rows = [
+        SimpleNamespace(
+            instrument_id=instrument,
+            decision_time=start + timedelta(minutes=5 * index),
+            target_start_time=start + timedelta(minutes=5 * index),
+            target_end_time=start + timedelta(minutes=5 * index + 1),
+            horizon=timedelta(minutes=1),
+            return_disposition=(
+                ReturnDisposition.MISSING_END
+                if index == missing_end_gap_index
+                else (
+                    ReturnDisposition.MISSING_START
+                    if index < gap_count or index == other_ineligible_index
+                    else ReturnDisposition.VALID
+                )
+            ),
+        )
+        for index in range(row_count)
+    ]
+    intervals = tuple((row.target_start_time, row.target_end_time) for row in rows[:active_count])
+    gaps: list[Mapping[str, JsonValue]] = [
+        {
+            "instrument_id": instrument,
+            "interval_start": (row.target_start_time - timedelta(minutes=1)).isoformat(),
+            "interval_end": row.target_start_time.isoformat(),
+            "disposition": "MISSING_BAR",
+            "request_sha256": f"{index + 1:064x}",
+            "result_sha256": f"{index + 101:064x}",
+        }
+        for index, row in enumerate(rows[:gap_count])
+    ]
+    if interior_gap_index is not None:
+        row = rows[interior_gap_index]
+        gaps.append(
+            {
+                "instrument_id": instrument,
+                "interval_start": (row.target_start_time + timedelta(seconds=20)).isoformat(),
+                "interval_end": (row.target_start_time + timedelta(seconds=40)).isoformat(),
+                "disposition": "MISSING_BAR",
+                "request_sha256": "f" * 64,
+                "result_sha256": "e" * 64,
+            }
+        )
+    if missing_end_gap_index is not None:
+        row = rows[missing_end_gap_index]
+        gaps.append(
+            {
+                "instrument_id": instrument,
+                "interval_start": (row.target_end_time - timedelta(minutes=1)).isoformat(),
+                "interval_end": row.target_end_time.isoformat(),
+                "disposition": "MISSING_BAR",
+                "request_sha256": "d" * 64,
+                "result_sha256": "c" * 64,
+            }
+        )
+    if duplicate_gap and gaps:
+        gaps.append(dict(gaps[0]))
+    fold = Fold(
+        fold_id="fold-1",
+        training_start=start,
+        training_cutoff=start + timedelta(days=1),
+        validation_start=start + timedelta(days=1),
+        validation_end=start + timedelta(days=2),
+        embargo_end=start + timedelta(days=1),
+        training_target_ids=(),
+        validation_target_ids=(),
+        holdout_excluded=True,
+        membership_hash=membership_hash((), ()),
+    )
+    candidates = [str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS]
+    active = {
+        candidate: intervals if candidate == instrument else ()
+        for candidate in (reversed(candidates) if reverse_inputs else candidates)
+    }
+    cells, blocking, _ = _ibkr_opportunity_coverage(
+        targets=cast(
+            TargetDataset,
+            SimpleNamespace(rows=tuple(reversed(rows)) if reverse_inputs else tuple(rows)),
+        ),
+        active_intervals=active,
+        provider_gaps=tuple(reversed(gaps)) if reverse_inputs else tuple(gaps),
+        primary_horizon=timedelta(minutes=1),
+        folds=(fold,),
+        holdout_range=(start + timedelta(days=2), start + timedelta(days=3)),
+    )
+    return cells[0], cells, blocking
+
+
+@pytest.mark.parametrize(
+    ("gap_count", "coverage", "passed"),
+    ((9, "91/100", True), (10, "9/10", True), (11, "89/100", False)),
+)
+def test_stage8_block_coverage_threshold_is_exact(
+    gap_count: int, coverage: str, passed: bool
+) -> None:
+    cell, cells, blocking = _synthetic_coverage(gap_count)
+
+    assert cell["coverage"] == coverage
+    assert cell["passed"] is passed
+    assert (cell["key"] in blocking) is not passed
+    assert cells[3]["coverage"] is None
+    assert cells[3]["passed"] is False
+
+
+def test_stage8_other_ineligible_opportunity_follows_amended_denominator() -> None:
+    cell, _, blocking = _synthetic_coverage(
+        10,
+        active_count=101,
+        row_count=101,
+        other_ineligible_index=100,
+    )
+
+    assert cell["opportunity_counts"] == {
+        "ELIGIBLE": 90,
+        "GAP": 10,
+        "INACTIVE": 0,
+        "OTHER_INELIGIBLE": 1,
+    }
+    assert cell["coverage"] == "9/10"
+    assert cell["passed"] is True
+    assert cell["key"] not in blocking
+
+
+def test_stage8_valid_target_with_interior_provider_gap_remains_eligible() -> None:
+    cell, _, blocking = _synthetic_coverage(0, interior_gap_index=50)
+
+    assert cell["opportunity_counts"] == {
+        "ELIGIBLE": 100,
+        "GAP": 0,
+        "INACTIVE": 0,
+        "OTHER_INELIGIBLE": 0,
+    }
+    assert cell["coverage"] == "1"
+    assert cell["passed"] is True
+    assert cell["key"] not in blocking
+
+
+@pytest.mark.parametrize(
+    ("gap_count", "missing_end_gap_index"),
+    ((1, None), (0, 0)),
+    ids=("missing-start", "missing-end"),
+)
+def test_stage8_missing_endpoint_uses_preceding_provider_bar_gap(
+    gap_count: int,
+    missing_end_gap_index: int | None,
+) -> None:
+    cell, _, blocking = _synthetic_coverage(
+        gap_count,
+        active_count=1,
+        row_count=1,
+        missing_end_gap_index=missing_end_gap_index,
+    )
+
+    assert cell["opportunity_counts"] == {
+        "ELIGIBLE": 0,
+        "GAP": 1,
+        "INACTIVE": 0,
+        "OTHER_INELIGIBLE": 0,
+    }
+    assert cell["coverage"] == "0"
+    assert cell["passed"] is False
+    assert cell["key"] in blocking
+
+
+def test_stage8_other_ineligible_ignores_unrelated_interior_gap() -> None:
+    cell, _, blocking = _synthetic_coverage(
+        0,
+        active_count=1,
+        row_count=1,
+        other_ineligible_index=0,
+        interior_gap_index=0,
+    )
+
+    assert cell["opportunity_counts"] == {
+        "ELIGIBLE": 0,
+        "GAP": 0,
+        "INACTIVE": 0,
+        "OTHER_INELIGIBLE": 1,
+    }
+    assert cell["coverage"] is None
+    assert cell["passed"] is False
+    assert cell["key"] in blocking
+
+
+def test_stage8_coverage_deduplicates_gaps_excludes_inactive_and_is_deterministic() -> None:
+    cell, cells, blocking = _synthetic_coverage(
+        10, duplicate_gap=True, active_count=99, other_ineligible_index=98
+    )
+    _, reversed_cells, reversed_blocking = _synthetic_coverage(
+        10,
+        duplicate_gap=True,
+        reverse_inputs=True,
+        active_count=99,
+        other_ineligible_index=98,
+    )
+
+    assert cell["opportunity_counts"] == {
+        "ELIGIBLE": 88,
+        "GAP": 10,
+        "INACTIVE": 1,
+        "OTHER_INELIGIBLE": 1,
+    }
+    assert cell["coverage"] == "44/49"
+    assert cells == reversed_cells
+    assert blocking == reversed_blocking
 
 
 @pytest.mark.parametrize(
@@ -1223,6 +1508,26 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         for event in first_progress
     )
 
+    identity_path = checkpoint_root / "identity.json"
+    legacy_identity = json.loads(identity_path.read_bytes())
+    legacy_identity["implementation_sha256"] = (
+        bounded_foundation_runtime._LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256
+    )
+    identity_path.write_bytes(_canonical_json(legacy_identity) + b"\n")
+
+    def checkpoint_snapshot() -> dict[Path, tuple[int, int, str]]:
+        return {
+            path.relative_to(checkpoint_root): (
+                path.stat().st_ino,
+                path.stat().st_mtime_ns,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+            )
+            for path in checkpoint_root.rglob("*")
+            if path.is_file()
+        }
+
+    retained_checkpoint = checkpoint_snapshot()
+
     def reject_repeated_semantic_verification(
         _path: Path, **_kwargs: object
     ) -> ProviderHistorySourceEvidence:
@@ -1255,6 +1560,7 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
         event.get("phase") == "derived" and event.get("event") == "reused"
         for event in second_progress
     )
+    assert checkpoint_snapshot() == retained_checkpoint
     assert second.observations.dataset_id == first.observations.dataset_id
     assert second.panel.dataset_id == first.panel.dataset_id
     assert second.targets.dataset_id == first.targets.dataset_id

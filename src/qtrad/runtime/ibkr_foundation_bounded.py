@@ -77,6 +77,12 @@ from qtrad.runtime.provider_history import (
 _CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-checkpoint-v1"
 _REPLAY_CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-replay-checkpoint-v1"
 _SOURCE_VERIFICATION_NAME = "source-verification.json"
+_LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
+    "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
+)
+_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
+    "c7cc4139e11609280ce1458960d4aea0c66a2a455306210379864d26ef4b8951"
+)
 _MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
 _DEFAULT_WORKERS = 4
@@ -192,7 +198,16 @@ class _Stage8Checkpoint:
             if identity_path.exists():
                 if not identity_path.is_file() or identity_path.is_symlink():
                     raise ValueError("Stage 8 checkpoint identity must be a regular file")
-                if identity_path.read_bytes() != encoded:
+                actual_encoded = identity_path.read_bytes()
+                try:
+                    actual = json.loads(actual_encoded)
+                except (UnicodeDecodeError, json.JSONDecodeError) as error:
+                    raise ValueError("Stage 8 checkpoint identity is invalid JSON") from error
+                if (
+                    not isinstance(actual, dict)
+                    or actual_encoded != _runtime()._json_bytes(actual) + b"\n"
+                    or not _checkpoint_identity_matches(actual, identity)
+                ):
                     raise ValueError("Stage 8 checkpoint identity does not match this build")
             else:
                 if any(root.iterdir()):
@@ -739,6 +754,46 @@ def _implementation_sha256() -> str:
     ):
         hasher.update(inspect.getsource(function).encode("utf-8"))
     return hasher.hexdigest()
+
+
+def _legacy_checkpoint_compatibility_sha256() -> str:
+    source = Path(__file__).read_text(encoding="utf-8")
+    lines = source.splitlines()
+    start = next(
+        index
+        for index, line in enumerate(lines)
+        if line.startswith("_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 =")
+    )
+    end = start + 1
+    while not lines[end].endswith(")"):
+        end += 1
+    lines[start : end + 1] = ["_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = <bound>"]
+    hasher = hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8"))
+    for function in (
+        _adapt_observation,
+        _observation_from_row,
+        _panel_audit_disposition,
+        _provider_evidence,
+        _revision_key,
+        _source_key,
+        _hash_json,
+        membership_hash,
+    ):
+        hasher.update(inspect.getsource(function).encode("utf-8"))
+    return hasher.hexdigest()
+
+
+def _checkpoint_identity_matches(
+    actual: Mapping[str, object], expected: Mapping[str, object]
+) -> bool:
+    if actual == expected:
+        return True
+    legacy = dict(expected)
+    legacy["implementation_sha256"] = _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256
+    return (
+        actual == legacy
+        and _legacy_checkpoint_compatibility_sha256() == _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256
+    )
 
 
 def _checkpoint_file(path: Path) -> _CheckpointFile:
@@ -2210,7 +2265,8 @@ def build_bounded_provider_foundation(
             active_intervals=active_intervals,
             provider_gaps=provider_gaps,
             primary_horizon=adapted_configuration.primary_vertical_horizon,
-            fold_count=len(folds.folds),
+            folds=folds.folds,
+            holdout_range=adapted_configuration.holdout_range,
         )
     finally:
         if not summary_stream.closed:
