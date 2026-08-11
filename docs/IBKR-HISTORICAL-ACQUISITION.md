@@ -978,10 +978,16 @@ ENTITLEMENT_UNAVAILABLE
 CONTRACT_IDENTITY_CHANGED
 SESSION_EVIDENCE_UNAVAILABLE
 INSUFFICIENT_COMMON_SUPPORT
+INSUFFICIENT_BLOCK_COVERAGE
 INSUFFICIENT_DURATION
 INSUFFICIENT_ROWS
 MISSING_CONFIRMATORY_TARGET
 ```
+
+Provider gaps remain explicit evidence. Confirmatory readiness applies the frozen 90% R2
+coverage threshold to persisted causal opportunities in each authenticated training,
+validation, and holdout block; inactive opportunities are excluded, overlapping gaps are
+counted once, and context-only gaps cannot block the fixed six candidates.
 
 Stop before:
 

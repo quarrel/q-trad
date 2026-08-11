@@ -6,6 +6,7 @@ from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
+from fractions import Fraction
 from typing import Literal, cast, overload
 from uuid import UUID, uuid5
 
@@ -15,13 +16,15 @@ from qtrad.application.provider_history import (
     ProviderHistorySourceEvidence,
     request_evidence_by_hash,
 )
+from qtrad.application.r2_readiness import R2_MINIMUM_COVERAGE, r2_research_blocks
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
-from qtrad.domain.folds import FoldDataset
+from qtrad.domain.folds import Fold, FoldDataset
 from qtrad.domain.foundation import (
     FoundationConfig,
     InstrumentRole,
     PanelDataset,
+    ReturnDisposition,
     TargetDataset,
 )
 from qtrad.domain.ibkr_foundation import (
@@ -174,7 +177,8 @@ def build_ibkr_foundation(
         active_intervals=active_intervals,
         provider_gaps=provider_gaps,
         primary_horizon=adapted_configuration.primary_vertical_horizon,
-        fold_count=len(folds.folds),
+        folds=folds.folds,
+        holdout_range=adapted_configuration.holdout_range,
     )
     return IBKRFoundationBuild(
         configuration=adapted_configuration,
@@ -200,7 +204,8 @@ def evaluate_ibkr_foundation_readiness(
     active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]] | None = None,
     provider_gaps: Sequence[Mapping[str, JsonValue]] = (),
     primary_horizon: timedelta,
-    fold_count: int = 0,
+    folds: Sequence[Fold],
+    holdout_range: tuple[datetime, datetime],
 ) -> IBKRFoundationReadiness:
     """Replay fixed history gates from the verified Stage 6/7 evidence."""
 
@@ -265,6 +270,14 @@ def evaluate_ibkr_foundation_readiness(
         return isinstance(instrument_id, str) and instrument_id in candidate_names
 
     confirmatory_gaps = tuple(gap for gap in provider_gaps if is_confirmatory_gap(gap))
+    coverage_cells, blocking_cells, coverage_diagnostics = _ibkr_opportunity_coverage(
+        targets=targets,
+        active_intervals=active_intervals,
+        provider_gaps=provider_gaps,
+        primary_horizon=primary_horizon,
+        folds=folds,
+        holdout_range=holdout_range,
+    )
     request_evidence: dict[str, JsonValue] = {}
     for candidate in sorted(candidate_names):
         candidate_requests = requests_by_instrument.get(candidate, [])
@@ -349,8 +362,10 @@ def evaluate_ibkr_foundation_readiness(
         for candidate in sorted(candidate_names)
     ):
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_ROWS)
-    if confirmatory_gaps or fold_count == 0:
+    if not folds:
         causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_COMMON_SUPPORT)
+    if blocking_cells:
+        causes.add(IBKRFoundationReadinessCause.INSUFFICIENT_BLOCK_COVERAGE)
 
     ordered_causes = tuple(cause for cause in IBKRFoundationReadinessCause if cause in causes)
     return IBKRFoundationReadiness(
@@ -368,8 +383,13 @@ def evaluate_ibkr_foundation_readiness(
             "provider_row_count": source_evidence.dataset.row_count,
             "provider_gap_count": len(confirmatory_gaps),
             "total_provider_gap_count": len(provider_gaps),
+            "raw_provider_gaps": [dict(gap) for gap in sorted(provider_gaps, key=_gap_sort_key)],
+            "coverage_cells": list(coverage_cells),
+            "coverage_threshold": str(R2_MINIMUM_COVERAGE),
+            "blocking_coverage_cells": list(blocking_cells),
+            "coverage_diagnostics": coverage_diagnostics,
             "target_row_count": len(targets.rows),
-            "fold_count": fold_count,
+            "fold_count": len(folds),
             "primary_horizon_seconds": primary_horizon.total_seconds(),
             "source_contract_selection_sha256": plan.contract_selection_sha256,
             "source_plan_sha256": plan.plan_sha256,
@@ -379,6 +399,131 @@ def evaluate_ibkr_foundation_readiness(
             "source_entitlement_summary": aggregate.entitlement_summary,
             "request_evidence": request_evidence,
         },
+    )
+
+
+def _ibkr_opportunity_coverage(
+    *,
+    targets: TargetDataset,
+    active_intervals: Mapping[str, Sequence[tuple[datetime, datetime]]],
+    provider_gaps: Sequence[Mapping[str, JsonValue]],
+    primary_horizon: timedelta,
+    folds: Sequence[Fold],
+    holdout_range: tuple[datetime, datetime],
+) -> tuple[tuple[dict[str, JsonValue], ...], tuple[str, ...], dict[str, JsonValue]]:
+    """Classify persisted Stage 8 opportunities against the frozen R2 blocks."""
+
+    candidates = tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS)
+    gaps_by_instrument: dict[str, list[tuple[datetime, datetime]]] = defaultdict(list)
+    context_gap_count = 0
+    for gap in sorted(provider_gaps, key=_gap_sort_key):
+        instrument = gap.get("instrument_id")
+        if not isinstance(instrument, str):
+            raise TypeError("provider gap instrument_id must be a string")
+        if instrument not in candidates:
+            context_gap_count += 1
+            continue
+        start = _evidence_time(gap.get("interval_start"), "provider gap interval start")
+        end = _evidence_time(gap.get("interval_end"), "provider gap interval end")
+        if end <= start:
+            raise ValueError("provider gap interval must have positive duration")
+        gaps_by_instrument[instrument].append((start, end))
+
+    blocks = r2_research_blocks(folds, holdout_range)
+    rows_by_instrument = {
+        instrument: tuple(
+            sorted(
+                (
+                    row
+                    for row in targets.rows
+                    if row.instrument_id == instrument and row.horizon == primary_horizon
+                ),
+                key=lambda row: (row.decision_time, row.target_start_time, row.target_end_time),
+            )
+        )
+        for instrument in candidates
+    }
+    cells: list[dict[str, JsonValue]] = []
+    blocking: list[str] = []
+    totals = {name: 0 for name in ("ELIGIBLE", "GAP", "INACTIVE", "OTHER_INELIGIBLE")}
+    for instrument in candidates:
+        intervals = tuple(sorted(active_intervals.get(instrument, ())))
+        gaps = tuple(sorted(gaps_by_instrument[instrument]))
+        for block, block_start, block_end in blocks:
+            counts = dict.fromkeys(totals, 0)
+            for row in rows_by_instrument[instrument]:
+                if not block_start <= row.decision_time < block_end:
+                    continue
+                is_active = any(
+                    start <= row.target_start_time and row.target_end_time <= end
+                    for start, end in intervals
+                )
+                if not is_active:
+                    disposition = "INACTIVE"
+                elif row.return_disposition is ReturnDisposition.VALID:
+                    disposition = "ELIGIBLE"
+                else:
+                    missing_endpoint = (
+                        row.target_start_time
+                        if row.return_disposition is ReturnDisposition.MISSING_START
+                        else (
+                            row.target_end_time
+                            if row.return_disposition is ReturnDisposition.MISSING_END
+                            else None
+                        )
+                    )
+                    disposition = (
+                        "GAP"
+                        if missing_endpoint is not None
+                        and any(start < missing_endpoint <= end for start, end in gaps)
+                        else "OTHER_INELIGIBLE"
+                    )
+                counts[disposition] += 1
+            denominator = counts["ELIGIBLE"] + counts["GAP"]
+            coverage = Fraction(counts["ELIGIBLE"], denominator) if denominator else None
+            passed = coverage is not None and coverage >= R2_MINIMUM_COVERAGE
+            key = f"{instrument}/{block}"
+            counts_json: dict[str, JsonValue] = {name: count for name, count in counts.items()}
+            cell: dict[str, JsonValue] = {
+                "key": key,
+                "instrument_id": instrument,
+                "block": block,
+                "block_start": block_start.isoformat(),
+                "block_end": block_end.isoformat(),
+                "opportunity_counts": counts_json,
+                "coverage": str(coverage) if coverage is not None else None,
+                "threshold": str(R2_MINIMUM_COVERAGE),
+                "passed": passed,
+            }
+            cells.append(cell)
+            if not passed:
+                blocking.append(key)
+            for disposition, count in counts.items():
+                totals[disposition] += count
+
+    totals_json: dict[str, JsonValue] = {name: count for name, count in totals.items()}
+    diagnostics: dict[str, JsonValue] = {
+        "authoritative": False,
+        "candidate_count": len(candidates),
+        "cell_count": len(cells),
+        "blocking_cell_count": len(blocking),
+        "context_gap_count": context_gap_count,
+        "opportunity_counts": totals_json,
+    }
+    return tuple(cells), tuple(blocking), diagnostics
+
+
+def _gap_sort_key(gap: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    return tuple(
+        str(gap.get(key) or "")
+        for key in (
+            "instrument_id",
+            "interval_start",
+            "interval_end",
+            "disposition",
+            "request_sha256",
+            "result_sha256",
+        )
     )
 
 
