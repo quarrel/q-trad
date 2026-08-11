@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from typing import cast
-from uuid import uuid4
 
 import polars as pl
 
@@ -35,7 +34,15 @@ from qtrad.domain.ibkr_foundation import (
     IBKRFoundationReadinessCause,
     IBKRFoundationReadinessState,
 )
+from qtrad.domain.ibkr_results import canonical_json_bytes
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.domain.provider_history import (
+    PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
+    PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
+    PROVIDER_HISTORY_SCHEMA_VERSION,
+    ProviderHistoricalAvailabilityPolicy,
+    sha256_json,
+)
 from qtrad.domain.r2_holdout import (
     R2G2ObservationView,
     R2G2PanelView,
@@ -56,6 +63,7 @@ from qtrad.runtime.foundation_bundle import (
     decode_foundation_config,
 )
 from qtrad.runtime.provider_history import (
+    _dataset_from_manifest,
     read_provider_history_source_evidence,
     verify_provider_history_file_only,
 )
@@ -271,16 +279,136 @@ def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, st
         provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
     )
     document = _mapping(_parse_json(manifest_bytes, "provider-history manifest"))
-    dataset = _mapping(document.get("dataset"), "provider-history dataset")
-    dataset_sha256 = _text(dataset.get("dataset_sha256"), "provider-history dataset identity")
-    if len(dataset_sha256) != 64 or any(
-        character not in "0123456789abcdef" for character in dataset_sha256
-    ):
-        raise ValueError("provider-history dataset identity must be lower-case SHA-256")
-    row_count = dataset.get("row_count")
-    if isinstance(row_count, bool) or not isinstance(row_count, int) or row_count < 0:
-        raise ValueError("provider-history dataset row count is invalid")
-    return hashlib.sha256(manifest_bytes).hexdigest(), dataset_sha256, row_count
+    if set(document) != {
+        "contract",
+        "schema_version",
+        "selector_contract",
+        "dataset",
+        "availability_policy",
+        "source_result",
+        "source_plan_row_bound",
+        "files",
+        "manifest_sha256",
+    }:
+        raise ValueError("provider-history manifest fields are not exact")
+    identity = dict(document)
+    manifest_sha256 = _text(identity.pop("manifest_sha256"), "manifest_sha256")
+    if document["contract"] != PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT:
+        raise ValueError("provider-history manifest contract is unsupported")
+    if document["schema_version"] != PROVIDER_HISTORY_SCHEMA_VERSION:
+        raise ValueError("provider-history manifest schema is unsupported")
+    if document["selector_contract"] != PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT:
+        raise ValueError("provider-history availability selector contract is unsupported")
+    if manifest_sha256 != sha256_json(identity):
+        raise ValueError("provider-history manifest identity does not match its content")
+    if manifest_bytes != canonical_json_bytes(cast(Mapping[str, JsonValue], document)):
+        raise ValueError("provider-history manifest bytes are not canonical")
+    policy = ProviderHistoricalAvailabilityPolicy.from_json_value(document["availability_policy"])
+    dataset = _dataset_from_manifest(
+        _mapping(document["dataset"], "provider-history dataset"), policy
+    )
+    return (
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        dataset.dataset_sha256,
+        dataset.row_count,
+    )
+
+
+def _prepare_ibkr_foundation_preflight(
+    output: Path,
+    *,
+    provider_manifest: Path,
+    configuration: FoundationConfig,
+    checkpoint_root: Path | None,
+    workers: int,
+) -> tuple[Path, Path, Path, str, str, int, bool, int, str]:
+    output = _output_path(output)
+    if output.exists():
+        raise FileExistsError(f"IBKR foundation output already exists: {output}")
+    if not output.parent.is_dir():
+        raise ValueError(f"IBKR foundation output parent is not a directory: {output.parent}")
+    child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
+    if child_root.exists():
+        raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
+
+    provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
+    _relative_path(output.parent, provider_manifest, "provider-history manifest")
+    provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
+        _stage8_checkpoint_source_identity(provider_manifest)
+    )
+    bounded = provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
+
+    from qtrad.runtime.ibkr_foundation_bounded import _validated_workers
+
+    workers = _validated_workers(workers)
+    checkpoint_status = "NOT_REQUIRED" if not bounded else "NOT_CONFIGURED"
+    if checkpoint_root is not None and bounded:
+        from qtrad.runtime.ibkr_foundation_bounded import prepare_stage8_checkpoint
+
+        checkpoint_status = (
+            "REUSED" if (checkpoint_root / "identity.json").is_file() else "INITIALIZED"
+        )
+        prepare_stage8_checkpoint(
+            checkpoint_root,
+            provider_manifest_sha256=provider_manifest_sha256,
+            provider_dataset_sha256=provider_dataset_sha256,
+            configuration_id=configuration.configuration_id,
+        )
+    return (
+        output,
+        provider_manifest,
+        child_root,
+        provider_manifest_sha256,
+        provider_dataset_sha256,
+        provider_row_count,
+        bounded,
+        workers,
+        checkpoint_status,
+    )
+
+
+def preflight_ibkr_foundation(
+    output: Path,
+    *,
+    provider_manifest: Path,
+    configuration: FoundationConfig,
+    checkpoint_root: Path | None = None,
+    workers: int = 4,
+) -> dict[str, JsonValue]:
+    """Authenticate a Stage 8 build invocation without decoding provider rows."""
+
+    (
+        output,
+        provider_manifest,
+        child_root,
+        provider_manifest_sha256,
+        provider_dataset_sha256,
+        provider_row_count,
+        bounded,
+        workers,
+        checkpoint_status,
+    ) = _prepare_ibkr_foundation_preflight(
+        output,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        workers=workers,
+    )
+    return {
+        "contract": "qtrad-stage8-foundation-preflight-v1",
+        "source_class": "IBKR_HISTORICAL_RESEARCH",
+        "output": str(output),
+        "child_root": str(child_root),
+        "provider_history_manifest": str(provider_manifest),
+        "provider_history_manifest_sha256": provider_manifest_sha256,
+        "provider_history_dataset_sha256": provider_dataset_sha256,
+        "provider_history_row_count": provider_row_count,
+        "configuration_id": configuration.configuration_id,
+        "bounded": bounded,
+        "workers": workers,
+        "checkpoint_root": str(checkpoint_root.resolve()) if checkpoint_root is not None else None,
+        "checkpoint_status": checkpoint_status,
+    }
 
 
 def write_ibkr_foundation(
@@ -294,15 +422,23 @@ def write_ibkr_foundation(
 ) -> IBKRFoundationBuild:
     """Build and create the source-specific bundle once."""
 
-    output = _output_path(output)
-    if output.exists():
-        raise FileExistsError(f"IBKR foundation output already exists: {output}")
-    provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
-    _relative_path(output.parent, provider_manifest, "provider-history manifest")
-    provider_manifest_sha256, provider_dataset_sha256, provider_row_count = (
-        _stage8_checkpoint_source_identity(provider_manifest)
+    (
+        output,
+        provider_manifest,
+        child_root,
+        provider_manifest_sha256,
+        provider_dataset_sha256,
+        _provider_row_count,
+        bounded,
+        workers,
+        _checkpoint_status,
+    ) = _prepare_ibkr_foundation_preflight(
+        output,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        workers=workers,
     )
-    bounded = provider_row_count > _BOUNDED_PROVIDER_HISTORY_ROWS
     source_evidence = None
     observation_capture = None
     if checkpoint_root is not None and bounded:
@@ -326,9 +462,6 @@ def write_ibkr_foundation(
                 configuration_id=configuration.configuration_id,
             )
     source_reused = source_evidence is not None
-    child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
-    if child_root.exists():
-        raise FileExistsError(f"IBKR foundation child directory already exists: {child_root}")
 
     started = time.monotonic()
     _emit_stage8_progress(progress_callback, started, "source-verification", "started")
@@ -438,39 +571,6 @@ def write_ibkr_foundation(
         output=str(output),
     )
     return build
-
-
-def rehearse_ibkr_foundation(
-    *,
-    provider_manifest: Path,
-    configuration: FoundationConfig,
-    checkpoint_root: Path | None = None,
-    workers: int = 4,
-    progress_callback: _ProgressCallback | None = None,
-) -> IBKRFoundationBuild:
-    """Exercise the real Stage 8 build while retaining no published bundle."""
-
-    provider_manifest = _regular_file(provider_manifest, "provider-history manifest")
-    output = provider_manifest.parent / f".qtrad-stage8-rehearsal-{uuid4().hex}.json"
-    child_root = output.parent / f"{output.name}{_CHILD_DIRECTORY_SUFFIX}"
-    try:
-        return write_ibkr_foundation(
-            output,
-            provider_manifest=provider_manifest,
-            configuration=configuration,
-            checkpoint_root=checkpoint_root,
-            workers=workers,
-            progress_callback=progress_callback,
-        )
-    finally:
-        if output.exists():
-            if output.is_symlink() or not output.is_file():
-                raise ValueError("Stage 8 rehearsal output changed before cleanup")
-            output.unlink()
-        if child_root.exists():
-            if child_root.is_symlink() or not child_root.is_dir():
-                raise ValueError("Stage 8 rehearsal child root changed before cleanup")
-            shutil.rmtree(child_root)
 
 
 def _emit_stage8_progress(
@@ -954,6 +1054,8 @@ def _load_ibkr_foundation_outcome_blind_with_g2_authority(
         holdout_target_source=holdout_target_source,
         decode_g2=False,
     )
+    if build.readiness.state is not IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY:
+        raise ValueError("nonqualifying IBKR foundation cannot authorise downstream R2 work")
     return build, build_id, authority
 
 
@@ -1783,7 +1885,7 @@ def _require_sha256(value: str, field: str) -> None:
 __all__ = [
     "foundation_config_payload",
     "load_ibkr_foundation",
-    "rehearse_ibkr_foundation",
+    "preflight_ibkr_foundation",
     "verify_ibkr_foundation",
     "write_ibkr_foundation",
 ]

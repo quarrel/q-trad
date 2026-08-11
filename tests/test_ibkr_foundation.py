@@ -56,7 +56,7 @@ from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     foundation_config_payload,
     load_ibkr_foundation_outcome_blind_with_identity,
-    rehearse_ibkr_foundation,
+    preflight_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -408,6 +408,12 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     )
     source_evidence = read_provider_history_source_evidence(provider_manifest)
     full_build = build_ibkr_foundation(source_evidence, configuration)
+    qualifying_readiness, _provider_gaps = _evaluate_session_aware_readiness()
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        lambda *_args, **_kwargs: replace(full_build, readiness=qualifying_readiness),
+    )
     bundle = tmp_path / "foundation.json"
     write_ibkr_foundation(
         bundle,
@@ -1165,21 +1171,40 @@ def test_stage8_cli_build_and_verify_round_trip(
     monkeypatch.setattr(cli, "Settings", lambda: SimpleNamespace(log_level="INFO"))
     monkeypatch.setattr(cli, "configure_logging", lambda _: None)
     bundle = tmp_path / "cli-foundation.json"
-    cli.main(
-        [
-            "research",
-            "foundation",
-            "build",
-            "--provider-history-manifest",
-            str(provider_manifest),
-            "--configuration",
-            str(configuration_path),
-            "--output",
-            str(bundle),
-        ]
-    )
+    common_args = [
+        "--provider-history-manifest",
+        str(provider_manifest),
+        "--configuration",
+        str(configuration_path),
+        "--output",
+        str(bundle),
+    ]
+    cli.main(["research", "foundation", "preflight", *common_args])
+    preflight_output = json.loads(capsys.readouterr().out)
+    assert preflight_output["contract"] == "qtrad-stage8-foundation-preflight-v1"
+    assert preflight_output["output"] == str(bundle.resolve())
+    assert not bundle.exists()
+    assert not bundle.with_name(f"{bundle.name}.children").exists()
+
+    cli.main(["research", "foundation", "build", *common_args])
     build_output = json.loads(capsys.readouterr().out)
-    assert build_output["contract"] == "qtrad-ibkr-historical-foundation-v1"
+    assert build_output["contract"] == "qtrad-stage8-foundation-publication-v1"
+    assert build_output["output"] == str(bundle.resolve())
+    assert build_output["build_sha256"]
+    assert build_output["readiness_state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
+    assert build_output["readiness_causes"]
+    assert build_output["coverage_summary"]["threshold"] == "9/10"
+    assert bundle.is_file()
+
+    nonqualifying_build = build_ibkr_foundation(
+        read_provider_history_source_evidence(provider_manifest), configuration
+    )
+    with pytest.raises(ValueError, match="nonqualifying IBKR foundation"):
+        foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
+            bundle,
+            holdout_target_source=_holdout_source_for_build(nonqualifying_build),
+        )
+
     cli.main(["research", "foundation", "verify", "--bundle", str(bundle)])
     verify_output = json.loads(capsys.readouterr().out)
     assert verify_output["source_class"] == "IBKR_HISTORICAL_RESEARCH"
@@ -1337,7 +1362,7 @@ def test_compact_provider_observation_summary_matches_row_replay(tmp_path: Path)
     assert summarized == replayed
 
 
-def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_early(
+def test_stage8_preflight_authenticates_checkpoint_without_decoding_or_publication(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
@@ -1347,65 +1372,96 @@ def test_stage8_checkpoint_preflight_initializes_empty_root_and_rejects_junk_ear
         end=_SHORT_STAGE8_END,
     )
     monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
-    checkpoint_root = tmp_path / "empty-checkpoint"
-    checkpoint_root.mkdir()
-    original_verifier = foundation_runtime.read_provider_history_source_evidence
-    verifier_started = False
+    checkpoint_root = tmp_path / "checkpoint"
+    output = tmp_path / "foundation.json"
 
-    def assert_checkpoint_prepared(
-        path: Path,
-        *,
-        verified_partition_callback: Callable[
-            [tuple[ProviderHistoricalObservation, ...], int], None
-        ]
-        | None = None,
-        source_replay_workers: int = 1,
-    ) -> ProviderHistorySourceEvidence:
-        nonlocal verifier_started
-        verifier_started = True
-        assert (checkpoint_root / "identity.json").is_file()
-        return original_verifier(
-            path,
-            verified_partition_callback=verified_partition_callback,
-            source_replay_workers=source_replay_workers,
-        )
+    def reject_expensive_work(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("preflight started provider decoding or foundation derivation")
 
     monkeypatch.setattr(
-        foundation_runtime,
-        "read_provider_history_source_evidence",
-        assert_checkpoint_prepared,
+        foundation_runtime, "read_provider_history_source_evidence", reject_expensive_work
     )
-    write_ibkr_foundation(
-        tmp_path / "empty-checkpoint-foundation.json",
+    monkeypatch.setattr(foundation_runtime, "build_ibkr_foundation", reject_expensive_work)
+    monkeypatch.setattr(foundation_runtime.pl, "read_parquet", reject_expensive_work)
+
+    manifest_document = json.loads(provider_manifest.read_bytes())
+    noncanonical_manifest = tmp_path / "noncanonical-provider-history.json"
+    noncanonical_manifest.write_text(json.dumps(manifest_document, indent=2), encoding="utf-8")
+
+    semantic_document = dict(manifest_document)
+    semantic_document["selector_contract"] = "unsupported-selector"
+    semantic_identity = dict(semantic_document)
+    semantic_identity.pop("manifest_sha256")
+    semantic_document["manifest_sha256"] = provider_history_runtime._sha256_json(semantic_identity)
+    semantic_manifest = tmp_path / "mutated-provider-history.json"
+    semantic_manifest.write_bytes(_canonical_json(semantic_document))
+
+    for invalid_manifest, message, invalid_checkpoint in (
+        (
+            noncanonical_manifest,
+            "manifest bytes are not canonical",
+            tmp_path / "noncanonical-checkpoint",
+        ),
+        (
+            semantic_manifest,
+            "availability selector contract is unsupported",
+            tmp_path / "semantic-checkpoint",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            preflight_ibkr_foundation(
+                output,
+                provider_manifest=invalid_manifest,
+                configuration=configuration,
+                checkpoint_root=invalid_checkpoint,
+                workers=1,
+            )
+        assert not invalid_checkpoint.exists()
+
+    result = preflight_ibkr_foundation(
+        output,
         provider_manifest=provider_manifest,
         configuration=configuration,
         checkpoint_root=checkpoint_root,
         workers=1,
     )
-    assert verifier_started
+
+    assert result["checkpoint_status"] == "INITIALIZED"
+    assert result["configuration_id"] == configuration.configuration_id
+    assert result["provider_history_dataset_sha256"]
+    assert not output.exists()
+    assert not output.with_name(f"{output.name}.children").exists()
+
+    identity_path = checkpoint_root / "identity.json"
+    legacy_identity = json.loads(identity_path.read_bytes())
+    legacy_identity["implementation_sha256"] = (
+        bounded_foundation_runtime._LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256
+    )
+    identity_path.write_bytes(_canonical_json(legacy_identity) + b"\n")
+    retained_identity = identity_path.read_bytes()
+
+    reused = preflight_ibkr_foundation(
+        output,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=checkpoint_root,
+        workers=1,
+    )
+    assert reused["checkpoint_status"] == "REUSED"
+    assert identity_path.read_bytes() == retained_identity
 
     junk_root = tmp_path / "junk-checkpoint"
     junk_root.mkdir()
     (junk_root / "unexpected").write_text("junk", encoding="utf-8")
-
-    def reject_source_verification(_path: Path, **_kwargs: object) -> ProviderHistorySourceEvidence:
-        raise AssertionError("source verification started before checkpoint rejection")
-
-    monkeypatch.setattr(
-        foundation_runtime,
-        "read_provider_history_source_evidence",
-        reject_source_verification,
-    )
-    rejected_output = tmp_path / "junk-checkpoint-foundation.json"
     with pytest.raises(ValueError, match="checkpoint identity is missing"):
-        write_ibkr_foundation(
-            rejected_output,
+        preflight_ibkr_foundation(
+            output,
             provider_manifest=provider_manifest,
             configuration=configuration,
             checkpoint_root=junk_root,
             workers=1,
         )
-    assert not rejected_output.exists()
+    assert not output.exists()
 
 
 def test_stage8_observation_capture_aborts_before_publication(
@@ -1602,8 +1658,8 @@ def test_bounded_foundation_reuses_identity_bound_checkpoints(
     assert not rejected_output.with_name(f"{rejected_output.name}.children").exists()
 
 
-def test_stage8_rehearsal_is_non_publishing_and_reports_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_stage8_post_publication_failure_retains_foundation(
+    tmp_path: Path,
 ) -> None:
     _, _, provider_manifest = _published_provider_history(tmp_path)
     configuration = _config(
@@ -1611,24 +1667,22 @@ def test_stage8_rehearsal_is_non_publishing_and_reports_progress(
         start=datetime(2026, 2, 1, tzinfo=UTC),
         end=_SHORT_STAGE8_END,
     )
-    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
-    before = set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*"))
-    progress: list[Mapping[str, object]] = []
+    output = tmp_path / "retained-foundation.json"
 
-    build = rehearse_ibkr_foundation(
-        provider_manifest=provider_manifest,
-        configuration=configuration,
-        checkpoint_root=tmp_path / "rehearsal-checkpoint",
-        progress_callback=progress.append,
-    )
+    def fail_after_publication(payload: Mapping[str, object]) -> None:
+        if payload.get("phase") == "publication":
+            raise RuntimeError("simulated terminal rendering failure")
 
-    assert build.provider_history.dataset_sha256
-    assert set(provider_manifest.parent.glob(".qtrad-stage8-rehearsal-*")) == before
-    assert any(
-        event.get("phase") == "source-verification" and event.get("event") == "completed"
-        for event in progress
-    )
-    assert any(
-        event.get("phase") == "publication" and event.get("event") == "completed"
-        for event in progress
+    with pytest.raises(RuntimeError, match="simulated terminal rendering failure"):
+        write_ibkr_foundation(
+            output,
+            provider_manifest=provider_manifest,
+            configuration=configuration,
+            progress_callback=fail_after_publication,
+        )
+
+    assert output.is_file()
+    assert output.with_name(f"{output.name}.children").is_dir()
+    assert verify_ibkr_foundation(output).readiness.state is (
+        IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
     )

@@ -171,7 +171,7 @@ from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
     load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
-    rehearse_ibkr_foundation,
+    preflight_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -1018,13 +1018,14 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_build.add_argument("--output", type=Path, required=True)
     foundation_build.add_argument("--checkpoint-root", type=Path)
     foundation_build.add_argument("--workers", type=int, choices=range(1, 9), default=4)
-    foundation_rehearse = research_foundation_sub.add_parser(
-        "rehearse", help="exercise Stage 8 with disposable publication and reusable checkpoints"
+    foundation_preflight = research_foundation_sub.add_parser(
+        "preflight", help="authenticate a Stage 8 build without decoding provider rows"
     )
-    foundation_rehearse.add_argument("--provider-history-manifest", type=Path, required=True)
-    foundation_rehearse.add_argument("--configuration", type=Path, required=True)
-    foundation_rehearse.add_argument("--checkpoint-root", type=Path)
-    foundation_rehearse.add_argument("--workers", type=int, choices=range(1, 9), default=4)
+    foundation_preflight.add_argument("--provider-history-manifest", type=Path, required=True)
+    foundation_preflight.add_argument("--configuration", type=Path, required=True)
+    foundation_preflight.add_argument("--output", type=Path, required=True)
+    foundation_preflight.add_argument("--checkpoint-root", type=Path)
+    foundation_preflight.add_argument("--workers", type=int, choices=range(1, 9), default=4)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
     baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
     baselines_experiment_build = baselines_sub.add_parser(
@@ -2131,11 +2132,12 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "foundation"
-        and args.foundation_command == "rehearse"
+        and args.foundation_command == "preflight"
     ):
-        _rehearse_foundation_bundle(
+        _preflight_foundation_bundle(
             provider_history_manifest_path=args.provider_history_manifest,
             configuration_path=args.configuration,
+            output_path=args.output,
             checkpoint_root_path=args.checkpoint_root,
             workers=args.workers,
         )
@@ -3028,14 +3030,23 @@ async def _build_foundation_bundle(
             workers=workers,
             progress_callback=_stage8_progress,
         )
+        published = json.loads(output_path.resolve().read_bytes())
+        evidence = build.readiness.evidence
         print(
             json.dumps(
                 {
-                    "contract": build.readiness.CONTRACT,
-                    "output": str(output_path),
+                    "contract": "qtrad-stage8-foundation-publication-v1",
+                    "output": str(output_path.resolve()),
+                    "build_sha256": published["build_sha256"],
                     "source_class": "IBKR_HISTORICAL_RESEARCH",
-                    "readiness": build.readiness.as_json(),
-                    "provider_history_dataset_sha256": (build.provider_history.dataset_sha256),
+                    "readiness_state": build.readiness.state.value,
+                    "readiness_causes": [cause.value for cause in build.readiness.causes],
+                    "coverage_summary": {
+                        "threshold": evidence["coverage_threshold"],
+                        "blocking_cells": evidence["blocking_coverage_cells"],
+                        "diagnostics": evidence["coverage_diagnostics"],
+                    },
+                    "provider_history_dataset_sha256": build.provider_history.dataset_sha256,
                 },
                 sort_keys=True,
             )
@@ -3093,30 +3104,24 @@ async def _build_foundation_bundle(
     )
 
 
-def _rehearse_foundation_bundle(
+def _preflight_foundation_bundle(
     *,
     provider_history_manifest_path: Path,
     configuration_path: Path,
+    output_path: Path,
     checkpoint_root_path: Path | None,
     workers: int,
 ) -> None:
     configuration = load_foundation_config(configuration_path)
-    build = rehearse_ibkr_foundation(
-        provider_manifest=provider_history_manifest_path,
-        configuration=configuration,
-        checkpoint_root=checkpoint_root_path,
-        workers=workers,
-        progress_callback=_stage8_progress,
-    )
     print(
         json.dumps(
-            {
-                "contract": "qtrad-stage8-foundation-rehearsal-v1",
-                "published": False,
-                "source_class": "IBKR_HISTORICAL_RESEARCH",
-                "readiness": build.readiness.as_json(),
-                "provider_history_dataset_sha256": build.provider_history.dataset_sha256,
-            },
+            preflight_ibkr_foundation(
+                output_path,
+                provider_manifest=provider_history_manifest_path,
+                configuration=configuration,
+                checkpoint_root=checkpoint_root_path,
+                workers=workers,
+            ),
             sort_keys=True,
         )
     )
