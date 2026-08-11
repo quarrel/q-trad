@@ -1117,7 +1117,7 @@ The following remain outside this plan:
 
 - **Status:** Proposed
 - **Date:** 2026-08-11
-- **Approval:** PR #TBD
+- **Approval:** PR #108
 - **Authority:** This amendment controls where it conflicts with the original
   Stage 7, Stage 8 or operational-completion wording.
 
