@@ -1319,7 +1319,7 @@ def _stage_replay_inputs(
     *, output: Path, research_root: Path, paths: Mapping[str, Path]
 ) -> dict[str, object]:
     expected = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
-    if set(paths) != expected:
+    if set(paths) not in {frozenset(expected), frozenset({*expected, "foundation_receipt"})}:
         raise ValueError(
             "representative replay inputs must include foundation, experiment and L0/L1/P0/P1"
         )
@@ -1337,7 +1337,7 @@ def _stage_replay_inputs(
     collected: dict[str, tuple[Path, ...]] = {
         name: (
             (_validated_replay_file(path),)
-            if name == "experiment"
+            if name in {"experiment", "foundation_receipt"}
             else _declared_replay_files(name, path, source_root)
         )
         for name, path in sorted(paths.items())
@@ -4345,6 +4345,13 @@ async def _replay_staged_oof_async(
     )
     if experiment.evidence_class is not expected_evidence_class:
         raise ValueError("staged OOF experiment has the wrong evidence classification")
+    if (
+        representative_profile == IBKR_HISTORICAL_PROFILE
+        and expected_evidence_class is EvidenceClass.CONFIRMATORY
+    ):
+        raise ValueError(
+            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+        )
     g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority | None = None
     if representative_profile == IBKR_HISTORICAL_PROFILE:
         (

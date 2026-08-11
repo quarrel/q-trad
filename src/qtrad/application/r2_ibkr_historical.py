@@ -52,6 +52,10 @@ def build_ibkr_historical_experiment(
 ) -> R2ExperimentConfig:
     """Build the profile from a verified Stage 8 foundation and persisted adapter identity."""
 
+    if evidence_class is EvidenceClass.CONFIRMATORY:
+        raise ValueError(
+            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+        )
     configuration = foundation.configuration
     if adapter_identity.foundation_bundle_id != foundation_bundle_id:
         raise ValueError("IBKR adapter identity does not bind the verified foundation")

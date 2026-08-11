@@ -2594,6 +2594,10 @@ async def _load_r2_foundation_inputs(
             clock=clock,
         )
 
+    if experiment.evidence_class is EvidenceClass.CONFIRMATORY:
+        raise ValueError(
+            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+        )
     if foundation_receipt_path is None:
         raise ValueError("IBKR historical R2 work requires a Stage 8 verification receipt")
     if outcome_blind:

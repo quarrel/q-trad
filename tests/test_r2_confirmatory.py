@@ -91,6 +91,8 @@ def _build_confirmatory_fixture(
     *,
     qualifying: bool = False,
     compact: bool = False,
+    replay_foundation_path: Path | None = None,
+    foundation_receipt_path: Path | None = None,
 ) -> tuple[
     Path,
     Any,
@@ -367,7 +369,7 @@ def _build_confirmatory_fixture(
         },
     }
     research_root = root / "research"
-    research_root.mkdir(parents=True)
+    research_root.mkdir(parents=True, exist_ok=True)
     foundation_path = research_root / "foundation.json"
 
     async def persist_fixture_foundation() -> Any:
@@ -415,6 +417,22 @@ def _build_confirmatory_fixture(
         return foundation_runtime.load_foundation_bundle(foundation_path)
 
     foundation_bundle = asyncio.run(persist_fixture_foundation())
+    if replay_foundation_path is not None:
+        foundation_bundle = type(foundation_bundle).create(
+            configuration=foundation_bundle.configuration,
+            observations=foundation_bundle.observations,
+            availability=foundation_bundle.availability,
+            panel=foundation_bundle.panel,
+            targets=foundation_bundle.targets,
+            folds=foundation_bundle.folds,
+            forecasts=foundation_bundle.forecasts,
+            ordered_instruments=foundation_bundle.ordered_instruments,
+            range_start=foundation_bundle.range_start,
+            range_end=foundation_bundle.range_end,
+            coverage=foundation_bundle.coverage,
+            build_summary=foundation_bundle.build_summary,
+            market_data_source_class=experiment.market_data_source_class,
+        )
     fixture_verified = cast(
         Any,
         SimpleNamespace(
@@ -480,6 +498,13 @@ def _build_confirmatory_fixture(
         availability_evidence_id=fixture_verified.bundle.availability.dataset_id,
     )
     fixture_verified.targets = R2OutcomeBlindTargetView.from_source(target_source)
+    replay_inputs = {
+        "foundation": replay_foundation_path or foundation_path,
+        "experiment": experiment_path,
+        **{name: research_root / path for name, path in feature_paths.items()},
+    }
+    if foundation_receipt_path is not None:
+        replay_inputs["foundation_receipt"] = foundation_receipt_path
     bundle_path = build_oof_bundle(
         verified=fixture_verified,
         experiment=experiment,
@@ -489,11 +514,7 @@ def _build_confirmatory_fixture(
         output=root / "oof",
         run_kind=CONFIRMATORY_RUN_KIND,
         representative_profile=(None if qualifying else verification.IBKR_HISTORICAL_PROFILE),
-        replay_inputs={
-            "foundation": foundation_path,
-            "experiment": experiment_path,
-            **{name: research_root / path for name, path in feature_paths.items()},
-        },
+        replay_inputs=replay_inputs,
         holdout_target_source=target_source,
     )
     return (

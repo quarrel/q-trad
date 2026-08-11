@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import shutil
@@ -52,6 +53,7 @@ from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
+from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
@@ -68,6 +70,8 @@ from qtrad.runtime.provider_history import (
 )
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
+from tests.test_r2_confirmatory import _build_confirmatory_fixture
+from tests.test_r2_ibkr_historical import _experiment
 
 _SHORT_STAGE8_END = datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30)
 
@@ -639,6 +643,83 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert not hasattr(foundation_runtime, "verify_ibkr_g2_feature_source")
     with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
         r2_verification_runtime.verify_confirmatory_g2_feature_source(cast(Any, g2_authority))
+
+
+def test_confirmatory_ibkr_rejects_ordinary_receipt_before_authority_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prebuilt_root = tmp_path / "prebuilt"
+    research_root = prebuilt_root / "research"
+    research_root.mkdir(parents=True)
+    _, _, provider_manifest = _published_provider_history(research_root)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    full_build = build_ibkr_foundation(source_evidence, configuration)
+    qualifying_readiness, _provider_gaps = _evaluate_session_aware_readiness()
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        lambda *_args, **_kwargs: replace(full_build, readiness=qualifying_readiness),
+    )
+    bundle = research_root / "stage8-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    receipt = research_root / "stage8-verification.json"
+    verify_ibkr_foundation(bundle, receipt_output=receipt)
+    experiment = replace(_experiment(), evidence_class=EvidenceClass.CONFIRMATORY)
+    holdout_source = _holdout_source_for_build(full_build)
+    monkeypatch.setattr(
+        r2_verification_runtime,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "fixture-application",
+            "image_identity": "sha256:" + "1" * 64,
+            "python_identity": "fixture-python",
+            "numpy_identity": "fixture-numpy",
+            "sklearn_identity": "fixture-sklearn",
+        },
+    )
+    prebuilt_oof = _build_confirmatory_fixture(
+        prebuilt_root,
+        compact=True,
+        replay_foundation_path=bundle,
+        foundation_receipt_path=receipt,
+    )[0]
+
+    def authority_construction_reached(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("authority construction reached")
+
+    monkeypatch.setattr(
+        cli,
+        "load_ibkr_foundation_outcome_blind_with_identity",
+        authority_construction_reached,
+    )
+    monkeypatch.setattr(
+        r2_verification_runtime,
+        "_load_ibkr_foundation_outcome_blind_with_g2_authority",
+        authority_construction_reached,
+    )
+    with pytest.raises(ValueError, match="promotion attestation"):
+        asyncio.run(
+            cli._load_r2_foundation_inputs(
+                cast(Any, SimpleNamespace()),
+                cast(Any, SimpleNamespace()),
+                foundation_bundle_path=bundle,
+                experiment=experiment,
+                outcome_blind=True,
+                holdout_target_source=holdout_source,
+                foundation_receipt_path=receipt,
+            )
+        )
+    with pytest.raises(ValueError, match="promotion attestation"):
+        asyncio.run(r2_verification_runtime._replay_confirmatory_oof_async(prebuilt_oof))
 
 
 def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:

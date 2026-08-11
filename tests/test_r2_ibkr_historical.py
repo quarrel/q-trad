@@ -223,6 +223,16 @@ def test_ibkr_profile_authenticates_the_persisted_adapter_identity() -> None:
         validate_ibkr_historical_profile(replace(experiment, source_adapter_identity=identity))
 
 
+def test_ibkr_builder_rejects_confirmatory_before_loading_foundation() -> None:
+    with pytest.raises(ValueError, match="promotion attestation"):
+        build_ibkr_historical_experiment(
+            cast(IBKRFoundationBuild, SimpleNamespace()),
+            foundation_bundle_id=FOUNDATION_ID,
+            adapter_identity=ADAPTER,
+            evidence_class=EvidenceClass.CONFIRMATORY,
+        )
+
+
 def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
     foundation = cast(IBKRFoundationBuild, _foundation())
     experiment = build_ibkr_historical_experiment(
