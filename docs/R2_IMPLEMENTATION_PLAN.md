@@ -2229,3 +2229,53 @@ Defer until later evidence justifies them:
 - online incremental fitting;
 - GPU training; and
 - shadow-live model serving.
+
+## Amendment — Confirmatory active-source coverage denominator
+
+- **Status:** Proposed
+- **Date:** 2026-08-11
+- **Approval:** PR #TBD
+
+### Original requirement
+
+Section 6.3 requires at least 90% valid 15-minute target coverage for every
+eligible instrument in every configured research block, measured only while the
+source is causally known to be active. Genuine closures and pre-listing periods
+do not count as missing opportunities.
+
+### Revised requirement
+
+This amendment makes the denominator explicit without changing the 90%
+threshold:
+
+```text
+numerator   = count(ELIGIBLE opportunities)
+denominator = count(ELIGIBLE opportunities) + count(GAP opportunities)
+coverage    = numerator / denominator
+```
+
+`INACTIVE` opportunities, genuine closures and pre-listing periods remain
+outside the denominator. An authenticated `GAP` remains visible and reduces
+coverage; it is not an automatic zero-coverage result and its mere presence is
+not a separate universal readiness failure.
+
+The gate is evaluated independently for every confirmatory instrument in every
+configured research block. Common-support row count, common duration, fold
+availability, target/group membership and session-evidence availability remain
+separate gates with separate causes.
+
+### Rationale
+
+The earlier wording established the threshold and active-source scope but did
+not state the numerator and denominator as an equation. Stage 8 consequently
+implemented a stricter zero-gap rule and reported `INSUFFICIENT_COMMON_SUPPORT`
+even when common-support row volume passed. The explicit equation preserves the
+intended fail-closed treatment of active missingness without converting one
+missing interval into automatic disqualification.
+
+### Prior evidence
+
+No immutable data or foundation bytes are invalidated by this policy
+clarification. Existing readiness dispositions must be recomputed before they
+can authorise confirmatory work. This amendment does not itself declare any
+foundation qualifying or permit holdout access.

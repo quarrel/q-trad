@@ -7,6 +7,8 @@
 - Translate external data once, at the adapter boundary.
 - Prefer explicit domain names and small protocols.
 - Keep canonical facts immutable and make projections disposable.
+- Treat completed verification of immutable evidence as reusable evidence. Downstream boundaries independently verify their own claims rather than recursively replaying unchanged ancestors unless a confirmatory or revocation policy requires it.
+- Scope cache and verification identities to semantics capable of changing the protected claim. Logging, documentation and presentation changes must not invalidate data-scale work.
 
 ## Python
 

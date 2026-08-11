@@ -846,6 +846,10 @@ After later permission changes, create a new plan referencing the original contr
 
 ## Stage 7 — Provider-history observation construction
 
+> **Amendment:** See “Verification reuse and Stage 8 publication” below. A
+> complete Stage 7 semantic verification may issue reusable evidence for exact
+> unchanged bytes; ordinary descendants do not recursively replay Stage 6.
+
 **Form:** research-input pull request.
 
 **Software status:** Provider-history observation construction and file-only verification are implemented
@@ -902,6 +906,10 @@ Unknown selectors and mixed native/provider inputs fail closed.
 ---
 
 ## Stage 8 — Source-specific foundation and readiness
+
+> **Amendment:** See “Verification reuse and Stage 8 publication” below. A valid
+> foundation is retained whether readiness is qualifying or nonqualifying;
+> readiness gates downstream authority rather than publication.
 
 **Form:** foundation integration pull request.
 
@@ -1104,3 +1112,51 @@ The following remain outside this plan:
 * OOF model selection;
 * confirmatory holdout execution;
 * any effectiveness claim.
+
+## Amendment — Verification reuse and Stage 8 publication
+
+- **Status:** Proposed
+- **Date:** 2026-08-11
+- **Approval:** PR #TBD
+- **Authority:** This amendment controls where it conflicts with the original
+  Stage 7, Stage 8 or operational-completion wording.
+
+### Original requirement or interpretation
+
+The staged plan required independent verification at every immutable boundary.
+The implementation interpreted cumulative replay as requiring descendants to
+repeat complete semantic verification of unchanged ancestor artefacts. The
+operational workflow also introduced a full-scale Stage 8 rehearsal that built
+useful deterministic output and then discarded it before a separate publication
+run.
+
+### Revised requirement
+
+- A complete Stage 7 verifier may issue create-only semantic-verification
+  evidence bound to the exact provider-history manifest, complete closure,
+  immediate source identities and accepted verifier contract.
+- Ordinary Stage 8 construction independently authenticates the exact Stage 7
+  closure and accepted verification evidence, then independently derives and
+  verifies only the Stage 8 transformation and claims.
+- Complete cumulative Stage 6-to-Stage 8 semantic replay occurs at confirmatory
+  promotion, explicit deep audit or verifier revocation, not at every ordinary
+  descendant invocation.
+- Stage 8 publishes every structurally valid, verified foundation, including a
+  foundation whose readiness is nonqualifying. Readiness alone controls whether
+  downstream confirmatory R2 work is authorised.
+- Authenticated provider gaps remain visible evidence. Their scientific effect
+  is determined by the versioned R2 readiness policy; nonzero gap count is not
+  itself artefact invalidity or a universal readiness failure.
+- Cheap preflight verifies inputs, configuration, output reservations,
+  checkpoint compatibility and resource policy. A full disposable rehearsal is
+  optional performance or fault-injection work and is not a prerequisite for a
+  normal publication run.
+- A completed deterministic build should normally be retained rather than
+  repeated solely because the invocation was labelled a rehearsal.
+
+### Prior evidence
+
+No Stage 6 or Stage 7 immutable evidence is invalidated. Existing Stage 8
+checkpoints may be reused when their claim-scoped semantic identities and exact
+inputs authenticate. This amendment does not declare the current foundation
+qualifying and does not authorise R2 registration, modelling or holdout access.
