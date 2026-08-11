@@ -226,3 +226,40 @@ plausible defaults.
 The GitHub fine-grained PAT used here cannot be granted Checks API access. This is an expected platform
 limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
 runs for the exact commit instead of repeatedly raising unavailable check-run access.
+
+## Contradiction and exception rule
+
+Treat merged ADRs, scientific invariants, immutable evidence, holdout
+boundaries, and preservation of authenticated expensive work as hard
+constraints.
+
+Treat suggested file lists, function locations, implementation tactics, and PR
+sequencing details as soft constraints unless expressly marked hard.
+
+When a soft constraint prevents the smallest correct implementation, make the
+narrowest necessary exception without requesting approval. Record the exception
+and rationale in the PR description.
+
+Before claiming that an exception has no persistence or invalidation impact,
+trace all transitive:
+
+- artefact identities;
+- semantic implementation identities;
+- whole-file or source-code hashes;
+- verification receipts;
+- checkpoint identities;
+- cache keys;
+- downstream authority boundaries.
+
+Stop and request a decision only when the exception would:
+
+- change scientific or readiness policy;
+- change a public artefact contract or schema;
+- invalidate or discard authenticated expensive work;
+- require provider calls or reacquisition;
+- access or affect holdout state;
+- create an irreversible external state;
+- or materially enlarge the agreed PR boundary.
+
+Never resolve a contradiction by silently weakening correctness merely to obey
+a tactical file boundary.
