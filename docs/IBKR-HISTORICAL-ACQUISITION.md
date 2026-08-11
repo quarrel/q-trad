@@ -846,15 +846,18 @@ After later permission changes, create a new plan referencing the original contr
 
 ## Stage 7 — Provider-history observation construction
 
-> **Amendment:** See “Verification reuse and Stage 8 publication” below. A
-> complete Stage 7 semantic verification may issue reusable evidence for exact
-> unchanged bytes; ordinary descendants do not recursively replay Stage 6.
+A complete Stage 7 semantic verification must issue create-only reusable evidence bound to the exact
+provider-history manifest, closure, immediate source identities and accepted verifier contract.
+Ordinary descendants authenticate that receipt and the exact unchanged closure without replaying
+Stage 6. Complete replay is reserved for confirmatory promotion, explicit deep audit or verifier
+revocation.
 
 **Form:** research-input pull request.
 
-**Software status:** Provider-history observation construction and file-only verification are implemented
-on `main`, including declared availability and source/lineage separation. A verified Stage 6 aggregate
-and result artifact are still required; no provider-history dataset is claimed by this software status.
+**Software status:** Provider-history construction and file-only semantic verification are implemented
+on `main`, and the retained Stage 7 dataset has an existing semantic-verification result. First-class
+receipt persistence and cheap downstream authentication remain the S7.1/S7.2 handoff; the retained
+result alone grants no Stage 8 or R2 authority.
 
 Implement:
 
@@ -907,16 +910,19 @@ Unknown selectors and mixed native/provider inputs fail closed.
 
 ## Stage 8 — Source-specific foundation and readiness
 
-> **Amendment:** See “Verification reuse and Stage 8 publication” below. A valid
-> foundation is retained whether readiness is qualifying or nonqualifying;
-> readiness gates downstream authority rather than publication.
+Every structurally valid Stage 8 foundation is retained whether readiness is qualifying or
+nonqualifying. Readiness gates downstream authority, not publication. Stage 8 independently
+verifies its own transformation once from authenticated immediate Stage 7 evidence and issues a
+reusable receipt; ordinary consumers authenticate that receipt rather than repeat data-scale replay.
+Complete cumulative Stage 6-to-Stage 8 replay occurs only at confirmatory promotion, explicit deep
+audit or verifier revocation.
 
 **Form:** foundation integration pull request.
 
-**Software status:** The source-specific foundation builder and readiness verifier are implemented on
-`main`, with independent replay, fixed six-candidate enforcement, session-aware gaps and bounded child
-Parquet persistence. They consume verified Stage 7 evidence; no qualifying readiness disposition or
-downstream R2 artifact has been created.
+**Software status:** The source-specific builder, corrected per-block coverage policy and readiness
+verifier are implemented on `main`. Existing rehearsal records and the compatible checkpoint are
+retained, but no Stage 8 foundation, reusable receipt, readiness disposition, confirmatory promotion
+or downstream R2 authority has been published.
 
 Extend foundation build and verification with mutually exclusive inputs:
 
@@ -1080,16 +1086,22 @@ The verifier must reject semantic republishing, not merely stale hashes.
 
 After the first full run:
 
-1. Verify every request result and aggregate result.
-2. Build and verify provider-history observations.
-3. Build and verify the source-specific foundation.
-4. Record readiness disposition.
-5. Back up PostgreSQL and immutable artifacts.
-6. Store raw market data outside Git.
-7. Commit only sanitized identities, dispositions and documentation.
-8. Update `PLAN.md`, `docs/STATUS.md`, architecture records and the IBKR runbook.
+1. Authenticate every Stage 6 request result and aggregate result.
+2. Build or reuse the retained Stage 7 provider-history observations, perform complete semantic
+   verification once, and persist the create-only Stage 7 receipt.
+3. Run cheap Stage 8 preflight, then publish the source-specific foundation from authenticated Stage 7
+   evidence and retain it whether readiness is qualifying or nonqualifying.
+4. Independently verify the Stage 8 transformation once, persist its create-only receipt, and prove the
+   ordinary authentication path performs no data-scale replay.
+5. Record the readiness disposition. If it qualifies and confirmatory use is separately authorised,
+   perform one cumulative replay from an immutable runtime and persist the confirmatory-promotion
+   attestation; otherwise retain the valid nonqualifying foundation and stop.
+6. Back up PostgreSQL and immutable artefacts; store raw market data outside Git.
+7. Commit only sanitised identities, dispositions and documentation.
+8. Update `PLAN.md`, `docs/STATUS.md`, `docs/ARCHITECTURE.md` and this runbook with the exact verified
+   state.
 
-The milestone is complete when the system produces one of two honest outcomes:
+The acquisition and verification system has two honest foundation outcomes:
 
 ```text
 QUALIFYING_HISTORY_READY
@@ -1101,7 +1113,10 @@ or:
 INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
 ```
 
-Both are successful executions of the acquisition and verification system. Only the first permits later registration of `R2-IBKR-HISTORICAL`.
+Both are valid retained publication and verification outcomes. Neither an ordinary verification
+receipt nor qualifying readiness alone authorises real F2: that boundary additionally requires the
+accepted confirmatory-promotion attestation. Implementation-only fixture work remains explicitly
+separate.
 
 # 7. Explicitly deferred work
 
@@ -1119,50 +1134,15 @@ The following remain outside this plan:
 * confirmatory holdout execution;
 * any effectiveness claim.
 
-## Amendment — Verification reuse and Stage 8 publication
+## Accepted amendment history — Verification reuse and Stage 8 publication
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-11
 - **Approval:** PR #108
-- **Authority:** This amendment controls where it conflicts with the original
-  Stage 7, Stage 8 or operational-completion wording.
+- **Decision:** `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`, Amendment 1
 
-### Original requirement or interpretation
-
-The staged plan required independent verification at every immutable boundary.
-The implementation interpreted cumulative replay as requiring descendants to
-repeat complete semantic verification of unchanged ancestor artefacts. The
-operational workflow also introduced a full-scale Stage 8 rehearsal that built
-useful deterministic output and then discarded it before a separate publication
-run.
-
-### Revised requirement
-
-- A complete Stage 7 verifier may issue create-only semantic-verification
-  evidence bound to the exact provider-history manifest, complete closure,
-  immediate source identities and accepted verifier contract.
-- Ordinary Stage 8 construction independently authenticates the exact Stage 7
-  closure and accepted verification evidence, then independently derives and
-  verifies only the Stage 8 transformation and claims.
-- Complete cumulative Stage 6-to-Stage 8 semantic replay occurs at confirmatory
-  promotion, explicit deep audit or verifier revocation, not at every ordinary
-  descendant invocation.
-- Stage 8 publishes every structurally valid, verified foundation, including a
-  foundation whose readiness is nonqualifying. Readiness alone controls whether
-  downstream confirmatory R2 work is authorised.
-- Authenticated provider gaps remain visible evidence. Their scientific effect
-  is determined by the versioned R2 readiness policy; nonzero gap count is not
-  itself artefact invalidity or a universal readiness failure.
-- Cheap preflight verifies inputs, configuration, output reservations,
-  checkpoint compatibility and resource policy. A full disposable rehearsal is
-  optional performance or fault-injection work and is not a prerequisite for a
-  normal publication run.
-- A completed deterministic build should normally be retained rather than
-  repeated solely because the invocation was labelled a rehearsal.
-
-### Prior evidence
-
-No Stage 6 or Stage 7 immutable evidence is invalidated. Existing Stage 8
-checkpoints may be reused when their claim-scoped semantic identities and exact
-inputs authenticate. This amendment does not declare the current foundation
-qualifying and does not authorise R2 registration, modelling or holdout access.
+The accepted amendment is integrated into Stage 7, Stage 8 and operational completion above. It
+separates artefact validity, execution provenance, scientific readiness and confirmatory authority;
+uses reusable claim-scoped verification receipts for ordinary descendants; retains valid foundations
+regardless of readiness; and reserves cumulative replay for confirmatory promotion, explicit audit or
+verifier revocation. No Stage 6 or Stage 7 immutable evidence was invalidated.

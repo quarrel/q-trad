@@ -2232,7 +2232,7 @@ Defer until later evidence justifies them:
 
 ## Amendment — Confirmatory active-source coverage denominator
 
-- **Status:** Proposed
+- **Status:** Accepted
 - **Date:** 2026-08-11
 - **Approval:** PR #108
 
