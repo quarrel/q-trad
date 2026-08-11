@@ -2234,7 +2234,7 @@ Defer until later evidence justifies them:
 
 - **Status:** Proposed
 - **Date:** 2026-08-11
-- **Approval:** PR #TBD
+- **Approval:** PR #108
 
 ### Original requirement
 

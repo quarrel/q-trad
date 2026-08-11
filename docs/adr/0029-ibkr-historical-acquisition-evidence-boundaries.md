@@ -200,7 +200,7 @@ and confirmatory promotion
 - **Date:** 2026-08-11
 - **Amends:** Trust model, digest claims, mutable operation and immutable
   evidence, independent replay, invariant matrix and consequences
-- **Approval:** PR #TBD
+- **Approval:** PR #108
 
 ### Context
 
