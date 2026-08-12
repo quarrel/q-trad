@@ -14,7 +14,10 @@ from qtrad.application.r2_features import R2FoundationInputs
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.foundation_bundle import AVAILABILITY_EVIDENCE_CONTRACT, FoundationBundle
-from qtrad.domain.ibkr_foundation import VerifiedIbkrFoundationPromotion
+from qtrad.domain.ibkr_foundation import (
+    VerifiedIbkrFoundationPromotion,
+    has_verified_ibkr_foundation_promotion_provenance,
+)
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_EVIDENCE,
@@ -57,6 +60,7 @@ def build_ibkr_historical_experiment(
     if evidence_class is EvidenceClass.CONFIRMATORY:
         if (
             promotion_authority is None
+            or not has_verified_ibkr_foundation_promotion_provenance(promotion_authority)
             or promotion_authority.foundation_bundle_id != foundation_bundle_id
         ):
             raise ValueError(

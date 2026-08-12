@@ -27,9 +27,11 @@ from qtrad.runtime.ibkr_foundation_promotion import (
     create_ibkr_foundation_confirmatory_promotion,
 )
 from qtrad.runtime.provider_history import read_provider_history_source_evidence
+from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
 from tests.test_ibkr_foundation import _evaluate_session_aware_readiness
 from tests.test_provider_history import _published_provider_history
 from tests.test_r1_foundation import _config
+from tests.test_r2_confirmatory import _build_confirmatory_fixture
 from tests.test_r2_ibkr_historical import _foundation as _r2_foundation
 
 
@@ -135,18 +137,54 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
     )
     assert authenticated.promotion_sha256 == authority.promotion_sha256
 
-    experiment = build_ibkr_historical_experiment(
-        cast(IBKRFoundationBuild, _r2_foundation()),
+    r2_foundation = cast(IBKRFoundationBuild, _r2_foundation())
+    adapter = IBKRHistoricalAdapterIdentity.create(
         foundation_bundle_id=authority.foundation_bundle_id,
-        adapter_identity=IBKRHistoricalAdapterIdentity.create(
-            foundation_bundle_id=authority.foundation_bundle_id,
-            application_identity=_runtime()["application_identity"],
-            image_identity=_runtime()["image_identity"],
-        ),
+        application_identity=_runtime()["application_identity"],
+        image_identity=_runtime()["image_identity"],
+    )
+    experiment = build_ibkr_historical_experiment(
+        r2_foundation,
+        foundation_bundle_id=authority.foundation_bundle_id,
+        adapter_identity=adapter,
         evidence_class=EvidenceClass.CONFIRMATORY,
         promotion_authority=authenticated,
     )
     assert experiment.evidence_class.value == "CONFIRMATORY"
+
+    manufactured = object.__new__(VerifiedIbkrFoundationPromotion)
+    object.__setattr__(manufactured, "_foundation_bundle_id", authority.foundation_bundle_id)
+    object.__setattr__(manufactured, "_promotion_sha256", "0" * 64)
+    with pytest.raises(ValueError, match="exact Stage 8 promotion attestation"):
+        build_ibkr_historical_experiment(
+            r2_foundation,
+            foundation_bundle_id=authority.foundation_bundle_id,
+            adapter_identity=adapter,
+            evidence_class=EvidenceClass.CONFIRMATORY,
+            promotion_authority=manufactured,
+        )
+
+
+def test_promoted_confirmatory_ibkr_oof_passes_generic_bundle_verification(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    research_root = tmp_path / "research"
+    research_root.mkdir()
+    bundle, receipt, _build = _foundation(research_root, monkeypatch, qualifying=True)
+    promotion = research_root / "promotion.json"
+    _promote(bundle, receipt, promotion, monkeypatch)
+
+    oof_path = _build_confirmatory_fixture(
+        tmp_path,
+        compact=True,
+        replay_foundation_path=bundle,
+        foundation_receipt_path=receipt,
+        foundation_promotion_path=promotion,
+    )[0]
+
+    verified = verify_r2_oof_bundle(oof_path)
+    assert verified.evidence_class is EvidenceClass.CONFIRMATORY
+    assert verified.source_class.value == "IBKR_HISTORICAL_RESEARCH"
 
 
 def test_promotion_fails_closed_before_replay_and_rejects_nonqualifying(
