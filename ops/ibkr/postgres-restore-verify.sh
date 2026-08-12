@@ -10,7 +10,7 @@ evidence_path="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only restore evi
 requested_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:-}"
 user="${QTRAD_IBKR_POSTGRES_USER:-qtrad_ibkr}"
 runtime_gid="${QTRAD_IBKR_RUNTIME_GID:?set QTRAD_IBKR_RUNTIME_GID}"
-
+lock_path="${QTRAD_IBKR_RESTORE_LOCK_PATH:-/run/lock/qtrad-ibkr-restore.lock}"
 [[ "$database" == qtrad_ibkr && "$restore_database" != "$database" ]] || {
     echo "restore target must be separate from qtrad_ibkr" >&2
     exit 64
@@ -33,12 +33,41 @@ runtime_gid="${QTRAD_IBKR_RUNTIME_GID:?set QTRAD_IBKR_RUNTIME_GID}"
 }
 
 temporary_evidence=""
+database_created=0
+lock_owner=0
+ingest_was_active=0
+health_timer_was_active=0
+
 cleanup() {
     [[ -z "$temporary_evidence" ]] || rm -f "$temporary_evidence"
-    docker exec "$container" psql --username="$user" --dbname=postgres \
-        --command "DROP DATABASE IF EXISTS \"$restore_database\"" > /dev/null 2>&1 || true
+    if ((database_created)); then
+        docker exec "$container" psql --username="$user" --dbname=postgres \
+            --command "DROP DATABASE IF EXISTS \"$restore_database\"" > /dev/null 2>&1 || true
+    fi
+    if ((lock_owner)); then
+        ((ingest_was_active == 0)) || systemctl start qtrad-ibkr-ingest.service
+        ((health_timer_was_active == 0)) || systemctl start qtrad-ibkr-health.timer
+    fi
 }
 trap cleanup EXIT
+
+enter_maintenance() {
+    if [[ "$(readlink -f "/proc/$$/fd/9" 2>/dev/null || true)" == "$lock_path" ]]; then
+        return
+    fi
+    install -d -m 0755 "$(dirname -- "$lock_path")"
+    exec 9>"$lock_path"
+    flock -n 9 || {
+        echo "another IBKR restore workflow holds $lock_path" >&2
+        exit 75
+    }
+    lock_owner=1
+    systemctl is-active --quiet qtrad-ibkr-ingest.service && ingest_was_active=1
+    systemctl is-active --quiet qtrad-ibkr-health.timer && health_timer_was_active=1
+    systemctl stop qtrad-ibkr-health.timer
+    systemctl stop qtrad-ibkr-health.service || true
+    systemctl stop qtrad-ibkr-ingest.service
+}
 
 if [[ -n "$requested_archive" ]]; then
     latest="$(realpath -e "$requested_archive")" || {
@@ -64,12 +93,14 @@ for runtime_readable in "$latest" "$latest.sha256"; do
         exit 64
     }
 done
+enter_maintenance
 started_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 sha256sum --check --status "$latest.sha256"
 archive_sha256="$(sha256sum "$latest" | cut -d ' ' -f 1)"
 
 docker exec "$container" psql --username="$user" --dbname=postgres \
     --command "CREATE DATABASE \"$restore_database\"" > /dev/null
+database_created=1
 docker exec -i "$container" pg_restore --exit-on-error --no-owner \
     --username="$user" --dbname="$restore_database" < "$latest"
 schema_head="$(docker exec "$container" psql --tuples-only --no-align \

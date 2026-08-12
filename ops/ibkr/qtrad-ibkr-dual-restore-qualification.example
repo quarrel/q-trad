@@ -2,14 +2,16 @@
 set -euo pipefail
 umask 077
 
-[[ "$#" -ge 4 && "$1" == deployment && "$3" == --policy \
+if [[ "$#" == 1 && ( "$1" == --check || "$1" == --apply ) ]]; then
+    :
+elif ! [[ "$#" -ge 4 && "$1" == deployment && "$3" == --policy \
     && ((("$2" == ibkr-qualification-snapshot || "$2" == ibkr-qualification-verify) \
             && "$4" == b4-exact-six) \
         || (("$2" == ibkr-promote || "$2" == ibkr-preflight) \
-            && "$4" == b5-full-universe)) ]] || {
-    echo "dual restore accepts only B4 qualification or exact B5 promotion/preflight" >&2
+            && "$4" == b5-full-universe)) ]]; then
+    echo "dual restore accepts B4 qualification, B5 promotion/preflight, or B5 deploy --check/--apply" >&2
     exit 64
-}
+fi
 
 restore_verify=/usr/local/sbin/qtrad-ibkr-postgres-restore-verify
 qualification=/usr/local/sbin/qtrad-ibkr-qualification
@@ -22,15 +24,40 @@ if [[ "${QTRAD_IBKR_DUAL_RESTORE_STAGE:-}" == parent-ready ]]; then
     export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_DATABASE_URL="$parent_url"
     export QTRAD_IBKR_PARENT_QUALIFICATION_RESTORE_EVIDENCE_PATH="$parent_evidence"
     exec env \
+        QTRAD_IBKR_DUAL_RESTORE_STAGE=current-ready \
         QTRAD_IBKR_RESTORE_ARCHIVE="$current_archive" \
         QTRAD_IBKR_RESTORE_EVIDENCE_PATH="$current_evidence" \
-        "$restore_verify" "$qualification" "$@"
+        "$restore_verify" "$0" "$@"
+fi
+
+if [[ "${QTRAD_IBKR_DUAL_RESTORE_STAGE:-}" == current-ready ]]; then
+    if [[ "$1" == --check || "$1" == --apply ]]; then
+        set -a
+        # shellcheck disable=SC1091
+        . /etc/qtrad/ibkr-ingest.env
+        set +a
+        [[ "${QTRAD_IBKR_RELEASE_POLICY:-}" == b5-full-universe ]] || {
+            echo "dual-restore deployment requires the B5 full-universe policy" >&2
+            exit 64
+        }
+        deploy="${QTRAD_IBKR_REPOSITORY_ROOT:?reviewed repository root unavailable}/ops/ibkr/deploy.sh"
+        [[ -r "$deploy" ]] || {
+            echo "reviewed deploy script is unavailable: $deploy" >&2
+            exit 69
+        }
+        exec env QTRAD_B3_PREFLIGHT_BIN="$qualification" bash "$deploy" "$1"
+    fi
+    exec "$qualification" "$@"
 fi
 
 parent_archive="${QTRAD_IBKR_PARENT_RESTORE_ARCHIVE:?set the qualification-bound parent archive}"
 parent_evidence="${QTRAD_IBKR_PARENT_RESTORE_EVIDENCE_PATH:?set a create-only parent restore evidence path}"
 current_archive="${QTRAD_IBKR_RESTORE_ARCHIVE:?set the qualification-bound current archive}"
 current_evidence="${QTRAD_IBKR_RESTORE_EVIDENCE_PATH:?set a create-only current restore evidence path}"
+[[ "$(realpath -e "$parent_archive")" != "$(realpath -e "$current_archive")" ]] || {
+    echo "B5 preflight requires distinct qualification-bound B3 and B4 archives" >&2
+    exit 64
+}
 
 exec env \
     QTRAD_IBKR_DUAL_RESTORE_STAGE=parent-ready \

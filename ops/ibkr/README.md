@@ -98,16 +98,19 @@ child command of `qtrad-ibkr-postgres-restore-verify`, through the installed
 `QTRAD_IBKR_RESTORE_ARCHIVE` and the new provenance path with
 `QTRAD_IBKR_RESTORE_EVIDENCE_PATH`; the archive is never a positional argument.
 The restore wrapper checks the selected backup's recorded SHA-256 before
-`pg_restore --exit-on-error`, marks the disposable `qtrad_ibkr_restore_verify_*`
-database with that archive identity, writes create-only restore evidence binding
-source database, restored database, schema, archive SHA and completion, exports
-the ephemeral restore URL/evidence path, executes the bounded qualification
-command while the database exists, and then drops it. The qualification wrapper
-is the single runtime composition: it preserves UID/GID 10001, read-only/cap-drop
-hardening, exact live/restore database identities, and the narrowly writable
-qualification-evidence directory. The application re-hashes the archive,
-authenticates the database marker and exact evidence before any snapshot or
-verifier can proceed.
+`pg_restore --exit-on-error`, takes the host-wide restore lock, quiesces the
+health timer and continuous ingest, marks the disposable
+`qtrad_ibkr_restore_verify_*` database with the archive identity, writes
+create-only restore evidence binding source database, restored database,
+schema, archive SHA and completion, exports the ephemeral restore URL/evidence
+path, executes the bounded child while the database exists, and then drops it.
+Nested dual/triple restores inherit the same lock and maintenance boundary.
+A concurrent restore exits 75 without creating a database. The outermost
+wrapper restores only services that were active before the operation. The
+qualification wrapper preserves UID/GID 10001, read-only/cap-drop hardening,
+exact live/restore identities and the narrowly writable evidence directory.
+The application re-hashes the archive and authenticates the database marker
+and exact evidence before any snapshot or verifier can proceed.
 
 The qualifying collector run must be cleanly stopped before backup so its final metrics
 and last healthy, post-reconnect snapshot are immutable in the run record and replay
@@ -200,8 +203,11 @@ Use the same composition with `ibkr-qualification-verify` and two fresh evidence
 for independent replay.
 
 B5 promotion and deployment preflight use that dual-restore wrapper with B3 as the parent
-and the qualified B4 archive as the current restore. B5 snapshot and verification require
-three simultaneous, independently owned restores:
+and the qualified B4 archive as the current restore. For B5 deployment, pass those exact
+archives and fresh evidence paths to the same wrapper, then use `--check` or `--apply`;
+it runs `deploy.sh` inside the authenticated dual-restore maintenance boundary. Do not set
+`QTRAD_B3_PREFLIGHT_BIN` or compose nested restore commands by hand. B5 snapshot and
+verification require three simultaneous, independently owned restores:
 
 ```bash
 QTRAD_IBKR_GRANDPARENT_RESTORE_ARCHIVE=<qualified-B3-archive> \
@@ -215,8 +221,10 @@ QTRAD_IBKR_RESTORE_EVIDENCE_PATH=<new-B5-evidence-path> \
 ```
 
 Use the same composition with `ibkr-qualification-verify` and three fresh evidence paths
-for independent B5 replay. Never decompose the wrappers' database lifecycles, Docker mounts,
-user identity, or archive selection into an ad-hoc operator command.
+for independent B5 replay. Every restore-backed operation deliberately creates a visible
+capture gap rather than competing with live persistence. Never decompose the wrappers'
+database lifecycles, Docker mounts, service quiescence, user identity or archive selection
+into an ad-hoc operator command.
 
 ## Running explicit historical CLI commands
 
@@ -267,14 +275,18 @@ closed when another run is active; preserve the failed container and its logs fo
 starting a second run. `QTRAD_IMAGE_DIGEST` may be a full immutable `qtrad-ibkr@sha256:` reference for
 canary binding; execution closure verification normalizes it to the locked bare `sha256:` digest.
 
-Image retention is part of the normal deployment lifecycle. `deploy.sh --check` reports the
-repository-scoped keep/remove plan without mutation. After a successful `--apply` restart,
-the deployer recalculates that plan, preserves the exact deployed image and every image referenced
-by any container, retains the most-recent additional unreferenced qtrad-ibkr image for rollback,
-and removes only older unreferenced immutable digests from that repository. Images lacking an
-immutable repository digest are retained for explicit review. It never invokes broad image or
-system pruning and does not touch unrelated repositories, containers, build cache, volumes,
-databases, backups, checkpoints or evidence.
+Image and build-cache retention are part of the normal deployment lifecycle.
+`deploy.sh --check` reports the repository-scoped image plan and the seven-day
+build-cache boundary without mutation. After a successful `--apply` restart, the
+deployer preserves the exact deployed image and every container-referenced image,
+retains the most-recent additional unreferenced qtrad-ibkr image for rollback,
+removes only older unreferenced immutable digests from that repository, and prunes
+Docker build cache older than 168 hours. It never invokes broad image or system
+pruning and does not touch unrelated images, containers, volumes, databases,
+backups, checkpoints or evidence. The health timer raises an operator-visible
+failure below 15% free on root. Deployment installs persistent journald with a
+512 MiB system cap so previous-boot incident evidence survives without unbounded
+root growth.
 
 PostgreSQL dumps and checksums belong under `/srv/qtrad/postgres/backups`; the backup script rejects
 other locations. Rollout rollback archives must have an explicit retention/location decision rather than
