@@ -110,3 +110,55 @@ class IBKRFoundationReadiness:
             "rows_by_candidate": dict(sorted(self.rows_by_candidate.items())),
             "evidence": dict(self.evidence),
         }
+
+
+_IBKR_FOUNDATION_PROMOTION_AUTHORITY_TOKEN = object()
+
+
+class VerifiedIbkrFoundationPromotion:
+    """Unforgeable result of authenticating one S8.4 promotion attestation."""
+
+    __slots__ = ("_foundation_bundle_id", "_promotion_sha256", "_verifier_token")
+
+    _foundation_bundle_id: str
+    _promotion_sha256: str
+    _verifier_token: object
+
+    def __init__(self) -> None:
+        raise TypeError("VerifiedIbkrFoundationPromotion is constructed only by its verifier")
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        foundation_bundle_id: str,
+        promotion_sha256: str,
+    ) -> "VerifiedIbkrFoundationPromotion":
+        if token is not _IBKR_FOUNDATION_PROMOTION_AUTHORITY_TOKEN:
+            raise TypeError("invalid IBKR foundation promotion verifier token")
+        value = object.__new__(cls)
+        object.__setattr__(value, "_verifier_token", token)
+        object.__setattr__(value, "_foundation_bundle_id", foundation_bundle_id)
+        object.__setattr__(value, "_promotion_sha256", promotion_sha256)
+        return value
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("VerifiedIbkrFoundationPromotion is immutable")
+
+    @property
+    def foundation_bundle_id(self) -> str:
+        return self._foundation_bundle_id
+
+    @property
+    def promotion_sha256(self) -> str:
+        return self._promotion_sha256
+
+
+def has_verified_ibkr_foundation_promotion_provenance(value: object) -> bool:
+    """Authenticate exact capability type and its private verifier sentinel."""
+
+    return (
+        type(value) is VerifiedIbkrFoundationPromotion
+        and getattr(value, "_verifier_token", None) is _IBKR_FOUNDATION_PROMOTION_AUTHORITY_TOKEN
+    )
