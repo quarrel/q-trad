@@ -10,6 +10,7 @@ StartLimitBurst=3
 Type=simple
 User=root
 EnvironmentFile=/etc/qtrad/ibkr-ingest.env
+ExecStartPre=/usr/bin/timeout 120 /bin/bash -c 'until /usr/local/sbin/qtrad-ibgateway-listener-check; do /usr/bin/sleep 2; done'
 ExecStart=/usr/local/sbin/qtrad-ibkr-ingest
 ExecStop=/bin/bash -c 'exec /usr/bin/docker stop --timeout 90 qtrad-ibkr-ingest'
 Restart=always

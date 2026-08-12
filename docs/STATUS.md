@@ -199,7 +199,7 @@ remains offline/replay.
   closure and Stage 7 provider-history dataset are retained. No Stage 8 foundation or qualifying
   confirmatory authority is retained. IBKR history stays provenance-distinct and cannot substantiate
   native IG fills, spreads or slippage.
-- `B5_FULL_UNIVERSE` qualifies only the retained twenty-contract native-capture session. The continuous deployment failed to surface its Gateway socket closure: generation remained 1 and callbacks did not resume after the 2026-08-10 22:30 UTC daily restart. A second defect let a full-universe liquid-hours health value exceed the domain bound and terminate the process, while duplicate Gateway units made recovery ownership ambiguous. These are operational defects, not invalidation of the controlled B5 evidence. Current runtime health must be rechecked before any authorised operation.
+- `B5_FULL_UNIVERSE` qualifies only the retained twenty-contract native-capture session. PR #116 corrected clean socket-closure detection, bounded health output and canonical Gateway ownership, and its immutable image is running. During the 2026-08-12 rollout, overlapping restore work contended with live persistence: session `536b9af2-af43-4b86-bdd0-313d8b6f3a9b` retained 66,380 of 116,381 callbacks and explicitly recorded 50,001 drops before failing closed. Preserve both this gap and the earlier post-2026-08-10 22:30 UTC gap. The resumed collector reached a fresh 20/20 LIVE session with zero new drops, but deployment remains blocked on refreshed liquid-hours authority and a controlled restore-backed apply.
 
 ## Next actions
 
@@ -211,7 +211,7 @@ remains offline/replay.
    the separately identified provider-history repack/pruning work without provider reacquisition.
 4. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication; real F2 requires the confirmatory-promotion attestation, and holdout evidence remains pending.
-5. Separately, deploy the socket-closure, bounded-health and single-Gateway-ownership corrections; retain the existing gap, then require a controlled and natural paper-account daily restart to establish a fresh generation, exact 20/20 LIVE reconstruction and zero unexplained loss.
+5. Deploy the restore-isolation follow-up: one locked maintenance boundary must quiesce ingest and health recovery, compose the exact B3/B4 authorities into B5 preflight/apply, preserve terminal persistence loss as an operator action, wait boundedly for Gateway readiness, retain bounded previous-boot journals and enforce root-space retention. Refresh expired liquid-hours authority, then require a controlled and natural paper-account daily restart with exact 20/20 LIVE reconstruction and zero unexplained loss.
 6. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
 7. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.

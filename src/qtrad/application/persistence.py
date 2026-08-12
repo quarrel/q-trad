@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from typing import Protocol
 
-from qtrad.domain.operations import AdapterHealth, HealthStatus
+from qtrad.domain.operations import AdapterHealth, HealthStatus, RecoveryAction
 from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.market_data import MarketDataRecord
 
@@ -213,5 +213,10 @@ class BoundedPersistenceWorker:
             health,
             status=status,
             reason_codes=tuple(sorted(reasons)),
+            recovery_action=(
+                RecoveryAction.OPERATOR
+                if snapshot.failed or snapshot.dropped
+                else health.recovery_action
+            ),
             attributes=tuple(attributes.items()),
         )

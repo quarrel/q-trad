@@ -746,9 +746,12 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "docker image prune" not in deploy
     assert "docker container ls -aq" in deploy
     assert "docker image rm" in deploy
+    assert "docker builder prune --force --filter until=168h" in deploy
     assert 'backup_env_file="/etc/qtrad/ibkr-backup.env"' in deploy
     assert "verify_backup_identity" in deploy
     assert "systemctl enable --now" not in deploy
+    assert "qtrad-ibkr-journald.conf.example" in deploy
+    assert "systemctl restart systemd-journald.service" in deploy
     assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
     assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
