@@ -2655,6 +2655,11 @@ async def _build_r2_oof(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
+    if (
+        foundation_receipt_path is not None
+        and experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE
+    ):
+        raise ValueError("a Stage 8 foundation receipt is only valid for IBKR historical OOF work")
     if holdout_target_source_path is None:
         raise ValueError("OOF build requires an authenticated holdout target source")
     holdout_target_source = R2HoldoutTargetSource.from_json(
