@@ -118,7 +118,10 @@ def _verify_replay_inputs(
         raise ValueError("representative replay inputs are missing or malformed")
     children = raw.get("children")
     expected = {"foundation", "experiment", "L0", "L1", "P0", "P1"}
-    if not isinstance(children, dict) or set(children) != expected:
+    if not isinstance(children, dict) or set(children) not in {
+        frozenset(expected),
+        frozenset({*expected, "foundation_receipt"}),
+    }:
         raise ValueError("representative replay inputs have incomplete children")
     root_resolved = root.resolve()
     for name, value in children.items():

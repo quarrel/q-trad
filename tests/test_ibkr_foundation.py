@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import shutil
@@ -52,10 +53,13 @@ from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import BarProvenance
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetView
+from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
+    authenticate_ibkr_foundation,
     foundation_config_payload,
     load_ibkr_foundation_outcome_blind_with_identity,
+    load_ibkr_foundation_with_identity,
     preflight_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -66,6 +70,8 @@ from qtrad.runtime.provider_history import (
 )
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
+from tests.test_r2_confirmatory import _build_confirmatory_fixture
+from tests.test_r2_ibkr_historical import _experiment
 
 _SHORT_STAGE8_END = datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30)
 
@@ -397,6 +403,171 @@ def test_provider_history_foundation_round_trips_and_replays_children(
         verify_ibkr_foundation(bundle)
 
 
+def test_stage8_verification_receipt_authenticates_without_semantic_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _foundation_bundle_fixture(tmp_path)
+    receipt = tmp_path / "foundation-verification.json"
+    checkpoint = tmp_path / "discarded-checkpoint"
+    checkpoint.mkdir()
+    (checkpoint / "identity.json").write_text("{}")
+
+    verified = verify_ibkr_foundation(bundle, receipt_output=receipt)
+    receipt_bytes = receipt.read_bytes()
+    with pytest.raises(FileExistsError):
+        verify_ibkr_foundation(bundle, receipt_output=receipt)
+    assert receipt.read_bytes() == receipt_bytes
+    shutil.rmtree(checkpoint)
+
+    receipt_document = json.loads(receipt_bytes)
+    assert receipt_document["contract"] == "qtrad-ibkr-foundation-verification-v1"
+    assert receipt_document["foundation_build_sha256"]
+    assert receipt_document["evidence_class"] == "IMPLEMENTATION_EVIDENCE_ONLY"
+    assert "rows" not in receipt_document
+    assert "holdout" not in receipt_document
+
+    def reject_semantic_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("receipt authentication performed semantic replay")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_semantic_replay,
+    )
+    monkeypatch.setattr(foundation_runtime, "build_ibkr_foundation", reject_semantic_replay)
+    loaded, build_id = load_ibkr_foundation_with_identity(bundle, receipt=receipt)
+    assert build_id == receipt_document["foundation_build_sha256"]
+    assert loaded.observations.dataset_id == verified.observations.dataset_id
+    assert loaded.panel.dataset_id == verified.panel.dataset_id
+    assert loaded.targets.dataset_id == verified.targets.dataset_id
+    assert loaded.folds.dataset_id == verified.folds.dataset_id
+
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", reject_semantic_replay)
+    monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", reject_semantic_replay)
+
+    result = authenticate_ibkr_foundation(bundle, receipt=receipt)
+
+    assert result["contract"] == "qtrad-ibkr-foundation-authentication-v1"
+    assert result["foundation_build_sha256"] == receipt_document["foundation_build_sha256"]
+    assert result["readiness"] == verified.readiness.as_json()
+    assert result["evidence_class"] == "IMPLEMENTATION_EVIDENCE_ONLY"
+    with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
+        r2_verification_runtime.verify_confirmatory_g2_feature_source(cast(Any, result))
+
+
+def test_stage8_verification_rejects_receipt_inside_authenticated_closure_before_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _foundation_bundle_fixture(tmp_path)
+    document = json.loads(bundle.read_text())
+    roots = (
+        bundle.with_suffix(bundle.suffix + ".children"),
+        (bundle.parent / document["provider_history_manifest"]).parent,
+    )
+    before = {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+
+    def reject_semantic_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("unsafe receipt location started semantic replay")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_semantic_replay,
+    )
+    for root in roots:
+        receipt = root / "verification.json"
+        with pytest.raises(ValueError, match="inside an authenticated closure"):
+            verify_ibkr_foundation(bundle, receipt_output=receipt)
+        assert not receipt.exists()
+
+    assert {
+        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        for root in roots
+        for path in root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+def test_stage8_authentication_rejects_receipt_and_closure_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle = _foundation_bundle_fixture(tmp_path)
+    receipt = tmp_path / "foundation-verification.json"
+    verify_ibkr_foundation(bundle, receipt_output=receipt)
+    original_receipt = receipt.read_bytes()
+
+    receipt.write_bytes(original_receipt.rstrip(b"\n") + b" \n")
+    with pytest.raises(ValueError, match="receipt bytes are not canonical"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    receipt.write_bytes(original_receipt)
+
+    receipt_document = json.loads(original_receipt)
+    receipt_document["completed_checks"] = receipt_document["completed_checks"][:-1]
+    receipt_identity = dict(receipt_document)
+    receipt_identity.pop("receipt_sha256")
+    receipt_document["receipt_sha256"] = hashlib.sha256(
+        _canonical_json(receipt_identity)
+    ).hexdigest()
+    receipt.write_bytes(_canonical_json(receipt_document) + b"\n")
+    with pytest.raises(ValueError, match="does not match the foundation"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    receipt.write_bytes(original_receipt)
+
+    with monkeypatch.context() as context:
+        context.setattr(foundation_runtime, "_FOUNDATION_VERIFIER_VERSION", 2)
+        with pytest.raises(ValueError, match="does not match the foundation"):
+            authenticate_ibkr_foundation(bundle, receipt=receipt)
+
+    bundle_bytes = bundle.read_bytes()
+    foundation_document = json.loads(bundle_bytes)
+    foundation_document["payload"]["readiness"]["causes"].append("MUTATED")
+    foundation_document["build_sha256"] = hashlib.sha256(
+        _canonical_json(foundation_document["payload"])
+    ).hexdigest()
+    bundle.write_bytes(_canonical_json(foundation_document) + b"\n")
+    with pytest.raises(ValueError, match="does not match the foundation"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    bundle.write_bytes(bundle_bytes)
+
+    foundation_document = json.loads(bundle_bytes)
+    child_reference = foundation_document["payload"]["children"]["observations"][0]
+    child_path = bundle.parent / child_reference["file"]
+    child_bytes = child_path.read_bytes()
+    child_path.write_bytes(child_bytes + b"x")
+    with pytest.raises(ValueError, match="Parquet bytes changed"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    child_path.write_bytes(child_bytes)
+
+    child_path.unlink()
+    with pytest.raises(FileNotFoundError, match="child Parquet"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    child_path.write_bytes(child_bytes)
+
+    orphan = child_path.parent / "orphan"
+    orphan.write_bytes(b"orphan")
+    with pytest.raises(ValueError, match="closure"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    orphan.unlink()
+
+    provider_manifest = bundle.parent / foundation_document["provider_history_manifest"]
+    provider_document = json.loads(provider_manifest.read_bytes())
+    provider_path = provider_manifest.parent / provider_document["files"][0]["path"]
+    provider_bytes = provider_path.read_bytes()
+    provider_path.write_bytes(provider_bytes + b"x")
+    with pytest.raises(ValueError, match="partition bytes"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+    provider_path.write_bytes(provider_bytes)
+
+    receipt.unlink()
+    with pytest.raises(ValueError, match="verification receipt"):
+        authenticate_ibkr_foundation(bundle, receipt=receipt)
+
+
 def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -420,6 +591,8 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
         provider_manifest=provider_manifest,
         configuration=configuration,
     )
+    receipt = tmp_path / "foundation-verification.json"
+    verify_ibkr_foundation(bundle, receipt_output=receipt)
     holdout_source = _holdout_source_for_build(full_build)
     original_read_child_rows = foundation_runtime._read_child_rows
 
@@ -451,6 +624,7 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     )
     blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
         bundle,
+        receipt=receipt,
         holdout_target_source=holdout_source,
     )
 
@@ -461,6 +635,7 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     _blind_build, build_id, g2_authority = (
         foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
             bundle,
+            receipt=receipt,
             holdout_target_source=holdout_source,
         )
     )
@@ -468,6 +643,83 @@ def test_ibkr_outcome_blind_loader_does_not_decode_full_children(
     assert not hasattr(foundation_runtime, "verify_ibkr_g2_feature_source")
     with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
         r2_verification_runtime.verify_confirmatory_g2_feature_source(cast(Any, g2_authority))
+
+
+def test_confirmatory_ibkr_rejects_ordinary_receipt_before_authority_construction(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    prebuilt_root = tmp_path / "prebuilt"
+    research_root = prebuilt_root / "research"
+    research_root.mkdir(parents=True)
+    _, _, provider_manifest = _published_provider_history(research_root)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    source_evidence = read_provider_history_source_evidence(provider_manifest)
+    full_build = build_ibkr_foundation(source_evidence, configuration)
+    qualifying_readiness, _provider_gaps = _evaluate_session_aware_readiness()
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        lambda *_args, **_kwargs: replace(full_build, readiness=qualifying_readiness),
+    )
+    bundle = research_root / "stage8-foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+    )
+    receipt = research_root / "stage8-verification.json"
+    verify_ibkr_foundation(bundle, receipt_output=receipt)
+    experiment = replace(_experiment(), evidence_class=EvidenceClass.CONFIRMATORY)
+    holdout_source = _holdout_source_for_build(full_build)
+    monkeypatch.setattr(
+        r2_verification_runtime,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "fixture-application",
+            "image_identity": "sha256:" + "1" * 64,
+            "python_identity": "fixture-python",
+            "numpy_identity": "fixture-numpy",
+            "sklearn_identity": "fixture-sklearn",
+        },
+    )
+    prebuilt_oof = _build_confirmatory_fixture(
+        prebuilt_root,
+        compact=True,
+        replay_foundation_path=bundle,
+        foundation_receipt_path=receipt,
+    )[0]
+
+    def authority_construction_reached(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("authority construction reached")
+
+    monkeypatch.setattr(
+        cli,
+        "load_ibkr_foundation_outcome_blind_with_identity",
+        authority_construction_reached,
+    )
+    monkeypatch.setattr(
+        r2_verification_runtime,
+        "_load_ibkr_foundation_outcome_blind_with_g2_authority",
+        authority_construction_reached,
+    )
+    with pytest.raises(ValueError, match="promotion attestation"):
+        asyncio.run(
+            cli._load_r2_foundation_inputs(
+                cast(Any, SimpleNamespace()),
+                cast(Any, SimpleNamespace()),
+                foundation_bundle_path=bundle,
+                experiment=experiment,
+                outcome_blind=True,
+                holdout_target_source=holdout_source,
+                foundation_receipt_path=receipt,
+            )
+        )
+    with pytest.raises(ValueError, match="promotion attestation"):
+        asyncio.run(r2_verification_runtime._replay_confirmatory_oof_async(prebuilt_oof))
 
 
 def test_ibkr_full_verifier_accepts_legacy_four_child_bundle(tmp_path: Path) -> None:
@@ -1130,9 +1382,18 @@ def test_stage8_cli_requires_one_foundation_source() -> None:
     assert provider_args.observations_manifest is None
 
     readiness_args = parser.parse_args(
-        ["research", "foundation", "readiness", "--bundle", "foundation.json"]
+        [
+            "research",
+            "foundation",
+            "readiness",
+            "--bundle",
+            "foundation.json",
+            "--receipt",
+            "receipt.json",
+        ]
     )
     assert readiness_args.bundle == Path("foundation.json")
+    assert readiness_args.receipt == Path("receipt.json")
 
     with pytest.raises(SystemExit):
         parser.parse_args(
@@ -1196,19 +1457,57 @@ def test_stage8_cli_build_and_verify_round_trip(
     assert build_output["coverage_summary"]["threshold"] == "9/10"
     assert bundle.is_file()
 
+    receipt = tmp_path / "cli-foundation-verification.json"
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "verify",
+            "--bundle",
+            str(bundle),
+            "--receipt-output",
+            str(receipt),
+        ]
+    )
+    verify_output = json.loads(capsys.readouterr().out)
+    assert verify_output["contract"] == "qtrad-ibkr-foundation-verification-v1"
+    assert verify_output["receipt"] == str(receipt.resolve())
+
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "authenticate",
+            "--bundle",
+            str(bundle),
+            "--receipt",
+            str(receipt),
+        ]
+    )
+    authenticate_output = json.loads(capsys.readouterr().out)
+    assert authenticate_output["evidence_class"] == "IMPLEMENTATION_EVIDENCE_ONLY"
+
     nonqualifying_build = build_ibkr_foundation(
         read_provider_history_source_evidence(provider_manifest), configuration
     )
     with pytest.raises(ValueError, match="nonqualifying IBKR foundation"):
         foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
             bundle,
+            receipt=receipt,
             holdout_target_source=_holdout_source_for_build(nonqualifying_build),
         )
 
-    cli.main(["research", "foundation", "verify", "--bundle", str(bundle)])
-    verify_output = json.loads(capsys.readouterr().out)
-    assert verify_output["source_class"] == "IBKR_HISTORICAL_RESEARCH"
-    cli.main(["research", "foundation", "readiness", "--bundle", str(bundle)])
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "readiness",
+            "--bundle",
+            str(bundle),
+            "--receipt",
+            str(receipt),
+        ]
+    )
     readiness_output = json.loads(capsys.readouterr().out)
     assert readiness_output["state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
 

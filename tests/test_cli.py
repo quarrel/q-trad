@@ -1216,6 +1216,35 @@ def test_parser_accepts_r2_replay_and_software_operations() -> None:
     assert software.baselines_command == "software-verify"
 
 
+@pytest.mark.asyncio
+async def test_oof_build_rejects_non_ibkr_foundation_receipt_before_publish(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    publish = Mock(side_effect=AssertionError("OOF publish reached"))
+    monkeypatch.setattr(
+        cli,
+        "load_experiment_and_feature_paths",
+        lambda **_kwargs: (SimpleNamespace(market_data_source_class=object()), {}),
+    )
+    monkeypatch.setattr(cli, "build_oof_bundle", publish)
+    output = tmp_path / "oof"
+
+    with pytest.raises(ValueError, match="only valid for IBKR historical OOF work"):
+        await cli._build_r2_oof(
+            cast(Settings, SimpleNamespace()),
+            cast(Clock, SimpleNamespace()),
+            foundation_bundle_path=tmp_path / "foundation.json",
+            foundation_receipt_path=tmp_path / "receipt.json",
+            experiment_path=tmp_path / "experiment.json",
+            feature_arguments=[],
+            output_path=output,
+            holdout_target_source_path=None,
+        )
+
+    publish.assert_not_called()
+    assert not output.exists()
+
+
 def test_cli_rejects_manufactured_software_input(
     tmp_path: Path,
     cli_environment: Settings,

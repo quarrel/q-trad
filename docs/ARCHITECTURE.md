@@ -96,6 +96,17 @@ contract-mapping, session, correction and availability policies plus an authenti
 A versioned foundation availability selector consumes that field without writing assumed values into
 native `received_at` or `persisted_at`; the native selector continues to use measured lineage.
 
+The durable IBKR historical foundation handoff is:
+
+> retained `foundation build` → one independent `foundation verify` with a create-only receipt →
+> ordinary `foundation authenticate`.
+
+The receipt binds the exact foundation, provider and child closure, configuration, readiness and
+claim-scoped verifier semantics. Authentication rechecks that closure without Stage 7 or Stage 8
+semantic replay. Its authority is `IMPLEMENTATION_EVIDENCE_ONLY`: qualifying readiness and an
+ordinary receipt do not authorise real F2, which separately requires the S8.4 confirmatory-promotion
+attestation.
+
 Each foundation binds one `MarketDataSourceClass`; historical, IBKR-native and IG-native observations
 remain separate through feature construction, modelling and reporting. That source dimension is
 orthogonal to R2 `EvidenceClass`. Foundation, experiment, feature, fit, forecast and report identities
