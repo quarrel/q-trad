@@ -1532,7 +1532,8 @@ def test_provider_history_foundation_bounded_replay(
         provider_manifest=provider_manifest,
         configuration=configuration,
     )
-    verified = verify_ibkr_foundation(bundle)
+    receipt = tmp_path / "bounded-foundation-verification.json"
+    verified = verify_ibkr_foundation(bundle, receipt_output=receipt)
     assert verified.readiness.as_json() == full.readiness.as_json()
     assert verified.observations.dataset_id == full.observations.dataset_id
     assert verified.panel.dataset_id == full.panel.dataset_id
@@ -1548,6 +1549,21 @@ def test_provider_history_foundation_bounded_replay(
         "targets",
         "folds",
     }
+
+    def reject_semantic_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("bounded receipt authentication performed semantic replay")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_semantic_replay,
+    )
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", reject_semantic_replay)
+    authenticated = authenticate_ibkr_foundation(bundle, receipt=receipt)
+
+    assert authenticated["foundation_build_sha256"] == document["build_sha256"]
+    assert authenticated["readiness"] == verified.readiness.as_json()
+    assert authenticated["evidence_class"] == "IMPLEMENTATION_EVIDENCE_ONLY"
 
 
 def test_bounded_foundation_parallel_derivation_matches_generic_across_chunk_seam(

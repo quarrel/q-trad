@@ -826,13 +826,18 @@ def authenticate_ibkr_foundation(
         authenticated, receipt
     )
     _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
-    child_ids = _child_reference_dataset_ids(authenticated.children)
+    child_kinds = _supported_child_kinds(authenticated.children)
+    child_ids = _child_reference_dataset_ids(
+        authenticated.children,
+        child_kinds=child_kinds,
+    )
     _verify_children_blind(
         authenticated.path.parent,
         authenticated.children,
         child_ids,
         authenticated.expected_lineage,
         decode_rows=False,
+        child_kinds=child_kinds,
     )
     return _authentication_result(authenticated, receipt_path, receipt_bytes, receipt_document)
 
@@ -849,8 +854,7 @@ def verify_ibkr_foundation(
     authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
     receipt_path: Path | None = None
     if receipt_output is not None:
-        if set(authenticated.children) != set(_CHILD_KINDS):
-            raise ValueError("verification receipts require the complete Stage 8 child closure")
+        _supported_child_kinds(authenticated.children)
         receipt_path = _output_path(receipt_output).resolve()
         immutable_roots = (
             (authenticated.path.parent / f"{authenticated.path.name}.children").resolve(),
@@ -885,15 +889,7 @@ def verify_ibkr_foundation(
             source_evidence,
             authenticated.provider_manifest_sha256,
         )
-        child_set = set(authenticated.children)
-        if child_set == set(_BASE_CHILD_KINDS):
-            child_kinds = _BASE_CHILD_KINDS
-        elif child_set == set(_LEGACY_CHILD_KINDS):
-            child_kinds = _LEGACY_CHILD_KINDS
-        elif child_set == set(_CHILD_KINDS):
-            child_kinds = _CHILD_KINDS
-        else:
-            raise ValueError("IBKR foundation child set is incomplete or unsupported")
+        child_kinds = _supported_child_kinds(authenticated.children)
         _verify_children(
             authenticated.path.parent,
             authenticated.children,
@@ -1372,11 +1368,24 @@ def _verify_ibkr_confirmatory_target_dataset(
     return targets
 
 
-def _child_reference_dataset_ids(children: Mapping[str, object]) -> dict[str, str]:
+def _supported_child_kinds(children: Mapping[str, object]) -> tuple[str, ...]:
+    child_set = set(children)
+    for kinds in (_BASE_CHILD_KINDS, _LEGACY_CHILD_KINDS, _CHILD_KINDS):
+        if child_set == set(kinds):
+            return kinds
+    raise ValueError("IBKR foundation child set is incomplete or unsupported")
+
+
+def _child_reference_dataset_ids(
+    children: Mapping[str, object],
+    *,
+    child_kinds: Sequence[str] | None = None,
+) -> dict[str, str]:
+    kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
     result: dict[str, str] = {}
-    if set(children) != set(_CHILD_KINDS):
+    if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
-    for kind in _CHILD_KINDS:
+    for kind in kinds:
         raw_parts = children[kind]
         if not isinstance(raw_parts, list) or not raw_parts:
             raise ValueError("IBKR foundation child parts are invalid")
@@ -1792,10 +1801,12 @@ def _verify_children_blind(
     decode_target: bool = False,
     decode_rows: bool = True,
     decode_base: bool = False,
+    child_kinds: Sequence[str] | None = None,
 ) -> dict[str, tuple[dict[str, JsonValue], ...]]:
     """Verify child bytes while decoding only explicitly requested rows."""
 
-    if set(children) != set(_CHILD_KINDS):
+    kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
+    if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
     decoded_kinds = (
         {
@@ -1818,7 +1829,7 @@ def _verify_children_blind(
     decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
-    for kind in _CHILD_KINDS:
+    for kind in kinds:
         raw_parts = children[kind]
         if not isinstance(raw_parts, list) or not raw_parts:
             raise ValueError("IBKR foundation child parts are invalid")
