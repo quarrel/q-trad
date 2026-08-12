@@ -103,9 +103,11 @@ The durable IBKR historical foundation handoff is:
 
 The receipt binds the exact foundation, provider and child closure, configuration, readiness and
 claim-scoped verifier semantics. Authentication rechecks that closure without Stage 7 or Stage 8
-semantic replay. Its authority is `IMPLEMENTATION_EVIDENCE_ONLY`: qualifying readiness and an
-ordinary receipt do not authorise real F2, which separately requires the S8.4 confirmatory-promotion
-attestation.
+semantic replay. Its authority is `IMPLEMENTATION_EVIDENCE_ONLY`. For a qualifying foundation,
+real IBKR F2 instead requires one operator-authorised `foundation promote-confirmatory` cumulative
+replay from a clean detached immutable runtime, followed by cheap `authenticate-promotion` checks.
+The create-only promotion binds the exact Stage 6–8 roots, accepted verifiers, qualifying readiness,
+runtime and authorization; confirmatory OOF construction and replay must carry that attestation.
 
 Each foundation binds one `MarketDataSourceClass`; historical, IBKR-native and IG-native observations
 remain separate through feature construction, modelling and reporting. That source dimension is

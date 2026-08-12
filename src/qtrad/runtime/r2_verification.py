@@ -167,6 +167,7 @@ from qtrad.runtime.ibkr_foundation import (
     _verify_ibkr_confirmatory_target_dataset,
     _verify_ibkr_g2_feature_source,
 )
+from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation_promotion
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     atomic_create,
@@ -1319,10 +1320,13 @@ def _stage_replay_inputs(
     *, output: Path, research_root: Path, paths: Mapping[str, Path]
 ) -> dict[str, object]:
     expected = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
-    if set(paths) not in {frozenset(expected), frozenset({*expected, "foundation_receipt"})}:
-        raise ValueError(
-            "representative replay inputs must include foundation, experiment and L0/L1/P0/P1"
-        )
+    accepted = {
+        frozenset(expected),
+        frozenset({*expected, "foundation_receipt"}),
+        frozenset({*expected, "foundation_receipt", "foundation_promotion"}),
+    }
+    if set(paths) not in accepted:
+        raise ValueError("replay inputs must include foundation, experiment and L0/L1/P0/P1")
     _reject_replay_symlink_ancestors(output / "replay-inputs")
     source_root = research_root.resolve()
     if source_root.is_symlink() or not source_root.is_dir():
@@ -1337,7 +1341,7 @@ def _stage_replay_inputs(
     collected: dict[str, tuple[Path, ...]] = {
         name: (
             (_validated_replay_file(path),)
-            if name in {"experiment", "foundation_receipt"}
+            if name in {"experiment", "foundation_receipt", "foundation_promotion"}
             else _declared_replay_files(name, path, source_root)
         )
         for name, path in sorted(paths.items())
@@ -4302,6 +4306,12 @@ async def _replay_staged_oof_async(
     expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
     if representative_profile == IBKR_HISTORICAL_PROFILE:
         expected_names.add("foundation_receipt")
+        if expected_run_kind == CONFIRMATORY_RUN_KIND:
+            if "foundation_promotion" not in raw_children:
+                raise ValueError(
+                    "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+                )
+            expected_names.add("foundation_promotion")
     if set(raw_children) != expected_names:
         raise ValueError("representative replay inputs have incomplete children")
     paths: dict[str, Path] = {}
@@ -4345,12 +4355,15 @@ async def _replay_staged_oof_async(
     )
     if experiment.evidence_class is not expected_evidence_class:
         raise ValueError("staged OOF experiment has the wrong evidence classification")
+    promotion_authority = None
     if (
         representative_profile == IBKR_HISTORICAL_PROFILE
         and expected_evidence_class is EvidenceClass.CONFIRMATORY
     ):
-        raise ValueError(
-            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+        promotion_authority = authenticate_ibkr_foundation_promotion(
+            paths["foundation"],
+            receipt=paths["foundation_receipt"],
+            promotion=paths["foundation_promotion"],
         )
     g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority | None = None
     if representative_profile == IBKR_HISTORICAL_PROFILE:
@@ -4376,6 +4389,7 @@ async def _replay_staged_oof_async(
             foundation_bundle_id=foundation_bundle_id,
             adapter_identity=adapter_identity,
             evidence_class=expected_evidence_class,
+            promotion_authority=promotion_authority,
         )
         if expected_experiment.as_json() != experiment.as_json():
             raise ValueError("IBKR experiment is not authenticated")
