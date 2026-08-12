@@ -7,6 +7,7 @@ configuration_file="${QTRAD_IBKR_CAPTURE_CONFIGURATION_PATH:?set QTRAD_IBKR_CAPT
 database_url="${QTRAD_DATABASE_URL:?set QTRAD_DATABASE_URL}"
 api_fingerprint="${QTRAD_IBKR_API_PACKAGE_FINGERPRINT:?set QTRAD_IBKR_API_PACKAGE_FINGERPRINT}"
 configuration_hash="${QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH:?set QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH}"
+gateway_listener_check="${QTRAD_IBKR_GATEWAY_LISTENER_CHECK:-/usr/local/sbin/qtrad-ibgateway-listener-check}"
 
 bounded_args=()
 if (($# > 0)); then
@@ -28,10 +29,8 @@ fi
 [[ "$checkpoint_root" == /* && -d "$checkpoint_root" && -w "$checkpoint_root" ]] || exit 69
 [[ -r "$configuration_file" ]] || exit 69
 [[ "$database_url" == postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr ]] || exit 64
-if [[ -z "$(ss -H -ltn '( sport = :4002 )')" ]]; then
-    echo 'Gateway API is not listening' >&2
-    exit 69
-fi
+[[ "$gateway_listener_check" == /* && -x "$gateway_listener_check" ]] || exit 69
+"$gateway_listener_check"
 
 exec docker run --rm --name qtrad-ibkr-ingest --network host \
     --user 10001:10001 --read-only --cap-drop=ALL \

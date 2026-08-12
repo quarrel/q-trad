@@ -6049,6 +6049,14 @@ async def _ingest_ibkr_native(
             configuration_hash=configuration.configuration_hash,
             started_at=clock.now(),
         )
+        LOGGER.info(
+            "ibkr_capture_session_started",
+            extra={
+                "capture_session_id": str(run_id),
+                "configuration_hash": configuration.configuration_hash,
+                "desired_subscriptions": len(configuration.listings),
+            },
+        )
         await store.seed_native_capture_instruments(configuration.listings)
         for listing in configuration.listings:
             await store.validate_provider_listing(
@@ -6071,6 +6079,13 @@ async def _ingest_ibkr_native(
         capture_session_id = run_id.value
         await adapter.connect()
         await adapter.subscribe(configuration.listings)
+        LOGGER.info(
+            "ibkr_capture_subscriptions_started",
+            extra={
+                "capture_session_id": str(capture_session_id),
+                "desired_subscriptions": len(configuration.listings),
+            },
+        )
         worker.start()
 
         async def persist_health_snapshot() -> None:
@@ -6228,6 +6243,17 @@ async def _ingest_ibkr_native(
                 persisted=final_metrics.persisted,
                 failed=final_metrics.failed,
                 dropped=final_metrics.dropped,
+            )
+            LOGGER.info(
+                "ibkr_capture_session_finished",
+                extra={
+                    "capture_session_id": str(run_id),
+                    "terminal_status": terminal_status,
+                    "records_received": final_metrics.records_received,
+                    "persisted": final_metrics.persisted,
+                    "failed": final_metrics.failed,
+                    "dropped": final_metrics.dropped,
+                },
             )
         if run_id is not None:
             await store.finish_run(

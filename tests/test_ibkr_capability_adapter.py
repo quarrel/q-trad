@@ -309,10 +309,17 @@ def test_current_official_error_callback_retains_error_time_and_code(
     )
 
     client.error(7, 1_785_000_000, 200, "ambiguous contract", "")
+    error_callback = callbacks.get_nowait()
+    assert error_callback.values == (1_785_000_000, 200, "REQUEST_ERROR")
+    assert capability._error_codes((error_callback,)) == ("IBKR_200",)
 
-    callback = callbacks.get_nowait()
-    assert callback.values == (1_785_000_000, 200, "REQUEST_ERROR")
-    assert capability._error_codes((callback,)) == ("IBKR_200",)
+    client.connectionClosed()
+    closed_callback = callbacks.get_nowait()
+    assert closed_callback.kind == "connection_closed"
+    assert closed_callback.request_id == -1
+    assert closed_callback.generation == 0
+    assert closed_callback.arrival_sequence == 2
+    assert closed_callback.received_time is not None
 
 
 @pytest.mark.parametrize(

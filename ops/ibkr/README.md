@@ -260,10 +260,7 @@ Keep the repository private and verify the resulting name/namespace before the f
 
 ## Host maintenance
 
-The first Gateway start may briefly scan large JARs and show high CPU from `unzip` helper processes.
-Do not launch multiple Gateway instances or repeatedly restart it while it is completing startup. Confirm
-the effective paper/read-only settings and inspect `systemctl show qtrad-ibgateway-10.49.service -p NRestarts`
-before diagnosing a restart loop.
+The first Gateway start may briefly scan large JARs and show high CPU from `unzip` helper processes. Do not launch multiple Gateway instances or repeatedly restart it while it is completing startup. The canonical `qtrad-ibgateway.service` must be the sole active q-trad Gateway service and must own the process listening on port 4002; deployment and ingest fail closed otherwise. Confirm the effective paper/read-only settings and inspect `systemctl show qtrad-ibgateway.service -p NRestarts` before diagnosing a restart loop.
 
 Run at most one historical executor at a time. The executor takes a PostgreSQL advisory lock and fails
 closed when another run is active; preserve the failed container and its logs for diagnosis rather than
