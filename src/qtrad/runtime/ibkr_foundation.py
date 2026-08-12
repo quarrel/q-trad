@@ -867,17 +867,42 @@ def verify_ibkr_foundation(
     if authenticated.provider_dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
         from qtrad.runtime.ibkr_foundation_bounded import (
             prepare_stage8_replay_checkpoint,
+            read_stage8_replay_source_verification,
+            store_stage8_replay_source_verification,
             verify_bounded_provider_foundation,
         )
 
+        published_bundle_sha256 = hashlib.sha256(authenticated.manifest_bytes).hexdigest()
         prepare_stage8_replay_checkpoint(
             replay_checkpoint_root,
             provider_manifest_sha256=authenticated.provider_manifest_sha256,
             provider_dataset_sha256=authenticated.provider_dataset.dataset_sha256,
             configuration_id=authenticated.configuration.configuration_id,
-            published_bundle_sha256=hashlib.sha256(authenticated.manifest_bytes).hexdigest(),
+            published_bundle_sha256=published_bundle_sha256,
         )
-        source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
+        source_evidence = (
+            read_stage8_replay_source_verification(
+                replay_checkpoint_root,
+                provider_manifest=authenticated.provider_path,
+                provider_manifest_sha256=authenticated.provider_manifest_sha256,
+                provider_dataset_sha256=authenticated.provider_dataset.dataset_sha256,
+                configuration_id=authenticated.configuration.configuration_id,
+                published_bundle_sha256=published_bundle_sha256,
+            )
+            if replay_checkpoint_root is not None
+            else None
+        )
+        if source_evidence is None:
+            source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
+            if replay_checkpoint_root is not None:
+                store_stage8_replay_source_verification(
+                    replay_checkpoint_root,
+                    source_evidence=source_evidence,
+                    provider_manifest_sha256=authenticated.provider_manifest_sha256,
+                    provider_dataset_sha256=authenticated.provider_dataset.dataset_sha256,
+                    configuration_id=authenticated.configuration.configuration_id,
+                    published_bundle_sha256=published_bundle_sha256,
+                )
         replay = verify_bounded_provider_foundation(
             source_evidence=source_evidence,
             configuration=authenticated.configuration,

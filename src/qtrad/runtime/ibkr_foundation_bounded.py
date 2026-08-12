@@ -81,7 +81,7 @@ _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
     "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
 )
 _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "8763f33a5f19e64aa7d05995b8423cfd99f21471842344d04b62ad266c06c926"
+    "5adb9aef36746f1f718c1fd041ced6ffada3e262bb544940e77aac1b5b1b2204"
 )
 _MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
@@ -169,6 +169,42 @@ class _Progress:
         )
 
 
+def _read_source_verification(root: Path | None) -> dict[str, object] | None:
+    if root is None:
+        return None
+    path = root / _SOURCE_VERIFICATION_NAME
+    if not path.exists():
+        return None
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("Stage 8 source-verification checkpoint must be a regular file")
+    if path.stat().st_size > _MAX_SOURCE_VERIFICATION_BYTES:
+        raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
+    encoded = path.read_bytes()
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("Stage 8 source-verification checkpoint is invalid JSON") from error
+    if not isinstance(value, dict):
+        raise ValueError("Stage 8 source-verification checkpoint must be an object")
+    if encoded != _runtime()._json_bytes(value) + b"\n":
+        raise ValueError("Stage 8 source-verification checkpoint is not canonical")
+    return value
+
+
+def _store_source_verification(root: Path | None, receipt: Mapping[str, object]) -> None:
+    if root is None:
+        return
+    encoded = _runtime()._json_bytes(receipt) + b"\n"
+    if len(encoded) > _MAX_SOURCE_VERIFICATION_BYTES:
+        raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
+    path = root / _SOURCE_VERIFICATION_NAME
+    if path.exists():
+        if _read_source_verification(root) != dict(receipt):
+            raise ValueError("Stage 8 source-verification checkpoint content changed")
+        return
+    _runtime()._write_create_only(path, encoded)
+
+
 class _Stage8Checkpoint:
     """Disposable, identity-bound canonical per-instrument staging."""
 
@@ -218,38 +254,10 @@ class _Stage8Checkpoint:
             _runtime()._write_create_only(root / "identity.json", encoded)
 
     def source_verification(self) -> dict[str, object] | None:
-        if self.root is None:
-            return None
-        path = self.root / _SOURCE_VERIFICATION_NAME
-        if not path.exists():
-            return None
-        if not path.is_file() or path.is_symlink():
-            raise ValueError("Stage 8 source-verification checkpoint must be a regular file")
-        if path.stat().st_size > _MAX_SOURCE_VERIFICATION_BYTES:
-            raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
-        encoded = path.read_bytes()
-        try:
-            value = json.loads(encoded)
-        except (UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ValueError("Stage 8 source-verification checkpoint is invalid JSON") from error
-        if not isinstance(value, dict):
-            raise ValueError("Stage 8 source-verification checkpoint must be an object")
-        if encoded != _runtime()._json_bytes(value) + b"\n":
-            raise ValueError("Stage 8 source-verification checkpoint is not canonical")
-        return value
+        return _read_source_verification(self.root)
 
     def store_source_verification(self, receipt: Mapping[str, object]) -> None:
-        if self.root is None:
-            return
-        encoded = _runtime()._json_bytes(receipt) + b"\n"
-        if len(encoded) > _MAX_SOURCE_VERIFICATION_BYTES:
-            raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
-        path = self.root / _SOURCE_VERIFICATION_NAME
-        if path.exists():
-            if self.source_verification() != dict(receipt):
-                raise ValueError("Stage 8 source-verification checkpoint content changed")
-            return
-        _runtime()._write_create_only(path, encoded)
+        _store_source_verification(self.root, receipt)
 
     def observation(self, instrument: str) -> _ObservationCheckpoint | None:
         directory = self._instrument_directory("observations", instrument)
@@ -651,6 +659,12 @@ class _ReplayCheckpoint:
             root.mkdir(parents=True, exist_ok=False)
             _runtime()._write_create_only(root / "identity.json", encoded)
 
+    def source_verification(self) -> dict[str, object] | None:
+        return _read_source_verification(self.root)
+
+    def store_source_verification(self, receipt: Mapping[str, object]) -> None:
+        _store_source_verification(self.root, receipt)
+
     def part(
         self,
         kind: str,
@@ -755,6 +769,53 @@ def prepare_stage8_replay_checkpoint(
         provider_dataset_sha256=provider_dataset_sha256,
         configuration_id=configuration_id,
         published_bundle_sha256=published_bundle_sha256,
+    )
+
+
+def read_stage8_replay_source_verification(
+    root: Path,
+    *,
+    provider_manifest: Path,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+    published_bundle_sha256: str,
+) -> ProviderHistorySourceEvidence | None:
+    """Restore a completed verifier source replay after byte-level reauthentication."""
+
+    checkpoint = _ReplayCheckpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+        published_bundle_sha256=published_bundle_sha256,
+    )
+    receipt = checkpoint.source_verification()
+    if receipt is None:
+        return None
+    return read_provider_history_source_verification_receipt(provider_manifest, receipt)
+
+
+def store_stage8_replay_source_verification(
+    root: Path,
+    *,
+    source_evidence: ProviderHistorySourceEvidence,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+    published_bundle_sha256: str,
+) -> None:
+    """Persist a completed verifier source replay before Stage 8 derivation."""
+
+    checkpoint = _ReplayCheckpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+        published_bundle_sha256=published_bundle_sha256,
+    )
+    checkpoint.store_source_verification(
+        provider_history_source_verification_receipt(source_evidence)
     )
 
 
