@@ -121,6 +121,7 @@ def _verify_replay_inputs(
     if not isinstance(children, dict) or set(children) not in {
         frozenset(expected),
         frozenset({*expected, "foundation_receipt"}),
+        frozenset({*expected, "foundation_receipt", "foundation_promotion"}),
     }:
         raise ValueError("representative replay inputs have incomplete children")
     root_resolved = root.resolve()

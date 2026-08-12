@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import importlib
 import importlib.metadata
+import logging
 from collections import deque
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, replace
@@ -36,6 +37,7 @@ from qtrad.ports.ibkr_capability import (
     IbkrRequestEvidence,
 )
 
+LOGGER = logging.getLogger(__name__)
 _BID = 1
 _ASK = 2
 _BID_SIZE = 0
@@ -210,7 +212,17 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
         try:
             self._session.mark_socket_connected()
             self._client = client
-            self._thread = Thread(target=client.run, name="ibkr-capability-reader", daemon=True)
+            generation = self._session.generation
+            LOGGER.info(
+                "ibkr_socket_connected",
+                extra={"connection_generation": generation},
+            )
+            self._thread = Thread(
+                target=self._run_reader,
+                args=(client, generation),
+                name="ibkr-capability-reader",
+                daemon=True,
+            )
             self._thread.start()
             await self._wait_for(-1, {"next_valid_id"}, self._handshake_timeout_seconds)
             self._session.mark_handshake()
@@ -237,6 +249,68 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
             if thread.is_alive():
                 raise RuntimeError("IBKR capability reader did not stop after disconnect")
         self._session.stop()
+
+    def _run_reader(self, client: Any, generation: int) -> None:
+        LOGGER.info(
+            "ibkr_reader_started",
+            extra={"connection_generation": generation},
+        )
+        try:
+            client.run()
+        finally:
+            LOGGER.warning(
+                "ibkr_reader_exited",
+                extra={
+                    "connection_generation": generation,
+                    "socket_connected": self._socket_connected(),
+                },
+            )
+
+    def _socket_connected(self) -> bool:
+        client = self._client
+        if client is None:
+            return False
+        is_connected = getattr(client, "isConnected", None)
+        if not callable(is_connected):
+            return True
+        try:
+            return bool(is_connected())
+        except Exception:
+            return False
+
+    def _reader_thread_alive(self) -> bool:
+        return self._thread is not None and self._thread.is_alive()
+
+    def _transport_failure_reason(self) -> str | None:
+        client = self._client
+        if client is None or not callable(getattr(client, "isConnected", None)):
+            return None
+        if not self._socket_connected():
+            return "socket_not_connected"
+        if not self._reader_thread_alive():
+            return "reader_thread_exited"
+        return None
+
+    def _mark_transport_closed(self, reason: str) -> IbkrRecoveryAction:
+        snapshot = self._session.snapshot()
+        if "API_SOCKET_CLOSED" in snapshot.reason_codes:
+            return snapshot.recovery_action
+        decision = self._session.mark_socket_closed()
+        LOGGER.error(
+            "ibkr_transport_closed",
+            extra={
+                "connection_generation": snapshot.generation,
+                "transport_reason": reason,
+                "recovery_action": decision.action.value,
+            },
+        )
+        return decision.action
+
+    def _raise_transport_closed(self, reason: str) -> None:
+        action = self._mark_transport_closed(reason)
+        raise IbkrConnectionIntegrityError(
+            f"IBKR transport closed ({reason}); recovery requires {action.value}"
+        )
 
     async def probe(
         self, queries: Sequence[IbkrContractQuery]
@@ -713,9 +787,14 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
     async def _next_callback(self, deadline: float) -> _Callback:
         if self._callbacks.overflowed.is_set():
             raise IbkrConnectionIntegrityError("IBKR capability callback queue overflowed")
-        if self._deferred_callbacks:
-            return self._deferred_callbacks.popleft()
-        return await self._next_queued_callback(deadline)
+        callback = (
+            self._deferred_callbacks.popleft()
+            if self._deferred_callbacks
+            else await self._next_queued_callback(deadline)
+        )
+        if callback.kind == "connection_closed":
+            self._raise_transport_closed("connection_closed_callback")
+        return callback
 
     async def _next_queued_callback(self, deadline: float) -> _Callback:
         if self._callbacks.overflowed.is_set():
@@ -730,6 +809,9 @@ class OfficialIbkrCapabilityAdapter(IbkrCapabilityAdapter):
                 raise IbkrConnectionIntegrityError(
                     "IBKR capability callback queue overflowed"
                 ) from error
+            transport_failure = self._transport_failure_reason()
+            if transport_failure is not None:
+                self._raise_transport_closed(transport_failure)
             raise TimeoutError("IBKR capability request timed out") from error
         self._arrival_sequence += 1
         return replace(
@@ -846,6 +928,14 @@ def _official_client(
     class _Client(ewrapper, eclient):
         def __init__(self) -> None:
             eclient.__init__(self, self)
+
+        def connectionClosed(self) -> None:
+            _emit(
+                callbacks,
+                _Callback("connection_closed", -1, ()),
+                generation,
+                next(sequence),
+            )
 
         def nextValidId(self, orderId: int) -> None:
             _emit(callbacks, _Callback("next_valid_id", -1, (orderId,)), generation, next(sequence))

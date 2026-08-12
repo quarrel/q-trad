@@ -14,6 +14,10 @@ from qtrad.application.r2_features import R2FoundationInputs
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.foundation import InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.foundation_bundle import AVAILABILITY_EVIDENCE_CONTRACT, FoundationBundle
+from qtrad.domain.ibkr_foundation import (
+    VerifiedIbkrFoundationPromotion,
+    has_verified_ibkr_foundation_promotion_provenance,
+)
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_EVIDENCE,
@@ -49,13 +53,21 @@ def build_ibkr_historical_experiment(
     foundation_bundle_id: str,
     adapter_identity: IBKRHistoricalAdapterIdentity,
     evidence_class: EvidenceClass = IBKR_HISTORICAL_EVIDENCE,
+    promotion_authority: VerifiedIbkrFoundationPromotion | None = None,
 ) -> R2ExperimentConfig:
     """Build the profile from a verified Stage 8 foundation and persisted adapter identity."""
 
     if evidence_class is EvidenceClass.CONFIRMATORY:
-        raise ValueError(
-            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
-        )
+        if (
+            promotion_authority is None
+            or not has_verified_ibkr_foundation_promotion_provenance(promotion_authority)
+            or promotion_authority.foundation_bundle_id != foundation_bundle_id
+        ):
+            raise ValueError(
+                "confirmatory IBKR historical work requires the exact Stage 8 promotion attestation"
+            )
+    elif promotion_authority is not None:
+        raise ValueError("Stage 8 promotion authority is valid only for confirmatory IBKR work")
     configuration = foundation.configuration
     if adapter_identity.foundation_bundle_id != foundation_bundle_id:
         raise ValueError("IBKR adapter identity does not bind the verified foundation")

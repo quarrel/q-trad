@@ -147,6 +147,9 @@ apply_image_retention() {
     docker image rm "${image_retention_remove_references[@]}" >/dev/null
 }
 
+apply_build_cache_retention() {
+    docker builder prune --force --filter until=168h >/dev/null
+}
 verify_backup_identity() {
     [[ -f "$backup_env_file" ]] || fail "canonical backup environment is missing: $backup_env_file"
     [[ "$(stat -c '%U:%G' "$backup_env_file")" == root:root ]] \
@@ -238,13 +241,19 @@ preflight_args=(
     --observed-at "${QTRAD_IBKR_PREFLIGHT_OBSERVED_AT:?set reviewed UTC preflight timestamp}"
 )
 if [[ -n "$preflight_bin" ]]; then
-    preflight_json="$("$preflight_bin" "${preflight_args[@]}")"
+    if ! preflight_json="$("$preflight_bin" "${preflight_args[@]}")"; then
+        [[ -z "$preflight_json" ]] || printf '%s\n' "$preflight_json" >&2
+        fail "release preflight command failed"
+    fi
 else
-    preflight_json="$(
+    if ! preflight_json="$(
         QTRAD_IBKR_IMAGE="$image" \
             QTRAD_IBKR_REPOSITORY_ROOT="$repository_root" \
             bash "$script_dir/qtrad-container-cli.sh" "${preflight_args[@]}"
-    )"
+    )"; then
+        [[ -z "$preflight_json" ]] || printf '%s\n' "$preflight_json" >&2
+        fail "release preflight command failed"
+    fi
 fi
 application_commit="$(jq -er '.application_commit' <<<"$preflight_json")"
 printf '%s\n' "$preflight_json" | jq -e \
@@ -296,6 +305,7 @@ verify_database_head
 
 if [[ "$mode" == "--check" ]]; then
     plan_image_retention
+    echo "IBKR build-cache retention plan: remove cache older than 168h"
     echo "IBKR B3 preflight passed; no host mutation performed"
     exit 0
 fi
@@ -304,6 +314,7 @@ fi
 install -d -o 10001 -g 10001 -m 0750 "$checkpoint_root"
 
 install -D -m 0750 "$script_dir/qtrad-ibkr-ingest-wrapper.example" /usr/local/sbin/qtrad-ibkr-ingest
+install -D -m 0750 "$script_dir/gateway-listener-check.sh" /usr/local/sbin/qtrad-ibgateway-listener-check
 install -D -m 0750 "$script_dir/qtrad-ibkr-api-wrapper.example" /usr/local/sbin/qtrad-ibkr-api
 install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healthcheck
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup
@@ -314,6 +325,7 @@ install -D -m 0750 "$script_dir/qtrad-ibkr-triple-restore-qualification.example"
 install -D -m 0750 "$script_dir/postgres-start.sh" /usr/local/sbin/qtrad-ibkr-postgres-start
 install -D -m 0750 "$script_dir/postgres-ready.sh" /usr/local/sbin/qtrad-ibkr-postgres-ready
 install -D -m 0750 "$script_dir/postgres-stop.sh" /usr/local/sbin/qtrad-ibkr-postgres-stop
+install -D -m 0644 "$script_dir/qtrad-ibkr-journald.conf.example" /etc/systemd/journald.conf.d/qtrad-ibkr.conf
 install -D -m 0644 "$script_dir/qtrad-ibkr-ingest.service.example" /etc/systemd/system/qtrad-ibkr-ingest.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-api.service.example" /etc/systemd/system/qtrad-ibkr-api.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-health.service.example" /etc/systemd/system/qtrad-ibkr-health.service
@@ -321,6 +333,7 @@ install -D -m 0644 "$script_dir/qtrad-ibkr-health.timer.example" /etc/systemd/sy
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.service.example" /etc/systemd/system/qtrad-ibkr-backup.service
 install -D -m 0644 "$script_dir/qtrad-ibkr-backup.timer.example" /etc/systemd/system/qtrad-ibkr-backup.timer
 install -D -m 0644 "$script_dir/qtrad-ibkr-postgres.service.example" /etc/systemd/system/qtrad-ibkr-postgres.service
+systemctl restart systemd-journald.service
 systemctl daemon-reload
 systemctl enable \
     qtrad-ibkr-postgres.service qtrad-ibkr-api.service qtrad-ibkr-ingest.service \
@@ -329,3 +342,4 @@ systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service
 systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer
 plan_image_retention
 apply_image_retention
+apply_build_cache_retention

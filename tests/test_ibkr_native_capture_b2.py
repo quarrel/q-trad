@@ -16,7 +16,7 @@ from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import ProductType, ProviderListing
 from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.modes import BrokerEnvironment
-from qtrad.domain.operations import AdapterHealth, HealthStatus
+from qtrad.domain.operations import AdapterHealth, HealthStatus, RecoveryAction
 from qtrad.ports.capture_feed import CaptureIdentity
 from qtrad.ports.ibkr_capability import IbkrContractEvidence
 from qtrad.ports.market_data import MarketDataRecord
@@ -133,6 +133,7 @@ async def test_bounded_persistence_reports_drops_and_fails_closed() -> None:
     assert snapshot.dropped == 2
     composed = worker.compose_health(_health())
     assert composed.status is HealthStatus.DEGRADED
+    assert composed.recovery_action is RecoveryAction.OPERATOR
     assert "PERSISTENCE_RECORDS_DROPPED" in composed.reason_codes
     assert dict(composed.attributes)["queue_capacity"] == "1"
 
@@ -151,6 +152,7 @@ async def test_persistence_failure_is_visible_in_composed_health() -> None:
     assert snapshot.failed == 1
     composed = worker.compose_health(_health())
     assert composed.status is HealthStatus.DEGRADED
+    assert composed.recovery_action is RecoveryAction.OPERATOR
     assert "PERSISTENCE_FAILURE" in composed.reason_codes
 
 

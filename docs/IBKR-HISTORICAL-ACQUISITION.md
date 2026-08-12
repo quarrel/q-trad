@@ -1137,10 +1137,30 @@ verification completes, its accepted receipt is persisted before Stage 8 derivat
 run on the same verifier identity resumes without repeating that semantic replay. Verified Stage 8
 parts are likewise retained as they are compared.
 
-Pass that same receipt as `--foundation-receipt` to IBKR historical experiment and
-R2 commands. Ordinary authentication rehashes the exact provider/foundation child
-closure; it does not replay Stage 7 rows or Stage 8 derivation and cannot be used as
-confirmatory authority.
+Pass that same receipt as `--foundation-receipt` to implementation-only IBKR historical
+commands. Ordinary authentication rehashes the exact provider/foundation child closure; it does not
+replay Stage 7 rows or Stage 8 derivation and cannot be used as confirmatory authority.
+
+For a qualifying foundation, create the separate S8.4 authority once from the authorised detached
+runtime, then authenticate it cheaply:
+
+```bash
+uv run qtrad research foundation promote-confirmatory \
+  --bundle <foundation.json> \
+  --receipt <verification-receipt.json> \
+  --authorized-by <operator> \
+  --authorized-at <UTC-minute> \
+  --authorization-reference <approval-reference> \
+  --output <new-confirmatory-promotion.json>
+uv run qtrad research foundation authenticate-promotion \
+  --bundle <foundation.json> \
+  --receipt <verification-receipt.json> \
+  --promotion <confirmatory-promotion.json>
+```
+
+Confirmatory IBKR experiment, feature, readiness and OOF commands require both
+`--foundation-receipt` and `--foundation-promotion`. The staged OOF retains both so real F2 replay
+can authenticate promotion before any G2 authority is constructed.
 
 # 7. Explicitly deferred work
 

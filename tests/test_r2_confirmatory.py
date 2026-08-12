@@ -93,6 +93,7 @@ def _build_confirmatory_fixture(
     compact: bool = False,
     replay_foundation_path: Path | None = None,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> tuple[
     Path,
     Any,
@@ -370,7 +371,9 @@ def _build_confirmatory_fixture(
     }
     research_root = root / "research"
     research_root.mkdir(parents=True, exist_ok=True)
-    foundation_path = research_root / "foundation.json"
+    foundation_path = research_root / (
+        "fixture-foundation.json" if replay_foundation_path is not None else "foundation.json"
+    )
 
     async def persist_fixture_foundation() -> Any:
         clock = cast(Clock, SimpleNamespace(now=lambda: experiment.holdout_range[0]))
@@ -505,6 +508,8 @@ def _build_confirmatory_fixture(
     }
     if foundation_receipt_path is not None:
         replay_inputs["foundation_receipt"] = foundation_receipt_path
+    if foundation_promotion_path is not None:
+        replay_inputs["foundation_promotion"] = foundation_promotion_path
     bundle_path = build_oof_bundle(
         verified=fixture_verified,
         experiment=experiment,

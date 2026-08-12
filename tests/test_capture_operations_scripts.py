@@ -171,7 +171,7 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     dual_restore = (ibkr / "qtrad-ibkr-dual-restore-qualification.example").read_text()
     triple_restore = (ibkr / "qtrad-ibkr-triple-restore-qualification.example").read_text()
     health_service = (ibkr / "qtrad-ibkr-health.service.example").read_text()
-
+    journald = (ibkr / "qtrad-ibkr-journald.conf.example").read_text()
     assert "usage: postgres-provision.sh --check|--apply" in provision
     assert "must be root-owned and mode 0600 or 0640" in provision
     assert "cmp --silent" in provision
@@ -202,6 +202,8 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert dual_restore.count("qtrad-ibkr-postgres-restore-verify") == 1
     assert "QTRAD_IBKR_PARENT_RESTORE_ARCHIVE" in dual_restore
     assert "QTRAD_IBKR_CURRENT_RESTORE_ARCHIVE" in dual_restore
+    assert 'QTRAD_B3_PREFLIGHT_BIN="$qualification"' in dual_restore
+    assert "QTRAD_IBKR_REPOSITORY_ROOT" in dual_restore
     assert triple_restore.count("qtrad-ibkr-postgres-restore-verify") == 1
     assert "QTRAD_IBKR_GRANDPARENT_RESTORE_ARCHIVE" in triple_restore
     assert "QTRAD_IBKR_B4_RESTORE_ARCHIVE" in triple_restore
@@ -209,6 +211,8 @@ def test_ibkr_native_postgres_is_independently_provisioned_and_authenticated() -
     assert "Wants=qtrad-ibkr-ingest.service" not in health_service
     assert "Requires=qtrad-ibkr-ingest.service" not in health_service
     assert "After=qtrad-ibkr-ingest.service" in health_service
+    assert "Storage=persistent" in journald
+    assert "SystemMaxUse=512M" in journald
     backup_service = (ibkr / "qtrad-ibkr-backup.service.example").read_text()
     restore_service = (ibkr / "qtrad-ibkr-restore-verify.service.example").read_text()
     assert "Requires=qtrad-ibkr-postgres.service" in backup_service
@@ -299,15 +303,86 @@ def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> 
     assert "ExecStop=/usr/bin/docker" not in ingest
 
 
-def test_ibkr_ingest_accepts_authenticated_gateway_listener_shape() -> None:
+def test_ibkr_ingest_accepts_only_the_canonical_gateway_listener() -> None:
     ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
     wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
     host = (ibkr / "verify-host.sh").read_text()
 
-    assert "Gateway API is not listening" in wrapper
-    assert "Gateway API is not localhost-only" not in wrapper
+    assert "qtrad-ibgateway-listener-check" in wrapper
+    assert "gateway-listener-check.sh" in host
     assert "firewall-cmd" in host
     assert "TrustedIPs" in host
+
+
+def test_ibkr_gateway_listener_check_rejects_duplicates_and_wrong_owner(
+    tmp_path: Path,
+) -> None:
+    script = REPOSITORY_ROOT / "ops" / "ibkr" / "gateway-listener-check.sh"
+    bin_dir = tmp_path / "bin"
+    proc_root = tmp_path / "proc"
+    bin_dir.mkdir()
+    (proc_root / "4242").mkdir(parents=True)
+    (bin_dir / "systemctl").write_text(
+        "#!/bin/sh\nprintf '%b\\n' \"$MOCK_GATEWAY_UNITS\"\n", encoding="utf-8"
+    )
+    (bin_dir / "ss").write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'LISTEN 0 5 *:4002 *:* users:((\"java\",pid=4242,fd=1))'\n",
+        encoding="utf-8",
+    )
+    for command in ("systemctl", "ss"):
+        (bin_dir / command).chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "QTRAD_IBKR_PROC_ROOT": str(proc_root),
+    }
+
+    duplicate = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": (
+                "qtrad-ibgateway.service loaded active running canonical\\n"
+                "qtrad-ibgateway-10.49.service loaded active running legacy"
+            ),
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert duplicate.returncode == 69
+    assert "sole active" in duplicate.stderr
+
+    (proc_root / "4242" / "cgroup").write_text(
+        "0::/system.slice/qtrad-ibgateway-10.49.service\n", encoding="utf-8"
+    )
+    wrong_owner = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": "qtrad-ibgateway.service loaded active running canonical",
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert wrong_owner.returncode == 69
+    assert "not owned" in wrong_owner.stderr
+
+    (proc_root / "4242" / "cgroup").write_text(
+        "0::/system.slice/qtrad-ibgateway.service\n", encoding="utf-8"
+    )
+    accepted = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": "qtrad-ibgateway.service loaded active running canonical",
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert accepted.returncode == 0
 
 
 def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:
@@ -324,6 +399,8 @@ def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:
     assert "checkpoint_root" in host
     assert "StartLimitIntervalSec=1h" in ingest
     assert "StartLimitBurst=3" in ingest
+    assert "ExecStartPre=/usr/bin/timeout 120" in ingest
+    assert "qtrad-ibgateway-listener-check" in ingest
     assert "Requires=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service" in ingest
     assert "RequiresMountsFor=/srv/qtrad/postgres" in postgres
     assert "After=docker.service qtrad-ibgateway.service qtrad-ibkr-postgres.service" in ingest
@@ -341,6 +418,8 @@ def test_ibkr_build_and_health_controls_are_durable() -> None:
     assert "docker buildx imagetools inspect" in build
     assert '--tag "$repository:$build_tag"' in build
     assert "QTRAD_IBKR_RESTART_HISTORY_PATH" in health
+    assert "QTRAD_IBKR_MIN_ROOT_FREE_PERCENT" in health
+    assert "root filesystem has less than" in health
     assert "restart_count" in health
     assert "if ((restart_count >= max_gateway_restarts)); then" in health
     assert "SOURCE_DATE_EPOCH" in build
@@ -2207,3 +2286,50 @@ done
     assert values["clock_source_online"] == 1
     assert values["clock_synchronised"] == 1
     assert values["clock_offset_seconds"] == clock_offset
+
+
+def test_ibkr_restore_lock_rejects_a_concurrent_workflow_before_mutation(tmp_path: Path) -> None:
+    script = REPOSITORY_ROOT / "ops" / "ibkr" / "postgres-restore-verify.sh"
+    backup_dir = tmp_path / "backups"
+    backup_dir.mkdir()
+    archive = backup_dir / "qtrad-ibkr-20260812T120000Z.dump"
+    archive.write_bytes(b"fixture")
+    archive.with_suffix(".dump.sha256").write_text("fixture\n", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    command_log = tmp_path / "mutations"
+    for name, body in {
+        "stat": "#!/bin/sh\nprintf '0:10001:640\\n'\n",
+        "sha256sum": (
+            '#!/bin/sh\ncase "$1" in --check) exit 0;; esac\nprintf \'%064d  %s\\n\' 0 "$1"\n'
+        ),
+        "flock": "#!/bin/sh\nexit 1\n",
+        "docker": f"#!/bin/sh\nprintf 'docker %s\\n' \"$*\" >> '{command_log}'\n",
+        "systemctl": f"#!/bin/sh\nprintf 'systemctl %s\\n' \"$*\" >> '{command_log}'\n",
+    }.items():
+        path = fake_bin / name
+        path.write_text(body, encoding="utf-8")
+        path.chmod(0o755)
+
+    result = subprocess.run(
+        ["bash", str(script), "/bin/true"],
+        env={
+            **os.environ,
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "QTRAD_IBKR_BACKUP_DIR": str(backup_dir),
+            "QTRAD_IBKR_RESTORE_ARCHIVE": str(archive),
+            "QTRAD_IBKR_RESTORE_DATABASE": "qtrad_ibkr_restore_verify_lock_fixture",
+            "QTRAD_IBKR_RESTORE_EVIDENCE_PATH": (
+                "/var/lib/qtrad/ibkr/restore-evidence/lock-fixture.json"
+            ),
+            "QTRAD_IBKR_RUNTIME_GID": "10001",
+            "QTRAD_IBKR_RESTORE_LOCK_PATH": str(tmp_path / "restore.lock"),
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 75
+    assert "another IBKR restore workflow holds" in result.stderr
+    assert not command_log.exists()

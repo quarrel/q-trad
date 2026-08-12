@@ -746,9 +746,12 @@ def test_b3_wiring_is_private_unprivileged_and_order_free() -> None:
     assert "docker image prune" not in deploy
     assert "docker container ls -aq" in deploy
     assert "docker image rm" in deploy
+    assert "docker builder prune --force --filter until=168h" in deploy
     assert 'backup_env_file="/etc/qtrad/ibkr-backup.env"' in deploy
     assert "verify_backup_identity" in deploy
     assert "systemctl enable --now" not in deploy
+    assert "qtrad-ibkr-journald.conf.example" in deploy
+    assert "systemctl restart systemd-journald.service" in deploy
     assert "systemctl restart qtrad-ibkr-api.service qtrad-ibkr-ingest.service" in deploy
     assert "systemctl restart qtrad-ibkr-health.timer qtrad-ibkr-backup.timer" in deploy
     assert "qtrad_ibkr" in backup
@@ -793,6 +796,8 @@ def test_ingest_wrapper_bounds_qualification_arguments(
         fake_bin / "docker",
         f"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{docker_calls}'\n",
     )
+    gateway_listener_check = tmp_path / "gateway-listener-check"
+    _write_executable(gateway_listener_check, "#!/bin/sh\nexit 0\n")
     checkpoint_root = tmp_path / "checkpoints"
     checkpoint_root.mkdir()
     configuration = tmp_path / "capture.json"
@@ -807,6 +812,7 @@ def test_ingest_wrapper_bounds_qualification_arguments(
             "QTRAD_DATABASE_URL": "postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr",
             "QTRAD_IBKR_API_PACKAGE_FINGERPRINT": "b" * 64,
             "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH": "c" * 64,
+            "QTRAD_IBKR_GATEWAY_LISTENER_CHECK": str(gateway_listener_check),
         }
     )
 

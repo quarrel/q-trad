@@ -5,8 +5,13 @@ system_url="${QTRAD_IBKR_SYSTEM_URL:-http://127.0.0.1:8000/api/v1/system}"
 state_dir="${QTRAD_IBKR_HEALTH_STATE_DIR:-/var/lib/qtrad/ibkr}"
 restart_history_path="${QTRAD_IBKR_RESTART_HISTORY_PATH:-${state_dir}/gateway-restarts}"
 max_gateway_restarts="${QTRAD_IBKR_MAX_GATEWAY_RESTARTS_PER_HOUR:-3}"
+min_root_free_percent="${QTRAD_IBKR_MIN_ROOT_FREE_PERCENT:-15}"
 [[ "$max_gateway_restarts" =~ ^[1-9][0-9]*$ ]] || {
     logger -p alert -t qtrad-ibkr-health "invalid Gateway restart budget"
+    exit 2
+}
+[[ "$min_root_free_percent" =~ ^[1-9][0-9]?$ ]] || {
+    logger -p alert -t qtrad-ibkr-health "invalid root filesystem free-space threshold"
     exit 2
 }
 lock_path="${state_dir}/ibkr-healthcheck.lock"
@@ -14,7 +19,15 @@ state_path="${state_dir}/ibkr-healthcheck.state"
 mkdir -p "$state_dir"
 exec 9>"$lock_path"
 flock -n 9 || exit 0
-
+root_used_percent="$(df --output=pcent / | tail -n 1 | tr -dc '0-9')"
+[[ "$root_used_percent" =~ ^[0-9]+$ && "$root_used_percent" -le 100 ]] || {
+    logger -p alert -t qtrad-ibkr-health "root filesystem usage is unavailable"
+    exit 2
+}
+if ((100 - root_used_percent < min_root_free_percent)); then
+    logger -p alert -t qtrad-ibkr-health "root filesystem has less than ${min_root_free_percent}% free"
+    exit 2
+fi
 payload="$(curl --fail --silent --show-error --max-time 10 "$system_url")" || {
     logger -t qtrad-ibkr-health "system endpoint unavailable; no component restart requested"
     exit 1

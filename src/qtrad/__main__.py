@@ -177,6 +177,10 @@ from qtrad.runtime.ibkr_foundation import (
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
+from qtrad.runtime.ibkr_foundation_promotion import (
+    authenticate_ibkr_foundation_promotion,
+    create_ibkr_foundation_confirmatory_promotion,
+)
 from qtrad.runtime.ibkr_historical import (
     build_ibkr_contract_selection_from_files,
     build_ibkr_historical_plan_from_files,
@@ -1018,6 +1022,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_authenticate.add_argument("--bundle", type=Path, required=True)
     foundation_authenticate.add_argument("--receipt", type=Path, required=True)
+    foundation_promote = research_foundation_sub.add_parser(
+        "promote-confirmatory",
+        help="cumulatively replay and create the S8.4 confirmatory authority",
+    )
+    foundation_promote.add_argument("--bundle", type=Path, required=True)
+    foundation_promote.add_argument("--receipt", type=Path, required=True)
+    foundation_promote.add_argument("--authorized-by", required=True)
+    foundation_promote.add_argument("--authorized-at", type=_utc_minute_argument, required=True)
+    foundation_promote.add_argument("--authorization-reference", required=True)
+    foundation_promote.add_argument("--output", type=Path, required=True)
+    foundation_promote.add_argument("--replay-checkpoint-root", type=Path)
+    foundation_promote.add_argument("--workers", type=int, choices=range(1, 9), default=4)
+    foundation_promotion_authenticate = research_foundation_sub.add_parser(
+        "authenticate-promotion",
+        help="authenticate S8.4 without cumulative replay",
+    )
+    foundation_promotion_authenticate.add_argument("--bundle", type=Path, required=True)
+    foundation_promotion_authenticate.add_argument("--receipt", type=Path, required=True)
+    foundation_promotion_authenticate.add_argument("--promotion", type=Path, required=True)
     foundation_readiness = research_foundation_sub.add_parser(
         "readiness", help="report authenticated IBKR historical foundation readiness"
     )
@@ -1048,6 +1071,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_experiment_build.add_argument("--foundation", type=Path, required=True)
     baselines_experiment_build.add_argument("--foundation-receipt", type=Path, required=True)
+    baselines_experiment_build.add_argument("--foundation-promotion", type=Path)
     baselines_experiment_build.add_argument(
         "--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,), required=True
     )
@@ -1057,6 +1081,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_readiness.add_argument("--foundation-receipt", type=Path)
+    baselines_readiness.add_argument("--foundation-promotion", type=Path)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
     baselines_readiness.add_argument("--software-bundle", type=Path)
     baselines_readiness.add_argument("--output", type=Path, required=True)
@@ -1068,11 +1093,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features_verify.add_argument("--foundation-receipt", type=Path)
+    baselines_features_verify.add_argument("--foundation-promotion", type=Path)
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
     baselines_features_verify.add_argument("--feature-set", required=True)
     baselines_features_verify.add_argument("--manifest", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features.add_argument("--foundation-receipt", type=Path)
+    baselines_features.add_argument("--foundation-promotion", type=Path)
     baselines_features.add_argument("--experiment", type=Path, required=True)
     baselines_features.add_argument("--feature-set", required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
@@ -1082,6 +1109,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_oof_build.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_oof_build.add_argument("--foundation-receipt", type=Path)
+    baselines_oof_build.add_argument("--foundation-promotion", type=Path)
     baselines_oof_build.add_argument("--experiment", type=Path, required=True)
     baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
     baselines_oof_build.add_argument(
@@ -2184,6 +2212,53 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "foundation"
+        and args.foundation_command == "promote-confirmatory"
+    ):
+        authority = create_ibkr_foundation_confirmatory_promotion(
+            args.bundle,
+            receipt=args.receipt,
+            output=args.output,
+            authorized_by=args.authorized_by,
+            authorized_at=args.authorized_at,
+            authorization_reference=args.authorization_reference,
+            replay_checkpoint_root=args.replay_checkpoint_root,
+            workers=args.workers,
+        )
+        print(
+            json.dumps(
+                {
+                    "contract": "qtrad-ibkr-foundation-confirmatory-promotion-v1",
+                    "foundation_build_sha256": authority.foundation_bundle_id,
+                    "promotion_sha256": authority.promotion_sha256,
+                    "output": str(args.output.resolve()),
+                    "state": "CONFIRMATORY_PROMOTED",
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
+        and args.foundation_command == "authenticate-promotion"
+    ):
+        authority = authenticate_ibkr_foundation_promotion(
+            args.bundle,
+            receipt=args.receipt,
+            promotion=args.promotion,
+        )
+        print(
+            json.dumps(
+                {
+                    "foundation_build_sha256": authority.foundation_bundle_id,
+                    "promotion_sha256": authority.promotion_sha256,
+                    "state": "CONFIRMATORY_PROMOTED",
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "foundation"
         and args.foundation_command == "readiness"
     ):
         _report_ibkr_foundation_readiness(args.bundle, receipt_path=args.receipt)
@@ -2196,6 +2271,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             profile=args.profile,
             foundation_path=args.foundation,
             foundation_receipt_path=args.foundation_receipt,
+            foundation_promotion_path=args.foundation_promotion,
             output_path=args.output,
         )
     elif (
@@ -2209,6 +2285,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 foundation_receipt_path=args.foundation_receipt,
+                foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 software_bundle_path=args.software_bundle,
                 output_path=args.output,
@@ -2225,6 +2302,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 foundation_receipt_path=args.foundation_receipt,
+                foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 feature_arguments=args.feature_manifest,
                 output_path=args.output,
@@ -2444,6 +2522,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 foundation_receipt_path=args.foundation_receipt,
+                foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 feature_set_name=args.feature_set,
                 output_path=args.output,
@@ -2460,6 +2539,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 foundation_bundle_path=args.foundation_bundle,
                 foundation_receipt_path=args.foundation_receipt,
+                foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 feature_set_name=args.feature_set,
                 manifest_path=args.manifest,
@@ -2520,10 +2600,20 @@ def _build_ibkr_historical_experiment_cli(
     profile: str,
     foundation_path: Path,
     foundation_receipt_path: Path,
+    foundation_promotion_path: Path | None,
     output_path: Path,
 ) -> None:
     if profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
         raise ValueError("experiment-build supports only the fixed IBKR historical profile")
+    promotion_authority = (
+        authenticate_ibkr_foundation_promotion(
+            foundation_path,
+            receipt=foundation_receipt_path,
+            promotion=foundation_promotion_path,
+        )
+        if foundation_promotion_path is not None
+        else None
+    )
     foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
         foundation_path, receipt=foundation_receipt_path
     )
@@ -2537,6 +2627,12 @@ def _build_ibkr_historical_experiment_cli(
         foundation,
         foundation_bundle_id=foundation_bundle_id,
         adapter_identity=adapter_identity,
+        evidence_class=(
+            EvidenceClass.CONFIRMATORY
+            if promotion_authority is not None
+            else EvidenceClass.IMPLEMENTATION
+        ),
+        promotion_authority=promotion_authority,
     )
     write_r2_experiment(output_path, experiment)
     print(json.dumps({"experiment": str(output_path)}, sort_keys=True))
@@ -2551,6 +2647,7 @@ async def _report_r2_readiness(
     software_bundle_path: Path | None,
     output_path: Path,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
@@ -2558,6 +2655,7 @@ async def _report_r2_readiness(
         clock,
         foundation_bundle_path=foundation_bundle_path,
         foundation_receipt_path=foundation_receipt_path,
+        foundation_promotion_path=foundation_promotion_path,
         experiment=experiment,
     )
     software_verified = False
@@ -2593,6 +2691,7 @@ async def _load_r2_foundation_inputs(
     outcome_blind: bool = False,
     holdout_target_source: object | None = None,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> VerifiedFoundation | R2FoundationInputs:
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         return await verify_foundation_bundle(
@@ -2601,12 +2700,21 @@ async def _load_r2_foundation_inputs(
             clock=clock,
         )
 
-    if experiment.evidence_class is EvidenceClass.CONFIRMATORY:
-        raise ValueError(
-            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
-        )
     if foundation_receipt_path is None:
         raise ValueError("IBKR historical R2 work requires a Stage 8 verification receipt")
+    promotion_authority = None
+    if experiment.evidence_class is EvidenceClass.CONFIRMATORY:
+        if foundation_promotion_path is None:
+            raise ValueError(
+                "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+            )
+        promotion_authority = authenticate_ibkr_foundation_promotion(
+            foundation_bundle_path,
+            receipt=foundation_receipt_path,
+            promotion=foundation_promotion_path,
+        )
+    elif foundation_promotion_path is not None:
+        raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
     if outcome_blind:
         from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
@@ -2634,6 +2742,7 @@ async def _load_r2_foundation_inputs(
         foundation_bundle_id=foundation_bundle_id,
         adapter_identity=adapter_identity,
         evidence_class=experiment.evidence_class,
+        promotion_authority=promotion_authority,
     )
     if expected.as_json() != experiment.as_json():
         raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
@@ -2655,6 +2764,7 @@ async def _build_r2_oof(
     output_path: Path,
     holdout_target_source_path: Path | None,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> None:
     from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
@@ -2667,6 +2777,11 @@ async def _build_r2_oof(
         and experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE
     ):
         raise ValueError("a Stage 8 foundation receipt is only valid for IBKR historical OOF work")
+    if (
+        foundation_promotion_path is not None
+        and experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE
+    ):
+        raise ValueError("a Stage 8 promotion is only valid for IBKR historical OOF work")
     if holdout_target_source_path is None:
         raise ValueError("OOF build requires an authenticated holdout target source")
     holdout_target_source = R2HoldoutTargetSource.from_json(
@@ -2685,6 +2800,7 @@ async def _build_r2_oof(
             clock,
             foundation_bundle_path=foundation_bundle_path,
             foundation_receipt_path=foundation_receipt_path,
+            foundation_promotion_path=foundation_promotion_path,
             experiment=experiment,
             outcome_blind=True,
             holdout_target_source=holdout_target_source,
@@ -2713,6 +2829,11 @@ async def _build_r2_oof(
                 if foundation_receipt_path is not None
                 else {}
             ),
+            **(
+                {"foundation_promotion": foundation_promotion_path}
+                if foundation_promotion_path is not None
+                else {}
+            ),
             "experiment": experiment_path,
             **feature_paths,
         },
@@ -2730,6 +2851,7 @@ async def _materialise_r2_features(
     feature_set_name: str,
     output_path: Path,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
@@ -2737,6 +2859,7 @@ async def _materialise_r2_features(
         clock,
         foundation_bundle_path=foundation_bundle_path,
         foundation_receipt_path=foundation_receipt_path,
+        foundation_promotion_path=foundation_promotion_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
@@ -2794,6 +2917,7 @@ async def _verify_persisted_r2_features(
     feature_set_name: str,
     manifest_path: Path,
     foundation_receipt_path: Path | None = None,
+    foundation_promotion_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
     verified = await _load_r2_foundation_inputs(
@@ -2801,6 +2925,7 @@ async def _verify_persisted_r2_features(
         clock,
         foundation_bundle_path=foundation_bundle_path,
         foundation_receipt_path=foundation_receipt_path,
+        foundation_promotion_path=foundation_promotion_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
@@ -5931,6 +6056,14 @@ async def _ingest_ibkr_native(
             configuration_hash=configuration.configuration_hash,
             started_at=clock.now(),
         )
+        LOGGER.info(
+            "ibkr_capture_session_started",
+            extra={
+                "capture_session_id": str(run_id),
+                "configuration_hash": configuration.configuration_hash,
+                "desired_subscriptions": len(configuration.listings),
+            },
+        )
         await store.seed_native_capture_instruments(configuration.listings)
         for listing in configuration.listings:
             await store.validate_provider_listing(
@@ -5953,6 +6086,13 @@ async def _ingest_ibkr_native(
         capture_session_id = run_id.value
         await adapter.connect()
         await adapter.subscribe(configuration.listings)
+        LOGGER.info(
+            "ibkr_capture_subscriptions_started",
+            extra={
+                "capture_session_id": str(capture_session_id),
+                "desired_subscriptions": len(configuration.listings),
+            },
+        )
         worker.start()
 
         async def persist_health_snapshot() -> None:
@@ -6110,6 +6250,17 @@ async def _ingest_ibkr_native(
                 persisted=final_metrics.persisted,
                 failed=final_metrics.failed,
                 dropped=final_metrics.dropped,
+            )
+            LOGGER.info(
+                "ibkr_capture_session_finished",
+                extra={
+                    "capture_session_id": str(run_id),
+                    "terminal_status": terminal_status,
+                    "records_received": final_metrics.records_received,
+                    "persisted": final_metrics.persisted,
+                    "failed": final_metrics.failed,
+                    "dropped": final_metrics.dropped,
+                },
             )
         if run_id is not None:
             await store.finish_run(
