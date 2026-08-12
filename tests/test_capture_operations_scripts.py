@@ -299,15 +299,86 @@ def test_ibkr_runtime_units_stop_docker_through_the_hardened_shell_context() -> 
     assert "ExecStop=/usr/bin/docker" not in ingest
 
 
-def test_ibkr_ingest_accepts_authenticated_gateway_listener_shape() -> None:
+def test_ibkr_ingest_accepts_only_the_canonical_gateway_listener() -> None:
     ibkr = REPOSITORY_ROOT / "ops" / "ibkr"
     wrapper = (ibkr / "qtrad-ibkr-ingest-wrapper.example").read_text()
     host = (ibkr / "verify-host.sh").read_text()
 
-    assert "Gateway API is not listening" in wrapper
-    assert "Gateway API is not localhost-only" not in wrapper
+    assert "qtrad-ibgateway-listener-check" in wrapper
+    assert "gateway-listener-check.sh" in host
     assert "firewall-cmd" in host
     assert "TrustedIPs" in host
+
+
+def test_ibkr_gateway_listener_check_rejects_duplicates_and_wrong_owner(
+    tmp_path: Path,
+) -> None:
+    script = REPOSITORY_ROOT / "ops" / "ibkr" / "gateway-listener-check.sh"
+    bin_dir = tmp_path / "bin"
+    proc_root = tmp_path / "proc"
+    bin_dir.mkdir()
+    (proc_root / "4242").mkdir(parents=True)
+    (bin_dir / "systemctl").write_text(
+        "#!/bin/sh\nprintf '%b\\n' \"$MOCK_GATEWAY_UNITS\"\n", encoding="utf-8"
+    )
+    (bin_dir / "ss").write_text(
+        "#!/bin/sh\nprintf '%s\\n' 'LISTEN 0 5 *:4002 *:* users:((\"java\",pid=4242,fd=1))'\n",
+        encoding="utf-8",
+    )
+    for command in ("systemctl", "ss"):
+        (bin_dir / command).chmod(0o755)
+    environment = {
+        **os.environ,
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "QTRAD_IBKR_PROC_ROOT": str(proc_root),
+    }
+
+    duplicate = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": (
+                "qtrad-ibgateway.service loaded active running canonical\\n"
+                "qtrad-ibgateway-10.49.service loaded active running legacy"
+            ),
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert duplicate.returncode == 69
+    assert "sole active" in duplicate.stderr
+
+    (proc_root / "4242" / "cgroup").write_text(
+        "0::/system.slice/qtrad-ibgateway-10.49.service\n", encoding="utf-8"
+    )
+    wrong_owner = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": "qtrad-ibgateway.service loaded active running canonical",
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert wrong_owner.returncode == 69
+    assert "not owned" in wrong_owner.stderr
+
+    (proc_root / "4242" / "cgroup").write_text(
+        "0::/system.slice/qtrad-ibgateway.service\n", encoding="utf-8"
+    )
+    accepted = subprocess.run(
+        ["bash", str(script)],
+        env={
+            **environment,
+            "MOCK_GATEWAY_UNITS": "qtrad-ibgateway.service loaded active running canonical",
+        },
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+    assert accepted.returncode == 0
 
 
 def test_ibkr_host_and_service_templates_keep_runtime_boundaries() -> None:

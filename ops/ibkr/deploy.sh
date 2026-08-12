@@ -304,6 +304,7 @@ fi
 install -d -o 10001 -g 10001 -m 0750 "$checkpoint_root"
 
 install -D -m 0750 "$script_dir/qtrad-ibkr-ingest-wrapper.example" /usr/local/sbin/qtrad-ibkr-ingest
+install -D -m 0750 "$script_dir/gateway-listener-check.sh" /usr/local/sbin/qtrad-ibgateway-listener-check
 install -D -m 0750 "$script_dir/qtrad-ibkr-api-wrapper.example" /usr/local/sbin/qtrad-ibkr-api
 install -D -m 0750 "$script_dir/healthcheck.sh" /usr/local/sbin/qtrad-ibkr-healthcheck
 install -D -m 0750 "$script_dir/postgres-backup.sh" /usr/local/sbin/qtrad-ibkr-postgres-backup

@@ -497,7 +497,7 @@ class IbkrSession:
             recovery_action = IbkrRecoveryAction.OPERATOR
         elif "GATEWAY_RESTART_REQUIRED" in self._reason_codes:
             recovery_action = IbkrRecoveryAction.RESTART_GATEWAY
-        elif "IBKR_PORT_RESET" in self._reason_codes:
+        elif {"IBKR_PORT_RESET", "API_SOCKET_CLOSED"} & self._reason_codes:
             recovery_action = IbkrRecoveryAction.RESTART_ADAPTER
         return IbkrSessionSnapshot(
             state=self._state,

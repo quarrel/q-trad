@@ -24,15 +24,13 @@ for unit in pmcd.service pmlogger.service pmie.service; do
 done
 # The official Gateway listener may bind to wildcard addresses. Effective localhost-only
 # access is enforced by TrustedIPs=127.0.0.1 (gateway-config-check.sh) and firewalld
-# denying 4002/tcp; retain a listener check so a stopped Gateway cannot pass silently.
-api_listeners="$(ss -H -ltn '( sport = :4002 )')" || {
-    echo "could not inspect Gateway API listener" >&2
+# denying 4002/tcp. The listener must belong to the one canonical Gateway service.
+gateway_listener_check="${QTRAD_IBKR_GATEWAY_LISTENER_CHECK:-$script_dir/gateway-listener-check.sh}"
+[[ "$gateway_listener_check" == /* && -x "$gateway_listener_check" ]] || {
+    echo "Gateway listener ownership checker is missing or not executable: $gateway_listener_check" >&2
     exit 1
 }
-[[ -n "$api_listeners" ]] || {
-    echo "Gateway API is not listening on port 4002" >&2
-    exit 1
-}
+"$gateway_listener_check"
 if firewall-cmd --query-port=4002/tcp; then
     echo "Gateway API is exposed by firewalld" >&2
     exit 1

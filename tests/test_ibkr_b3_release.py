@@ -793,6 +793,8 @@ def test_ingest_wrapper_bounds_qualification_arguments(
         fake_bin / "docker",
         f"#!/bin/sh\nprintf '%s\\n' \"$*\" > '{docker_calls}'\n",
     )
+    gateway_listener_check = tmp_path / "gateway-listener-check"
+    _write_executable(gateway_listener_check, "#!/bin/sh\nexit 0\n")
     checkpoint_root = tmp_path / "checkpoints"
     checkpoint_root.mkdir()
     configuration = tmp_path / "capture.json"
@@ -807,6 +809,7 @@ def test_ingest_wrapper_bounds_qualification_arguments(
             "QTRAD_DATABASE_URL": "postgresql+asyncpg://qtrad_ibkr@127.0.0.1:5432/qtrad_ibkr",
             "QTRAD_IBKR_API_PACKAGE_FINGERPRINT": "b" * 64,
             "QTRAD_IBKR_CAPTURE_CONFIGURATION_HASH": "c" * 64,
+            "QTRAD_IBKR_GATEWAY_LISTENER_CHECK": str(gateway_listener_check),
         }
     )
 

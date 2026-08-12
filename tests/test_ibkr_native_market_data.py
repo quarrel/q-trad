@@ -783,3 +783,44 @@ async def test_out_of_coverage_liquid_hours_remain_freshness_required(
     assert "BID_EVIDENCE_MISSING" in health.reason_codes
     assert "ASK_EVIDENCE_MISSING" in health.reason_codes
     assert dict(health.attributes)["liquid_hours_out_of_coverage"] == "ibkr:IBKR_PAPER:eur-usd"
+
+
+@pytest.mark.asyncio
+async def test_full_universe_unknown_hours_health_attributes_remain_bounded(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    listings = tuple(_listing(f"reviewed-market-{index:02d}") for index in range(20))
+    client = _FakeClient(Queue())
+    adapter = _adapter(
+        monkeypatch,
+        client,
+        listings,
+        expected_active_policy=lambda _listing, _observed_at: IbkrMarketActivity.UNKNOWN,
+    )
+    await adapter.connect()
+    await adapter.subscribe(listings)
+
+    health = await adapter.health()
+    attributes = dict(health.attributes)
+
+    assert attributes["liquid_hours_out_of_coverage_count"] == "20"
+    assert attributes["liquid_hours_out_of_coverage"].startswith("count=20;sha256=")
+    assert all(len(value) <= 200 for value in attributes.values())
+
+
+@pytest.mark.asyncio
+async def test_quiet_dead_transport_requests_adapter_restart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    client = _FakeClient(Queue())
+    cast(Any, client).isConnected = lambda: False
+    adapter = _adapter(monkeypatch, client, request_timeout_seconds=0.01)
+    await _connect_and_subscribe(adapter, _listing())
+
+    with pytest.raises(capability.IbkrConnectionIntegrityError, match="socket_not_connected"):
+        await anext(adapter.records())
+
+    health = await adapter.health()
+    assert "API_SOCKET_CLOSED" in health.reason_codes
+    assert health.recovery_action is native.RecoveryAction.RESTART_ADAPTER
+    assert dict(health.attributes)["socket_connected"] == "false"

@@ -6,7 +6,7 @@ import asyncio
 import hashlib
 import json
 from collections import OrderedDict, deque
-from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
@@ -323,6 +323,9 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
 
     async def health(self) -> AdapterHealth:
         observed_at = self._received_time()
+        transport_failure = self._transport_failure_reason()
+        if transport_failure is not None:
+            self._mark_transport_closed(transport_failure)
         snapshot = self._session.snapshot()
         reasons = set(snapshot.reason_codes)
         if self._callbacks.overflowed.is_set():
@@ -428,15 +431,18 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
             ("expected_active_subscriptions", str(sum(expected_active.values()))),
             (
                 "liquid_hours_out_of_coverage",
-                ",".join(
-                    sorted(
-                        listing_id
-                        for listing_id, status in activity.items()
-                        if status is IbkrMarketActivity.UNKNOWN
-                    )
-                )
-                or "none",
+                _bounded_listing_summary(
+                    listing_id
+                    for listing_id, status in activity.items()
+                    if status is IbkrMarketActivity.UNKNOWN
+                ),
             ),
+            (
+                "liquid_hours_out_of_coverage_count",
+                str(sum(status is IbkrMarketActivity.UNKNOWN for status in activity.values())),
+            ),
+            ("socket_connected", str(self._socket_connected()).lower()),
+            ("reader_thread_alive", str(self._reader_thread_alive()).lower()),
             ("callback_queue_capacity", "50000"),
             ("superseded_callbacks", str(snapshot.superseded_callbacks)),
             ("unknown_request_callbacks", str(self._unknown_request_callbacks)),
@@ -993,6 +999,15 @@ class IbkrNativeMarketDataAdapter(OfficialIbkrCapabilityAdapter, MarketDataAdapt
     def _raise_if_terminal(self) -> None:
         if self._terminal_error is not None:
             raise self._terminal_error
+
+
+def _bounded_listing_summary(listing_ids: Iterable[str]) -> str:
+    joined = ",".join(sorted(listing_ids))
+    if not joined:
+        return "none"
+    if len(joined) <= 200:
+        return joined
+    return f"count={joined.count(',') + 1};sha256={hashlib.sha256(joined.encode()).hexdigest()}"
 
 
 def _review_candidate(

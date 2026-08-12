@@ -292,3 +292,15 @@ def test_system_message_from_superseded_generation_is_ignored() -> None:
     assert session.state == IbkrSessionState.CONNECTED
     assert session.snapshot().superseded_callbacks == 1
     assert session.snapshot().reason_codes == ("SUPERSEDED_GENERATION",)
+
+
+def test_socket_closure_remains_an_adapter_restart_until_a_new_connection() -> None:
+    session = _connected_session()
+
+    decision = session.mark_socket_closed()
+    snapshot = session.snapshot()
+
+    assert decision.action is IbkrRecoveryAction.RESTART_ADAPTER
+    assert snapshot.recovery_action is IbkrRecoveryAction.RESTART_ADAPTER
+    assert snapshot.active_subscriptions == 0
+    assert "API_SOCKET_CLOSED" in snapshot.reason_codes
