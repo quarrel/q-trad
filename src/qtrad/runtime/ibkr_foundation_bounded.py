@@ -81,7 +81,7 @@ _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
     "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
 )
 _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "c7cc4139e11609280ce1458960d4aea0c66a2a455306210379864d26ef4b8951"
+    "8763f33a5f19e64aa7d05995b8423cfd99f21471842344d04b62ad266c06c926"
 )
 _MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
@@ -737,6 +737,25 @@ class _ReplayCheckpoint:
         parent = self.root / kind
         parent.mkdir(parents=True, exist_ok=True)
         return parent / f"part-{index:06d}"
+
+
+def prepare_stage8_replay_checkpoint(
+    root: Path | None,
+    *,
+    provider_manifest_sha256: str,
+    provider_dataset_sha256: str,
+    configuration_id: str,
+    published_bundle_sha256: str,
+) -> None:
+    """Initialize or authenticate replay checkpoints before expensive source replay."""
+
+    _ReplayCheckpoint(
+        root,
+        provider_manifest_sha256=provider_manifest_sha256,
+        provider_dataset_sha256=provider_dataset_sha256,
+        configuration_id=configuration_id,
+        published_bundle_sha256=published_bundle_sha256,
+    )
 
 
 def _implementation_sha256() -> str:

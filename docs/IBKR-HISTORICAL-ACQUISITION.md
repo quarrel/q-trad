@@ -1123,11 +1123,16 @@ The retained Stage 8 handoff is therefore:
 ```bash
 uv run qtrad research foundation verify \
   --bundle <foundation.json> \
-  --receipt-output <new-verification-receipt.json>
+  --receipt-output <new-verification-receipt.json> \
+  --replay-checkpoint-root <new-or-matching-verifier-replay-checkpoint-directory>
 uv run qtrad research foundation authenticate \
   --bundle <foundation.json> \
   --receipt <verification-receipt.json>
 ```
+
+The replay checkpoint is a verifier cache bound to the exact published foundation. It must be a
+new directory or one previously created by `foundation verify`; a retained `foundation build
+--checkpoint-root` is a distinct construction cache and cannot be reused here.
 
 Pass that same receipt as `--foundation-receipt` to IBKR historical experiment and
 R2 commands. Ordinary authentication rehashes the exact provider/foundation child

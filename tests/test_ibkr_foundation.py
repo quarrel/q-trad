@@ -1617,6 +1617,45 @@ def test_bounded_foundation_parallel_derivation_matches_generic_across_chunk_sea
     ) == expected_ids
 
 
+def test_bounded_replay_rejects_construction_checkpoint_before_source_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    construction_checkpoint = tmp_path / "construction-checkpoint"
+    bundle = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=provider_manifest,
+        configuration=configuration,
+        checkpoint_root=construction_checkpoint,
+        workers=1,
+    )
+
+    def reject_source_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("provider-history replay started")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_source_replay,
+    )
+    with pytest.raises(
+        ValueError,
+        match="Stage 8 replay checkpoint identity does not match this verification",
+    ):
+        verify_ibkr_foundation(
+            bundle,
+            replay_checkpoint_root=construction_checkpoint,
+            workers=1,
+        )
+
+
 def test_bounded_replay_reuses_verified_parts_and_reports_exact_divergence(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -490,7 +490,9 @@ git diff --check
 
 From a detached exact-head worktree:
 
-1. run the new deep `foundation verify` **once** against the S8.2-published foundation;
+1. run the new deep `foundation verify` **once** against the S8.2-published foundation, using a
+   new or matching verifier replay-checkpoint directory rather than the retained construction
+   checkpoint;
 2. write the receipt create-only;
 3. run `foundation authenticate` and prove it is cheap;
 4. record exact manifest, build, receipt, verifier, and provider identities;
