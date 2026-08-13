@@ -3179,8 +3179,18 @@ def _build_provider_history(
         source_manifest=historical_result_path,
         source_artifact=source_artifact,
         availability_delay=availability_delay,
-        verification_receipt=verification_receipt_path,
     )
+    print(
+        json.dumps(
+            {
+                "manifest": str(manifest_path),
+                "status": "PUBLISHED_UNVERIFIED",
+            },
+            sort_keys=True,
+        ),
+        flush=True,
+    )
+    verify_provider_history(manifest_path, receipt_output=verification_receipt_path)
     evidence = authenticate_provider_history(manifest_path, receipt=verification_receipt_path)
     dataset = evidence.dataset
     print(
@@ -3192,6 +3202,7 @@ def _build_provider_history(
                 "dataset_sha256": dataset.dataset_sha256,
                 "availability_delay": dataset.availability_policy.delay_text,
                 "rows": dataset.row_count,
+                "status": "VERIFIED",
                 "verified": True,
             },
             sort_keys=True,

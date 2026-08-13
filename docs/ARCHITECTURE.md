@@ -97,12 +97,14 @@ A versioned foundation availability selector consumes that field without writing
 native `received_at` or `persisted_at`; the native selector continues to use measured lineage.
 
 
-The durable provider-history handoff is one deep Stage 7 verification followed by a create-only,
-configuration-independent receipt. The receipt binds the exact provider manifest, dataset and Stage 6
-identities, availability policy, semantic summaries and claim-scoped verifier check set. Ordinary
-consumers authenticate the unchanged closure and receipt without decoding Parquet rows or replaying
-Stage 6; explicit re-verification and confirmatory cumulative replay remain separate operations.
-`foundation build` accepts this receipt as its immediate Stage 7 authority.
+The durable provider-history handoff atomically publishes a structurally authenticated
+`PUBLISHED_UNVERIFIED` closure before one independent deep Stage 7 verification creates its
+configuration-independent receipt. Semantic-verification or receipt-write failure retains the unchanged
+closure but grants no downstream authority. The receipt binds the exact provider manifest, dataset and
+Stage 6 identities, availability policy, semantic summaries and claim-scoped verifier check set. Ordinary
+consumers authenticate the unchanged closure and receipt without decoding Parquet rows or replaying Stage
+6; explicit re-verification and confirmatory cumulative replay remain separate operations. `foundation
+build` accepts this receipt as its immediate Stage 7 authority.
 
 The durable IBKR historical foundation handoff is:
 

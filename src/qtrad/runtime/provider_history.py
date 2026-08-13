@@ -135,9 +135,8 @@ def publish_provider_history(
     source_artifact: ProviderHistorySource,
     dataset: ProviderHistoricalDataset | None = None,
     availability_delay: timedelta | None = None,
-    verification_receipt: Path | None = None,
 ) -> Path:
-    """Stage, verify once, and atomically create one provider-history closure."""
+    """Stage, authenticate structurally, and atomically publish one closure."""
     if dataset is None:
         if availability_delay is None:
             raise ValueError("availability delay is required when dataset is not supplied")
@@ -154,17 +153,6 @@ def publish_provider_history(
     destination = _absolute_output_path(output_directory)
     _require_new_output_directory(destination)
     source_root = _require_file(source_manifest, "IBKR historical result manifest").parent
-    receipt_path = (
-        _absolute_output_path(verification_receipt) if verification_receipt is not None else None
-    )
-    if receipt_path is not None:
-        if receipt_path.exists():
-            raise FileExistsError(f"provider-history path already exists: {receipt_path}")
-        if receipt_path.is_relative_to(destination) or receipt_path.is_relative_to(source_root):
-            raise ValueError(
-                "provider-history receipt cannot be written inside an authenticated closure"
-            )
-
     staging = Path(
         tempfile.mkdtemp(
             prefix=f".{destination.name}.staging-",
@@ -179,22 +167,9 @@ def publish_provider_history(
             dataset=dataset,
             availability_policy=policy,
         )
-        verification = _verify_provider_history(staged_manifest)
-        if verification.dataset.dataset_sha256 != built_dataset.dataset_sha256:
-            raise RuntimeError("provider-history changed between staging and verification")
-        receipt_document = (
-            provider_history_verification_receipt(
-                staged_manifest,
-                _source_evidence(staged_manifest, verification),
-            )
-            if receipt_path is not None
-            else None
-        )
-        receipt_bytes = (
-            canonical_json_bytes(receipt_document) if receipt_document is not None else None
-        )
-        if receipt_bytes is not None and len(receipt_bytes) > _MAX_VERIFICATION_RECEIPT_BYTES:
-            raise ValueError("provider-history verification receipt exceeds its byte bound")
+        staged_dataset = verify_provider_history_file_only(staged_manifest)
+        if staged_dataset.dataset_sha256 != built_dataset.dataset_sha256:
+            raise RuntimeError("provider-history changed during staging")
         if destination.exists():
             raise FileExistsError(f"provider-history output already exists: {destination}")
         os.rename(staging, destination)
@@ -202,10 +177,6 @@ def publish_provider_history(
         if staging.exists():
             shutil.rmtree(staging)
         raise
-
-    if receipt_path is not None:
-        assert receipt_bytes is not None
-        _write_create_only(receipt_path, receipt_bytes)
     return destination / _MANIFEST_NAME
 
 

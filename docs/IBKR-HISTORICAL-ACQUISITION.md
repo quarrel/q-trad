@@ -854,9 +854,10 @@ revocation.
 
 **Form:** research-input pull request.
 
-**Software status:** Provider-history construction, one-pass receipt persistence, explicit deep
-re-verification and cheap receipt authentication are implemented. The retained Stage 7 dataset still
-needs the operational create-only S7.1 receipt before an existing Stage 8 publication can adopt it.
+**Software status:** Provider-history construction now performs only bounded structural closure
+checks before atomic publication. The normal command then runs one independent semantic verification,
+persists its create-only receipt and proves cheap authentication. The retained Stage 7 dataset still needs
+the operational create-only receipt to finish successfully before existing Stage 8 variants adopt it.
 
 Commands:
 
@@ -876,10 +877,13 @@ qtrad research observations authenticate-provider-history \
   --receipt <path>
 ```
 
-The builder consumes only independently verified aggregate results, performs the Stage 7 semantic
-verification once, publishes the exact closure, and then writes the receipt create-only. A receipt-write
-failure leaves the immutable provider-history closure present but unclaimed. Receipt files must remain
-outside both the provider-history and embedded Stage 6 closures.
+The builder consumes only independently verified aggregate results and writes the Stage 7 transformation
+once. Bounded canonical-manifest, exact-tree, regular-file, hash, schema and Parquet-footer checks guard
+the staging rename without reconstructing every semantic row. The command reports
+`PUBLISHED_UNVERIFIED` after atomic publication, then `VERIFIED` only after one independent replay,
+create-only receipt persistence and authentication. Semantic-verification or receipt-write failure leaves
+the immutable closure present but unclaimed. Receipt files must remain outside both the provider-history
+and embedded Stage 6 closures.
 
 The availability selector union becomes:
 
