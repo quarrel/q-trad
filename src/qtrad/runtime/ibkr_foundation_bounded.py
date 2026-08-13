@@ -70,6 +70,7 @@ from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.research import ObservationDataset, ObservationRow
 from qtrad.runtime.provider_history import (
+    VerifiedProviderHistoryRows,
     provider_history_source_verification_receipt,
     read_provider_history_source_verification_receipt,
 )
@@ -81,7 +82,7 @@ _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
     "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
 )
 _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "5adb9aef36746f1f718c1fd041ced6ffada3e262bb544940e77aac1b5b1b2204"
+    "83e51f989f9fd8c99bd7595fe83e8978cb17a8f6cdaf183e6148324aa6fb3ab1"
 )
 _MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
@@ -1176,6 +1177,18 @@ def _adapted_instrument_rows(
     instrument: str,
     source_dataset_id: str,
 ) -> Iterator[ObservationRow]:
+    if isinstance(rows, VerifiedProviderHistoryRows):
+        ordered = sorted(rows.partitions, key=lambda part: part.path.as_posix())
+        selected = [part for part in ordered if part.reference.key[0] == instrument]
+        if selected:
+            start = ordered.index(selected[0])
+            if ordered[start : start + len(selected)] != selected:
+                raise ValueError("provider-history instrument partitions are not contiguous")
+            offset = sum(part.row_count for part in ordered[:start])
+            return (
+                _adapt_observation(row, source_dataset_id, position)
+                for position, row in enumerate(rows.iter_instrument(instrument), offset + 1)
+            )
     positioned = cast(
         Callable[[str], Iterator[tuple[ProviderHistoricalObservation, int]]] | None,
         getattr(rows, "iter_instrument_with_positions", None),
