@@ -207,6 +207,8 @@ Run checks in proportion to the change:
   parallelise that lane without per-worker database isolation. Use `ops/dev/verify.sh` rather than
   reproducing its selections manually; and
 - credential-gated or endurance checks only when their behaviour is under review.
+- For elapsed timing in development or operational shell runs, use Bash's `time` keyword or epoch
+  timestamp arithmetic. The slim runtime image does not install `/usr/bin/time`.
 
 Update active documents only when their current claims change. Add or supersede an ADR for a durable
 architectural decision, not ordinary implementation detail or a reversible model experiment.
