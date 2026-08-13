@@ -57,6 +57,7 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalObservation,
 )
+from qtrad.runtime import ibkr_foundation_bounded as bounded_foundation_runtime
 from qtrad.runtime import provider_history as provider_history_runtime
 from qtrad.runtime.ibkr_results import (
     IbkrHistoricalResultStream,
@@ -862,6 +863,25 @@ def test_provider_history_orders_hashed_partition_paths(tmp_path: Path) -> None:
         dataset=dataset,
     )
     verify_provider_history(provider_manifest)
+
+    rows = read_provider_history_source_evidence(provider_manifest).observations
+    assert isinstance(rows, provider_history_runtime.VerifiedProviderHistoryRows)
+    offset = 0
+    expected_start: dict[str, int] = {}
+    for _path, partition in sorted(zip(dataset_paths, dataset.partitions, strict=True)):
+        expected_start.setdefault(partition.instrument_id, offset + 1)
+        offset += partition.row_count
+    for instrument in rows.instruments:
+        first = next(
+            bounded_foundation_runtime._adapted_instrument_rows(
+                rows,
+                None,
+                instrument,
+                dataset.dataset_sha256,
+            )
+        )
+        assert first.global_position == expected_start[instrument]
+        assert first.stream_version == expected_start[instrument]
 
 
 def test_provider_history_accepts_maximum_stage6_child_bound() -> None:
