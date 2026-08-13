@@ -65,6 +65,7 @@ from qtrad.runtime.ibkr_results import (
     write_ibkr_historical_result,
 )
 from qtrad.runtime.provider_history import (
+    authenticate_provider_history,
     publish_provider_history,
     read_provider_history_source_evidence,
     verify_provider_history,
@@ -526,6 +527,98 @@ def test_provider_history_rejects_parquet_mutation_and_missing_child(tmp_path: P
         verify_provider_history(second_manifest)
 
 
+def test_provider_history_receipt_is_create_only_and_authentication_is_cheap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    dataset = build_provider_history_dataset(
+        artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+    receipt = tmp_path / "provider-verification-receipt.json"
+    original_verify = provider_history_runtime._verify_provider_history
+    verification_count = 0
+
+    def count_verification(path: Path):
+        nonlocal verification_count
+        verification_count += 1
+        return original_verify(path)
+
+    monkeypatch.setattr(provider_history_runtime, "_verify_provider_history", count_verification)
+    manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=artifact,
+        dataset=dataset,
+        verification_receipt=receipt,
+    )
+    assert verification_count == 1
+
+    def reject_deep_work(*_args: object, **_kwargs: object) -> None:
+        raise AssertionError("deep provider-history verification reached")
+
+    monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", reject_deep_work)
+    monkeypatch.setattr(
+        provider_history_runtime,
+        "_start_provider_history_source_replay",
+        reject_deep_work,
+    )
+    evidence = authenticate_provider_history(manifest, receipt=receipt)
+    assert evidence.dataset == dataset
+    with pytest.raises(FileExistsError):
+        verify_provider_history(manifest, receipt_output=receipt)
+
+
+def test_provider_history_receipt_rejects_changed_verifier_version(tmp_path: Path) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    receipt = tmp_path / "provider-verification-receipt.json"
+    verify_provider_history(manifest, receipt_output=receipt)
+    document = json.loads(receipt.read_bytes())
+    document["verifier_version"] += 1
+    identity = dict(document)
+    identity.pop("receipt_sha256")
+    document["receipt_sha256"] = provider_history_runtime._sha256_json(identity)
+    receipt.write_bytes(canonical_json_bytes(document))
+
+    with pytest.raises(ValueError, match="verifier is unsupported"):
+        authenticate_provider_history(manifest, receipt=receipt)
+
+
+def test_provider_history_receipt_write_failure_leaves_published_closure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    dataset = build_provider_history_dataset(
+        artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+
+    receipt = tmp_path / "provider-verification-receipt.json"
+    original_write = provider_history_runtime._write_create_only
+
+    def reject_receipt_write(path: Path, payload: bytes) -> None:
+        if path == receipt:
+            raise OSError("receipt write failed")
+        original_write(path, payload)
+
+    monkeypatch.setattr(provider_history_runtime, "_write_create_only", reject_receipt_write)
+    with pytest.raises(OSError, match="receipt write failed"):
+        publish_provider_history(
+            tmp_path / "provider",
+            source_manifest=result_manifest,
+            source_artifact=artifact,
+            dataset=dataset,
+            verification_receipt=receipt,
+        )
+    assert (tmp_path / "provider" / "manifest.json").is_file()
+
+
 def test_provider_history_cli_round_trip_arguments() -> None:
     parser = build_parser()
     build_args = parser.parse_args(
@@ -539,6 +632,8 @@ def test_provider_history_cli_round_trip_arguments() -> None:
             "PT5M",
             "--output",
             "/tmp/provider",
+            "--verification-receipt",
+            "/tmp/provider-verification-receipt.json",
         ]
     )
     verify_args = parser.parse_args(
@@ -548,12 +643,28 @@ def test_provider_history_cli_round_trip_arguments() -> None:
             "verify-provider-history",
             "--manifest",
             "/tmp/provider/manifest.json",
+            "--receipt-output",
+            "/tmp/provider-verification-receipt.json",
+        ]
+    )
+    authenticate_args = parser.parse_args(
+        [
+            "research",
+            "observations",
+            "authenticate-provider-history",
+            "--manifest",
+            "/tmp/provider/manifest.json",
+            "--receipt",
+            "/tmp/provider-verification-receipt.json",
         ]
     )
 
     assert build_args.observations_command == "build-provider-history"
     assert build_args.availability_delay == timedelta(minutes=5)
+    assert build_args.verification_receipt == Path("/tmp/provider-verification-receipt.json")
     assert verify_args.observations_command == "verify-provider-history"
+    assert verify_args.receipt_output == Path("/tmp/provider-verification-receipt.json")
+    assert authenticate_args.observations_command == "authenticate-provider-history"
 
 
 def test_provider_history_eligibility_replays_two_chunks_and_excludes_incomplete_instrument() -> (
@@ -824,6 +935,7 @@ def test_provider_history_build_replays_source_before_bounds(
             historical_result_path=result_manifest,
             availability_delay=timedelta(minutes=5),
             output_path=tmp_path / "provider",
+            verification_receipt_path=tmp_path / "provider-verification-receipt.json",
         )
 
 

@@ -165,6 +165,33 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
         )
 
 
+def test_promotion_authenticates_exact_legacy_stage7_verifier_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, receipt, _build = _foundation(tmp_path, monkeypatch, qualifying=True)
+    promotion = tmp_path / "promotion.json"
+    _promote(bundle, receipt, promotion, monkeypatch)
+
+    document = json.loads(promotion.read_bytes())
+    document["stage7"]["provider_verifier_sha256"] = (
+        "fb4b30c9486d45e8ca4bd5e427a79f12c48443a6ef8ac046e0cbc5927b6ee000"
+    )
+    identity = dict(document)
+    identity.pop("promotion_sha256")
+    document["promotion_sha256"] = promotion_runtime._sha(identity)
+    promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
+
+    authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
+
+    document["stage7"]["provider_verifier_sha256"] = "0" * 64
+    identity = dict(document)
+    identity.pop("promotion_sha256")
+    document["promotion_sha256"] = promotion_runtime._sha(identity)
+    promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
+    with pytest.raises(ValueError, match="stage7 binding changed"):
+        authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
+
+
 def test_promoted_confirmatory_ibkr_oof_passes_generic_bundle_verification(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

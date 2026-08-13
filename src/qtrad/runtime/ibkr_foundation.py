@@ -66,6 +66,7 @@ from qtrad.runtime.foundation_bundle import (
 )
 from qtrad.runtime.provider_history import (
     _dataset_from_manifest,
+    authenticate_provider_history,
     read_provider_history_source_evidence,
     verify_provider_history_file_only,
 )
@@ -468,6 +469,7 @@ def write_ibkr_foundation(
     *,
     provider_manifest: Path,
     configuration: FoundationConfig,
+    provider_history_receipt: Path | None = None,
     checkpoint_root: Path | None = None,
     workers: int = 4,
     progress_callback: _ProgressCallback | None = None,
@@ -491,9 +493,13 @@ def write_ibkr_foundation(
         checkpoint_root=checkpoint_root,
         workers=workers,
     )
-    source_evidence = None
+    source_evidence = (
+        authenticate_provider_history(provider_manifest, receipt=provider_history_receipt)
+        if provider_history_receipt is not None
+        else None
+    )
     observation_capture = None
-    if checkpoint_root is not None and bounded:
+    if checkpoint_root is not None and bounded and source_evidence is None:
         from qtrad.runtime.ibkr_foundation_bounded import (
             prepare_stage8_observation_capture,
             read_stage8_source_verification,
@@ -846,6 +852,7 @@ def verify_ibkr_foundation(
     path: Path,
     *,
     replay_checkpoint_root: Path | None = None,
+    provider_history_receipt: Path | None = None,
     workers: int = 4,
     receipt_output: Path | None = None,
 ) -> IBKRFoundationBuild:
@@ -864,6 +871,11 @@ def verify_ibkr_foundation(
             raise ValueError(
                 "verification receipt cannot be written inside an authenticated closure"
             )
+    source_evidence = (
+        authenticate_provider_history(authenticated.provider_path, receipt=provider_history_receipt)
+        if provider_history_receipt is not None
+        else None
+    )
     if authenticated.provider_dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
         from qtrad.runtime.ibkr_foundation_bounded import (
             prepare_stage8_replay_checkpoint,
@@ -880,8 +892,8 @@ def verify_ibkr_foundation(
             configuration_id=authenticated.configuration.configuration_id,
             published_bundle_sha256=published_bundle_sha256,
         )
-        source_evidence = (
-            read_stage8_replay_source_verification(
+        if source_evidence is None and replay_checkpoint_root is not None:
+            source_evidence = read_stage8_replay_source_verification(
                 replay_checkpoint_root,
                 provider_manifest=authenticated.provider_path,
                 provider_manifest_sha256=authenticated.provider_manifest_sha256,
@@ -889,9 +901,6 @@ def verify_ibkr_foundation(
                 configuration_id=authenticated.configuration.configuration_id,
                 published_bundle_sha256=published_bundle_sha256,
             )
-            if replay_checkpoint_root is not None
-            else None
-        )
         if source_evidence is None:
             source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
             if replay_checkpoint_root is not None:
@@ -913,7 +922,8 @@ def verify_ibkr_foundation(
             workers=workers,
         )
     else:
-        source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
+        if source_evidence is None:
+            source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
         replay = build_ibkr_foundation(source_evidence, authenticated.configuration)
         expected_payload = _build_payload(replay, source_evidence, authenticated.children)
         if expected_payload != authenticated.payload:

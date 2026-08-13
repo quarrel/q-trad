@@ -67,6 +67,7 @@ from qtrad.runtime.ibkr_foundation import (
 from qtrad.runtime.provider_history import (
     VerifiedProviderHistoryRows,
     read_provider_history_source_evidence,
+    verify_provider_history,
 )
 from tests.test_provider_history import _FINGERPRINT, _published_provider_history, _request
 from tests.test_r1_foundation import _config
@@ -326,6 +327,45 @@ def test_stage8_declarations_are_fixed_and_model_independent() -> None:
         == IBKR_CONFIRMATORY_INSTRUMENTS
     )
     assert IBKR_CONFIRMATORY_GROUPS == ("FX", "indices", "commodities")
+
+
+def test_stage8_build_consumes_stage7_receipt_without_source_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(foundation_runtime, "_BOUNDED_PROVIDER_HISTORY_ROWS", 0)
+    _, _, provider_manifest = _published_provider_history(tmp_path)
+    receipt = tmp_path / "provider-verification-receipt.json"
+    verify_provider_history(provider_manifest, receipt_output=receipt)
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=_SHORT_STAGE8_END,
+    )
+
+    def reject_source_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("provider-history source replay reached")
+
+    monkeypatch.setattr(
+        foundation_runtime,
+        "read_provider_history_source_evidence",
+        reject_source_replay,
+    )
+    build = write_ibkr_foundation(
+        tmp_path / "foundation.json",
+        provider_manifest=provider_manifest,
+        provider_history_receipt=receipt,
+        configuration=configuration,
+        checkpoint_root=tmp_path / "checkpoint",
+        workers=1,
+    )
+    assert build.observations.dataset_id
+    verified = verify_ibkr_foundation(
+        tmp_path / "foundation.json",
+        provider_history_receipt=receipt,
+        workers=1,
+    )
+    assert verified.observations.dataset_id == build.observations.dataset_id
 
 
 def test_provider_history_foundation_round_trips_and_replays_children(

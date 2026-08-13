@@ -21,7 +21,10 @@ from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     verify_ibkr_foundation,
 )
-from qtrad.runtime.provider_history import provider_history_verifier_sha256
+from qtrad.runtime.provider_history import (
+    is_provider_history_verifier_sha256_accepted,
+    provider_history_verifier_sha256,
+)
 from qtrad.runtime.r2_bundles import atomic_create
 
 _PROMOTION_CONTRACT = "qtrad-ibkr-foundation-confirmatory-promotion-v1"
@@ -258,7 +261,18 @@ def authenticate_ibkr_foundation_promotion(
     ):
         raise ValueError("IBKR confirmatory promotion verifier is not accepted")
     for name in ("stage6", "stage7", "stage8", "readiness"):
-        if document[name] != bindings[name]:
+        claimed_binding = document[name]
+        if name == "stage7":
+            stage7 = dict(_mapping(claimed_binding, "promotion Stage 7 binding"))
+            verifier_sha256 = _sha256(
+                stage7.get("provider_verifier_sha256"),
+                "promotion Stage 7 verifier identity",
+            )
+            if is_provider_history_verifier_sha256_accepted(verifier_sha256):
+                expected_stage7 = _mapping(bindings[name], "expected Stage 7 binding")
+                stage7["provider_verifier_sha256"] = expected_stage7["provider_verifier_sha256"]
+            claimed_binding = stage7
+        if claimed_binding != bindings[name]:
             raise ValueError(f"IBKR confirmatory promotion {name} binding changed")
     readiness = _mapping(document["readiness"], "promotion readiness")
     if (
