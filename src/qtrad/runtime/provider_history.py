@@ -1326,6 +1326,13 @@ def provider_history_verifier_sha256() -> str:
     )
 
 
+def is_provider_history_verifier_sha256_accepted(value: str) -> bool:
+    return value in {
+        provider_history_verifier_sha256(),
+        _LEGACY_PROVIDER_HISTORY_VERIFIER_SHA256,
+    }
+
+
 def provider_history_source_verification_receipt(
     evidence: ProviderHistorySourceEvidence,
 ) -> dict[str, JsonValue]:
@@ -1440,10 +1447,7 @@ def read_provider_history_source_verification_receipt(
         "provider-history receipt verifier identity",
     )
     _require_digest(verifier_sha256, "provider-history receipt verifier identity")
-    if verifier_sha256 not in {
-        provider_history_verifier_sha256(),
-        _LEGACY_PROVIDER_HISTORY_VERIFIER_SHA256,
-    }:
+    if not is_provider_history_verifier_sha256_accepted(verifier_sha256):
         raise ValueError("provider-history source-verification receipt implementation changed")
     dataset_sha256 = _string(
         receipt["dataset_sha256"],
