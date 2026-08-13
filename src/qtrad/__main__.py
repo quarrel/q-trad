@@ -220,6 +220,7 @@ from qtrad.runtime.ibkr_results import (
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.provider_history import (
+    authenticate_provider_history,
     publish_provider_history,
     verify_provider_history,
 )
@@ -993,11 +994,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--availability-delay", type=_availability_delay_argument, required=True
     )
     provider_history_build.add_argument("--output", type=Path, required=True)
+    provider_history_build.add_argument("--verification-receipt", type=Path, required=True)
     provider_history_verify = research_observations_sub.add_parser(
         "verify-provider-history",
         help="independently verify provider-history observations and their source closure",
     )
     provider_history_verify.add_argument("--manifest", type=Path, required=True)
+    provider_history_verify.add_argument("--receipt-output", type=Path)
+    provider_history_authenticate = research_observations_sub.add_parser(
+        "authenticate-provider-history",
+        help="authenticate provider history from its Stage 7 receipt without semantic replay",
+    )
+    provider_history_authenticate.add_argument("--manifest", type=Path, required=True)
+    provider_history_authenticate.add_argument("--receipt", type=Path, required=True)
     research_foundation = research_sub.add_parser(
         "foundation", help="verify an immutable causal foundation bundle"
     )
@@ -1009,6 +1018,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
     foundation_verify.add_argument("--receipt-output", type=Path)
+    foundation_verify.add_argument("--provider-history-receipt", type=Path)
     foundation_verify.add_argument(
         "--replay-checkpoint-root",
         type=Path,
@@ -1052,6 +1062,7 @@ def build_parser() -> argparse.ArgumentParser:
     foundation_source = foundation_build.add_mutually_exclusive_group(required=True)
     foundation_source.add_argument("--observations-manifest", type=Path)
     foundation_source.add_argument("--provider-history-manifest", type=Path)
+    foundation_build.add_argument("--provider-history-receipt", type=Path)
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
     foundation_build.add_argument("--checkpoint-root", type=Path)
@@ -2153,13 +2164,20 @@ def main(argv: Sequence[str] | None = None) -> None:
             historical_result_path=args.historical_result,
             availability_delay=args.availability_delay,
             output_path=args.output,
+            verification_receipt_path=args.verification_receipt,
         )
     elif (
         args.command == "research"
         and args.research_command == "observations"
         and args.observations_command == "verify-provider-history"
     ):
-        _verify_provider_history(args.manifest)
+        _verify_provider_history(args.manifest, receipt_output=args.receipt_output)
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
+        and args.observations_command == "authenticate-provider-history"
+    ):
+        _authenticate_provider_history(args.manifest, args.receipt)
     elif (
         args.command == "research"
         and args.research_command == "foundation"
@@ -2171,6 +2189,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 observations_manifest_path=args.observations_manifest,
                 provider_history_manifest_path=args.provider_history_manifest,
+                provider_history_receipt_path=args.provider_history_receipt,
                 configuration_path=args.configuration,
                 output_path=args.output,
                 checkpoint_root_path=args.checkpoint_root,
@@ -2201,6 +2220,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 args.bundle,
                 receipt_output=args.receipt_output,
                 replay_checkpoint_root=args.replay_checkpoint_root,
+                provider_history_receipt=args.provider_history_receipt,
             )
         )
     elif (
@@ -3149,6 +3169,7 @@ def _build_provider_history(
     historical_result_path: Path,
     availability_delay: timedelta,
     output_path: Path,
+    verification_receipt_path: Path,
 ) -> None:
     source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
     for _ in source_artifact.iter_request_results():
@@ -3158,16 +3179,19 @@ def _build_provider_history(
         source_manifest=historical_result_path,
         source_artifact=source_artifact,
         availability_delay=availability_delay,
+        verification_receipt=verification_receipt_path,
     )
-    verified = verify_provider_history(manifest_path)
+    evidence = authenticate_provider_history(manifest_path, receipt=verification_receipt_path)
+    dataset = evidence.dataset
     print(
         json.dumps(
             {
-                "contract": verified.CONTRACT,
+                "contract": dataset.CONTRACT,
                 "manifest": str(manifest_path),
-                "dataset_sha256": verified.dataset_sha256,
-                "availability_delay": verified.availability_policy.delay_text,
-                "rows": verified.row_count,
+                "verification_receipt": str(verification_receipt_path.resolve()),
+                "dataset_sha256": dataset.dataset_sha256,
+                "availability_delay": dataset.availability_policy.delay_text,
+                "rows": dataset.row_count,
                 "verified": True,
             },
             sort_keys=True,
@@ -3175,17 +3199,42 @@ def _build_provider_history(
     )
 
 
-def _verify_provider_history(manifest_path: Path) -> None:
-    dataset = verify_provider_history(manifest_path)
+def _verify_provider_history(
+    manifest_path: Path,
+    *,
+    receipt_output: Path | None = None,
+) -> None:
+    dataset = verify_provider_history(manifest_path, receipt_output=receipt_output)
     print(
         json.dumps(
             {
                 "contract": dataset.CONTRACT,
                 "manifest": str(manifest_path),
+                "verification_receipt": (
+                    str(receipt_output.resolve()) if receipt_output is not None else None
+                ),
                 "dataset_sha256": dataset.dataset_sha256,
                 "availability_delay": dataset.availability_policy.delay_text,
                 "rows": dataset.row_count,
                 "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _authenticate_provider_history(manifest_path: Path, receipt_path: Path) -> None:
+    evidence = authenticate_provider_history(manifest_path, receipt=receipt_path)
+    dataset = evidence.dataset
+    print(
+        json.dumps(
+            {
+                "contract": "qtrad-provider-history-authentication-v1",
+                "manifest": str(manifest_path),
+                "receipt": str(receipt_path),
+                "dataset_sha256": dataset.dataset_sha256,
+                "rows": dataset.row_count,
+                "authenticated": True,
             },
             sort_keys=True,
         )
@@ -3198,6 +3247,7 @@ async def _build_foundation_bundle(
     *,
     observations_manifest_path: Path | None,
     provider_history_manifest_path: Path | None,
+    provider_history_receipt_path: Path | None,
     configuration_path: Path,
     output_path: Path,
     checkpoint_root_path: Path | None,
@@ -3205,12 +3255,15 @@ async def _build_foundation_bundle(
 ) -> None:
     if (observations_manifest_path is None) == (provider_history_manifest_path is None):
         raise ValueError("exactly one foundation source must be provided")
+    if provider_history_receipt_path is not None and provider_history_manifest_path is None:
+        raise ValueError("provider-history receipt requires a provider-history source")
     configuration = load_foundation_config(configuration_path)
     if provider_history_manifest_path is not None:
         build = write_ibkr_foundation(
             output_path,
             provider_manifest=provider_history_manifest_path,
             configuration=configuration,
+            provider_history_receipt=provider_history_receipt_path,
             checkpoint_root=checkpoint_root_path,
             workers=workers,
             progress_callback=_stage8_progress,
@@ -3323,6 +3376,7 @@ async def _verify_foundation_bundle(
     *,
     receipt_output: Path | None = None,
     replay_checkpoint_root: Path | None = None,
+    provider_history_receipt: Path | None = None,
 ) -> None:
     if bundle_path.is_file() and not bundle_path.is_symlink():
         try:
@@ -3338,6 +3392,7 @@ async def _verify_foundation_bundle(
             verified = verify_ibkr_foundation(
                 bundle_path,
                 replay_checkpoint_root=replay_checkpoint_root,
+                provider_history_receipt=provider_history_receipt,
                 receipt_output=receipt_output,
             )
             print(
@@ -3355,6 +3410,8 @@ async def _verify_foundation_bundle(
                 )
             )
             return
+    if provider_history_receipt is not None:
+        raise ValueError("--provider-history-receipt requires an IBKR foundation")
     verified = await verify_foundation_bundle(
         root=settings.research_root,
         bundle_path=bundle_path,

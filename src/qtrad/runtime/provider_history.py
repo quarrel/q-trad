@@ -72,6 +72,22 @@ _MAX_FILE_BYTES = 256 * 1024 * 1024
 _MAX_CLOSURE_FILES = 20_100
 _READ_BATCH_ROWS = 8_192
 _SOURCE_VERIFICATION_RECEIPT_CONTRACT = "qtrad-provider-history-source-verification-v1"
+_PROVIDER_HISTORY_VERIFICATION_CONTRACT = "qtrad-provider-history-verification-v1"
+_PROVIDER_HISTORY_VERIFICATION_SCHEMA_VERSION = 1
+_PROVIDER_HISTORY_VERIFIER_CONTRACT = "qtrad-provider-history-semantic-verifier-v1"
+_PROVIDER_HISTORY_VERIFIER_VERSION = 1
+_PROVIDER_HISTORY_COMPLETED_CHECKS = (
+    "manifest-and-closure-bytes",
+    "stage6-plan-result-and-request-replay",
+    "availability-policy-replay",
+    "partition-semantic-replay",
+    "request-evidence-summary",
+    "observation-interval-summary",
+)
+_LEGACY_PROVIDER_HISTORY_VERIFIER_SHA256 = (
+    "fb4b30c9486d45e8ca4bd5e427a79f12c48443a6ef8ac046e0cbc5927b6ee000"
+)
+_MAX_VERIFICATION_RECEIPT_BYTES = 64 * 1024 * 1024
 
 _OBSERVATION_FIELDS = (
     "contract",
@@ -119,8 +135,9 @@ def publish_provider_history(
     source_artifact: ProviderHistorySource,
     dataset: ProviderHistoricalDataset | None = None,
     availability_delay: timedelta | None = None,
+    verification_receipt: Path | None = None,
 ) -> Path:
-    """Stage, verify, and atomically create one provider-history closure."""
+    """Stage, verify once, and atomically create one provider-history closure."""
     if dataset is None:
         if availability_delay is None:
             raise ValueError("availability delay is required when dataset is not supplied")
@@ -137,6 +154,17 @@ def publish_provider_history(
     destination = _absolute_output_path(output_directory)
     _require_new_output_directory(destination)
     source_root = _require_file(source_manifest, "IBKR historical result manifest").parent
+    receipt_path = (
+        _absolute_output_path(verification_receipt) if verification_receipt is not None else None
+    )
+    if receipt_path is not None:
+        if receipt_path.exists():
+            raise FileExistsError(f"provider-history path already exists: {receipt_path}")
+        if receipt_path.is_relative_to(destination) or receipt_path.is_relative_to(source_root):
+            raise ValueError(
+                "provider-history receipt cannot be written inside an authenticated closure"
+            )
+
     staging = Path(
         tempfile.mkdtemp(
             prefix=f".{destination.name}.staging-",
@@ -151,9 +179,22 @@ def publish_provider_history(
             dataset=dataset,
             availability_policy=policy,
         )
-        verified = verify_provider_history(staged_manifest)
-        if verified.dataset_sha256 != built_dataset.dataset_sha256:
+        verification = _verify_provider_history(staged_manifest)
+        if verification.dataset.dataset_sha256 != built_dataset.dataset_sha256:
             raise RuntimeError("provider-history changed between staging and verification")
+        receipt_document = (
+            provider_history_verification_receipt(
+                staged_manifest,
+                _source_evidence(staged_manifest, verification),
+            )
+            if receipt_path is not None
+            else None
+        )
+        receipt_bytes = (
+            canonical_json_bytes(receipt_document) if receipt_document is not None else None
+        )
+        if receipt_bytes is not None and len(receipt_bytes) > _MAX_VERIFICATION_RECEIPT_BYTES:
+            raise ValueError("provider-history verification receipt exceeds its byte bound")
         if destination.exists():
             raise FileExistsError(f"provider-history output already exists: {destination}")
         os.rename(staging, destination)
@@ -161,6 +202,10 @@ def publish_provider_history(
         if staging.exists():
             shutil.rmtree(staging)
         raise
+
+    if receipt_path is not None:
+        assert receipt_bytes is not None
+        _write_create_only(receipt_path, receipt_bytes)
     return destination / _MANIFEST_NAME
 
 
@@ -488,10 +533,34 @@ class _ObservationSummaryBuilder:
         )
 
 
-def verify_provider_history(path: Path) -> ProviderHistoricalDataset:
-    """Verify the complete provider-history and embedded Stage 6 closure from files only."""
+def verify_provider_history(
+    path: Path,
+    *,
+    receipt_output: Path | None = None,
+) -> ProviderHistoricalDataset:
+    """Deeply verify provider history and optionally persist its create-only receipt."""
 
-    return _verify_provider_history(path).dataset
+    manifest = _require_file(path, "provider-history manifest")
+    receipt_path = _absolute_output_path(receipt_output) if receipt_output is not None else None
+    if receipt_path is not None:
+        if receipt_path.exists():
+            raise FileExistsError(f"provider-history path already exists: {receipt_path}")
+        if receipt_path.is_relative_to(manifest.parent):
+            raise ValueError(
+                "provider-history receipt cannot be written inside its authenticated closure"
+            )
+
+    verification = _verify_provider_history(manifest)
+    if receipt_path is not None:
+        receipt = provider_history_verification_receipt(
+            manifest,
+            _source_evidence(manifest, verification),
+        )
+        encoded = canonical_json_bytes(receipt)
+        if len(encoded) > _MAX_VERIFICATION_RECEIPT_BYTES:
+            raise ValueError("provider-history verification receipt exceeds its byte bound")
+        _write_create_only(receipt_path, encoded)
+    return verification.dataset
 
 
 def _verify_provider_history(
@@ -1246,9 +1315,15 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
 
 
 def provider_history_verifier_sha256() -> str:
-    """Return the implementation identity that invalidates semantic receipts."""
+    """Return the claim-scoped semantic verifier identity."""
 
-    return hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+    return _sha256_json(
+        {
+            "contract": _PROVIDER_HISTORY_VERIFIER_CONTRACT,
+            "version": _PROVIDER_HISTORY_VERIFIER_VERSION,
+            "completed_checks": list(_PROVIDER_HISTORY_COMPLETED_CHECKS),
+        }
+    )
 
 
 def provider_history_source_verification_receipt(
@@ -1291,6 +1366,44 @@ def provider_history_source_verification_receipt(
     }
 
 
+def provider_history_verification_receipt(
+    path: Path,
+    evidence: ProviderHistorySourceEvidence,
+) -> dict[str, JsonValue]:
+    """Encode one first-class Stage 7 semantic verification receipt."""
+
+    manifest_path = _require_file(path, "provider-history manifest")
+    manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
+    document = _mapping(
+        _parse_json(manifest_bytes, "provider-history manifest"),
+        "provider-history manifest",
+    )
+    source_reference = _source_reference(document["source_result"])
+    compact = provider_history_source_verification_receipt(evidence)
+    identity: dict[str, JsonValue] = {
+        "contract": _PROVIDER_HISTORY_VERIFICATION_CONTRACT,
+        "schema_version": _PROVIDER_HISTORY_VERIFICATION_SCHEMA_VERSION,
+        "provider_history_contract": PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT,
+        "provider_history_schema_version": PROVIDER_HISTORY_SCHEMA_VERSION,
+        "provider_history_manifest_sha256": sha256_bytes(manifest_bytes),
+        "provider_history_dataset_sha256": evidence.dataset.dataset_sha256,
+        "stage6_plan_sha256": evidence.dataset.plan_sha256,
+        "stage6_runtime_sha256": evidence.dataset.runtime_sha256,
+        "stage6_aggregate_sha256": evidence.dataset.aggregate_sha256,
+        "stage6_result_manifest_sha256": _string(
+            source_reference["bytes_sha256"], "source result manifest identity"
+        ),
+        "availability_policy": evidence.dataset.availability_policy.as_json_value(),
+        "request_evidence": compact["request_evidence"],
+        "observation_summary": compact["observation_summary"],
+        "verifier_contract": _PROVIDER_HISTORY_VERIFIER_CONTRACT,
+        "verifier_version": _PROVIDER_HISTORY_VERIFIER_VERSION,
+        "verifier_identity": provider_history_verifier_sha256(),
+        "completed_checks": list(_PROVIDER_HISTORY_COMPLETED_CHECKS),
+    }
+    return {**identity, "receipt_sha256": _sha256_json(identity)}
+
+
 def _receipt_timestamp(value: object, field: str) -> datetime:
     raw = _string(value, field)
     try:
@@ -1327,7 +1440,10 @@ def read_provider_history_source_verification_receipt(
         "provider-history receipt verifier identity",
     )
     _require_digest(verifier_sha256, "provider-history receipt verifier identity")
-    if verifier_sha256 != provider_history_verifier_sha256():
+    if verifier_sha256 not in {
+        provider_history_verifier_sha256(),
+        _LEGACY_PROVIDER_HISTORY_VERIFIER_SHA256,
+    }:
         raise ValueError("provider-history source-verification receipt implementation changed")
     dataset_sha256 = _string(
         receipt["dataset_sha256"],
@@ -1512,6 +1628,112 @@ def read_provider_history_source_verification_receipt(
     )
 
 
+def authenticate_provider_history(
+    path: Path,
+    *,
+    receipt: Path,
+) -> ProviderHistorySourceEvidence:
+    """Authenticate a Stage 7 receipt without semantic replay or row decoding."""
+
+    receipt_path = _require_file(receipt, "provider-history verification receipt")
+    receipt_bytes = _read_bounded(receipt_path, "provider-history verification receipt")
+    if len(receipt_bytes) > _MAX_VERIFICATION_RECEIPT_BYTES:
+        raise ValueError("provider-history verification receipt exceeds its byte bound")
+    document = _mapping(
+        _parse_json(receipt_bytes, "provider-history verification receipt"),
+        "provider-history verification receipt",
+    )
+    fields = {
+        "contract",
+        "schema_version",
+        "provider_history_contract",
+        "provider_history_schema_version",
+        "provider_history_manifest_sha256",
+        "provider_history_dataset_sha256",
+        "stage6_plan_sha256",
+        "stage6_runtime_sha256",
+        "stage6_aggregate_sha256",
+        "stage6_result_manifest_sha256",
+        "availability_policy",
+        "request_evidence",
+        "observation_summary",
+        "verifier_contract",
+        "verifier_version",
+        "verifier_identity",
+        "completed_checks",
+        "receipt_sha256",
+    }
+    _require_exact_keys(document, fields, "provider-history verification receipt")
+    if receipt_bytes != canonical_json_bytes(cast(Mapping[str, JsonValue], document)):
+        raise ValueError("provider-history verification receipt bytes are not canonical")
+    identity = dict(document)
+    receipt_sha256 = _string(identity.pop("receipt_sha256"), "provider-history receipt identity")
+    if receipt_sha256 != _sha256_json(identity):
+        raise ValueError("provider-history verification receipt identity does not match")
+    if (
+        document["contract"] != _PROVIDER_HISTORY_VERIFICATION_CONTRACT
+        or document["schema_version"] != _PROVIDER_HISTORY_VERIFICATION_SCHEMA_VERSION
+        or document["provider_history_contract"] != PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT
+        or document["provider_history_schema_version"] != PROVIDER_HISTORY_SCHEMA_VERSION
+        or document["verifier_contract"] != _PROVIDER_HISTORY_VERIFIER_CONTRACT
+        or document["verifier_version"] != _PROVIDER_HISTORY_VERIFIER_VERSION
+        or document["verifier_identity"] != provider_history_verifier_sha256()
+        or document["completed_checks"] != list(_PROVIDER_HISTORY_COMPLETED_CHECKS)
+    ):
+        raise ValueError("provider-history verification receipt verifier is unsupported")
+
+    manifest_path = _require_file(path, "provider-history manifest")
+    manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
+    manifest = _mapping(
+        _parse_json(manifest_bytes, "provider-history manifest"),
+        "provider-history manifest",
+    )
+    source_reference = _source_reference(manifest["source_result"])
+    expected = {
+        "provider_history_manifest_sha256": sha256_bytes(manifest_bytes),
+        "provider_history_dataset_sha256": _mapping(
+            manifest["dataset"], "provider-history dataset"
+        )["dataset_sha256"],
+        "stage6_plan_sha256": _mapping(manifest["dataset"], "provider-history dataset")[
+            "plan_sha256"
+        ],
+        "stage6_runtime_sha256": _mapping(manifest["dataset"], "provider-history dataset")[
+            "runtime_sha256"
+        ],
+        "stage6_aggregate_sha256": _mapping(manifest["dataset"], "provider-history dataset")[
+            "aggregate_sha256"
+        ],
+        "stage6_result_manifest_sha256": source_reference["bytes_sha256"],
+        "availability_policy": manifest["availability_policy"],
+    }
+    if any(document[field] != value for field, value in expected.items()):
+        raise ValueError("provider-history verification receipt does not match its closure")
+
+    return read_provider_history_source_verification_receipt(
+        manifest_path,
+        {
+            "contract": _SOURCE_VERIFICATION_RECEIPT_CONTRACT,
+            "provider_verifier_sha256": document["verifier_identity"],
+            "dataset_sha256": document["provider_history_dataset_sha256"],
+            "request_evidence": document["request_evidence"],
+            "observation_summary": document["observation_summary"],
+        },
+    )
+
+
+def _source_evidence(
+    path: Path,
+    verification: _ProviderHistoryVerification,
+) -> ProviderHistorySourceEvidence:
+    return ProviderHistorySourceEvidence(
+        dataset=verification.dataset,
+        observations=_provider_history_rows(path, verification.dataset),
+        source_artifact=verification.source_artifact,
+        request_evidence=verification.request_evidence,
+        observation_summary=verification.observation_summary,
+    )
+
+
 def read_provider_history_source_evidence(
     path: Path,
     *,
@@ -1525,13 +1747,7 @@ def read_provider_history_source_evidence(
         verified_partition_callback=verified_partition_callback,
         source_replay_workers=source_replay_workers,
     )
-    return ProviderHistorySourceEvidence(
-        dataset=verification.dataset,
-        observations=_provider_history_rows(path, verification.dataset),
-        source_artifact=verification.source_artifact,
-        request_evidence=verification.request_evidence,
-        observation_summary=verification.observation_summary,
-    )
+    return _source_evidence(path, verification)
 
 
 @dataclass(frozen=True, slots=True)

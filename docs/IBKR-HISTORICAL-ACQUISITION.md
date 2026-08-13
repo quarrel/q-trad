@@ -854,24 +854,32 @@ revocation.
 
 **Form:** research-input pull request.
 
-**Software status:** Provider-history construction and file-only semantic verification are implemented
-on `main`, and the retained Stage 7 dataset has an existing semantic-verification result. First-class
-receipt persistence and cheap downstream authentication remain the S7.1/S7.2 handoff; the retained
-result alone grants no Stage 8 or R2 authority.
+**Software status:** Provider-history construction, one-pass receipt persistence, explicit deep
+re-verification and cheap receipt authentication are implemented. The retained Stage 7 dataset still
+needs the operational create-only S7.1 receipt before an existing Stage 8 publication can adopt it.
 
-Implement:
+Commands:
 
 ```text
 qtrad research observations build-provider-history \
   --historical-result <manifest> \
   --availability-delay PT5M \
-  --output <directory>
+  --output <directory> \
+  --verification-receipt <new-file>
 
 qtrad research observations verify-provider-history \
-  --manifest <path>
+  --manifest <path> \
+  --receipt-output <new-file>
+
+qtrad research observations authenticate-provider-history \
+  --manifest <path> \
+  --receipt <path>
 ```
 
-The builder consumes only independently verified aggregate results.
+The builder consumes only independently verified aggregate results, performs the Stage 7 semantic
+verification once, publishes the exact closure, and then writes the receipt create-only. A receipt-write
+failure leaves the immutable provider-history closure present but unclaimed. Receipt files must remain
+outside both the provider-history and embedded Stage 6 closures.
 
 The availability selector union becomes:
 
