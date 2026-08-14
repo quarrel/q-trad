@@ -106,16 +106,17 @@ consumers authenticate the unchanged closure and receipt without decoding Parque
 6; explicit re-verification and confirmatory cumulative replay remain separate operations. `foundation
 build` accepts this receipt as its immediate Stage 7 authority.
 
-An authenticated v1 closure can also be repacked create-only into the explicit v2 physical contract
-without replaying Stage 6 or changing the semantic dataset identity. V2 groups observations by
-instrument and calendar month with bounded numbered parts; its separate physical manifest binds paths,
-bytes, encoding, row counts and interval bounds while the original v1 evidence remains unchanged.
-The migration bridge applies the same layout-independent Stage 8 selection to v1 and v2 solely to prove
-equivalence. Once v2 is published, deeply verified, receipted and equivalence-proven, normal Stage 7/8 is
-v2-only: retain v1 only for cheap authentication of existing evidence, use its archived exact commit for
-historical deep verification, and remove the v1 writer and general runtime in the immediate follow-up.
-Ordinary v2 authentication hashes selected physical parts but reads neither unselected parts nor Stage 6
-result children. Explicit verification and confirmatory promotion retain complete audit and semantic replay.
+An authenticated v1 closure can be repacked create-only into the explicit v2 physical contract without
+replaying Stage 6 or changing semantic dataset identity. V2 groups observations by instrument and
+calendar month with bounded numbered parts; its separate physical manifest binds paths, bytes, encoding,
+row counts and interval bounds while the original v1 evidence remains unchanged. The migration bridge
+applies the same layout-independent Stage 8 selection to v1 and v2 solely to prove equivalence.
+
+The real migration is complete, so normal Stage 7/8 operation is v2-only. Retain v1 only for cheap
+authentication of existing evidence and use its archived exact commit for historical deep verification;
+the active follow-up removes the v1 writer and general runtime. Ordinary v2 authentication hashes
+selected physical parts but reads neither unselected parts nor Stage 6 result children. Explicit
+verification and confirmatory promotion retain complete audit and semantic replay.
 
 The durable IBKR historical foundation handoff is:
 

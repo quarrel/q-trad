@@ -2,7 +2,7 @@
 
 **Updated:** 2026-08-14
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** the full Stage 6 acquisition/result closure and Stage 7 provider-history dataset are retained; Stage 8 block-coverage readiness is corrected, but foundation publication, reusable receipts and confirmatory promotion remain pending
+**Parallel track:** the retained Stage 6–8 IBKR historical evidence is verified, S7.3 v2 migration is complete, and the qualifying foundation has separate implementation-only receipt and confirmatory-promotion authorities
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -159,13 +159,21 @@ remains offline/replay.
   sanitized error evidence, bounded cancellation/timeout handling, immutable canary evidence and
   file-only canary/profile operations. The account-gated capability review, matched host deployment
   and bounded canary are complete; all 12 representative 1D/1W/2W/4W cases passed.
-  The full Stage 6 acquisition/result closure and the provenance-distinct Stage 7 provider-history
-  dataset are retained. Stage 7 has an existing semantic-verification result but not yet the
-  first-class reusable receipt required by the revised handoff. Stage 8 block-coverage readiness is
-  corrected on `main`, and the prior rehearsal records and checkpoint remain retained, but no Stage 8
-  foundation, reusable verification receipt, qualifying readiness disposition, confirmatory promotion
-  or downstream R2 authority has been published. IBKR history stays provenance-distinct and cannot
-  substantiate native IG fills, spreads or slippage.
+  The full Stage 6 result closure and the provenance-distinct original Stage 7 v1 provider-history
+  closure remain retained. S7.1 issued reusable receipt `42f6c251...338e`; S7.3 exact-head validation
+  at `f0e882bbcd19aabbefb1add2d87a03daae7670e8` cheaply authenticated it, published and independently
+  verified v2 once, and preserved all 3,376,258 rows, 2,948 logical partitions, dataset identity
+  `2f7f6199...a0e7e3` and aggregate identity `2ca2fbd0...22a0c` while reducing 2,948 physical
+  parts to 120. V2 receipt `daa116bc...86a44` authenticated in 3.99 seconds. A deliberately bounded
+  Stage 8 build selected 14 of 120 parts, completed in 753.12 seconds and published build
+  `31ae56bd...d5d7f`; its insufficient-history disposition is expected and makes no research claim.
+  Durable rollout evidence is retained at
+  `/workspace/tmp/ibkr-historical-r2-20260810T081317Z/stage7/s73-validation-f0e882b-attempt1`.
+  The retained full Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`; receipt
+  `56228947...ffd01` is implementation-only and authenticated promotion `1a1d09d9...81e2` is the
+  distinct confirmatory capability. No real holdout result, effectiveness claim or downstream R2 result
+  has been created. IBKR history stays provenance-distinct and cannot substantiate native IG fills,
+  spreads or slippage.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Final-image B3 and B4 parents were refreshed and independently replayed before the full-universe promotion.
 - Controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, and retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts. Backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`.
 - Snapshot plus independent three-restore replay authenticated the qualification-bound B3 and B4 parents and current B5 store before minting `B5_FULL_UNIVERSE` with canonical artifact SHA-256 `efb6f465221659cb0b1c65d6e0df12ac01d20a9227d07e606e8febf78152ed24`. The qualification file SHA-256 is `87c4860dbc97b7e73e1849ed58ba528b1b630cdd13207393fec32ebfb1eb9218`; verifier output SHA-256 is `dbca7ba916fa2c1a97fecc2dd1ef71f73621ddf87cbe6313ca7f416b41949a67`. Continuous capture initially resumed 20/20 on commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but its last callback was 2026-08-10 22:30:00 UTC when the active Gateway auto-restarted. It did not reconstruct subscriptions and later failed closed; the subsequent interval is an explicit collection gap. PR #117 subsequently completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily restarts on 2026-08-12 and 2026-08-13 each reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops.
@@ -195,24 +203,24 @@ remains offline/replay.
   while its exact listing is available before it can be promoted.
 - R0's 2026-07-22 bounded historical-data decision remains retained evidence. ADR 0028 subsequently
   approved an independently governed IBKR paper-market-data track. Exact contracts, account
-  entitlements and the Stage 5 1D/1W/2W/4W capability boundary are evidenced; the full Stage 6 result
-  closure and Stage 7 provider-history dataset are retained. No Stage 8 foundation or qualifying
-  confirmatory authority is retained. IBKR history stays provenance-distinct and cannot substantiate
-  native IG fills, spreads or slippage.
+  entitlements and the Stage 5 1D/1W/2W/4W capability boundary are evidenced. The retained Stage 6–8
+  historical path is verified through the S7.3 v2 migration, an implementation-only Stage 8 receipt and a
+  separate qualifying confirmatory-promotion attestation. No real holdout or downstream R2 result exists.
+  IBKR history stays provenance-distinct and cannot substantiate native IG fills, spreads or slippage.
 - `B5_FULL_UNIVERSE` qualifies only the retained twenty-contract native-capture session. PR #116 corrected clean socket-closure detection, bounded health output and canonical Gateway ownership. During its 2026-08-12 rollout, overlapping restore work contended with live persistence: session `536b9af2-af43-4b86-bdd0-313d8b6f3a9b` retained 66,380 of 116,381 callbacks and explicitly recorded 50,001 drops before failing closed. Preserve both this gap and the earlier post-2026-08-10 22:30 UTC gap. PR #117 deployed restore isolation and root-space retention through the controlled restore-backed apply. The current paper account has no distinct weekly 2FA expiry; two natural daily Gateway restarts have demonstrated exact 20/20 LIVE reconstruction and zero unexplained loss.
 
 ## Next actions
 
-1. Publish the Stage 8 foundation from the retained checkpoint under the corrected coverage policy;
-   retain it whether readiness is qualifying or nonqualifying.
-2. Independently verify that foundation once, persist and authenticate its reusable receipt, and run
-   confirmatory promotion only if readiness qualifies and that operation is separately authorised.
-3. Persist and adopt the reusable Stage 7 receipt, remove redundant deep verification, then complete
-   the separately identified provider-history repack/pruning work without provider reacquisition.
-4. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
-   authentication; real F2 requires the confirmatory-promotion attestation, and holdout evidence remains pending.
-5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-6. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
+1. Remove the v1 provider-history writer and general v1 runtime in the next IBKR data-foundation
+   maintenance PR; retain only cheap authentication of existing v1 evidence and use its archived exact
+   commit for any historical deep audit.
+2. The R2 integration/verification workstream owns the post-S7.3 recursive-verification architecture
+   audit across R1 and R2; consolidate replay only where it preserves independent authority boundaries.
+3. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
+   authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
+   holdout execution and effectiveness evidence remain separately authorised and pending.
+4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities
