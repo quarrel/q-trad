@@ -1,12 +1,13 @@
 """Persistence and independent verification for thin R1 foundation bundles."""
 
+import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from math import ceil
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 from uuid import UUID
 
@@ -48,8 +49,13 @@ from qtrad.domain.foundation import (
 )
 from qtrad.domain.foundation_bundle import (
     AVAILABILITY_EVIDENCE_CONTRACT,
+    FOUNDATION_BUNDLE_CONTRACT,
+    FOUNDATION_BUNDLE_SCHEMA_VERSION,
+    FOUNDATION_VERIFICATION_RECEIPT_CONTRACT,
+    FOUNDATION_VERIFICATION_RECEIPT_SCHEMA_VERSION,
     ArtifactReference,
     FoundationBundle,
+    FoundationVerificationReceipt,
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import DataGap, DataQuality, MarketDataSourceClass, PriceBasis
@@ -75,6 +81,29 @@ from qtrad.domain.time import require_utc
 from qtrad.ports.clock import Clock
 
 _MAX_BUNDLE_BYTES = 4 * 1024 * 1024
+_MAX_RECEIPT_BYTES = 512 * 1024
+_FOUNDATION_VERIFIER_CONTRACT = "qtrad-r1-foundation-semantic-verifier-v1"
+_FOUNDATION_VERIFIER_VERSION = 1
+_FOUNDATION_VERIFIER_CHECKS = (
+    "observation-build-availability",
+    "causal-panel",
+    "target-maturity",
+    "chronological-folds",
+    "initial-forecast-lineage",
+    "coverage",
+    "cross-lineage",
+    "outcome-blind-projections",
+    "g2-safe-projections",
+)
+_FOUNDATION_PROJECTION_NAMES: tuple[tuple[str, str], ...] = (
+    ("target_index", "target-index"),
+    ("causal_metadata", "causal-metadata"),
+    ("observations", "blind-observations"),
+    ("panel", "blind-panel"),
+    ("g2_observations", "g2-observations"),
+    ("g2_panel", "g2-panel"),
+    ("pre_holdout_target", "pre-holdout-target"),
+)
 _CONFIGURATION_KEYS = {
     "contract",
     "schema_version",
@@ -126,6 +155,7 @@ class VerifiedFoundationBundle:
     forecasts: ForecastDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
+    receipt: FoundationVerificationReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +170,7 @@ class OutcomeBlindVerifiedFoundationBundle:
     folds: FoldDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
+    receipt: FoundationVerificationReceipt | None = None
     g2_feature_source: "G2FeatureSourceAuthority | None" = None
 
 
@@ -212,13 +243,426 @@ def write_foundation_bundle(path: Path, bundle: FoundationBundle) -> None:
         output.write(encoded)
 
 
+def _foundation_receipt_for(
+    bundle_path: Path, bundle: FoundationBundle
+) -> FoundationVerificationReceipt:
+    return FoundationVerificationReceipt.create(
+        foundation_id=bundle.foundation_id,
+        closure_id=bundle.closure_id,
+        bundle_manifest_sha256=_sha256_file(bundle_path),
+        artifact_contract=FOUNDATION_BUNDLE_CONTRACT,
+        artifact_schema_version=FOUNDATION_BUNDLE_SCHEMA_VERSION,
+        child_semantic_ids=bundle.semantic_child_ids,
+        verifier_contract=_FOUNDATION_VERIFIER_CONTRACT,
+        verifier_version=_FOUNDATION_VERIFIER_VERSION,
+        completed_checks=_FOUNDATION_VERIFIER_CHECKS,
+        verifier_identity=_sha256_json(
+            {
+                "contract": _FOUNDATION_VERIFIER_CONTRACT,
+                "version": _FOUNDATION_VERIFIER_VERSION,
+                "checks": list(_FOUNDATION_VERIFIER_CHECKS),
+            }
+        ),
+    )
+
+
+def write_foundation_verification_receipt(
+    path: Path, receipt: FoundationVerificationReceipt
+) -> None:
+    if path.is_symlink() or path.exists():
+        raise ValueError("foundation verification receipt output must be a new regular file")
+    encoded = json.dumps(receipt.as_json(), sort_keys=True, indent=2) + "\n"
+    if len(encoded.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+        raise ValueError("foundation verification receipt exceeds its byte bound")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as output:
+        output.write(encoded)
+
+
+def load_foundation_verification_receipt(path: Path) -> FoundationVerificationReceipt:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("foundation verification receipt must be a regular non-symlink file")
+    encoded = path.read_bytes()
+    if len(encoded) > _MAX_RECEIPT_BYTES:
+        raise ValueError("foundation verification receipt exceeds its byte bound")
+    payload = _mapping(json.loads(encoded))
+    expected = {
+        "contract",
+        "schema_version",
+        "foundation_id",
+        "closure_id",
+        "bundle_manifest_sha256",
+        "artifact_contract",
+        "artifact_schema_version",
+        "child_semantic_ids",
+        "verifier_contract",
+        "verifier_version",
+        "completed_checks",
+        "verifier_identity",
+        "verification_id",
+    }
+    if set(payload) != expected:
+        raise ValueError("foundation verification receipt has an unexpected schema")
+    if (
+        payload["contract"] != FOUNDATION_VERIFICATION_RECEIPT_CONTRACT
+        or payload["schema_version"] != FOUNDATION_VERIFICATION_RECEIPT_SCHEMA_VERSION
+    ):
+        raise ValueError("foundation verification receipt contract is unsupported")
+    child_ids = _mapping(payload["child_semantic_ids"])
+    completed_checks = _sequence(payload["completed_checks"])
+    receipt = FoundationVerificationReceipt(
+        foundation_id=_text(payload["foundation_id"]),
+        closure_id=_text(payload["closure_id"]),
+        bundle_manifest_sha256=_text(payload["bundle_manifest_sha256"]),
+        artifact_contract=_text(payload["artifact_contract"]),
+        artifact_schema_version=_int(payload["artifact_schema_version"]),
+        child_semantic_ids={key: _text(value) for key, value in child_ids.items()},
+        verifier_contract=_text(payload["verifier_contract"]),
+        verifier_version=_int(payload["verifier_version"]),
+        completed_checks=tuple(_text(value) for value in completed_checks),
+        verifier_identity=_text(payload["verifier_identity"]),
+        verification_id=_text(payload["verification_id"]),
+    )
+    canonical = json.dumps(receipt.as_json(), sort_keys=True, indent=2) + "\n"
+    if encoded.decode("utf-8") != canonical:
+        raise ValueError("foundation verification receipt bytes are not canonical")
+    return receipt
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _preflight_bundle_output(path: Path) -> None:
     if path.is_symlink() or path.exists():
         raise ValueError("foundation bundle output must be a new regular file")
 
 
+def _reject_receipt_in_bundle_closure(
+    *, bundle_path: Path, bundle: FoundationBundle, receipt_path: Path
+) -> None:
+    resolved_receipt = receipt_path.resolve()
+    owned_paths = {bundle_path.resolve()}
+    owned_paths.update(
+        (bundle_path.parent / reference.manifest_path).resolve() for reference in bundle.children
+    )
+    if resolved_receipt in owned_paths:
+        raise ValueError("foundation verification receipt must be outside the bundle closure")
+
+
+def _expected_verifier_identity() -> str:
+    return _sha256_json(
+        {
+            "contract": _FOUNDATION_VERIFIER_CONTRACT,
+            "version": _FOUNDATION_VERIFIER_VERSION,
+            "checks": list(_FOUNDATION_VERIFIER_CHECKS),
+        }
+    )
+
+
+def _authenticate_receipt(
+    *, bundle_path: Path, bundle: FoundationBundle, receipt: FoundationVerificationReceipt
+) -> None:
+    if receipt.foundation_id != bundle.foundation_id or receipt.closure_id != bundle.closure_id:
+        raise ValueError("foundation verification receipt does not match the bundle identities")
+    if (
+        receipt.artifact_contract != FOUNDATION_BUNDLE_CONTRACT
+        or receipt.artifact_schema_version != FOUNDATION_BUNDLE_SCHEMA_VERSION
+    ):
+        raise ValueError("foundation verification receipt artefact contract is unsupported")
+    if receipt.bundle_manifest_sha256 != _sha256_file(bundle_path):
+        raise ValueError("foundation verification receipt does not match bundle bytes")
+    if dict(receipt.child_semantic_ids) != bundle.semantic_child_ids:
+        raise ValueError("foundation verification receipt does not match child semantic identities")
+    if (
+        receipt.verifier_contract != _FOUNDATION_VERIFIER_CONTRACT
+        or receipt.verifier_version != _FOUNDATION_VERIFIER_VERSION
+        or receipt.completed_checks != _FOUNDATION_VERIFIER_CHECKS
+        or receipt.verifier_identity != _expected_verifier_identity()
+    ):
+        raise ValueError("foundation verification receipt verifier authority is unsupported")
+
+
+def _projection_references(
+    bundle: FoundationBundle, build_summary: Mapping[str, object]
+) -> dict[str, ArtifactReference]:
+    payload = _mapping(build_summary["outcome_blind_projections"])
+    expected_keys = {key for key, _name in _FOUNDATION_PROJECTION_NAMES}
+    if set(payload) != expected_keys:
+        raise ValueError("foundation outcome-blind projection set is incomplete")
+    declared = {key: _reference(name, payload[key]) for key, name in _FOUNDATION_PROJECTION_NAMES}
+    expected_names = {name for _key, name in _FOUNDATION_PROJECTION_NAMES}
+    bundled = {reference.name: reference for reference in bundle.projections}
+    if set(bundled) != expected_names or len(bundle.projections) != len(expected_names):
+        raise ValueError("foundation bundle projection set is unsupported")
+    for key, name in _FOUNDATION_PROJECTION_NAMES:
+        if bundled[name] != declared[key]:
+            raise ValueError("foundation projection reference differs from build summary")
+    return declared
+
+
+def _regular_file(root: Path, relative: str, *, field: str) -> Path:
+    path = PurePosixPath(relative)
+    if path.is_absolute() or not path.parts or any(part in {"", ".", ".."} for part in path.parts):
+        raise ValueError(f"foundation {field} path is unsafe")
+    root_path = root.resolve()
+    candidate = root_path.joinpath(*path.parts)
+    current = root_path
+    for part in path.parts:
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"foundation {field} path must not be a symlink")
+    resolved = candidate.resolve(strict=False)
+    if not resolved.is_relative_to(root_path):
+        raise ValueError(f"foundation {field} path escapes the research root")
+    if not candidate.is_file() or not resolved.is_file():
+        raise ValueError(f"foundation {field} path must be a regular file")
+    return resolved
+
+
+def _guard_foundation_manifest(root: Path, reference: ArtifactReference) -> None:
+    _regular_file(root, reference.manifest_path, field=f"{reference.name} manifest")
+
+
+def _guard_foundation_child(root: Path, manifest: FoundationChildManifest) -> None:
+    _regular_file(root, manifest.file, field=f"{manifest.kind} child")
+
+
+def _guard_observation_manifest(root: Path, reference: ArtifactReference) -> None:
+    _regular_file(root, reference.manifest_path, field="observations manifest")
+
+
+def _guard_observation_children(root: Path, manifest: ObservationManifest) -> None:
+    for relative in manifest.files:
+        _regular_file(root, relative, field="observation child")
+
+
+async def authenticate_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt: Path | FoundationVerificationReceipt,
+    consumed_children: Sequence[str] = (),
+) -> FoundationBundle:
+    """Authenticate a verified R1 bundle without replaying causal builders.
+
+    Manifest bytes and the receipt are checked for every child. Parquet bytes are
+    checked only for children named in ``consumed_children``; row decoding is
+    likewise limited to those consumed children.
+    """
+    bundle = load_foundation_bundle(bundle_path)
+    _projection_references(bundle, _mapping(bundle.build_summary))
+    if isinstance(receipt, Path):
+        _reject_receipt_in_bundle_closure(
+            bundle_path=bundle_path,
+            bundle=bundle,
+            receipt_path=receipt,
+        )
+    authenticated_receipt = (
+        load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+    )
+    _authenticate_receipt(bundle_path=bundle_path, bundle=bundle, receipt=authenticated_receipt)
+    references = {reference.name: reference for reference in bundle.children}
+    consumed = tuple(consumed_children)
+    if len(set(consumed)) != len(consumed):
+        raise ValueError("foundation consumed child names must be unique")
+    unknown = set(consumed) - set(references)
+    if unknown:
+        raise ValueError(f"foundation consumed child is unknown: {sorted(unknown)!r}")
+    observation_store = ParquetObservationStore(root, clock)
+    store = ParquetFoundationArtifactStore(root, clock)
+    for reference in bundle.children:
+        if reference.name == "observations":
+            _guard_observation_manifest(root, reference)
+            manifest = await observation_store.read_manifest(reference.manifest_id)
+            _verify_observation_reference(reference, manifest)
+            if reference.name in consumed:
+                _guard_observation_children(root, manifest)
+                await observation_store.read_observations(reference.manifest_id)
+        else:
+            _guard_foundation_manifest(root, reference)
+            manifest = await store.read_manifest(reference.manifest_id)
+            _verify_child_reference(reference, manifest)
+            if reference.name in consumed:
+                _guard_foundation_child(root, manifest)
+                await store.read_rows(reference.manifest_id)
+    return bundle
+
+
+async def restore_authenticated_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt: Path | FoundationVerificationReceipt,
+) -> VerifiedFoundationBundle:
+    """Restore R1 children from one authenticated receipt without semantic replay."""
+
+    bundle = await authenticate_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+        receipt=receipt,
+    )
+    authenticated_receipt = (
+        load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+    )
+    build_summary = _mapping(bundle.build_summary)
+    expected_build_summary_keys = {
+        "application_version",
+        "image_identity",
+        "row_counts",
+        "outcome_blind_projections",
+    }
+    if set(build_summary) != expected_build_summary_keys:
+        raise ValueError("foundation build summary has an unexpected schema")
+    expected_row_counts: dict[str, JsonValue] = {
+        "observations": bundle.observations.row_count,
+        "panel": bundle.panel.row_count,
+        "targets": bundle.targets.row_count,
+        "folds": bundle.folds.row_count,
+        "forecasts": bundle.forecasts.row_count,
+    }
+    if _mapping(build_summary["row_counts"]) != expected_row_counts:
+        raise ValueError("foundation build summary row counts are invalid")
+
+    observation_store = ParquetObservationStore(root, clock)
+    _guard_observation_manifest(root, bundle.observations)
+    observation_manifest = await observation_store.read_manifest(bundle.observations.manifest_id)
+    _verify_observation_reference(bundle.observations, observation_manifest)
+    _guard_observation_children(root, observation_manifest)
+    observations = await observation_store.read_observations(observation_manifest.manifest_id)
+    evidence = load_observation_build_evidence(observation_manifest)
+
+    store = ParquetFoundationArtifactStore(root, clock)
+    manifests: dict[str, FoundationChildManifest] = {}
+    rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    for reference in (
+        bundle.configuration,
+        bundle.availability,
+        bundle.panel,
+        bundle.targets,
+        bundle.folds,
+        bundle.forecasts,
+    ):
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
+        _verify_child_reference(reference, manifest)
+        _guard_foundation_child(root, manifest)
+        manifests[reference.name] = manifest
+        rows[reference.name] = await store.read_rows(reference.manifest_id)
+
+    configuration = decode_foundation_config(_single_row(rows, "configuration"))
+    availability = cast(Mapping[str, JsonValue], _single_row(rows, "availability"))
+    if availability != evidence.payload:
+        raise ValueError("availability child differs from observation build evidence")
+    expected_availability_id = _hash_json(
+        {
+            "contract": AVAILABILITY_EVIDENCE_CONTRACT,
+            "observation_dataset_id": observations.dataset_id,
+            "evidence": availability,
+        }
+    )
+    if manifests["availability"].dataset_id != expected_availability_id:
+        raise ValueError("availability child semantic identity is invalid")
+
+    _require_lineage(
+        manifests["configuration"],
+        {"observation_dataset_id": observations.dataset_id},
+    )
+    _require_lineage(
+        manifests["availability"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "observation_manifest_id": observation_manifest.manifest_id,
+        },
+    )
+    _require_lineage(
+        manifests["panel"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["targets"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["folds"],
+        {
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["forecasts"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "panel_dataset_id": manifests["panel"].dataset_id,
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "fold_dataset_id": manifests["folds"].dataset_id,
+        },
+    )
+
+    panel = PanelDataset(
+        rows=tuple(_panel_row(row) for row in rows["panel"]),
+        observation_dataset_id=_lineage_text(manifests["panel"], "observation_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["panel"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["panel"].dataset_id,
+    )
+    targets = TargetDataset(
+        rows=tuple(_target(row) for row in rows["targets"]),
+        observation_dataset_id=_lineage_text(manifests["targets"], "observation_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["targets"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["targets"].dataset_id,
+    )
+    folds = FoldDataset(
+        folds=tuple(_fold(row) for row in rows["folds"]),
+        target_dataset_id=_lineage_text(manifests["folds"], "target_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["folds"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["folds"].dataset_id,
+    )
+    forecasts = ForecastDataset(
+        rows=tuple(_forecast(row) for row in rows["forecasts"]),
+        observation_dataset_id=_lineage_text(manifests["forecasts"], "observation_dataset_id"),
+        panel_dataset_id=_lineage_text(manifests["forecasts"], "panel_dataset_id"),
+        target_dataset_id=_lineage_text(manifests["forecasts"], "target_dataset_id"),
+        fold_dataset_id=_lineage_text(manifests["forecasts"], "fold_dataset_id"),
+        dataset_id=manifests["forecasts"].dataset_id,
+    )
+    return VerifiedFoundationBundle(
+        bundle=bundle,
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+        source_active_intervals=evidence.source_active_intervals,
+        availability_evidence=availability,
+        receipt=authenticated_receipt,
+    )
+
+
 def load_foundation_bundle(path: Path) -> FoundationBundle:
-    """Load only the bounded top-level references; child verification is separate."""
+    """Load only bounded references; child verification is separate."""
 
     if path.is_symlink() or not path.is_file():
         raise ValueError("foundation bundle must be a regular non-symlink file")
@@ -230,17 +674,22 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         "contract",
         "schema_version",
         "children",
+        "projections",
         "ordered_instruments",
         "range_start",
         "range_end",
         "coverage",
         "build_summary",
         "source_class",
-        "bundle_id",
+        "foundation_id",
+        "closure_id",
     }
     if set(payload) != expected:
         raise ValueError("foundation bundle has an unexpected schema")
-    if payload["contract"] != FoundationBundle.CONTRACT or payload["schema_version"] != 2:
+    if (
+        payload["contract"] != FoundationBundle.CONTRACT
+        or payload["schema_version"] != FoundationBundle.SCHEMA_VERSION
+    ):
         raise ValueError("foundation bundle contract is unsupported")
     children = _mapping(payload["children"])
     child_names = {
@@ -254,6 +703,15 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
     }
     if set(children) != child_names:
         raise ValueError("foundation bundle child set is incomplete")
+    projection_payload = _sequence(payload["projections"])
+    projections = tuple(
+        _reference(_text(_mapping(item)["name"]), item) for item in projection_payload
+    )
+    expected_projection_names = {name for _key, name in _FOUNDATION_PROJECTION_NAMES}
+    if set(reference.name for reference in projections) != expected_projection_names or len(
+        projections
+    ) != len(expected_projection_names):
+        raise ValueError("foundation bundle projection set is unsupported")
     return FoundationBundle(
         configuration=_reference("configuration", children["configuration"]),
         observations=_reference("observations", children["observations"]),
@@ -269,8 +727,10 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         range_end=_datetime(payload["range_end"]),
         coverage=tuple(_coverage(_mapping(item)) for item in _sequence(payload["coverage"])),
         build_summary=cast(Mapping[str, JsonValue], _mapping(payload["build_summary"])),
+        foundation_id=_text(payload["foundation_id"]),
+        closure_id=_text(payload["closure_id"]),
         market_data_source_class=MarketDataSourceClass(_text(payload["source_class"])),
-        bundle_id=_text(payload["bundle_id"]),
+        projections=projections,
     )
 
 
@@ -823,6 +1283,15 @@ async def persist_foundation_bundle(
             ).as_json(),
         },
     }
+    projection_references = (
+        _child_reference("target-index", target_index_manifest),
+        _child_reference("causal-metadata", causal_metadata_manifest),
+        _child_reference("blind-observations", blind_observations_manifest),
+        _child_reference("blind-panel", blind_panel_manifest),
+        _child_reference("g2-observations", g2_observations_manifest),
+        _child_reference("g2-panel", g2_panel_manifest),
+        _child_reference("pre-holdout-target", pre_holdout_target_manifest),
+    )
     bundle = build_foundation_bundle(
         configuration=configuration,
         observations=observations,
@@ -838,21 +1307,29 @@ async def persist_foundation_bundle(
         fold_reference=_child_reference("folds", fold_manifest),
         forecast_reference=_child_reference("forecasts", forecast_manifest),
         build_summary=build_summary,
+        projections=projection_references,
     )
     write_foundation_bundle(output_path, bundle)
-    await verify_foundation_bundle(root=root, bundle_path=output_path, clock=clock)
     return bundle
 
 
-async def verify_foundation_bundle(
-    *, root: Path, bundle_path: Path, clock: Clock
+async def _verify_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
 ) -> VerifiedFoundationBundle:
     """Verify child bytes, manifests, semantic identities and all cross-references."""
 
     bundle = load_foundation_bundle(bundle_path)
+    build_summary = _mapping(bundle.build_summary)
+    projection_references = _projection_references(bundle, build_summary)
     observation_store = ParquetObservationStore(root, clock)
-    observation_manifest = await observation_store.verify(bundle.observations.manifest_id)
+    _guard_observation_manifest(root, bundle.observations)
+    observation_manifest = await observation_store.read_manifest(bundle.observations.manifest_id)
     _verify_observation_reference(bundle.observations, observation_manifest)
+    _guard_observation_children(root, observation_manifest)
+    await observation_store.verify(bundle.observations.manifest_id)
     observations = await observation_store.read_observations(observation_manifest.manifest_id)
     evidence = verify_observation_build_evidence(observation_manifest, observations)
 
@@ -867,8 +1344,11 @@ async def verify_foundation_bundle(
         bundle.folds,
         bundle.forecasts,
     ):
-        manifest = await store.verify(reference.manifest_id)
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
         _verify_child_reference(reference, manifest)
+        _guard_foundation_child(root, manifest)
+        await store.verify(reference.manifest_id)
         manifests[reference.name] = manifest
         rows[reference.name] = await store.read_rows(reference.manifest_id)
 
@@ -928,18 +1408,13 @@ async def verify_foundation_bundle(
             "fold_dataset_id": manifests["folds"].dataset_id,
         },
     )
-    build_summary = _mapping(bundle.build_summary)
-    standard_build_summary_keys = {
+    extension_build_summary_keys = {
         "application_version",
         "image_identity",
         "row_counts",
+        "outcome_blind_projections",
     }
-    extension_build_summary_keys = standard_build_summary_keys | {"outcome_blind_projections"}
-    build_summary_keys = frozenset(build_summary)
-    if build_summary_keys not in {
-        frozenset(standard_build_summary_keys),
-        frozenset(extension_build_summary_keys),
-    }:
+    if frozenset(build_summary) != frozenset(extension_build_summary_keys):
         raise ValueError("foundation build summary has an unexpected schema")
     application_version = _text(build_summary["application_version"])
     image_identity = _text(build_summary["image_identity"])
@@ -1028,196 +1503,180 @@ async def verify_foundation_bundle(
         forecasts=forecasts,
         coverage=bundle.coverage,
     )
-    blind_projection_payload = build_summary.get("outcome_blind_projections")
-    if blind_projection_payload is not None:
-        projection_payload = _mapping(blind_projection_payload)
-        projection_names = {
-            "target_index": "target-index",
-            "causal_metadata": "causal-metadata",
-            "observations": "blind-observations",
-            "panel": "blind-panel",
-            "pre_holdout_target": "pre-holdout-target",
-        }
-        g2_projection_names = {
-            "g2_observations": "g2-observations",
-            "g2_panel": "g2-panel",
-        }
-        if set(projection_payload) == set(projection_names) | set(g2_projection_names):
-            projection_names.update(g2_projection_names)
-        elif set(projection_payload) != set(projection_names):
-            raise ValueError("foundation outcome-blind projection set is incomplete")
-        projection_manifests: dict[str, FoundationChildManifest] = {}
-        projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
-        for key, name in projection_names.items():
-            reference = _reference(name, projection_payload[key])
-            manifest = await store.verify(reference.manifest_id)
-            _verify_child_reference(reference, manifest)
-            if (
-                manifest.application_version != application_version
-                or manifest.image_identity != image_identity
-            ):
-                raise ValueError("foundation projection build identity differs from the bundle")
-            projection_manifests[key] = manifest
-            projection_rows[key] = await store.read_rows(reference.manifest_id)
+    projection_manifests: dict[str, FoundationChildManifest] = {}
+    projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    for key, _name in _FOUNDATION_PROJECTION_NAMES:
+        reference = projection_references[key]
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
+        _verify_child_reference(reference, manifest)
+        _guard_foundation_child(root, manifest)
+        await store.verify(reference.manifest_id)
+        if (
+            manifest.application_version != application_version
+            or manifest.image_identity != image_identity
+        ):
+            raise ValueError("foundation projection build identity differs from the bundle")
+        projection_manifests[key] = manifest
+        projection_rows[key] = await store.read_rows(reference.manifest_id)
+    _require_lineage(
+        projection_manifests["target_index"],
+        {
+            "target_dataset_id": targets.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        projection_manifests["causal_metadata"],
+        {
+            "panel_dataset_id": panel.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        projection_manifests["observations"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+        },
+    )
+    _require_lineage(
+        projection_manifests["panel"],
+        {
+            "panel_dataset_id": panel.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+        },
+    )
+    _require_lineage(
+        projection_manifests["pre_holdout_target"],
+        {
+            "target_dataset_id": targets.dataset_id,
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+            "holdout_start": configuration.holdout_range[0].isoformat(),
+        },
+    )
+    expected_target_index = R2HoldoutTargetIndex.create(targets)
+    target_index = R2HoldoutTargetIndex.from_rows(
+        source_target_dataset_id=targets.dataset_id,
+        observation_dataset_id=observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+        rows=projection_rows["target_index"],
+    )
+    if (
+        target_index != expected_target_index
+        or target_index.dataset_id != projection_manifests["target_index"].dataset_id
+    ):
+        raise ValueError("foundation target-index projection differs from full replay")
+    expected_causal_metadata = R2HoldoutCausalMetadata.create(panel)
+    causal_metadata = R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=panel.dataset_id,
+        rows=projection_rows["causal_metadata"],
+    )
+    if (
+        causal_metadata != expected_causal_metadata
+        or causal_metadata.dataset_id != projection_manifests["causal_metadata"].dataset_id
+    ):
+        raise ValueError("foundation causal metadata projection differs from full replay")
+    expected_blind_observations = R2OutcomeBlindObservationView.from_dataset(
+        observations, holdout_start=configuration.holdout_range[0]
+    )
+    actual_blind_observations = R2OutcomeBlindObservationView(
+        dataset_id=observations.dataset_id,
+        rows=tuple(
+            _observation_from_row(cast(Mapping[str, object], row))
+            for row in projection_rows["observations"]
+        ),
+        configuration=observations.configuration,
+        source_dataset_ids=observations.source_dataset_ids,
+        selection_policies=observations.selection_policies,
+        projection_id=projection_manifests["observations"].dataset_id,
+    )
+    if actual_blind_observations != expected_blind_observations:
+        raise ValueError("foundation blind observation projection differs from full replay")
+    expected_blind_panel = R2OutcomeBlindPanelView.from_dataset(
+        panel, holdout_start=configuration.holdout_range[0]
+    )
+    actual_blind_panel = R2OutcomeBlindPanelView(
+        dataset_id=panel.dataset_id,
+        observation_dataset_id=observations.dataset_id,
+        foundation_configuration_id=configuration.configuration_id,
+        rows=tuple(_panel_row(row) for row in projection_rows["panel"]),
+        projection_id=projection_manifests["panel"].dataset_id,
+    )
+    if actual_blind_panel != expected_blind_panel:
+        raise ValueError("foundation blind panel projection differs from full replay")
+    if "g2_observations" in projection_manifests:
         _require_lineage(
-            projection_manifests["target_index"],
+            projection_manifests["g2_observations"],
             {
-                "target_dataset_id": targets.dataset_id,
                 "observation_dataset_id": observations.dataset_id,
                 "foundation_configuration_id": configuration.configuration_id,
+                "holdout_start": configuration.holdout_range[0].isoformat(),
+                "holdout_end": configuration.holdout_range[1].isoformat(),
             },
         )
         _require_lineage(
-            projection_manifests["causal_metadata"],
+            projection_manifests["g2_panel"],
             {
                 "panel_dataset_id": panel.dataset_id,
                 "observation_dataset_id": observations.dataset_id,
                 "foundation_configuration_id": configuration.configuration_id,
-            },
-        )
-        _require_lineage(
-            projection_manifests["observations"],
-            {
-                "observation_dataset_id": observations.dataset_id,
                 "holdout_start": configuration.holdout_range[0].isoformat(),
+                "holdout_end": configuration.holdout_range[1].isoformat(),
             },
         )
-        _require_lineage(
-            projection_manifests["panel"],
-            {
-                "panel_dataset_id": panel.dataset_id,
-                "observation_dataset_id": observations.dataset_id,
-                "foundation_configuration_id": configuration.configuration_id,
-                "holdout_start": configuration.holdout_range[0].isoformat(),
-            },
-        )
-        _require_lineage(
-            projection_manifests["pre_holdout_target"],
-            {
-                "target_dataset_id": targets.dataset_id,
-                "observation_dataset_id": observations.dataset_id,
-                "foundation_configuration_id": configuration.configuration_id,
-                "holdout_start": configuration.holdout_range[0].isoformat(),
-            },
-        )
-        expected_target_index = R2HoldoutTargetIndex.create(targets)
-        target_index = R2HoldoutTargetIndex.from_rows(
-            source_target_dataset_id=targets.dataset_id,
-            observation_dataset_id=observations.dataset_id,
-            foundation_configuration_id=configuration.configuration_id,
-            rows=projection_rows["target_index"],
-        )
-        if (
-            target_index != expected_target_index
-            or target_index.dataset_id != projection_manifests["target_index"].dataset_id
-        ):
-            raise ValueError("foundation target-index projection differs from full replay")
-        expected_causal_metadata = R2HoldoutCausalMetadata.create(panel)
-        causal_metadata = R2HoldoutCausalMetadata.from_rows(
-            source_panel_dataset_id=panel.dataset_id,
-            rows=projection_rows["causal_metadata"],
-        )
-        if (
-            causal_metadata != expected_causal_metadata
-            or causal_metadata.dataset_id != projection_manifests["causal_metadata"].dataset_id
-        ):
-            raise ValueError("foundation causal metadata projection differs from full replay")
-        expected_blind_observations = R2OutcomeBlindObservationView.from_dataset(
-            observations, holdout_start=configuration.holdout_range[0]
-        )
-        actual_blind_observations = R2OutcomeBlindObservationView(
+        actual_g2_observations = R2G2ObservationView(
             dataset_id=observations.dataset_id,
             rows=tuple(
                 _observation_from_row(cast(Mapping[str, object], row))
-                for row in projection_rows["observations"]
+                for row in projection_rows["g2_observations"]
             ),
             configuration=observations.configuration,
             source_dataset_ids=observations.source_dataset_ids,
             selection_policies=observations.selection_policies,
-            projection_id=projection_manifests["observations"].dataset_id,
+            holdout_range=configuration.holdout_range,
+            projection_id=projection_manifests["g2_observations"].dataset_id,
         )
-        if actual_blind_observations != expected_blind_observations:
-            raise ValueError("foundation blind observation projection differs from full replay")
-        expected_blind_panel = R2OutcomeBlindPanelView.from_dataset(
-            panel, holdout_start=configuration.holdout_range[0]
-        )
-        actual_blind_panel = R2OutcomeBlindPanelView(
+        actual_g2_panel = R2G2PanelView(
             dataset_id=panel.dataset_id,
             observation_dataset_id=observations.dataset_id,
             foundation_configuration_id=configuration.configuration_id,
-            rows=tuple(_panel_row(row) for row in projection_rows["panel"]),
-            projection_id=projection_manifests["panel"].dataset_id,
+            rows=tuple(_panel_row(row) for row in projection_rows["g2_panel"]),
+            holdout_range=configuration.holdout_range,
+            projection_id=projection_manifests["g2_panel"].dataset_id,
         )
-        if actual_blind_panel != expected_blind_panel:
-            raise ValueError("foundation blind panel projection differs from full replay")
-        if "g2_observations" in projection_manifests:
-            _require_lineage(
-                projection_manifests["g2_observations"],
-                {
-                    "observation_dataset_id": observations.dataset_id,
-                    "foundation_configuration_id": configuration.configuration_id,
-                    "holdout_start": configuration.holdout_range[0].isoformat(),
-                    "holdout_end": configuration.holdout_range[1].isoformat(),
-                },
-            )
-            _require_lineage(
-                projection_manifests["g2_panel"],
-                {
-                    "panel_dataset_id": panel.dataset_id,
-                    "observation_dataset_id": observations.dataset_id,
-                    "foundation_configuration_id": configuration.configuration_id,
-                    "holdout_start": configuration.holdout_range[0].isoformat(),
-                    "holdout_end": configuration.holdout_range[1].isoformat(),
-                },
-            )
-            actual_g2_observations = R2G2ObservationView(
-                dataset_id=observations.dataset_id,
-                rows=tuple(
-                    _observation_from_row(cast(Mapping[str, object], row))
-                    for row in projection_rows["g2_observations"]
-                ),
-                configuration=observations.configuration,
-                source_dataset_ids=observations.source_dataset_ids,
-                selection_policies=observations.selection_policies,
-                holdout_range=configuration.holdout_range,
-                projection_id=projection_manifests["g2_observations"].dataset_id,
-            )
-            actual_g2_panel = R2G2PanelView(
-                dataset_id=panel.dataset_id,
-                observation_dataset_id=observations.dataset_id,
-                foundation_configuration_id=configuration.configuration_id,
-                rows=tuple(_panel_row(row) for row in projection_rows["g2_panel"]),
-                holdout_range=configuration.holdout_range,
-                projection_id=projection_manifests["g2_panel"].dataset_id,
-            )
-            if actual_g2_observations != R2G2ObservationView.from_dataset(
-                observations, holdout_range=configuration.holdout_range
-            ):
-                raise ValueError("foundation G2 observation projection differs from full replay")
-            if actual_g2_panel != R2G2PanelView.from_dataset(
-                panel, holdout_range=configuration.holdout_range
-            ):
-                raise ValueError("foundation G2 panel projection differs from full replay")
-        pre_holdout_target = R2PreHoldoutTargetProjection.from_json(
-            _single_row(projection_rows, "pre_holdout_target")
-        )
-        expected_pre_holdout_target = R2PreHoldoutTargetProjection.create_from_target_dataset(
-            targets,
-            holdout_start=configuration.holdout_range[0],
-            primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
-            target_instruments=tuple(
-                instrument_id
-                for instrument_id in configuration.ordered_instruments
-                if InstrumentRole(configuration.instrument_roles[instrument_id])
-                is InstrumentRole.TARGET
-            ),
-        )
-        if (
-            pre_holdout_target != expected_pre_holdout_target
-            or pre_holdout_target.projection_id
-            != projection_manifests["pre_holdout_target"].dataset_id
+        if actual_g2_observations != R2G2ObservationView.from_dataset(
+            observations, holdout_range=configuration.holdout_range
         ):
-            raise ValueError("foundation pre-holdout target projection differs from full replay")
+            raise ValueError("foundation G2 observation projection differs from full replay")
+        if actual_g2_panel != R2G2PanelView.from_dataset(
+            panel, holdout_range=configuration.holdout_range
+        ):
+            raise ValueError("foundation G2 panel projection differs from full replay")
+    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(
+        _single_row(projection_rows, "pre_holdout_target")
+    )
+    expected_pre_holdout_target = R2PreHoldoutTargetProjection.create_from_target_dataset(
+        targets,
+        holdout_start=configuration.holdout_range[0],
+        primary_horizon_seconds=int(configuration.primary_vertical_horizon.total_seconds()),
+        target_instruments=tuple(
+            instrument_id
+            for instrument_id in configuration.ordered_instruments
+            if InstrumentRole(configuration.instrument_roles[instrument_id])
+            is InstrumentRole.TARGET
+        ),
+    )
+    if (
+        pre_holdout_target != expected_pre_holdout_target
+        or pre_holdout_target.projection_id != projection_manifests["pre_holdout_target"].dataset_id
+    ):
+        raise ValueError("foundation pre-holdout target projection differs from full replay")
     if (
         bundle.configuration.dataset_id != configuration.configuration_id
         or bundle.ordered_instruments != configuration.ordered_instruments
@@ -1225,6 +1684,7 @@ async def verify_foundation_bundle(
         or bundle.range_end != configuration.range_end
     ):
         raise ValueError("foundation bundle metadata differs from its configuration")
+    receipt = _foundation_receipt_for(bundle_path, bundle)
     return VerifiedFoundationBundle(
         bundle=bundle,
         configuration=configuration,
@@ -1235,7 +1695,33 @@ async def verify_foundation_bundle(
         forecasts=forecasts,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
+        receipt=receipt,
     )
+
+
+async def verify_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt_output: Path,
+) -> VerifiedFoundationBundle:
+    """Run one explicit semantic verification and persist its receipt."""
+    verified = await _verify_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+    )
+    receipt = verified.receipt
+    if receipt is None:
+        raise RuntimeError("foundation semantic verifier did not issue a receipt")
+    _reject_receipt_in_bundle_closure(
+        bundle_path=bundle_path,
+        bundle=verified.bundle,
+        receipt_path=receipt_output,
+    )
+    write_foundation_verification_receipt(receipt_output, receipt)
+    return verified
 
 
 async def verify_outcome_blind_foundation_bundle(
@@ -1244,10 +1730,18 @@ async def verify_outcome_blind_foundation_bundle(
     bundle_path: Path,
     clock: Clock,
     holdout_target_source: R2HoldoutTargetSource,
+    receipt: Path | FoundationVerificationReceipt,
 ) -> OutcomeBlindVerifiedFoundationBundle:
     """Verify only authenticated outcome-blind R1 projections needed by F2."""
-    bundle = load_foundation_bundle(bundle_path)
+    bundle = await authenticate_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+        receipt=receipt,
+        consumed_children=(),
+    )
     build_summary = _mapping(bundle.build_summary)
+    projection_references = _projection_references(bundle, build_summary)
     if set(build_summary) != {
         "application_version",
         "image_identity",
@@ -1268,8 +1762,10 @@ async def verify_outcome_blind_foundation_bundle(
         raise ValueError("foundation build summary row counts are invalid")
 
     observation_store = ParquetObservationStore(root, clock)
+    _guard_observation_manifest(root, bundle.observations)
     observation_manifest = await observation_store.verify_file(bundle.observations.manifest_id)
     _verify_observation_reference(bundle.observations, observation_manifest)
+    _guard_observation_children(root, observation_manifest)
     evidence = load_observation_build_evidence(observation_manifest)
 
     store = ParquetFoundationArtifactStore(root, clock)
@@ -1284,54 +1780,25 @@ async def verify_outcome_blind_foundation_bundle(
     manifests: dict[str, FoundationChildManifest] = {}
     rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     for reference in standard_references:
-        manifest = (
-            await store.verify_file(reference.manifest_id)
-            if reference.name
-            in {
-                "panel",
-                "targets",
-                "forecasts",
-            }
-            else await store.verify(reference.manifest_id)
-        )
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
         _verify_child_reference(reference, manifest)
         manifests[reference.name] = manifest
         if reference.name in {"configuration", "availability", "folds"}:
+            _guard_foundation_child(root, manifest)
             rows[reference.name] = await store.read_rows(reference.manifest_id)
 
-    projection_payload = _mapping(build_summary["outcome_blind_projections"])
-    projection_names = {
-        "target_index": "target-index",
-        "causal_metadata": "causal-metadata",
-        "observations": "blind-observations",
-        "panel": "blind-panel",
-        "pre_holdout_target": "pre-holdout-target",
-    }
-    g2_projection_names = {
-        "g2_observations": "g2-observations",
-        "g2_panel": "g2-panel",
-    }
-    has_g2_feature_source = set(projection_payload) == set(projection_names) | set(
-        g2_projection_names
-    )
-    if has_g2_feature_source:
-        projection_names.update(g2_projection_names)
-    elif set(projection_payload) != set(projection_names):
-        raise ValueError("foundation outcome-blind projection set is incomplete")
+    has_g2_feature_source = True
     projection_manifests: dict[str, FoundationChildManifest] = {}
     projection_rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
-    projection_references: dict[str, ArtifactReference] = {}
-    for key, name in projection_names.items():
-        reference = _reference(name, projection_payload[key])
-        manifest = (
-            await store.verify_file(reference.manifest_id)
-            if key in g2_projection_names
-            else await store.verify(reference.manifest_id)
-        )
+    for key, _name in _FOUNDATION_PROJECTION_NAMES:
+        reference = projection_references[key]
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
         _verify_child_reference(reference, manifest)
         projection_manifests[key] = manifest
-        projection_references[key] = reference
-        if key not in g2_projection_names:
+        if key not in {"g2_observations", "g2_panel"}:
+            _guard_foundation_child(root, manifest)
             projection_rows[key] = await store.read_rows(reference.manifest_id)
 
     configuration = decode_foundation_config(_single_row(rows, "configuration"))
@@ -1473,7 +1940,7 @@ async def verify_outcome_blind_foundation_bundle(
         observation_reference = projection_references["g2_observations"]
         panel_reference = projection_references["g2_panel"]
         source_id = _g2_feature_source_id(
-            foundation_bundle_id=bundle.bundle_id,
+            foundation_bundle_id=bundle.foundation_id,
             foundation_configuration_id=configuration.configuration_id,
             observation_dataset_id=observation_manifest.dataset_id,
             panel_dataset_id=manifests["panel"].dataset_id,
@@ -1486,7 +1953,7 @@ async def verify_outcome_blind_foundation_bundle(
         )
         g2_feature_source = G2FeatureSourceAuthority(
             root=root,
-            foundation_bundle_id=bundle.bundle_id,
+            foundation_bundle_id=bundle.foundation_id,
             foundation_configuration_id=configuration.configuration_id,
             observation_dataset_id=observation_manifest.dataset_id,
             panel_dataset_id=manifests["panel"].dataset_id,
@@ -1576,12 +2043,6 @@ async def verify_outcome_blind_foundation_bundle(
     for fold in folds.folds:
         if not set(fold.training_target_ids) | set(fold.validation_target_ids) <= target_ids:
             raise ValueError("fold membership is not covered by the holdout target source")
-    expected_folds = build_expanding_folds(
-        cast(TargetDataset, R2OutcomeBlindTargetView.from_source(holdout_target_source)),
-        configuration,
-    )
-    if folds != expected_folds:
-        raise ValueError("foundation folds differ from deterministic pre-holdout replay")
     return OutcomeBlindVerifiedFoundationBundle(
         bundle=bundle,
         configuration=configuration,
@@ -1591,6 +2052,9 @@ async def verify_outcome_blind_foundation_bundle(
         folds=folds,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
+        receipt=(
+            load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+        ),
         g2_feature_source=g2_feature_source,
     )
 
@@ -1618,10 +2082,14 @@ async def _verify_g2_feature_source(
         raise ValueError("G2 feature source authority identity is invalid")
 
     store = ParquetFoundationArtifactStore(authority.root, clock)
-    observation_manifest = await store.verify(authority.observation_reference.manifest_id)
-    panel_manifest = await store.verify(authority.panel_reference.manifest_id)
+    _guard_foundation_manifest(authority.root, authority.observation_reference)
+    observation_manifest = await store.read_manifest(authority.observation_reference.manifest_id)
     _verify_child_reference(authority.observation_reference, observation_manifest)
+    _guard_foundation_child(authority.root, observation_manifest)
+    _guard_foundation_manifest(authority.root, authority.panel_reference)
+    panel_manifest = await store.read_manifest(authority.panel_reference.manifest_id)
     _verify_child_reference(authority.panel_reference, panel_manifest)
+    _guard_foundation_child(authority.root, panel_manifest)
     _require_lineage(
         observation_manifest,
         {
@@ -1641,10 +2109,14 @@ async def _verify_g2_feature_source(
             "holdout_end": authority.holdout_range[1].isoformat(),
         },
     )
+    _guard_foundation_manifest(authority.root, authority.observation_reference)
+    _guard_foundation_child(authority.root, observation_manifest)
     observation_rows = tuple(
         _observation_from_row(cast(Mapping[str, object], row))
         for row in await store.read_rows(authority.observation_reference.manifest_id)
     )
+    _guard_foundation_manifest(authority.root, authority.panel_reference)
+    _guard_foundation_child(authority.root, panel_manifest)
     panel_rows = tuple(
         _panel_row(row) for row in await store.read_rows(authority.panel_reference.manifest_id)
     )
@@ -1701,15 +2173,17 @@ async def _verify_confirmatory_target_dataset(
     """Decode the exact authenticated target child after irreversible confirmatory OPENED."""
 
     if (
-        authority.foundation_bundle_id != foundation.bundle.bundle_id
+        authority.foundation_bundle_id != foundation.bundle.foundation_id
         or authority.foundation_configuration_id != foundation.configuration.configuration_id
         or authority.observation_dataset_id != foundation.observations.dataset_id
     ):
         raise ValueError("confirmatory outcome authority differs from verified F2 foundation")
     reference = foundation.bundle.targets
     store = ParquetFoundationArtifactStore(authority.root, clock)
-    manifest = await store.verify(reference.manifest_id)
+    _guard_foundation_manifest(authority.root, reference)
+    manifest = await store.read_manifest(reference.manifest_id)
     _verify_child_reference(reference, manifest)
+    _guard_foundation_child(authority.root, manifest)
     _require_lineage(
         manifest,
         {
@@ -1717,6 +2191,8 @@ async def _verify_confirmatory_target_dataset(
             "foundation_configuration_id": authority.foundation_configuration_id,
         },
     )
+    _guard_foundation_manifest(authority.root, reference)
+    _guard_foundation_child(authority.root, manifest)
     rows = tuple(
         _target(cast(Mapping[str, object], row))
         for row in await store.read_rows(reference.manifest_id)

@@ -16,7 +16,7 @@ from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
-from qtrad.domain.foundation_bundle import FoundationBundle
+from qtrad.domain.foundation_bundle import ArtifactReference, FoundationBundle
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.research import (
@@ -25,15 +25,17 @@ from qtrad.domain.research import (
     build_availability_delay_report,
     build_revision_delay_report,
 )
+from qtrad.runtime import foundation_bundle as foundation_runtime
 from qtrad.runtime.foundation_bundle import (
+    authenticate_foundation_bundle,
     load_foundation_bundle,
     load_foundation_config,
+    load_foundation_verification_receipt,
     persist_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
     verify_outcome_blind_foundation_bundle,
-    write_foundation_bundle,
 )
 from qtrad.runtime.settings import Settings
 from tests.test_r1_walk_forward import _config
@@ -214,7 +216,12 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
     configuration_path.write_text(json.dumps(configuration.as_json()), encoding="utf-8")
 
     loaded = load_foundation_bundle(path)
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     loaded_configuration = load_foundation_config(configuration_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
@@ -268,7 +275,14 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         "folds",
         "forecasts",
     }
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
+    receipt = verified.receipt
+    assert receipt is not None
     source = R2HoldoutTargetSource.create_from_target_dataset(
         verified.targets,
         holdout_range=configuration.holdout_range,
@@ -282,11 +296,13 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         availability_evidence_id=bundle.availability.dataset_id,
     )
     original_read_rows = ParquetFoundationArtifactStore.read_rows
+    read_counts: dict[str, int] = {}
 
     async def guarded_read_rows(
         self: ParquetFoundationArtifactStore, manifest_id: str
     ) -> tuple[dict[str, JsonValue], ...]:
         manifest = await self.read_manifest(manifest_id)
+        read_counts[manifest.kind] = read_counts.get(manifest.kind, 0) + 1
         assert manifest.kind not in {
             "panel",
             "targets",
@@ -307,7 +323,9 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         bundle_path=path,
         clock=clock,
         holdout_target_source=source,
+        receipt=receipt,
     )
+    assert all(count == 1 for count in read_counts.values())
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
     assert blind.g2_feature_source is not None
     assert all(
@@ -346,40 +364,25 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
             bundle_path=path,
             clock=clock,
             holdout_target_source=tampered_source,
+            receipt=receipt,
         )
 
 
 @pytest.mark.asyncio
-async def test_full_verifier_accepts_extension_free_v2_bundle(tmp_path: Path) -> None:
-    bundle, path, clock, _configuration = await _bundle(tmp_path)
-    standard_summary = {
-        key: value
-        for key, value in bundle.build_summary.items()
-        if key != "outcome_blind_projections"
-    }
-    legacy = FoundationBundle.create(
-        configuration=bundle.configuration,
-        observations=bundle.observations,
-        availability=bundle.availability,
-        panel=bundle.panel,
-        targets=bundle.targets,
-        folds=bundle.folds,
-        forecasts=bundle.forecasts,
-        ordered_instruments=bundle.ordered_instruments,
-        range_start=bundle.range_start,
-        range_end=bundle.range_end,
-        coverage=bundle.coverage,
-        build_summary=standard_summary,
-        market_data_source_class=bundle.market_data_source_class,
-    )
+async def test_legacy_bundle_contract_is_rejected_without_compatibility_reader(
+    tmp_path: Path,
+) -> None:
+    _bundle_value, path, _clock, _configuration = await _bundle(tmp_path)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["contract"] = "qtrad-research-foundation-bundle-v2"
+    payload["schema_version"] = 2
+    payload["bundle_id"] = payload.pop("foundation_id")
+    payload.pop("closure_id")
     legacy_path = path.with_name("legacy-foundation.json")
-    write_foundation_bundle(legacy_path, legacy)
-    verified = await verify_foundation_bundle(
-        root=tmp_path,
-        bundle_path=legacy_path,
-        clock=clock,
-    )
-    assert verified.targets.dataset_id == bundle.targets.dataset_id
+    legacy_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="unexpected schema"):
+        load_foundation_bundle(legacy_path)
 
 
 @pytest.mark.asyncio
@@ -392,15 +395,25 @@ async def test_tampering_with_a_child_invalidates_the_bundle(tmp_path: Path) -> 
     child_path.write_bytes(child_path.read_bytes() + b"tampered")
 
     with pytest.raises(ValueError, match="file hash"):
-        await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+        await verify_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            receipt_output=tmp_path / "foundation-receipt.json",
+        )
 
 
 @pytest.mark.asyncio
-async def test_verifier_replays_children_instead_of_only_authenticating_them(
-    tmp_path: Path,
+async def test_persist_does_not_invoke_independent_verifier(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle, path, clock, configuration = await _bundle(tmp_path)
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     changed_row = replace(verified.panel.rows[0], close=Decimal("999"))
     changed_panel = PanelDataset.create(
         (changed_row, *verified.panel.rows[1:]),
@@ -416,24 +429,137 @@ async def test_verifier_replays_children_instead_of_only_authenticating_them(
     observation_manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
         bundle.observations.manifest_id
     )
+    verifier_calls = 0
 
-    with pytest.raises(ValueError, match="deterministic causal replay"):
-        await persist_foundation_bundle(
-            root=tmp_path,
-            clock=clock,
-            output_path=tmp_path / "wrong-foundation.json",
-            observation_manifest=observation_manifest,
-            configuration=configuration,
-            observations=verified.observations,
-            panel=changed_panel,
-            targets=verified.targets,
-            folds=verified.folds,
-            forecasts=changed_forecasts,
-            availability_evidence=_evidence(
-                verified.observations, configuration.feature_lag_calibration_range
+    async def unexpected_verifier(*_args: object, **_kwargs: object) -> object:
+        nonlocal verifier_calls
+        verifier_calls += 1
+        raise AssertionError("persist unexpectedly invoked the independent verifier")
+
+    monkeypatch.setattr(foundation_runtime, "verify_foundation_bundle", unexpected_verifier)
+    candidate = await persist_foundation_bundle(
+        root=tmp_path,
+        clock=clock,
+        output_path=tmp_path / "changed-foundation.json",
+        observation_manifest=observation_manifest,
+        configuration=configuration,
+        observations=verified.observations,
+        panel=changed_panel,
+        targets=verified.targets,
+        folds=verified.folds,
+        forecasts=changed_forecasts,
+        availability_evidence=_evidence(
+            verified.observations, configuration.feature_lag_calibration_range
+        ),
+        application_version="test",
+        image_identity="test@sha256:" + "1" * 64,
+    )
+    assert candidate.foundation_id != bundle.foundation_id
+    assert verifier_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_semantic_and_closure_identities_are_separate(tmp_path: Path) -> None:
+    bundle, _path, _clock, _configuration = await _bundle(tmp_path)
+
+    def recreate(**changes: object) -> FoundationBundle:
+        return FoundationBundle.create(
+            configuration=cast(
+                ArtifactReference, changes.get("configuration", bundle.configuration)
             ),
-            application_version="test",
-            image_identity="test@sha256:" + "1" * 64,
+            observations=cast(ArtifactReference, changes.get("observations", bundle.observations)),
+            availability=cast(ArtifactReference, changes.get("availability", bundle.availability)),
+            panel=cast(ArtifactReference, changes.get("panel", bundle.panel)),
+            targets=cast(ArtifactReference, changes.get("targets", bundle.targets)),
+            folds=cast(ArtifactReference, changes.get("folds", bundle.folds)),
+            forecasts=cast(ArtifactReference, changes.get("forecasts", bundle.forecasts)),
+            ordered_instruments=bundle.ordered_instruments,
+            range_start=bundle.range_start,
+            range_end=bundle.range_end,
+            coverage=bundle.coverage,
+            build_summary=cast(
+                Mapping[str, JsonValue], changes.get("build_summary", bundle.build_summary)
+            ),
+            market_data_source_class=bundle.market_data_source_class,
+            projections=bundle.projections,
+        )
+
+    provenance_only = recreate(
+        build_summary={
+            **bundle.build_summary,
+            "application_version": "unrelated-application",
+            "image_identity": "unrelated-image",
+        }
+    )
+    assert provenance_only.foundation_id == bundle.foundation_id
+    assert provenance_only.closure_id == bundle.closure_id
+
+    alternate_root = (
+        "manifests"
+        if bundle.configuration.manifest_path.startswith("foundation-")
+        else "foundation-manifests"
+    )
+    physical_only = recreate(
+        configuration=replace(
+            bundle.configuration,
+            manifest_path=f"{alternate_root}/{bundle.configuration.manifest_id}.json",
+        )
+    )
+    assert physical_only.foundation_id == bundle.foundation_id
+    assert physical_only.closure_id != bundle.closure_id
+
+    semantic_change = recreate(panel=replace(bundle.panel, dataset_id="f" * 64))
+    assert semantic_change.foundation_id != bundle.foundation_id
+    assert semantic_change.closure_id == bundle.closure_id
+
+
+@pytest.mark.asyncio
+async def test_authentication_is_lazy_and_consumed_child_tamper_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
+    assert verified.receipt is not None
+
+    def unexpected_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("cheap authentication replayed a causal builder")
+
+    monkeypatch.setattr(foundation_runtime, "build_asof_panel", unexpected_replay)
+    monkeypatch.setattr(foundation_runtime, "build_frozen_targets", unexpected_replay)
+    monkeypatch.setattr(foundation_runtime, "build_expanding_folds", unexpected_replay)
+    monkeypatch.setattr(foundation_runtime, "build_zero_return_forecasts", unexpected_replay)
+    await authenticate_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt=verified.receipt,
+    )
+    restored = await foundation_runtime.restore_authenticated_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt=verified.receipt,
+    )
+    assert restored.bundle.foundation_id == bundle.foundation_id
+    assert restored.bundle.closure_id == bundle.closure_id
+
+    manifest = await ParquetFoundationArtifactStore(tmp_path, clock).read_manifest(
+        bundle.targets.manifest_id
+    )
+    child_path = tmp_path / manifest.file
+    child_path.write_bytes(child_path.read_bytes() + b"tampered")
+    with pytest.raises(ValueError, match="file hash"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            receipt=verified.receipt,
+            consumed_children=("targets",),
         )
 
 
@@ -638,16 +764,158 @@ async def test_foundation_verification_is_wired_to_the_cli(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     bundle, path, clock, _ = await _bundle(tmp_path)
-
+    receipt_path = tmp_path / "foundation-receipt.json"
     parsed = cli.build_parser().parse_args(
-        ["research", "foundation", "verify", "--bundle", str(path)]
+        [
+            "research",
+            "foundation",
+            "verify",
+            "--bundle",
+            str(path),
+            "--receipt-output",
+            str(receipt_path),
+        ]
     )
     assert parsed.research_command == "foundation"
     await cli._verify_foundation_bundle(
         Settings(research_root=tmp_path),
         clock,
         path,
+        receipt_output=receipt_path,
     )
     output = json.loads(capsys.readouterr().out)
-    assert output["bundle_id"] == bundle.bundle_id
+    assert output["foundation_id"] == bundle.foundation_id
     assert output["children"]["forecasts"]["rows"] == bundle.forecasts.row_count
+    assert receipt_path.is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ("missing", "extra", "substituted"))
+async def test_projection_set_must_match_bundle_summary_and_supported_set(
+    tmp_path: Path, mutation: str
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "original-receipt.json",
+    )
+    receipt = verified.receipt
+    assert receipt is not None
+    build_summary = dict(bundle.build_summary)
+    projection_payload = dict(
+        cast(Mapping[str, JsonValue], build_summary["outcome_blind_projections"])
+    )
+    if mutation == "missing":
+        projection_payload.pop("panel")
+    elif mutation == "extra":
+        projection_payload["rogue"] = {}
+    else:
+        substituted = dict(cast(Mapping[str, JsonValue], projection_payload["panel"]))
+        substituted["dataset_id"] = "f" * 64
+        projection_payload["panel"] = substituted
+    build_summary["outcome_blind_projections"] = projection_payload
+    candidate = FoundationBundle.create(
+        configuration=bundle.configuration,
+        observations=bundle.observations,
+        availability=bundle.availability,
+        panel=bundle.panel,
+        targets=bundle.targets,
+        folds=bundle.folds,
+        forecasts=bundle.forecasts,
+        ordered_instruments=bundle.ordered_instruments,
+        range_start=bundle.range_start,
+        range_end=bundle.range_end,
+        coverage=bundle.coverage,
+        build_summary=build_summary,
+        market_data_source_class=bundle.market_data_source_class,
+        projections=bundle.projections,
+    )
+    candidate_path = tmp_path / f"projection-{mutation}.json"
+    foundation_runtime.write_foundation_bundle(candidate_path, candidate)
+    receipt_output = tmp_path / f"projection-{mutation}-receipt.json"
+    with pytest.raises(ValueError, match="projection"):
+        await verify_foundation_bundle(
+            root=tmp_path,
+            bundle_path=candidate_path,
+            clock=clock,
+            receipt_output=receipt_output,
+        )
+    assert not receipt_output.exists()
+    with pytest.raises(ValueError, match="projection"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=candidate_path,
+            clock=clock,
+            receipt=receipt,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_name", ("targets", "observations"))
+async def test_authentication_rejects_symlink_consumed_child(
+    tmp_path: Path, child_name: str
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
+    receipt = verified.receipt
+    assert receipt is not None
+    if child_name == "observations":
+        observation_manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+            bundle.observations.manifest_id
+        )
+        child_path = tmp_path / observation_manifest.files[0]
+    else:
+        child_manifest = await ParquetFoundationArtifactStore(tmp_path, clock).read_manifest(
+            bundle.targets.manifest_id
+        )
+        child_path = tmp_path / child_manifest.file
+    outside = tmp_path.parent / f"outside-{child_name}.parquet"
+    outside.write_bytes(child_path.read_bytes())
+    child_path.unlink()
+    child_path.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            receipt=receipt,
+            consumed_children=(child_name,),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("artifact_contract", "wrong-foundation-contract"), ("artifact_schema_version", 99)),
+)
+async def test_foundation_receipt_binds_artifact_contract_and_schema(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    _bundle_value, path, clock, _configuration = await _bundle(tmp_path)
+    receipt_path = tmp_path / "foundation-receipt.json"
+    await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=receipt_path,
+    )
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    mutated = tmp_path / f"mutated-{field}.json"
+    mutated.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="artefact contract"):
+        load_foundation_verification_receipt(mutated)
+
+
+def test_foundation_verify_requires_receipt_output() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["research", "foundation", "verify", "--bundle", "foundation.json"]
+        )

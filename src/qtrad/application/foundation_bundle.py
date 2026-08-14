@@ -1,4 +1,4 @@
-"""Cross-artefact verification and composition for the thin R1 bundle."""
+"""Cross-artefact composition for the thin R1 foundation bundle."""
 
 from collections.abc import Mapping, Sequence
 
@@ -14,6 +14,7 @@ from qtrad.domain.foundation import (
     TargetDataset,
 )
 from qtrad.domain.foundation_bundle import ArtifactReference, FoundationBundle
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.research import ObservationDataset
 
 
@@ -33,11 +34,18 @@ def build_foundation_bundle(
     fold_reference: ArtifactReference,
     forecast_reference: ArtifactReference,
     build_summary: Mapping[str, JsonValue],
+    projections: Sequence[ArtifactReference] = (),
+    market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
 ) -> FoundationBundle:
-    """Verify loaded children, then emit references without duplicating their rows."""
+    """Compose already-built children after bounded in-memory relationship checks.
+
+    The causal builders have already established each child semantic identity. This
+    boundary checks only the identities and lineage needed to publish the references;
+    independent semantic replay belongs to verify_foundation_bundle.
+    """
 
     coverage = summarise_horizon_coverage(targets, configuration)
-    verify_foundation_children(
+    _check_foundation_relationships(
         configuration=configuration,
         observations=observations,
         panel=panel,
@@ -69,10 +77,12 @@ def build_foundation_bundle(
         range_end=configuration.range_end,
         coverage=coverage,
         build_summary=build_summary,
+        projections=projections,
+        market_data_source_class=market_data_source_class,
     )
 
 
-def verify_foundation_children(
+def _check_foundation_relationships(
     *,
     configuration: FoundationConfig,
     observations: ObservationDataset,
@@ -82,7 +92,7 @@ def verify_foundation_children(
     forecasts: ForecastDataset,
     coverage: Sequence[HorizonCoverageSummary],
 ) -> None:
-    """Rebuild semantic identities and reject broken cross-dataset references."""
+    """Check cross-object IDs and forecast lineage without rebuilding datasets."""
 
     configuration_id = configuration.configuration_id
     if observations.dataset_id != configuration.observation_dataset_id:
@@ -107,64 +117,43 @@ def verify_foundation_children(
         raise ValueError("foundation forecasts do not match targets")
     if forecasts.fold_dataset_id != folds.dataset_id:
         raise ValueError("foundation forecasts do not match folds")
-
-    rebuilt_observations = ObservationDataset.create(
-        observations.rows,
-        configuration=observations.configuration,
-        source_dataset_ids=observations.source_dataset_ids,
-        selection_policies=observations.selection_policies,
-    )
-    rebuilt_panel = PanelDataset.create(
-        panel.rows,
-        observation_dataset_id=panel.observation_dataset_id,
-        foundation_configuration_id=panel.foundation_configuration_id,
-    )
-    rebuilt_targets = TargetDataset.create(
-        targets.rows,
-        observation_dataset_id=targets.observation_dataset_id,
-        foundation_configuration_id=targets.foundation_configuration_id,
-    )
-    rebuilt_folds = FoldDataset.create(
-        folds.folds,
-        target_dataset_id=folds.target_dataset_id,
-        foundation_configuration_id=folds.foundation_configuration_id,
-    )
-    rebuilt_forecasts = ForecastDataset.create(
-        forecasts.rows,
-        observation_dataset_id=forecasts.observation_dataset_id,
-        panel_dataset_id=forecasts.panel_dataset_id,
-        target_dataset_id=forecasts.target_dataset_id,
-        fold_dataset_id=forecasts.fold_dataset_id,
-    )
-    rebuilt = (
-        rebuilt_observations.dataset_id,
-        rebuilt_panel.dataset_id,
-        rebuilt_targets.dataset_id,
-        rebuilt_folds.dataset_id,
-        rebuilt_forecasts.dataset_id,
-    )
-    expected = (
-        observations.dataset_id,
-        panel.dataset_id,
-        targets.dataset_id,
-        folds.dataset_id,
-        forecasts.dataset_id,
-    )
-    if rebuilt != expected:
-        raise ValueError("foundation child fails independent semantic verification")
-    _verify_coverage(targets, coverage, configuration)
+    _verify_coverage_shape(configuration, coverage)
     _verify_forecast_lineage(configuration, panel, targets, folds, forecasts)
 
 
-def _verify_coverage(
-    targets: TargetDataset,
-    summaries: Sequence[HorizonCoverageSummary],
+def verify_foundation_children(
+    *,
     configuration: FoundationConfig,
+    observations: ObservationDataset,
+    panel: PanelDataset,
+    targets: TargetDataset,
+    folds: FoldDataset,
+    forecasts: ForecastDataset,
+    coverage: Sequence[HorizonCoverageSummary],
+) -> None:
+    """Verify cross-dataset lineage after one independent semantic replay.
+
+    Child constructors and the deterministic builders perform semantic identity
+    checks. This function deliberately does not recreate those datasets.
+    """
+
+    _check_foundation_relationships(
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+        coverage=coverage,
+    )
+
+
+def _verify_coverage_shape(
+    configuration: FoundationConfig,
+    summaries: Sequence[HorizonCoverageSummary],
 ) -> None:
     if tuple(summary.horizon for summary in summaries) != configuration.target_horizons:
         raise ValueError("foundation coverage does not match configured horizons")
-    if tuple(summaries) != summarise_horizon_coverage(targets, configuration):
-        raise ValueError("foundation coverage is inconsistent with target dispositions")
 
 
 def _verify_forecast_lineage(

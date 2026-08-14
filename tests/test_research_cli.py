@@ -320,6 +320,8 @@ def test_r2_feature_commands_require_explicit_feature_set(
         command,
         "--foundation-bundle",
         str(tmp_path / "foundation.json"),
+        "--foundation-receipt",
+        str(tmp_path / "foundation-receipt.json"),
         "--experiment",
         str(tmp_path / "experiment.json"),
         destination,

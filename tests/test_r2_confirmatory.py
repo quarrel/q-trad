@@ -21,6 +21,7 @@ import qtrad.runtime.foundation_bundle as foundation_runtime
 import qtrad.runtime.r2_holdout as holdout_runtime
 import qtrad.runtime.r2_verification as verification
 from qtrad.__main__ import build_parser
+from qtrad.adapters.parquet.foundation import ParquetFoundationArtifactStore
 from qtrad.adapters.parquet.observations import ParquetObservationStore
 from qtrad.application.r2_features import build_raw_feature_rows, feature_schema_for_set
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
@@ -84,6 +85,115 @@ from qtrad.runtime.r2_verification import (
     verify_confirmatory_g2_preparation,
     verify_confirmatory_r2h,
 )
+
+
+def _fixture_blind_foundation(
+    root: Path,
+) -> tuple[
+    Path,
+    foundation_runtime.OutcomeBlindVerifiedFoundationBundle,
+    foundation_runtime.G2FeatureSourceAuthority,
+]:
+    with pytest.MonkeyPatch.context() as fixture_patch:
+        fixture_patch.setattr(
+            verification,
+            "runtime_identities",
+            lambda: {
+                "application_identity": "fixture-application",
+                "image_identity": "sha256:" + "1" * 64,
+                "python_identity": "fixture-python",
+                "numpy_identity": "fixture-numpy",
+                "sklearn_identity": "fixture-sklearn",
+            },
+        )
+        bundle_path, _, _, _, _ = _build_confirmatory_fixture(
+            root,
+            qualifying=True,
+            compact=True,
+        )
+    oof_bundle = verification.verify_r2_oof_bundle(bundle_path)
+    assert oof_bundle.holdout_target_source is not None
+    target_source = R2HoldoutTargetSource.from_json(
+        cast(
+            dict[str, object],
+            json.loads(
+                (bundle_path.parent / oof_bundle.holdout_target_source.path).read_text(
+                    encoding="utf-8"
+                )
+            ),
+        )
+    )
+    blind_foundation = asyncio.run(
+        foundation_runtime.verify_outcome_blind_foundation_bundle(
+            root=root / "research",
+            bundle_path=root / "research" / "foundation.json",
+            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            receipt=root / "research" / "foundation-receipt.json",
+            holdout_target_source=target_source,
+        )
+    )
+    assert blind_foundation.g2_feature_source is not None
+    return (
+        root / "research",
+        blind_foundation,
+        blind_foundation.g2_feature_source,
+    )
+
+
+def _symlink_foundation_child(
+    research_root: Path,
+    manifest_id: str,
+    outside_path: Path,
+) -> None:
+    clock = cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC)))
+    manifest = asyncio.run(
+        ParquetFoundationArtifactStore(research_root, clock).read_manifest(manifest_id)
+    )
+    child_path = research_root / manifest.file
+    outside_path.write_bytes(child_path.read_bytes())
+    child_path.unlink()
+    child_path.symlink_to(outside_path)
+
+
+@pytest.mark.parametrize("reference_name", ("observation_reference", "panel_reference"))
+def test_g2_feature_source_rejects_same_byte_symlink_escape(
+    tmp_path: Path,
+    reference_name: str,
+) -> None:
+    research_root, _, authority = _fixture_blind_foundation(tmp_path)
+    reference = getattr(authority, reference_name)
+    _symlink_foundation_child(
+        research_root,
+        reference.manifest_id,
+        tmp_path / f"outside-{reference_name}.parquet",
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        asyncio.run(
+            foundation_runtime._verify_g2_feature_source(
+                authority,
+                clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            )
+        )
+
+
+def test_confirmatory_target_rejects_same_byte_symlink_escape(tmp_path: Path) -> None:
+    research_root, blind_foundation, authority = _fixture_blind_foundation(tmp_path)
+    reference = blind_foundation.bundle.targets
+    _symlink_foundation_child(
+        research_root,
+        reference.manifest_id,
+        tmp_path / "outside-targets.parquet",
+    )
+
+    with pytest.raises(ValueError, match="symlink"):
+        asyncio.run(
+            foundation_runtime._verify_confirmatory_target_dataset(
+                blind_foundation,
+                authority,
+                clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            )
+        )
 
 
 def _build_confirmatory_fixture(
@@ -420,6 +530,17 @@ def _build_confirmatory_fixture(
         return foundation_runtime.load_foundation_bundle(foundation_path)
 
     foundation_bundle = asyncio.run(persist_fixture_foundation())
+    local_foundation_receipt_path = foundation_receipt_path
+    if local_foundation_receipt_path is None:
+        local_foundation_receipt_path = research_root / "foundation-receipt.json"
+        receipt = foundation_runtime._foundation_receipt_for(
+            foundation_path,
+            foundation_bundle,
+        )
+        foundation_runtime.write_foundation_verification_receipt(
+            local_foundation_receipt_path,
+            receipt,
+        )
     if replay_foundation_path is not None:
         foundation_bundle = type(foundation_bundle).create(
             configuration=foundation_bundle.configuration,
@@ -452,7 +573,7 @@ def _build_confirmatory_fixture(
     )
     experiment = replace(
         experiment,
-        r1_bundle_id=foundation_bundle.bundle_id,
+        r1_bundle_id=foundation_bundle.foundation_id,
         r1_application_version="fixture-application",
         r1_image_identity="fixture-image",
         foundation_configuration_id=configuration.configuration_id,
@@ -506,8 +627,7 @@ def _build_confirmatory_fixture(
         "experiment": experiment_path,
         **{name: research_root / path for name, path in feature_paths.items()},
     }
-    if foundation_receipt_path is not None:
-        replay_inputs["foundation_receipt"] = foundation_receipt_path
+    replay_inputs["foundation_receipt"] = local_foundation_receipt_path
     if foundation_promotion_path is not None:
         replay_inputs["foundation_promotion"] = foundation_promotion_path
     bundle_path = build_oof_bundle(
@@ -1190,6 +1310,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             root=tmp_path / "research",
             bundle_path=tmp_path / "research" / "foundation.json",
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now())),
+            receipt=tmp_path / "research" / "foundation-receipt.json",
             holdout_target_source=target_source,
         )
     )

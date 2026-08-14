@@ -270,7 +270,7 @@ def _verified(
     )
     return SimpleNamespace(
         bundle=SimpleNamespace(
-            bundle_id=config.r1_bundle_id,
+            foundation_id=config.r1_bundle_id,
             ordered_instruments=config.ordered_instruments,
             range_start=START,
             range_end=END,

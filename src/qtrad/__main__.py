@@ -131,6 +131,7 @@ from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.foundation_bundle import (
     load_foundation_config,
     persist_foundation_bundle,
+    restore_authenticated_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
@@ -1007,7 +1008,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify every foundation child and cross-reference"
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
-    foundation_verify.add_argument("--receipt-output", type=Path)
+    foundation_verify.add_argument("--receipt-output", type=Path, required=True)
     foundation_verify.add_argument("--provider-history-receipt", type=Path)
     foundation_verify.add_argument(
         "--replay-checkpoint-root",
@@ -1082,7 +1083,7 @@ def build_parser() -> argparse.ArgumentParser:
         "readiness", help="verify R2 experiment bindings and report independent readiness gates"
     )
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
-    baselines_readiness.add_argument("--foundation-receipt", type=Path)
+    baselines_readiness.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_readiness.add_argument("--foundation-promotion", type=Path)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
     baselines_readiness.add_argument("--software-bundle", type=Path)
@@ -1094,13 +1095,13 @@ def build_parser() -> argparse.ArgumentParser:
         "features-verify", help="independently verify a persisted R2 raw-feature child"
     )
     baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
-    baselines_features_verify.add_argument("--foundation-receipt", type=Path)
+    baselines_features_verify.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_features_verify.add_argument("--foundation-promotion", type=Path)
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
     baselines_features_verify.add_argument("--feature-set", required=True)
     baselines_features_verify.add_argument("--manifest", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
-    baselines_features.add_argument("--foundation-receipt", type=Path)
+    baselines_features.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_features.add_argument("--foundation-promotion", type=Path)
     baselines_features.add_argument("--experiment", type=Path, required=True)
     baselines_features.add_argument("--feature-set", required=True)
@@ -1110,7 +1111,7 @@ def build_parser() -> argparse.ArgumentParser:
         "oof-build", help="authenticate R2 feature children and build an OOF bundle"
     )
     baselines_oof_build.add_argument("--foundation-bundle", type=Path, required=True)
-    baselines_oof_build.add_argument("--foundation-receipt", type=Path)
+    baselines_oof_build.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_oof_build.add_argument("--foundation-promotion", type=Path)
     baselines_oof_build.add_argument("--experiment", type=Path, required=True)
     baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
@@ -2669,7 +2670,7 @@ async def _report_r2_readiness(
             software_bundle_path.parent / software.representative_oof_bundle.path
         )
         software_verified = (
-            representative.foundation_bundle_id == verified.bundle.bundle_id
+            representative.foundation_bundle_id == verified.bundle.foundation_id
             and representative.experiment_configuration_id == experiment.configuration_id
             and representative.source_class is experiment.market_data_source_class
             and representative.evidence_class is experiment.evidence_class
@@ -2695,10 +2696,13 @@ async def _load_r2_foundation_inputs(
     foundation_promotion_path: Path | None = None,
 ) -> VerifiedFoundation | R2FoundationInputs:
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
-        return await verify_foundation_bundle(
+        if foundation_receipt_path is None:
+            raise ValueError("non-IBKR R2 work requires a foundation verification receipt")
+        return await restore_authenticated_foundation_bundle(
             root=settings.research_root,
             bundle_path=foundation_bundle_path,
             clock=clock,
+            receipt=foundation_receipt_path,
         )
 
     if foundation_receipt_path is None:
@@ -2773,11 +2777,8 @@ async def _build_r2_oof(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
-    if (
-        foundation_receipt_path is not None
-        and experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE
-    ):
-        raise ValueError("a Stage 8 foundation receipt is only valid for IBKR historical OOF work")
+    if foundation_receipt_path is None:
+        raise ValueError("R2 OOF build requires a foundation verification receipt")
     if (
         foundation_promotion_path is not None
         and experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE
@@ -2794,6 +2795,7 @@ async def _build_r2_oof(
             bundle_path=foundation_bundle_path,
             clock=clock,
             holdout_target_source=holdout_target_source,
+            receipt=foundation_receipt_path,
         )
     else:
         verified = await _load_r2_foundation_inputs(
@@ -2825,11 +2827,7 @@ async def _build_r2_oof(
         ),
         replay_inputs={
             "foundation": foundation_bundle_path,
-            **(
-                {"foundation_receipt": foundation_receipt_path}
-                if foundation_receipt_path is not None
-                else {}
-            ),
+            "foundation_receipt": foundation_receipt_path,
             **(
                 {"foundation_promotion": foundation_promotion_path}
                 if foundation_promotion_path is not None
@@ -3285,7 +3283,7 @@ async def _build_foundation_bundle(
     print(
         json.dumps(
             {
-                "bundle_id": bundle.bundle_id,
+                "foundation_id": bundle.foundation_id,
                 "output": str(output_path),
                 "children": {child.name: child.manifest_id for child in bundle.children},
             },
@@ -3326,7 +3324,7 @@ async def _verify_foundation_bundle(
     clock: Clock,
     bundle_path: Path,
     *,
-    receipt_output: Path | None = None,
+    receipt_output: Path,
     replay_checkpoint_root: Path | None = None,
     provider_history_receipt: Path | None = None,
 ) -> None:
@@ -3368,12 +3366,13 @@ async def _verify_foundation_bundle(
         root=settings.research_root,
         bundle_path=bundle_path,
         clock=clock,
+        receipt_output=receipt_output,
     )
     print(
         json.dumps(
             {
                 "contract": verified.bundle.CONTRACT,
-                "bundle_id": verified.bundle.bundle_id,
+                "foundation_id": verified.bundle.foundation_id,
                 "children": {
                     child.name: {
                         "dataset_id": child.dataset_id,
