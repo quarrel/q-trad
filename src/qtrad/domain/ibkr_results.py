@@ -1,4 +1,4 @@
-"""Immutable Stage 4 IBKR historical result evidence contracts."""
+"""Immutable Stage 6 IBKR historical result evidence contracts."""
 
 from __future__ import annotations
 
@@ -29,8 +29,12 @@ from qtrad.domain.ibkr_historical import (
 from qtrad.domain.time import require_utc
 
 REQUEST_RESULT_CONTRACT = "qtrad-ibkr-historical-request-result-v2"
-HISTORICAL_RESULT_CONTRACT = "qtrad-ibkr-historical-result-v2"
-RESULT_SCHEMA_VERSION = 2
+HISTORICAL_RESULT_CONTRACT = "qtrad-ibkr-historical-result-v3"
+HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT = (
+    "qtrad-ibkr-historical-result-verification-v1"
+)
+RESULT_SCHEMA_VERSION = 3
+REQUEST_RESULT_SCHEMA_VERSION = 2
 MAX_IBKR_RESULT_BYTES = 8 * 1024 * 1024
 MAX_IBKR_RESULT_REQUEST_BYTES = 32 * 1024 * 1024
 MAX_IBKR_RESULT_CHILDREN = 20_000
@@ -338,7 +342,7 @@ class IbkrHistoricalRequestResult:
     result_sha256: str
 
     CONTRACT = REQUEST_RESULT_CONTRACT
-    SCHEMA_VERSION = RESULT_SCHEMA_VERSION
+    SCHEMA_VERSION = REQUEST_RESULT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
         _require_sha256(self.plan_sha256, "IBKR request result plan hash")
@@ -414,14 +418,18 @@ class IbkrHistoricalRequestResult:
 
 @dataclass(frozen=True, slots=True)
 class IbkrHistoricalAggregateResult:
-    """Aggregate result whose exact child closure is independently derived from the plan."""
+    """Stage 6 aggregate with separate semantic and physical identities."""
 
     plan: IbkrHistoricalChildReference
     runtime_sha256: str
     request_results: tuple[IbkrHistoricalChildReference, ...]
     coverage_summary: dict[str, JsonValue]
     entitlement_summary: dict[str, JsonValue]
-    aggregate_sha256: str
+    result_id: str
+    closure_id: str
+    publication_status: str = "PUBLISHED_UNVERIFIED"
+    # Kept as an in-memory alias for current callers; never serialised.
+    aggregate_sha256: str | None = None
 
     CONTRACT = HISTORICAL_RESULT_CONTRACT
     SCHEMA_VERSION = RESULT_SCHEMA_VERSION
@@ -440,23 +448,118 @@ class IbkrHistoricalAggregateResult:
             self.request_results
         ):
             raise ValueError("IBKR aggregate request-result child identities must be unique")
-        _require_sha256(self.aggregate_sha256, "IBKR aggregate hash")
-        if self.aggregate_sha256 != sha256_json(self.identity_payload()):
-            raise ValueError("IBKR aggregate hash does not match canonical content")
+        if self.publication_status != "PUBLISHED_UNVERIFIED":
+            raise ValueError("IBKR aggregate publication status is unsupported")
+        _require_sha256(self.result_id, "IBKR aggregate result identity")
+        if self.result_id != sha256_json(self.semantic_identity_payload()):
+            raise ValueError("IBKR aggregate result identity does not match semantic content")
+        _require_sha256(self.closure_id, "IBKR aggregate closure identity")
+        if self.closure_id != sha256_json(self.closure_identity_payload()):
+            raise ValueError("IBKR aggregate closure identity does not match physical content")
+        if self.aggregate_sha256 is None:
+            object.__setattr__(self, "aggregate_sha256", self.result_id)
 
-    def identity_payload(self) -> dict[str, JsonValue]:
+    def semantic_identity_payload(self) -> dict[str, JsonValue]:
+        """Return only scientific Stage 6 meaning, excluding physical references."""
         return {
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
-            "plan": self.plan.as_json_value(),
-            "runtime_sha256": self.runtime_sha256,
-            "request_results": [item.as_json_value() for item in self.request_results],
+            "plan_semantic_id": self.plan.semantic_sha256,
+            "request_result_semantic_ids": [
+                item.semantic_sha256 for item in self.request_results
+            ],
             "coverage_summary": _json_object(self.coverage_summary, "coverage summary"),
             "entitlement_summary": _json_object(self.entitlement_summary, "entitlement summary"),
         }
 
+    def closure_identity_payload(self) -> dict[str, JsonValue]:
+        """Return exact manifest metadata and declared child bytes."""
+        return {
+            **self.semantic_identity_payload(),
+            "result_id": self.result_id,
+            "plan": self.plan.as_json_value(),
+            "runtime_sha256": self.runtime_sha256,
+            "request_results": [item.as_json_value() for item in self.request_results],
+            "publication_status": self.publication_status,
+        }
+
+    def identity_payload(self) -> dict[str, JsonValue]:
+        """Return canonical manifest content without the compatibility alias."""
+        return {**self.closure_identity_payload(), "closure_id": self.closure_id}
+
     def as_json_value(self) -> dict[str, JsonValue]:
-        return {**self.identity_payload(), "aggregate_sha256": self.aggregate_sha256}
+        return self.identity_payload()
+
+
+@dataclass(frozen=True, slots=True)
+class IbkrHistoricalResultVerificationReceipt:
+    """Small create-only proof for one immutable Stage 6 closure."""
+
+    result_id: str
+    closure_id: str
+    result_contract: str
+    result_schema_version: int
+    manifest_sha256: str
+    plan_semantic_id: str
+    verifier_contract: str
+    verifier_version: str
+    completed_checks: tuple[str, ...]
+    verifier_identity: str
+    verification_id: str
+
+    CONTRACT = HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT
+
+    def __post_init__(self) -> None:
+        if (
+            self.result_contract != HISTORICAL_RESULT_CONTRACT
+            or self.result_schema_version != RESULT_SCHEMA_VERSION
+        ):
+            raise ValueError("IBKR result receipt Stage 6 contract or schema is unsupported")
+        for value, field in (
+            (self.result_id, "receipt result identity"),
+            (self.closure_id, "receipt closure identity"),
+            (self.manifest_sha256, "receipt manifest hash"),
+            (self.plan_semantic_id, "receipt plan identity"),
+            (self.verifier_identity, "receipt verifier identity"),
+            (self.verification_id, "receipt identity"),
+        ):
+            _require_sha256(value, field)
+        if self.verifier_contract != self.CONTRACT or not self.verifier_version:
+            raise ValueError("IBKR result receipt verifier contract is unsupported")
+        if (
+            not self.completed_checks
+            or len(set(self.completed_checks)) != len(self.completed_checks)
+        ):
+            raise ValueError("IBKR result receipt completed checks are invalid")
+        if self.verifier_identity != sha256_json(self.verifier_identity_payload()):
+            raise ValueError("IBKR result receipt verifier identity changed")
+        if self.verification_id != sha256_json(self.identity_payload()):
+            raise ValueError("IBKR result receipt identity changed")
+
+    def verifier_identity_payload(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.verifier_contract,
+            "version": self.verifier_version,
+            "completed_checks": list(self.completed_checks),
+        }
+
+    def identity_payload(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "result_contract": self.result_contract,
+            "result_schema_version": self.result_schema_version,
+            "result_id": self.result_id,
+            "closure_id": self.closure_id,
+            "manifest_sha256": self.manifest_sha256,
+            "plan_semantic_id": self.plan_semantic_id,
+            "verifier_contract": self.verifier_contract,
+            "verifier_version": self.verifier_version,
+            "completed_checks": list(self.completed_checks),
+            "verifier_identity": self.verifier_identity,
+        }
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {**self.identity_payload(), "verification_id": self.verification_id}
 
 
 @dataclass(frozen=True, slots=True)
@@ -518,6 +621,7 @@ def _require_sha256(value: str, field: str) -> None:
 
 __all__ = [
     "HISTORICAL_RESULT_CONTRACT",
+    "HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT",
     "MAX_IBKR_RESULT_ATTEMPTS",
     "MAX_IBKR_RESULT_BYTES",
     "MAX_IBKR_RESULT_CALLBACKS",
@@ -525,6 +629,7 @@ __all__ = [
     "MAX_IBKR_RESULT_COMPLETION_MARKERS",
     "MAX_IBKR_RESULT_REQUEST_BYTES",
     "REQUEST_RESULT_CONTRACT",
+    "REQUEST_RESULT_SCHEMA_VERSION",
     "RESULT_SCHEMA_VERSION",
     "IbkrHistoricalAggregateResult",
     "IbkrHistoricalAttemptEvidence",
@@ -537,6 +642,7 @@ __all__ = [
     "IbkrHistoricalRequestResult",
     "IbkrHistoricalRequestSnapshot",
     "IbkrHistoricalResultArtifact",
+    "IbkrHistoricalResultVerificationReceipt",
     "canonical_json_bytes",
     "sha256_bytes",
 ]

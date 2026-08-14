@@ -41,6 +41,8 @@ from qtrad.domain.provider_history import (
     sha256_json,
 )
 from qtrad.runtime.ibkr_results import (
+    _LEGACY_HISTORICAL_RESULT_V2_CONTRACT,
+    _read_legacy_ibkr_historical_result_v2_header,
     verify_ibkr_historical_result_stream,
 )
 
@@ -294,14 +296,21 @@ def _dataset_from_manifest(
     return dataset
 
 
-def _source_reference(value: object) -> dict[str, object]:
+def _source_reference(
+    value: object,
+    *,
+    allow_legacy_stage6: bool = False,
+) -> dict[str, object]:
     mapping = _mapping(value, "provider-history source result")
     _require_exact_keys(
         mapping,
         {"path", "contract", "semantic_sha256", "bytes_sha256", "plan_sha256"},
         "provider-history source result",
     )
-    if mapping["contract"] != HISTORICAL_RESULT_CONTRACT:
+    if mapping["contract"] != HISTORICAL_RESULT_CONTRACT and not (
+        allow_legacy_stage6
+        and mapping["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+    ):
         raise ValueError("provider-history source result contract is unsupported")
     _require_digest(mapping["semantic_sha256"], "source semantic identity")
     _require_digest(mapping["bytes_sha256"], "source bytes identity")
@@ -574,7 +583,10 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
     dataset_document = _mapping(document["dataset"], "provider-history dataset")
     policy = ProviderHistoricalAvailabilityPolicy.from_json_value(document["availability_policy"])
     dataset = _dataset_from_manifest(dataset_document, policy)
-    source_reference = _source_reference(document["source_result"])
+    source_reference = _source_reference(
+        document["source_result"],
+        allow_legacy_stage6=True,
+    )
     if source_reference["path"] != _SOURCE_MANIFEST_PATH:
         raise ValueError("provider-history source result path is not canonical")
     source_path = _safe_child(root, str(source_reference["path"]), "source result")
@@ -582,7 +594,18 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
     source_bytes = _read_bounded(source_path, "embedded IBKR result manifest")
     if sha256_bytes(source_bytes) != str(source_reference["bytes_sha256"]):
         raise ValueError("embedded IBKR result manifest bytes do not match its reference")
-    source_stream = verify_ibkr_historical_result_stream(source_path)
+    source_document = _mapping(
+        _parse_json(source_bytes, "embedded IBKR result manifest"),
+        "embedded IBKR result manifest",
+    )
+    source_stream = (
+        _read_legacy_ibkr_historical_result_v2_header(
+            source_path,
+            require_exact_tree=True,
+        )
+        if source_document["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+        else verify_ibkr_historical_result_stream(source_path)
+    )
     if source_stream.aggregate.aggregate_sha256 != source_reference["semantic_sha256"]:
         raise ValueError("embedded IBKR result identity does not match provider history")
     if source_stream.plan.plan_sha256 != source_reference["plan_sha256"]:
@@ -795,13 +818,24 @@ def read_provider_history_source_verification_receipt(
         ),
         "provider-history manifest",
     )
-    source_reference = _source_reference(document["source_result"])
-    source_path = _safe_child(root, str(source_reference["path"]), "source result")
-    source_stream = (
-        verify_ibkr_historical_result_stream(source_path)
-        if _verified_source_artifact is None
-        else _verified_source_artifact
+    source_reference = _source_reference(
+        document["source_result"],
+        allow_legacy_stage6=True,
     )
+    source_path = _safe_child(root, str(source_reference["path"]), "source result")
+    if _verified_source_artifact is None:
+        source_bytes = _read_bounded(source_path, "provider-history source manifest")
+        source_document = _mapping(
+            _parse_json(source_bytes, "provider-history source manifest"),
+            "provider-history source manifest",
+        )
+        source_stream = (
+            _read_legacy_ibkr_historical_result_v2_header(source_path)
+            if source_document["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+            else verify_ibkr_historical_result_stream(source_path)
+        )
+    else:
+        source_stream = _verified_source_artifact
     result_sha256_by_request: dict[str, str] = {}
     for reference in source_stream.aggregate.request_results:
         if not reference.path.startswith("requests/") or not reference.path.endswith(".json"):
@@ -1053,7 +1087,10 @@ def authenticate_provider_history(
         _parse_json(manifest_bytes, "provider-history manifest"),
         "provider-history manifest",
     )
-    source_reference = _source_reference(manifest["source_result"])
+    source_reference = _source_reference(
+        manifest["source_result"],
+        allow_legacy_stage6=True,
+    )
     expected = {
         "provider_history_manifest_sha256": sha256_bytes(manifest_bytes),
         "provider_history_dataset_sha256": _mapping(

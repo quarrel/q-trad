@@ -216,6 +216,7 @@ from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
+    verify_ibkr_historical_result_stream,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.provider_history import (
@@ -862,7 +863,7 @@ def build_parser() -> argparse.ArgumentParser:
         include_planner_image=False,
     )
     historical_result_build = historical_ibkr_sub.add_parser(
-        "result-build", help="publish and verify one completed IBKR historical result closure"
+        "result-build", help="publish one completed IBKR historical result closure"
     )
     historical_result_build.add_argument("--plan", type=Path, required=True)
     historical_result_build.add_argument("--output", type=Path, required=True)
@@ -870,6 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="independently verify an IBKR historical result closure from files"
     )
     historical_result_verify.add_argument("--result", type=Path, required=True)
+    historical_result_verify.add_argument("--receipt-output", type=Path)
 
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -1991,7 +1993,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.historical_provider == "ibkr"
         and args.historical_ibkr_command == "verify"
     ):
-        _verify_ibkr_historical_result(args.result)
+        _verify_ibkr_historical_result(args.result, receipt_output=args.receipt_output)
     elif args.command == "instruments" and args.instrument_command == "promote":
         _promote_universe(
             clock,
@@ -5110,9 +5112,12 @@ async def _build_ibkr_historical_result(
             manifest_path = output_path / "manifest.json" if output_path.is_dir() else output_path
         else:
             manifest_path = publish_ibkr_historical_result(output_path, artifact)
-        verified = verify_ibkr_historical_result(manifest_path)
-        if verified.aggregate.aggregate_sha256 != artifact.aggregate.aggregate_sha256:
-            raise RuntimeError("IBKR result changed between publication and verification")
+        structural = verify_ibkr_historical_result_stream(manifest_path)
+        if (
+            structural.aggregate.result_id != artifact.aggregate.result_id
+            or structural.aggregate.closure_id != artifact.aggregate.closure_id
+        ):
+            raise RuntimeError("IBKR result changed between publication checks")
         published_at = clock.now()
         await store.mark_ibkr_historical_requests_published(
             plan_sha256=plan.plan_sha256,
@@ -5126,27 +5131,33 @@ async def _build_ibkr_historical_result(
     print(
         json.dumps(
             {
-                "aggregate_sha256": artifact.aggregate.aggregate_sha256,
+                "closure_id": artifact.aggregate.closure_id,
                 "manifest": str(manifest_path),
                 "plan_sha256": plan.plan_sha256,
+                "publication_status": artifact.aggregate.publication_status,
                 "published": True,
                 "request_count": len(artifact.request_results),
-                "verified": True,
+                "verified": False
             },
             sort_keys=True,
         )
     )
 
 
-def _verify_ibkr_historical_result(result_path: Path) -> None:
-    artifact = verify_ibkr_historical_result(result_path)
+def _verify_ibkr_historical_result(
+    result_path: Path,
+    *,
+    receipt_output: Path | None,
+) -> None:
+    artifact = verify_ibkr_historical_result(result_path, receipt_output=receipt_output)
     print(
         json.dumps(
             {
-                "aggregate_sha256": artifact.aggregate.aggregate_sha256,
+                "closure_id": artifact.aggregate.closure_id,
                 "manifest": str(result_path),
                 "plan_sha256": artifact.plan.plan_sha256,
                 "request_count": len(artifact.request_results),
+                "result_id": artifact.aggregate.result_id,
                 "verified": True,
             },
             sort_keys=True,

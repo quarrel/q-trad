@@ -30,8 +30,10 @@ from qtrad.domain.provider_history import (
     utc_text,
 )
 from qtrad.runtime.ibkr_results import (
+    _LEGACY_HISTORICAL_RESULT_V2_CONTRACT,
     IbkrHistoricalResultStream,
     _read_ibkr_historical_result_header,
+    _read_legacy_ibkr_historical_result_v2_header,
 )
 from qtrad.runtime.provider_history import (
     _MANIFEST_NAME,
@@ -514,7 +516,7 @@ def _read_provider_history_v2_manifest(path: Path) -> _V2Manifest:
     )
     if document["availability_policy"] != dataset.availability_policy.as_json_value():
         raise ValueError("provider-history v2 availability policy changed")
-    source_reference = _source_reference(document["source_result"])
+    source_reference = _source_reference(document["source_result"], allow_legacy_stage6=True)
     migration = _migration_source(document["migration_source"])
     raw_parts = document["parts"]
     if not isinstance(raw_parts, list) or not raw_parts:
@@ -551,7 +553,15 @@ def _read_provider_history_v2_source_header(
     source_manifest_bytes = _read_bounded(source_manifest, "provider-history v2 source manifest")
     if sha256_bytes(source_manifest_bytes) != manifest.source_reference["bytes_sha256"]:
         raise ValueError("provider-history v2 source manifest bytes changed")
-    source_stream = _read_ibkr_historical_result_header(source_manifest)
+    source_document = _mapping(
+        _parse_json(source_manifest_bytes, "provider-history v2 source manifest"),
+        "provider-history v2 source manifest",
+    )
+    source_stream = (
+        _read_legacy_ibkr_historical_result_v2_header(source_manifest)
+        if source_document["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+        else _read_ibkr_historical_result_header(source_manifest)
+    )
     if (
         source_stream.plan.contract_selection_sha256 != manifest.dataset.contract_selection_sha256
         or source_stream.plan.plan_sha256 != manifest.dataset.plan_sha256
