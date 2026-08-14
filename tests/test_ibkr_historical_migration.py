@@ -265,3 +265,179 @@ def test_normal_cli_has_no_retained_migration_entrypoint() -> None:
     assert not hasattr(cli, "migrate_retained_ibkr_evidence")
     with pytest.raises(SystemExit):
         build_parser().parse_args(["research", "ibkr", "migrate-retained"])
+
+
+def test_disposable_migration_orchestrator_uses_each_boundary_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    paths = _paths(tmp_path)
+    plan = migration.MigrationPlan(
+        implementation_commit="670e04e",
+        paths=paths,
+        source_stage6_result_id="r" * 64,
+        source_stage6_closure_id="c" * 64,
+        source_stage6_request_count=1,
+        source_stage7_dataset_id="d" * 64,
+        source_stage7_manifest_sha256="m" * 64,
+        source_stage7_part_count=1,
+        source_stage8_build_id="f" * 64,
+        source_stage8_manifest_sha256="s" * 64,
+        source_promotion_id="p" * 64,
+    )
+    calls: list[str] = []
+
+    class _Stream:
+        plan = SimpleNamespace()
+        plan_bytes = b"plan"
+        aggregate = SimpleNamespace(
+            result_id="r" * 64,
+            closure_id="c" * 64,
+            request_results=(object(),),
+        )
+
+        def iter_request_results(self) -> tuple[object, ...]:
+            calls.append("stage6-child-read")
+            return (object(),)
+
+    fake_stage7 = SimpleNamespace(
+        dataset=SimpleNamespace(partitions=(object(),)),
+        observations=(object(),),
+    )
+    fake_counts = migration.MigrationWorkCounts(
+        old_stage6_request_children=1,
+        new_stage6_request_children=1,
+        old_stage7_parts_read=1,
+        new_stage7_parts_read=1,
+        old_stage7_rows_decoded=1,
+        new_stage7_rows_decoded=1,
+        old_stage8_child_rows_read=1,
+        new_stage8_child_rows_read=1,
+        stage6_semantic_replays=1,
+        stage7_semantic_replays=1,
+        stage8_semantic_replays=1,
+        promotion_semantic_replays=0,
+    )
+
+    monkeypatch.setattr(migration, "plan_retained_ibkr_migration", lambda *_args, **_kwargs: plan)
+    monkeypatch.setattr(
+        migration,
+        "_authenticate_ibkr_foundation_migration_v2",
+        lambda *_args, **_kwargs: {"authenticated": True},
+    )
+    monkeypatch.setattr(
+        migration,
+        "_authenticate_ibkr_foundation_promotion_migration_v2",
+        lambda *_args, **_kwargs: {"authenticated": True},
+    )
+    monkeypatch.setattr(
+        migration,
+        "authenticate_provider_history_v2",
+        lambda *_args, **_kwargs: SimpleNamespace(observations=(object(),)),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_read_provider_history_v2_manifest",
+        lambda *_args, **_kwargs: SimpleNamespace(parts=(object(),)),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_read_legacy_ibkr_historical_result_v2_header",
+        lambda *_args, **_kwargs: _Stream(),
+    )
+    monkeypatch.setattr(
+        migration,
+        "build_ibkr_historical_aggregate_result",
+        lambda *_args, **_kwargs: calls.append("stage6-build") or object(),
+    )
+    monkeypatch.setattr(
+        migration,
+        "IbkrHistoricalResultArtifact",
+        lambda **_kwargs: object(),
+    )
+    monkeypatch.setattr(
+        migration,
+        "publish_ibkr_historical_result",
+        lambda *_args, **_kwargs: calls.append("stage6-publish") or paths.stage6_manifest,
+    )
+    monkeypatch.setattr(
+        migration,
+        "verify_ibkr_historical_result",
+        lambda *_args, **_kwargs: calls.append("stage6-verify"),
+    )
+    monkeypatch.setattr(
+        migration,
+        "build_provider_history",
+        lambda *_args, **_kwargs: calls.append("stage7-build") or paths.stage7_manifest,
+    )
+    monkeypatch.setattr(
+        migration,
+        "verify_provider_history",
+        lambda *_args, **_kwargs: calls.append("stage7-verify") or fake_stage7,
+    )
+    monkeypatch.setattr(
+        migration,
+        "_compare_stage7",
+        lambda *_args, **_kwargs: calls.append("stage7-compare") or {},
+    )
+    monkeypatch.setattr(
+        migration,
+        "_authenticate_foundation_manifest",
+        lambda *_args, **_kwargs: SimpleNamespace(configuration=object()),
+    )
+    monkeypatch.setattr(
+        migration,
+        "write_ibkr_foundation",
+        lambda *_args, **_kwargs: calls.append("stage8-build"),
+    )
+    monkeypatch.setattr(
+        migration,
+        "verify_ibkr_foundation",
+        lambda *_args, **_kwargs: calls.append("stage8-verify") or object(),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_compare_stage8",
+        lambda *_args, **_kwargs: calls.append("stage8-compare") or ({}, 1, 1),
+    )
+    monkeypatch.setattr(
+        migration,
+        "create_ibkr_foundation_confirmatory_promotion",
+        lambda *_args, **_kwargs: calls.append("promotion") or object(),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_migration_record",
+        lambda **_kwargs: {
+            "work_counts": fake_counts.as_json_value(),
+            "safety": {"provider_calls": 0, "holdout_access": 0},
+        },
+    )
+
+    source_bytes = paths.source_stage6_manifest.read_bytes()
+    result = migration.migrate_retained_ibkr_evidence(
+        paths,
+        implementation_commit="670e04e",
+        promotion_authorisation=migration.PromotionAuthorisation(
+            authorized_by="operator",
+            authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+            authorization_reference="fixture",
+        ),
+    )
+
+    assert calls == [
+        "stage6-child-read",
+        "stage6-build",
+        "stage6-publish",
+        "stage6-verify",
+        "stage7-build",
+        "stage7-verify",
+        "stage7-compare",
+        "stage8-build",
+        "stage8-verify",
+        "stage8-compare",
+        "promotion",
+    ]
+    assert result.work_counts == fake_counts
+    assert result.record_path == paths.record
+    assert paths.record.is_file()
+    assert paths.source_stage6_manifest.read_bytes() == source_bytes
