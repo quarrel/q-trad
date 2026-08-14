@@ -145,6 +145,27 @@ Minor spelling, formatting and unambiguous CLI corrections do not require an ame
   normal code and evidence review.
 - **Amendment date:** 2026-08-03.
 
+### Amendment 5 — separate R2 scientific and evidence identities
+
+- **Original requirement:** Section 5.1 and the experiment configuration bound the R1 bundle ID and
+  R1 application/image identity without separating scientific meaning from physical evidence and
+  execution provenance. Other identity-bearing R2 contracts could retain code/image identity on the
+  same basis.
+- **Revised requirement:** the R2 scientific configuration binds the authenticated immediate foundation
+  semantic identity, `MarketDataSourceClass`, `EvidenceClass` and scientific configuration. Foundation
+  closure, verification and promotion identities remain separate evidence or authority bindings and do
+  not enter scientific identity. Whole R1 application/image identity is provenance unless a
+  claim-scoped numerical dependency changes the claimed computation; only that dependency's relevant
+  version or policy then enters scientific identity. Existing R1 bundle, code and image
+  references in this plan are read subject to this classification.
+- **Rationale:** unrelated physical layout or whole-application changes must not silently create a new
+  experiment, while exact evidence and consequential authority remain authenticated separately.
+- **Evidence impact:** no decision-grade R2 evidence exists, so no scientific result is invalidated.
+  PR-I1 replaces the current internal contracts and regenerates implementation fixtures under the
+  revised identities.
+- **Approving review:** PR #124.
+- **Amendment date:** 2026-08-14.
+
 ---
 
 ## 3. Research questions
