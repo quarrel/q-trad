@@ -16,7 +16,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from enum import StrEnum
 from hashlib import sha256
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import MappingProxyType, SimpleNamespace
 from typing import Any, cast
@@ -54,7 +54,6 @@ from qtrad.application.r2_holdout import (
     seal_holdout_forecasts,
 )
 from qtrad.application.r2_ibkr_historical import (
-    build_ibkr_historical_experiment,
     build_ibkr_r2_foundation_inputs,
 )
 from qtrad.application.r2_pooled import build_pooled_ridge_oof
@@ -75,12 +74,14 @@ from qtrad.domain.forecasts import ForecastDataset
 from qtrad.domain.foundation import (
     AvailabilityBasis,
     ExcursionDisposition,
+    FoundationConfig,
     InstrumentRole,
+    PanelDataset,
     ReturnDisposition,
     TargetDataset,
     TargetRow,
 )
-from qtrad.domain.ibkr_foundation import IBKR_FOUNDATION_CONTRACT
+from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
@@ -152,6 +153,7 @@ from qtrad.domain.r2_readiness import (
     R2ReadinessReport,
     ReadinessState,
 )
+from qtrad.domain.research import ObservationDataset
 from qtrad.ports.clock import Clock
 from qtrad.runtime.foundation_bundle import (
     G2FeatureSourceAuthority,
@@ -159,6 +161,7 @@ from qtrad.runtime.foundation_bundle import (
     VerifiedG2FeatureSource,
     _verify_confirmatory_target_dataset,
     _verify_g2_feature_source,
+    restore_authenticated_foundation_bundle,
     verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_foundation import (
@@ -166,6 +169,7 @@ from qtrad.runtime.ibkr_foundation import (
     _load_ibkr_foundation_outcome_blind_with_g2_authority,
     _verify_ibkr_confirmatory_target_dataset,
     _verify_ibkr_g2_feature_source,
+    load_ibkr_foundation_with_identity,
 )
 from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation_promotion
 from qtrad.runtime.r2_bundles import (
@@ -283,6 +287,124 @@ def _immutable_experiment(experiment: R2ExperimentConfig) -> R2ExperimentConfig:
             else cast(Mapping[str, JsonValue], _deep_freeze(experiment.source_adapter_identity))
         ),
     )
+
+
+@dataclass(frozen=True, slots=True)
+class AuthenticatedR2Foundation:
+    """Immediate-parent authority and semantic inputs consumed by R2."""
+
+    foundation_id: str
+    closure_id: str
+    verification_id: str
+    source_class: MarketDataSourceClass
+    evidence_class: EvidenceClass
+    semantic_inputs: R2FoundationInputs
+    g2_feature_source: ConfirmatoryG2FeatureSourceAuthority | None = None
+    promotion_id: str | None = None
+    bundle_path: Path | None = None
+    receipt_path: Path | None = None
+    promotion_path: Path | None = None
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.foundation_id, "foundation ID"),
+            (self.closure_id, "foundation closure ID"),
+            (self.verification_id, "foundation verification ID"),
+        ):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"{field} must be a lowercase SHA-256 identity")
+        if self.promotion_id is not None and (
+            len(self.promotion_id) != 64
+            or any(character not in "0123456789abcdef" for character in self.promotion_id)
+        ):
+            raise ValueError("foundation promotion ID must be a lowercase SHA-256 identity")
+        if self.semantic_inputs.bundle.foundation_id != self.foundation_id:
+            raise ValueError("R2 foundation authority differs from its semantic inputs")
+        if self.semantic_inputs.bundle.market_data_source_class is not self.source_class:
+            raise ValueError("R2 foundation source class differs from its semantic inputs")
+
+    @property
+    def bundle(self) -> FoundationBundle:
+        return self.semantic_inputs.bundle
+
+    @property
+    def configuration(self) -> FoundationConfig:
+        return self.semantic_inputs.configuration
+
+    @property
+    def observations(self) -> ObservationDataset:
+        return self.semantic_inputs.observations
+
+    @property
+    def panel(self) -> PanelDataset:
+        return self.semantic_inputs.panel
+
+    @property
+    def targets(self) -> TargetDataset:
+        return self.semantic_inputs.targets
+
+    @property
+    def folds(self) -> FoldDataset:
+        return self.semantic_inputs.folds
+
+    @property
+    def availability_evidence(self) -> Mapping[str, JsonValue]:
+        return self.semantic_inputs.availability_evidence
+
+    @property
+    def source_active_intervals(self) -> Mapping[str, tuple[tuple[datetime, datetime], ...]]:
+        return self.semantic_inputs.source_active_intervals
+
+    def identity_json(self) -> dict[str, JsonValue]:
+        """Return semantic, closure and authority identities for a descriptor."""
+        return {
+            "foundation_id": self.foundation_id,
+            "closure_id": self.closure_id,
+            "verification_id": self.verification_id,
+            "promotion_id": self.promotion_id,
+            "source_class": self.source_class.value,
+            "evidence_class": self.evidence_class.value,
+        }
+
+    def runtime_json(
+        self,
+        *,
+        feature_manifest_paths: Mapping[str, Path],
+        experiment_path: Path,
+        research_root: Path,
+    ) -> dict[str, JsonValue]:
+        """Return runtime locators; these are not scientific identity fields."""
+        if self.bundle_path is None or self.receipt_path is None:
+            raise ValueError("R2 foundation authority is missing its bundle or receipt path")
+        if (
+            self.source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
+            and self.evidence_class is EvidenceClass.CONFIRMATORY
+            and (self.promotion_id is None or self.promotion_path is None)
+        ):
+            raise ValueError(
+                "confirmatory R2 IBKR foundation authority is missing promotion evidence"
+            )
+        absolute_research_root = research_root.absolute()
+
+        def absolute_locator(path: Path, *, relative_root: Path | None = None) -> str:
+            candidate = (
+                path if path.is_absolute() or relative_root is None else relative_root / path
+            )
+            return str(candidate.absolute())
+
+        return {
+            "foundation": absolute_locator(self.bundle_path),
+            "foundation_receipt": absolute_locator(self.receipt_path),
+            "foundation_promotion": (
+                absolute_locator(self.promotion_path) if self.promotion_path is not None else None
+            ),
+            "experiment": absolute_locator(experiment_path),
+            "research_root": str(absolute_research_root),
+            "feature_manifests": {
+                name: absolute_locator(path, relative_root=absolute_research_root)
+                for name, path in sorted(feature_manifest_paths.items())
+            },
+        }
 
 
 class VerifiedConfirmatoryF2:
@@ -826,6 +948,145 @@ def _foundation_inputs(verified: R1FoundationBindings) -> R2FoundationInputs:
     )
 
 
+def _require_sha256_identity(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} is not a lowercase SHA-256 identity")
+    return value
+
+
+async def authenticate_r1_foundation_for_r2(
+    *,
+    root: Path,
+    bundle_path: Path,
+    receipt_path: Path,
+    clock: Clock,
+    evidence_class: EvidenceClass,
+    outcome_blind: bool = False,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
+) -> AuthenticatedR2Foundation:
+    """Authenticate the current R1 receipt once and expose R2 semantic inputs."""
+    if outcome_blind:
+        if holdout_target_source is None:
+            raise ValueError("outcome-blind R1 authentication requires a holdout target source")
+        verified = await verify_outcome_blind_foundation_bundle(
+            root=root,
+            bundle_path=bundle_path,
+            clock=clock,
+            holdout_target_source=holdout_target_source,
+            receipt=receipt_path,
+        )
+    else:
+        verified = await restore_authenticated_foundation_bundle(
+            root=root,
+            bundle_path=bundle_path,
+            clock=clock,
+            receipt=receipt_path,
+        )
+    receipt = verified.receipt
+    if receipt is None:
+        raise ValueError("authenticated R1 foundation has no verification receipt")
+    return AuthenticatedR2Foundation(
+        foundation_id=verified.bundle.foundation_id,
+        closure_id=verified.bundle.closure_id,
+        verification_id=receipt.verification_id,
+        source_class=verified.bundle.market_data_source_class,
+        evidence_class=evidence_class,
+        semantic_inputs=_foundation_inputs(cast(R1FoundationBindings, verified)),
+        g2_feature_source=getattr(verified, "g2_feature_source", None),
+        bundle_path=bundle_path,
+        receipt_path=receipt_path,
+        promotion_path=None,
+    )
+
+
+def _stage8_authority_ids(bundle_path: Path, receipt_path: Path) -> tuple[str, str, str]:
+    if bundle_path.is_symlink() or not bundle_path.is_file():
+        raise ValueError("Stage 8 foundation must be a regular non-symlink file")
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise ValueError("Stage 8 receipt must be a regular non-symlink file")
+    manifest_bytes = bundle_path.read_bytes()
+    manifest = json.loads(manifest_bytes)
+    receipt = json.loads(receipt_path.read_bytes())
+    if not isinstance(manifest, dict) or not isinstance(receipt, dict):
+        raise ValueError("Stage 8 authority documents must be JSON objects")
+    foundation_id = _require_sha256_identity(manifest.get("foundation_id"), "Stage 8 foundation ID")
+    closure_id = _require_sha256_identity(manifest.get("closure_id"), "Stage 8 closure ID")
+    verification_id = _require_sha256_identity(
+        receipt.get("verification_id"), "Stage 8 verification ID"
+    )
+    receipt_foundation_id = _require_sha256_identity(
+        receipt.get("foundation_id"), "Stage 8 receipt foundation ID"
+    )
+    receipt_closure_id = _require_sha256_identity(
+        receipt.get("closure_id"), "Stage 8 receipt closure ID"
+    )
+    if receipt.get("foundation_manifest_sha256") != sha256(manifest_bytes).hexdigest():
+        raise ValueError("Stage 8 receipt does not bind the foundation manifest bytes")
+    if receipt_foundation_id != foundation_id:
+        raise ValueError("Stage 8 receipt foundation identity differs from its manifest")
+    if receipt_closure_id != closure_id:
+        raise ValueError("Stage 8 receipt closure identity differs from its manifest")
+    return foundation_id, closure_id, verification_id
+
+
+def authenticate_ibkr_foundation_for_r2(
+    *,
+    foundation_path: Path,
+    receipt_path: Path,
+    adapter_identity: IBKRHistoricalAdapterIdentity,
+    evidence_class: EvidenceClass,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
+    promotion_path: Path | None = None,
+) -> AuthenticatedR2Foundation:
+    """Authenticate Stage 8 and adapt only its immediate semantic inputs for R2."""
+    promotion_id: str | None = None
+    g2_feature_source: IBKRG2FeatureSourceAuthority | None = None
+    if evidence_class is EvidenceClass.CONFIRMATORY:
+        if holdout_target_source is None or promotion_path is None:
+            raise ValueError("confirmatory Stage 8 authentication requires holdout and promotion")
+        promotion = authenticate_ibkr_foundation_promotion(
+            foundation_path, receipt=receipt_path, promotion=promotion_path
+        )
+        promotion_id = promotion.promotion_sha256
+    elif promotion_path is not None:
+        raise ValueError("Stage 8 promotion is valid only for confirmatory R2 work")
+    if holdout_target_source is None:
+        foundation, foundation_id = load_ibkr_foundation_with_identity(
+            foundation_path, receipt=receipt_path
+        )
+    else:
+        foundation, foundation_id, g2_feature_source = (
+            _load_ibkr_foundation_outcome_blind_with_g2_authority(
+                foundation_path,
+                receipt=receipt_path,
+                holdout_target_source=holdout_target_source,
+            )
+        )
+    stage8_id, closure_id, verification_id = _stage8_authority_ids(foundation_path, receipt_path)
+    if foundation_id != stage8_id or adapter_identity.foundation_bundle_id != stage8_id:
+        raise ValueError("Stage 8 foundation identity differs from its adapter authority")
+    semantic_inputs = build_ibkr_r2_foundation_inputs(
+        foundation, foundation_bundle_id=stage8_id, adapter_identity=adapter_identity
+    )
+    return AuthenticatedR2Foundation(
+        foundation_id=stage8_id,
+        closure_id=closure_id,
+        verification_id=verification_id,
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_class=evidence_class,
+        semantic_inputs=semantic_inputs,
+        g2_feature_source=g2_feature_source if holdout_target_source is not None else None,
+        promotion_id=promotion_id,
+        bundle_path=foundation_path,
+        receipt_path=receipt_path,
+        promotion_path=promotion_path,
+    )
+
+
 def _manifest_payload(manifest: R2FeatureManifest) -> dict[str, JsonValue]:
     return manifest.as_json()
 
@@ -859,6 +1120,7 @@ def _descriptor_payload(
     run_kind: str,
     identities: dict[str, str],
     representative_profile: str | None = None,
+    foundation_authority: AuthenticatedR2Foundation | None = None,
 ) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": OOF_DESCRIPTOR_CONTRACT,
@@ -908,6 +1170,8 @@ def _descriptor_payload(
         "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
     }
+    if foundation_authority is not None:
+        semantic["foundation_authority"] = foundation_authority.identity_json()
     if representative_profile is not None:
         semantic["representative_profile"] = representative_profile
     descriptor_id = sha256(canonical_bytes(semantic)).hexdigest()
@@ -1135,256 +1399,6 @@ def _validate_representative_fold_layout(
         expected_training_cutoff = expected_validation_end
     if folds[-1].validation_end != holdout_start:
         raise ValueError("representative validation interval does not end at the holdout boundary")
-
-
-def _reject_replay_symlink_ancestors(path: Path) -> None:
-    current = path
-    while current != current.parent:
-        if current.is_symlink():
-            raise ValueError(f"replay output path traverses a symlink: {current}")
-        current = current.parent
-
-
-def _validated_replay_file(path: Path, source_root: Path | None = None) -> Path:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("replay input must be a regular non-symlink file")
-    _reject_replay_symlink_ancestors(path)
-    resolved = path.resolve()
-    if source_root is not None and not resolved.is_relative_to(source_root):
-        raise ValueError("replay input escapes the research root")
-    return resolved
-
-
-def _declared_replay_path(raw: object, *, base: Path, source_root: Path, field: str) -> Path:
-    if not isinstance(raw, str):
-        raise ValueError(f"replay manifest {field} is malformed")
-    relative = PurePosixPath(raw)
-    if relative.is_absolute() or ".." in relative.parts:
-        raise ValueError(f"replay manifest {field} is unsafe")
-    return _validated_replay_file(base / relative, source_root)
-
-
-def _declared_replay_files(name: str, path: Path, source_root: Path) -> tuple[Path, ...]:
-    initial = _validated_replay_file(path, source_root)
-    pending: list[tuple[Path, str]] = [(initial, name)]
-    seen: set[Path] = set()
-
-    def add_tree(directory: Path) -> None:
-        resolved = directory.resolve()
-        root = source_root.resolve()
-        if directory.is_symlink() or not resolved.is_dir() or not resolved.is_relative_to(root):
-            raise ValueError(f"replay closure directory is unsafe or unavailable: {directory}")
-        for candidate in sorted(resolved.rglob("*")):
-            if candidate.is_symlink():
-                raise ValueError(f"replay closure contains a symlink: {candidate}")
-            if candidate.is_dir():
-                continue
-            if not candidate.is_file():
-                raise ValueError(f"replay closure contains a non-file: {candidate}")
-            seen.add(candidate)
-
-    while pending:
-        current, role = pending.pop()
-        if current in seen:
-            continue
-        seen.add(current)
-        if current.suffix != ".json":
-            continue
-        try:
-            payload = json.loads(current.read_bytes())
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise ValueError(f"replay manifest is not valid JSON: {current.name}") from exc
-        if not isinstance(payload, dict):
-            raise ValueError(f"replay manifest must be a JSON object: {current.name}")
-        if role == "foundation" and payload.get("contract") == IBKR_FOUNDATION_CONTRACT:
-            stage8_payload = payload.get("payload")
-            if not isinstance(stage8_payload, dict):
-                raise ValueError("IBKR foundation replay payload is malformed")
-            provider_path = _declared_replay_path(
-                payload.get("provider_history_manifest"),
-                base=current.parent,
-                source_root=source_root,
-                field="provider_history_manifest",
-            )
-            add_tree(provider_path.parent)
-            children = stage8_payload.get("children")
-            if not isinstance(children, dict):
-                raise ValueError("IBKR foundation replay children are malformed")
-            for raw_parts in children.values():
-                if not isinstance(raw_parts, list) or not raw_parts:
-                    raise ValueError("IBKR foundation replay child parts are malformed")
-                for child in raw_parts:
-                    if not isinstance(child, dict):
-                        raise ValueError("IBKR foundation replay child part is malformed")
-                    child_path = _declared_replay_path(
-                        child.get("manifest_path"),
-                        base=current.parent,
-                        source_root=source_root,
-                        field="manifest_path",
-                    )
-                    pending.append((child_path, "foundation-child"))
-        elif role == "foundation":
-            children = payload.get("children")
-            if isinstance(children, dict):
-                for child_name, child in children.items():
-                    if not isinstance(child, dict):
-                        raise ValueError("foundation replay child is malformed")
-                    child_path = _declared_replay_path(
-                        child.get("manifest_path"),
-                        base=source_root,
-                        source_root=source_root,
-                        field="manifest_path",
-                    )
-                    pending.append(
-                        (
-                            child_path,
-                            "observation-manifest"
-                            if child_name == "observations"
-                            else "foundation-child",
-                        )
-                    )
-            build_summary = payload.get("build_summary")
-            projections = (
-                build_summary.get("outcome_blind_projections")
-                if isinstance(build_summary, dict)
-                else None
-            )
-            if isinstance(projections, dict):
-                for child in projections.values():
-                    if not isinstance(child, dict):
-                        raise ValueError("foundation replay projection is malformed")
-                    pending.append(
-                        (
-                            _declared_replay_path(
-                                child.get("manifest_path"),
-                                base=source_root,
-                                source_root=source_root,
-                                field="manifest_path",
-                            ),
-                            "foundation-child",
-                        )
-                    )
-        elif role in {"foundation-child", "observation-manifest"}:
-            if role == "foundation-child":
-                pending.append(
-                    (
-                        _declared_replay_path(
-                            payload.get("file"),
-                            base=source_root,
-                            source_root=source_root,
-                            field="file",
-                        ),
-                        "binary",
-                    )
-                )
-            else:
-                files = payload.get("files")
-                if not isinstance(files, list):
-                    raise ValueError("observation replay manifest files are malformed")
-                for raw_file in files:
-                    pending.append(
-                        (
-                            _declared_replay_path(
-                                raw_file,
-                                base=source_root,
-                                source_root=source_root,
-                                field="files",
-                            ),
-                            "binary",
-                        )
-                    )
-        elif role in _REQUIRED_FEATURE_SETS:
-            chunks = payload.get("chunks")
-            if chunks is None and not payload:
-                continue
-            if not isinstance(chunks, list):
-                raise ValueError("feature replay manifest chunks are malformed")
-            for chunk in chunks:
-                if not isinstance(chunk, dict):
-                    raise ValueError("feature replay chunk is malformed")
-                for field in ("data_file", "lineage_file"):
-                    pending.append(
-                        (
-                            _declared_replay_path(
-                                chunk.get(field),
-                                base=current.parent,
-                                source_root=source_root,
-                                field=field,
-                            ),
-                            "binary",
-                        )
-                    )
-    return tuple(sorted(seen))
-
-
-def _stage_replay_inputs(
-    *, output: Path, research_root: Path, paths: Mapping[str, Path]
-) -> dict[str, object]:
-    expected = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
-    accepted = {
-        frozenset(expected),
-        frozenset({*expected, "foundation_receipt"}),
-        frozenset({*expected, "foundation_receipt", "foundation_promotion"}),
-    }
-    if set(paths) not in accepted:
-        raise ValueError("replay inputs must include foundation, experiment and L0/L1/P0/P1")
-    _reject_replay_symlink_ancestors(output / "replay-inputs")
-    source_root = research_root.resolve()
-    if source_root.is_symlink() or not source_root.is_dir():
-        raise ValueError("replay research root must be a regular non-symlink directory")
-    output_root = output.resolve()
-    if output_root.is_relative_to(source_root):
-        raise ValueError("replay output must not be inside its source root")
-    replay_root = output / "replay-inputs"
-    replay_root.mkdir(parents=True, exist_ok=False)
-    _reject_replay_symlink_ancestors(replay_root)
-
-    collected: dict[str, tuple[Path, ...]] = {
-        name: (
-            (_validated_replay_file(path),)
-            if name in {"experiment", "foundation_receipt", "foundation_promotion"}
-            else _declared_replay_files(name, path, source_root)
-        )
-        for name, path in sorted(paths.items())
-    }
-    staged: dict[Path, PurePosixPath] = {}
-    for name, files in collected.items():
-        if name == "experiment":
-            staged[files[0]] = PurePosixPath("replay-inputs/experiment.json")
-        else:
-            for file in files:
-                staged.setdefault(
-                    file,
-                    PurePosixPath("replay-inputs/research")
-                    / PurePosixPath(file.relative_to(source_root).as_posix()),
-                )
-    for source, relative in sorted(staged.items(), key=lambda item: item[1].as_posix()):
-        destination = output / relative
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        destination.write_bytes(source.read_bytes())
-
-    children: dict[str, object] = {}
-    for name, files in sorted(collected.items()):
-        root_relative = (
-            PurePosixPath("replay-inputs")
-            if name == "experiment"
-            else PurePosixPath("replay-inputs/research")
-        )
-        references = [
-            {
-                "path": staged[file].as_posix(),
-                "sha256": sha256(file.read_bytes()).hexdigest(),
-            }
-            for file in sorted(files, key=lambda item: staged[item].as_posix())
-        ]
-        initial = _validated_replay_file(paths[name], None if name == "experiment" else source_root)
-        children[name] = {
-            "path": staged[initial].as_posix(),
-            "root": root_relative.as_posix(),
-            "sha256": sha256(initial.read_bytes()).hexdigest(),
-            "files": references,
-        }
-    return {"root": ".", "children": children}
 
 
 def _descriptor_reference(
@@ -2009,9 +2023,10 @@ def build_oof_bundle(
     clock: Clock,
     output: Path,
     run_kind: str = "REPRESENTATIVE",
-    replay_inputs: Mapping[str, Path] | None = None,
+    foundation_authority: AuthenticatedR2Foundation | None = None,
     representative_profile: str | None = None,
     holdout_target_source: R2HoldoutTargetSource | None = None,
+    experiment_path: Path | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     if run_kind not in {*_IMPLEMENTATION_RUN_KINDS, CONFIRMATORY_RUN_KIND}:
@@ -2029,11 +2044,19 @@ def build_oof_bundle(
     if run_kind == CONFIRMATORY_RUN_KIND:
         if holdout_target_source is None:
             raise ValueError("confirmatory OOF build requires an authenticated target source")
-        if replay_inputs is None:
-            raise ValueError("confirmatory OOF build requires authenticated replay inputs")
+        if foundation_authority is None:
+            raise ValueError("confirmatory OOF build requires immediate foundation authority")
     if run_kind in {"REPRESENTATIVE", CONFIRMATORY_RUN_KIND}:
         if holdout_target_source is None:
             raise ValueError("OOF build requires an authenticated holdout target source")
+        if foundation_authority is None:
+            raise ValueError("canonical OOF build requires immediate foundation authority")
+        if foundation_authority.foundation_id != verified.bundle.foundation_id:
+            raise ValueError("R2 authority differs from the supplied semantic foundation")
+        if foundation_authority.source_class is not experiment.market_data_source_class:
+            raise ValueError("R2 authority source differs from the experiment")
+        if foundation_authority.evidence_class is not experiment.evidence_class:
+            raise ValueError("R2 authority evidence differs from the experiment")
         if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
             if representative_profile != IBKR_HISTORICAL_PROFILE:
                 raise ValueError("IBKR historical OOF run requires IBKR_HISTORICAL_V1")
@@ -2397,6 +2420,7 @@ def build_oof_bundle(
         run_kind=run_kind,
         identities=identities,
         representative_profile=representative_profile,
+        foundation_authority=foundation_authority,
     )
     descriptor.update(
         {
@@ -2406,13 +2430,22 @@ def build_oof_bundle(
             "evaluation_report_id": evaluation.report_id,
         }
     )
-    if replay_inputs is not None:
-        descriptor["replay_inputs"] = cast(
-            dict[str, JsonValue],
-            _stage_replay_inputs(output=output, research_root=research_root, paths=replay_inputs),
+    if foundation_authority is not None:
+        if experiment_path is None:
+            raise ValueError("canonical OOF build requires an experiment runtime locator")
+        descriptor["runtime_inputs"] = foundation_authority.runtime_json(
+            feature_manifest_paths=feature_manifest_paths,
+            experiment_path=experiment_path,
+            research_root=research_root,
         )
     descriptor["descriptor_id"] = sha256(
-        canonical_bytes({key: value for key, value in descriptor.items() if key != "descriptor_id"})
+        canonical_bytes(
+            {
+                key: value
+                for key, value in descriptor.items()
+                if key not in {"descriptor_id", "runtime_inputs"}
+            }
+        )
     ).hexdigest()
     descriptor_path = "evaluation/run-descriptor.json"
     children[descriptor_path] = cast(dict[str, object], descriptor)
@@ -2625,25 +2658,16 @@ def holdout_configuration_registry(
     return tuple(registry)
 
 
-def _confirmatory_replay_experiment_path(
-    bundle_path: Path, descriptor: Mapping[str, object]
-) -> Path:
-    replay = descriptor.get("replay_inputs")
-    if not isinstance(replay, dict):
-        raise ValueError("confirmatory OOF descriptor has no replay-input closure")
-    children = replay.get("children")
-    if not isinstance(children, dict):
-        raise ValueError("confirmatory OOF replay-input closure is malformed")
-    child = children.get("experiment")
-    if not isinstance(child, dict) or not isinstance(child.get("path"), str):
-        raise ValueError("confirmatory OOF replay closure has no experiment child")
-    child_payload = cast(dict[str, object], child)
-    child_path = child_payload["path"]
-    if not isinstance(child_path, str):
-        raise ValueError("confirmatory OOF replay closure has no experiment path")
-    path = bundle_path.parent / child_path
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("confirmatory OOF replay experiment is unavailable")
+def _descriptor_experiment_path(descriptor: Mapping[str, object]) -> Path:
+    runtime = descriptor.get("runtime_inputs")
+    if not isinstance(runtime, dict):
+        raise ValueError("OOF descriptor has no immediate-parent runtime locators")
+    raw_path = runtime.get("experiment")
+    if not isinstance(raw_path, str):
+        raise ValueError("OOF descriptor has no experiment runtime locator")
+    path = Path(raw_path)
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise ValueError("OOF experiment runtime locator is unavailable")
     return path
 
 
@@ -2850,7 +2874,7 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         if descriptor.get(key) != expected:
             raise ValueError(f"confirmatory F2 descriptor has an unauthenticated {key}")
 
-    experiment = load_r2_experiment(_confirmatory_replay_experiment_path(path, descriptor))
+    experiment = load_r2_experiment(_descriptor_experiment_path(descriptor))
     if experiment.configuration_id != bundle.experiment_configuration_id:
         raise ValueError("confirmatory F2 experiment differs from the OOF envelope")
     if experiment.evidence_class is not EvidenceClass.CONFIRMATORY:
@@ -4264,7 +4288,7 @@ def _tree_bytes(root: Path) -> dict[str, bytes]:
     }
 
 
-async def _replay_staged_oof_async(
+async def _replay_authority_oof_async(
     path: Path,
     *,
     expected_run_kind: str = "REPRESENTATIVE",
@@ -4274,171 +4298,168 @@ async def _replay_staged_oof_async(
     R1FoundationBindings,
     ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
+    """Replay R2 from the authenticated immediate parent and consumed feature bytes."""
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
-        raise ValueError("staged OOF bundle has no authenticated holdout target source")
+        raise ValueError("OOF bundle has no authenticated holdout target source")
     source_payload = _load_selection(path.parent / bundle.holdout_target_source.path)
     holdout_target_source = R2HoldoutTargetSource.from_json(source_payload)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
     if descriptor.get("run_kind") != expected_run_kind:
-        raise ValueError(f"staged replay requires a {expected_run_kind} OOF run")
-    raw_inputs = descriptor.get("replay_inputs")
-    if not isinstance(raw_inputs, dict):
-        raise ValueError("staged OOF descriptor has no authenticated replay inputs")
-    raw_children_value = raw_inputs.get("children")
-    if raw_inputs.get("root") != "." or not isinstance(raw_children_value, dict):
-        raise ValueError("staged replay inputs are malformed")
-    raw_children = cast(dict[object, object], raw_children_value)
-    representative_profile = descriptor.get("representative_profile")
-    expected_names = {"foundation", "foundation_receipt", "experiment", *_REQUIRED_FEATURE_SETS}
-    if (
-        representative_profile == IBKR_HISTORICAL_PROFILE
-        and expected_run_kind == CONFIRMATORY_RUN_KIND
-    ):
-        if "foundation_promotion" not in raw_children:
-            raise ValueError(
-                "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
-            )
-        expected_names.add("foundation_promotion")
-    if set(raw_children) != expected_names:
-        raise ValueError("representative replay inputs have incomplete children")
-    paths: dict[str, Path] = {}
-    roots: dict[str, Path] = {}
-    bundle_root = path.parent.resolve()
-    for name, value in raw_children.items():
-        if not isinstance(name, str) or not isinstance(value, dict):
-            raise ValueError("staged replay input child is malformed")
-        raw_path = value.get("path")
-        raw_root = value.get("root")
-        expected_digest = value.get("sha256")
-        if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
-            raise ValueError("staged replay input identity is incomplete")
-        relative_path = PurePosixPath(cast(str, raw_path))
-        relative_root = PurePosixPath(cast(str, raw_root))
+        raise ValueError(f"authority replay requires a {expected_run_kind} OOF run")
+    raw_authority = descriptor.get("foundation_authority")
+    if not isinstance(raw_authority, dict):
+        raise ValueError("OOF descriptor has no authenticated foundation authority")
+    raw_runtime = descriptor.get("runtime_inputs")
+    if not isinstance(raw_runtime, dict):
+        raise ValueError("OOF descriptor has no immediate-parent runtime locators")
+    expected_runtime_keys = {
+        "foundation",
+        "foundation_receipt",
+        "foundation_promotion",
+        "experiment",
+        "research_root",
+        "feature_manifests",
+    }
+    if set(raw_runtime) != expected_runtime_keys:
+        raise ValueError("OOF runtime locators are incomplete or contain unknown fields")
+    runtime = cast(dict[str, object], raw_runtime)
+
+    def runtime_file(name: str) -> Path:
+        value = runtime[name]
+        if not isinstance(value, str):
+            raise ValueError(f"OOF runtime locator is not a path: {name}")
+        candidate = Path(value)
+        if not candidate.is_absolute() or candidate.is_symlink() or not candidate.is_file():
+            raise ValueError(f"OOF runtime file is unavailable: {name}")
+        return candidate
+
+    foundation_path = runtime_file("foundation")
+    receipt_path = runtime_file("foundation_receipt")
+    experiment_path = runtime_file("experiment")
+    raw_research_root = runtime["research_root"]
+    if not isinstance(raw_research_root, str):
+        raise ValueError("OOF runtime research root is not a path")
+    research_root = Path(raw_research_root)
+    if not research_root.is_absolute() or research_root.is_symlink() or not research_root.is_dir():
+        raise ValueError("OOF runtime research root is unavailable")
+    raw_feature_paths = runtime["feature_manifests"]
+    if not isinstance(raw_feature_paths, dict):
+        raise ValueError("OOF runtime feature manifests are malformed")
+    if set(raw_feature_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF runtime feature manifests must cover exactly L0/L1/P0/P1")
+    feature_paths = {
+        name: runtime_file_value
+        for name, raw_path in raw_feature_paths.items()
+        if isinstance(raw_path, str)
+        for runtime_file_value in (Path(raw_path),)
+    }
+    if set(feature_paths) != _REQUIRED_FEATURE_SETS:
+        raise ValueError("OOF runtime feature manifest paths are malformed")
+    for name, feature_path in feature_paths.items():
         if (
-            relative_path.is_absolute()
-            or relative_root.is_absolute()
-            or ".." in relative_path.parts
-            or ".." in relative_root.parts
+            not feature_path.is_absolute()
+            or feature_path.is_symlink()
+            or not feature_path.is_file()
         ):
-            raise ValueError("staged replay input path is unsafe")
-        candidate = (bundle_root / relative_path).resolve()
-        root = (bundle_root / relative_root).resolve()
-        if not candidate.is_relative_to(bundle_root) or not root.is_relative_to(bundle_root):
-            raise ValueError("staged replay input escapes the bundle root")
-        if candidate.is_symlink() or not candidate.is_file():
-            raise ValueError(f"staged replay input is unavailable: {name}")
-        if sha256(candidate.read_bytes()).hexdigest() != cast(str, expected_digest):
-            raise ValueError(f"staged replay input changed: {name}")
-        paths[name] = candidate
-        roots[name] = root
-    research_root = roots["foundation"]
-    if any(roots[name] != research_root for name in _REQUIRED_FEATURE_SETS):
-        raise ValueError("staged feature inputs do not share the foundation root")
-    experiment = load_r2_experiment(paths["experiment"])
+            raise ValueError(f"OOF runtime feature manifest is unavailable: {name}")
+    raw_promotion_path = runtime["foundation_promotion"]
+    promotion_path: Path | None
+    if raw_promotion_path is None:
+        promotion_path = None
+    elif isinstance(raw_promotion_path, str):
+        promotion_path = Path(raw_promotion_path)
+        if (
+            not promotion_path.is_absolute()
+            or promotion_path.is_symlink()
+            or not promotion_path.is_file()
+        ):
+            raise ValueError("OOF runtime foundation promotion is unavailable")
+    else:
+        raise ValueError("OOF runtime foundation promotion locator is malformed")
+
+    experiment = load_r2_experiment(experiment_path)
     expected_evidence_class = (
         EvidenceClass.CONFIRMATORY
         if expected_run_kind == CONFIRMATORY_RUN_KIND
         else EvidenceClass.IMPLEMENTATION
     )
     if experiment.evidence_class is not expected_evidence_class:
-        raise ValueError("staged OOF experiment has the wrong evidence classification")
-    promotion_authority = None
-    if (
-        representative_profile == IBKR_HISTORICAL_PROFILE
-        and expected_evidence_class is EvidenceClass.CONFIRMATORY
-    ):
-        promotion_authority = authenticate_ibkr_foundation_promotion(
-            paths["foundation"],
-            receipt=paths["foundation_receipt"],
-            promotion=paths["foundation_promotion"],
-        )
-    g2_feature_source_authority: ConfirmatoryG2FeatureSourceAuthority | None = None
-    if representative_profile == IBKR_HISTORICAL_PROFILE:
-        (
-            stage8_foundation,
-            foundation_bundle_id,
-            g2_feature_source_authority,
-        ) = _load_ibkr_foundation_outcome_blind_with_g2_authority(
-            paths["foundation"],
-            receipt=paths["foundation_receipt"],
-            holdout_target_source=holdout_target_source,
-        )
-        if foundation_bundle_id != experiment.r1_bundle_id:
-            raise ValueError("IBKR replay foundation differs from the experiment")
+        raise ValueError("OOF experiment has the wrong evidence classification")
+    representative_profile = descriptor.get("representative_profile")
+    if representative_profile is not None and not isinstance(representative_profile, str):
+        raise ValueError("OOF representative profile is malformed")
+
+    clock = cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC)))
+    if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
         adapter_payload = experiment.source_adapter_identity
         if not isinstance(adapter_payload, Mapping):
-            raise ValueError("IBKR replay experiment has no persisted adapter identity")
+            raise ValueError("IBKR experiment has no persisted adapter identity")
         adapter_identity = IBKRHistoricalAdapterIdentity.from_json(adapter_payload)
-        if adapter_identity.foundation_bundle_id != foundation_bundle_id:
-            raise ValueError("IBKR adapter identity differs from the experiment foundation")
-        expected_experiment = build_ibkr_historical_experiment(
-            stage8_foundation,
-            foundation_bundle_id=foundation_bundle_id,
+        require_ibkr_adapter_runtime_identity(adapter_identity)
+        authority = authenticate_ibkr_foundation_for_r2(
+            foundation_path=foundation_path,
+            receipt_path=receipt_path,
             adapter_identity=adapter_identity,
             evidence_class=expected_evidence_class,
-            promotion_authority=promotion_authority,
-        )
-        if expected_experiment.as_json() != experiment.as_json():
-            raise ValueError("IBKR experiment is not authenticated")
-        require_ibkr_adapter_runtime_identity(adapter_identity)
-        verified = build_ibkr_r2_foundation_inputs(
-            stage8_foundation,
-            foundation_bundle_id=foundation_bundle_id,
-            adapter_identity=adapter_identity,
-        )
-        _validate_representative_ibkr_historical_v1(
-            verified,
-            experiment,
-            expected_evidence_class=expected_evidence_class,
-        )
-        replayed_folds = stage8_foundation.folds
-        replayed_source_active_intervals = stage8_foundation.active_intervals
-    elif representative_profile is not None:
-        raise ValueError("representative OOF descriptor has an unsupported profile")
-    else:
-        verified = await verify_outcome_blind_foundation_bundle(
-            root=research_root,
-            bundle_path=paths["foundation"],
-            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
             holdout_target_source=holdout_target_source,
-            receipt=paths["foundation_receipt"],
+            promotion_path=promotion_path,
         )
+        if authority.foundation_id != experiment.r1_bundle_id:
+            raise ValueError("IBKR foundation differs from the experiment")
         if expected_run_kind != CONFIRMATORY_RUN_KIND:
-            _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)
-        replayed_folds = verified.folds
-        replayed_source_active_intervals = verified.source_active_intervals
-        g2_feature_source_authority = verified.g2_feature_source
-    verify_exact_r1_bindings(cast(R1FoundationBindings, verified), experiment)
-    feature_paths = {name: paths[name] for name in _REQUIRED_FEATURE_SETS}
+            _validate_representative_ibkr_historical_v1(
+                authority.semantic_inputs,
+                experiment,
+                expected_evidence_class=expected_evidence_class,
+            )
+    else:
+        if promotion_path is not None:
+            raise ValueError("R1 runtime authority cannot include a promotion")
+        authority = await authenticate_r1_foundation_for_r2(
+            root=research_root,
+            bundle_path=foundation_path,
+            receipt_path=receipt_path,
+            clock=clock,
+            evidence_class=expected_evidence_class,
+            outcome_blind=True,
+            holdout_target_source=holdout_target_source,
+        )
+        if representative_profile is not None:
+            raise ValueError("representative profile is only valid for IBKR historical runs")
+        if expected_run_kind != CONFIRMATORY_RUN_KIND:
+            _validate_representative_capture_v4(authority.semantic_inputs, experiment)
+
+    if authority.identity_json() != cast(dict[str, JsonValue], raw_authority):
+        raise ValueError("OOF foundation authority differs from its descriptor")
+    verify_exact_r1_bindings(authority.semantic_inputs, experiment)
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
         build_oof_bundle(
-            verified=cast(R1FoundationBindings, verified),
+            verified=authority.semantic_inputs,
+            foundation_authority=authority,
             experiment=experiment,
             feature_manifest_paths=feature_paths,
             research_root=research_root,
-            clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
+            clock=clock,
             output=expected_root,
-            representative_profile=(
-                representative_profile if isinstance(representative_profile, str) else None
-            ),
+            representative_profile=representative_profile,
             run_kind=expected_run_kind,
-            replay_inputs=paths,
             holdout_target_source=holdout_target_source,
+            experiment_path=experiment_path,
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
-            raise ValueError("staged OOF bundle does not replay to the authenticated pipeline")
+            raise ValueError("OOF bundle does not replay to the authenticated pipeline")
     return (
-        replayed_folds,
-        replayed_source_active_intervals,
-        cast(R1FoundationBindings, verified),
-        g2_feature_source_authority,
+        authority.folds,
+        authority.semantic_inputs.source_active_intervals,
+        authority.semantic_inputs,
+        authority.g2_feature_source,
     )
 
 
 async def _replay_representative_oof_async(path: Path) -> None:
-    await _replay_staged_oof_async(path)
+    await _replay_authority_oof_async(path)
 
 
 async def _replay_confirmatory_oof_async(
@@ -4449,7 +4470,7 @@ async def _replay_confirmatory_oof_async(
     R1FoundationBindings,
     ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
-    return await _replay_staged_oof_async(path, expected_run_kind=CONFIRMATORY_RUN_KIND)
+    return await _replay_authority_oof_async(path, expected_run_kind=CONFIRMATORY_RUN_KIND)
 
 
 def _replay_representative_oof(path: Path) -> None:

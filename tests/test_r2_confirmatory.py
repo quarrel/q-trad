@@ -67,6 +67,7 @@ from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import canonical_bytes
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
+    AuthenticatedR2Foundation,
     ConfirmatoryR2HStatus,
     OpenedConfirmatoryHoldout,
     VerifiedConfirmatoryF2,
@@ -622,16 +623,26 @@ def _build_confirmatory_fixture(
         availability_evidence_id=fixture_verified.bundle.availability.dataset_id,
     )
     fixture_verified.targets = R2OutcomeBlindTargetView.from_source(target_source)
-    replay_inputs = {
-        "foundation": replay_foundation_path or foundation_path,
-        "experiment": experiment_path,
-        **{name: research_root / path for name, path in feature_paths.items()},
-    }
-    replay_inputs["foundation_receipt"] = local_foundation_receipt_path
-    if foundation_promotion_path is not None:
-        replay_inputs["foundation_promotion"] = foundation_promotion_path
+    foundation_path_for_authority = replay_foundation_path or foundation_path
+    receipt_payload = cast(
+        dict[str, object], json.loads(local_foundation_receipt_path.read_bytes())
+    )
+    verification_id = receipt_payload.get("verification_id")
+    if not isinstance(verification_id, str):
+        raise ValueError("fixture receipt has no verification identity")
+    foundation_authority = AuthenticatedR2Foundation(
+        foundation_id=foundation_bundle.foundation_id,
+        closure_id=foundation_bundle.closure_id,
+        verification_id=verification_id,
+        source_class=experiment.market_data_source_class,
+        evidence_class=experiment.evidence_class,
+        semantic_inputs=verification._foundation_inputs(fixture_verified),
+        bundle_path=foundation_path_for_authority,
+        receipt_path=local_foundation_receipt_path,
+    )
     bundle_path = build_oof_bundle(
         verified=fixture_verified,
+        foundation_authority=foundation_authority,
         experiment=experiment,
         feature_manifest_paths=feature_paths,
         research_root=research_root,
@@ -639,8 +650,8 @@ def _build_confirmatory_fixture(
         output=root / "oof",
         run_kind=CONFIRMATORY_RUN_KIND,
         representative_profile=(None if qualifying else verification.IBKR_HISTORICAL_PROFILE),
-        replay_inputs=replay_inputs,
         holdout_target_source=target_source,
+        experiment_path=experiment_path,
     )
     return (
         bundle_path,

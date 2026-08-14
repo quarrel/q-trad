@@ -229,81 +229,6 @@ def write_r2_oof_bundle(
     return path
 
 
-def _verify_replay_inputs(
-    root: Path, descriptor: Mapping[str, object], allowed_paths: set[str]
-) -> None:
-    raw = descriptor.get("replay_inputs")
-    if not isinstance(raw, dict) or raw.get("root") != ".":
-        raise ValueError("representative replay inputs are missing or malformed")
-    children = raw.get("children")
-    expected = {"foundation", "experiment", "L0", "L1", "P0", "P1"}
-    if not isinstance(children, dict) or set(children) not in {
-        frozenset(expected),
-        frozenset({*expected, "foundation_receipt"}),
-        frozenset({*expected, "foundation_receipt", "foundation_promotion"}),
-    }:
-        raise ValueError("representative replay inputs have incomplete children")
-    root_resolved = root.resolve()
-    for name, value in children.items():
-        if not isinstance(name, str) or not isinstance(value, dict):
-            raise ValueError("representative replay input child is malformed")
-        raw_path = value.get("path")
-        raw_root = value.get("root")
-        expected_digest = value.get("sha256")
-        files = value.get("files")
-        if not all(isinstance(item, str) for item in (raw_path, raw_root, expected_digest)):
-            raise ValueError("representative replay input identity is incomplete")
-        if not isinstance(files, list) or not files:
-            raise ValueError("representative replay input file closure is missing")
-        initial_path = Path(cast(str, raw_path))
-        replay_root = Path(cast(str, raw_root))
-        if (
-            initial_path.is_absolute()
-            or replay_root.is_absolute()
-            or ".." in initial_path.parts
-            or ".." in replay_root.parts
-        ):
-            raise ValueError("representative replay input path is unsafe")
-        candidate_root = (root / replay_root).resolve()
-        if not candidate_root.is_relative_to(root_resolved):
-            raise ValueError("representative replay input escapes the bundle root")
-        if candidate_root.is_symlink() or not candidate_root.is_dir():
-            raise ValueError(f"representative replay input root is unavailable: {name}")
-        declared: dict[str, str] = {}
-        for raw_file in files:
-            if not isinstance(raw_file, dict) or set(raw_file) != {"path", "sha256"}:
-                raise ValueError("representative replay input file reference is malformed")
-            file_path = raw_file.get("path")
-            file_digest = raw_file.get("sha256")
-            if not isinstance(file_path, str) or not isinstance(file_digest, str):
-                raise ValueError("representative replay input file identity is incomplete")
-            relative_file = Path(file_path)
-            if relative_file.is_absolute() or ".." in relative_file.parts:
-                raise ValueError("representative replay input file path is unsafe")
-            candidate = (root / relative_file).resolve()
-            if (
-                not candidate.is_relative_to(root_resolved)
-                or not candidate.is_relative_to(candidate_root)
-                or candidate.is_symlink()
-                or not candidate.is_file()
-            ):
-                raise ValueError(f"representative replay input file is unavailable: {name}")
-            normalized = relative_file.as_posix()
-            if normalized in declared:
-                raise ValueError("representative replay input file closure contains duplicates")
-            if sha256(candidate.read_bytes()).hexdigest() != file_digest:
-                raise ValueError(f"representative replay input file changed: {name}")
-            declared[normalized] = file_digest
-            allowed_paths.add(normalized)
-        normalized_initial = initial_path.as_posix()
-        if normalized_initial not in declared:
-            raise ValueError(f"representative replay input path is not in its closure: {name}")
-        if declared[normalized_initial] != expected_digest:
-            raise ValueError(
-                f"representative replay input identity differs from its closure: {name}"
-            )
-
-
 def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     payload = _load_object(path)
     if set(payload) != {
@@ -386,10 +311,12 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
             if not isinstance(descriptor_id, str):
                 raise ValueError("R2 OOF descriptor must expose a descriptor ID")
             descriptor_payload = {
-                key: value for key, value in child.items() if key != "descriptor_id"
+                key: value
+                for key, value in child.items()
+                if key not in {"descriptor_id", "runtime_inputs"}
             }
             if sha256(canonical_bytes(descriptor_payload)).hexdigest() != descriptor_id:
-                raise ValueError("R2 OOF descriptor ID does not authenticate its content")
+                raise ValueError("R2 OOF descriptor ID does not authenticate its semantic content")
             if (
                 child.get("foundation_bundle_id") != bundle.foundation_bundle_id
                 or child.get("experiment_configuration_id") != bundle.experiment_configuration_id
@@ -398,8 +325,76 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 or child.get("holdout_excluded") is not True
             ):
                 raise ValueError("R2 OOF descriptor lineage differs from its bundle")
-            if "replay_inputs" in child:
-                _verify_replay_inputs(path.parent, child, allowed_paths)
+            run_kind = child.get("run_kind")
+            if run_kind in {"REPRESENTATIVE", "CONFIRMATORY"}:
+                authority = child.get("foundation_authority")
+                if not isinstance(authority, dict):
+                    raise ValueError("canonical OOF descriptor has no foundation authority")
+                if set(authority) != {
+                    "foundation_id",
+                    "closure_id",
+                    "verification_id",
+                    "promotion_id",
+                    "source_class",
+                    "evidence_class",
+                }:
+                    raise ValueError("OOF foundation authority fields are incomplete")
+                for field in ("foundation_id", "closure_id", "verification_id"):
+                    value = authority.get(field)
+                    if (
+                        not isinstance(value, str)
+                        or len(value) != 64
+                        or any(character not in "0123456789abcdef" for character in value)
+                    ):
+                        raise ValueError(f"OOF foundation authority has an invalid {field}")
+                if authority.get("foundation_id") != bundle.foundation_bundle_id:
+                    raise ValueError("OOF foundation authority differs from its bundle")
+                if authority.get("source_class") != bundle.source_class.value:
+                    raise ValueError("OOF foundation authority source differs from its bundle")
+                if authority.get("evidence_class") != bundle.evidence_class.value:
+                    raise ValueError("OOF foundation authority evidence differs from its bundle")
+                promotion_id = authority.get("promotion_id")
+                if promotion_id is not None and (
+                    not isinstance(promotion_id, str)
+                    or len(promotion_id) != 64
+                    or any(character not in "0123456789abcdef" for character in promotion_id)
+                ):
+                    raise ValueError("OOF foundation authority has an invalid promotion ID")
+                if (
+                    run_kind == "CONFIRMATORY"
+                    and bundle.source_class.value == "IBKR_HISTORICAL_RESEARCH"
+                    and not isinstance(promotion_id, str)
+                ):
+                    raise ValueError("confirmatory IBKR OOF descriptor has no promotion authority")
+                if run_kind == "REPRESENTATIVE" and promotion_id is not None:
+                    raise ValueError(
+                        "representative OOF descriptor cannot bind promotion authority"
+                    )
+                if (
+                    bundle.source_class.value != "IBKR_HISTORICAL_RESEARCH"
+                    and promotion_id is not None
+                ):
+                    raise ValueError("native OOF descriptor cannot bind promotion authority")
+                runtime = child.get("runtime_inputs")
+                if not isinstance(runtime, dict) or set(runtime) != {
+                    "foundation",
+                    "foundation_receipt",
+                    "foundation_promotion",
+                    "experiment",
+                    "research_root",
+                    "feature_manifests",
+                }:
+                    raise ValueError("canonical OOF descriptor runtime locators are incomplete")
+                feature_manifests = runtime.get("feature_manifests")
+                if not isinstance(feature_manifests, dict) or set(feature_manifests) != {
+                    "L0",
+                    "L1",
+                    "P0",
+                    "P1",
+                }:
+                    raise ValueError("canonical OOF descriptor feature locators are incomplete")
+            elif "foundation_authority" in child or "runtime_inputs" in child:
+                raise ValueError("synthetic OOF descriptor cannot bind runtime authority")
         contract = child.get("contract")
         if (
             ref.path.startswith("preprocessing/")

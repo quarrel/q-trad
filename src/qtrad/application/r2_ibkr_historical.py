@@ -250,6 +250,7 @@ def build_ibkr_r2_foundation_inputs(
 
     bundle = SimpleNamespace(
         bundle_id=foundation_bundle_id,
+        foundation_id=foundation_bundle_id,
         market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
         ordered_instruments=configuration.ordered_instruments,
         range_start=configuration.range_start,
