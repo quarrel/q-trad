@@ -6,7 +6,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 
 import pytest
 
@@ -28,24 +28,36 @@ from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import verify_ibkr_foundation, write_ibkr_foundation
 from qtrad.runtime.ibkr_foundation_promotion import (
     authenticate_ibkr_foundation_promotion,
-    create_ibkr_foundation_confirmatory_promotion,
+)
+from qtrad.runtime.ibkr_foundation_promotion import (
+    create_ibkr_foundation_confirmatory_promotion as _create_promotion,
 )
 from qtrad.runtime.ibkr_results import IbkrHistoricalResultStream
-from qtrad.runtime.provider_history import (
-    authenticate_provider_history,
-    read_provider_history_source_evidence,
-    verify_provider_history,
-)
 from qtrad.runtime.provider_history_v2 import (
+    authenticate_provider_history_v2,
     provider_history_v2_verifier_sha256,
-    repack_provider_history_v2,
 )
 from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
 from tests.test_ibkr_foundation import _evaluate_session_aware_readiness
-from tests.test_provider_history import _published_provider_history
+from tests.test_provider_history import (
+    _provider_history_receipt,
+    _published_provider_history,
+)
 from tests.test_r1_foundation import _config
 from tests.test_r2_confirmatory import _build_confirmatory_fixture
 from tests.test_r2_ibkr_historical import _foundation as _r2_foundation
+
+
+def create_ibkr_foundation_confirmatory_promotion(
+    *args: Any,
+    **kwargs: Any,
+) -> VerifiedIbkrFoundationPromotion:
+    bundle = cast(Path, args[0] if args else kwargs["foundation"])
+    kwargs.setdefault(
+        "provider_history_receipt",
+        _provider_history_receipt(bundle.parent / "provider" / "manifest.json"),
+    )
+    return _create_promotion(*args, **kwargs)
 
 
 def _runtime() -> dict[str, str]:
@@ -67,12 +79,16 @@ def _foundation(
     qualifying: bool,
 ) -> tuple[Path, Path, IBKRFoundationBuild]:
     _, _, provider_manifest = _published_provider_history(tmp_path)
+    provider_receipt = _provider_history_receipt(provider_manifest)
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
         end=datetime(2026, 2, 1, 0, 30, tzinfo=UTC),
     )
-    source = read_provider_history_source_evidence(provider_manifest)
+    source = authenticate_provider_history_v2(
+        provider_manifest,
+        receipt=provider_receipt,
+    )
     build = build_ibkr_foundation(source, configuration)
     if qualifying:
         readiness, _gaps = _evaluate_session_aware_readiness()
@@ -86,10 +102,15 @@ def _foundation(
     write_ibkr_foundation(
         bundle,
         provider_manifest=provider_manifest,
+        provider_history_receipt=provider_receipt,
         configuration=configuration,
     )
     receipt = tmp_path / "verification.json"
-    verify_ibkr_foundation(bundle, receipt_output=receipt)
+    verify_ibkr_foundation(
+        bundle,
+        provider_history_receipt=provider_receipt,
+        receipt_output=receipt,
+    )
     return bundle, receipt, build
 
 
@@ -140,10 +161,6 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
     monkeypatch.setattr(foundation_runtime, "verify_ibkr_foundation", no_replay)
     monkeypatch.setattr(foundation_runtime, "build_ibkr_foundation", no_replay)
     monkeypatch.setattr(foundation_runtime, "_read_child_rows", no_replay)
-    monkeypatch.setattr(
-        provider_history_runtime, "read_provider_history_source_evidence", no_replay
-    )
-    monkeypatch.setattr(provider_history_runtime, "_read_parquet_rows", no_replay)
     monkeypatch.setattr("qtrad.runtime.r2_verification.runtime_identities", no_replay)
     authenticated = authenticate_ibkr_foundation_promotion(
         bundle, receipt=receipt, promotion=promotion
@@ -178,47 +195,12 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
         )
 
 
-def test_promotion_authenticates_exact_legacy_stage7_verifier_identity(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    bundle, receipt, _build = _foundation(tmp_path, monkeypatch, qualifying=True)
-    promotion = tmp_path / "promotion.json"
-    _promote(bundle, receipt, promotion, monkeypatch)
-
-    document = json.loads(promotion.read_bytes())
-    document["stage7"]["provider_verifier_sha256"] = (
-        "fb4b30c9486d45e8ca4bd5e427a79f12c48443a6ef8ac046e0cbc5927b6ee000"
-    )
-    identity = dict(document)
-    identity.pop("promotion_sha256")
-    document["promotion_sha256"] = promotion_runtime._sha(identity)
-    promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
-
-    authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
-
-    document["stage7"]["provider_verifier_sha256"] = "0" * 64
-    identity = dict(document)
-    identity.pop("promotion_sha256")
-    document["promotion_sha256"] = promotion_runtime._sha(identity)
-    promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
-    with pytest.raises(ValueError, match="stage7 binding changed"):
-        authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
-
-
 def test_v2_promotion_replays_stage7_and_rejects_v1_verifier_binding(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _, _, v1_manifest = _published_provider_history(tmp_path)
-    v1_receipt = tmp_path / "provider-history-v1-receipt.json"
-    verify_provider_history(v1_manifest, receipt_output=v1_receipt)
-    v2_receipt = tmp_path / "provider-history-v2-receipt.json"
-    v2_manifest, _ = repack_provider_history_v2(
-        v1_manifest,
-        v1_receipt,
-        tmp_path / "provider-v2",
-        receipt_output=v2_receipt,
-    )
+    _, _, v2_manifest = _published_provider_history(tmp_path)
+    v2_receipt = _provider_history_receipt(v2_manifest)
     configuration = _config(
         cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
         start=datetime(2026, 2, 1, tzinfo=UTC),
@@ -232,7 +214,7 @@ def test_v2_promotion_replays_stage7_and_rejects_v1_verifier_binding(
             }
         )
     )
-    source = authenticate_provider_history(
+    source = authenticate_provider_history_v2(
         v2_manifest,
         receipt=v2_receipt,
         instrument_ids=requested,
@@ -449,3 +431,30 @@ def test_promotion_rejects_masquerade_root_changes_and_verifier_revocation(
     monkeypatch.setattr(promotion_runtime, "_PROMOTION_VERIFIER_VERSION", 2)
     with pytest.raises(ValueError, match="verifier is not accepted"):
         authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
+
+
+def test_new_promotion_rejects_legacy_provider_contract_before_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    bundle, receipt, _build = _foundation(tmp_path, monkeypatch, qualifying=True)
+    output = tmp_path / "promotion.json"
+    original_bindings = promotion_runtime._bindings
+
+    def legacy_bindings(*args: Any, **kwargs: Any) -> tuple[Any, Path, str]:
+        bindings, provider_path, _contract = original_bindings(*args, **kwargs)
+        return (
+            bindings,
+            provider_path,
+            "qtrad-provider-historical-observations-v1",
+        )
+
+    monkeypatch.setattr(promotion_runtime, "_bindings", legacy_bindings)
+
+    with pytest.raises(
+        ValueError,
+        match="new confirmatory promotions require provider-history v2",
+    ):
+        _promote(bundle, receipt, output, monkeypatch)
+
+    assert not output.exists()

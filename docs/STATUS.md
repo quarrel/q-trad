@@ -169,7 +169,10 @@ remains offline/replay.
   `31ae56bd...d5d7f`; its insufficient-history disposition is expected and makes no research claim.
   Durable rollout evidence is retained at
   `/workspace/tmp/ibkr-historical-r2-20260810T081317Z/stage7/s73-validation-f0e882b-attempt1`.
-  The retained full Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`; receipt
+  Live Stage 7/8 operation is now v2-only. The v1 writer, repacker, row decoder, deep verifier and new
+  Stage 8/promotion paths are retired; only cheap exact-tree/receipt authentication of retained v1
+  evidence remains, with exact-head `f0e882bbcd19aabbefb1add2d87a03daae7670e8` available for a historical
+  deep audit. The retained full Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`; receipt
   `56228947...ffd01` is implementation-only and authenticated promotion `1a1d09d9...81e2` is the
   distinct confirmatory capability. No real holdout result, effectiveness claim or downstream R2 result
   has been created. IBKR history stays provenance-distinct and cannot substantiate native IG fills,
@@ -211,16 +214,13 @@ remains offline/replay.
 
 ## Next actions
 
-1. Remove the v1 provider-history writer and general v1 runtime in the next IBKR data-foundation
-   maintenance PR; retain only cheap authentication of existing v1 evidence and use its archived exact
-   commit for any historical deep audit.
-2. The R2 integration/verification workstream owns the post-S7.3 recursive-verification architecture
+1. The R2 integration/verification workstream owns the post-S7.3 recursive-verification architecture
    audit across R1 and R2; consolidate replay only where it preserves independent authority boundaries.
-3. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
+2. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
    holdout execution and effectiveness evidence remain separately authorised and pending.
-4. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-5. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
+3. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+4. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities

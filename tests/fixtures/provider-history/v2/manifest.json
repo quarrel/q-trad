@@ -1,0 +1,70 @@
+{
+  "availability_policy": {
+    "contract": "qtrad-provider-history-availability-selector-v1",
+    "delay": "PT5M",
+    "formula": "interval_end_plus_declared_delay",
+    "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+    "schema_version": 1,
+    "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+  },
+  "contract": "qtrad-provider-historical-observations-v2",
+  "dataset": {
+    "aggregate_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242",
+    "availability_policy": {
+      "contract": "qtrad-provider-history-availability-selector-v1",
+      "delay": "PT5M",
+      "formula": "interval_end_plus_declared_delay",
+      "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+      "schema_version": 1,
+      "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+    },
+    "contract": "qtrad-provider-historical-observations-v1",
+    "contract_selection_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dataset_sha256": "fed9565c3988c3ad45a39f656cf02eadd83cb61f7e330450192c29f1df1f5092",
+    "environment": "paper",
+    "partitions": [
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-01",
+        "partition_sha256": "10fc8b9f4501eb965cb557d4c5913a7fc42549f6c4966f67667caf46b8eda60d",
+        "row_count": 1
+      }
+    ],
+    "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+    "provider": "ibkr",
+    "row_count": 1,
+    "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "schema_version": 1,
+    "source_class": "IBKR_HISTORICAL_RESEARCH"
+  },
+  "migration_source": {
+    "contract": "qtrad-provider-history-v1-to-v2-repack-v1",
+    "source_provider_history_contract": "qtrad-provider-historical-observations-v1",
+    "source_provider_history_manifest_sha256": "ee08ee6aa3c61e9517bcfce18cecb34ab2b3e79629429e171664681afdd0c50e",
+    "source_verification_receipt_path": "migration-source/provider-history-verification-receipt.json",
+    "source_verification_receipt_sha256": "a78a2b15295ba4579b90e20edf2066ac34d25f8c28d69c91c64c120882e2e51e"
+  },
+  "parts": [
+    {
+      "bytes_sha256": "33dc6aed1c118eba9aef73ad600e13312ace20358e16d07af718f10cc6e2d5f0",
+      "instrument_id": "fx:aud-usd",
+      "maximum_interval_end": "2026-02-01T00:02:00Z",
+      "minimum_interval_start": "2026-02-01T00:01:00Z",
+      "ordered_row_sha256": "6a3916efb42bfa02100e131a05d96b10548564dd7d59748e2ee4bdff39f915a0",
+      "part_ordinal": 1,
+      "path": "observations/instrument-27befb6bcd4ea5570ee2e90d218e0d41151d06dca930a3b3fa5f0ce9a540c388/month-2026-02/part-0001.parquet",
+      "row_count": 1
+    }
+  ],
+  "physical_manifest_sha256": "085a089a8459f0c7a533717128ed93835a0d0715def07883d328904a1e94f7d1",
+  "schema_version": 2,
+  "selector_contract": "qtrad-provider-history-availability-selector-v1",
+  "source_plan_row_bound": 2,
+  "source_result": {
+    "bytes_sha256": "497a3e86e92f03d6d392ffadb8e7471d3d5175b01fe098aed203c6adefb89556",
+    "contract": "qtrad-ibkr-historical-result-v2",
+    "path": "source-result/manifest.json",
+    "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+    "semantic_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242"
+  }
+}

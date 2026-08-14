@@ -1,0 +1,441 @@
+{
+  "aggregate_sha256": "3a927ed2071b3c8e6574e42ad4369c2f9d29479110fa8cec5eb92ae6010270de",
+  "contract": "qtrad-ibkr-historical-result-v2",
+  "coverage_summary": {
+    "accepted_bar_row_count": 62,
+    "by_instrument": {
+      "fx:aud-usd": {
+        "bar_failed_request_count": 0,
+        "bar_no_data_request_count": 0,
+        "bar_planned_request_count": 62,
+        "bar_rows": 62,
+        "bar_successful_request_count": 62,
+        "bar_terminal_request_count": 62,
+        "schedule_failed_request_count": 0,
+        "schedule_no_data_request_count": 0,
+        "schedule_planned_request_count": 3,
+        "schedule_sessions": 0,
+        "schedule_successful_request_count": 3,
+        "schedule_terminal_request_count": 3
+      }
+    },
+    "failed_request_count": 0,
+    "no_data_request_count": 0,
+    "operational_successful_request_count": 65,
+    "planned_request_count": 65,
+    "provider_session_count": 0,
+    "successful_request_count": 65,
+    "terminal_request_count": 65
+  },
+  "entitlement_summary": {
+    "disposition_counts": {
+      "SUCCEEDED": 65
+    },
+    "operational_disposition_counts": {
+      "SUCCEEDED": 65
+    },
+    "provider_history_eligible_instruments": [
+      "fx:aud-usd"
+    ]
+  },
+  "plan": {
+    "bytes_sha256": "4c34990599b36d1b56ad5df671df35e925e36461aeae8f5ef2b28261bae36181",
+    "contract": "qtrad-ibkr-historical-plan-v1",
+    "path": "plan.json",
+    "semantic_sha256": "02835b62f9c1ed585800f7c0a6b18489afe9221bd94c6b3ae19267a7617973c4"
+  },
+  "request_results": [
+    {
+      "bytes_sha256": "0695f826c68738ffd3018444b4ddb198a84a7436f5e8161d99bb3b86017e837c",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/0195148f684a7d5e3122668d3f67a26c76047b6ecd741a715c9c62821cdf8031.json",
+      "semantic_sha256": "c23bc46462d5b7e76451e003ae44a1b706a95c94f6213663d55102785e4e77cc"
+    },
+    {
+      "bytes_sha256": "4afb3827a4f734ab48b035549f3f7cff57a6229adcba2eb450ff7b87b2e593aa",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/0ac7c1f153c8d6f028cbb029196cb77e1390d673a7166203f2c0c1bc2eaf98f9.json",
+      "semantic_sha256": "57ef6b62e7b52e763ddb8464c27f1fecedd87a2dbb6cafb4d9e78619bcc21f26"
+    },
+    {
+      "bytes_sha256": "f20004216d5292ba2b55c5961f9e9392238b5984911bc7811982fdfb8c22ec96",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/0fac3b40fb8ab4ea5379b8a2dac09684d54573f357de262eb2fd7923e83e3703.json",
+      "semantic_sha256": "25d61a848f83199be0a9ca1b91e853643d1fb653081bd2cfaad6c519c3cd4cdc"
+    },
+    {
+      "bytes_sha256": "6ca5e0c8f5ae83f80f18143933f74d8564b04daa243296e985f2b98bd1198112",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/148666c7cc9a71d30cce81cc5a838a72c8c4e5306d5836ccf6a41963ff3650c4.json",
+      "semantic_sha256": "9c519ce7159b581927853735f08442e5e27937131f1da8eba7b7668c5b4c0aee"
+    },
+    {
+      "bytes_sha256": "16c240e843a9e83dcf5e68406119454e5c778c47ebdc6b5a7ef9ad1e74df3266",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/1a99f7a50d72152fe58ae376b4a7a63d052645727fc7fcfca852f01bac4b2e54.json",
+      "semantic_sha256": "feb1c5f5a8d1d88a4227d707a14b0aa08f377ad2c56fcd9540493a25d368c268"
+    },
+    {
+      "bytes_sha256": "6c298f8319bcf390ffe31836b1cf542550c32aba78d34e5d0172d0e36da8da23",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/278fef5883907f2d88eda33ebcb3588957be4d067bfe8df04536174eef9463af.json",
+      "semantic_sha256": "02c1aee1f92fab63a660613425849a5935baeb8ee17f1b5d23453bb142d8ba25"
+    },
+    {
+      "bytes_sha256": "c8124e6e22ff93a79b2e7db51734b6ceedd4478a07579372b3246dc7fa70903c",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/27b09704748033fd057ac38f39e024e038b3f4fd8be32ed6466e61e52a0b826c.json",
+      "semantic_sha256": "1fe146c37146db0c5f35533f2c70bdf7f93765cf62e0d55be7ddd242f328a6c4"
+    },
+    {
+      "bytes_sha256": "71a628a77198b98aa546fc23a05365ef6efb8b02b8e0b1856680be162a948632",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/29fd0a40d3a7fa0c32bd3150e44a8f5e7428b8b577fb975890ed50176d215a02.json",
+      "semantic_sha256": "52c26c0521298c6db09ab031ec0a270ad3802ace7e3d3b3e633c810eda5f8f32"
+    },
+    {
+      "bytes_sha256": "98cf50ee1eb1840c9cabd1f9ec28e35d04b072a1021d8b8d3cba7f3668168c9c",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/2a32fb4ba779ac59e4c2376e83d126f8b6f7f044f615507df9f80e002304fa34.json",
+      "semantic_sha256": "7c73c6a8744d06630d7d767fb5ccf4a633a96a294f9cd0776c8420724d2ad7f3"
+    },
+    {
+      "bytes_sha256": "6538d1f3e18a3c6b6a15a894cf0798208985c50c2ca7a564b17fcd9f304b7f6e",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/2aa52a4a8fabfca9cb22e08666cb31bd8aa5a4c54c27de991aca3049407b3b9a.json",
+      "semantic_sha256": "1afe1bb2f7841280023e640051a623465fec345d60896eab32f656ad7dd10a4d"
+    },
+    {
+      "bytes_sha256": "da4bab1feb21837a139a5ea2e13ff085255227e122853437b23cd2d004d55b4f",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/2f650619bcbbaeb5e7f889f61f49c976978fcc2b8c5adf33107bf1844fabbec0.json",
+      "semantic_sha256": "7ac8d173e11701f9eac2da06488c506429855470a17789ae77c35e0e8a0ce87c"
+    },
+    {
+      "bytes_sha256": "54f5bfcd0a11516aed9aad9b150a04aff0f76b59e124c12eb5f0b0a95e9dd287",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/2feb86bf04332be5984fcbc0ca14da6881df3916c54740721da78b9a465b8f0e.json",
+      "semantic_sha256": "40771e39d3371c18fd6a7437485c13aab98adf2fccbaf76e8c099f6910e15b44"
+    },
+    {
+      "bytes_sha256": "06616fc1d4cf5f57ee20eed2425963d3028437e7fa3576dcad7489746fd2cce8",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/343805f3203881dfc11801ea6089d3cfd407fad4098ecfa6cb6b287f17557bfe.json",
+      "semantic_sha256": "91795b11176f71ec12dd59092cbfa4a1840b7ea6070c871d69ccaea2f115a221"
+    },
+    {
+      "bytes_sha256": "ace1a045f5d1837cbf193445eb07fffba5ce8afccfa987fa5fdbb9f95147bf02",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/38129fdd8f83ef3a7ef42afb4827ae027172e2fdc068a17fa1b323974a2533a7.json",
+      "semantic_sha256": "6f872917250314c564d92affc0e9bf80b1486d3cdb22bb64a0d3202eedd54aa9"
+    },
+    {
+      "bytes_sha256": "3f6aa3cd75f74044bcf1c567b88f766d1de3f4966616a72d6ee529c9feb18ca3",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/3acb6f5fbdafd8bbc3f6ecc93dad968a111b70ea6f3193aa84a91556a1b63d95.json",
+      "semantic_sha256": "7522379162a85c8bd2ecaa905c1a993c487065d77e59acef1ce061bd0dc499bd"
+    },
+    {
+      "bytes_sha256": "bb76cb0bd1af8aca080246a84a47b3e5053e91ba10b7a13402772c9774cd8ac7",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/4136d84933b6c7644efa6593dd5eb9f6dea163b09ecabe4e62c758f6e3e62a95.json",
+      "semantic_sha256": "963970ac6b1d54a856324a2cb7a85778b049cc0c15a1b9dc8e03c7c5fee1d651"
+    },
+    {
+      "bytes_sha256": "bf05e7a24f2267efbd5dd5352a42187e2c535a5f051789a8ad5a0ef0549e3697",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/44c228b4add4ce5a5c8fd16f7701f9ab4d609735af7284645f309202e0acde07.json",
+      "semantic_sha256": "100413aadfe2bc56d668a630ca44f34643b7c3bf045133ceda1dfdfb1a4d7fd4"
+    },
+    {
+      "bytes_sha256": "a45f486fbb56a3a405b73d9ef803769a484bd51247565d747f201ebb3c7c84ec",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/49302fa1cb0377f4c134921aba7830ef1293e47c8a6e6d541054fcfe4a00f012.json",
+      "semantic_sha256": "1bfa058ced7ca28e2e231f3b7711f8fe347b34e2053b18e3f4143cec711088fa"
+    },
+    {
+      "bytes_sha256": "32800a909fe19b1e0121f1031b4e2429c369d42ee26b1bfc7c217a17e2da0c58",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/4a559c78877d0c816b5ee199b1432a52228a44eb0019e21bb3a8103cdaab16ed.json",
+      "semantic_sha256": "a07733e5e6e92a8d8ba576d39c1ce81693fcb4ffdcda8baf112990be08ba7354"
+    },
+    {
+      "bytes_sha256": "2ec0ee53797c56fd8ab5d6b990c2f80fa28f48a41cb1f49c47715fabc17836c4",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/4e23114a16a547237b31fff5fe6f562b8b2f81d29127808ac5c4137fa122af9d.json",
+      "semantic_sha256": "2921c5e3bb71a99c2571e6b59e40734413f8b2c28b93e41769dcec5919ff3303"
+    },
+    {
+      "bytes_sha256": "a397a92edc454a3361f2e864eecdcf1391a1533c3df7ef48ad57b4a45e630d17",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/4e3a74de2fa616a866f7c2deb5880e11897187d83ece0e6f10d6132ff1425996.json",
+      "semantic_sha256": "36f6f17420ed0075146ec82389261e6316a44dd01e23c732af8cacfb7cd382a8"
+    },
+    {
+      "bytes_sha256": "dce8d08da6a0a5cdb95867e47bd8c28f470027707377ea5cd91ba4f537794a21",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/50a19df1e09cd4e64c7b0e7e4811d3a36ce59c7dc85bba43dbeb5c51a5f43b0c.json",
+      "semantic_sha256": "9218d3bd2918f2b493811293d4e52dadad8f8768621fbe1eb1eab0e79e091af5"
+    },
+    {
+      "bytes_sha256": "d104d72b603aa94be10e2acbecd9e634380695e164f820c5615968a1d0957f92",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/513d2753c257dd81c460380705b44c1a44081cb0b905897c5bd2a3daf51715b1.json",
+      "semantic_sha256": "10ea4f4afb00a6f36766b1c1a4e41e4dc429e5c826ec78653461a82799779634"
+    },
+    {
+      "bytes_sha256": "0dba63f4c7bacafd5154c69a8cb43e24947a64ae5c716375952a1a6ae2bb494d",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/54c2ee9c3c0bf23fda437b867401626267ca840fc34b5a5695f6651fe5c99a5e.json",
+      "semantic_sha256": "00178bc9e1e1860ba1b80650cc613799cf6d08dc2477f8654c6531aa2df2b9da"
+    },
+    {
+      "bytes_sha256": "8e1a04dbae3c16fff5c963e579d8ff8de636e0035d3f7312b909092d9de4340a",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/57866cecedb1e6665ebdd3dc255f3c43f3366abcfe7b39c79b1e507c75df0235.json",
+      "semantic_sha256": "68bdd7c0b41aa9f93bf75366a37593158a6329ceb3eb2e3b7f8da5449c26c904"
+    },
+    {
+      "bytes_sha256": "a1bd835aba5389a56e3d9184ce0171a486f87ccf827e9552d3966498b33ba7cf",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/5d39123a181ac68d6e68b382dadfccc886507f0ec5702b5334c177cac19330ca.json",
+      "semantic_sha256": "7d2d7b5affbfd1ae5f2fd3fcdac9c44eadf0216918bae57f4b6cd8b97d27f408"
+    },
+    {
+      "bytes_sha256": "30b81c9aa069bfdd3ae45b96c9ce554045949307c47f9ed589c00d915834a4df",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/6b791c35f17f867d7611fcc870acee4ddc823a130886902443af436e11d49ca4.json",
+      "semantic_sha256": "e1601a72136ef582a6817d6ca072274cfe16f403e14806604c14bb00f59c9e7d"
+    },
+    {
+      "bytes_sha256": "8e1abec6b944a18c048dbf2d8f3633f3db94784cf854d1ada1a9cfcb63dcdc69",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/6c6ee2c6c7cbe4a8288ce250d2cab82d8e84a329a9a193bcd6230203d90dc15f.json",
+      "semantic_sha256": "8e3150ab6e073233873bc401f664ed0360f3ac267900baf38709eb5c2e7e8a4c"
+    },
+    {
+      "bytes_sha256": "59609034bd2cc1b19bdae3b8ab10a9e7d76f239f19cfc3767f172540efb62325",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/6f79935dd1ef6163bc7f9a44c63a8b2b0f2645aaa3b6ccc7c146441989cc2601.json",
+      "semantic_sha256": "14af982de598cb7261b21d5b7dd11a0be8856cc33170826624fce60ace2512b7"
+    },
+    {
+      "bytes_sha256": "e8e41d4ca1287aa01c1a217ea74076146785a9a623350d49f2b2e7d5aaab2ccb",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/714cfb13b4efc8e2ef1a62310d394384e567ea00600cf1a27ca0ecfa62b9468b.json",
+      "semantic_sha256": "f11d32d9924a5396253b22e1c5a93a199694c61776d09aad6b7b996e65b330f9"
+    },
+    {
+      "bytes_sha256": "0ff7ce776f9f770a4b820907f8d6e6e45be7e3e7d4ff03052cb320553ade10f9",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/776bf2b298bab138ac477572e6a54f449615516a73aa15be16104a64b1aa4423.json",
+      "semantic_sha256": "dda25ed6391df82886e002d4f5eccafcaf9453af811d6e5602c7f8ff329850d6"
+    },
+    {
+      "bytes_sha256": "6176caac7ffebedc4e80af2a636c3f70d49c1c1d5baacef2b196ca63f126c294",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/7cd2d0274199009e2998b69c1b20f46ea834603e7462e4d56aff7992611b4edf.json",
+      "semantic_sha256": "49492a1cca4d8eba0ec6ca66687e1e6293e77db2eb92b8061940e41cb8b726e2"
+    },
+    {
+      "bytes_sha256": "c4b2c5ea65f379da620c32468b702cf867c596ec915ff85bba72d9e55b0bea38",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/7e320858f6012657e8fee48006b9b6f68108f10119cf8b23d9791a83f28adec7.json",
+      "semantic_sha256": "9097cb140f119f48e2d14fe501b0d0a2eeebbab46fa76c764c5394d677c6d397"
+    },
+    {
+      "bytes_sha256": "6343fd2ab74a1d0d4fedc8dcd59d00088c9830f3a1ff810c6cb522d19036ecb9",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/7f70702204ef1c68ef302a03bc3ab2c16457cb5695aa95d8fc865794bf4e7503.json",
+      "semantic_sha256": "77d54e6d5ef9971d8431b3d799e57e438258173f3f9d56443eaccaeb2e20cdb6"
+    },
+    {
+      "bytes_sha256": "9c1e7ce6e2a2ad5905ace4308a66daba1d64f878f6ca99abda6a45464395c534",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/8119791ea4f5e897a5e52b018cf7c761449a4c6e87ef95a5d481c3bb51f2a981.json",
+      "semantic_sha256": "eca101226b8915baa6214e9039ae8a1a8a838527e6d068d8a3ff40de56ec480e"
+    },
+    {
+      "bytes_sha256": "33033af0649887660ae23135597ebcb2e6b85cc5cd4e3496e215793509f77e26",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/8f6c0ca50c924de10103c20f249ee2529d02b0e9c41e05197d8f5737d030369e.json",
+      "semantic_sha256": "1357a4cbc463cbdfc158fd264474373d48c863a306cdd6195ea94e70d0243ee4"
+    },
+    {
+      "bytes_sha256": "20093ddd2c3e4c462884b211b508f3383fd5febf131d96594a43efe5d1e923d5",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/92c1968e63b7126644f9b711b53d821224143de69ad4e4ded22972f77db8c0f7.json",
+      "semantic_sha256": "ac85d6d7fef1d62eeed51ab039d3fed936dd8b3c57221e0db1278d695b98aaf2"
+    },
+    {
+      "bytes_sha256": "90ebf547bfdae5d575a909f7f1022bbc13611c0f13516529e6a95ce125aecce5",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/a15066cc847520ed9dc861dcbd6ee7a03edd8575698a2ff1a4f109ff696ca9ac.json",
+      "semantic_sha256": "a1da5ad2d3bdac8145140590789aac812a02eb8ab0dae6eb0bf627a40376a03d"
+    },
+    {
+      "bytes_sha256": "31eb9362955ed9d40dba0c6a048a0535ce566ae4254b2c4ce40b7881401f313d",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/a26b5c4df428dfa0967b393e5e50b3119abf2f45e819224f5491b881cadbce40.json",
+      "semantic_sha256": "1f3b83ee377d3e641cd7b6968542e7085806804a5e42a28537cbf6addf9ca054"
+    },
+    {
+      "bytes_sha256": "be93b0c29ad78aade11e8c9de545a40798c58542f3b1cd2b5bc9656b1b302745",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/a39096a430295f32cc915d2f20ccae8dcae14084c4f23979f214984531f5d4b3.json",
+      "semantic_sha256": "472437cf73a2451e3947592078119f24d50c54f77791d616f222f0094f8ec8fa"
+    },
+    {
+      "bytes_sha256": "88a789d7a536fa7115a0bcd9baaf0896feeca09edf3adae1b15b2cdd6c115e98",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/a3a6038b41d5d2f1757ec4ec4222a2eefaefc5b85a090bd85bf0fc327e8467ec.json",
+      "semantic_sha256": "a3b87876f4f4ef17b71006585ad8b6fa9c14923813be281415cf96b5cd502dd6"
+    },
+    {
+      "bytes_sha256": "efdaf87da1b8393836663c0d5c2bcfc63ebf9fe578732b5d31ec47f1549f9e21",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/a9e4686e8852f22903a61154776d6fd72e8f98c8d63175496f408ca9d4aef099.json",
+      "semantic_sha256": "6c12e75fed74a0f8b6a86cfbe2800c85c3e6ba53082bf99d7c4ebc07fef66530"
+    },
+    {
+      "bytes_sha256": "813607e87b1498fd02154e4eca379cdf8d4032c370aaa9c31c2e90ab7af542b3",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/ab427abd7fb11793a73a41e7556f7ef3e5a23dcd324d9804b63542ea394b7186.json",
+      "semantic_sha256": "d83c357b4849e5a91dc4c1bc50a7875c95fd6979a42cca79984c7728cd48fa31"
+    },
+    {
+      "bytes_sha256": "a97506a46571cf52ae92010da6ca260e54ac4573e0bd881c0ba41dbdccafd444",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/ae78498128ff0b0c434e71f3ff4aa805cdceb9daa91f7f5d294d44f23ceeeb4b.json",
+      "semantic_sha256": "7cfb688902de4c6ec14758647abd9b5a98cc88dfabb6eee6768c30de4c954dab"
+    },
+    {
+      "bytes_sha256": "cf187ffeaf7073600757396312fe8e5771566ec2a1611dbb1220511b2161d005",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/af5e3668003dbd63aaaa24b06116a81dc53f81d12b44f5c23f09e602a08d751b.json",
+      "semantic_sha256": "3480f73851be37ca0acfd5aba935335069e7bced823cce0a21f561e198585a34"
+    },
+    {
+      "bytes_sha256": "ed9f03bf6b7bc82cd76db907f7a9266bcb8718850a2b07381d5e7749a47a2cdb",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/b05783f8fe300aa13aff83dd6f49084e944ca6ebae034c577c76866f758e3a96.json",
+      "semantic_sha256": "a67b44d80a16422984f65fb3386b266bde70b1e7ed90e1da773c150d93f2fd98"
+    },
+    {
+      "bytes_sha256": "124a4952c3927cade3168bff3b49fb181996a6f24b1f13c43bdaf6f7ec7f5def",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/b27bdc379b1e1c4cafc0a4e37da9e6b6af8334072e2c15df80150b76e848df72.json",
+      "semantic_sha256": "908d3f7a2cd42c0bb2f208bd2d60b1340ee664302cf7b31230e4a04983a55fda"
+    },
+    {
+      "bytes_sha256": "539c445b7ec819fb31084600ac0fa1fbcdf6d57429e76f1006104c5926c9efe3",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/b2ed67dc3bd75225b1c31a3fa5df8dce502f4748dfb1298feadc6ab89706b4fd.json",
+      "semantic_sha256": "04be3ec13e722da401740ffa57d36c25f9340e7f8399cad1671e226439515c7b"
+    },
+    {
+      "bytes_sha256": "15343d4fa93631705cd80800e83d736bfe5bd3f9fb6a30247bcc7c0407032bf8",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/b4889e23ecaddca25508973784c1293e175658cebf0a6b4261b287267c170edc.json",
+      "semantic_sha256": "cf88bb0bc855b35a2aa5cdeca33fa3cd072ac74be37980ae2e38f4da1166513a"
+    },
+    {
+      "bytes_sha256": "a4a8a4e07f621d6e5fda6d25058e404edfe8abaf58db36d10e59b918abc94a60",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/badffcf371975a255aac2b97ea7d830a033432afd27e3bff75ca674e2facf5e7.json",
+      "semantic_sha256": "abd76939f84cb68047289373a2afe09d439a7f35cc4650afa4b430ead38469de"
+    },
+    {
+      "bytes_sha256": "9423e6a3b283a0398970344620f5f6e813387ac4abe10443f896e52ac294656e",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/bbe94a8ec041525a8210d2c44b987d2b2eeb3c0d8a8b47a64da337b87d4408bf.json",
+      "semantic_sha256": "819edb41ffdc7e9826bf1a3a83d6c72abb8bd959ecb69c5c9df02d2036e44159"
+    },
+    {
+      "bytes_sha256": "9c884e205ceac7dc01942326c184e1b79d723d4e43259066fd15ca830596391d",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/bf7332e02806a681662a4685d4305a7a67c99f893257dd7dbbe8ac496abb01eb.json",
+      "semantic_sha256": "0cdcfceb14a7f326d82a348db11348f78aef925a036e63ac078bc4f6370d591b"
+    },
+    {
+      "bytes_sha256": "d074d201adcb2b6fab7674ff0868b77c2eb1d36f85856029dc21595ab90678ba",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/d100b55838cf9b90be3302978606ea36daf8213c814618bab7af2a843129744e.json",
+      "semantic_sha256": "a144bfeb0b7cc8a40784572c784ae5531b96f5ce6b6da91a84afe29f5634ef52"
+    },
+    {
+      "bytes_sha256": "2bd6eed2c665d0f4c52ff18310612a8e48cfc5b41281e51e2870b2befbf4538d",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/d2c2a7113e62bd0718a989a4962d908de138ba99eb4c4dfc444de115d2014892.json",
+      "semantic_sha256": "5199f5f9b6459d302f12185e65730723715ac91a03914130f6d5e6b7b1da9002"
+    },
+    {
+      "bytes_sha256": "6d40074e32d150976f71c459d42167ad126f493414114b7cae4a943b8334e34f",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/d908b7b9f10f53c83ed0194712a0d23e8e99cffed26cecf1ab2fbf37f0797655.json",
+      "semantic_sha256": "d2b0ef9323d59a7eae2f3972e951c979f71b78f871de8f1c7f75262dc511ce94"
+    },
+    {
+      "bytes_sha256": "d06fc3d1a03e4cc9cc03059616fa3f2b07bd7aed92631a33766bad0597c1ddca",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/dba9c7b89b0c19eaec3fbddaff38a28c769a9a6f2a4c37fcbc7e8545b4d3b58d.json",
+      "semantic_sha256": "11c7ab6e689fd224cce39453b48e48abcdbc4fe49b3668ac94399c0645627def"
+    },
+    {
+      "bytes_sha256": "787529344288b5ac92c891a267209bec186a40bedd0e242464feae1c2d8abf13",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/ea04cde3af09de9d625598b82f0f1aaa4b6a4d603a3aa9f2a8f7969b86cb0b7c.json",
+      "semantic_sha256": "89a489f8c808cc66d42388c43887a6d087de5d2737f8bfa0b18fbb2457481ef9"
+    },
+    {
+      "bytes_sha256": "9d3e8a5b0ca45629c175845c2756103a097bacd8f5d8375bd629967c5cd4ff54",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/ed2aab1afc013fec9766cf1b270e9f8f846eef889350354c31e866e93c6471d7.json",
+      "semantic_sha256": "fc39ccd4e1463eb0ab811e5755f370a7d584c8c14dac48e920b6029093f15e74"
+    },
+    {
+      "bytes_sha256": "655c0673968f74270269d16767134b2b4d9b39aeab5e1e9fcd74d4a9a50e2ad8",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/ee11a7811cfc8ecbe761a775447a125fffc70bbf283f992cefd3fcc1226122cb.json",
+      "semantic_sha256": "62efcfa8757ae963d11830e780738cb044c240dca755876d6335f4204e82f0a1"
+    },
+    {
+      "bytes_sha256": "e2e81c1104a040164ae9ec855eebacf16dd7244d5c137d44262f39bf51c8aea0",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/f0447cbdec8f74ddef4b29d003d699f4150911113e9fb7b3c52a42a9003e895a.json",
+      "semantic_sha256": "924c0b07b8247b4a70604c3b100f747e252e873a8de53a7f2ab177c3161268ed"
+    },
+    {
+      "bytes_sha256": "0cfa32cd8e509548d265feb59d78bd8de38c041446ade12fcdc85f5f4e38f7bc",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/f070399e60d8b14ba747a9fb73cef0a2b3b510c95d13e040dd52ba9c4a1063fa.json",
+      "semantic_sha256": "552f4bcead72a789eea8efa668d54aeda1f062a45652bad754bdf3df6de49d84"
+    },
+    {
+      "bytes_sha256": "11a4d7a56d339b946ee96e941ef553cc983f6165f542a7af4182f619d38def8e",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/f208d6829469f02fbbdbff99fa91bc91deeb39259e2ac5768139a2af741d2cce.json",
+      "semantic_sha256": "74ca7664778ba964da631f865b3d52c1d4695bf7c857d8626a7dafe8f2e162ac"
+    },
+    {
+      "bytes_sha256": "11b03644ad4ee7bb5bfba6216ef292fabb4449a44d9e4d8a7a50fdc18eb84811",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/f36bec0fdaccb5b664cfe19b6e14fb4d817cd854d4ae802ba1e7706914b629f3.json",
+      "semantic_sha256": "83066440a65457b4434ab64fa614f5ce082e50a849c1d0d76b78396b789074b8"
+    },
+    {
+      "bytes_sha256": "ca234e750b3993ae0f1134aeed7bdf0eaf1819cad59924b9053c34e9266c6e4b",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/f4f17e5fd17fcaca8ccb666ba31030f0af006ef60360ef8b8ae08094084824c6.json",
+      "semantic_sha256": "7a737bb43b2aa460a61e24a983e3a73b831a3c658fc8e5389b4da27ba0d4aa69"
+    },
+    {
+      "bytes_sha256": "780c43a09f2247fe916a0bcad285690dde6909fd57e0851667c50c65158ba673",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/fc7d29c02240e0cd51f111aeab21a8a5b79bd27ef4178f02e9645d02261f7164.json",
+      "semantic_sha256": "46f490fe5083f63a034521832eea0ac213afc9e01e9dc621b9265337014d4ab3"
+    }
+  ],
+  "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "schema_version": 2
+}

@@ -43,7 +43,6 @@ from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_SCHEMA_VERSION,
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalDataset,
-    sha256_json,
 )
 from qtrad.domain.r2_holdout import (
     R2G2ObservationView,
@@ -67,8 +66,6 @@ from qtrad.runtime.foundation_bundle import (
 )
 from qtrad.runtime.provider_history import (
     _dataset_from_manifest,
-    authenticate_provider_history,
-    read_provider_history_source_evidence,
     verify_provider_history_file_only,
 )
 
@@ -328,6 +325,8 @@ def _manifest_payload(
 def _provider_history_manifest_identity(
     provider_manifest: Path,
 ) -> tuple[str, ProviderHistoricalDataset]:
+    """Read v2 identity or the retained v1 identity needed by existing authorities."""
+
     manifest_bytes = _bounded_bytes(
         provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
     )
@@ -360,7 +359,7 @@ def _provider_history_manifest_identity(
         raise ValueError("provider-history manifest schema is unsupported")
     if document["selector_contract"] != PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT:
         raise ValueError("provider-history availability selector contract is unsupported")
-    if manifest_sha256 != sha256_json(identity):
+    if manifest_sha256 != _sha(identity):
         raise ValueError("provider-history manifest identity does not match its content")
     if manifest_bytes != canonical_json_bytes(cast(Mapping[str, JsonValue], document)):
         raise ValueError("provider-history manifest bytes are not canonical")
@@ -372,8 +371,17 @@ def _provider_history_manifest_identity(
 
 
 def _stage8_checkpoint_source_identity(provider_manifest: Path) -> tuple[str, str, int]:
-    manifest_sha256, dataset = _provider_history_manifest_identity(provider_manifest)
-    return manifest_sha256, dataset.dataset_sha256, dataset.row_count
+    manifest_bytes = _bounded_bytes(
+        provider_manifest, _MAX_MANIFEST_BYTES, "provider-history v2 manifest"
+    )
+    from qtrad.runtime.provider_history_v2 import _read_provider_history_v2_manifest
+
+    manifest = _read_provider_history_v2_manifest(provider_manifest)
+    return (
+        hashlib.sha256(manifest_bytes).hexdigest(),
+        manifest.dataset.dataset_sha256,
+        manifest.dataset.row_count,
+    )
 
 
 def _prepare_ibkr_foundation_preflight(
@@ -490,7 +498,7 @@ def write_ibkr_foundation(
         provider_manifest,
         child_root,
         provider_manifest_sha256,
-        provider_dataset_sha256,
+        _provider_dataset_sha256,
         _provider_row_count,
         bounded,
         workers,
@@ -502,101 +510,31 @@ def write_ibkr_foundation(
         checkpoint_root=checkpoint_root,
         workers=workers,
     )
-    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    if provider_history_receipt is None:
+        raise ValueError("Stage 8 construction requires the provider-history v2 receipt")
+    from qtrad.runtime.provider_history_v2 import authenticate_provider_history_v2
 
-    provider_history_v2 = (
-        _mapping(
-            _parse_json(
-                _bounded_bytes(provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"),
-                "provider-history manifest",
+    source_evidence = authenticate_provider_history_v2(
+        provider_manifest,
+        receipt=provider_history_receipt,
+        instrument_ids=tuple(
+            sorted(
+                {
+                    *configuration.ordered_instruments,
+                    *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+                }
             )
-        )["contract"]
-        == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+        ),
+        interval_start=configuration.required_observation_start,
+        interval_end=configuration.required_observation_end,
     )
-    if provider_history_v2 and provider_history_receipt is None:
-        raise ValueError("provider-history v2 Stage 8 construction requires its accepted receipt")
-    source_evidence = (
-        authenticate_provider_history(
-            provider_manifest,
-            receipt=provider_history_receipt,
-            instrument_ids=tuple(
-                sorted(
-                    {
-                        *configuration.ordered_instruments,
-                        *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
-                    }
-                )
-            ),
-            interval_start=configuration.required_observation_start,
-            interval_end=configuration.required_observation_end,
-        )
-        if provider_history_receipt is not None
-        else None
-    )
-    observation_capture = None
-    if checkpoint_root is not None and bounded and source_evidence is None:
-        from qtrad.runtime.ibkr_foundation_bounded import (
-            prepare_stage8_observation_capture,
-            read_stage8_source_verification,
-        )
-
-        source_evidence = read_stage8_source_verification(
-            checkpoint_root,
-            provider_manifest=provider_manifest,
-            provider_manifest_sha256=provider_manifest_sha256,
-            provider_dataset_sha256=provider_dataset_sha256,
-            configuration_id=configuration.configuration_id,
-        )
-        if source_evidence is None:
-            observation_capture = prepare_stage8_observation_capture(
-                checkpoint_root,
-                provider_manifest_sha256=provider_manifest_sha256,
-                provider_dataset_sha256=provider_dataset_sha256,
-                configuration_id=configuration.configuration_id,
-            )
-    source_reused = source_evidence is not None
-
     started = time.monotonic()
     _emit_stage8_progress(progress_callback, started, "source-verification", "started")
-    try:
-        if source_evidence is None:
-            source_evidence = read_provider_history_source_evidence(
-                provider_manifest,
-                verified_partition_callback=(
-                    observation_capture.add_partition if observation_capture is not None else None
-                ),
-                source_replay_workers=2 if bounded and workers > 1 else 1,
-            )
-            if observation_capture is not None:
-                observation_capture.complete()
-                assert checkpoint_root is not None
-                from qtrad.runtime.ibkr_foundation_bounded import (
-                    store_stage8_source_verification as store_source_verification,
-                )
-
-                store_source_verification(
-                    checkpoint_root,
-                    source_evidence=source_evidence,
-                    provider_manifest_sha256=provider_manifest_sha256,
-                    provider_dataset_sha256=provider_dataset_sha256,
-                    configuration_id=configuration.configuration_id,
-                )
-    except BaseException as error:
-        if observation_capture is not None:
-            observation_capture.abort()
-        _emit_stage8_progress(
-            progress_callback,
-            started,
-            "source-verification",
-            "failed",
-            error_type=type(error).__name__,
-        )
-        raise
     _emit_stage8_progress(
         progress_callback,
         started,
         "source-verification",
-        "reused" if source_reused else "completed",
+        "reused",
         provider_row_count=source_evidence.dataset.row_count,
     )
     build: IBKRFoundationBuild | None = None
@@ -906,46 +844,27 @@ def verify_ibkr_foundation(
             raise ValueError(
                 "verification receipt cannot be written inside an authenticated closure"
             )
-    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    if provider_history_receipt is None:
+        raise ValueError("Stage 8 verification requires the provider-history v2 receipt")
+    from qtrad.runtime.provider_history_v2 import authenticate_provider_history_v2
 
-    provider_history_v2 = (
-        _mapping(
-            _parse_json(
-                _bounded_bytes(
-                    authenticated.provider_path,
-                    _MAX_MANIFEST_BYTES,
-                    "provider-history manifest",
-                ),
-                "provider-history manifest",
+    source_evidence = authenticate_provider_history_v2(
+        authenticated.provider_path,
+        receipt=provider_history_receipt,
+        instrument_ids=tuple(
+            sorted(
+                {
+                    *authenticated.configuration.ordered_instruments,
+                    *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+                }
             )
-        )["contract"]
-        == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
-    )
-    if provider_history_v2 and provider_history_receipt is None:
-        raise ValueError("provider-history v2 Stage 8 verification requires its accepted receipt")
-    source_evidence = (
-        authenticate_provider_history(
-            authenticated.provider_path,
-            receipt=provider_history_receipt,
-            instrument_ids=tuple(
-                sorted(
-                    {
-                        *authenticated.configuration.ordered_instruments,
-                        *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
-                    }
-                )
-            ),
-            interval_start=authenticated.configuration.required_observation_start,
-            interval_end=authenticated.configuration.required_observation_end,
-        )
-        if provider_history_receipt is not None
-        else None
+        ),
+        interval_start=authenticated.configuration.required_observation_start,
+        interval_end=authenticated.configuration.required_observation_end,
     )
     if authenticated.provider_dataset.row_count > _BOUNDED_PROVIDER_HISTORY_ROWS:
         from qtrad.runtime.ibkr_foundation_bounded import (
             prepare_stage8_replay_checkpoint,
-            read_stage8_replay_source_verification,
-            store_stage8_replay_source_verification,
             verify_bounded_provider_foundation,
         )
 
@@ -957,26 +876,6 @@ def verify_ibkr_foundation(
             configuration_id=authenticated.configuration.configuration_id,
             published_bundle_sha256=published_bundle_sha256,
         )
-        if source_evidence is None and replay_checkpoint_root is not None:
-            source_evidence = read_stage8_replay_source_verification(
-                replay_checkpoint_root,
-                provider_manifest=authenticated.provider_path,
-                provider_manifest_sha256=authenticated.provider_manifest_sha256,
-                provider_dataset_sha256=authenticated.provider_dataset.dataset_sha256,
-                configuration_id=authenticated.configuration.configuration_id,
-                published_bundle_sha256=published_bundle_sha256,
-            )
-        if source_evidence is None:
-            source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
-            if replay_checkpoint_root is not None:
-                store_stage8_replay_source_verification(
-                    replay_checkpoint_root,
-                    source_evidence=source_evidence,
-                    provider_manifest_sha256=authenticated.provider_manifest_sha256,
-                    provider_dataset_sha256=authenticated.provider_dataset.dataset_sha256,
-                    configuration_id=authenticated.configuration.configuration_id,
-                    published_bundle_sha256=published_bundle_sha256,
-                )
         replay = verify_bounded_provider_foundation(
             source_evidence=source_evidence,
             configuration=authenticated.configuration,
@@ -987,8 +886,6 @@ def verify_ibkr_foundation(
             workers=workers,
         )
     else:
-        if source_evidence is None:
-            source_evidence = read_provider_history_source_evidence(authenticated.provider_path)
         replay = build_ibkr_foundation(source_evidence, authenticated.configuration)
         expected_payload = _build_payload(replay, source_evidence, authenticated.children)
         if expected_payload != authenticated.payload:

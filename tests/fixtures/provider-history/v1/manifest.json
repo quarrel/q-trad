@@ -1,0 +1,60 @@
+{
+  "availability_policy": {
+    "contract": "qtrad-provider-history-availability-selector-v1",
+    "delay": "PT5M",
+    "formula": "interval_end_plus_declared_delay",
+    "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+    "schema_version": 1,
+    "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+  },
+  "contract": "qtrad-provider-historical-observations-v1",
+  "dataset": {
+    "aggregate_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242",
+    "availability_policy": {
+      "contract": "qtrad-provider-history-availability-selector-v1",
+      "delay": "PT5M",
+      "formula": "interval_end_plus_declared_delay",
+      "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+      "schema_version": 1,
+      "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+    },
+    "contract": "qtrad-provider-historical-observations-v1",
+    "contract_selection_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dataset_sha256": "fed9565c3988c3ad45a39f656cf02eadd83cb61f7e330450192c29f1df1f5092",
+    "environment": "paper",
+    "partitions": [
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-01",
+        "partition_sha256": "10fc8b9f4501eb965cb557d4c5913a7fc42549f6c4966f67667caf46b8eda60d",
+        "row_count": 1
+      }
+    ],
+    "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+    "provider": "ibkr",
+    "row_count": 1,
+    "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "schema_version": 1,
+    "source_class": "IBKR_HISTORICAL_RESEARCH"
+  },
+  "files": [
+    {
+      "bytes_sha256": "33dc6aed1c118eba9aef73ad600e13312ace20358e16d07af718f10cc6e2d5f0",
+      "partition_sha256": "10fc8b9f4501eb965cb557d4c5913a7fc42549f6c4966f67667caf46b8eda60d",
+      "path": "observations/instrument-dd3231fd09f2516e8ef1100a1afb9a94364249c74c00129cd406868874645cd5/date-2026-02-01.parquet",
+      "row_count": 1,
+      "row_upper_bound": 2
+    }
+  ],
+  "manifest_sha256": "0be479242dee9795439cf2565fad48a36d5c828db381eb50cfb28f4a4ab34ff6",
+  "schema_version": 1,
+  "selector_contract": "qtrad-provider-history-availability-selector-v1",
+  "source_plan_row_bound": 2,
+  "source_result": {
+    "bytes_sha256": "497a3e86e92f03d6d392ffadb8e7471d3d5175b01fe098aed203c6adefb89556",
+    "contract": "qtrad-ibkr-historical-result-v2",
+    "path": "source-result/manifest.json",
+    "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+    "semantic_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242"
+  }
+}

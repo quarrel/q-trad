@@ -1,0 +1,132 @@
+{
+  "accepted_rows": [
+    {
+      "bar_end": "2026-02-01T00:02:00Z",
+      "bar_start": "2026-02-01T00:01:00Z",
+      "callback_sequence": 1,
+      "close": "1.1005",
+      "count": 3,
+      "high": "1.101",
+      "low": "1.099",
+      "open": "1.1",
+      "volume": 7,
+      "wap": "1.1001"
+    }
+  ],
+  "acquisition_completed_at": "2026-02-01T00:00:10Z",
+  "acquisition_started_at": "2026-02-01T00:00:00Z",
+  "attempts": [
+    {
+      "attempt_id": "00000000-0000-0000-0000-000000000011",
+      "attempt_ordinal": 1,
+      "connection_generation": 1,
+      "connection_session_id": "00000000-0000-0000-0000-000000000001",
+      "detail": null,
+      "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+      "provider_request_id": 101,
+      "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684",
+      "started_at": "2026-02-01T00:00:00Z",
+      "status": "SUCCEEDED",
+      "terminal_at": "2026-02-01T00:00:10Z",
+      "terminal_disposition": "SUCCEEDED"
+    }
+  ],
+  "callbacks": [
+    {
+      "attempt_id": "00000000-0000-0000-0000-000000000011",
+      "callback_id": 1,
+      "closure_eligible": true,
+      "connection_generation": 1,
+      "connection_session_id": "00000000-0000-0000-0000-000000000001",
+      "kind": "MIDPOINT_BAR",
+      "payload": {
+        "close": "1.1005",
+        "count": 3,
+        "date": 1769904060,
+        "high": "1.1010",
+        "low": "1.0990",
+        "open": "1.1000",
+        "volume": 7,
+        "wap": "1.1001"
+      },
+      "provider_request_id": 101,
+      "received_at": "2026-02-01T00:00:02Z",
+      "sequence": 1
+    },
+    {
+      "attempt_id": "00000000-0000-0000-0000-000000000011",
+      "callback_id": 2,
+      "closure_eligible": true,
+      "connection_generation": 1,
+      "connection_session_id": "00000000-0000-0000-0000-000000000001",
+      "kind": "COMPLETION",
+      "payload": {},
+      "provider_request_id": 101,
+      "received_at": "2026-02-01T00:00:03Z",
+      "sequence": 2
+    }
+  ],
+  "completion_markers": [
+    {
+      "attempt_id": "00000000-0000-0000-0000-000000000011",
+      "closure_eligible": true,
+      "completed_at": "2026-02-01T00:00:03Z",
+      "connection_generation": 1,
+      "connection_session_id": "00000000-0000-0000-0000-000000000001",
+      "marker_id": 1,
+      "payload": {},
+      "provider_request_id": 101,
+      "raw_midpoint_bar_callback_count": 1,
+      "raw_schedule_callback_count": 0,
+      "sequence": 2
+    }
+  ],
+  "contract": "qtrad-ibkr-historical-request-result-v2",
+  "error_classification": null,
+  "evidence_disposition": "SUCCEEDED",
+  "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+  "request_payload": {
+    "bar_size": "1 min",
+    "duration": "1 D",
+    "end_date_time": "20260201-00:02:00 UTC",
+    "fingerprint": {
+      "con_id": 42,
+      "contract_month": null,
+      "currency": "USD",
+      "exchange": "IDEALPRO",
+      "local_symbol": "AUD.USD",
+      "multiplier": null,
+      "primary_exchange": null,
+      "security_type": "CASH",
+      "symbol": "AUD",
+      "trading_class": "AUD.USD",
+      "underlying_con_id": null
+    },
+    "format_date": 2,
+    "instrument_id": "fx:aud-usd",
+    "interval_end": "2026-02-01T00:02:00Z",
+    "interval_start": "2026-02-01T00:00:00Z",
+    "keep_up_to_date": false,
+    "kind": "MIDPOINT_BARS",
+    "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684",
+    "use_rth": false,
+    "what_to_show": "MIDPOINT"
+  },
+  "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684",
+  "request_status": "SUCCEEDED",
+  "result_sha256": "8905aa803b2fd245644041fd182e3c8ec97289159b7eed3023a1830e17c63ac0",
+  "retry_history": [
+    {
+      "attempt_id": "00000000-0000-0000-0000-000000000011",
+      "attempt_ordinal": 1,
+      "status": "SUCCEEDED",
+      "terminal_at": "2026-02-01T00:00:10Z",
+      "terminal_disposition": "SUCCEEDED"
+    }
+  ],
+  "schema_version": 2,
+  "selected_attempt_id": "00000000-0000-0000-0000-000000000011",
+  "session_state": null,
+  "sessions": [],
+  "terminal_disposition": "SUCCEEDED"
+}

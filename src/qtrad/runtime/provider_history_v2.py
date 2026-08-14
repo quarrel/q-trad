@@ -1,13 +1,10 @@
-"""Provider-history v2 repacking, verification, and pruned reads."""
+"""Provider-history v2 verification and pruned reads."""
 
 from __future__ import annotations
 
 import io
 import json
-import os
-import shutil
-import tempfile
-from collections.abc import Iterator, Mapping, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -38,26 +35,20 @@ from qtrad.runtime.ibkr_results import (
 )
 from qtrad.runtime.provider_history import (
     _MANIFEST_NAME,
-    _MAX_CLOSURE_FILES,
     _OBSERVATION_FIELDS,
     _SOURCE_DIRECTORY,
     _SOURCE_VERIFICATION_RECEIPT_CONTRACT,
-    _absolute_output_path,
-    _copy_source_file,
     _dataset_from_manifest,
     _int,
     _mapping,
     _ObservationSummaryBuilder,
-    _parquet_bytes,
     _parquet_footer_row_count,
     _parse_json,
-    _prepare_output_directory,
     _read_bounded,
     _require_digest,
     _require_exact_keys,
     _require_exact_tree,
     _require_file,
-    _require_new_output_directory,
     _safe_child,
     _sha256_json,
     _source_file_digests,
@@ -310,75 +301,6 @@ def provider_history_v2_verifier_sha256() -> str:
             "completed_checks": list(PROVIDER_HISTORY_V2_COMPLETED_CHECKS),
         }
     )
-
-
-def repack_provider_history_v2(
-    source_manifest: Path,
-    source_receipt: Path,
-    output_directory: Path,
-    *,
-    receipt_output: Path,
-) -> tuple[Path, ProviderHistoricalDataset]:
-    """Authenticate v1, repack once, publish, verify once, and issue a v2 receipt."""
-
-    from qtrad.runtime.provider_history import (
-        authenticate_provider_history,
-        preflight_provider_history_verification_receipt,
-    )
-
-    source_manifest_path = _require_file(source_manifest, "provider-history v1 manifest")
-    source_receipt_path = _require_file(source_receipt, "provider-history v1 verification receipt")
-    destination = _absolute_output_path(output_directory)
-    _require_new_output_directory(destination)
-    if destination.is_relative_to(source_manifest_path.parent):
-        raise ValueError("provider-history v2 output cannot be inside the v1 closure")
-    receipt_path = preflight_provider_history_verification_receipt(
-        receipt_output,
-        immutable_roots=(source_manifest_path.parent, destination),
-    )
-    source_evidence = authenticate_provider_history(
-        source_manifest_path,
-        receipt=source_receipt_path,
-    )
-    source_document = _mapping(
-        _parse_json(
-            _read_bounded(source_manifest_path, "provider-history v1 manifest"),
-            "provider-history v1 manifest",
-        ),
-        "provider-history v1 manifest",
-    )
-    if source_document["contract"] != "qtrad-provider-historical-observations-v1":
-        raise ValueError("provider-history v2 repack source contract is unsupported")
-    staging = Path(
-        tempfile.mkdtemp(
-            prefix=f".{destination.name}.staging-",
-            dir=str(destination.parent),
-        )
-    )
-    try:
-        staged_manifest = _write_v2_closure(
-            staging,
-            source_manifest=source_manifest_path,
-            source_receipt=source_receipt_path,
-            source_document=source_document,
-            source_evidence=source_evidence,
-        )
-        if destination.exists():
-            raise FileExistsError(f"provider-history output already exists: {destination}")
-        os.rename(staging, destination)
-    except BaseException:
-        if staging.exists():
-            shutil.rmtree(staging)
-        raise
-
-    manifest_path = destination / staged_manifest.name
-    evidence = verify_provider_history_v2(manifest_path)
-    receipt = provider_history_v2_verification_receipt(manifest_path, evidence)
-    encoded = canonical_json_bytes(receipt)
-    if len(encoded) > _MAX_RECEIPT_BYTES:
-        raise ValueError("provider-history v2 receipt exceeds its byte bound")
-    _write_create_only(receipt_path, encoded)
-    return manifest_path, evidence.dataset
 
 
 def verify_provider_history_v2(
@@ -771,157 +693,6 @@ def _selected_provider_history_v2_rows(
         manifest=manifest,
         selected_parts=selected_inputs,
         selection=selection,
-    )
-
-
-def _write_v2_closure(
-    output_directory: Path,
-    *,
-    source_manifest: Path,
-    source_receipt: Path,
-    source_document: Mapping[str, object],
-    source_evidence: ProviderHistorySourceEvidence,
-) -> Path:
-    root = _absolute_output_path(output_directory)
-    _prepare_output_directory(root)
-    source_reference = _source_reference(source_document["source_result"])
-    original_source_manifest = _safe_child(
-        source_manifest.parent,
-        _string(source_reference["path"], "provider-history source result path"),
-        "provider-history source result",
-    )
-    original_source_root = original_source_manifest.parent
-    source_manifest_bytes = _read_bounded(
-        original_source_manifest, "provider-history source result manifest"
-    )
-    source_digests = _source_file_digests(source_evidence.source_artifact, source_manifest_bytes)
-    if _source_files(original_source_root) != set(source_digests):
-        raise ValueError("provider-history v1 source closure changed during repack")
-
-    parts: list[ProviderHistoryV2PartReference] = []
-    current_month: tuple[str, int, int] | None = None
-    current_rows: list[ProviderHistoricalObservation] = []
-    next_ordinal = 1
-    previous_key: tuple[str, datetime, str] | None = None
-
-    def flush_rows() -> None:
-        nonlocal current_rows, next_ordinal
-        if not current_rows:
-            return
-        for rows, payload in _split_rows(tuple(current_rows)):
-            parts.append(_write_v2_part(root, rows, payload, next_ordinal))
-            next_ordinal += 1
-        current_rows = []
-
-    for row in source_evidence.observations:
-        key = row_sort_key(row)
-        if previous_key is not None and key <= previous_key:
-            raise ValueError("provider-history v1 rows are not canonical during repack")
-        previous_key = key
-        month = (row.instrument_id, row.interval_start.year, row.interval_start.month)
-        if current_month is not None and month != current_month:
-            flush_rows()
-            next_ordinal = 1
-        current_month = month
-        current_rows.append(row)
-        if len(current_rows) == _MAX_PART_ROWS:
-            flush_rows()
-    flush_rows()
-    if sum(part.row_count for part in parts) != source_evidence.dataset.row_count:
-        raise ValueError("provider-history v2 repack row count changed")
-
-    copied_source: set[str] = set()
-    for relative in sorted(source_digests):
-        _copy_source_file(
-            original_source_root,
-            root / _SOURCE_DIRECTORY,
-            relative,
-            expected_digest=source_digests[relative],
-        )
-        copied_source.add(f"{_SOURCE_DIRECTORY}/{relative}")
-
-    source_receipt_bytes = _read_bounded(source_receipt, "provider-history v1 verification receipt")
-    _write_create_only(root / _MIGRATION_RECEIPT_PATH, source_receipt_bytes)
-    migration_source: dict[str, JsonValue] = {
-        "contract": _MIGRATION_CONTRACT,
-        "source_provider_history_contract": cast(JsonValue, source_document["contract"]),
-        "source_provider_history_manifest_sha256": sha256_bytes(
-            _read_bounded(source_manifest, "provider-history v1 manifest")
-        ),
-        "source_verification_receipt_path": _MIGRATION_RECEIPT_PATH,
-        "source_verification_receipt_sha256": sha256_bytes(source_receipt_bytes),
-    }
-    identity: dict[str, JsonValue] = {
-        "contract": PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
-        "schema_version": PROVIDER_HISTORY_V2_SCHEMA_VERSION,
-        "selector_contract": PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
-        "dataset": source_evidence.dataset.as_json_value(),
-        "availability_policy": source_evidence.dataset.availability_policy.as_json_value(),
-        "source_result": cast(JsonValue, source_reference),
-        "source_plan_row_bound": cast(JsonValue, source_document["source_plan_row_bound"]),
-        "migration_source": cast(JsonValue, migration_source),
-        "parts": [part.as_json_value() for part in parts],
-    }
-    manifest = {**identity, "physical_manifest_sha256": _sha256_json(identity)}
-    _write_create_only(root / _MANIFEST_NAME, canonical_json_bytes(manifest))
-    expected = {
-        _MANIFEST_NAME,
-        _MIGRATION_RECEIPT_PATH,
-        *(part.path for part in parts),
-        *copied_source,
-    }
-    if len(expected) > _MAX_CLOSURE_FILES:
-        raise ValueError("provider-history v2 closure exceeds its file-count bound")
-    _require_exact_tree(root, set(expected))
-    return root / _MANIFEST_NAME
-
-
-def _split_rows(
-    rows: tuple[ProviderHistoricalObservation, ...],
-) -> tuple[
-    tuple[tuple[ProviderHistoricalObservation, ...], bytes],
-    ...,
-]:
-    encoded = _parquet_bytes(rows)
-    if len(encoded) <= _TARGET_PART_BYTES:
-        return ((rows, encoded),)
-    if len(rows) == 1:
-        raise ValueError("provider-history v2 row exceeds its target part bound")
-    middle = len(rows) // 2
-    return (*_split_rows(rows[:middle]), *_split_rows(rows[middle:]))
-
-
-def _write_v2_part(
-    root: Path,
-    rows: tuple[ProviderHistoricalObservation, ...],
-    payload: bytes,
-    ordinal: int,
-) -> ProviderHistoryV2PartReference:
-    if not rows or len(rows) > _MAX_PART_ROWS:
-        raise ValueError("provider-history v2 part row count is invalid")
-    instrument_id = rows[0].instrument_id
-    month = (rows[0].interval_start.year, rows[0].interval_start.month)
-    if any(
-        row.instrument_id != instrument_id
-        or (row.interval_start.year, row.interval_start.month) != month
-        for row in rows
-    ):
-        raise ValueError("provider-history v2 part crosses its instrument-month boundary")
-    if len(payload) > _TARGET_PART_BYTES:
-        raise ValueError("provider-history v2 physical part exceeds its byte bound")
-    path = _v2_part_path(instrument_id, month[0], month[1], ordinal)
-    _write_create_only(root / path, payload)
-    return ProviderHistoryV2PartReference(
-        instrument_id=instrument_id,
-        minimum_interval_start=rows[0].interval_start,
-        maximum_interval_end=rows[-1].interval_end,
-        row_count=len(rows),
-        ordered_row_sha256=sha256_json(
-            {"observation_sha256": [row.observation_sha256 for row in rows]}
-        ),
-        bytes_sha256=sha256_bytes(payload),
-        path=path,
-        part_ordinal=ordinal,
     )
 
 

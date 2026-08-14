@@ -1,0 +1,88 @@
+{
+  "contract": "qtrad-ibkr-historical-plan-v1",
+  "contract_selection_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "eligible_contracts": [
+    {
+      "fingerprint": {
+        "con_id": 42,
+        "contract_month": null,
+        "currency": "USD",
+        "exchange": "IDEALPRO",
+        "local_symbol": "AUD.USD",
+        "multiplier": null,
+        "primary_exchange": null,
+        "security_type": "CASH",
+        "symbol": "AUD",
+        "trading_class": "AUD.USD",
+        "underlying_con_id": null
+      },
+      "instrument_id": "fx:aud-usd"
+    }
+  ],
+  "end": "2026-02-01T00:02:00Z",
+  "environment": "paper",
+  "plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+  "planner_qtrad_commit": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+  "planner_qtrad_image_digest": "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+  "provider": "ibkr",
+  "request_profile_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "requests": [
+    {
+      "bar_size": "1 min",
+      "duration": "1 D",
+      "end_date_time": "20260201-00:02:00 UTC",
+      "fingerprint": {
+        "con_id": 42,
+        "contract_month": null,
+        "currency": "USD",
+        "exchange": "IDEALPRO",
+        "local_symbol": "AUD.USD",
+        "multiplier": null,
+        "primary_exchange": null,
+        "security_type": "CASH",
+        "symbol": "AUD",
+        "trading_class": "AUD.USD",
+        "underlying_con_id": null
+      },
+      "format_date": 2,
+      "instrument_id": "fx:aud-usd",
+      "interval_end": "2026-02-01T00:02:00Z",
+      "interval_start": "2026-02-01T00:00:00Z",
+      "keep_up_to_date": false,
+      "kind": "MIDPOINT_BARS",
+      "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684",
+      "use_rth": false,
+      "what_to_show": "MIDPOINT"
+    },
+    {
+      "bar_size": "1 day",
+      "duration": "1 D",
+      "end_date_time": "20260201-00:02:00 UTC",
+      "fingerprint": {
+        "con_id": 42,
+        "contract_month": null,
+        "currency": "USD",
+        "exchange": "IDEALPRO",
+        "local_symbol": "AUD.USD",
+        "multiplier": null,
+        "primary_exchange": null,
+        "security_type": "CASH",
+        "symbol": "AUD",
+        "trading_class": "AUD.USD",
+        "underlying_con_id": null
+      },
+      "format_date": 2,
+      "instrument_id": "fx:aud-usd",
+      "interval_end": "2026-02-01T00:02:00Z",
+      "interval_start": "2026-02-01T00:00:00Z",
+      "keep_up_to_date": false,
+      "kind": "SCHEDULE",
+      "request_sha256": "647efe5c92e6e7a93bfc507c5577f4e656285d3900f5b32db28ffebd9fd7e197",
+      "use_rth": false,
+      "what_to_show": "SCHEDULE"
+    }
+  ],
+  "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "schema_version": 1,
+  "start": "2026-02-01T00:00:00Z"
+}

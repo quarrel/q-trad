@@ -394,14 +394,13 @@ def create_ibkr_foundation_confirmatory_promotion(
     )
     if any(resolved_output.is_relative_to(root.resolve()) for root in immutable_roots):
         raise ValueError("promotion cannot be written inside an authenticated closure")
-    if provider_contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
-        if provider_history_receipt is None:
-            raise ValueError("v2 confirmatory promotion requires its Stage 7 receipt")
-        authenticate_provider_history_v2(provider_path, receipt=provider_history_receipt)
-        replay_provider_history_v2_stage6(provider_path)
-        verify_provider_history_v2(provider_path)
-    elif provider_history_receipt is not None:
-        raise ValueError("legacy v1 promotion does not accept a Stage 7 receipt")
+    if provider_contract != PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        raise ValueError("new confirmatory promotions require provider-history v2")
+    if provider_history_receipt is None:
+        raise ValueError("v2 confirmatory promotion requires its Stage 7 receipt")
+    authenticate_provider_history_v2(provider_path, receipt=provider_history_receipt)
+    replay_provider_history_v2_stage6(provider_path)
+    verify_provider_history_v2(provider_path)
     replay = verify_ibkr_foundation(
         foundation,
         provider_history_receipt=provider_history_receipt,

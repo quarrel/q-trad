@@ -854,24 +854,18 @@ revocation.
 
 **Form:** research-input pull request.
 
-**Software status:** Provider-history construction performs only bounded structural closure checks before
-atomic publication. The normal command runs one independent semantic verification, persists its
-create-only receipt and proves cheap authentication. The retained v1 receipt is authenticated, and the
-completed create-only v2 migration preserves the 3,376,258-row semantic dataset while reducing 2,948
-daily physical parts to 120 monthly parts. Normal Stage 7/8 use is v2-only; retain v1 only to authenticate
-existing evidence until the general v1 writer/runtime removal follow-up lands.
+**Software status:** The completed rollout published and independently verified the v2 closure once,
+preserving the 3,376,258-row semantic dataset while reducing 2,948 daily physical parts to 120 monthly
+parts. Normal Stage 7/8 use is v2-only. The v1 writer, repacker, row decoder, deep verifier and new Stage
+8/promotion routes are retired; retained v1 evidence supports only cheap exact-tree/receipt
+authentication. Historical v1 deep audit remains available through exact commit
+`f0e882bbcd19aabbefb1add2d87a03daae7670e8`.
 
-Commands:
+Current v2 verification and v1/v2 authentication commands:
 
 ```text
-qtrad research observations build-provider-history \
-  --historical-result <manifest> \
-  --availability-delay PT5M \
-  --output <directory> \
-  --verification-receipt <new-file>
-
 qtrad research observations verify-provider-history \
-  --manifest <path> \
+  --manifest <v2-path> \
   --receipt-output <new-file>
 
 qtrad research observations authenticate-provider-history \
@@ -879,13 +873,12 @@ qtrad research observations authenticate-provider-history \
   --receipt <path>
 ```
 
-The builder consumes only independently verified aggregate results and writes the Stage 7 transformation
-once. Bounded canonical-manifest, exact-tree, regular-file, hash, schema and Parquet-footer checks guard
-the staging rename without reconstructing every semantic row. The command reports
-`PUBLISHED_UNVERIFIED` after atomic publication, then `VERIFIED` only after one independent replay,
-create-only receipt persistence and authentication. Semantic-verification or receipt-write failure leaves
-the immutable closure present but unclaimed. Receipt files must remain outside both the provider-history
-and embedded Stage 6 closures.
+During the completed publication, the retired builder consumed only independently verified aggregate
+results and wrote Stage 7 create-only. Bounded structural checks guarded atomic publication before one
+independent semantic verification and create-only receipt persistence. Semantic-verification or
+receipt-write failure retained the immutable closure as unclaimed. Current v2 verification preserves
+those audit semantics; receipt files remain outside both the provider-history and embedded Stage 6
+closures.
 
 The availability selector union becomes:
 
