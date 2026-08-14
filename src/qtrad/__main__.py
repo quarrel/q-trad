@@ -225,6 +225,7 @@ from qtrad.runtime.provider_history import (
     publish_provider_history,
     verify_provider_history,
 )
+from qtrad.runtime.provider_history_v2 import repack_provider_history_v2
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     build_qualification_gap_plan_set_history_artifact,
@@ -996,6 +997,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     provider_history_build.add_argument("--output", type=Path, required=True)
     provider_history_build.add_argument("--verification-receipt", type=Path, required=True)
+    provider_history_repack = research_observations_sub.add_parser(
+        "repack-provider-history",
+        help="repack accepted provider history into the prunable v2 physical layout",
+    )
+    provider_history_repack.add_argument("--manifest", type=Path, required=True)
+    provider_history_repack.add_argument("--verification-receipt", type=Path, required=True)
+    provider_history_repack.add_argument("--output", type=Path, required=True)
+    provider_history_repack.add_argument("--verification-receipt-output", type=Path, required=True)
     provider_history_verify = research_observations_sub.add_parser(
         "verify-provider-history",
         help="independently verify provider-history observations and their source closure",
@@ -1039,6 +1048,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_promote.add_argument("--bundle", type=Path, required=True)
     foundation_promote.add_argument("--receipt", type=Path, required=True)
+    foundation_promote.add_argument("--provider-history-receipt", type=Path)
     foundation_promote.add_argument("--authorized-by", required=True)
     foundation_promote.add_argument("--authorized-at", type=_utc_minute_argument, required=True)
     foundation_promote.add_argument("--authorization-reference", required=True)
@@ -2170,6 +2180,17 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "observations"
+        and args.observations_command == "repack-provider-history"
+    ):
+        _repack_provider_history(
+            manifest_path=args.manifest,
+            receipt_path=args.verification_receipt,
+            output_path=args.output,
+            receipt_output=args.verification_receipt_output,
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
         and args.observations_command == "verify-provider-history"
     ):
         _verify_provider_history(args.manifest, receipt_output=args.receipt_output)
@@ -2238,6 +2259,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         authority = create_ibkr_foundation_confirmatory_promotion(
             args.bundle,
             receipt=args.receipt,
+            provider_history_receipt=args.provider_history_receipt,
             output=args.output,
             authorized_by=args.authorized_by,
             authorized_at=args.authorized_at,
@@ -3206,6 +3228,42 @@ def _build_provider_history(
                 "verification_receipt": str(receipt_path),
                 "dataset_sha256": dataset.dataset_sha256,
                 "availability_delay": dataset.availability_policy.delay_text,
+                "rows": dataset.row_count,
+                "status": "VERIFIED",
+                "verified": True,
+            },
+            sort_keys=True,
+        )
+    )
+
+
+def _repack_provider_history(
+    *,
+    manifest_path: Path,
+    receipt_path: Path,
+    output_path: Path,
+    receipt_output: Path,
+) -> None:
+    v2_manifest, dataset = repack_provider_history_v2(
+        manifest_path,
+        receipt_path,
+        output_path,
+        receipt_output=receipt_output,
+    )
+    document = json.loads(v2_manifest.read_bytes())
+    parts = document["parts"]
+    if not isinstance(parts, list):
+        raise TypeError("provider-history v2 manifest parts must be a list")
+    print(
+        json.dumps(
+            {
+                "contract": dataset.CONTRACT,
+                "manifest": str(v2_manifest),
+                "verification_receipt": str(receipt_output.resolve()),
+                "dataset_sha256": dataset.dataset_sha256,
+                "physical_manifest_sha256": document["physical_manifest_sha256"],
+                "parts": len(parts),
+                "files": sum(1 for path in output_path.rglob("*") if path.is_file()),
                 "rows": dataset.row_count,
                 "status": "VERIFIED",
                 "verified": True,

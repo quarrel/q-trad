@@ -28,6 +28,7 @@ from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import FoldDataset
 from qtrad.domain.foundation import FoundationConfig, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
+    IBKR_CONFIRMATORY_INSTRUMENTS,
     IBKR_FOUNDATION_CONTRACT,
     IBKR_FOUNDATION_SCHEMA_VERSION,
     IBKRFoundationReadiness,
@@ -331,6 +332,14 @@ def _provider_history_manifest_identity(
         provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"
     )
     document = _mapping(_parse_json(manifest_bytes, "provider-history manifest"))
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        _read_provider_history_v2_manifest,
+    )
+
+    if document["contract"] == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        manifest = _read_provider_history_v2_manifest(provider_manifest)
+        return hashlib.sha256(manifest_bytes).hexdigest(), manifest.dataset
     if set(document) != {
         "contract",
         "schema_version",
@@ -493,8 +502,34 @@ def write_ibkr_foundation(
         checkpoint_root=checkpoint_root,
         workers=workers,
     )
+    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+
+    provider_history_v2 = (
+        _mapping(
+            _parse_json(
+                _bounded_bytes(provider_manifest, _MAX_MANIFEST_BYTES, "provider-history manifest"),
+                "provider-history manifest",
+            )
+        )["contract"]
+        == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    )
+    if provider_history_v2 and provider_history_receipt is None:
+        raise ValueError("provider-history v2 Stage 8 construction requires its accepted receipt")
     source_evidence = (
-        authenticate_provider_history(provider_manifest, receipt=provider_history_receipt)
+        authenticate_provider_history(
+            provider_manifest,
+            receipt=provider_history_receipt,
+            instrument_ids=tuple(
+                sorted(
+                    {
+                        *configuration.ordered_instruments,
+                        *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+                    }
+                )
+            ),
+            interval_start=configuration.required_observation_start,
+            interval_end=configuration.required_observation_end,
+        )
         if provider_history_receipt is not None
         else None
     )
@@ -871,8 +906,38 @@ def verify_ibkr_foundation(
             raise ValueError(
                 "verification receipt cannot be written inside an authenticated closure"
             )
+    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+
+    provider_history_v2 = (
+        _mapping(
+            _parse_json(
+                _bounded_bytes(
+                    authenticated.provider_path,
+                    _MAX_MANIFEST_BYTES,
+                    "provider-history manifest",
+                ),
+                "provider-history manifest",
+            )
+        )["contract"]
+        == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    )
+    if provider_history_v2 and provider_history_receipt is None:
+        raise ValueError("provider-history v2 Stage 8 verification requires its accepted receipt")
     source_evidence = (
-        authenticate_provider_history(authenticated.provider_path, receipt=provider_history_receipt)
+        authenticate_provider_history(
+            authenticated.provider_path,
+            receipt=provider_history_receipt,
+            instrument_ids=tuple(
+                sorted(
+                    {
+                        *authenticated.configuration.ordered_instruments,
+                        *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+                    }
+                )
+            ),
+            interval_start=authenticated.configuration.required_observation_start,
+            interval_end=authenticated.configuration.required_observation_end,
+        )
         if provider_history_receipt is not None
         else None
     )

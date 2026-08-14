@@ -16,14 +16,22 @@ from qtrad.domain.ibkr_foundation import (
     IBKRFoundationReadinessState,
     VerifiedIbkrFoundationPromotion,
 )
+from qtrad.domain.provider_history import PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     verify_ibkr_foundation,
 )
 from qtrad.runtime.provider_history import (
-    is_provider_history_verifier_sha256_accepted,
+    is_provider_history_v1_verifier_sha256_accepted,
     provider_history_verifier_sha256,
+)
+from qtrad.runtime.provider_history_v2 import (
+    PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+    authenticate_provider_history_v2,
+    provider_history_v2_verifier_sha256,
+    replay_provider_history_v2_stage6,
+    verify_provider_history_v2,
 )
 from qtrad.runtime.r2_bundles import atomic_create
 
@@ -120,7 +128,7 @@ def _bindings(
     foundation: Path,
     receipt: Path,
     authentication: Mapping[str, object],
-) -> tuple[dict[str, JsonValue], Path]:
+) -> tuple[dict[str, JsonValue], Path, str]:
     foundation_path, foundation_bytes, foundation_document = _document(
         foundation, "IBKR foundation"
     )
@@ -133,6 +141,13 @@ def _bindings(
         foundation_path.parent / provider_relative,
         "provider-history manifest",
     )
+    provider_contract = _text(provider_document.get("contract"), "provider-history contract")
+    if provider_contract == PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT:
+        provider_verifier_sha256 = provider_history_verifier_sha256()
+    elif provider_contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        provider_verifier_sha256 = provider_history_v2_verifier_sha256()
+    else:
+        raise ValueError("provider-history contract is unsupported for promotion")
     provider_dataset = _mapping(provider_document.get("dataset"), "provider-history dataset")
     source_result = _mapping(provider_document.get("source_result"), "Stage 6 source result")
     stage6: dict[str, JsonValue] = {
@@ -150,7 +165,7 @@ def _bindings(
         "runtime_sha256": _sha256(
             provider_dataset.get("runtime_sha256"), "Stage 7 runtime identity"
         ),
-        "provider_verifier_sha256": provider_history_verifier_sha256(),
+        "provider_verifier_sha256": provider_verifier_sha256,
     }
     stage8: dict[str, JsonValue] = {
         "foundation_manifest_sha256": hashlib.sha256(foundation_bytes).hexdigest(),
@@ -170,12 +185,16 @@ def _bindings(
         ),
     }
     readiness = cast(JsonValue, authentication.get("readiness"))
-    return {
-        "stage6": stage6,
-        "stage7": stage7,
-        "stage8": stage8,
-        "readiness": readiness,
-    }, provider_path
+    return (
+        {
+            "stage6": stage6,
+            "stage7": stage7,
+            "stage8": stage8,
+            "readiness": readiness,
+        },
+        provider_path,
+        provider_contract,
+    )
 
 
 def _operator_authorization(
@@ -238,7 +257,7 @@ def authenticate_ibkr_foundation_promotion(
     """Authenticate S8.4 without repeating cumulative semantic replay."""
 
     authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
-    bindings, _provider_path = _bindings(foundation, receipt, authentication)
+    bindings, _provider_path, _provider_contract = _bindings(foundation, receipt, authentication)
     _promotion_path, promotion_bytes, document = _document(promotion, "IBKR confirmatory promotion")
     if set(document) != _PROMOTION_FIELDS:
         raise ValueError("IBKR confirmatory promotion fields are not exact")
@@ -268,9 +287,16 @@ def authenticate_ibkr_foundation_promotion(
                 stage7.get("provider_verifier_sha256"),
                 "promotion Stage 7 verifier identity",
             )
-            if is_provider_history_verifier_sha256_accepted(verifier_sha256):
-                expected_stage7 = _mapping(bindings[name], "expected Stage 7 binding")
-                stage7["provider_verifier_sha256"] = expected_stage7["provider_verifier_sha256"]
+            expected_stage7 = _mapping(bindings[name], "expected Stage 7 binding")
+            expected_verifier = _sha256(
+                expected_stage7.get("provider_verifier_sha256"),
+                "expected promotion Stage 7 verifier identity",
+            )
+            if (
+                expected_verifier == provider_history_verifier_sha256()
+                and is_provider_history_v1_verifier_sha256_accepted(verifier_sha256)
+            ):
+                stage7["provider_verifier_sha256"] = expected_verifier
             claimed_binding = stage7
         if claimed_binding != bindings[name]:
             raise ValueError(f"IBKR confirmatory promotion {name} binding changed")
@@ -331,6 +357,7 @@ def create_ibkr_foundation_confirmatory_promotion(
     foundation: Path,
     *,
     receipt: Path,
+    provider_history_receipt: Path | None = None,
     output: Path,
     authorized_by: str,
     authorized_at: datetime,
@@ -353,7 +380,7 @@ def create_ibkr_foundation_confirmatory_promotion(
     runtime = _runtime(runtime_identities())
     _require_detached_source()
     authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
-    bindings, provider_path = _bindings(foundation, receipt, authentication)
+    bindings, provider_path, provider_contract = _bindings(foundation, receipt, authentication)
     readiness = _mapping(bindings["readiness"], "promotion readiness")
     if (
         readiness.get("state") != IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY.value
@@ -367,15 +394,24 @@ def create_ibkr_foundation_confirmatory_promotion(
     )
     if any(resolved_output.is_relative_to(root.resolve()) for root in immutable_roots):
         raise ValueError("promotion cannot be written inside an authenticated closure")
+    if provider_contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        if provider_history_receipt is None:
+            raise ValueError("v2 confirmatory promotion requires its Stage 7 receipt")
+        authenticate_provider_history_v2(provider_path, receipt=provider_history_receipt)
+        replay_provider_history_v2_stage6(provider_path)
+        verify_provider_history_v2(provider_path)
+    elif provider_history_receipt is not None:
+        raise ValueError("legacy v1 promotion does not accept a Stage 7 receipt")
     replay = verify_ibkr_foundation(
         foundation,
+        provider_history_receipt=provider_history_receipt,
         replay_checkpoint_root=replay_checkpoint_root,
         workers=workers,
     )
     if replay.readiness.state is not IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY:
         raise ValueError("cumulative replay did not establish qualifying readiness")
     replayed_authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
-    replayed_bindings, _replayed_provider_path = _bindings(
+    replayed_bindings, _replayed_provider_path, _replayed_provider_contract = _bindings(
         foundation, receipt, replayed_authentication
     )
     if replayed_bindings != bindings:

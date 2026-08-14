@@ -178,8 +178,9 @@ class IbkrHistoricalResultStream:
         replay.finish()
 
 
-def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStream:
-    """Verify a Stage 6 closure header and return a one-child-at-a-time reader."""
+def _read_ibkr_historical_result_header(path: Path) -> IbkrHistoricalResultStream:
+    """Authenticate Stage 6 manifest and plan metadata without walking result children."""
+
     manifest_path = _require_file(path, "IBKR result manifest")
     root = manifest_path.parent
     manifest_bytes = _read_bytes(manifest_path, "IBKR aggregate result")
@@ -208,11 +209,10 @@ def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStre
     }
     if set(references_by_path) != expected_paths:
         raise ValueError("IBKR aggregate child closure differs from its plan")
-    for reference in aggregate.request_results:
-        if reference.contract != REQUEST_RESULT_CONTRACT:
-            raise ValueError("IBKR aggregate request child contract is unsupported")
-        _safe_child(root, reference.path, "IBKR request-result child")
-    _require_exact_tree(root, {_MANIFEST_NAME, _PLAN_NAME, _REQUEST_DIRECTORY, *expected_paths})
+    if any(
+        reference.contract != REQUEST_RESULT_CONTRACT for reference in aggregate.request_results
+    ):
+        raise ValueError("IBKR aggregate request child contract is unsupported")
     return IbkrHistoricalResultStream(
         source_root=root,
         plan=plan,
@@ -220,6 +220,19 @@ def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStre
         aggregate=aggregate,
         references_by_path=references_by_path,
     )
+
+
+def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStream:
+    """Verify a Stage 6 closure header and return a one-child-at-a-time reader."""
+
+    stream = _read_ibkr_historical_result_header(path)
+    for reference in stream.aggregate.request_results:
+        _safe_child(stream.source_root, reference.path, "IBKR request-result child")
+    _require_exact_tree(
+        stream.source_root,
+        {_REQUEST_DIRECTORY, *stream.source_files},
+    )
+    return stream
 
 
 def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
