@@ -140,6 +140,11 @@ def test_v3_file_only_verifier_rejects_orphan_and_receipt_mutation(
             receipt_output=tmp_path / "orphan-receipt.json",
         )
 
+    part_path = json.loads(manifest.read_bytes())["parts"][0]["path"]
+    (orphan_root / "orphan-link").symlink_to(orphan_root / part_path)
+    with pytest.raises(ValueError, match="closure tree contains a symlink"):
+        verify_provider_history_file_only(orphan_root / "manifest.json")
+
     receipt = tmp_path / "stage7-receipt.json"
     verify_provider_history(
         manifest,
@@ -191,3 +196,19 @@ def test_v3_deep_verifier_rejects_changed_availability_policy(tmp_path: Path) ->
             stage6_receipt=stage6_receipt,
             receipt_output=tmp_path / "stage7-custom-receipt.json",
         )
+
+
+def test_v3_publish_rejects_symlinked_output_ancestor(tmp_path: Path) -> None:
+    stage6_manifest, stage6_receipt = _stage6_closure(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    linked = tmp_path / "linked"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="output path escapes its root"):
+        build_provider_history(
+            stage6_manifest,
+            stage6_receipt=stage6_receipt,
+            output=linked / "stage7",
+        )
+    assert not (outside / "stage7").exists()

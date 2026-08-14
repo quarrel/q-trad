@@ -1109,16 +1109,17 @@ def _validate_receipt(manifest: ProviderHistoryV3Manifest, receipt: Mapping[str,
 def _publish(
     output: Path, manifest: ProviderHistoryV3Manifest, payloads: Mapping[str, bytes]
 ) -> None:
-    if output.exists():
-        raise FileExistsError(f"provider-history v3 output already exists: {output}")
-    if not output.parent.is_dir():
+    destination = _validate_output_path(output)
+    if destination.exists():
+        raise FileExistsError(f"provider-history v3 output already exists: {destination}")
+    if not destination.parent.is_dir():
         raise FileNotFoundError(
-            f"provider-history v3 output parent does not exist: {output.parent}"
+            f"provider-history v3 output parent does not exist: {destination.parent}"
         )
-    output.mkdir()
+    destination.mkdir()
     for path, payload in payloads.items():
-        _write_create_only(_safe_child(output, path, "provider-history part"), payload)
-    _write_create_only(output / MANIFEST_NAME, manifest.bytes)
+        _write_create_only(_safe_child(destination, path, "provider-history part"), payload)
+    _write_create_only(destination / MANIFEST_NAME, manifest.bytes)
 
 
 def _preflight_receipt(path: Path, manifest: Path) -> Path:
@@ -1133,13 +1134,42 @@ def _preflight_receipt(path: Path, manifest: Path) -> Path:
 
 
 def _require_exact_tree(root: Path, expected: set[str]) -> None:
-    actual = {
-        item.relative_to(root).as_posix()
-        for item in root.rglob("*")
-        if item.is_file() and not item.is_symlink()
-    }
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("provider-history v3 closure root is not a regular directory")
+    rooted = root.absolute()
+    if rooted.resolve() != rooted:
+        raise ValueError("provider-history v3 closure root escapes its path")
+    actual: set[str] = set()
+    for item in root.rglob("*"):
+        if item.is_symlink():
+            raise ValueError("provider-history v3 closure tree contains a symlink")
+        if item.is_dir():
+            continue
+        if not item.is_file():
+            raise ValueError("provider-history v3 closure tree contains unsupported entry")
+        actual.add(item.relative_to(root).as_posix())
+    for relative in expected:
+        relative_path = Path(relative)
+        if (
+            relative_path.is_absolute()
+            or relative_path.as_posix() != relative
+            or any(part in {"", ".", ".."} for part in relative_path.parts)
+        ):
+            raise ValueError("provider-history v3 closure path is not canonical")
+        candidate = (root / relative_path).absolute()
+        if candidate.resolve(strict=False) != candidate:
+            raise ValueError("provider-history v3 closure path escapes its root")
     if actual != expected:
         raise ValueError("provider-history v3 closure tree changed")
+
+
+def _validate_output_path(output: Path) -> Path:
+    if any(part == ".." for part in output.parts):
+        raise ValueError("provider-history v3 output path is not canonical")
+    candidate = output.absolute()
+    if candidate.is_symlink() or candidate.resolve(strict=False) != candidate:
+        raise ValueError("provider-history v3 output path escapes its root")
+    return candidate
 
 
 def _safe_child(root: Path, relative: str, field: str) -> Path:
