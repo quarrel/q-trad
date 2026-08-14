@@ -4348,9 +4348,9 @@ async def _replay_authority_oof_async(
         raise ValueError("OOF runtime feature manifests are malformed")
     if set(raw_feature_paths) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF runtime feature manifests must cover exactly L0/L1/P0/P1")
-    feature_paths = {
+    feature_paths: dict[str, Path] = {
         name: runtime_file_value
-        for name, raw_path in raw_feature_paths.items()
+        for name, raw_path in cast(dict[str, object], raw_feature_paths).items()
         if isinstance(raw_path, str)
         for runtime_file_value in (Path(raw_path),)
     }
