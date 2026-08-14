@@ -496,6 +496,171 @@ async def authenticate_foundation_bundle(
     return bundle
 
 
+async def restore_authenticated_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt: Path | FoundationVerificationReceipt,
+) -> VerifiedFoundationBundle:
+    """Restore R1 children from one authenticated receipt without semantic replay."""
+
+    bundle = await authenticate_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+        receipt=receipt,
+    )
+    authenticated_receipt = (
+        load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+    )
+    build_summary = _mapping(bundle.build_summary)
+    expected_build_summary_keys = {
+        "application_version",
+        "image_identity",
+        "row_counts",
+        "outcome_blind_projections",
+    }
+    if set(build_summary) != expected_build_summary_keys:
+        raise ValueError("foundation build summary has an unexpected schema")
+    expected_row_counts: dict[str, JsonValue] = {
+        "observations": bundle.observations.row_count,
+        "panel": bundle.panel.row_count,
+        "targets": bundle.targets.row_count,
+        "folds": bundle.folds.row_count,
+        "forecasts": bundle.forecasts.row_count,
+    }
+    if _mapping(build_summary["row_counts"]) != expected_row_counts:
+        raise ValueError("foundation build summary row counts are invalid")
+
+    observation_store = ParquetObservationStore(root, clock)
+    _guard_observation_manifest(root, bundle.observations)
+    observation_manifest = await observation_store.read_manifest(bundle.observations.manifest_id)
+    _verify_observation_reference(bundle.observations, observation_manifest)
+    _guard_observation_children(root, observation_manifest)
+    observations = await observation_store.read_observations(observation_manifest.manifest_id)
+    evidence = load_observation_build_evidence(observation_manifest)
+
+    store = ParquetFoundationArtifactStore(root, clock)
+    manifests: dict[str, FoundationChildManifest] = {}
+    rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
+    for reference in (
+        bundle.configuration,
+        bundle.availability,
+        bundle.panel,
+        bundle.targets,
+        bundle.folds,
+        bundle.forecasts,
+    ):
+        _guard_foundation_manifest(root, reference)
+        manifest = await store.read_manifest(reference.manifest_id)
+        _verify_child_reference(reference, manifest)
+        _guard_foundation_child(root, manifest)
+        manifests[reference.name] = manifest
+        rows[reference.name] = await store.read_rows(reference.manifest_id)
+
+    configuration = decode_foundation_config(_single_row(rows, "configuration"))
+    availability = cast(Mapping[str, JsonValue], _single_row(rows, "availability"))
+    if availability != evidence.payload:
+        raise ValueError("availability child differs from observation build evidence")
+    expected_availability_id = _hash_json(
+        {
+            "contract": AVAILABILITY_EVIDENCE_CONTRACT,
+            "observation_dataset_id": observations.dataset_id,
+            "evidence": availability,
+        }
+    )
+    if manifests["availability"].dataset_id != expected_availability_id:
+        raise ValueError("availability child semantic identity is invalid")
+
+    _require_lineage(
+        manifests["configuration"],
+        {"observation_dataset_id": observations.dataset_id},
+    )
+    _require_lineage(
+        manifests["availability"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "observation_manifest_id": observation_manifest.manifest_id,
+        },
+    )
+    _require_lineage(
+        manifests["panel"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["targets"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["folds"],
+        {
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "foundation_configuration_id": configuration.configuration_id,
+        },
+    )
+    _require_lineage(
+        manifests["forecasts"],
+        {
+            "observation_dataset_id": observations.dataset_id,
+            "panel_dataset_id": manifests["panel"].dataset_id,
+            "target_dataset_id": manifests["targets"].dataset_id,
+            "fold_dataset_id": manifests["folds"].dataset_id,
+        },
+    )
+
+    panel = PanelDataset(
+        rows=tuple(_panel_row(row) for row in rows["panel"]),
+        observation_dataset_id=_lineage_text(manifests["panel"], "observation_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["panel"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["panel"].dataset_id,
+    )
+    targets = TargetDataset(
+        rows=tuple(_target(row) for row in rows["targets"]),
+        observation_dataset_id=_lineage_text(manifests["targets"], "observation_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["targets"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["targets"].dataset_id,
+    )
+    folds = FoldDataset(
+        folds=tuple(_fold(row) for row in rows["folds"]),
+        target_dataset_id=_lineage_text(manifests["folds"], "target_dataset_id"),
+        foundation_configuration_id=_lineage_text(
+            manifests["folds"], "foundation_configuration_id"
+        ),
+        dataset_id=manifests["folds"].dataset_id,
+    )
+    forecasts = ForecastDataset(
+        rows=tuple(_forecast(row) for row in rows["forecasts"]),
+        observation_dataset_id=_lineage_text(manifests["forecasts"], "observation_dataset_id"),
+        panel_dataset_id=_lineage_text(manifests["forecasts"], "panel_dataset_id"),
+        target_dataset_id=_lineage_text(manifests["forecasts"], "target_dataset_id"),
+        fold_dataset_id=_lineage_text(manifests["forecasts"], "fold_dataset_id"),
+        dataset_id=manifests["forecasts"].dataset_id,
+    )
+    return VerifiedFoundationBundle(
+        bundle=bundle,
+        configuration=configuration,
+        observations=observations,
+        panel=panel,
+        targets=targets,
+        folds=folds,
+        forecasts=forecasts,
+        source_active_intervals=evidence.source_active_intervals,
+        availability_evidence=availability,
+        receipt=authenticated_receipt,
+    )
+
+
 def load_foundation_bundle(path: Path) -> FoundationBundle:
     """Load only bounded references; child verification is separate."""
 
@@ -1917,10 +2082,14 @@ async def _verify_g2_feature_source(
         raise ValueError("G2 feature source authority identity is invalid")
 
     store = ParquetFoundationArtifactStore(authority.root, clock)
-    observation_manifest = await store.verify(authority.observation_reference.manifest_id)
-    panel_manifest = await store.verify(authority.panel_reference.manifest_id)
+    _guard_foundation_manifest(authority.root, authority.observation_reference)
+    observation_manifest = await store.read_manifest(authority.observation_reference.manifest_id)
     _verify_child_reference(authority.observation_reference, observation_manifest)
+    _guard_foundation_child(authority.root, observation_manifest)
+    _guard_foundation_manifest(authority.root, authority.panel_reference)
+    panel_manifest = await store.read_manifest(authority.panel_reference.manifest_id)
     _verify_child_reference(authority.panel_reference, panel_manifest)
+    _guard_foundation_child(authority.root, panel_manifest)
     _require_lineage(
         observation_manifest,
         {
@@ -1940,10 +2109,12 @@ async def _verify_g2_feature_source(
             "holdout_end": authority.holdout_range[1].isoformat(),
         },
     )
+    _guard_foundation_child(authority.root, observation_manifest)
     observation_rows = tuple(
         _observation_from_row(cast(Mapping[str, object], row))
         for row in await store.read_rows(authority.observation_reference.manifest_id)
     )
+    _guard_foundation_child(authority.root, panel_manifest)
     panel_rows = tuple(
         _panel_row(row) for row in await store.read_rows(authority.panel_reference.manifest_id)
     )
@@ -2007,8 +2178,10 @@ async def _verify_confirmatory_target_dataset(
         raise ValueError("confirmatory outcome authority differs from verified F2 foundation")
     reference = foundation.bundle.targets
     store = ParquetFoundationArtifactStore(authority.root, clock)
-    manifest = await store.verify(reference.manifest_id)
+    _guard_foundation_manifest(authority.root, reference)
+    manifest = await store.read_manifest(reference.manifest_id)
     _verify_child_reference(reference, manifest)
+    _guard_foundation_child(authority.root, manifest)
     _require_lineage(
         manifest,
         {
@@ -2016,6 +2189,7 @@ async def _verify_confirmatory_target_dataset(
             "foundation_configuration_id": authority.foundation_configuration_id,
         },
     )
+    _guard_foundation_child(authority.root, manifest)
     rows = tuple(
         _target(cast(Mapping[str, object], row))
         for row in await store.read_rows(reference.manifest_id)

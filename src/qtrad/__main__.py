@@ -129,12 +129,9 @@ from qtrad.runtime.backfill_plan import (
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.foundation_bundle import (
-    _verify_foundation_bundle as _verify_foundation_bundle_runtime,
-)
-from qtrad.runtime.foundation_bundle import (
-    authenticate_foundation_bundle,
     load_foundation_config,
     persist_foundation_bundle,
+    restore_authenticated_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
@@ -2701,16 +2698,11 @@ async def _load_r2_foundation_inputs(
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
         if foundation_receipt_path is None:
             raise ValueError("non-IBKR R2 work requires a foundation verification receipt")
-        await authenticate_foundation_bundle(
+        return await restore_authenticated_foundation_bundle(
             root=settings.research_root,
             bundle_path=foundation_bundle_path,
             clock=clock,
             receipt=foundation_receipt_path,
-        )
-        return await _verify_foundation_bundle_runtime(
-            root=settings.research_root,
-            bundle_path=foundation_bundle_path,
-            clock=clock,
         )
 
     if foundation_receipt_path is None:

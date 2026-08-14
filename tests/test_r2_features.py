@@ -1276,13 +1276,10 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
 ) -> None:
     config = experiment()
     foundation = _replay_foundation(config)
+    restore_bundle = AsyncMock(return_value=foundation)
+    monkeypatch.setattr(cli, "restore_authenticated_foundation_bundle", restore_bundle)
     verify_bundle = AsyncMock(return_value=foundation)
-    monkeypatch.setattr(cli, "_verify_foundation_bundle_runtime", verify_bundle)
-    monkeypatch.setattr(
-        cli,
-        "authenticate_foundation_bundle",
-        AsyncMock(return_value=foundation.bundle),
-    )
+    monkeypatch.setattr(cli, "_verify_foundation_bundle_runtime", verify_bundle, raising=False)
     monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
     settings = Settings(
         research_root=tmp_path,
@@ -1311,7 +1308,8 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     )
     verified = json.loads(capsys.readouterr().out)
     assert verified == built
-    assert verify_bundle.await_count == 2
+    assert restore_bundle.await_count == 2
+    assert verify_bundle.await_count == 0
 
 
 def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(

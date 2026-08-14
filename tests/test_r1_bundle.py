@@ -539,6 +539,14 @@ async def test_authentication_is_lazy_and_consumed_child_tamper_fails(
         clock=clock,
         receipt=verified.receipt,
     )
+    restored = await foundation_runtime.restore_authenticated_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt=verified.receipt,
+    )
+    assert restored.bundle.foundation_id == bundle.foundation_id
+    assert restored.bundle.closure_id == bundle.closure_id
 
     manifest = await ParquetFoundationArtifactStore(tmp_path, clock).read_manifest(
         bundle.targets.manifest_id
