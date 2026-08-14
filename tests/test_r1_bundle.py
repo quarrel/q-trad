@@ -16,7 +16,7 @@ from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.walk_forward import build_expanding_folds, build_zero_return_forecasts
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, PanelDataset
-from qtrad.domain.foundation_bundle import FoundationBundle
+from qtrad.domain.foundation_bundle import ArtifactReference, FoundationBundle
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 from qtrad.domain.research import (
@@ -281,6 +281,8 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         clock=clock,
         receipt_output=tmp_path / "foundation-receipt.json",
     )
+    receipt = verified.receipt
+    assert receipt is not None
     source = R2HoldoutTargetSource.create_from_target_dataset(
         verified.targets,
         holdout_range=configuration.holdout_range,
@@ -321,7 +323,7 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         bundle_path=path,
         clock=clock,
         holdout_target_source=source,
-        receipt=verified.receipt,
+        receipt=receipt,
     )
     assert all(count == 1 for count in read_counts.values())
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
@@ -362,7 +364,7 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
             bundle_path=path,
             clock=clock,
             holdout_target_source=tampered_source,
-            receipt=verified.receipt,
+            receipt=receipt,
         )
 
 
@@ -462,18 +464,22 @@ async def test_semantic_and_closure_identities_are_separate(tmp_path: Path) -> N
 
     def recreate(**changes: object) -> FoundationBundle:
         return FoundationBundle.create(
-            configuration=changes.get("configuration", bundle.configuration),
-            observations=changes.get("observations", bundle.observations),
-            availability=changes.get("availability", bundle.availability),
-            panel=changes.get("panel", bundle.panel),
-            targets=changes.get("targets", bundle.targets),
-            folds=changes.get("folds", bundle.folds),
-            forecasts=changes.get("forecasts", bundle.forecasts),
+            configuration=cast(
+                ArtifactReference, changes.get("configuration", bundle.configuration)
+            ),
+            observations=cast(ArtifactReference, changes.get("observations", bundle.observations)),
+            availability=cast(ArtifactReference, changes.get("availability", bundle.availability)),
+            panel=cast(ArtifactReference, changes.get("panel", bundle.panel)),
+            targets=cast(ArtifactReference, changes.get("targets", bundle.targets)),
+            folds=cast(ArtifactReference, changes.get("folds", bundle.folds)),
+            forecasts=cast(ArtifactReference, changes.get("forecasts", bundle.forecasts)),
             ordered_instruments=bundle.ordered_instruments,
             range_start=bundle.range_start,
             range_end=bundle.range_end,
             coverage=bundle.coverage,
-            build_summary=changes.get("build_summary", bundle.build_summary),
+            build_summary=cast(
+                Mapping[str, JsonValue], changes.get("build_summary", bundle.build_summary)
+            ),
             market_data_source_class=bundle.market_data_source_class,
             projections=bundle.projections,
         )
@@ -787,6 +793,8 @@ async def test_projection_set_must_match_bundle_summary_and_supported_set(
         clock=clock,
         receipt_output=tmp_path / "original-receipt.json",
     )
+    receipt = verified.receipt
+    assert receipt is not None
     build_summary = dict(bundle.build_summary)
     projection_payload = dict(
         cast(Mapping[str, JsonValue], build_summary["outcome_blind_projections"])
@@ -832,7 +840,7 @@ async def test_projection_set_must_match_bundle_summary_and_supported_set(
             root=tmp_path,
             bundle_path=candidate_path,
             clock=clock,
-            receipt=verified.receipt,
+            receipt=receipt,
         )
 
 
@@ -848,6 +856,8 @@ async def test_authentication_rejects_symlink_consumed_child(
         clock=clock,
         receipt_output=tmp_path / "foundation-receipt.json",
     )
+    receipt = verified.receipt
+    assert receipt is not None
     if child_name == "observations":
         observation_manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
             bundle.observations.manifest_id
@@ -867,7 +877,7 @@ async def test_authentication_rejects_symlink_consumed_child(
             root=tmp_path,
             bundle_path=path,
             clock=clock,
-            receipt=verified.receipt,
+            receipt=receipt,
             consumed_children=(child_name,),
         )
 

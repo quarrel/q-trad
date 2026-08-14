@@ -251,7 +251,7 @@ def test_ibkr_builder_binds_stage8_children_and_availability() -> None:
         foundation_bundle_id=FOUNDATION_ID,
         adapter_identity=ADAPTER,
     )
-    assert inputs.bundle.bundle_id == FOUNDATION_ID
+    assert cast(SimpleNamespace, inputs.bundle).bundle_id == FOUNDATION_ID
     assert inputs.bundle.market_data_source_class is IBKR_HISTORICAL_SOURCE
     assert inputs.bundle.ordered_instruments == ORDERED_UNIVERSE
     assert inputs.bundle.build_summary["source_adapter_identity"] == ADAPTER.as_json()
