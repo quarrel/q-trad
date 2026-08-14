@@ -91,8 +91,10 @@ visible loss/lag and a proportionate active-session observation.
 
 Release preparation and deployment remain separate operations:
 
-1. GitHub Actions must pass for the exact main-branch commit. Workflow-run evidence is authoritative
-   because the GitHub token cannot read check runs.
+1. Run `ops/dev/verify.sh` locally for the exact clean main-branch commit. GitHub Actions testing is
+   temporarily paused, so its exact-commit workflow proves formatting, linting and typing only; that
+   workflow must also pass. Workflow-run evidence is authoritative because the GitHub token cannot
+   read check runs.
 2. Manually publish the application image only from that reviewed main commit. Use its immutable
    multi-platform OCI index digest and unique commit tag; never publish or deploy `latest`.
 3. Commit a deployment descriptor binding the application digest, configuration hash and required

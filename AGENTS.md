@@ -229,6 +229,10 @@ The GitHub fine-grained PAT used here cannot be granted Checks API access. This 
 limitation, not a missing permission or merge blocker. Verify CI through GitHub Actions workflow
 runs for the exact commit instead of repeatedly raising unavailable check-run access.
 
+GitHub Actions testing is temporarily paused. The `verify` job covers formatting, linting and typing
+only; run `ops/dev/verify.sh` locally for test evidence, and never treat a green GitHub workflow as
+proof that tests passed.
+
 ## Contradiction and exception rule
 
 Treat merged ADRs, scientific invariants, immutable evidence, holdout
