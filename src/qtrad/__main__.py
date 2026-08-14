@@ -1019,8 +1019,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
     foundation_verify.add_argument("--receipt-output", type=Path, required=True)
-    foundation_verify.add_argument("--stage7-manifest", type=Path, required=True)
-    foundation_verify.add_argument("--stage7-receipt", type=Path, required=True)
+    foundation_verify.add_argument("--stage7-manifest", type=Path)
+    foundation_verify.add_argument("--stage7-receipt", type=Path)
     foundation_authenticate = research_foundation_sub.add_parser(
         "authenticate", help="authenticate a verified Stage 8 foundation without replay"
     )

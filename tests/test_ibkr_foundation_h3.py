@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from qtrad import __main__ as cli
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     load_ibkr_foundation,
@@ -16,6 +19,7 @@ from qtrad.runtime.ibkr_foundation import (
 from qtrad.runtime.ibkr_foundation_promotion import (
     authenticate_ibkr_foundation_promotion,
 )
+from qtrad.runtime.settings import Settings
 from tests.test_provider_history_v3 import _authenticated_v3_source, _stage8_configuration
 
 
@@ -183,6 +187,48 @@ def test_stage8_v3_cli_uses_stage7_parent_and_promotion_has_no_replay_flags() ->
                 "promotion.json",
             ]
         )
+
+
+def test_stage8_v3_cli_dispatch_requires_complete_stage7_parent(tmp_path: Path) -> None:
+    bundle = tmp_path / "foundation.json"
+    bundle.write_text(
+        json.dumps({"contract": "qtrad-ibkr-historical-foundation-v2"}) + "\n",
+        encoding="utf-8",
+    )
+    receipt = tmp_path / "foundation-receipt.json"
+    base = [
+        "research",
+        "foundation",
+        "verify",
+        "--bundle",
+        str(bundle),
+        "--receipt-output",
+        str(receipt),
+    ]
+
+    class _Clock:
+        def now(self) -> datetime:
+            return datetime(2026, 8, 14, tzinfo=UTC)
+
+    for parent_args in (
+        (),
+        ("--stage7-manifest", "stage7/manifest.json"),
+        ("--stage7-receipt", "stage7/receipt.json"),
+    ):
+        parsed = cli.build_parser().parse_args([*base, *parent_args])
+        with pytest.raises(
+            ValueError, match="Stage 8 v2 verification requires Stage 7 manifest and receipt"
+        ):
+            asyncio.run(
+                cli._verify_foundation_bundle(
+                    Settings(research_root=tmp_path),
+                    _Clock(),
+                    bundle,
+                    receipt_output=receipt,
+                    stage7_manifest_path=parsed.stage7_manifest,
+                    stage7_receipt_path=parsed.stage7_receipt,
+                )
+            )
 
 
 def test_stage8_v3_authentication_rejects_mutated_child_bytes(tmp_path: Path) -> None:
