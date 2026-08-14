@@ -64,10 +64,12 @@ work and records only the milestone sequence needed to reach the next trustworth
   The full Stage 6 result closure and original Stage 7 v1 provider-history evidence remain retained.
   Stage 7 now has reusable verification receipts and cheap authentication; exact-head S7.3 validation
   repacked the 3,376,258-row dataset create-only into 120 v2 physical parts while preserving dataset
-  identity `2f7f6199...a0e7e3` and aggregate identity `2ca2fbd0...22a0c`. The retained Stage 8
-  foundation is `QUALIFYING_HISTORY_READY`, has an implementation-only receipt, and has a separately
-  authenticated S8.4 confirmatory-promotion attestation. No real holdout result or effectiveness claim
-  exists, and IBKR evidence cannot substantiate an IG-native conclusion.
+  identity `2f7f6199...a0e7e3` and aggregate identity `2ca2fbd0...22a0c`. Live Stage 7/8 operation is
+  v2-only: v1 construction, deep replay, row decoding and repacking are retired, while exact-tree/receipt
+  authentication remains for retained evidence. The retained Stage 8 foundation is
+  `QUALIFYING_HISTORY_READY`, has an implementation-only receipt, and has a separately authenticated
+  S8.4 confirmatory-promotion attestation. No real holdout result or effectiveness claim exists, and IBKR
+  evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
@@ -166,7 +168,8 @@ chronology ambiguity before those contracts are fixed.
   S7.3 exact-head commit `f0e882bbcd19aabbefb1add2d87a03daae7670e8` published and independently
   verified the semantically identical v2 closure: 3,376,258 rows and 2,948 logical partitions now occupy
   120 physical parts. A bounded receipt-backed Stage 8 build selected 14 of those parts without provider
-  reacquisition or mutation of the retained v1 foundation.
+  reacquisition or mutation of the retained v1 foundation. New construction, verification and authority
+  paths are v2-only; retained v1 evidence supports cheap authentication only.
 - The retained Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`. Receipt
   `56228947...ffd01` grants only `IMPLEMENTATION_EVIDENCE_ONLY`; promotion
   `1a1d09d9...81e2` is the separate `CONFIRMATORY` capability required before real IBKR F2.

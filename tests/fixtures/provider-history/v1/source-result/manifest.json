@@ -1,0 +1,63 @@
+{
+  "aggregate_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242",
+  "contract": "qtrad-ibkr-historical-result-v2",
+  "coverage_summary": {
+    "accepted_bar_row_count": 1,
+    "by_instrument": {
+      "fx:aud-usd": {
+        "bar_failed_request_count": 0,
+        "bar_no_data_request_count": 0,
+        "bar_planned_request_count": 1,
+        "bar_rows": 1,
+        "bar_successful_request_count": 1,
+        "bar_terminal_request_count": 1,
+        "schedule_failed_request_count": 0,
+        "schedule_no_data_request_count": 0,
+        "schedule_planned_request_count": 1,
+        "schedule_sessions": 0,
+        "schedule_successful_request_count": 1,
+        "schedule_terminal_request_count": 1
+      }
+    },
+    "failed_request_count": 0,
+    "no_data_request_count": 0,
+    "operational_successful_request_count": 2,
+    "planned_request_count": 2,
+    "provider_session_count": 0,
+    "successful_request_count": 2,
+    "terminal_request_count": 2
+  },
+  "entitlement_summary": {
+    "disposition_counts": {
+      "SUCCEEDED": 2
+    },
+    "operational_disposition_counts": {
+      "SUCCEEDED": 2
+    },
+    "provider_history_eligible_instruments": [
+      "fx:aud-usd"
+    ]
+  },
+  "plan": {
+    "bytes_sha256": "665548c10f5f13f28bf93a08957c858ea667d39c9aa335ac138d9f72b58bd0c9",
+    "contract": "qtrad-ibkr-historical-plan-v1",
+    "path": "plan.json",
+    "semantic_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56"
+  },
+  "request_results": [
+    {
+      "bytes_sha256": "a9f25a7be906598f4e9428bcdb947a74a2101cfbbfd774a92f884098cf06a87e",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/647efe5c92e6e7a93bfc507c5577f4e656285d3900f5b32db28ffebd9fd7e197.json",
+      "semantic_sha256": "4837141f4ec2c4e4c9d6fedfa98b6b442e6ce707b00ae4d3a918db45902bcc7b"
+    },
+    {
+      "bytes_sha256": "d4386aae86d00429faa57415fcf6e95e78d7a680adcba1d3723ee5e9354d026d",
+      "contract": "qtrad-ibkr-historical-request-result-v2",
+      "path": "requests/749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684.json",
+      "semantic_sha256": "8905aa803b2fd245644041fd182e3c8ec97289159b7eed3023a1830e17c63ac0"
+    }
+  ],
+  "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "schema_version": 2
+}

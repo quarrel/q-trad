@@ -216,16 +216,12 @@ from qtrad.runtime.ibkr_release import IbkrAuthorityPaths
 from qtrad.runtime.ibkr_results import (
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
-    verify_ibkr_historical_result_stream,
 )
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.provider_history import (
     authenticate_provider_history,
-    preflight_provider_history_verification_receipt,
-    publish_provider_history,
     verify_provider_history,
 )
-from qtrad.runtime.provider_history_v2 import repack_provider_history_v2
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     build_qualification_gap_plan_set_history_artifact,
@@ -987,24 +983,6 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="independently verify an observation manifest and its Parquet files"
     )
     observations_verify.add_argument("--manifest", type=Path, required=True)
-    provider_history_build = research_observations_sub.add_parser(
-        "build-provider-history",
-        help="build provider-history observations from a verified IBKR result",
-    )
-    provider_history_build.add_argument("--historical-result", type=Path, required=True)
-    provider_history_build.add_argument(
-        "--availability-delay", type=_availability_delay_argument, required=True
-    )
-    provider_history_build.add_argument("--output", type=Path, required=True)
-    provider_history_build.add_argument("--verification-receipt", type=Path, required=True)
-    provider_history_repack = research_observations_sub.add_parser(
-        "repack-provider-history",
-        help="repack accepted provider history into the prunable v2 physical layout",
-    )
-    provider_history_repack.add_argument("--manifest", type=Path, required=True)
-    provider_history_repack.add_argument("--verification-receipt", type=Path, required=True)
-    provider_history_repack.add_argument("--output", type=Path, required=True)
-    provider_history_repack.add_argument("--verification-receipt-output", type=Path, required=True)
     provider_history_verify = research_observations_sub.add_parser(
         "verify-provider-history",
         help="independently verify provider-history observations and their source closure",
@@ -2169,28 +2147,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "observations"
-        and args.observations_command == "build-provider-history"
-    ):
-        _build_provider_history(
-            historical_result_path=args.historical_result,
-            availability_delay=args.availability_delay,
-            output_path=args.output,
-            verification_receipt_path=args.verification_receipt,
-        )
-    elif (
-        args.command == "research"
-        and args.research_command == "observations"
-        and args.observations_command == "repack-provider-history"
-    ):
-        _repack_provider_history(
-            manifest_path=args.manifest,
-            receipt_path=args.verification_receipt,
-            output_path=args.output,
-            receipt_output=args.verification_receipt_output,
-        )
-    elif (
-        args.command == "research"
-        and args.research_command == "observations"
         and args.observations_command == "verify-provider-history"
     ):
         _verify_provider_history(args.manifest, receipt_output=args.receipt_output)
@@ -3187,92 +3143,6 @@ async def _verify_research_observations(
     )
 
 
-def _build_provider_history(
-    *,
-    historical_result_path: Path,
-    availability_delay: timedelta,
-    output_path: Path,
-    verification_receipt_path: Path,
-) -> None:
-    receipt_path = preflight_provider_history_verification_receipt(
-        verification_receipt_path,
-        immutable_roots=(output_path, historical_result_path.parent),
-    )
-    source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
-    for _ in source_artifact.iter_request_results():
-        pass
-    manifest_path = publish_provider_history(
-        output_path,
-        source_manifest=historical_result_path,
-        source_artifact=source_artifact,
-        availability_delay=availability_delay,
-    )
-    print(
-        json.dumps(
-            {
-                "manifest": str(manifest_path),
-                "status": "PUBLISHED_UNVERIFIED",
-            },
-            sort_keys=True,
-        ),
-        flush=True,
-    )
-    verify_provider_history(manifest_path, receipt_output=receipt_path)
-    evidence = authenticate_provider_history(manifest_path, receipt=receipt_path)
-    dataset = evidence.dataset
-    print(
-        json.dumps(
-            {
-                "contract": dataset.CONTRACT,
-                "manifest": str(manifest_path),
-                "verification_receipt": str(receipt_path),
-                "dataset_sha256": dataset.dataset_sha256,
-                "availability_delay": dataset.availability_policy.delay_text,
-                "rows": dataset.row_count,
-                "status": "VERIFIED",
-                "verified": True,
-            },
-            sort_keys=True,
-        )
-    )
-
-
-def _repack_provider_history(
-    *,
-    manifest_path: Path,
-    receipt_path: Path,
-    output_path: Path,
-    receipt_output: Path,
-) -> None:
-    v2_manifest, dataset = repack_provider_history_v2(
-        manifest_path,
-        receipt_path,
-        output_path,
-        receipt_output=receipt_output,
-    )
-    document = json.loads(v2_manifest.read_bytes())
-    parts = document["parts"]
-    if not isinstance(parts, list):
-        raise TypeError("provider-history v2 manifest parts must be a list")
-    print(
-        json.dumps(
-            {
-                "contract": dataset.CONTRACT,
-                "manifest": str(v2_manifest),
-                "verification_receipt": str(receipt_output.resolve()),
-                "dataset_sha256": dataset.dataset_sha256,
-                "physical_manifest_sha256": document["physical_manifest_sha256"],
-                "parts": len(parts),
-                "files": sum(1 for path in output_path.rglob("*") if path.is_file()),
-                "rows": dataset.row_count,
-                "status": "VERIFIED",
-                "verified": True,
-            },
-            sort_keys=True,
-        )
-    )
-
-
 def _verify_provider_history(
     manifest_path: Path,
     *,
@@ -3298,8 +3168,14 @@ def _verify_provider_history(
 
 
 def _authenticate_provider_history(manifest_path: Path, receipt_path: Path) -> None:
-    evidence = authenticate_provider_history(manifest_path, receipt=receipt_path)
-    dataset = evidence.dataset
+    from qtrad.domain.provider_history import ProviderHistoricalDataset
+
+    authenticated = authenticate_provider_history(manifest_path, receipt=receipt_path)
+    dataset = (
+        authenticated
+        if isinstance(authenticated, ProviderHistoricalDataset)
+        else authenticated.dataset
+    )
     print(
         json.dumps(
             {

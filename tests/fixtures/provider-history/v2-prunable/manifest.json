@@ -1,0 +1,456 @@
+{
+  "availability_policy": {
+    "contract": "qtrad-provider-history-availability-selector-v1",
+    "delay": "PT5M",
+    "formula": "interval_end_plus_declared_delay",
+    "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+    "schema_version": 1,
+    "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+  },
+  "contract": "qtrad-provider-historical-observations-v2",
+  "dataset": {
+    "aggregate_sha256": "3a927ed2071b3c8e6574e42ad4369c2f9d29479110fa8cec5eb92ae6010270de",
+    "availability_policy": {
+      "contract": "qtrad-provider-history-availability-selector-v1",
+      "delay": "PT5M",
+      "formula": "interval_end_plus_declared_delay",
+      "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+      "schema_version": 1,
+      "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+    },
+    "contract": "qtrad-provider-historical-observations-v1",
+    "contract_selection_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "dataset_sha256": "69a0e34e4c99434452d6ad2c7700cdbd2762e091e32794dc0caaac25aeb12f9a",
+    "environment": "paper",
+    "partitions": [
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-01",
+        "partition_sha256": "8952a4f2af0bb0d87d784bdf1b8755f1251abe9f8ed3932bb9c7c16b25ece947",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-02",
+        "partition_sha256": "6db51caade54058a43c2f8b0fb4cffb5ff02fe8c8be897cefb3a40bfba7c8e87",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-03",
+        "partition_sha256": "618986b98a86b0639f0fc57de1df37160105016274bcb93fbb108e6f0b180a77",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-04",
+        "partition_sha256": "c769be374d29fa6833247729e456885aed256949b53c0198a0fdc925e942af55",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-05",
+        "partition_sha256": "2ab5879573b0e3b78c6c5d99c21829571ae035e10be68bdbf6edc8ab22c9011b",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-06",
+        "partition_sha256": "432fdaba77ef343a5bb4e3816ca5e6cbd8a1ee206d900ed2590c3d2cd1dfdaa3",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-07",
+        "partition_sha256": "0a81d9378fa3e0bf3ded7421a749c8ad9de77bde9d515fc39072cca9b272e459",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-08",
+        "partition_sha256": "329dd8e432d484600b7680684bcd66e5b30220c95a1c2991e8d1fe564aa2f25f",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-09",
+        "partition_sha256": "ecddc1e54854ba7d78f935051cfa76340d09fb8b867caa934aff202b87f54eab",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-10",
+        "partition_sha256": "6a28d9cb7ba0ea6910c1e111d552541e5e063f9e45614d925f894321fc21b87b",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-11",
+        "partition_sha256": "4273f362f5942cb2dbbfea56b55dd5728eec55aa36e76860caa95cb9e6bb32c9",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-12",
+        "partition_sha256": "c8a5a38a37665eacf5c3fd2df51edb7217e14de7960f404e8077b282a79e2254",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-13",
+        "partition_sha256": "0c5a6b2b5273f62446b461e15549c15b54ceb1208a7324060d321cc7a62941ba",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-14",
+        "partition_sha256": "2564e174a002a23c608fc87f3bf4e10dea0c6e7d773e3312ac2bdbda601862a1",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-15",
+        "partition_sha256": "2dde14b1222788f7e8367965c1dec8cb8b02875223f8d319b039203b6e3294d5",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-16",
+        "partition_sha256": "f9e4a6323d0a950d5f6f3ea460d64599d6e3ac9c42cbbad433071c0a449d2e02",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-17",
+        "partition_sha256": "5dde00df6aad2517f68ec47b604cb86fdcb7fa2a8608aebeceb42fbea8fb6b7c",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-18",
+        "partition_sha256": "96be089a21edd4e9480ade3cc5eb0ec7cfe312a37e799f2c133f347dece577dd",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-19",
+        "partition_sha256": "3e10b101573b12c471f92f8ffa7580b1152670f46577173ddfc02d829be61cd8",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-20",
+        "partition_sha256": "2676847f573c9a6ca688329b379aee13d2f17a0f0c1eb9cd1673a87d69877dd2",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-21",
+        "partition_sha256": "722b961afd3994ffbb1a1b37d77538624c3369a7eb618d83bce9137e55bde067",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-22",
+        "partition_sha256": "4c63823df4f343e554c35ecb41d6937ec722906be450ad588e9f56665b5c0c5a",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-23",
+        "partition_sha256": "af20df9aae9be5e1fdd44a2a33037400ec17616bad921969c3192ec9be780900",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-24",
+        "partition_sha256": "60885c656cd028fd1c2c91e323114198c2315971d4a4b65e18b053271f99fe60",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-25",
+        "partition_sha256": "039c4736e2a12b4c12354405cf66e87009f6d64199ddd90b5cde4eeee37cc03d",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-26",
+        "partition_sha256": "6fcf8b866b4204a170e2853fc9de237d723e18efca80d6132f483696f1c9b132",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-27",
+        "partition_sha256": "e2da890ad687295a172949c3ebe19ab3a1f3e1e3af2eb9f9e88d0e0eb2276e2a",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-02-28",
+        "partition_sha256": "9b3bb212005991142adb481c389db2438715d9cc6337454069cabaae7b45f0ab",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-01",
+        "partition_sha256": "18ad589a49151df37ca2af9314b239e441a5459320324508715d63d8478faf12",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-02",
+        "partition_sha256": "01c94f0df49a81f66badffa255918938d48013b94efffcb7ca5b08c7d53e5eda",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-03",
+        "partition_sha256": "fdfb843400c366cd98c397a0d9259080234ad9f6440c66382a0d7d9ce48f9c07",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-04",
+        "partition_sha256": "5744edb21fd9d3f10a14038bc8a16fb552d18aabeea6b591989beb02dcd09f65",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-05",
+        "partition_sha256": "b12b46f453a2e40ab1bcc1b52d962e94bd3a653dfa3a0ff07904a95a53124e67",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-06",
+        "partition_sha256": "6f1a4611ad3fb067ee25f3cc56010f02504b7ae0f06a569d5c568b729c3afb86",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-07",
+        "partition_sha256": "4b64e82b0269c1316072ff591b5edcd78167b8a139413a0c0d5aead74af23cae",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-08",
+        "partition_sha256": "70b4e32738999357e5208fe12c3eacfa42c88f019d91a621efca91df0ff5cb94",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-09",
+        "partition_sha256": "3ed085bbfd7c92f29c198246fe6f0ea2d6e43a171ebf179c169488109836c99b",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-10",
+        "partition_sha256": "a59c4ab9b021bbb092e4c0a3824db5b1bbfbc1d04c5c22e4d6a28be9ded5636d",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-11",
+        "partition_sha256": "38025acc208dade4fafa217408db43b99a6abe247823c880b63e6ef93f5145d2",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-12",
+        "partition_sha256": "8351228278da9d57f6e5a0ace94fc99f0668aa230fce2fe73e1ca6c89b2f7270",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-13",
+        "partition_sha256": "8a04c279844586cf30724cb477825425fc0852a8c2560eca191e70b03995baae",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-14",
+        "partition_sha256": "b6db195387b0577ddf690b82d74805f04a9443dc8bb4bdf7b3af33360f0d9124",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-15",
+        "partition_sha256": "49543bbb4abf684c9fb8ca2f808705b94044c1855c5068f4e3ecf4dcbbf8cf99",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-16",
+        "partition_sha256": "fcf885513f569c6617e3863a546fd9a4977bf09fb29a24e37f180902a4eb3e05",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-17",
+        "partition_sha256": "87b43ac210cb28249ba7a606eb41442571ea2a872ef29218d508dc5762580072",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-18",
+        "partition_sha256": "ed791778c2bfd497b5158597426f89a404f0e97892d28d67e326888ac382929c",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-19",
+        "partition_sha256": "4b0c98124542d0aa977520365872ea73b1f945df5e4204ffb964f73720190e62",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-20",
+        "partition_sha256": "f00926f7764e61172a0ded559a832e18bee12d288ac0aad9a4f82032fe2c5e27",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-21",
+        "partition_sha256": "95dd10192a5d35207a1579a3caf37ed56f2822951f98bff77f6af1a6050ab62b",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-22",
+        "partition_sha256": "f9b9bdad1ef7e21b4685de1616a4d3afa3d11f7b46135ec58e236bcef9a5b141",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-23",
+        "partition_sha256": "752ebb1e411ee8453de81b3a5a2178c56aea15e2d75dcb3de7c3a192cf8ca413",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-24",
+        "partition_sha256": "929c20a6785fa28c646dc4ef581dee88318cf501bd33f08622ec2f45fbff1429",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-25",
+        "partition_sha256": "cf54be0d1bae84306e28d38e5b14759a14d96f32c8854438212f2a5fc09b5496",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-26",
+        "partition_sha256": "962ae8245811f6246e548f2f1f995ff89e81a05435019aa90b294b9c9c766686",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-27",
+        "partition_sha256": "961163b3e25d3e99feb97a97125a9ade3bef9b1ca14c66620584b76753604461",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-28",
+        "partition_sha256": "65edb19ff4f7a881cba8ca0014d3a44231445b54ce2fe7d6e2fc2b146737c49e",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-29",
+        "partition_sha256": "1b313048eea7745d25f1004cf2942bc469003e6fd904aa45eb60992b932fb0b5",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-30",
+        "partition_sha256": "3638d0a127500a7e87b3f6e6d65325016aacf4d8485ff68c6276e5adc2b23860",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-03-31",
+        "partition_sha256": "3c8703f2bbc456d2707e48dfe28a5417510d06e5e484a2d6087f80e8a1bd0caf",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-04-01",
+        "partition_sha256": "29cead42aa8b4aa362149edcb8894a0c8546b6997ac7f271ba905a9bae65b16a",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-04-02",
+        "partition_sha256": "52325d4d07ea39a94d2245e523064070ba70f12c4999cda5a8101591314f7df3",
+        "row_count": 1
+      },
+      {
+        "instrument_id": "fx:aud-usd",
+        "partition_date": "2026-04-03",
+        "partition_sha256": "fddc04fdb97a7e501879e834016108844457d7f541839b0a3f2b1040b1624efc",
+        "row_count": 1
+      }
+    ],
+    "plan_sha256": "02835b62f9c1ed585800f7c0a6b18489afe9221bd94c6b3ae19267a7617973c4",
+    "provider": "ibkr",
+    "row_count": 62,
+    "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "schema_version": 1,
+    "source_class": "IBKR_HISTORICAL_RESEARCH"
+  },
+  "migration_source": {
+    "contract": "qtrad-provider-history-v1-to-v2-repack-v1",
+    "source_provider_history_contract": "qtrad-provider-historical-observations-v1",
+    "source_provider_history_manifest_sha256": "80951e059390e3e96ab7a10dff3b6805492f77c388185ffea7b63bc2f40ee676",
+    "source_verification_receipt_path": "migration-source/provider-history-verification-receipt.json",
+    "source_verification_receipt_sha256": "b2a3b456776dee39d169ee99144cb09c635beed4c7aba1cfb914010e6db66ec1"
+  },
+  "parts": [
+    {
+      "bytes_sha256": "5897a1ef8e911dfda5305e8acb61c757ec7cea9f70f3451874fdc21f1dfa7785",
+      "instrument_id": "fx:aud-usd",
+      "maximum_interval_end": "2026-02-28T00:02:00Z",
+      "minimum_interval_start": "2026-02-01T00:01:00Z",
+      "ordered_row_sha256": "00bd06ef7970a1812d3b7090ddf5f158f5e3301faaabea4c16f5aa6531d36062",
+      "part_ordinal": 1,
+      "path": "observations/instrument-27befb6bcd4ea5570ee2e90d218e0d41151d06dca930a3b3fa5f0ce9a540c388/month-2026-02/part-0001.parquet",
+      "row_count": 28
+    },
+    {
+      "bytes_sha256": "f5e1e176560222232a51562191f2ff7777eeebe71871b663d4b9e92db4098808",
+      "instrument_id": "fx:aud-usd",
+      "maximum_interval_end": "2026-03-31T00:02:00Z",
+      "minimum_interval_start": "2026-03-01T00:01:00Z",
+      "ordered_row_sha256": "de62556a9730cf00945dbec330eb55fc0e70304fbc0de0ea12f186a2a2d7a55c",
+      "part_ordinal": 1,
+      "path": "observations/instrument-27befb6bcd4ea5570ee2e90d218e0d41151d06dca930a3b3fa5f0ce9a540c388/month-2026-03/part-0001.parquet",
+      "row_count": 31
+    },
+    {
+      "bytes_sha256": "4d8670eb59d53105553a3cc79f1f03bb6532f51ce265035ba6b55ed1f2b03dd4",
+      "instrument_id": "fx:aud-usd",
+      "maximum_interval_end": "2026-04-03T00:02:00Z",
+      "minimum_interval_start": "2026-04-01T00:01:00Z",
+      "ordered_row_sha256": "aab3b256125fb3e6480241751e56c231a5941853df82c0408d00ef768b889e03",
+      "part_ordinal": 1,
+      "path": "observations/instrument-27befb6bcd4ea5570ee2e90d218e0d41151d06dca930a3b3fa5f0ce9a540c388/month-2026-04/part-0001.parquet",
+      "row_count": 3
+    }
+  ],
+  "physical_manifest_sha256": "ce0947cde875b07c7e5ae71202c7b90888509ad06f06f658596a8e3b36d28de3",
+  "schema_version": 2,
+  "selector_contract": "qtrad-provider-history-availability-selector-v1",
+  "source_plan_row_bound": 89280,
+  "source_result": {
+    "bytes_sha256": "97b26c2f0c25bca18907359e585ca937f0332a9f93f6454a0aee4e366761ff68",
+    "contract": "qtrad-ibkr-historical-result-v2",
+    "path": "source-result/manifest.json",
+    "plan_sha256": "02835b62f9c1ed585800f7c0a6b18489afe9221bd94c6b3ae19267a7617973c4",
+    "semantic_sha256": "3a927ed2071b3c8e6574e42ad4369c2f9d29479110fa8cec5eb92ae6010270de"
+  }
+}

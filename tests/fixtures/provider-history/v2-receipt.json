@@ -1,0 +1,70 @@
+{
+  "availability_policy": {
+    "contract": "qtrad-provider-history-availability-selector-v1",
+    "delay": "PT5M",
+    "formula": "interval_end_plus_declared_delay",
+    "policy": "BAR_END_PLUS_DECLARED_PROVIDER_DELAY",
+    "schema_version": 1,
+    "selector": "PROVIDER_HISTORY_DECLARED_DELAY"
+  },
+  "completed_checks": [
+    "manifest-and-closure-bytes",
+    "accepted-v1-receipt-binding",
+    "availability-policy-binding",
+    "physical-part-semantic-replay",
+    "request-evidence-summary",
+    "observation-interval-summary"
+  ],
+  "contract": "qtrad-provider-history-verification-v2",
+  "migration_source": {
+    "contract": "qtrad-provider-history-v1-to-v2-repack-v1",
+    "source_provider_history_contract": "qtrad-provider-historical-observations-v1",
+    "source_provider_history_manifest_sha256": "ee08ee6aa3c61e9517bcfce18cecb34ab2b3e79629429e171664681afdd0c50e",
+    "source_verification_receipt_path": "migration-source/provider-history-verification-receipt.json",
+    "source_verification_receipt_sha256": "a78a2b15295ba4579b90e20edf2066ac34d25f8c28d69c91c64c120882e2e51e"
+  },
+  "observation_summary": {
+    "accepted_intervals_by_request": [
+      {
+        "intervals": [
+          [
+            "2026-02-01T00:01:00+00:00",
+            "2026-02-01T00:02:00+00:00"
+          ]
+        ],
+        "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684"
+      }
+    ],
+    "source_end": "2026-02-01T00:02:00+00:00",
+    "source_start": "2026-02-01T00:01:00+00:00"
+  },
+  "provider_history_contract": "qtrad-provider-historical-observations-v2",
+  "provider_history_dataset_sha256": "fed9565c3988c3ad45a39f656cf02eadd83cb61f7e330450192c29f1df1f5092",
+  "provider_history_manifest_sha256": "8ed23330c77dbb2aae91cc99ebed164fab71f686a495202316d8db34ff4b1964",
+  "provider_history_schema_version": 2,
+  "receipt_sha256": "dab62ac26fdf8faded33b3f1fc524771dbb499aea6334f9dad5d2c9157918c3b",
+  "request_evidence": [
+    {
+      "accepted_row_count": 0,
+      "evidence_disposition": "SUCCEEDED",
+      "request_sha256": "647efe5c92e6e7a93bfc507c5577f4e656285d3900f5b32db28ffebd9fd7e197",
+      "result_sha256": "4837141f4ec2c4e4c9d6fedfa98b6b442e6ce707b00ae4d3a918db45902bcc7b",
+      "sessions": []
+    },
+    {
+      "accepted_row_count": 1,
+      "evidence_disposition": "SUCCEEDED",
+      "request_sha256": "749f55da42bab9d58bebef2f621bf286528d608a09ace24678c1e7c26ad18684",
+      "result_sha256": "8905aa803b2fd245644041fd182e3c8ec97289159b7eed3023a1830e17c63ac0",
+      "sessions": []
+    }
+  ],
+  "schema_version": 2,
+  "stage6_aggregate_sha256": "d269b7377a92ad66042d53d6de4482d6aba49fe409ec2c279ea948d2d93bc242",
+  "stage6_plan_sha256": "6f56c95eec27ed06ccc50c314e705174837b324d1c5d83f4dad2d55b9b92af56",
+  "stage6_result_manifest_sha256": "497a3e86e92f03d6d392ffadb8e7471d3d5175b01fe098aed203c6adefb89556",
+  "stage6_runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "verifier_contract": "qtrad-provider-history-semantic-verifier-v2",
+  "verifier_identity": "f24ec2a1f799832c0767b1af1d85e2dbd9e61863b85f17101085ba7936b0a89b",
+  "verifier_version": 1
+}

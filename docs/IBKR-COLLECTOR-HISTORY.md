@@ -410,17 +410,15 @@ availability_basis = persisted_at
 
 Historical IBKR bars must not be relabelled as quote-derived observations.
 
-Add a parallel builder:
-
-```text
-qtrad research observations build-provider-history
-```
-
-with a contract such as:
+The completed historical rollout introduced a parallel v1 provider-history builder and contract:
 
 ```text
 qtrad-provider-historical-observations-v1
 ```
+
+After the create-only, semantically identical v2 migration was verified, that builder and the general v1
+runtime were retired. The v1 contract remains only as the identity of retained evidence that can be
+cheaply authenticated.
 
 It declares:
 

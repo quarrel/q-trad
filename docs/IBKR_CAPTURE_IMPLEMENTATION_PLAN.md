@@ -444,8 +444,8 @@ qtrad historical ibkr plan
 qtrad historical ibkr register
 qtrad historical ibkr execute
 qtrad historical ibkr verify
-qtrad research observations build-provider-history
 qtrad research observations verify-provider-history
+qtrad research observations authenticate-provider-history
 qtrad research foundation build
 qtrad research foundation verify
 qtrad ingest --provider ibkr --environment paper
