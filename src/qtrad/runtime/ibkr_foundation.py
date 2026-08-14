@@ -46,6 +46,7 @@ from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_SCHEMA_VERSION,
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalDataset,
+    ProviderHistoricalDatasetV3,
 )
 from qtrad.domain.r2_holdout import (
     R2G2ObservationView,
@@ -84,6 +85,19 @@ _CHILD_DIRECTORY_SUFFIX = ".children"
 _BOUNDED_PROVIDER_HISTORY_ROWS = 500_000
 _FOUNDATION_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v1"
 _FOUNDATION_VERIFICATION_SCHEMA_VERSION = 1
+_FOUNDATION_V3_CONTRACT = "qtrad-ibkr-historical-foundation-v2"
+_FOUNDATION_V3_SCHEMA_VERSION = 2
+_FOUNDATION_V3_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v2"
+_FOUNDATION_V3_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v2"
+_FOUNDATION_V3_VERIFIER_VERSION = 1
+_FOUNDATION_V3_CHECKS = (
+    "stage7-receipt-authentication",
+    "stage8-independent-derivation",
+    "foundation-metadata-equivalence",
+    "child-byte-closure",
+    "child-semantic-equivalence",
+    "readiness-equivalence",
+)
 _FOUNDATION_AUTHENTICATION_CONTRACT = "qtrad-ibkr-foundation-authentication-v1"
 _FOUNDATION_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v1"
 _FOUNDATION_VERIFIER_VERSION = 1
@@ -154,6 +168,194 @@ _REFERENCE_FIELDS = {
     "file",
     "file_sha256",
 }
+_V3_PAYLOAD_FIELDS = frozenset(
+    {
+        "configuration",
+        "provider_history",
+        "source_evidence",
+        "children",
+        "child_lineage",
+        "semantic_children",
+        "active_intervals",
+        "provider_gaps",
+        "readiness",
+        "readiness_semantics",
+    }
+)
+_V3_PROVIDER_HISTORY_FIELDS = frozenset({"dataset", "stage7"})
+_V3_STAGE7_FIELDS = frozenset(
+    {
+        "dataset_sha256",
+        "row_count",
+        "manifest_sha256",
+        "result_id",
+        "closure_id",
+        "verification_id",
+        "plan_sha256",
+        "runtime_sha256",
+        "selected_input_sha256",
+        "selected_input",
+        "selected_input_semantic_id",
+        "availability_policy",
+        "eligible_contracts",
+        "coverage_summary",
+        "entitlement_summary",
+        "dataset",
+    }
+)
+_V3_DATASET_FIELDS = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "source_class",
+        "provider",
+        "environment",
+        "contract_selection_sha256",
+        "stage6_result_id",
+        "availability_policy",
+        "partitions",
+        "row_count",
+        "source_start",
+        "source_end",
+        "dataset_sha256",
+    }
+)
+_V3_PARTITION_FIELDS = frozenset(
+    {"instrument_id", "partition_date", "row_count", "partition_sha256"}
+)
+_V3_AVAILABILITY_POLICY_FIELDS = frozenset(
+    {"contract", "schema_version", "selector", "policy", "delay", "formula"}
+)
+_V3_SELECTED_INPUT_FIELDS = frozenset(
+    {
+        "contract",
+        "parent_dataset_sha256",
+        "requested_instrument_ids",
+        "interval_start",
+        "interval_end",
+        "row_count_upper_bound",
+        "semantic_id",
+    }
+)
+_V3_CONFIGURATION_FIELDS = frozenset(
+    {
+        "contract",
+        "name",
+        "schema_version",
+        "observation_dataset_id",
+        "ordered_instruments",
+        "instrument_roles",
+        "range_start",
+        "range_end",
+        "grid_resolution_seconds",
+        "availability_basis",
+        "feature_lag_policy",
+        "feature_lag_calibration_range",
+        "feature_lag_percentile",
+        "feature_lag_safety_margin_seconds",
+        "selected_feature_lag_seconds",
+        "target_horizons_seconds",
+        "primary_vertical_horizon_seconds",
+        "target_revision_delay_seconds",
+        "target_revision_policy",
+        "target_revision_policy_reason",
+        "required_feature_bases",
+        "target_basis",
+        "fold_policy",
+        "holdout_range",
+        "embargo_seconds",
+        "minimum_training_duration_seconds",
+        "minimum_validation_duration_seconds",
+        "configuration_id",
+    }
+)
+_V3_SOURCE_EVIDENCE_FIELDS = frozenset(
+    {"eligible_contracts", "coverage_summary", "entitlement_summary"}
+)
+_V3_READINESS_FIELDS = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "state",
+        "causes",
+        "candidate_instruments",
+        "groups",
+        "common_support_start",
+        "common_support_end",
+        "common_support_rows",
+        "rows_by_candidate",
+        "evidence",
+    }
+)
+_V3_READINESS_EVIDENCE_FIELDS = frozenset(
+    {
+        "provider_row_count",
+        "provider_gap_count",
+        "total_provider_gap_count",
+        "raw_provider_gaps",
+        "coverage_cells",
+        "coverage_threshold",
+        "blocking_coverage_cells",
+        "coverage_diagnostics",
+        "target_row_count",
+        "fold_count",
+        "primary_horizon_seconds",
+        "source_contract_selection_sha256",
+        "source_plan_sha256",
+        "source_runtime_sha256",
+        "source_result_id",
+        "source_closure_id",
+        "source_verification_id",
+        "source_coverage_summary",
+        "source_entitlement_summary",
+        "request_evidence",
+    }
+)
+_V3_READINESS_PROJECTION_FIELDS = frozenset(
+    {
+        "projection_contract",
+        "readiness_contract",
+        "readiness_schema_version",
+        "state",
+        "causes",
+        "candidate_instruments",
+        "groups",
+        "common_support_start",
+        "common_support_end",
+        "common_support_rows",
+        "rows_by_candidate",
+        "evidence",
+    }
+)
+_V3_READINESS_PROJECTION_EVIDENCE_FIELDS = frozenset(
+    {
+        "provider_row_count",
+        "provider_gap_count",
+        "total_provider_gap_count",
+        "raw_provider_gaps",
+        "coverage_cells",
+        "coverage_threshold",
+        "blocking_coverage_cells",
+        "coverage_diagnostics",
+        "target_row_count",
+        "fold_count",
+        "primary_horizon_seconds",
+        "request_evidence",
+        "source_coverage_summary",
+        "source_entitlement_summary",
+    }
+)
+_V3_LINEAGE_FIELDS = frozenset(
+    {
+        "stage7_manifest_sha256",
+        "stage7_dataset_sha256",
+        "stage7_result_id",
+        "stage7_closure_id",
+        "stage7_verification_id",
+        "stage7_selected_input_sha256",
+        "stage7_selected_input_semantic_id",
+    }
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -440,15 +642,32 @@ def _prepare_ibkr_foundation_preflight(
     )
 
 
-def preflight_ibkr_foundation(
+def _preflight_ibkr_foundation_migration_v2(
     output: Path,
     *,
-    provider_manifest: Path,
+    provider_manifest: Path | None = None,
     configuration: FoundationConfig,
     checkpoint_root: Path | None = None,
     workers: int = 4,
+    stage7_manifest: Path | None = None,
+    stage7_receipt: Path | None = None,
 ) -> dict[str, JsonValue]:
-    """Authenticate a Stage 8 build invocation without decoding provider rows."""
+    """Temporary migration-only preflight for retained v2 authority checkpoints.
+
+    This private path is outside normal CLI/runtime construction and is deleted by PR-H4.
+    """
+
+    if stage7_manifest is not None or stage7_receipt is not None:
+        if stage7_manifest is None or stage7_receipt is None:
+            raise ValueError("Stage 8 preflight requires both Stage 7 manifest and receipt")
+        return _preflight_ibkr_foundation_v3(
+            output,
+            stage7_manifest=stage7_manifest,
+            stage7_receipt=stage7_receipt,
+            configuration=configuration,
+        )
+    if provider_manifest is None:
+        raise ValueError("Stage 8 preflight requires a Stage 7 manifest")
 
     (
         output,
@@ -484,17 +703,53 @@ def preflight_ibkr_foundation(
     }
 
 
-def write_ibkr_foundation(
+def preflight_ibkr_foundation(
     output: Path,
     *,
-    provider_manifest: Path,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    configuration: FoundationConfig,
+) -> dict[str, JsonValue]:
+    """Preflight the current Stage 8 path from the authenticated Stage 7 parent."""
+
+    return _preflight_ibkr_foundation_v3(
+        output,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=configuration,
+    )
+
+
+def _write_ibkr_foundation_migration_v2(
+    output: Path,
+    *,
+    provider_manifest: Path | None = None,
     configuration: FoundationConfig,
     provider_history_receipt: Path | None = None,
     checkpoint_root: Path | None = None,
     workers: int = 4,
     progress_callback: _ProgressCallback | None = None,
+    stage7_manifest: Path | None = None,
+    stage7_receipt: Path | None = None,
 ) -> IBKRFoundationBuild:
-    """Build and create the source-specific bundle once."""
+    """Temporary migration-only writer for retained v1/v2 foundation authorities.
+
+    This private path is outside the normal writer and is deleted by PR-H4.
+    """
+
+    if stage7_manifest is not None or stage7_receipt is not None:
+        if stage7_manifest is None or stage7_receipt is None:
+            raise ValueError("Stage 8 construction requires both Stage 7 manifest and receipt")
+        return _write_ibkr_foundation_v3(
+            output,
+            stage7_manifest=stage7_manifest,
+            stage7_receipt=stage7_receipt,
+            configuration=configuration,
+            workers=workers,
+            progress_callback=progress_callback,
+        )
+    if provider_manifest is None:
+        raise ValueError("Stage 8 construction requires a Stage 7 manifest")
 
     (
         output,
@@ -605,6 +860,27 @@ def write_ibkr_foundation(
         output=str(output),
     )
     return build
+
+
+def write_ibkr_foundation(
+    output: Path,
+    *,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    configuration: FoundationConfig,
+    workers: int = 4,
+    progress_callback: _ProgressCallback | None = None,
+) -> IBKRFoundationBuild:
+    """Build the current Stage 8 bundle from the authenticated Stage 7 parent."""
+
+    return _write_ibkr_foundation_v3(
+        output,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=configuration,
+        workers=workers,
+        progress_callback=progress_callback,
+    )
 
 
 def _emit_stage8_progress(
@@ -796,12 +1072,16 @@ def _authentication_result(
     }
 
 
-def authenticate_ibkr_foundation(
+def _authenticate_ibkr_foundation_migration_v2(
     path: Path,
     *,
     receipt: Path,
 ) -> dict[str, JsonValue]:
-    """Authenticate a verified Stage 8 closure without semantic replay."""
+    """Authenticate retained v1/v2 Stage 8 evidence for PR-H4 migration only.
+
+    This private helper is outside normal authentication and CLI reachability;
+    delete it with PR-H4 after retained evidence is migrated.
+    """
 
     authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
     receipt_path, receipt_bytes, receipt_document = _authenticate_verification_receipt(
@@ -824,15 +1104,45 @@ def authenticate_ibkr_foundation(
     return _authentication_result(authenticated, receipt_path, receipt_bytes, receipt_document)
 
 
-def verify_ibkr_foundation(
+def authenticate_ibkr_foundation(
+    path: Path,
+    *,
+    receipt: Path,
+) -> dict[str, JsonValue]:
+    """Authenticate a current Stage 8 v3 closure without semantic replay."""
+
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 authentication is required")
+    return _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+
+
+def _verify_ibkr_foundation_migration_v2(
     path: Path,
     *,
     replay_checkpoint_root: Path | None = None,
     provider_history_receipt: Path | None = None,
     workers: int = 4,
     receipt_output: Path | None = None,
+    stage7_manifest: Path | None = None,
+    stage7_receipt: Path | None = None,
 ) -> IBKRFoundationBuild:
-    """Independently replay every child and optionally persist its receipt."""
+    """Temporary migration-only replay for retained v1/v2 foundation authorities.
+
+    This private path is outside normal verification and is deleted by PR-H4.
+    """
+
+    if stage7_manifest is not None or stage7_receipt is not None:
+        if stage7_manifest is None or stage7_receipt is None:
+            raise ValueError("Stage 8 verification requires both Stage 7 manifest and receipt")
+        if receipt_output is None:
+            raise ValueError("Stage 8 verification requires a receipt output")
+        return _verify_ibkr_foundation_v3(
+            path,
+            stage7_manifest=stage7_manifest,
+            stage7_receipt=stage7_receipt,
+            receipt_output=receipt_output,
+            workers=workers,
+        )
 
     authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
     receipt_path: Path | None = None
@@ -920,25 +1230,45 @@ def verify_ibkr_foundation(
     return replay
 
 
-def _load_authenticated_ibkr_foundation(
+def verify_ibkr_foundation(
+    path: Path,
+    *,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    receipt_output: Path,
+    workers: int = 4,
+) -> IBKRFoundationBuild:
+    """Independently verify the current Stage 8 transformation and write its receipt."""
+
+    return _verify_ibkr_foundation_v3(
+        path,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=receipt_output,
+        workers=workers,
+    )
+
+
+def _load_authenticated_ibkr_foundation_v3(
     path: Path,
     *,
     receipt: Path,
 ) -> tuple[IBKRFoundationBuild, str]:
-    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
-    _authenticate_verification_receipt(authenticated, receipt)
-    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
-    child_ids = _child_reference_dataset_ids(authenticated.children)
+    authenticated = _read_v3_manifest(path)
+    _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+    child_kinds = _supported_child_kinds(authenticated.children)
+    child_ids = _child_reference_dataset_ids(authenticated.children, child_kinds=child_kinds)
     decoded = _verify_children_blind(
         authenticated.path.parent,
         authenticated.children,
         child_ids,
-        authenticated.expected_lineage,
+        authenticated.lineage,
         decode_rows=False,
         decode_base=True,
+        child_kinds=child_kinds,
     )
-
     configuration = authenticated.configuration
+    provider_dataset = cast(ProviderHistoricalDataset, authenticated.provider_dataset)
     observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
     source_start = (
         min(row.interval_start for row in observation_rows)
@@ -964,14 +1294,12 @@ def _load_authenticated_ibkr_foundation(
             "observed_interval_end": source_end.isoformat() if observation_rows else None,
             "grid_resolution_seconds": int(configuration.grid_resolution.total_seconds()),
             "availability_basis": configuration.availability_basis.value,
-            "source_dataset_id": authenticated.provider_dataset.dataset_sha256,
+            "source_dataset_id": provider_dataset.dataset_sha256,
         },
-        source_dataset_ids=(authenticated.provider_dataset.dataset_sha256,),
+        source_dataset_ids=(provider_dataset.dataset_sha256,),
         selection_policies={
             "source_class": "IBKR_HISTORICAL_RESEARCH",
-            "availability_policy": (
-                authenticated.provider_dataset.availability_policy.as_json_value()
-            ),
+            "availability_policy": provider_dataset.availability_policy.as_json_value(),
             "correction_policy": "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE",
         },
         dataset_id=child_ids["observations"],
@@ -1011,7 +1339,7 @@ def _load_authenticated_ibkr_foundation(
         ),
         target_index=target_index,
         causal_metadata=causal_metadata,
-        provider_history=authenticated.provider_dataset,
+        provider_history=provider_dataset,
         active_intervals=_decode_active_intervals(authenticated.payload["active_intervals"]),
         provider_gaps=tuple(
             cast(Mapping[str, JsonValue], _mapping(item, "IBKR provider gap"))
@@ -1019,7 +1347,19 @@ def _load_authenticated_ibkr_foundation(
         ),
         readiness=_decode_readiness(authenticated.payload["readiness"]),
     )
-    return build, _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
+    return build, authenticated.foundation_id
+
+
+def _load_authenticated_ibkr_foundation(
+    path: Path,
+    *,
+    receipt: Path,
+) -> tuple[IBKRFoundationBuild, str]:
+    """Load only current Stage 8 v3 evidence authenticated by its receipt."""
+
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 loading is required")
+    return _load_authenticated_ibkr_foundation_v3(path, receipt=receipt)
 
 
 def load_ibkr_foundation(path: Path, *, receipt: Path) -> IBKRFoundationBuild:
@@ -1061,23 +1401,25 @@ def _load_ibkr_foundation_outcome_blind(
     while only the persisted outcome-blind projections and folds are decoded.
     """
 
-    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
-    receipt_path, _receipt_bytes, _receipt_document = _authenticate_verification_receipt(
-        authenticated, receipt
-    )
-    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
-    manifest_path = authenticated.path
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 outcome-blind loading is required")
+    authenticated_v3 = _read_v3_manifest(path)
+    _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+    manifest_path = authenticated_v3.path
+    receipt_path = receipt.resolve()
     root = manifest_path.parent
-    provider_dataset = authenticated.provider_dataset
-    payload = authenticated.payload
-    configuration = authenticated.configuration
-    children = authenticated.children
+    provider_dataset = cast(ProviderHistoricalDataset, authenticated_v3.provider_dataset)
+    payload = authenticated_v3.payload
+    configuration = authenticated_v3.configuration
+    children = authenticated_v3.children
+    expected_lineage = authenticated_v3.lineage
+    build_id = authenticated_v3.foundation_id
     child_ids = _child_reference_dataset_ids(children)
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
-        authenticated.expected_lineage,
+        expected_lineage,
         decode_g2=decode_g2,
         decode_target=decode_target,
     )
@@ -1159,7 +1501,6 @@ def _load_ibkr_foundation_outcome_blind(
         rows=tuple(_panel_row(row) for row in decoded["blind-panel"]),
         projection_id=child_ids["blind-panel"],
     )
-    build_id = _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
     child_references_sha256 = _sha({kind: children[kind] for kind in _G2_EXTENSION_CHILD_KINDS})
     target_child_references_sha256 = _sha(children["targets"])
     g2_source_id = _ibkr_g2_feature_source_id(
@@ -1687,6 +2028,83 @@ def _write_child_parts(
     return parts
 
 
+def _require_exact_child_tree(root: Path, expected_paths: set[str]) -> None:
+    """Reject anything outside the manifest-declared canonical child tree."""
+
+    if root.is_symlink() or not root.is_dir():
+        raise ValueError("IBKR foundation child root is not a regular directory")
+    rooted = root.absolute()
+    if rooted.resolve(strict=False) != rooted:
+        raise ValueError("IBKR foundation child root contains a symlink")
+    allowed_files: set[str] = set()
+    allowed_dirs: set[str] = set()
+    for relative in expected_paths:
+        path = _safe_relative(relative)
+        if path.as_posix() != relative:
+            raise ValueError("IBKR foundation child path is not canonical")
+        current = path.parent
+        while current != PurePosixPath("."):
+            allowed_dirs.add(current.as_posix())
+            current = current.parent
+        candidate = rooted / path
+        if candidate.resolve(strict=False) != candidate:
+            raise ValueError("IBKR foundation child path contains a symlink")
+        allowed_files.add(relative)
+    actual_files: set[str] = set()
+    actual_dirs: set[str] = set()
+    for entry in root.rglob("*"):
+        relative = entry.relative_to(root).as_posix()
+        if entry.is_symlink():
+            raise ValueError("IBKR foundation child tree contains a symlink")
+        if entry.is_dir():
+            actual_dirs.add(relative)
+        elif entry.is_file():
+            actual_files.add(relative)
+        else:
+            raise ValueError("IBKR foundation child tree contains an unsupported entry")
+    if actual_files != allowed_files or actual_dirs != allowed_dirs:
+        raise ValueError("IBKR foundation child tree differs from its manifest")
+
+
+def _preflight_child_tree(
+    bundle_root: Path,
+    children: Mapping[str, object],
+    kinds: Sequence[str],
+) -> None:
+    expected_paths: set[str] = set()
+    root_names: set[str] = set()
+    for kind in kinds:
+        raw_parts = children[kind]
+        if not isinstance(raw_parts, list) or not raw_parts:
+            raise ValueError("IBKR foundation child parts are invalid")
+        if len(raw_parts) > _MAX_CHILD_PARTS:
+            raise ValueError("IBKR foundation child part count exceeds its bound")
+        previous_path = ""
+        for raw_part in raw_parts:
+            reference = _child_reference(raw_part, kind)
+            manifest_path = _text(reference["manifest_path"], "child manifest path")
+            if manifest_path <= previous_path:
+                raise ValueError("IBKR foundation child references are not canonical")
+            previous_path = manifest_path
+            file_path = _text(reference["file"], "child Parquet path")
+            manifest_parts = PurePosixPath(manifest_path).parts
+            file_parts = PurePosixPath(file_path).parts
+            if not manifest_parts or not file_parts or manifest_parts[0] != file_parts[0]:
+                raise ValueError("IBKR foundation child references use inconsistent roots")
+            root_names.add(manifest_parts[0])
+            expected_paths.update({manifest_path, file_path})
+    if len(root_names) != 1:
+        raise ValueError("IBKR foundation child references use multiple roots")
+    root_name = next(iter(root_names))
+    prefix = f"{root_name}/"
+    relative_paths: set[str] = set()
+    for path in expected_paths:
+        if not path.startswith(prefix):
+            raise ValueError("IBKR foundation child path is outside its root")
+        relative_paths.add(path[len(prefix) :])
+    _require_exact_child_tree(bundle_root / root_name, relative_paths)
+
+
 def _verify_children(
     bundle_root: Path,
     children: Mapping[str, object],
@@ -1699,6 +2117,7 @@ def _verify_children(
     kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
     if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
+    _preflight_child_tree(bundle_root, children, kinds)
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
     for kind in kinds:
@@ -1833,6 +2252,7 @@ def _verify_children_blind(
     kinds = _CHILD_KINDS if child_kinds is None else tuple(child_kinds)
     if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
+    _preflight_child_tree(bundle_root, children, kinds)
     decoded_kinds = (
         {
             "folds",
@@ -2198,6 +2618,657 @@ def _int(value: object, field: str) -> int:
 def _require_sha256(value: str, field: str) -> None:
     if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
         raise ValueError(f"{field} must be a lower-case SHA-256")
+
+
+@dataclass(frozen=True, slots=True)
+class _AuthenticatedFoundationV3:
+    path: Path
+    manifest_bytes: bytes
+    document: dict[str, object]
+    payload: dict[str, object]
+    configuration: FoundationConfig
+    provider_dataset: ProviderHistoricalDatasetV3
+    stage7: dict[str, object]
+    children: Mapping[str, JsonValue]
+    lineage: dict[str, JsonValue]
+    foundation_id: str
+    closure_id: str
+
+
+def _is_v3_foundation(path: Path) -> bool:
+    if path.is_symlink() or not path.is_file():
+        return False
+    try:
+        value = json.loads(_bounded_bytes(path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest"))
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    return isinstance(value, dict) and value.get("contract") == _FOUNDATION_V3_CONTRACT
+
+
+def _stage7_source_v3(
+    manifest: Path, receipt: Path, configuration: FoundationConfig
+) -> ProviderHistorySourceEvidence:
+    from qtrad.runtime.provider_history_v3 import authenticate_provider_history_v3
+
+    instruments = tuple(
+        sorted(
+            {*configuration.ordered_instruments, *(str(i) for i in IBKR_CONFIRMATORY_INSTRUMENTS)}
+        )
+    )
+    return authenticate_provider_history_v3(
+        manifest,
+        receipt=receipt,
+        instrument_ids=instruments,
+        interval_start=configuration.required_observation_start,
+        interval_end=configuration.required_observation_end,
+    )
+
+
+def _v3_selected_input(source: ProviderHistorySourceEvidence) -> dict[str, JsonValue]:
+    selection = source.selection
+    if selection is None:
+        raise ValueError("Stage 8 current path requires an authenticated Stage 7 selection")
+    if selection.parent_dataset_sha256 != source.dataset.dataset_sha256:
+        raise ValueError("Stage 7 selected input is not bound to its dataset")
+    identity: dict[str, JsonValue] = {
+        "contract": "qtrad-stage7-selected-input-semantic-v1",
+        "parent_dataset_sha256": selection.parent_dataset_sha256,
+        "requested_instrument_ids": list(selection.requested_instrument_ids),
+        "interval_start": selection.interval_start.isoformat(),
+        "interval_end": selection.interval_end.isoformat(),
+        "row_count_upper_bound": selection.row_count_upper_bound,
+    }
+    return {**identity, "semantic_id": _sha(identity)}
+
+
+def _v3_readiness_projection(readiness: Mapping[str, object]) -> dict[str, JsonValue]:
+    evidence = _mapping(readiness["evidence"], "Stage 8 readiness evidence")
+    evidence_fields = (
+        "provider_row_count",
+        "provider_gap_count",
+        "total_provider_gap_count",
+        "raw_provider_gaps",
+        "coverage_cells",
+        "coverage_threshold",
+        "blocking_coverage_cells",
+        "coverage_diagnostics",
+        "target_row_count",
+        "fold_count",
+        "primary_horizon_seconds",
+        "request_evidence",
+        "source_coverage_summary",
+        "source_entitlement_summary",
+    )
+    return {
+        "projection_contract": "qtrad-stage8-readiness-semantics-v1",
+        "readiness_contract": cast(JsonValue, readiness["contract"]),
+        "readiness_schema_version": cast(JsonValue, readiness["schema_version"]),
+        "state": cast(JsonValue, readiness["state"]),
+        "causes": cast(JsonValue, readiness["causes"]),
+        "candidate_instruments": cast(JsonValue, readiness["candidate_instruments"]),
+        "groups": cast(JsonValue, readiness["groups"]),
+        "common_support_start": cast(JsonValue, readiness["common_support_start"]),
+        "common_support_end": cast(JsonValue, readiness["common_support_end"]),
+        "common_support_rows": cast(JsonValue, readiness["common_support_rows"]),
+        "rows_by_candidate": cast(JsonValue, readiness["rows_by_candidate"]),
+        "evidence": {field: cast(JsonValue, evidence[field]) for field in evidence_fields},
+    }
+
+
+def _stage7_metadata_v3(
+    source: ProviderHistorySourceEvidence, manifest: Path
+) -> dict[str, JsonValue]:
+    dataset = source.dataset
+    if not isinstance(dataset, ProviderHistoricalDatasetV3):
+        raise ValueError("Stage 8 current path requires a Stage 7 v3 dataset")
+    summary = provider_history_stage6_summary(source)
+    if None in (summary.result_id, summary.closure_id, summary.verification_id):
+        raise ValueError("Stage 7 source-result identity is incomplete")
+    selection = source.selection
+    if selection is None:
+        raise ValueError("Stage 8 current path requires an authenticated Stage 7 selection")
+    selected_input = _v3_selected_input(source)
+    return {
+        "dataset_sha256": dataset.dataset_sha256,
+        "row_count": dataset.row_count,
+        "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        "result_id": summary.result_id,
+        "closure_id": summary.closure_id,
+        "verification_id": summary.verification_id,
+        "plan_sha256": dataset.stage6_plan_sha256,
+        "runtime_sha256": dataset.stage6_runtime_sha256,
+        "selected_input_sha256": selection.selection_sha256,
+        "selected_input": selected_input,
+        "selected_input_semantic_id": selected_input["semantic_id"],
+        "availability_policy": dataset.availability_policy.as_json_value(),
+        "eligible_contracts": [
+            contract.as_json_value() for contract in source.source_artifact.plan.eligible_contracts
+        ],
+        "coverage_summary": dict(summary.coverage_summary),
+        "entitlement_summary": dict(summary.entitlement_summary),
+        "dataset": dataset.as_json_value(),
+    }
+
+
+def _v3_lineage(
+    source: ProviderHistorySourceEvidence, metadata: Mapping[str, JsonValue]
+) -> dict[str, JsonValue]:
+    return {
+        "stage7_manifest_sha256": cast(str, metadata["manifest_sha256"]),
+        "stage7_dataset_sha256": source.dataset.dataset_sha256,
+        "stage7_result_id": cast(str, metadata["result_id"]),
+        "stage7_closure_id": cast(str, metadata["closure_id"]),
+        "stage7_verification_id": cast(str, metadata["verification_id"]),
+        "stage7_selected_input_sha256": cast(str, metadata["selected_input_sha256"]),
+        "stage7_selected_input_semantic_id": cast(str, metadata["selected_input_semantic_id"]),
+    }
+
+
+def _v3_payload(
+    build: IBKRFoundationBuild,
+    source: ProviderHistorySourceEvidence,
+    children: Mapping[str, JsonValue],
+    metadata: Mapping[str, JsonValue],
+    lineage: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    readiness = build.readiness.as_json()
+    return {
+        "configuration": {
+            **foundation_config_payload(build.configuration),
+            "configuration_id": build.configuration.configuration_id,
+        },
+        "provider_history": {
+            "dataset": metadata["dataset"],
+            "stage7": dict(metadata),
+        },
+        "source_evidence": {
+            "eligible_contracts": cast(list[JsonValue], metadata["eligible_contracts"]),
+            "coverage_summary": cast(dict[str, JsonValue], metadata["coverage_summary"]),
+            "entitlement_summary": cast(dict[str, JsonValue], metadata["entitlement_summary"]),
+        },
+        "children": dict(children),
+        "child_lineage": dict(lineage),
+        "semantic_children": cast(JsonValue, _child_dataset_ids(build)),
+        "active_intervals": {
+            instrument: [[start.isoformat(), end.isoformat()] for start, end in intervals]
+            for instrument, intervals in sorted(build.active_intervals.items())
+        },
+        "provider_gaps": [dict(gap) for gap in build.provider_gaps],
+        "readiness": readiness,
+        "readiness_semantics": _v3_readiness_projection(readiness),
+    }
+
+
+def _require_v3_fields(value: object, expected: frozenset[str], field: str) -> dict[str, object]:
+    mapping = _mapping(value, field)
+    if set(mapping) != expected:
+        raise ValueError(f"{field} fields are not exact")
+    return mapping
+
+
+def _validate_v3_contracts(value: object, field: str) -> None:
+    if not isinstance(value, list):
+        raise ValueError(f"{field} must be a list")
+    fingerprint_fields = frozenset(
+        {
+            "con_id",
+            "symbol",
+            "security_type",
+            "currency",
+            "exchange",
+            "primary_exchange",
+            "local_symbol",
+            "trading_class",
+            "multiplier",
+            "underlying_con_id",
+            "contract_month",
+        }
+    )
+    for index, raw_contract in enumerate(value):
+        contract = _require_v3_fields(
+            raw_contract,
+            frozenset({"instrument_id", "fingerprint"}),
+            f"{field}[{index}]",
+        )
+        _require_v3_fields(
+            contract["fingerprint"],
+            fingerprint_fields,
+            f"{field}[{index}].fingerprint",
+        )
+
+
+def _validate_v3_dataset(value: object, field: str) -> dict[str, object]:
+    dataset = _require_v3_fields(value, _V3_DATASET_FIELDS, field)
+    _require_v3_fields(
+        dataset["availability_policy"],
+        _V3_AVAILABILITY_POLICY_FIELDS,
+        f"{field}.availability_policy",
+    )
+    partitions = dataset["partitions"]
+    if not isinstance(partitions, list):
+        raise ValueError(f"{field}.partitions must be a list")
+    for index, partition in enumerate(partitions):
+        _require_v3_fields(partition, _V3_PARTITION_FIELDS, f"{field}.partitions[{index}]")
+    return dataset
+
+
+def _validate_v3_payload_schema(payload: Mapping[str, object]) -> None:
+    root = _require_v3_fields(payload, _V3_PAYLOAD_FIELDS, "Stage 8 v3 payload")
+    _require_v3_fields(
+        root["configuration"],
+        _V3_CONFIGURATION_FIELDS,
+        "Stage 8 v3 configuration",
+    )
+    provider = _require_v3_fields(
+        root["provider_history"],
+        _V3_PROVIDER_HISTORY_FIELDS,
+        "Stage 8 v3 provider history",
+    )
+    dataset = _validate_v3_dataset(provider["dataset"], "Stage 8 v3 provider dataset")
+    stage7 = _require_v3_fields(provider["stage7"], _V3_STAGE7_FIELDS, "Stage 8 v3 Stage 7")
+    stage7_dataset = _validate_v3_dataset(stage7["dataset"], "Stage 8 v3 Stage 7 dataset")
+    if stage7_dataset != dataset:
+        raise ValueError("Stage 8 v3 Stage 7 dataset differs from provider dataset")
+    selected = _require_v3_fields(
+        stage7["selected_input"],
+        _V3_SELECTED_INPUT_FIELDS,
+        "Stage 8 v3 selected input",
+    )
+    selected_identity = dict(selected)
+    selected_semantic_id = _text(
+        selected_identity.pop("semantic_id"),
+        "Stage 8 v3 selected input identity",
+    )
+    if selected_semantic_id != _sha(selected_identity):
+        raise ValueError("Stage 8 v3 selected input identity does not match")
+    source = _require_v3_fields(
+        root["source_evidence"],
+        _V3_SOURCE_EVIDENCE_FIELDS,
+        "Stage 8 v3 source evidence",
+    )
+    _validate_v3_contracts(source["eligible_contracts"], "Stage 8 v3 eligible contracts")
+    _validate_v3_contracts(stage7["eligible_contracts"], "Stage 8 v3 Stage 7 eligible contracts")
+    if stage7["eligible_contracts"] != source["eligible_contracts"]:
+        raise ValueError("Stage 8 v3 eligible contracts differ between authorities")
+    for field in ("coverage_summary", "entitlement_summary"):
+        if stage7[field] != source[field]:
+            raise ValueError(f"Stage 8 v3 {field} differs between authorities")
+    children = _mapping(root["children"], "Stage 8 v3 children")
+    if set(children) != set(_CHILD_KINDS):
+        raise ValueError("Stage 8 v3 children fields are not exact")
+    for kind in _CHILD_KINDS:
+        parts = children[kind]
+        if not isinstance(parts, list):
+            raise ValueError(f"Stage 8 v3 children.{kind} must be a list")
+        for part in parts:
+            _child_reference(part, kind)
+    _require_v3_fields(root["child_lineage"], _V3_LINEAGE_FIELDS, "Stage 8 v3 child lineage")
+    semantic_children = _mapping(root["semantic_children"], "Stage 8 v3 semantic children")
+    if set(semantic_children) != set(_CHILD_KINDS):
+        raise ValueError("Stage 8 v3 semantic children fields are not exact")
+    for kind in _CHILD_KINDS:
+        _text(semantic_children[kind], f"Stage 8 v3 semantic child {kind}")
+    readiness = _require_v3_fields(root["readiness"], _V3_READINESS_FIELDS, "Stage 8 v3 readiness")
+    _require_v3_fields(
+        readiness["evidence"],
+        _V3_READINESS_EVIDENCE_FIELDS,
+        "Stage 8 v3 readiness evidence",
+    )
+    readiness_semantics = _require_v3_fields(
+        root["readiness_semantics"],
+        _V3_READINESS_PROJECTION_FIELDS,
+        "Stage 8 v3 readiness semantics",
+    )
+    _require_v3_fields(
+        readiness_semantics["evidence"],
+        _V3_READINESS_PROJECTION_EVIDENCE_FIELDS,
+        "Stage 8 v3 readiness semantic evidence",
+    )
+
+
+def _v3_foundation_id(payload: Mapping[str, object]) -> str:
+    config = _mapping(payload["configuration"], "Stage 8 configuration")
+    provider = _mapping(payload["provider_history"], "Stage 7 parent")
+    stage7 = _mapping(provider["stage7"], "Stage 7 parent")
+    dataset = _mapping(provider["dataset"], "Stage 7 dataset")
+    selected_input = _mapping(stage7["selected_input"], "Stage 7 selected input")
+    return _sha(
+        {
+            "contract": _FOUNDATION_V3_CONTRACT,
+            "source_class": "IBKR_HISTORICAL_RESEARCH",
+            "stage7_dataset_sha256": stage7["dataset_sha256"],
+            "stage7_result_id": stage7["result_id"],
+            "stage7_contract_selection_sha256": dataset["contract_selection_sha256"],
+            "stage7_selected_input_semantic_id": selected_input["semantic_id"],
+            "configuration_id": config["configuration_id"],
+            "children": payload["semantic_children"],
+            "readiness_semantics": payload["readiness_semantics"],
+        }
+    )
+
+
+def _v3_closure_id(foundation_id: str, children: Mapping[str, object]) -> str:
+    references_seen: list[JsonValue] = []
+    for kind, raw_parts in sorted(children.items()):
+        if not isinstance(raw_parts, list):
+            raise ValueError(f"Stage 8 child references for {kind} are invalid")
+        for raw in raw_parts:
+            reference = _mapping(raw, "Stage 8 child reference")
+            references_seen.append(
+                cast(
+                    JsonValue,
+                    {"kind": kind, "reference": dict(reference)},
+                )
+            )
+    return _sha({"foundation_id": foundation_id, "child_references": references_seen})
+
+
+def _v3_manifest(
+    build: IBKRFoundationBuild,
+    source: ProviderHistorySourceEvidence,
+    children: Mapping[str, JsonValue],
+    metadata: Mapping[str, JsonValue],
+    lineage: Mapping[str, JsonValue],
+) -> tuple[dict[str, JsonValue], bytes]:
+    payload = _v3_payload(build, source, children, metadata, lineage)
+    foundation_id = _v3_foundation_id(payload)
+    closure_id = _v3_closure_id(foundation_id, children)
+    identity: dict[str, JsonValue] = {
+        "contract": _FOUNDATION_V3_CONTRACT,
+        "schema_version": _FOUNDATION_V3_SCHEMA_VERSION,
+        "source_class": "IBKR_HISTORICAL_RESEARCH",
+        "foundation_id": foundation_id,
+        "closure_id": closure_id,
+        "payload": payload,
+    }
+    document = {**identity, "manifest_sha256": _sha(identity)}
+    return document, _json_bytes(document) + b"\n"
+
+
+def _v3_receipt(authenticated: _AuthenticatedFoundationV3) -> dict[str, JsonValue]:
+    identity: dict[str, JsonValue] = {
+        "contract": _FOUNDATION_V3_VERIFICATION_CONTRACT,
+        "schema_version": _FOUNDATION_V3_SCHEMA_VERSION,
+        "foundation_contract": _FOUNDATION_V3_CONTRACT,
+        "foundation_schema_version": _FOUNDATION_V3_SCHEMA_VERSION,
+        "foundation_id": authenticated.foundation_id,
+        "closure_id": authenticated.closure_id,
+        "foundation_manifest_sha256": hashlib.sha256(authenticated.manifest_bytes).hexdigest(),
+        "stage7_dataset_sha256": _text(authenticated.stage7["dataset_sha256"], "Stage 7 dataset"),
+        "stage7_result_id": _text(authenticated.stage7["result_id"], "Stage 7 result"),
+        "stage7_closure_id": _text(authenticated.stage7["closure_id"], "Stage 7 closure"),
+        "stage7_verification_id": _text(
+            authenticated.stage7["verification_id"], "Stage 7 verification"
+        ),
+        "stage7_selected_input_sha256": _text(
+            authenticated.stage7["selected_input_sha256"], "Stage 7 selection"
+        ),
+        "stage7_selected_input_semantic_id": _text(
+            authenticated.stage7["selected_input_semantic_id"], "Stage 7 semantic selection"
+        ),
+        "configuration_id": authenticated.configuration.configuration_id,
+        "readiness_sha256": _sha(authenticated.payload["readiness"]),
+        "evidence_class": EvidenceClass.IMPLEMENTATION.value,
+        "verifier_contract": _FOUNDATION_V3_VERIFIER_CONTRACT,
+        "verifier_version": _FOUNDATION_V3_VERIFIER_VERSION,
+        "verifier_identity": _sha({"contract": _FOUNDATION_V3_VERIFIER_CONTRACT, "version": 1}),
+        "completed_checks": list(_FOUNDATION_V3_CHECKS),
+    }
+    return {**identity, "verification_id": _sha(identity)}
+
+
+def _v3_receipt_output(path: Path, foundation: Path) -> Path:
+    output = _output_path(path).resolve()
+    root = foundation.resolve().parent / f"{foundation.name}{_CHILD_DIRECTORY_SUFFIX}"
+    if output.exists():
+        raise FileExistsError(f"Stage 8 verification receipt already exists: {output}")
+    if output.is_relative_to(root.resolve()):
+        raise ValueError("Stage 8 verification receipt cannot be written inside its closure")
+    if not output.parent.is_dir():
+        raise FileNotFoundError(
+            f"Stage 8 verification receipt parent does not exist: {output.parent}"
+        )
+    return output
+
+
+def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _AuthenticatedFoundationV3:
+    manifest_path = _regular_file(path, "IBKR foundation manifest")
+    manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
+    document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
+    expected = {
+        "contract",
+        "schema_version",
+        "source_class",
+        "foundation_id",
+        "closure_id",
+        "payload",
+        "manifest_sha256",
+    }
+    if (
+        set(document) != expected
+        or document["contract"] != _FOUNDATION_V3_CONTRACT
+        or document["source_class"] != "IBKR_HISTORICAL_RESEARCH"
+    ):
+        raise ValueError("Stage 8 v2 manifest contract or fields are unsupported")
+    if document["schema_version"] != _FOUNDATION_V3_SCHEMA_VERSION:
+        raise ValueError("Stage 8 v2 manifest schema is unsupported")
+    if manifest_bytes != _json_bytes(document) + b"\n":
+        raise ValueError("Stage 8 v2 manifest bytes are not canonical")
+    unsigned = dict(document)
+    if _text(unsigned.pop("manifest_sha256"), "Stage 8 manifest") != _sha(unsigned):
+        raise ValueError("Stage 8 manifest identity does not match")
+    payload = _mapping(document["payload"], "Stage 8 v2 payload")
+    _validate_v3_payload_schema(payload)
+    foundation_id = _text(document["foundation_id"], "Stage 8 foundation identity")
+    if foundation_id != _v3_foundation_id(payload):
+        raise ValueError("Stage 8 foundation identity does not match semantic payload")
+    children = _mapping(payload["children"], "Stage 8 children")
+    closure_id = _text(document["closure_id"], "Stage 8 closure identity")
+    if closure_id != _v3_closure_id(foundation_id, children):
+        raise ValueError("Stage 8 closure identity does not match child bytes")
+    configuration_payload = dict(_mapping(payload["configuration"], "Stage 8 configuration"))
+    configuration_id = _text(
+        configuration_payload.pop("configuration_id", None), "Stage 8 configuration identity"
+    )
+    configuration = decode_foundation_config(configuration_payload)
+    if configuration.configuration_id != configuration_id:
+        raise ValueError("Stage 8 configuration identity does not match")
+    provider = _mapping(payload["provider_history"], "Stage 7 parent")
+    stage7 = _mapping(provider["stage7"], "Stage 7 parent")
+    dataset_mapping = _mapping(provider["dataset"], "Stage 7 dataset")
+    policy = ProviderHistoricalAvailabilityPolicy.from_json_value(
+        dataset_mapping["availability_policy"]
+    )
+    dataset = ProviderHistoricalDatasetV3.from_json_value(
+        provider["dataset"],
+        availability_policy=policy,
+        stage6_plan_sha256=_text(stage7["plan_sha256"], "Stage 7 plan"),
+        stage6_runtime_sha256=_text(stage7["runtime_sha256"], "Stage 7 runtime"),
+        stage6_closure_id=_text(stage7["closure_id"], "Stage 7 closure"),
+        stage6_verification_id=_text(stage7["verification_id"], "Stage 7 verification"),
+        stage6_manifest_sha256=_text(stage7["manifest_sha256"], "Stage 7 manifest"),
+    )
+    readiness = _mapping(payload["readiness"], "Stage 8 readiness")
+    readiness_semantics = _mapping(payload["readiness_semantics"], "Stage 8 readiness semantics")
+    if readiness_semantics != _v3_readiness_projection(readiness):
+        raise ValueError("Stage 8 readiness semantic projection changed")
+    selected_input = _mapping(stage7["selected_input"], "Stage 7 selected input")
+    selected_identity = dict(selected_input)
+    if (
+        set(selected_identity)
+        != {
+            "contract",
+            "parent_dataset_sha256",
+            "requested_instrument_ids",
+            "interval_start",
+            "interval_end",
+            "row_count_upper_bound",
+            "semantic_id",
+        }
+        or selected_identity["contract"] != "qtrad-stage7-selected-input-semantic-v1"
+    ):
+        raise ValueError("Stage 7 selected-input semantic schema is unsupported")
+    selected_semantic_id = _text(
+        selected_identity.pop("semantic_id", None), "Stage 7 semantic selection"
+    )
+    if selected_semantic_id != _sha(selected_identity):
+        raise ValueError("Stage 7 selected-input semantic identity changed")
+    if selected_identity.get("parent_dataset_sha256") != dataset.dataset_sha256:
+        raise ValueError("Stage 7 selected input dataset differs from its authority")
+    if stage7.get("selected_input_semantic_id") != selected_semantic_id:
+        raise ValueError("Stage 7 selected-input semantic identity is inconsistent")
+    children = cast(Mapping[str, JsonValue], children)
+    lineage = cast(dict[str, JsonValue], _mapping(payload["child_lineage"], "Stage 8 lineage"))
+    kinds = _supported_child_kinds(children)
+    child_ids = _child_reference_dataset_ids(children, child_kinds=kinds)
+    if verify_children:
+        _verify_children_blind(
+            manifest_path.parent,
+            children,
+            child_ids,
+            lineage,
+            decode_rows=False,
+            child_kinds=kinds,
+        )
+    return _AuthenticatedFoundationV3(
+        manifest_path,
+        manifest_bytes,
+        document,
+        payload,
+        configuration,
+        dataset,
+        stage7,
+        children,
+        lineage,
+        foundation_id,
+        closure_id,
+    )
+
+
+def _authenticate_ibkr_foundation_v3(path: Path, *, receipt: Path) -> dict[str, JsonValue]:
+    authenticated = _read_v3_manifest(path)
+    receipt_path = _regular_file(receipt, "Stage 8 verification receipt")
+    receipt_bytes = _bounded_bytes(
+        receipt_path, _MAX_MANIFEST_BYTES, "Stage 8 verification receipt"
+    )
+    document = _mapping(_parse_json(receipt_bytes, "Stage 8 verification receipt"))
+    expected = _v3_receipt(authenticated)
+    if document != expected or receipt_bytes != _json_bytes(document) + b"\n":
+        raise ValueError("Stage 8 verification receipt does not match foundation")
+    return {
+        "contract": "qtrad-stage8-foundation-authentication-v2",
+        "schema_version": _FOUNDATION_V3_SCHEMA_VERSION,
+        "foundation": str(authenticated.path),
+        "foundation_id": authenticated.foundation_id,
+        "closure_id": authenticated.closure_id,
+        "verification_id": _text(document["verification_id"], "Stage 8 verification"),
+        "verification_receipt": str(receipt.resolve()),
+        "readiness": cast(JsonValue, authenticated.payload["readiness"]),
+        "evidence_class": EvidenceClass.IMPLEMENTATION.value,
+    }
+
+
+def _write_children_v3(
+    child_root: Path,
+    bundle_root: Path,
+    build: IBKRFoundationBuild,
+    lineage: Mapping[str, JsonValue],
+) -> dict[str, JsonValue]:
+    rows = _child_rows(build)
+    ids = _child_dataset_ids(build)
+    return {
+        kind: _write_child_parts(child_root, bundle_root, kind, rows[kind], ids[kind], lineage)
+        for kind in _CHILD_KINDS
+    }
+
+
+def _write_ibkr_foundation_v3(
+    output: Path,
+    *,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    configuration: FoundationConfig,
+    workers: int,
+    progress_callback: _ProgressCallback | None,
+) -> IBKRFoundationBuild:
+    destination = _output_path(output)
+    if destination.exists():
+        raise FileExistsError(f"IBKR foundation output already exists: {destination}")
+    if not destination.parent.is_dir():
+        raise FileNotFoundError(
+            f"IBKR foundation output parent does not exist: {destination.parent}"
+        )
+    source = _stage7_source_v3(stage7_manifest, stage7_receipt, configuration)
+    metadata = _stage7_metadata_v3(source, stage7_manifest)
+    lineage = _v3_lineage(source, metadata)
+    build = build_ibkr_foundation(source, configuration)
+    child_root = destination.parent / f"{destination.name}{_CHILD_DIRECTORY_SUFFIX}"
+    child_root.mkdir()
+    try:
+        children = _write_children_v3(child_root, destination.parent, build, lineage)
+        _document, encoded = _v3_manifest(build, source, children, metadata, lineage)
+        _preflight_child_tree(destination.parent, children, _CHILD_KINDS)
+        _write_create_only(destination, encoded)
+    except BaseException:
+        shutil.rmtree(child_root, ignore_errors=True)
+        raise
+    if progress_callback is not None:
+        progress_callback(
+            {"contract": "qtrad-stage8-progress-v2", "phase": "publication", "event": "completed"}
+        )
+    return build
+
+
+def _verify_ibkr_foundation_v3(
+    path: Path,
+    *,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    receipt_output: Path,
+    workers: int,
+) -> IBKRFoundationBuild:
+    authenticated = _read_v3_manifest(path, verify_children=False)
+    _preflight_child_tree(authenticated.path.parent, authenticated.children, _CHILD_KINDS)
+    receipt = _v3_receipt_output(receipt_output, authenticated.path)
+    source = _stage7_source_v3(stage7_manifest, stage7_receipt, authenticated.configuration)
+    replay = build_ibkr_foundation(source, authenticated.configuration)
+    metadata = _stage7_metadata_v3(source, stage7_manifest)
+    lineage = _v3_lineage(source, metadata)
+    if (
+        _v3_payload(replay, source, authenticated.children, metadata, lineage)
+        != authenticated.payload
+    ):
+        raise ValueError("Stage 8 metadata differs from independent replay")
+    _verify_children(
+        authenticated.path.parent,
+        authenticated.children,
+        _child_rows(replay),
+        _child_dataset_ids(replay),
+        lineage,
+        child_kinds=_supported_child_kinds(authenticated.children),
+    )
+    _write_create_only(receipt, _json_bytes(_v3_receipt(authenticated)) + b"\n")
+    return replay
+
+
+def _preflight_ibkr_foundation_v3(
+    output: Path,
+    *,
+    stage7_manifest: Path,
+    stage7_receipt: Path,
+    configuration: FoundationConfig,
+) -> dict[str, JsonValue]:
+    source = _stage7_source_v3(stage7_manifest, stage7_receipt, configuration)
+    metadata = _stage7_metadata_v3(source, stage7_manifest)
+    return {
+        "contract": "qtrad-stage8-foundation-preflight-v2",
+        "source_class": "IBKR_HISTORICAL_RESEARCH",
+        "output": str(_output_path(output)),
+        "stage7_dataset_sha256": metadata["dataset_sha256"],
+        "stage7_verification_id": metadata["verification_id"],
+        "configuration_id": configuration.configuration_id,
+        "selected_input_sha256": metadata["selected_input_sha256"],
+    }
 
 
 __all__ = [

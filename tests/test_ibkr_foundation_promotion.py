@@ -25,12 +25,17 @@ from qtrad.domain.ibkr_results import IbkrHistoricalRequestResult
 from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
-from qtrad.runtime.ibkr_foundation import verify_ibkr_foundation, write_ibkr_foundation
-from qtrad.runtime.ibkr_foundation_promotion import (
-    authenticate_ibkr_foundation_promotion,
+from qtrad.runtime.ibkr_foundation import (
+    _verify_ibkr_foundation_migration_v2 as verify_ibkr_foundation,
+)
+from qtrad.runtime.ibkr_foundation import (
+    _write_ibkr_foundation_migration_v2 as write_ibkr_foundation,
 )
 from qtrad.runtime.ibkr_foundation_promotion import (
-    create_ibkr_foundation_confirmatory_promotion as _create_promotion,
+    _authenticate_ibkr_foundation_promotion_migration_v2 as authenticate_ibkr_foundation_promotion,
+)
+from qtrad.runtime.ibkr_foundation_promotion import (
+    _create_ibkr_foundation_confirmatory_promotion_migration_v2 as _create_promotion,
 )
 from qtrad.runtime.ibkr_results import IbkrHistoricalResultStream
 from qtrad.runtime.provider_history_v2 import (
@@ -351,7 +356,7 @@ def test_promotion_fails_closed_before_replay_and_rejects_nonqualifying(
         "qtrad.runtime.r2_verification.runtime_identities",
         lambda: (_ for _ in ()).throw(ValueError("dirty source tree")),
     )
-    monkeypatch.setattr(promotion_runtime, "verify_ibkr_foundation", replay_reached)
+    monkeypatch.setattr(promotion_runtime, "_verify_ibkr_foundation_migration_v2", replay_reached)
     with pytest.raises(ValueError, match="dirty source tree"):
         create_ibkr_foundation_confirmatory_promotion(
             bundle,
