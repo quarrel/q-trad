@@ -84,6 +84,12 @@ def _semantic_id(payload: Mapping[str, object], identity_key: str) -> str:
     contract = payload.get("contract")
     if contract == "qtrad-r2-final-fit-v1":
         semantic.pop("runtime_identities", None)
+        preprocessing = semantic.get("preprocessing")
+        if not isinstance(preprocessing, Mapping):
+            raise ValueError("final fit preprocessing evidence must be an object")
+        semantic["preprocessing"] = {
+            key: value for key, value in preprocessing.items() if key != "foundation_bundle_id"
+        }
     elif contract == "qtrad-r2-holdout-forecast-seal-v1":
         semantic.pop("runtime_identities", None)
         semantic.pop("prepared_at", None)
