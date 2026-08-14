@@ -405,7 +405,9 @@ def test_result_builder_and_file_verifier_replay_a_create_only_closure(tmp_path:
     assert manifest_document["contract"] == "qtrad-ibkr-historical-result-v3"
     assert manifest_document["schema_version"] == 3
     assert "aggregate_sha256" not in manifest_document
-    verified = verify_ibkr_historical_result(manifest)
+    receipt = tmp_path / "result-receipt.json"
+    verified = verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    assert receipt.is_file()
 
     bar_result = next(
         item
@@ -454,13 +456,19 @@ def test_result_verifier_rejects_missing_and_orphan_children(tmp_path: Path) -> 
     child = next(output.joinpath("requests").glob("*.json"))
     child.unlink()
     with pytest.raises(ValueError, match=r"child closure|missing"):
-        verify_ibkr_historical_result(manifest)
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "missing-receipt.json",
+        )
 
     output = tmp_path / "orphan"
     manifest = write_ibkr_historical_result(output, artifact)
     output.joinpath("requests", "orphan.json").write_text("{}")
     with pytest.raises(ValueError, match=r"child closure|unexpected"):
-        verify_ibkr_historical_result(manifest)
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "orphan-receipt.json",
+        )
 
 
 def test_result_builder_classifies_conflicting_bar_duplicate() -> None:
@@ -639,10 +647,12 @@ def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path)
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
     output = tmp_path / "staged-result"
-
     manifest = publish_ibkr_historical_result(output, artifact)
 
-    assert verify_ibkr_historical_result(manifest).aggregate.aggregate_sha256 == (
+    assert verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "staged-result-receipt.json",
+    ).aggregate.aggregate_sha256 == (
         artifact.aggregate.aggregate_sha256
     )
     with pytest.raises(FileExistsError):
@@ -675,7 +685,10 @@ def test_result_publisher_allows_realistic_large_request_child(tmp_path: Path) -
     assert len(child_bytes) <= MAX_IBKR_RESULT_REQUEST_BYTES
 
     manifest = publish_ibkr_historical_result(tmp_path / "large-child", large_artifact)
-    verified = verify_ibkr_historical_result(manifest)
+    verified = verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "large-receipt.json",
+    )
     assert verified.aggregate.aggregate_sha256 == aggregate.aggregate_sha256
 
 
@@ -687,7 +700,15 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
         ["historical", "ibkr", "result-build", "--plan", "plan.json", "--output", "result"]
     )
     verify_args = parser.parse_args(
-        ["historical", "ibkr", "verify", "--result", "result/manifest.json"]
+        [
+            "historical",
+            "ibkr",
+            "verify",
+            "--result",
+            "result/manifest.json",
+            "--receipt-output",
+            "result-verification.json",
+        ]
     )
 
     assert build_args.historical_ibkr_command == "result-build"
@@ -695,6 +716,55 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
     assert build_args.output == Path("result")
     assert verify_args.historical_ibkr_command == "verify"
     assert verify_args.result == Path("result/manifest.json")
+    assert verify_args.receipt_output == Path("result-verification.json")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["historical", "ibkr", "verify", "--result", "result/manifest.json"])
+
+def test_historical_result_verify_cli_reports_only_after_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qtrad.__main__ import _verify_ibkr_historical_result
+
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+
+    _verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    report = json.loads(capsys.readouterr().out)
+    assert report["verified"] is True
+    assert report["receipt"] == str(receipt)
+    assert receipt.is_file()
+
+
+def test_result_verification_requires_durable_receipt_output(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+
+    with pytest.raises(TypeError, match="receipt_output"):
+        verify_ibkr_historical_result(manifest)  # type: ignore[call-arg]
+
+
+def test_result_verification_cannot_succeed_when_receipt_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+
+    original_write = ibkr_runtime._write_create_only
+
+    def fail_receipt_write(path: Path, payload: bytes, field: str) -> None:
+        if field == "IBKR result verification receipt":
+            raise OSError("receipt persistence failed")
+        original_write(path, payload, field)
+
+    monkeypatch.setattr(ibkr_runtime, "_write_create_only", fail_receipt_write)
+    with pytest.raises(OSError, match="receipt persistence failed"):
+        verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    assert not receipt.exists()
 
 
 def test_result_builder_and_file_verifier_accepts_invalidated_restart(tmp_path: Path) -> None:
@@ -754,7 +824,10 @@ def test_result_builder_and_file_verifier_accepts_invalidated_restart(tmp_path: 
 
     artifact = build_ibkr_historical_result_artifact(plan, restarted)
     manifest = write_ibkr_historical_result(tmp_path / "restart", artifact)
-    verified = verify_ibkr_historical_result(manifest)
+    verified = verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "restart-receipt.json",
+    )
     bar_result = next(
         item
         for item in verified.request_results

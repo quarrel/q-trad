@@ -373,15 +373,11 @@ def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStre
 def verify_ibkr_historical_result(
     path: Path,
     *,
-    receipt_output: Path | None = None,
+    receipt_output: Path,
 ) -> IbkrHistoricalResultArtifact:
-    """Independently replay Stage 6 once and optionally persist its receipt."""
+    """Independently replay Stage 6 once and persist its receipt."""
     stream = verify_ibkr_historical_result_stream(path)
-    receipt_path = (
-        _preflight_verification_receipt(path, receipt_output)
-        if receipt_output is not None
-        else None
-    )
+    receipt_path = _preflight_verification_receipt(path, receipt_output)
     results = tuple(stream.iter_request_results())
     replay_ibkr_historical_aggregate_result(
         stream.plan,
@@ -395,13 +391,12 @@ def verify_ibkr_historical_result(
         request_results=results,
         aggregate=stream.aggregate,
     )
-    if receipt_path is not None:
-        receipt = _build_verification_receipt(path, stream.aggregate, stream.plan)
-        _write_create_only(
-            receipt_path,
-            canonical_json_bytes(receipt.as_json_value()),
-            "IBKR result verification receipt",
-        )
+    receipt = _build_verification_receipt(path, stream.aggregate, stream.plan)
+    _write_create_only(
+        receipt_path,
+        canonical_json_bytes(receipt.as_json_value()),
+        "IBKR result verification receipt",
+    )
     return artifact
 
 

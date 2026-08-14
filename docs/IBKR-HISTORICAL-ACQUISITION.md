@@ -646,7 +646,8 @@ qtrad historical ibkr result-build \
   --output <directory>
 
 qtrad historical ibkr verify \
-  --result <manifest>
+  --result <manifest> \
+  --receipt-output <new-verification-receipt.json>
 ```
 
 ### Exit criteria
@@ -817,7 +818,9 @@ qtrad historical ibkr plan-verify --plan <path>
 qtrad historical ibkr register --plan <path> --confirm-plan-hash <sha256>
 qtrad historical ibkr execute --plan-id <sha256> --request-profile <path>
 qtrad historical ibkr result-build --plan <path> --output <directory>
-qtrad historical ibkr verify --result <manifest>
+qtrad historical ibkr verify \
+  --result <manifest> \
+  --receipt-output <new-verification-receipt.json>
 ```
 
 Execution policy:

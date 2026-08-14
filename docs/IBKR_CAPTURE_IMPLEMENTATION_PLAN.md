@@ -443,7 +443,7 @@ qtrad instruments review --provider ibkr --environment paper
 qtrad historical ibkr plan
 qtrad historical ibkr register
 qtrad historical ibkr execute
-qtrad historical ibkr verify
+qtrad historical ibkr verify --result <manifest> --receipt-output <new-verification-receipt.json>
 qtrad research observations verify-provider-history
 qtrad research observations authenticate-provider-history
 qtrad research foundation build

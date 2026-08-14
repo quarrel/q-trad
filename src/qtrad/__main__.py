@@ -871,7 +871,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="independently verify an IBKR historical result closure from files"
     )
     historical_result_verify.add_argument("--result", type=Path, required=True)
-    historical_result_verify.add_argument("--receipt-output", type=Path)
+    historical_result_verify.add_argument("--receipt-output", type=Path, required=True)
 
     promote = instrument_sub.add_parser(
         "promote", help="verify explicit reviewed selections and emit an undeployed universe"
@@ -5147,7 +5147,7 @@ async def _build_ibkr_historical_result(
 def _verify_ibkr_historical_result(
     result_path: Path,
     *,
-    receipt_output: Path | None,
+    receipt_output: Path,
 ) -> None:
     artifact = verify_ibkr_historical_result(result_path, receipt_output=receipt_output)
     print(
@@ -5156,6 +5156,7 @@ def _verify_ibkr_historical_result(
                 "closure_id": artifact.aggregate.closure_id,
                 "manifest": str(result_path),
                 "plan_sha256": artifact.plan.plan_sha256,
+                "receipt": str(receipt_output),
                 "request_count": len(artifact.request_results),
                 "result_id": artifact.aggregate.result_id,
                 "verified": True,
