@@ -1277,7 +1277,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     config = experiment()
     foundation = _replay_foundation(config)
     verify_bundle = AsyncMock(return_value=foundation)
-    monkeypatch.setattr(cli, "verify_foundation_bundle", verify_bundle)
+    monkeypatch.setattr(cli, "_verify_foundation_bundle_runtime", verify_bundle)
     monkeypatch.setattr(
         cli,
         "authenticate_foundation_bundle",

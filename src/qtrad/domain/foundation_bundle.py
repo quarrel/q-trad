@@ -79,6 +79,8 @@ class FoundationVerificationReceipt:
     foundation_id: str
     closure_id: str
     bundle_manifest_sha256: str
+    artifact_contract: str
+    artifact_schema_version: int
     child_semantic_ids: Mapping[str, str]
     verifier_contract: str
     verifier_version: int
@@ -92,6 +94,11 @@ class FoundationVerificationReceipt:
         _require_sha256(self.foundation_id, "foundation verification foundation ID")
         _require_sha256(self.closure_id, "foundation verification closure ID")
         _require_sha256(self.bundle_manifest_sha256, "foundation bundle manifest hash")
+        if (
+            self.artifact_contract != FOUNDATION_BUNDLE_CONTRACT
+            or self.artifact_schema_version != FOUNDATION_BUNDLE_SCHEMA_VERSION
+        ):
+            raise ValueError("foundation verification artefact contract is unsupported")
         _require_sha256(self.verifier_identity, "foundation verifier identity")
         if not self.verifier_contract or self.verifier_version <= 0:
             raise ValueError("foundation verifier contract is invalid")
@@ -122,6 +129,8 @@ class FoundationVerificationReceipt:
         foundation_id: str,
         closure_id: str,
         bundle_manifest_sha256: str,
+        artifact_contract: str,
+        artifact_schema_version: int,
         child_semantic_ids: Mapping[str, str],
         verifier_contract: str,
         verifier_version: int,
@@ -134,6 +143,8 @@ class FoundationVerificationReceipt:
             "foundation_id": foundation_id,
             "closure_id": closure_id,
             "bundle_manifest_sha256": bundle_manifest_sha256,
+            "artifact_contract": artifact_contract,
+            "artifact_schema_version": artifact_schema_version,
             "child_semantic_ids": dict(child_semantic_ids),
             "verifier_contract": verifier_contract,
             "verifier_version": verifier_version,
@@ -144,6 +155,8 @@ class FoundationVerificationReceipt:
             foundation_id=foundation_id,
             closure_id=closure_id,
             bundle_manifest_sha256=bundle_manifest_sha256,
+            artifact_contract=artifact_contract,
+            artifact_schema_version=artifact_schema_version,
             child_semantic_ids=dict(child_semantic_ids),
             verifier_contract=verifier_contract,
             verifier_version=verifier_version,
@@ -159,6 +172,8 @@ class FoundationVerificationReceipt:
             "foundation_id": self.foundation_id,
             "closure_id": self.closure_id,
             "bundle_manifest_sha256": self.bundle_manifest_sha256,
+            "artifact_contract": self.artifact_contract,
+            "artifact_schema_version": self.artifact_schema_version,
             "child_semantic_ids": dict(self.child_semantic_ids),
             "verifier_contract": self.verifier_contract,
             "verifier_version": self.verifier_version,

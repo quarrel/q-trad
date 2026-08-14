@@ -30,6 +30,7 @@ from qtrad.runtime.foundation_bundle import (
     authenticate_foundation_bundle,
     load_foundation_bundle,
     load_foundation_config,
+    load_foundation_verification_receipt,
     persist_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
@@ -215,7 +216,12 @@ async def test_bundle_is_thin_and_children_verify_without_model_code(tmp_path: P
     configuration_path.write_text(json.dumps(configuration.as_json()), encoding="utf-8")
 
     loaded = load_foundation_bundle(path)
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     loaded_configuration = load_foundation_config(configuration_path)
     payload = json.loads(path.read_text(encoding="utf-8"))
 
@@ -269,7 +275,12 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         "folds",
         "forecasts",
     }
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     source = R2HoldoutTargetSource.create_from_target_dataset(
         verified.targets,
         holdout_range=configuration.holdout_range,
@@ -283,11 +294,13 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         availability_evidence_id=bundle.availability.dataset_id,
     )
     original_read_rows = ParquetFoundationArtifactStore.read_rows
+    read_counts: dict[str, int] = {}
 
     async def guarded_read_rows(
         self: ParquetFoundationArtifactStore, manifest_id: str
     ) -> tuple[dict[str, JsonValue], ...]:
         manifest = await self.read_manifest(manifest_id)
+        read_counts[manifest.kind] = read_counts.get(manifest.kind, 0) + 1
         assert manifest.kind not in {
             "panel",
             "targets",
@@ -310,6 +323,7 @@ async def test_outcome_blind_verifier_hash_authenticates_outcome_children(
         holdout_target_source=source,
         receipt=verified.receipt,
     )
+    assert all(count == 1 for count in read_counts.values())
     assert blind.targets.rows == source.pre_holdout_target_dataset.rows
     assert blind.g2_feature_source is not None
     assert all(
@@ -379,7 +393,12 @@ async def test_tampering_with_a_child_invalidates_the_bundle(tmp_path: Path) -> 
     child_path.write_bytes(child_path.read_bytes() + b"tampered")
 
     with pytest.raises(ValueError, match="file hash"):
-        await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+        await verify_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            receipt_output=tmp_path / "foundation-receipt.json",
+        )
 
 
 @pytest.mark.asyncio
@@ -387,7 +406,12 @@ async def test_persist_does_not_invoke_independent_verifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle, path, clock, configuration = await _bundle(tmp_path)
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     changed_row = replace(verified.panel.rows[0], close=Decimal("999"))
     changed_panel = PanelDataset.create(
         (changed_row, *verified.panel.rows[1:]),
@@ -488,7 +512,12 @@ async def test_authentication_is_lazy_and_consumed_child_tamper_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     bundle, path, clock, _configuration = await _bundle(tmp_path)
-    verified = await verify_foundation_bundle(root=tmp_path, bundle_path=path, clock=clock)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
     assert verified.receipt is not None
 
     def unexpected_replay(*_args: object, **_kwargs: object) -> object:
@@ -721,12 +750,19 @@ async def test_foundation_verification_is_wired_to_the_cli(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     bundle, path, clock, _ = await _bundle(tmp_path)
-
+    receipt_path = tmp_path / "foundation-receipt.json"
     parsed = cli.build_parser().parse_args(
-        ["research", "foundation", "verify", "--bundle", str(path)]
+        [
+            "research",
+            "foundation",
+            "verify",
+            "--bundle",
+            str(path),
+            "--receipt-output",
+            str(receipt_path),
+        ]
     )
     assert parsed.research_command == "foundation"
-    receipt_path = tmp_path / "foundation-receipt.json"
     await cli._verify_foundation_bundle(
         Settings(research_root=tmp_path),
         clock,
@@ -737,3 +773,131 @@ async def test_foundation_verification_is_wired_to_the_cli(
     assert output["foundation_id"] == bundle.foundation_id
     assert output["children"]["forecasts"]["rows"] == bundle.forecasts.row_count
     assert receipt_path.is_file()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mutation", ("missing", "extra", "substituted"))
+async def test_projection_set_must_match_bundle_summary_and_supported_set(
+    tmp_path: Path, mutation: str
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "original-receipt.json",
+    )
+    build_summary = dict(bundle.build_summary)
+    projection_payload = dict(
+        cast(Mapping[str, JsonValue], build_summary["outcome_blind_projections"])
+    )
+    if mutation == "missing":
+        projection_payload.pop("panel")
+    elif mutation == "extra":
+        projection_payload["rogue"] = {}
+    else:
+        substituted = dict(cast(Mapping[str, JsonValue], projection_payload["panel"]))
+        substituted["dataset_id"] = "f" * 64
+        projection_payload["panel"] = substituted
+    build_summary["outcome_blind_projections"] = projection_payload
+    candidate = FoundationBundle.create(
+        configuration=bundle.configuration,
+        observations=bundle.observations,
+        availability=bundle.availability,
+        panel=bundle.panel,
+        targets=bundle.targets,
+        folds=bundle.folds,
+        forecasts=bundle.forecasts,
+        ordered_instruments=bundle.ordered_instruments,
+        range_start=bundle.range_start,
+        range_end=bundle.range_end,
+        coverage=bundle.coverage,
+        build_summary=build_summary,
+        market_data_source_class=bundle.market_data_source_class,
+        projections=bundle.projections,
+    )
+    candidate_path = tmp_path / f"projection-{mutation}.json"
+    foundation_runtime.write_foundation_bundle(candidate_path, candidate)
+    receipt_output = tmp_path / f"projection-{mutation}-receipt.json"
+    with pytest.raises(ValueError, match="projection"):
+        await verify_foundation_bundle(
+            root=tmp_path,
+            bundle_path=candidate_path,
+            clock=clock,
+            receipt_output=receipt_output,
+        )
+    assert not receipt_output.exists()
+    with pytest.raises(ValueError, match="projection"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=candidate_path,
+            clock=clock,
+            receipt=verified.receipt,
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("child_name", ("targets", "observations"))
+async def test_authentication_rejects_symlink_consumed_child(
+    tmp_path: Path, child_name: str
+) -> None:
+    bundle, path, clock, _configuration = await _bundle(tmp_path)
+    verified = await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=tmp_path / "foundation-receipt.json",
+    )
+    if child_name == "observations":
+        observation_manifest = await ParquetObservationStore(tmp_path, clock).read_manifest(
+            bundle.observations.manifest_id
+        )
+        child_path = tmp_path / observation_manifest.files[0]
+    else:
+        child_manifest = await ParquetFoundationArtifactStore(tmp_path, clock).read_manifest(
+            bundle.targets.manifest_id
+        )
+        child_path = tmp_path / child_manifest.file
+    outside = tmp_path.parent / f"outside-{child_name}.parquet"
+    outside.write_bytes(child_path.read_bytes())
+    child_path.unlink()
+    child_path.symlink_to(outside)
+    with pytest.raises(ValueError, match="symlink"):
+        await authenticate_foundation_bundle(
+            root=tmp_path,
+            bundle_path=path,
+            clock=clock,
+            receipt=verified.receipt,
+            consumed_children=(child_name,),
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (("artifact_contract", "wrong-foundation-contract"), ("artifact_schema_version", 99)),
+)
+async def test_foundation_receipt_binds_artifact_contract_and_schema(
+    tmp_path: Path, field: str, value: object
+) -> None:
+    _bundle_value, path, clock, _configuration = await _bundle(tmp_path)
+    receipt_path = tmp_path / "foundation-receipt.json"
+    await verify_foundation_bundle(
+        root=tmp_path,
+        bundle_path=path,
+        clock=clock,
+        receipt_output=receipt_path,
+    )
+    payload = json.loads(receipt_path.read_text(encoding="utf-8"))
+    payload[field] = value
+    mutated = tmp_path / f"mutated-{field}.json"
+    mutated.write_text(json.dumps(payload, sort_keys=True, indent=2) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="artefact contract"):
+        load_foundation_verification_receipt(mutated)
+
+
+def test_foundation_verify_requires_receipt_output() -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(
+            ["research", "foundation", "verify", "--bundle", "foundation.json"]
+        )

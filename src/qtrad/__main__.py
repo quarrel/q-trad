@@ -129,6 +129,9 @@ from qtrad.runtime.backfill_plan import (
 from qtrad.runtime.capture_feed import HttpCaptureFeedClient, load_capture_feed_page
 from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.foundation_bundle import (
+    _verify_foundation_bundle as _verify_foundation_bundle_runtime,
+)
+from qtrad.runtime.foundation_bundle import (
     authenticate_foundation_bundle,
     load_foundation_config,
     persist_foundation_bundle,
@@ -1008,7 +1011,7 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="verify every foundation child and cross-reference"
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
-    foundation_verify.add_argument("--receipt-output", type=Path)
+    foundation_verify.add_argument("--receipt-output", type=Path, required=True)
     foundation_verify.add_argument("--provider-history-receipt", type=Path)
     foundation_verify.add_argument(
         "--replay-checkpoint-root",
@@ -2704,7 +2707,7 @@ async def _load_r2_foundation_inputs(
             clock=clock,
             receipt=foundation_receipt_path,
         )
-        return await verify_foundation_bundle(
+        return await _verify_foundation_bundle_runtime(
             root=settings.research_root,
             bundle_path=foundation_bundle_path,
             clock=clock,
@@ -3329,7 +3332,7 @@ async def _verify_foundation_bundle(
     clock: Clock,
     bundle_path: Path,
     *,
-    receipt_output: Path | None = None,
+    receipt_output: Path,
     replay_checkpoint_root: Path | None = None,
     provider_history_receipt: Path | None = None,
 ) -> None:
