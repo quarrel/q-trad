@@ -553,8 +553,9 @@ def test_provider_history_receipt_is_create_only_and_authentication_is_cheap(
         source_manifest=result_manifest,
         source_artifact=artifact,
         dataset=dataset,
-        verification_receipt=receipt,
     )
+    assert verification_count == 0
+    verify_provider_history(manifest, receipt_output=receipt)
     assert verification_count == 1
 
     def reject_deep_work(*_args: object, **_kwargs: object) -> None:
@@ -598,7 +599,12 @@ def test_provider_history_receipt_write_failure_leaves_published_closure(
         artifact,
         availability_delay=timedelta(minutes=5),
     )
-
+    manifest = publish_provider_history(
+        tmp_path / "provider",
+        source_manifest=result_manifest,
+        source_artifact=artifact,
+        dataset=dataset,
+    )
     receipt = tmp_path / "provider-verification-receipt.json"
     original_write = provider_history_runtime._write_create_only
 
@@ -609,14 +615,140 @@ def test_provider_history_receipt_write_failure_leaves_published_closure(
 
     monkeypatch.setattr(provider_history_runtime, "_write_create_only", reject_receipt_write)
     with pytest.raises(OSError, match="receipt write failed"):
+        verify_provider_history(manifest, receipt_output=receipt)
+    assert manifest.is_file()
+    assert not receipt.exists()
+
+
+def test_provider_history_staging_failure_publishes_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    dataset = build_provider_history_dataset(
+        artifact,
+        availability_delay=timedelta(minutes=5),
+    )
+
+    def reject_staging(_path: Path) -> None:
+        raise ValueError("staging closure failed")
+
+    monkeypatch.setattr(
+        provider_history_runtime,
+        "verify_provider_history_file_only",
+        reject_staging,
+    )
+    with pytest.raises(ValueError, match="staging closure failed"):
         publish_provider_history(
             tmp_path / "provider",
             source_manifest=result_manifest,
             source_artifact=artifact,
             dataset=dataset,
-            verification_receipt=receipt,
         )
+    assert not (tmp_path / "provider").exists()
+
+
+def test_provider_history_cli_reports_publication_then_single_verification(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    original_verify = provider_history_runtime._verify_provider_history
+    verification_count = 0
+
+    def count_verification(path: Path):
+        nonlocal verification_count
+        verification_count += 1
+        return original_verify(path)
+
+    monkeypatch.setattr(provider_history_runtime, "_verify_provider_history", count_verification)
+    qtrad_main._build_provider_history(
+        historical_result_path=result_manifest,
+        availability_delay=timedelta(minutes=5),
+        output_path=tmp_path / "provider",
+        verification_receipt_path=tmp_path / "provider-verification-receipt.json",
+    )
+
+    statuses = [json.loads(line)["status"] for line in capsys.readouterr().out.splitlines()]
+    assert statuses == ["PUBLISHED_UNVERIFIED", "VERIFIED"]
+    assert verification_count == 1
+
+
+def test_provider_history_cli_rejects_receipt_inside_stage6_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    source_root = result_manifest.parent
+    receipt = source_root / "stage7-verification-receipt.json"
+    original_tree = {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+
+    def fail_if_transformation_starts(_path: Path) -> None:
+        raise AssertionError("Stage 7 transformation reached")
+
+    monkeypatch.setattr(
+        qtrad_main,
+        "verify_ibkr_historical_result_stream",
+        fail_if_transformation_starts,
+    )
+    with pytest.raises(ValueError, match="inside an authenticated closure"):
+        qtrad_main._build_provider_history(
+            historical_result_path=result_manifest,
+            availability_delay=timedelta(minutes=5),
+            output_path=tmp_path / "provider",
+            verification_receipt_path=receipt,
+        )
+
+    assert not (tmp_path / "provider").exists()
+    assert not receipt.exists()
+    assert {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    } == original_tree
+
+
+def test_provider_history_verification_failure_retains_published_output(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "provider-verification-receipt.json"
+
+    def reject_verification(_path: Path) -> None:
+        raise ValueError("semantic verification failed")
+
+    monkeypatch.setattr(
+        provider_history_runtime,
+        "_verify_provider_history",
+        reject_verification,
+    )
+    with pytest.raises(ValueError, match="semantic verification failed"):
+        qtrad_main._build_provider_history(
+            historical_result_path=result_manifest,
+            availability_delay=timedelta(minutes=5),
+            output_path=tmp_path / "provider",
+            verification_receipt_path=receipt,
+        )
+
+    output = json.loads(capsys.readouterr().out)
+    assert output["status"] == "PUBLISHED_UNVERIFIED"
     assert (tmp_path / "provider" / "manifest.json").is_file()
+    assert not receipt.exists()
 
 
 def test_provider_history_cli_round_trip_arguments() -> None:
