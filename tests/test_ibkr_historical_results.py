@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 from collections.abc import Sequence
 from dataclasses import fields, replace
@@ -652,9 +653,7 @@ def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path)
     assert verify_ibkr_historical_result(
         manifest,
         receipt_output=tmp_path / "staged-result-receipt.json",
-    ).aggregate.aggregate_sha256 == (
-        artifact.aggregate.aggregate_sha256
-    )
+    ).aggregate.aggregate_sha256 == (artifact.aggregate.aggregate_sha256)
     with pytest.raises(FileExistsError):
         publish_ibkr_historical_result(output, artifact)
 
@@ -720,6 +719,7 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["historical", "ibkr", "verify", "--result", "result/manifest.json"])
 
+
 def test_historical_result_verify_cli_reports_only_after_receipt(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -737,13 +737,12 @@ def test_historical_result_verify_cli_reports_only_after_receipt(
     assert receipt.is_file()
 
 
-def test_result_verification_requires_durable_receipt_output(tmp_path: Path) -> None:
-    plan, snapshot = _build_fixture()
-    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
-    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
-
-    with pytest.raises(TypeError, match="receipt_output"):
-        verify_ibkr_historical_result(manifest)  # type: ignore[call-arg]
+def test_result_verification_requires_durable_receipt_output() -> None:
+    receipt_parameter = inspect.signature(verify_ibkr_historical_result).parameters[
+        "receipt_output"
+    ]
+    assert receipt_parameter.default is inspect.Parameter.empty
+    assert receipt_parameter.kind is inspect.Parameter.KEYWORD_ONLY
 
 
 def test_result_verification_cannot_succeed_when_receipt_write_fails(
@@ -1365,7 +1364,6 @@ def test_aggregate_replay_rejects_duplicate_provider_request_identity_between_re
         )
 
 
-
 def test_result_identity_separates_semantic_and_closure_fields() -> None:
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
@@ -1459,9 +1457,7 @@ def test_result_publication_and_deep_verification_have_bounded_replay_work(
     receipt = tmp_path / "result-receipt.json"
     verify_ibkr_historical_result(manifest, receipt_output=receipt)
     assert len(replay_calls) == 1
-    assert sorted(child_reads) == sorted(
-        f"{item.request_sha256}.json" for item in plan.requests
-    )
+    assert sorted(child_reads) == sorted(f"{item.request_sha256}.json" for item in plan.requests)
 
 
 def test_result_receipt_authentication_skips_replay_and_child_reads(
@@ -1524,12 +1520,11 @@ def test_receipt_backed_stream_rejects_consumed_child_tamper(tmp_path: Path) -> 
     receipt = tmp_path / "result-receipt.json"
     verify_ibkr_historical_result(manifest, receipt_output=receipt)
 
-    child = (tmp_path / "result" / "requests" / f"{plan.requests[0].request_sha256}.json")
+    child = tmp_path / "result" / "requests" / f"{plan.requests[0].request_sha256}.json"
     child.write_bytes(child.read_bytes() + b" ")
     stream = authenticate_ibkr_historical_result(manifest, receipt=receipt)
     with pytest.raises(ValueError, match="child bytes digest"):
         next(stream.iter_request_results(request_order=(plan.requests[0],)))
-
 
 
 def _receipt_verification_id(document: dict[str, object]) -> str:

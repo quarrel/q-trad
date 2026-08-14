@@ -300,9 +300,7 @@ def build_ibkr_historical_aggregate_result(
         "contract": HISTORICAL_RESULT_CONTRACT,
         "schema_version": IbkrHistoricalAggregateResult.SCHEMA_VERSION,
         "plan_semantic_id": plan.plan_sha256,
-        "request_result_semantic_ids": [
-            item.semantic_sha256 for item in child_refs
-        ],
+        "request_result_semantic_ids": [item.semantic_sha256 for item in child_refs],
         "coverage_summary": coverage,
         "entitlement_summary": entitlement,
     }
@@ -409,8 +407,6 @@ def replay_ibkr_historical_request_result(
         raise ValueError("IBKR request-result retry history does not replay")
     if result.error_classification != derived.error_classification:
         raise ValueError("IBKR request-result error classification does not replay")
-
-
 
 
 def replay_ibkr_historical_aggregate_result(

@@ -30,9 +30,7 @@ from qtrad.domain.time import require_utc
 
 REQUEST_RESULT_CONTRACT = "qtrad-ibkr-historical-request-result-v2"
 HISTORICAL_RESULT_CONTRACT = "qtrad-ibkr-historical-result-v3"
-HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT = (
-    "qtrad-ibkr-historical-result-verification-v1"
-)
+HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT = "qtrad-ibkr-historical-result-verification-v1"
 RESULT_SCHEMA_VERSION = 3
 REQUEST_RESULT_SCHEMA_VERSION = 2
 MAX_IBKR_RESULT_BYTES = 8 * 1024 * 1024
@@ -465,9 +463,7 @@ class IbkrHistoricalAggregateResult:
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "plan_semantic_id": self.plan.semantic_sha256,
-            "request_result_semantic_ids": [
-                item.semantic_sha256 for item in self.request_results
-            ],
+            "request_result_semantic_ids": [item.semantic_sha256 for item in self.request_results],
             "coverage_summary": _json_object(self.coverage_summary, "coverage summary"),
             "entitlement_summary": _json_object(self.entitlement_summary, "entitlement summary"),
         }
@@ -526,9 +522,8 @@ class IbkrHistoricalResultVerificationReceipt:
             _require_sha256(value, field)
         if self.verifier_contract != self.CONTRACT or not self.verifier_version:
             raise ValueError("IBKR result receipt verifier contract is unsupported")
-        if (
-            not self.completed_checks
-            or len(set(self.completed_checks)) != len(self.completed_checks)
+        if not self.completed_checks or len(set(self.completed_checks)) != len(
+            self.completed_checks
         ):
             raise ValueError("IBKR result receipt completed checks are invalid")
         if self.verifier_identity != sha256_json(self.verifier_identity_payload()):

@@ -5137,7 +5137,7 @@ async def _build_ibkr_historical_result(
                 "publication_status": artifact.aggregate.publication_status,
                 "published": True,
                 "request_count": len(artifact.request_results),
-                "verified": False
+                "verified": False,
             },
             sort_keys=True,
         )

@@ -169,10 +169,7 @@ class IbkrHistoricalResultStream:
             order = tuple(request_order)
         request_ids = tuple(item.request_sha256 for item in order)
         expected_ids = {item.request_sha256 for item in self.plan.requests}
-        if (
-            len(request_ids) != len(set(request_ids))
-            or not set(request_ids).issubset(expected_ids)
-        ):
+        if len(request_ids) != len(set(request_ids)) or not set(request_ids).issubset(expected_ids):
             raise ValueError("IBKR result stream request order differs from the plan")
         for request in order:
             relative_path = f"{_REQUEST_DIRECTORY}/{request.request_sha256}.json"
@@ -420,9 +417,7 @@ def authenticate_ibkr_historical_result(
     if receipt_bytes != canonical_json_bytes(cast(dict[str, JsonValue], document)):
         raise ValueError("IBKR result verification receipt is not canonical")
     parsed = _verification_receipt_from_json(document)
-    expected_manifest_sha256 = sha256_bytes(
-        _read_bytes(manifest_path, "IBKR aggregate result")
-    )
+    expected_manifest_sha256 = sha256_bytes(_read_bytes(manifest_path, "IBKR aggregate result"))
     expected_verifier_identity = sha256_json(
         {
             "contract": HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
@@ -583,9 +578,7 @@ def _aggregate_from_json(value: Mapping[str, object]) -> IbkrHistoricalAggregate
     )
     if value["plan_semantic_id"] != plan_ref.semantic_sha256:
         raise ValueError("IBKR aggregate semantic plan identity differs from its reference")
-    if value["request_result_semantic_ids"] != [
-        item.semantic_sha256 for item in request_refs
-    ]:
+    if value["request_result_semantic_ids"] != [item.semantic_sha256 for item in request_refs]:
         raise ValueError("IBKR aggregate semantic request identities differ from its references")
     return IbkrHistoricalAggregateResult(
         plan=plan_ref,

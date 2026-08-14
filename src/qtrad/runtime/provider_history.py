@@ -308,8 +308,7 @@ def _source_reference(
         "provider-history source result",
     )
     if mapping["contract"] != HISTORICAL_RESULT_CONTRACT and not (
-        allow_legacy_stage6
-        and mapping["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+        allow_legacy_stage6 and mapping["contract"] == _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
     ):
         raise ValueError("provider-history source result contract is unsupported")
     _require_digest(mapping["semantic_sha256"], "source semantic identity")
