@@ -854,10 +854,12 @@ revocation.
 
 **Form:** research-input pull request.
 
-**Software status:** Provider-history construction now performs only bounded structural closure
-checks before atomic publication. The normal command then runs one independent semantic verification,
-persists its create-only receipt and proves cheap authentication. The retained Stage 7 dataset still needs
-the operational create-only receipt to finish successfully before existing Stage 8 variants adopt it.
+**Software status:** Provider-history construction performs only bounded structural closure checks before
+atomic publication. The normal command runs one independent semantic verification, persists its
+create-only receipt and proves cheap authentication. The retained v1 receipt is authenticated, and the
+completed create-only v2 migration preserves the 3,376,258-row semantic dataset while reducing 2,948
+daily physical parts to 120 monthly parts. Normal Stage 7/8 use is v2-only; retain v1 only to authenticate
+existing evidence until the general v1 writer/runtime removal follow-up lands.
 
 Commands:
 
@@ -932,9 +934,10 @@ audit or verifier revocation.
 **Form:** foundation integration pull request.
 
 **Software status:** The source-specific builder, corrected per-block coverage policy and readiness
-verifier are implemented on `main`. Existing rehearsal records and the compatible checkpoint are
-retained, but no Stage 8 foundation, reusable receipt, readiness disposition, confirmatory promotion
-or downstream R2 authority has been published.
+verifier are implemented on `main`. The retained foundation is `QUALIFYING_HISTORY_READY`; its
+authenticated ordinary receipt grants `IMPLEMENTATION_EVIDENCE_ONLY`, and its separately authenticated
+S8.4 promotion grants the confirmatory capability required before real IBKR F2. No real holdout result,
+effectiveness claim or downstream R2 result has been created.
 
 Extend foundation build and verification with mutually exclusive inputs:
 

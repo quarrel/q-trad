@@ -1,10 +1,8 @@
 # Agent implementation plan: source-specific `R2-IBKR-HISTORICAL` representative integration
 
-**Status:** Implemented; retained temporarily for the Stage 8 confirmatory-promotion handoff.
-**Retirement criteria:** Move this plan to `docs/archive/` after S8.4 has landed; the real-F2
-promotion-attestation gate is recorded in `docs/IBKR-HISTORICAL-ACQUISITION.md`,
-`docs/R2_IMPLEMENTATION_PLAN.md` and `docs/ARCHITECTURE.md`; current evidence claims are recorded in
-`PLAN.md` and `docs/STATUS.md`; and no active authority depends on this file.
+**Status:** Implemented and archived on 2026-08-14. The real-F2 promotion-attestation gate and current
+evidence state now live in `docs/IBKR-HISTORICAL-ACQUISITION.md`, `docs/R2_IMPLEMENTATION_PLAN.md`,
+`docs/ARCHITECTURE.md`, `PLAN.md` and `docs/STATUS.md`; no active authority depends on this file.
 
 ## Objective
 

@@ -674,7 +674,10 @@ Unknown fields fail closed.
 The configuration has a semantic ID calculated from canonical JSON. All model, feature, fit, forecast
 and evaluation artefacts bind that ID. `market_data_source_class` identifies provider origin and
 `evidence_class` independently identifies implementation-only or confirmatory research status; both
-must match the verified foundation and every downstream artefact.
+must match the verified foundation and every downstream artefact. For `IBKR_HISTORICAL_RESEARCH`, an
+ordinary Stage 8 verification receipt can authorise only `IMPLEMENTATION_EVIDENCE_ONLY`. Real F2
+construction and replay additionally require the authenticated qualifying S8.4 confirmatory-promotion
+attestation before any G2 authority is constructed.
 
 ### 9.2 Raw feature dataset
 

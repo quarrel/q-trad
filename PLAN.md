@@ -61,11 +61,13 @@ work and records only the milestone sequence needed to reach the next trustworth
   adapter, callback normalization, immutable canary evidence and file-only canary/profile operations.
   Account-gated capability review, host deployment and the bounded Stage 5 canary are now complete:
   all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases passed with the frozen 300-second profile.
-  The full Stage 6 acquisition/result closure and Stage 7 provider-history dataset are retained.
-  Stage 7 has an existing semantic-verification result but not yet the first-class reusable receipt
-  required by the revised handoff. Stage 8 block-coverage readiness is corrected on `main`, and the
-  prior rehearsal records and checkpoint remain retained, but no Stage 8 foundation has been
-  published or promoted and IBKR evidence cannot substantiate an IG-native conclusion.
+  The full Stage 6 result closure and original Stage 7 v1 provider-history evidence remain retained.
+  Stage 7 now has reusable verification receipts and cheap authentication; exact-head S7.3 validation
+  repacked the 3,376,258-row dataset create-only into 120 v2 physical parts while preserving dataset
+  identity `2f7f6199...a0e7e3` and aggregate identity `2ca2fbd0...22a0c`. The retained Stage 8
+  foundation is `QUALIFYING_HISTORY_READY`, has an implementation-only receipt, and has a separately
+  authenticated S8.4 confirmatory-promotion attestation. No real holdout result or effectiveness claim
+  exists, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
@@ -160,11 +162,16 @@ chronology ambiguity before those contracts are fixed.
 - The account-gated exact-contract capability review, matched read-only host deployment and Stage 5
   canary are complete. The canary passed all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases,
   and the 300-second request profile is frozen.
-- The full Stage 6 result closure and Stage 7 provider-history dataset are retained. Continue the
-  revised Stage 8 handoff by publishing from the retained checkpoint, verifying once into a reusable
-  receipt, and requiring a separate confirmatory promotion before real F2 authority.
-- No qualifying IBKR readiness disposition or downstream R2 artifact has been created; keep
-  `R2-IBKR-HISTORICAL` source-specific and do not combine its evidence with IG-native data.
+- The full Stage 6 result closure, original Stage 7 v1 closure and its reusable receipt remain retained.
+  S7.3 exact-head commit `f0e882bbcd19aabbefb1add2d87a03daae7670e8` published and independently
+  verified the semantically identical v2 closure: 3,376,258 rows and 2,948 logical partitions now occupy
+  120 physical parts. A bounded receipt-backed Stage 8 build selected 14 of those parts without provider
+  reacquisition or mutation of the retained v1 foundation.
+- The retained Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`. Receipt
+  `56228947...ffd01` grants only `IMPLEMENTATION_EVIDENCE_ONLY`; promotion
+  `1a1d09d9...81e2` is the separate `CONFIRMATORY` capability required before real IBKR F2.
+  No real holdout result, effectiveness claim or downstream R2 result has been created; keep
+  `R2-IBKR-HISTORICAL` source-specific and distinct from IG-native evidence.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Exact-main controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
 - The qualifying backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`. Continuous capture initially resumed 20/20 on application commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but stopped receiving at the 2026-08-10 22:30 UTC Gateway auto-restart and later failed closed. Preserve that gap. PR #116 restored socket-death detection and canonical Gateway ownership; its 2026-08-12 rollout exposed a second explicit gap when concurrent restore work saturated persistence. PR #117 then completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily Gateway restarts on 2026-08-12 and 2026-08-13 each replaced the collector process and reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops. This is the applicable lifecycle gate for the current paper account, which has no distinct weekly 2FA expiry.
 - Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,

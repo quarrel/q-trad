@@ -7,17 +7,12 @@
 **Starting authority:** current `main`, including the merged ADR 0029 amendment on reusable
 verification evidence, claim-scoped invalidation, separate
 validity/readiness/provenance/confirmatory authority, and confirmatory promotion.
-**Status:** Active remediation plan until the retirement criteria below are met.
-**Documentation handoff:** Each PR must update `docs/ARCHITECTURE.md` in the same PR when it makes a
-durable implemented flow true. S8.3 records Stage 8 receipts and cheap authentication; S8.4 records
-confirmatory promotion; S7.1/S7.2 record the Stage 7 receipt and single-verification publication flow;
-and S7.3 records semantic-versus-physical identity and prunable consumption.
-`docs/IBKR-HISTORICAL-ACQUISITION.md` remains the operator workflow authority.
-**Retirement criteria:** Move this plan to `docs/archive/` only after S8.1–S8.4 and S7.1–S7.3 have
-landed, or any deliberately deferred remainder has a named active owner; exact-head operational
-handoffs are complete; durable contracts are folded into `docs/ARCHITECTURE.md`,
-`docs/IBKR-HISTORICAL-ACQUISITION.md` and the relevant R2 documents; `PLAN.md` and `docs/STATUS.md`
-record the verified state; and no active authority depends on this file.
+**Status:** Completed and archived on 2026-08-14 after S8.1–S8.4 and S7.1–S7.3 landed and their
+exact-head operational handoffs completed. Durable authority now lives in
+`docs/ARCHITECTURE.md`, `docs/IBKR-HISTORICAL-ACQUISITION.md`, `docs/R2_IMPLEMENTATION_PLAN.md`,
+`PLAN.md` and `docs/STATUS.md`. The next IBKR data-foundation maintenance PR owns removal of the
+general v1 writer/runtime; the R2 integration/verification workstream owns the recursive-verification
+architecture audit.
 
 ---
 
