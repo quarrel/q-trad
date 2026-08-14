@@ -858,31 +858,40 @@ relevant defect or an explicit operator request.
 
 **Form:** research-input pull request.
 
-**Software status:** The completed rollout published and independently verified the v2 closure once,
-preserving the 3,376,258-row semantic dataset while reducing 2,948 daily physical parts to 120 monthly
-parts. Normal Stage 7/8 use is v2-only. The v1 writer, repacker, row decoder, deep verifier and new Stage
-8/promotion routes are retired; retained v1 evidence supports only cheap exact-tree/receipt
-authentication. Historical v1 deep audit remains available through exact commit
+**Software status:** The normal Stage 7 construction path now publishes a direct v3 closure containing
+only its manifest and monthly/split observation parts. Build and deep verification authenticate the
+immediate Stage 6 manifest and receipt, consume each request-result child once, and write a create-only
+Stage 7 receipt outside the closure. Ordinary authentication reuses that receipt without Stage 6 replay
+and reads only selected Stage 7 parts. Stage 8 consumer cutover remains a separate handoff; existing v2
+and v1 closures remain retained migration evidence for the named foundation/promotion authorities, not
+normal writer, repacker, CLI or reader paths. PR-H4 deletes that temporary migration bridge after retained
+evidence migration.
+
+Historical v1 deep audit remains available through exact commit
 `f0e882bbcd19aabbefb1add2d87a03daae7670e8`.
 
-Current v2 verification and v1/v2 authentication commands:
+Current v3 construction, verification and authentication commands:
 
 ```text
+qtrad research observations build-provider-history \
+  --stage6-manifest <stage6-path>/manifest.json \
+  --stage6-receipt <stage6-receipt> \
+  --output <v3-directory>
+
 qtrad research observations verify-provider-history \
-  --manifest <v2-path> \
+  --manifest <v3-directory>/manifest.json \
+  --stage6-manifest <stage6-path>/manifest.json \
+  --stage6-receipt <stage6-receipt> \
   --receipt-output <new-file>
 
 qtrad research observations authenticate-provider-history \
-  --manifest <path> \
-  --receipt <path>
+  --manifest <v3-directory>/manifest.json \
+  --receipt <stage7-receipt>
 ```
 
-During the completed publication, the retired builder consumed only independently verified aggregate
-results and wrote Stage 7 create-only. Bounded structural checks guarded atomic publication before one
-independent semantic verification and create-only receipt persistence. Semantic-verification or
-receipt-write failure retained the immutable closure as unclaimed. Current v2 verification preserves
-those audit semantics; receipt files remain outside both the provider-history and embedded Stage 6
-closures.
+Publication performs bounded structural checks and create-only writes. Semantic-verification or
+receipt-write failure retains the immutable closure as unclaimed. Stage 7 receipt files remain outside
+both the provider-history closure and the embedded Stage 6 closure.
 
 The availability selector union becomes:
 

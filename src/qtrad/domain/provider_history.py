@@ -677,3 +677,219 @@ def row_sort_key(row: ProviderHistoricalObservation) -> tuple[str, datetime, str
 
 def canonical_json(value: Mapping[str, JsonValue]) -> bytes:
     return canonical_json_bytes(value)
+
+
+# Stage 7 v3 identity contract. The retained classes above remain available only
+# to read the named v1 migration evidence; normal Stage 7 uses this contract.
+PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT = "qtrad-provider-historical-observations-v3"
+PROVIDER_HISTORY_V3_SCHEMA_VERSION = 3
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistoricalDatasetV3:
+    """Stage 7 semantic identity bound to a verified Stage 6 result.
+
+    Stage 6 closure, runtime and verification values are retained as authority
+    metadata/provenance properties for downstream callers, but are deliberately
+    excluded from identity_payload.
+    """
+
+    partitions: tuple[ProviderHistoricalPartitionReference, ...]
+    contract_selection_sha256: str
+    stage6_result_id: str
+    availability_policy: ProviderHistoricalAvailabilityPolicy
+    row_count: int
+    source_start: datetime
+    source_end: datetime
+    dataset_sha256: str
+    stage6_plan_sha256: str
+    stage6_runtime_sha256: str
+    stage6_closure_id: str
+    stage6_verification_id: str
+    stage6_manifest_sha256: str
+    _identity_validation_bypass: bool = field(default=False, repr=False, compare=False)
+
+    CONTRACT = PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT
+    SCHEMA_VERSION = PROVIDER_HISTORY_V3_SCHEMA_VERSION
+
+    @property
+    def plan_sha256(self) -> str:
+        return self.stage6_plan_sha256
+
+    @property
+    def runtime_sha256(self) -> str:
+        return self.stage6_runtime_sha256
+
+    @property
+    def aggregate_sha256(self) -> str:
+        """Compatibility metadata only; never serialised or used for identity."""
+        return self.stage6_result_id
+
+    def __post_init__(self) -> None:
+        for value, field_name in (
+            (self.contract_selection_sha256, "contract selection identity"),
+            (self.stage6_result_id, "Stage 6 result identity"),
+            (self.stage6_plan_sha256, "Stage 6 plan identity"),
+            (self.stage6_runtime_sha256, "Stage 6 runtime identity"),
+            (self.stage6_closure_id, "Stage 6 closure identity"),
+            (self.stage6_verification_id, "Stage 6 verification identity"),
+            (self.stage6_manifest_sha256, "Stage 6 manifest identity"),
+            (self.dataset_sha256, "dataset identity"),
+        ):
+            _require_sha256(value, f"provider-history {field_name}")
+        require_utc(self.source_start, "provider-history source start")
+        require_utc(self.source_end, "provider-history source end")
+        if self.source_end <= self.source_start:
+            raise ValueError("provider-history source range is invalid")
+        if tuple(sorted(self.partitions, key=lambda item: item.key)) != self.partitions:
+            raise ValueError("provider-history v3 partition references must be canonical")
+        keys = [partition.key for partition in self.partitions]
+        if len(set(keys)) != len(keys):
+            raise ValueError("provider-history v3 partition references must be unique")
+        if self.row_count < 0 or self.row_count != sum(
+            partition.row_count for partition in self.partitions
+        ):
+            raise ValueError("provider-history v3 dataset row count is inconsistent")
+        if not self._identity_validation_bypass and self.dataset_sha256 != sha256_json(
+            self.identity_payload()
+        ):
+            raise ValueError(
+                "provider-history v3 dataset identity does not match canonical content"
+            )
+
+    def identity_payload(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "source_class": PROVIDER_HISTORY_SOURCE_CLASS,
+            "provider": PROVIDER_HISTORY_PROVIDER,
+            "environment": PROVIDER_HISTORY_ENVIRONMENT,
+            "contract_selection_sha256": self.contract_selection_sha256,
+            "stage6_result_id": self.stage6_result_id,
+            "availability_policy": self.availability_policy.as_json_value(),
+            "partitions": [partition.as_json_value() for partition in self.partitions],
+            "row_count": self.row_count,
+            "source_start": utc_text(self.source_start),
+            "source_end": utc_text(self.source_end),
+        }
+
+    def as_json_value(self) -> dict[str, JsonValue]:
+        return {**self.identity_payload(), "dataset_sha256": self.dataset_sha256}
+
+    @classmethod
+    def create(
+        cls,
+        partitions: tuple[ProviderHistoricalPartitionReference, ...],
+        *,
+        contract_selection_sha256: str,
+        stage6_result_id: str,
+        availability_policy: ProviderHistoricalAvailabilityPolicy,
+        source_start: datetime,
+        source_end: datetime,
+        stage6_plan_sha256: str,
+        stage6_runtime_sha256: str,
+        stage6_closure_id: str,
+        stage6_verification_id: str,
+        stage6_manifest_sha256: str,
+    ) -> ProviderHistoricalDatasetV3:
+        ordered = tuple(sorted(partitions, key=lambda item: item.key))
+        provisional = cls(
+            partitions=ordered,
+            contract_selection_sha256=contract_selection_sha256,
+            stage6_result_id=stage6_result_id,
+            availability_policy=availability_policy,
+            row_count=sum(item.row_count for item in ordered),
+            source_start=source_start,
+            source_end=source_end,
+            dataset_sha256="0" * 64,
+            stage6_plan_sha256=stage6_plan_sha256,
+            stage6_runtime_sha256=stage6_runtime_sha256,
+            stage6_closure_id=stage6_closure_id,
+            stage6_verification_id=stage6_verification_id,
+            stage6_manifest_sha256=stage6_manifest_sha256,
+            _identity_validation_bypass=True,
+        )
+        return replace(
+            provisional,
+            dataset_sha256=sha256_json(provisional.identity_payload()),
+            _identity_validation_bypass=False,
+        )
+
+    @classmethod
+    def from_json_value(
+        cls,
+        value: object,
+        *,
+        availability_policy: ProviderHistoricalAvailabilityPolicy,
+        stage6_plan_sha256: str,
+        stage6_runtime_sha256: str,
+        stage6_closure_id: str,
+        stage6_verification_id: str,
+        stage6_manifest_sha256: str,
+    ) -> ProviderHistoricalDatasetV3:
+        data = _object(value, "provider-history v3 dataset")
+        expected = {
+            "contract",
+            "schema_version",
+            "source_class",
+            "provider",
+            "environment",
+            "contract_selection_sha256",
+            "stage6_result_id",
+            "availability_policy",
+            "partitions",
+            "row_count",
+            "source_start",
+            "source_end",
+            "dataset_sha256",
+        }
+        if set(data) != expected:
+            raise ValueError("provider-history v3 dataset fields are not exact")
+        if data["contract"] != cls.CONTRACT or data["schema_version"] != cls.SCHEMA_VERSION:
+            raise ValueError("provider-history v3 dataset contract or schema is unsupported")
+        if data["availability_policy"] != availability_policy.as_json_value():
+            raise ValueError("provider-history v3 dataset availability policy changed")
+        raw_parts = data["partitions"]
+        if not isinstance(raw_parts, list):
+            raise TypeError("provider-history v3 dataset partitions must be a list")
+        parts: list[ProviderHistoricalPartitionReference] = []
+        for position, raw_part in enumerate(raw_parts):
+            item = _object(raw_part, f"provider-history v3 partition {position}")
+            expected_part = {"instrument_id", "partition_date", "row_count", "partition_sha256"}
+            if set(item) != expected_part:
+                raise ValueError("provider-history v3 partition fields are not exact")
+            parts.append(
+                ProviderHistoricalPartitionReference(
+                    instrument_id=_string_value(item["instrument_id"], "instrument"),
+                    partition_date=date.fromisoformat(
+                        _string_value(item["partition_date"], "partition date")
+                    ),
+                    row_count=_json_int(item["row_count"], "row count"),
+                    partition_sha256=_string_value(item["partition_sha256"], "partition identity"),
+                )
+            )
+        return cls(
+            partitions=tuple(parts),
+            contract_selection_sha256=_string_value(
+                data["contract_selection_sha256"], "contract selection identity"
+            ),
+            stage6_result_id=_string_value(data["stage6_result_id"], "Stage 6 result identity"),
+            availability_policy=availability_policy,
+            row_count=_json_int(data["row_count"], "row count"),
+            source_start=_parse_time(
+                _string_value(data["source_start"], "source start"), "source start"
+            ),
+            source_end=_parse_time(_string_value(data["source_end"], "source end"), "source end"),
+            dataset_sha256=_string_value(data["dataset_sha256"], "dataset identity"),
+            stage6_plan_sha256=stage6_plan_sha256,
+            stage6_runtime_sha256=stage6_runtime_sha256,
+            stage6_closure_id=stage6_closure_id,
+            stage6_verification_id=stage6_verification_id,
+            stage6_manifest_sha256=stage6_manifest_sha256,
+        )
+
+
+def _string_value(value: object, field: str) -> str:
+    if not isinstance(value, str) or not value:
+        raise TypeError(f"{field} must be a non-empty string")
+    return value

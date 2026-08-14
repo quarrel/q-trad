@@ -5,9 +5,8 @@ from __future__ import annotations
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from typing import Protocol
+from typing import Any, Protocol
 
-from qtrad.application.ibkr_results import replay_ibkr_historical_aggregate_result
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPlan,
@@ -21,7 +20,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalResultArtifact,
 )
 from qtrad.domain.provider_history import (
-    ProviderHistoricalDataset,
+    ProviderHistoricalDatasetV3,
     ProviderHistoricalObservation,
     sha256_json,
     utc_text,
@@ -205,7 +204,7 @@ class ProviderHistorySelection:
 class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
 
-    dataset: ProviderHistoricalDataset
+    dataset: Any
     observations: ProviderHistoryObservationRows
     source_artifact: ProviderHistorySource
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
@@ -213,17 +212,41 @@ class ProviderHistorySourceEvidence:
     selection: ProviderHistorySelection | None = None
 
     def __post_init__(self) -> None:
-        if (
-            self.dataset.contract_selection_sha256
-            != self.source_artifact.plan.contract_selection_sha256
-        ):
-            raise ValueError("provider-history source contract selection differs from its dataset")
-        if self.dataset.plan_sha256 != self.source_artifact.plan.plan_sha256:
-            raise ValueError("provider-history source plan differs from its dataset")
-        if self.dataset.runtime_sha256 != self.source_artifact.plan.runtime_sha256:
-            raise ValueError("provider-history source runtime differs from its dataset")
-        if self.dataset.aggregate_sha256 != self.source_artifact.aggregate.aggregate_sha256:
-            raise ValueError("provider-history source aggregate differs from its dataset")
+        if isinstance(self.dataset, ProviderHistoricalDatasetV3):
+            if (
+                self.dataset.contract_selection_sha256
+                != self.source_artifact.plan.contract_selection_sha256
+            ):
+                raise ValueError(
+                    "provider-history v3 source contract selection differs from its dataset"
+                )
+            if self.dataset.stage6_result_id != self.source_artifact.aggregate.result_id:
+                raise ValueError("provider-history v3 Stage 6 result differs from its dataset")
+            if self.dataset.stage6_closure_id != self.source_artifact.aggregate.closure_id:
+                raise ValueError("provider-history v3 Stage 6 closure differs from its dataset")
+            if (
+                getattr(self.source_artifact, "verification_id", None)
+                != self.dataset.stage6_verification_id
+            ):
+                raise ValueError(
+                    "provider-history v3 Stage 6 verification differs from its dataset"
+                )
+            if self.dataset.stage6_plan_sha256 != self.source_artifact.plan.plan_sha256:
+                raise ValueError("provider-history v3 Stage 6 plan differs from its dataset")
+        else:
+            if (
+                self.dataset.contract_selection_sha256
+                != self.source_artifact.plan.contract_selection_sha256
+            ):
+                raise ValueError(
+                    "provider-history source contract selection differs from its dataset"
+                )
+            if self.dataset.plan_sha256 != self.source_artifact.plan.plan_sha256:
+                raise ValueError("provider-history source plan differs from its dataset")
+            if self.dataset.runtime_sha256 != self.source_artifact.plan.runtime_sha256:
+                raise ValueError("provider-history source runtime differs from its dataset")
+            if self.dataset.aggregate_sha256 != self.source_artifact.aggregate.aggregate_sha256:
+                raise ValueError("provider-history source aggregate differs from its dataset")
         if self.selection is None:
             if len(self.observations) != self.dataset.row_count:
                 raise ValueError(
@@ -291,13 +314,6 @@ def _partition_row_bounds(
 def _provider_history_eligible_instruments(
     source: ProviderHistorySource,
 ) -> frozenset[str]:
-    if isinstance(source, IbkrHistoricalResultArtifact):
-        replay_ibkr_historical_aggregate_result(
-            source.plan,
-            source.plan_bytes,
-            source.request_results,
-            source.aggregate,
-        )
     raw = source.aggregate.entitlement_summary.get("provider_history_eligible_instruments")
     if not isinstance(raw, list):
         raise ValueError("IBKR aggregate provider-history eligibility summary is invalid")

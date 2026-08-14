@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -224,6 +224,7 @@ from qtrad.runtime.provider_history import (
     authenticate_provider_history,
     verify_provider_history,
 )
+from qtrad.runtime.provider_history_v3 import build_provider_history
 from qtrad.runtime.qualification_gap_history import (
     build_qualification_gap_history_artifact,
     build_qualification_gap_plan_set_history_artifact,
@@ -986,12 +987,21 @@ def build_parser() -> argparse.ArgumentParser:
         "verify", help="independently verify an observation manifest and its Parquet files"
     )
     observations_verify.add_argument("--manifest", type=Path, required=True)
+    provider_history_build = research_observations_sub.add_parser(
+        "build-provider-history",
+        help="build direct Stage 7 provider history from an authenticated Stage 6 result",
+    )
+    provider_history_build.add_argument("--stage6-manifest", type=Path, required=True)
+    provider_history_build.add_argument("--stage6-receipt", type=Path, required=True)
+    provider_history_build.add_argument("--output", type=Path, required=True)
     provider_history_verify = research_observations_sub.add_parser(
         "verify-provider-history",
-        help="independently verify provider-history observations and their source closure",
+        help="independently verify Stage 7 observations against its Stage 6 parent",
     )
     provider_history_verify.add_argument("--manifest", type=Path, required=True)
-    provider_history_verify.add_argument("--receipt-output", type=Path)
+    provider_history_verify.add_argument("--stage6-manifest", type=Path, required=True)
+    provider_history_verify.add_argument("--stage6-receipt", type=Path, required=True)
+    provider_history_verify.add_argument("--receipt-output", type=Path, required=True)
     provider_history_authenticate = research_observations_sub.add_parser(
         "authenticate-provider-history",
         help="authenticate provider history from its Stage 7 receipt without semantic replay",
@@ -2150,9 +2160,24 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "observations"
+        and args.observations_command == "build-provider-history"
+    ):
+        build_provider_history(
+            args.stage6_manifest,
+            stage6_receipt=args.stage6_receipt,
+            output=args.output,
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "observations"
         and args.observations_command == "verify-provider-history"
     ):
-        _verify_provider_history(args.manifest, receipt_output=args.receipt_output)
+        _verify_provider_history(
+            args.manifest,
+            stage6_manifest=args.stage6_manifest,
+            stage6_receipt=args.stage6_receipt,
+            receipt_output=args.receipt_output,
+        )
     elif (
         args.command == "research"
         and args.research_command == "observations"
@@ -3146,17 +3171,31 @@ async def _verify_research_observations(
 def _verify_provider_history(
     manifest_path: Path,
     *,
-    receipt_output: Path | None = None,
+    stage6_manifest: Path,
+    stage6_receipt: Path,
+    receipt_output: Path,
 ) -> None:
-    dataset = verify_provider_history(manifest_path, receipt_output=receipt_output)
+    from qtrad.domain.provider_history import (
+        ProviderHistoricalDataset,
+        ProviderHistoricalDatasetV3,
+    )
+
+    authenticated = verify_provider_history(
+        manifest_path,
+        stage6_manifest=stage6_manifest,
+        stage6_receipt=stage6_receipt,
+        receipt_output=receipt_output,
+    )
+    if isinstance(authenticated, (ProviderHistoricalDataset, ProviderHistoricalDatasetV3)):
+        dataset = authenticated
+    else:
+        dataset = cast(Any, authenticated).dataset
     print(
         json.dumps(
             {
                 "contract": dataset.CONTRACT,
                 "manifest": str(manifest_path),
-                "verification_receipt": (
-                    str(receipt_output.resolve()) if receipt_output is not None else None
-                ),
+                "verification_receipt": str(receipt_output.resolve()),
                 "dataset_sha256": dataset.dataset_sha256,
                 "availability_delay": dataset.availability_policy.delay_text,
                 "rows": dataset.row_count,
