@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Any
@@ -340,3 +341,117 @@ def test_stage8_promotion_output_preflight_rejects_unsafe_paths_before_authority
             )
     assert not (outside / "traversal-promotion.json").exists()
     assert not (outside / "symlink-promotion.json").exists()
+
+
+def _rewrite_v3_manifest_and_receipt(bundle: Path, receipt: Path) -> None:
+    import qtrad.runtime.ibkr_foundation as foundation_runtime
+
+    document = json.loads(bundle.read_bytes())
+    unsigned = {key: value for key, value in document.items() if key != "manifest_sha256"}
+    document["manifest_sha256"] = foundation_runtime._sha(unsigned)
+    bundle.write_bytes(foundation_runtime._json_bytes(document) + b"\n")
+
+    receipt_document = json.loads(receipt.read_bytes())
+    receipt_document["foundation_manifest_sha256"] = hashlib.sha256(bundle.read_bytes()).hexdigest()
+    receipt_identity = {
+        key: value for key, value in receipt_document.items() if key != "verification_id"
+    }
+    receipt_document["verification_id"] = foundation_runtime._sha(receipt_identity)
+    receipt.write_bytes(foundation_runtime._json_bytes(receipt_document) + b"\n")
+
+
+@pytest.mark.parametrize(
+    "location",
+    (
+        ("payload",),
+        ("payload", "configuration"),
+        ("payload", "provider_history"),
+        ("payload", "provider_history", "stage7"),
+        ("payload", "provider_history", "stage7", "selected_input"),
+        ("payload", "readiness"),
+        ("payload", "readiness", "evidence"),
+        ("payload", "readiness_semantics"),
+    ),
+)
+def test_stage8_v3_rejects_unknown_nested_payload_fields(
+    tmp_path: Path, location: tuple[str, ...]
+) -> None:
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    output = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        output,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=1,
+    )
+    foundation_receipt = tmp_path / "foundation-receipt.json"
+    verify_ibkr_foundation(
+        output,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=foundation_receipt,
+        workers=1,
+    )
+
+    document = json.loads(output.read_bytes())
+    target: dict[str, Any] = document
+    for key in location:
+        target = target[key]
+    target["unexpected"] = "rejected"
+    output.write_bytes(json.dumps(document, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+    _rewrite_v3_manifest_and_receipt(output, foundation_receipt)
+
+    with pytest.raises(ValueError, match=r"fields are not exact|schema"):
+        authenticate_ibkr_foundation(output, receipt=foundation_receipt)
+
+
+def test_stage8_deep_verifier_preflights_invalid_tree_before_stage7(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    output = tmp_path / "foundation.json"
+    write_ibkr_foundation(
+        output,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+        workers=1,
+    )
+    child_root = output.parent / "foundation.json.children"
+    (child_root / "orphan-before-stage7").write_bytes(b"orphan")
+    receipt = tmp_path / "foundation-receipt.json"
+    stage7_calls: list[object] = []
+
+    import qtrad.runtime.ibkr_foundation as foundation_runtime
+
+    def reject_stage7(*_args: object, **_kwargs: object) -> object:
+        stage7_calls.append(None)
+        raise AssertionError("invalid Stage 8 tree reached Stage 7")
+
+    monkeypatch.setattr(foundation_runtime, "_stage7_source_v3", reject_stage7)
+    with pytest.raises(ValueError, match="child tree"):
+        verify_ibkr_foundation(
+            output,
+            stage7_manifest=stage7_manifest,
+            stage7_receipt=stage7_receipt,
+            receipt_output=receipt,
+            workers=1,
+        )
+    assert stage7_calls == []
+    assert not receipt.exists()
+
+
+def test_stage8_public_authentication_is_current_v3_only(tmp_path: Path) -> None:
+    legacy = tmp_path / "legacy-foundation.json"
+    legacy.write_bytes(b"{}\n")
+    with pytest.raises(ValueError, match="current Stage 8 v3"):
+        authenticate_ibkr_foundation(legacy, receipt=tmp_path / "receipt.json")
+    with pytest.raises(ValueError, match="current Stage 8 v3"):
+        authenticate_ibkr_foundation_promotion(
+            legacy,
+            receipt=tmp_path / "receipt.json",
+            promotion=tmp_path / "promotion.json",
+        )

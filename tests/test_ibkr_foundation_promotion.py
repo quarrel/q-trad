@@ -32,10 +32,10 @@ from qtrad.runtime.ibkr_foundation import (
     _write_ibkr_foundation_migration_v2 as write_ibkr_foundation,
 )
 from qtrad.runtime.ibkr_foundation_promotion import (
-    _create_ibkr_foundation_confirmatory_promotion_migration_v2 as _create_promotion,
+    _authenticate_ibkr_foundation_promotion_migration_v2 as authenticate_ibkr_foundation_promotion,
 )
 from qtrad.runtime.ibkr_foundation_promotion import (
-    authenticate_ibkr_foundation_promotion,
+    _create_ibkr_foundation_confirmatory_promotion_migration_v2 as _create_promotion,
 )
 from qtrad.runtime.ibkr_results import IbkrHistoricalResultStream
 from qtrad.runtime.provider_history_v2 import (

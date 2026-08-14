@@ -124,9 +124,8 @@ configuration-independent receipt. Semantic-verification or receipt-write failur
 closure but grants no downstream authority. The receipt binds the exact provider manifest, dataset and
 Stage 6 identities, availability policy, semantic summaries and claim-scoped verifier check set. Ordinary
 consumers authenticate the unchanged closure and receipt without decoding Parquet rows or replaying Stage
-6. The current confirmatory route still performs cumulative replay and is scheduled for replacement;
-target promotion authenticates the accepted receipt without semantic replay. `foundation build` accepts
-this receipt as its immediate Stage 7 authority.
+6. Confirmatory promotion authenticates the accepted Stage 8 receipt, qualifying readiness and explicit operator authority without semantic replay.
+`foundation build` accepts this receipt as its immediate Stage 7 authority.
 
 The authenticated retained v1 closure was repacked create-only into the explicit v2 physical contract
 without replaying Stage 6 or changing semantic dataset identity. V2 groups observations by instrument and
@@ -134,7 +133,7 @@ calendar month with bounded numbered parts; its separate physical manifest binds
 row counts and interval bounds while the original v1 evidence remains unchanged. The retired migration
 bridge applied the same layout-independent Stage 8 selection to v1 and v2 solely to prove equivalence.
 
-The real migration and runtime retirement are complete for the normal writer and CLI: current Stage 7 uses the v3 provider-history receipt/source contract and current Stage 8 uses its v2 foundation manifest/receipt contract. Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row decoder and deep verifier are reachable only through explicitly named migration helpers until PR-H4 deletes that bridge. Ordinary current authentication hashes selected physical parts but reads neither unselected parts nor Stage 6 result children. Explicit current deep audit retains complete semantic replay; the current confirmatory route is authority-only: it authenticates the exact accepted Stage 8 receipt and performs no Stage 6/7/8 semantic replay.
+The real migration and runtime retirement are complete for the normal writer and CLI: current Stage 7 uses the v3 provider-history receipt/source contract and current Stage 8 uses its v2 foundation manifest/receipt contract. Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row decoder and deep verifier are reachable only through explicitly named migration helpers until PR-H4 deletes that bridge. Public Stage 8 authentication and promotion reject v1/v2; `_authenticate_ibkr_foundation_migration_v2` and `_authenticate_ibkr_foundation_promotion_migration_v2` remain private migration-only entry points. Ordinary current authentication hashes selected physical parts but reads neither unselected parts nor Stage 6 result children. Explicit current deep audit retains complete semantic replay; confirmatory promotion is authority-only: it authenticates the exact accepted Stage 8 receipt and performs no Stage 6/7/8 semantic replay.
 
 The durable IBKR historical foundation handoff is:
 

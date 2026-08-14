@@ -55,6 +55,9 @@ from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetV
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
+    _authenticate_ibkr_foundation_migration_v2 as authenticate_ibkr_foundation,
+)
+from qtrad.runtime.ibkr_foundation import (
     _preflight_ibkr_foundation_migration_v2 as preflight_ibkr_foundation,
 )
 from qtrad.runtime.ibkr_foundation import (
@@ -64,7 +67,9 @@ from qtrad.runtime.ibkr_foundation import (
     _write_ibkr_foundation_migration_v2 as _write_ibkr_foundation,
 )
 from qtrad.runtime.ibkr_foundation import (
-    authenticate_ibkr_foundation,
+    authenticate_ibkr_foundation as authenticate_ibkr_foundation_current,
+)
+from qtrad.runtime.ibkr_foundation import (
     load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
 )
@@ -538,6 +543,8 @@ def test_stage8_verification_receipt_authenticates_without_semantic_replay(
 
     monkeypatch.setattr(foundation_runtime, "_read_child_rows", reject_semantic_replay)
     monkeypatch.setattr(provider_history_runtime, "_read_v2_part", reject_semantic_replay)
+    with pytest.raises(ValueError, match="current Stage 8 v3"):
+        authenticate_ibkr_foundation_current(bundle, receipt=receipt)
 
     result = authenticate_ibkr_foundation(bundle, receipt=receipt)
 

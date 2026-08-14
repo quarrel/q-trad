@@ -19,6 +19,7 @@ from qtrad.domain.ibkr_foundation import (
 from qtrad.domain.provider_history import PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.runtime.ibkr_foundation import (
+    _authenticate_ibkr_foundation_migration_v2,
     _verify_ibkr_foundation_migration_v2,
     authenticate_ibkr_foundation,
 )
@@ -429,17 +430,19 @@ def _foundation_v3_contract(path: Path) -> bool:
     return document.get("contract") == _FOUNDATION_V3_CONTRACT
 
 
-def authenticate_ibkr_foundation_promotion(
+def _authenticate_ibkr_foundation_promotion_migration_v2(
     foundation: Path,
     *,
     receipt: Path,
     promotion: Path,
 ) -> VerifiedIbkrFoundationPromotion:
-    """Authenticate S8.4 without repeating cumulative semantic replay."""
-    if _foundation_v3_contract(foundation):
-        return _authenticate_v3_promotion(foundation, receipt=receipt, promotion=promotion)
+    """Authenticate retained v1/v2 promotion evidence for PR-H4 migration only.
 
-    authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    This private helper is outside normal promotion and CLI reachability;
+    delete it with PR-H4 after retained evidence is migrated.
+    """
+
+    authentication = _authenticate_ibkr_foundation_migration_v2(foundation, receipt=receipt)
     bindings, _provider_path, _provider_contract = _bindings(foundation, receipt, authentication)
     _promotion_path, promotion_bytes, document = _document(promotion, "IBKR confirmatory promotion")
     if set(document) != _PROMOTION_FIELDS:
@@ -517,6 +520,19 @@ def authenticate_ibkr_foundation_promotion(
     if promotion_bytes != _canonical_bytes(document) + b"\n":
         raise ValueError("IBKR confirmatory promotion bytes changed")
     return _authority(document)
+
+
+def authenticate_ibkr_foundation_promotion(
+    foundation: Path,
+    *,
+    receipt: Path,
+    promotion: Path,
+) -> VerifiedIbkrFoundationPromotion:
+    """Authenticate current Stage 8 v3 promotion authority without replay."""
+
+    if not _foundation_v3_contract(foundation):
+        raise ValueError("current Stage 8 v3 promotion is required")
+    return _authenticate_v3_promotion(foundation, receipt=receipt, promotion=promotion)
 
 
 def _require_detached_source() -> None:
@@ -647,7 +663,7 @@ def _create_ibkr_foundation_confirmatory_promotion_migration_v2(
 
     runtime = _runtime(runtime_identities())
     _require_detached_source()
-    authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    authentication = _authenticate_ibkr_foundation_migration_v2(foundation, receipt=receipt)
     bindings, provider_path, provider_contract = _bindings(foundation, receipt, authentication)
     readiness = _mapping(bindings["readiness"], "promotion readiness")
     if (
@@ -677,7 +693,9 @@ def _create_ibkr_foundation_confirmatory_promotion_migration_v2(
     )
     if replay.readiness.state is not IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY:
         raise ValueError("cumulative replay did not establish qualifying readiness")
-    replayed_authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    replayed_authentication = _authenticate_ibkr_foundation_migration_v2(
+        foundation, receipt=receipt
+    )
     replayed_bindings, _replayed_provider_path, _replayed_provider_contract = _bindings(
         foundation, receipt, replayed_authentication
     )
