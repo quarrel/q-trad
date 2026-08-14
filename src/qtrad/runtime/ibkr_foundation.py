@@ -1355,104 +1355,11 @@ def _load_authenticated_ibkr_foundation(
     *,
     receipt: Path,
 ) -> tuple[IBKRFoundationBuild, str]:
-    if _is_v3_foundation(path):
-        return _load_authenticated_ibkr_foundation_v3(path, receipt=receipt)
+    """Load only current Stage 8 v3 evidence authenticated by its receipt."""
 
-    authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
-    _authenticate_verification_receipt(authenticated, receipt)
-    _verify_provider_history_closure(authenticated.provider_path, authenticated.provider_dataset)
-    child_ids = _child_reference_dataset_ids(authenticated.children)
-    decoded = _verify_children_blind(
-        authenticated.path.parent,
-        authenticated.children,
-        child_ids,
-        authenticated.expected_lineage,
-        decode_rows=False,
-        decode_base=True,
-    )
-
-    configuration = authenticated.configuration
-    observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
-    source_start = (
-        min(row.interval_start for row in observation_rows)
-        if observation_rows
-        else configuration.range_start
-    )
-    source_end = (
-        max(row.interval_end for row in observation_rows)
-        if observation_rows
-        else configuration.range_end
-    )
-    observations = ObservationDataset(
-        rows=observation_rows,
-        configuration={
-            "contract": "qtrad-ibkr-historical-observation-adapter-v1",
-            "source_class": "IBKR_HISTORICAL_RESEARCH",
-            "provider": "ibkr",
-            "environment": "paper",
-            "ordered_instruments": list(configuration.ordered_instruments),
-            "interval_start": configuration.required_observation_start.isoformat(),
-            "interval_end": configuration.required_observation_end.isoformat(),
-            "observed_interval_start": source_start.isoformat() if observation_rows else None,
-            "observed_interval_end": source_end.isoformat() if observation_rows else None,
-            "grid_resolution_seconds": int(configuration.grid_resolution.total_seconds()),
-            "availability_basis": configuration.availability_basis.value,
-            "source_dataset_id": authenticated.provider_dataset.dataset_sha256,
-        },
-        source_dataset_ids=(authenticated.provider_dataset.dataset_sha256,),
-        selection_policies={
-            "source_class": "IBKR_HISTORICAL_RESEARCH",
-            "availability_policy": (
-                authenticated.provider_dataset.availability_policy.as_json_value()
-            ),
-            "correction_policy": "FROZEN_FIRST_SUCCESSFUL_RESPONSE_NO_REFETCH_MERGE",
-        },
-        dataset_id=child_ids["observations"],
-    )
-    panel = PanelDataset(
-        rows=tuple(_panel_row(row) for row in decoded["panel"]),
-        observation_dataset_id=observations.dataset_id,
-        foundation_configuration_id=configuration.configuration_id,
-        dataset_id=child_ids["panel"],
-    )
-    targets = TargetDataset(
-        rows=tuple(_target(row) for row in decoded["targets"]),
-        observation_dataset_id=observations.dataset_id,
-        foundation_configuration_id=configuration.configuration_id,
-        dataset_id=child_ids["targets"],
-    )
-    target_index = R2HoldoutTargetIndex.from_rows(
-        source_target_dataset_id=targets.dataset_id,
-        observation_dataset_id=observations.dataset_id,
-        foundation_configuration_id=configuration.configuration_id,
-        rows=decoded["target-index"],
-    )
-    causal_metadata = R2HoldoutCausalMetadata.from_rows(
-        source_panel_dataset_id=panel.dataset_id,
-        rows=decoded["causal-metadata"],
-    )
-    build = IBKRFoundationBuild(
-        configuration=configuration,
-        observations=observations,
-        panel=panel,
-        targets=targets,
-        folds=FoldDataset(
-            folds=tuple(_fold(row) for row in decoded["folds"]),
-            target_dataset_id=targets.dataset_id,
-            foundation_configuration_id=configuration.configuration_id,
-            dataset_id=child_ids["folds"],
-        ),
-        target_index=target_index,
-        causal_metadata=causal_metadata,
-        provider_history=authenticated.provider_dataset,
-        active_intervals=_decode_active_intervals(authenticated.payload["active_intervals"]),
-        provider_gaps=tuple(
-            cast(Mapping[str, JsonValue], _mapping(item, "IBKR provider gap"))
-            for item in _sequence(authenticated.payload["provider_gaps"])
-        ),
-        readiness=_decode_readiness(authenticated.payload["readiness"]),
-    )
-    return build, _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 loading is required")
+    return _load_authenticated_ibkr_foundation_v3(path, receipt=receipt)
 
 
 def load_ibkr_foundation(path: Path, *, receipt: Path) -> IBKRFoundationBuild:
@@ -1494,36 +1401,20 @@ def _load_ibkr_foundation_outcome_blind(
     while only the persisted outcome-blind projections and folds are decoded.
     """
 
-    if _is_v3_foundation(path):
-        authenticated_v3 = _read_v3_manifest(path)
-        _authenticate_ibkr_foundation_v3(path, receipt=receipt)
-        manifest_path = authenticated_v3.path
-        receipt_path = receipt.resolve()
-        root = manifest_path.parent
-        provider_dataset = cast(ProviderHistoricalDataset, authenticated_v3.provider_dataset)
-        payload = authenticated_v3.payload
-        configuration = authenticated_v3.configuration
-        children = authenticated_v3.children
-        expected_lineage = authenticated_v3.lineage
-        build_id = authenticated_v3.foundation_id
-        child_ids = _child_reference_dataset_ids(children)
-    else:
-        authenticated = _authenticate_foundation_manifest(path, provider_closure=False)
-        receipt_path, _receipt_bytes, _receipt_document = _authenticate_verification_receipt(
-            authenticated, receipt
-        )
-        _verify_provider_history_closure(
-            authenticated.provider_path, authenticated.provider_dataset
-        )
-        manifest_path = authenticated.path
-        root = manifest_path.parent
-        provider_dataset = authenticated.provider_dataset
-        payload = authenticated.payload
-        configuration = authenticated.configuration
-        children = authenticated.children
-        expected_lineage = authenticated.expected_lineage
-        build_id = _text(authenticated.document["build_sha256"], "IBKR foundation build hash")
-        child_ids = _child_reference_dataset_ids(children)
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 outcome-blind loading is required")
+    authenticated_v3 = _read_v3_manifest(path)
+    _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+    manifest_path = authenticated_v3.path
+    receipt_path = receipt.resolve()
+    root = manifest_path.parent
+    provider_dataset = cast(ProviderHistoricalDataset, authenticated_v3.provider_dataset)
+    payload = authenticated_v3.payload
+    configuration = authenticated_v3.configuration
+    children = authenticated_v3.children
+    expected_lineage = authenticated_v3.lineage
+    build_id = authenticated_v3.foundation_id
+    child_ids = _child_reference_dataset_ids(children)
     decoded = _verify_children_blind(
         root,
         children,
