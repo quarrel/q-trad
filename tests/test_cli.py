@@ -1187,6 +1187,8 @@ def test_parser_accepts_r2_replay_and_software_operations() -> None:
             "oof-build",
             "--foundation-bundle",
             "foundation.json",
+            "--foundation-receipt",
+            "foundation-receipt.json",
             "--experiment",
             "experiment.json",
             "--feature-manifest",
@@ -1217,7 +1219,7 @@ def test_parser_accepts_r2_replay_and_software_operations() -> None:
 
 
 @pytest.mark.asyncio
-async def test_oof_build_rejects_non_ibkr_foundation_receipt_before_publish(
+async def test_oof_build_requires_foundation_receipt_and_holdout_source(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     publish = Mock(side_effect=AssertionError("OOF publish reached"))
@@ -1229,7 +1231,9 @@ async def test_oof_build_rejects_non_ibkr_foundation_receipt_before_publish(
     monkeypatch.setattr(cli, "build_oof_bundle", publish)
     output = tmp_path / "oof"
 
-    with pytest.raises(ValueError, match="only valid for IBKR historical OOF work"):
+    with pytest.raises(
+        ValueError, match="OOF build requires an authenticated holdout target source"
+    ):
         await cli._build_r2_oof(
             cast(Settings, SimpleNamespace()),
             cast(Clock, SimpleNamespace()),

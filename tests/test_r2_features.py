@@ -125,7 +125,7 @@ def _foundation(
     panel_id = values.get("panel_id", config.panel_dataset_id)
     target_id = values.get("target_id", config.target_dataset_id)
     fold_id = values.get("fold_id", config.fold_dataset_id)
-    bundle_id = values.get("bundle_id", config.r1_bundle_id)
+    foundation_id = values.get("foundation_id", config.r1_bundle_id)
     intervals: dict[str, tuple[tuple[datetime, datetime], ...]] = (
         active
         if active is not None
@@ -137,7 +137,7 @@ def _foundation(
         bundle=cast(
             Any,
             SimpleNamespace(
-                bundle_id=bundle_id,
+                foundation_id=foundation_id,
                 ordered_instruments=config.ordered_instruments,
                 range_start=START,
                 range_end=END,
@@ -931,7 +931,7 @@ def test_materialisation_is_explicit_order_independent_target_only_and_excludes_
 @pytest.mark.parametrize(
     "override",
     (
-        {"bundle_id": "0" * 64},
+        {"foundation_id": "0" * 64},
         {"observation_id": "0" * 64},
         {"configuration_id": "0" * 64},
         {"panel_id": "0" * 64},
@@ -1278,6 +1278,11 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     foundation = _replay_foundation(config)
     verify_bundle = AsyncMock(return_value=foundation)
     monkeypatch.setattr(cli, "verify_foundation_bundle", verify_bundle)
+    monkeypatch.setattr(
+        cli,
+        "authenticate_foundation_bundle",
+        AsyncMock(return_value=foundation.bundle),
+    )
     monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
     settings = Settings(
         research_root=tmp_path,
@@ -1287,6 +1292,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
         settings,
         FixedClock(),
         foundation_bundle_path=Path("foundation.json"),
+        foundation_receipt_path=Path("foundation-receipt.json"),
         experiment_path=Path("experiment.json"),
         feature_set_name="L0",
         output_path=Path("features.json"),
@@ -1298,6 +1304,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
         settings,
         FixedClock(),
         foundation_bundle_path=Path("foundation.json"),
+        foundation_receipt_path=Path("foundation-receipt.json"),
         experiment_path=Path("experiment.json"),
         feature_set_name="L0",
         manifest_path=Path("features.json"),

@@ -420,6 +420,17 @@ def _build_confirmatory_fixture(
         return foundation_runtime.load_foundation_bundle(foundation_path)
 
     foundation_bundle = asyncio.run(persist_fixture_foundation())
+    local_foundation_receipt_path = foundation_receipt_path
+    if local_foundation_receipt_path is None:
+        local_foundation_receipt_path = research_root / "foundation-receipt.json"
+        receipt = foundation_runtime._foundation_receipt_for(
+            foundation_path,
+            foundation_bundle,
+        )
+        foundation_runtime.write_foundation_verification_receipt(
+            local_foundation_receipt_path,
+            receipt,
+        )
     if replay_foundation_path is not None:
         foundation_bundle = type(foundation_bundle).create(
             configuration=foundation_bundle.configuration,
@@ -452,7 +463,7 @@ def _build_confirmatory_fixture(
     )
     experiment = replace(
         experiment,
-        r1_bundle_id=foundation_bundle.bundle_id,
+        r1_bundle_id=foundation_bundle.foundation_id,
         r1_application_version="fixture-application",
         r1_image_identity="fixture-image",
         foundation_configuration_id=configuration.configuration_id,
@@ -506,8 +517,7 @@ def _build_confirmatory_fixture(
         "experiment": experiment_path,
         **{name: research_root / path for name, path in feature_paths.items()},
     }
-    if foundation_receipt_path is not None:
-        replay_inputs["foundation_receipt"] = foundation_receipt_path
+    replay_inputs["foundation_receipt"] = local_foundation_receipt_path
     if foundation_promotion_path is not None:
         replay_inputs["foundation_promotion"] = foundation_promotion_path
     bundle_path = build_oof_bundle(
@@ -1190,6 +1200,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             root=tmp_path / "research",
             bundle_path=tmp_path / "research" / "foundation.json",
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now())),
+            receipt=tmp_path / "research" / "foundation-receipt.json",
             holdout_target_source=target_source,
         )
     )

@@ -1869,7 +1869,7 @@ def _synthetic_pipeline_inputs(
         R1FoundationBindings,
         SimpleNamespace(
             bundle=SimpleNamespace(
-                bundle_id=r1_id,
+                foundation_id=r1_id,
                 market_data_source_class=experiment.market_data_source_class,
                 ordered_instruments=ordered,
                 range_start=start,
@@ -2404,7 +2404,7 @@ def build_oof_bundle(
     evaluation_refs.append(_child_reference(register_path, register))
     evaluation_refs.extend(forecast_child_refs)
     descriptor = _descriptor_payload(
-        foundation_bundle_id=verified.bundle.bundle_id,
+        foundation_bundle_id=verified.bundle.foundation_id,
         experiment=experiment,
         feature_names=tuple(sorted(datasets)),
         run_kind=run_kind,
@@ -2439,7 +2439,7 @@ def build_oof_bundle(
         children[source_path] = source_payload
         holdout_source_ref = _child_reference(source_path, source_payload)
     bundle = R2OofBundle.create(
-        foundation_bundle_id=verified.bundle.bundle_id,
+        foundation_bundle_id=verified.bundle.foundation_id,
         experiment_configuration_id=experiment.configuration_id,
         source_class=experiment.market_data_source_class,
         evidence_class=experiment.evidence_class,
@@ -4303,15 +4303,16 @@ async def _replay_staged_oof_async(
         raise ValueError("staged replay inputs are malformed")
     raw_children = cast(dict[object, object], raw_children_value)
     representative_profile = descriptor.get("representative_profile")
-    expected_names = {"foundation", "experiment", *_REQUIRED_FEATURE_SETS}
-    if representative_profile == IBKR_HISTORICAL_PROFILE:
-        expected_names.add("foundation_receipt")
-        if expected_run_kind == CONFIRMATORY_RUN_KIND:
-            if "foundation_promotion" not in raw_children:
-                raise ValueError(
-                    "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
-                )
-            expected_names.add("foundation_promotion")
+    expected_names = {"foundation", "foundation_receipt", "experiment", *_REQUIRED_FEATURE_SETS}
+    if (
+        representative_profile == IBKR_HISTORICAL_PROFILE
+        and expected_run_kind == CONFIRMATORY_RUN_KIND
+    ):
+        if "foundation_promotion" not in raw_children:
+            raise ValueError(
+                "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+            )
+        expected_names.add("foundation_promotion")
     if set(raw_children) != expected_names:
         raise ValueError("representative replay inputs have incomplete children")
     paths: dict[str, Path] = {}
@@ -4414,6 +4415,7 @@ async def _replay_staged_oof_async(
             bundle_path=paths["foundation"],
             clock=cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC))),
             holdout_target_source=holdout_target_source,
+            receipt=paths["foundation_receipt"],
         )
         if expected_run_kind != CONFIRMATORY_RUN_KIND:
             _validate_representative_capture_v4(cast(R1FoundationBindings, verified), experiment)

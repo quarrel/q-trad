@@ -209,7 +209,7 @@ def evaluate_r2_readiness(
     unmet.append("locked holdout requires a verified immutable confirmatory OOF selection manifest")
     return R2ReadinessReport(
         experiment_configuration_id=experiment.configuration_id,
-        r1_bundle_id=verified.bundle.bundle_id,
+        r1_bundle_id=verified.bundle.foundation_id,
         software_contract_ready=ReadinessState.READY,
         representative_integration_ready=representative,
         confirmatory_data_ready=confirmatory_data,
@@ -456,7 +456,7 @@ def verify_exact_r1_bindings(
         else observations.configuration["availability_basis"]
     )
     expected = {
-        "r1_bundle_id": (experiment.r1_bundle_id, bundle.bundle_id),
+        "r1_bundle_id": (experiment.r1_bundle_id, bundle.foundation_id),
         "observation_dataset_id": (experiment.observation_dataset_id, observations.dataset_id),
         "foundation_configuration_id": (
             experiment.foundation_configuration_id,

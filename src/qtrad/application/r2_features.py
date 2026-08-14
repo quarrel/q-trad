@@ -304,7 +304,7 @@ def build_outcome_blind_holdout_feature_rows(
     if experiment.evidence_class is not EvidenceClass.CONFIRMATORY:
         raise ValueError("outcome-blind holdout features require confirmatory evidence")
     if (
-        foundation.bundle.bundle_id != experiment.r1_bundle_id
+        foundation.bundle.foundation_id != experiment.r1_bundle_id
         or foundation.configuration.configuration_id != experiment.foundation_configuration_id
         or foundation.observations.dataset_id != experiment.observation_dataset_id
         or foundation.panel.dataset_id != experiment.panel_dataset_id
@@ -386,7 +386,7 @@ def materialise_outcome_blind_training_features(
     # same source and experiment fields before using the established OOF iterator.
     if (
         experiment.evidence_class is not EvidenceClass.CONFIRMATORY
-        or foundation.bundle.bundle_id != experiment.r1_bundle_id
+        or foundation.bundle.foundation_id != experiment.r1_bundle_id
         or foundation.configuration.configuration_id != experiment.foundation_configuration_id
         or foundation.observations.dataset_id != experiment.observation_dataset_id
         or foundation.panel.dataset_id != experiment.panel_dataset_id

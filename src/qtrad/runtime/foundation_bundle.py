@@ -1,7 +1,8 @@
 """Persistence and independent verification for thin R1 foundation bundles."""
 
+import hashlib
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -48,8 +49,11 @@ from qtrad.domain.foundation import (
 )
 from qtrad.domain.foundation_bundle import (
     AVAILABILITY_EVIDENCE_CONTRACT,
+    FOUNDATION_VERIFICATION_RECEIPT_CONTRACT,
+    FOUNDATION_VERIFICATION_RECEIPT_SCHEMA_VERSION,
     ArtifactReference,
     FoundationBundle,
+    FoundationVerificationReceipt,
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.market_data import DataGap, DataQuality, MarketDataSourceClass, PriceBasis
@@ -75,6 +79,20 @@ from qtrad.domain.time import require_utc
 from qtrad.ports.clock import Clock
 
 _MAX_BUNDLE_BYTES = 4 * 1024 * 1024
+_MAX_RECEIPT_BYTES = 512 * 1024
+_FOUNDATION_VERIFIER_CONTRACT = "qtrad-r1-foundation-semantic-verifier-v1"
+_FOUNDATION_VERIFIER_VERSION = 1
+_FOUNDATION_VERIFIER_CHECKS = (
+    "observation-build-availability",
+    "causal-panel",
+    "target-maturity",
+    "chronological-folds",
+    "initial-forecast-lineage",
+    "coverage",
+    "cross-lineage",
+    "outcome-blind-projections",
+    "g2-safe-projections",
+)
 _CONFIGURATION_KEYS = {
     "contract",
     "schema_version",
@@ -126,6 +144,7 @@ class VerifiedFoundationBundle:
     forecasts: ForecastDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
+    receipt: FoundationVerificationReceipt | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +159,7 @@ class OutcomeBlindVerifiedFoundationBundle:
     folds: FoldDataset
     source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     availability_evidence: Mapping[str, JsonValue]
+    receipt: FoundationVerificationReceipt | None = None
     g2_feature_source: "G2FeatureSourceAuthority | None" = None
 
 
@@ -212,13 +232,195 @@ def write_foundation_bundle(path: Path, bundle: FoundationBundle) -> None:
         output.write(encoded)
 
 
+def _foundation_receipt_for(
+    bundle_path: Path, bundle: FoundationBundle
+) -> FoundationVerificationReceipt:
+    return FoundationVerificationReceipt.create(
+        foundation_id=bundle.foundation_id,
+        closure_id=bundle.closure_id,
+        bundle_manifest_sha256=_sha256_file(bundle_path),
+        child_semantic_ids=bundle.semantic_child_ids,
+        verifier_contract=_FOUNDATION_VERIFIER_CONTRACT,
+        verifier_version=_FOUNDATION_VERIFIER_VERSION,
+        completed_checks=_FOUNDATION_VERIFIER_CHECKS,
+        verifier_identity=_sha256_json(
+            {
+                "contract": _FOUNDATION_VERIFIER_CONTRACT,
+                "version": _FOUNDATION_VERIFIER_VERSION,
+                "checks": list(_FOUNDATION_VERIFIER_CHECKS),
+            }
+        ),
+    )
+
+
+def write_foundation_verification_receipt(
+    path: Path, receipt: FoundationVerificationReceipt
+) -> None:
+    if path.is_symlink() or path.exists():
+        raise ValueError("foundation verification receipt output must be a new regular file")
+    encoded = json.dumps(receipt.as_json(), sort_keys=True, indent=2) + "\n"
+    if len(encoded.encode("utf-8")) > _MAX_RECEIPT_BYTES:
+        raise ValueError("foundation verification receipt exceeds its byte bound")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("x", encoding="utf-8") as output:
+        output.write(encoded)
+
+
+def load_foundation_verification_receipt(path: Path) -> FoundationVerificationReceipt:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("foundation verification receipt must be a regular non-symlink file")
+    encoded = path.read_bytes()
+    if len(encoded) > _MAX_RECEIPT_BYTES:
+        raise ValueError("foundation verification receipt exceeds its byte bound")
+    payload = _mapping(json.loads(encoded))
+    expected = {
+        "contract",
+        "schema_version",
+        "foundation_id",
+        "closure_id",
+        "bundle_manifest_sha256",
+        "child_semantic_ids",
+        "verifier_contract",
+        "verifier_version",
+        "completed_checks",
+        "verifier_identity",
+        "verification_id",
+    }
+    if set(payload) != expected:
+        raise ValueError("foundation verification receipt has an unexpected schema")
+    if (
+        payload["contract"] != FOUNDATION_VERIFICATION_RECEIPT_CONTRACT
+        or payload["schema_version"] != FOUNDATION_VERIFICATION_RECEIPT_SCHEMA_VERSION
+    ):
+        raise ValueError("foundation verification receipt contract is unsupported")
+    child_ids = _mapping(payload["child_semantic_ids"])
+    completed_checks = _sequence(payload["completed_checks"])
+    receipt = FoundationVerificationReceipt(
+        foundation_id=_text(payload["foundation_id"]),
+        closure_id=_text(payload["closure_id"]),
+        bundle_manifest_sha256=_text(payload["bundle_manifest_sha256"]),
+        child_semantic_ids={key: _text(value) for key, value in child_ids.items()},
+        verifier_contract=_text(payload["verifier_contract"]),
+        verifier_version=_int(payload["verifier_version"]),
+        completed_checks=tuple(_text(value) for value in completed_checks),
+        verifier_identity=_text(payload["verifier_identity"]),
+        verification_id=_text(payload["verification_id"]),
+    )
+    canonical = json.dumps(receipt.as_json(), sort_keys=True, indent=2) + "\n"
+    if encoded.decode("utf-8") != canonical:
+        raise ValueError("foundation verification receipt bytes are not canonical")
+    return receipt
+
+
+def _sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _sha256_json(value: object) -> str:
+    return hashlib.sha256(
+        json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def _preflight_bundle_output(path: Path) -> None:
     if path.is_symlink() or path.exists():
         raise ValueError("foundation bundle output must be a new regular file")
 
 
+def _reject_receipt_in_bundle_closure(
+    *, bundle_path: Path, bundle: FoundationBundle, receipt_path: Path
+) -> None:
+    resolved_receipt = receipt_path.resolve()
+    owned_paths = {bundle_path.resolve()}
+    owned_paths.update(
+        (bundle_path.parent / reference.manifest_path).resolve() for reference in bundle.children
+    )
+    if resolved_receipt in owned_paths:
+        raise ValueError("foundation verification receipt must be outside the bundle closure")
+
+
+def _expected_verifier_identity() -> str:
+    return _sha256_json(
+        {
+            "contract": _FOUNDATION_VERIFIER_CONTRACT,
+            "version": _FOUNDATION_VERIFIER_VERSION,
+            "checks": list(_FOUNDATION_VERIFIER_CHECKS),
+        }
+    )
+
+
+def _authenticate_receipt(
+    *, bundle_path: Path, bundle: FoundationBundle, receipt: FoundationVerificationReceipt
+) -> None:
+    if receipt.foundation_id != bundle.foundation_id or receipt.closure_id != bundle.closure_id:
+        raise ValueError("foundation verification receipt does not match the bundle identities")
+    if receipt.bundle_manifest_sha256 != _sha256_file(bundle_path):
+        raise ValueError("foundation verification receipt does not match bundle bytes")
+    if dict(receipt.child_semantic_ids) != bundle.semantic_child_ids:
+        raise ValueError("foundation verification receipt does not match child semantic identities")
+    if (
+        receipt.verifier_contract != _FOUNDATION_VERIFIER_CONTRACT
+        or receipt.verifier_version != _FOUNDATION_VERIFIER_VERSION
+        or receipt.completed_checks != _FOUNDATION_VERIFIER_CHECKS
+        or receipt.verifier_identity != _expected_verifier_identity()
+    ):
+        raise ValueError("foundation verification receipt verifier authority is unsupported")
+
+
+async def authenticate_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt: Path | FoundationVerificationReceipt,
+    consumed_children: Sequence[str] = (),
+) -> FoundationBundle:
+    """Authenticate a verified R1 bundle without replaying causal builders.
+
+    Manifest bytes and the receipt are checked for every child. Parquet bytes are
+    checked only for children named in ``consumed_children``; row decoding is
+    likewise limited to those consumed children.
+    """
+    bundle = load_foundation_bundle(bundle_path)
+    if isinstance(receipt, Path):
+        _reject_receipt_in_bundle_closure(
+            bundle_path=bundle_path,
+            bundle=bundle,
+            receipt_path=receipt,
+        )
+    authenticated_receipt = (
+        load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+    )
+    _authenticate_receipt(bundle_path=bundle_path, bundle=bundle, receipt=authenticated_receipt)
+    references = {reference.name: reference for reference in bundle.children}
+    consumed = tuple(consumed_children)
+    if len(set(consumed)) != len(consumed):
+        raise ValueError("foundation consumed child names must be unique")
+    unknown = set(consumed) - set(references)
+    if unknown:
+        raise ValueError(f"foundation consumed child is unknown: {sorted(unknown)!r}")
+    observation_store = ParquetObservationStore(root, clock)
+    store = ParquetFoundationArtifactStore(root, clock)
+    for reference in bundle.children:
+        if reference.name == "observations":
+            manifest = (
+                await observation_store.verify(reference.manifest_id)
+                if reference.name in consumed
+                else await observation_store.read_manifest(reference.manifest_id)
+            )
+            _verify_observation_reference(reference, manifest)
+        else:
+            manifest = (
+                await store.verify(reference.manifest_id)
+                if reference.name in consumed
+                else await store.read_manifest(reference.manifest_id)
+            )
+            _verify_child_reference(reference, manifest)
+    return bundle
+
+
 def load_foundation_bundle(path: Path) -> FoundationBundle:
-    """Load only the bounded top-level references; child verification is separate."""
+    """Load only bounded references; child verification is separate."""
 
     if path.is_symlink() or not path.is_file():
         raise ValueError("foundation bundle must be a regular non-symlink file")
@@ -230,17 +432,22 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         "contract",
         "schema_version",
         "children",
+        "projections",
         "ordered_instruments",
         "range_start",
         "range_end",
         "coverage",
         "build_summary",
         "source_class",
-        "bundle_id",
+        "foundation_id",
+        "closure_id",
     }
     if set(payload) != expected:
         raise ValueError("foundation bundle has an unexpected schema")
-    if payload["contract"] != FoundationBundle.CONTRACT or payload["schema_version"] != 2:
+    if (
+        payload["contract"] != FoundationBundle.CONTRACT
+        or payload["schema_version"] != FoundationBundle.SCHEMA_VERSION
+    ):
         raise ValueError("foundation bundle contract is unsupported")
     children = _mapping(payload["children"])
     child_names = {
@@ -254,6 +461,10 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
     }
     if set(children) != child_names:
         raise ValueError("foundation bundle child set is incomplete")
+    projection_payload = _sequence(payload["projections"])
+    projections = tuple(
+        _reference(_text(_mapping(item)["name"]), item) for item in projection_payload
+    )
     return FoundationBundle(
         configuration=_reference("configuration", children["configuration"]),
         observations=_reference("observations", children["observations"]),
@@ -269,8 +480,10 @@ def load_foundation_bundle(path: Path) -> FoundationBundle:
         range_end=_datetime(payload["range_end"]),
         coverage=tuple(_coverage(_mapping(item)) for item in _sequence(payload["coverage"])),
         build_summary=cast(Mapping[str, JsonValue], _mapping(payload["build_summary"])),
+        foundation_id=_text(payload["foundation_id"]),
+        closure_id=_text(payload["closure_id"]),
         market_data_source_class=MarketDataSourceClass(_text(payload["source_class"])),
-        bundle_id=_text(payload["bundle_id"]),
+        projections=projections,
     )
 
 
@@ -823,6 +1036,15 @@ async def persist_foundation_bundle(
             ).as_json(),
         },
     }
+    projection_references = (
+        _child_reference("target-index", target_index_manifest),
+        _child_reference("causal-metadata", causal_metadata_manifest),
+        _child_reference("blind-observations", blind_observations_manifest),
+        _child_reference("blind-panel", blind_panel_manifest),
+        _child_reference("g2-observations", g2_observations_manifest),
+        _child_reference("g2-panel", g2_panel_manifest),
+        _child_reference("pre-holdout-target", pre_holdout_target_manifest),
+    )
     bundle = build_foundation_bundle(
         configuration=configuration,
         observations=observations,
@@ -838,14 +1060,18 @@ async def persist_foundation_bundle(
         fold_reference=_child_reference("folds", fold_manifest),
         forecast_reference=_child_reference("forecasts", forecast_manifest),
         build_summary=build_summary,
+        projections=projection_references,
     )
     write_foundation_bundle(output_path, bundle)
-    await verify_foundation_bundle(root=root, bundle_path=output_path, clock=clock)
     return bundle
 
 
 async def verify_foundation_bundle(
-    *, root: Path, bundle_path: Path, clock: Clock
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    receipt_output: Path | None = None,
 ) -> VerifiedFoundationBundle:
     """Verify child bytes, manifests, semantic identities and all cross-references."""
 
@@ -1225,6 +1451,14 @@ async def verify_foundation_bundle(
         or bundle.range_end != configuration.range_end
     ):
         raise ValueError("foundation bundle metadata differs from its configuration")
+    receipt = _foundation_receipt_for(bundle_path, bundle)
+    if receipt_output is not None:
+        _reject_receipt_in_bundle_closure(
+            bundle_path=bundle_path,
+            bundle=bundle,
+            receipt_path=receipt_output,
+        )
+        write_foundation_verification_receipt(receipt_output, receipt)
     return VerifiedFoundationBundle(
         bundle=bundle,
         configuration=configuration,
@@ -1235,6 +1469,7 @@ async def verify_foundation_bundle(
         forecasts=forecasts,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
+        receipt=receipt,
     )
 
 
@@ -1244,9 +1479,25 @@ async def verify_outcome_blind_foundation_bundle(
     bundle_path: Path,
     clock: Clock,
     holdout_target_source: R2HoldoutTargetSource,
+    receipt: Path | FoundationVerificationReceipt,
 ) -> OutcomeBlindVerifiedFoundationBundle:
     """Verify only authenticated outcome-blind R1 projections needed by F2."""
-    bundle = load_foundation_bundle(bundle_path)
+    bundle = await authenticate_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+        receipt=receipt,
+        consumed_children=(
+            "configuration",
+            "availability",
+            "folds",
+            "target-index",
+            "causal-metadata",
+            "blind-observations",
+            "blind-panel",
+            "pre-holdout-target",
+        ),
+    )
     build_summary = _mapping(bundle.build_summary)
     if set(build_summary) != {
         "application_version",
@@ -1284,16 +1535,7 @@ async def verify_outcome_blind_foundation_bundle(
     manifests: dict[str, FoundationChildManifest] = {}
     rows: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     for reference in standard_references:
-        manifest = (
-            await store.verify_file(reference.manifest_id)
-            if reference.name
-            in {
-                "panel",
-                "targets",
-                "forecasts",
-            }
-            else await store.verify(reference.manifest_id)
-        )
+        manifest = await store.read_manifest(reference.manifest_id)
         _verify_child_reference(reference, manifest)
         manifests[reference.name] = manifest
         if reference.name in {"configuration", "availability", "folds"}:
@@ -1323,11 +1565,7 @@ async def verify_outcome_blind_foundation_bundle(
     projection_references: dict[str, ArtifactReference] = {}
     for key, name in projection_names.items():
         reference = _reference(name, projection_payload[key])
-        manifest = (
-            await store.verify_file(reference.manifest_id)
-            if key in g2_projection_names
-            else await store.verify(reference.manifest_id)
-        )
+        manifest = await store.read_manifest(reference.manifest_id)
         _verify_child_reference(reference, manifest)
         projection_manifests[key] = manifest
         projection_references[key] = reference
@@ -1473,7 +1711,7 @@ async def verify_outcome_blind_foundation_bundle(
         observation_reference = projection_references["g2_observations"]
         panel_reference = projection_references["g2_panel"]
         source_id = _g2_feature_source_id(
-            foundation_bundle_id=bundle.bundle_id,
+            foundation_bundle_id=bundle.foundation_id,
             foundation_configuration_id=configuration.configuration_id,
             observation_dataset_id=observation_manifest.dataset_id,
             panel_dataset_id=manifests["panel"].dataset_id,
@@ -1486,7 +1724,7 @@ async def verify_outcome_blind_foundation_bundle(
         )
         g2_feature_source = G2FeatureSourceAuthority(
             root=root,
-            foundation_bundle_id=bundle.bundle_id,
+            foundation_bundle_id=bundle.foundation_id,
             foundation_configuration_id=configuration.configuration_id,
             observation_dataset_id=observation_manifest.dataset_id,
             panel_dataset_id=manifests["panel"].dataset_id,
@@ -1576,12 +1814,6 @@ async def verify_outcome_blind_foundation_bundle(
     for fold in folds.folds:
         if not set(fold.training_target_ids) | set(fold.validation_target_ids) <= target_ids:
             raise ValueError("fold membership is not covered by the holdout target source")
-    expected_folds = build_expanding_folds(
-        cast(TargetDataset, R2OutcomeBlindTargetView.from_source(holdout_target_source)),
-        configuration,
-    )
-    if folds != expected_folds:
-        raise ValueError("foundation folds differ from deterministic pre-holdout replay")
     return OutcomeBlindVerifiedFoundationBundle(
         bundle=bundle,
         configuration=configuration,
@@ -1591,6 +1823,9 @@ async def verify_outcome_blind_foundation_bundle(
         folds=folds,
         source_active_intervals=evidence.source_active_intervals,
         availability_evidence=availability,
+        receipt=(
+            load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
+        ),
         g2_feature_source=g2_feature_source,
     )
 
@@ -1701,7 +1936,7 @@ async def _verify_confirmatory_target_dataset(
     """Decode the exact authenticated target child after irreversible confirmatory OPENED."""
 
     if (
-        authority.foundation_bundle_id != foundation.bundle.bundle_id
+        authority.foundation_bundle_id != foundation.bundle.foundation_id
         or authority.foundation_configuration_id != foundation.configuration.configuration_id
         or authority.observation_dataset_id != foundation.observations.dataset_id
     ):
