@@ -2,9 +2,10 @@
 
 - **Status:** Accepted
 - **Date:** 2026-08-02
-- **Amended:** 2026-08-11 by Amendment 1
-- **Amendment 1 status:** Proposed
-- **Amendment authority:** Where Amendment 1 conflicts with the original decision, Amendment 1 controls.
+- **Amended:** 2026-08-14 by Amendment 2
+- **Amendment 1 status:** Accepted
+- **Amendment 2 status:** Accepted
+- **Amendment authority:** Amendment 2 controls where amendments conflict; otherwise Amendment 1 controls over the original decision.
 
 ## Context
 
@@ -133,9 +134,9 @@ retry. Once the first independently valid terminal outcome is selected, it is ne
 
 ### Independent replay and absence claims
 
-> **Amendment 1:** The cumulative-replay requirement in this section now applies
-> to confirmatory promotion and explicit deep audit. Ordinary boundary
-> verification is immediate-input and claim scoped.
+> **Amendment 2:** The cumulative replay described below is exceptional deep audit only. Ordinary
+> verification authenticates accepted immediate-parent verification or promotion evidence and proves
+> the current boundary's claims. Confirmatory promotion authenticates existing proof; it does not replay ancestry.
 
 Independent replay means loading the original files in a new verifier path, authenticating their
 complete closure, deriving expected identities and outputs from lower-layer children and fixed policy,
@@ -221,10 +222,10 @@ holdout leakage and false provenance. It is not required to resist an operator
 deliberately forging both evidence and its verification records in order to
 mislead themselves.
 
-Confirmatory evidence retains a stronger boundary: before an artefact may
-authorise confirmatory research or holdout use, the required semantic chain is
-independently replayed from an immutable runtime and recorded by a confirmatory
-promotion attestation.
+Confirmatory evidence retains a separate authority boundary. Before an artefact may authorise
+confirmatory research or holdout use, promotion authenticates its exact accepted verification receipt,
+the required evidence and readiness class, verifier acceptance and explicit operator authorisation.
+Promotion does not repeat semantic replay; the exceptional deep-audit triggers remain separate.
 
 ### Decision
 
@@ -258,7 +259,7 @@ The receipt must bind at least:
 - the exact manifest identity and authenticated closure identity;
 - immediate input artefact identities;
 - the verifier contract and version;
-- a claim-scoped semantic implementation identity;
+- a claim-scoped verifier identity;
 - the verification procedure or check set completed; and
 - the verification result.
 
@@ -267,8 +268,8 @@ A later consumer may restore the established semantic result when it:
 1. independently authenticates the exact artefact bytes and complete file tree;
 2. independently authenticates the receipt;
 3. confirms that the receipt names the exact artefact and immediate inputs; and
-4. confirms that the verifier contract and semantic implementation identity
-   remain accepted and have not been revoked.
+4. confirms that the verifier contract and claim-scoped verifier identity remain
+   accepted and have not been revoked.
 
 This is not equivalent to trusting a caller-supplied pass flag. The receipt is
 immutable evidence whose applicability is re-established against the unchanged
@@ -288,15 +289,14 @@ At an ordinary build or verification boundary, independent replay means:
 It does not require recursively repeating complete semantic replay of every
 unchanged ancestor on every descendant invocation.
 
-The complete cumulative replay remains required when:
+Complete cumulative replay remains available only when:
 
-- an artefact is promoted for confirmatory authority;
 - an accepted verifier identity has been revoked;
 - a defect may have affected a previously established semantic result; or
 - an operator explicitly requests a fresh deep audit.
 
-After successful confirmatory promotion, descendants consume the promotion
-attestation rather than repeating the same ancestor replay again.
+Neither ordinary verification nor confirmatory promotion triggers deep audit. Descendants consume the
+exact accepted verification receipt or promotion rather than repeating ancestor replay.
 
 #### 4. Confirmatory promotion is separate from ordinary iteration
 
@@ -306,15 +306,13 @@ immutable artefacts through accepted semantic-verification receipts.
 Before an artefact may support `CONFIRMATORY` evidence, irreversible holdout
 access or a confirmatory conclusion:
 
-- the exact artefact and required ancestry must be replayed from a detached
-  immutable worktree or immutable image;
-- the complete replay must use accepted verifier contracts; and
-- the resulting promotion attestation must bind the exact artefact roots,
-  verifier identities and runtime provenance.
+- authenticate the exact artefact closure and accepted verification receipt;
+- confirm the required completed-check set, verifier acceptance, evidence class and readiness class;
+- record explicit operator authorisation; and
+- create a promotion binding the exact semantic, closure and verification identities.
 
-Promotion reuses the existing immutable artefacts. It does not require a data
-rebuild unless producer semantics were defective or the authenticated bytes
-changed.
+Promotion reuses the existing verified artefact and does not repeat semantic replay. A separate deep
+audit is required only under the exceptional triggers above.
 
 #### 5. Invalidation is claim-scoped
 
@@ -373,7 +371,7 @@ solely because the invocation was named a rehearsal.
 
 | Amendment ID | Original requirement or interpretation | Revised requirement |
 |---|---|---|
-| A1.1 | Later verification was implemented as cumulative semantic replay of unchanged ancestors | Later boundaries consume authenticated immediate inputs and replay their own transformation; cumulative replay occurs at confirmatory promotion or explicit revocation |
+| A1.1 | Later verification was implemented as cumulative semantic replay of unchanged ancestors | Later boundaries authenticate accepted immediate-parent proof and replay only their own transformation; cumulative replay is exceptional deep audit, while confirmatory promotion authenticates existing proof |
 | A1.2 | Verification authority existed only transiently in a process | Complete semantic verification may issue reusable create-only evidence |
 | A1.3 | Exact source revision or whole-module identity could invalidate all cached work | Exact revision remains provenance; semantic invalidation is scoped to code and policy capable of changing the protected claim |
 | A1.4 | A provenance failure could block use of an otherwise unchanged artefact without distinguishing the failed claim | Artefact validity, provenance, readiness and confirmatory authority are reported separately |
@@ -385,7 +383,7 @@ solely because the invocation was named a rehearsal.
 
 | Invariant | Required authenticated proof | Failure behaviour |
 |---|---|---|
-| Verification receipt | Exact artefact and closure identities, immediate inputs, accepted verifier contract/version and claim-scoped semantic implementation identity | Reject or reverify the receipt's exact artefact; do not rebuild unchanged data solely because verifier authority changed |
+| Verification receipt | Exact artefact and closure identities, immediate inputs, accepted verifier contract/version and claim-scoped verifier identity | Reject or reverify the receipt's exact artefact; do not rebuild unchanged data solely because verifier authority changed |
 | Claim-scoped invalidation | Causal relationship between the changed input, code or policy and the protected claim | Invalidate only affected claims and descendants; unrelated operational or provenance changes do not revoke artefact validity |
 
 ### Evidence and migration impact
@@ -428,9 +426,57 @@ Ordinary local research can reuse authenticated immutable history and
 deterministic derived work without recursively repeating unchanged semantic
 verification.
 
-Confirmatory promotion remains deliberately expensive, but its cost is paid
-once per exact promoted artefact and accepted verifier contract rather than at
-every downstream boundary.
+Confirmatory promotion is replay-free authority over an exact accepted verification receipt. The
+semantic verification cost is paid once per exact artefact and accepted verifier contract, not again
+at promotion or every downstream boundary.
 
 The system must maintain explicit verifier-version and revocation policy.
 Ordinary local iteration does not claim resistance to deliberate self-forgery.
+
+## Amendment 2 — Immediate-parent verification and replay-free promotion
+
+- **Status:** Accepted
+- **Date:** 2026-08-14
+- **Amends:** Independent replay, verification evidence, confirmatory promotion, identity and compatibility
+
+### Context
+
+Amendment 1 made ordinary verification boundary-local but still required cumulative semantic replay at
+confirmatory promotion. That repeated already-established work and mixed verification with authority.
+The same protection is obtained more directly by authenticating the exact accepted proof and granting
+explicit promotion authority over it.
+
+### Decision
+
+1. **Immediate-parent proof.** A boundary authenticates its accepted immediate-parent verification or
+   promotion evidence and independently proves only the transformation and claims it introduces. A child
+   binds the parent's semantic, closure and verification or promotion identities; it does not copy or
+   recursively prove the parent's complete ancestry.
+2. **Prove once, authenticate many.** A successful deep verifier issues a durable create-only receipt for
+   its exact artefact, immediate-parent authority, verifier contract and completed-check set. Ordinary
+   descendants authenticate that receipt instead of rerunning the verifier.
+3. **Promotion grants authority.** Confirmatory promotion authenticates the exact accepted receipt,
+   required evidence and readiness class, verifier acceptance and explicit operator authorisation, then
+   writes a create-only promotion. Promotion does not replay already-proved semantics.
+4. **Deep audit is exceptional.** Semantic replay is repeated only after verifier revocation, when a
+   discovered defect may affect an established claim, or when the operator explicitly requests an audit.
+5. **Exact bytes are authenticated lazily.** A manifest and receipt establish the declared closure and
+   expected child byte identities. A consumer hashes and validates each child it consumes, but does not
+   hash or decode unused children merely because they are present.
+6. **Identity classes remain distinct.** `semantic_id` identifies scientific meaning, `closure_id` the
+   exact physical representation, `verification_id` the completed proof, and `promotion_id` the granted
+   authority. Execution provenance is separate. Paths, timestamps, file layout, JSON formatting,
+   whole-application revision and physical child hashes are not semantic identity unless they change the
+   claimed computation.
+7. **The trust mechanism stays proportional.** This single-user system does not add signatures, PKI,
+   transparency logs, a generic trust service or a hostile-operator threat model.
+8. **Compatibility requires a named current need.** A temporary reader or migration bridge must name the
+   retained evidence it serves and the PR that deletes it after migration. There are no dual writers or
+   permanent legacy paths for old fixtures or hypothetical consumers.
+
+### Consequences
+
+This amendment changes authority for the planned Stage 6 through R2 handoffs; it does not claim those
+implementation migrations are complete. Scientific, source-class, causal, holdout, create-only and
+exact-consumed-byte controls remain unchanged. Existing immutable evidence is migrated through new
+artefacts and receipts where required, without provider reacquisition or in-place mutation.
