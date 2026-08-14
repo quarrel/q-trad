@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -15,9 +16,12 @@ import qtrad.runtime.provider_history as provider_history_runtime
 from qtrad.application.ibkr_foundation import IBKRFoundationBuild, build_ibkr_foundation
 from qtrad.application.r2_ibkr_historical import build_ibkr_historical_experiment
 from qtrad.domain.ibkr_foundation import (
+    IBKR_CONFIRMATORY_INSTRUMENTS,
     IBKRFoundationReadinessState,
     VerifiedIbkrFoundationPromotion,
 )
+from qtrad.domain.ibkr_historical import IbkrHistoricalRequest
+from qtrad.domain.ibkr_results import IbkrHistoricalRequestResult
 from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
@@ -26,7 +30,16 @@ from qtrad.runtime.ibkr_foundation_promotion import (
     authenticate_ibkr_foundation_promotion,
     create_ibkr_foundation_confirmatory_promotion,
 )
-from qtrad.runtime.provider_history import read_provider_history_source_evidence
+from qtrad.runtime.ibkr_results import IbkrHistoricalResultStream
+from qtrad.runtime.provider_history import (
+    authenticate_provider_history,
+    read_provider_history_source_evidence,
+    verify_provider_history,
+)
+from qtrad.runtime.provider_history_v2 import (
+    provider_history_v2_verifier_sha256,
+    repack_provider_history_v2,
+)
 from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
 from tests.test_ibkr_foundation import _evaluate_session_aware_readiness
 from tests.test_provider_history import _published_provider_history
@@ -190,6 +203,135 @@ def test_promotion_authenticates_exact_legacy_stage7_verifier_identity(
     promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
     with pytest.raises(ValueError, match="stage7 binding changed"):
         authenticate_ibkr_foundation_promotion(bundle, receipt=receipt, promotion=promotion)
+
+
+def test_v2_promotion_replays_stage7_and_rejects_v1_verifier_binding(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _, _, v1_manifest = _published_provider_history(tmp_path)
+    v1_receipt = tmp_path / "provider-history-v1-receipt.json"
+    verify_provider_history(v1_manifest, receipt_output=v1_receipt)
+    v2_receipt = tmp_path / "provider-history-v2-receipt.json"
+    v2_manifest, _ = repack_provider_history_v2(
+        v1_manifest,
+        v1_receipt,
+        tmp_path / "provider-v2",
+        receipt_output=v2_receipt,
+    )
+    configuration = _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 1, 0, 30, tzinfo=UTC),
+    )
+    requested = tuple(
+        sorted(
+            {
+                *configuration.ordered_instruments,
+                *(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+            }
+        )
+    )
+    source = authenticate_provider_history(
+        v2_manifest,
+        receipt=v2_receipt,
+        instrument_ids=requested,
+        interval_start=configuration.required_observation_start,
+        interval_end=configuration.required_observation_end,
+    )
+    build = build_ibkr_foundation(source, configuration)
+    readiness, _gaps = _evaluate_session_aware_readiness()
+    build = replace(build, readiness=readiness)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        lambda *_args, **_kwargs: build,
+    )
+    bundle = tmp_path / "foundation-v2.json"
+    write_ibkr_foundation(
+        bundle,
+        provider_manifest=v2_manifest,
+        provider_history_receipt=v2_receipt,
+        configuration=configuration,
+    )
+    foundation_receipt = tmp_path / "foundation-v2-receipt.json"
+    verify_ibkr_foundation(
+        bundle,
+        provider_history_receipt=v2_receipt,
+        receipt_output=foundation_receipt,
+    )
+
+    monkeypatch.setattr("qtrad.runtime.r2_verification.runtime_identities", _runtime)
+    monkeypatch.setattr(promotion_runtime, "_require_detached_source", lambda: None)
+    deep_replay_reached = False
+    receipt_authenticated = False
+    stage6_replay_reached = False
+    original_verify = promotion_runtime.verify_provider_history_v2
+    original_authenticate = promotion_runtime.authenticate_provider_history_v2
+    original_iter_request_results = IbkrHistoricalResultStream.iter_request_results
+
+    def record_receipt_authentication(path: Path, *, receipt: Path) -> object:
+        nonlocal receipt_authenticated
+        receipt_authenticated = True
+        return original_authenticate(path, receipt=receipt)
+
+    def record_stage6_replay(
+        self: IbkrHistoricalResultStream,
+        *,
+        request_order: Sequence[IbkrHistoricalRequest] | None = None,
+    ) -> Iterator[IbkrHistoricalRequestResult]:
+        nonlocal stage6_replay_reached
+        assert receipt_authenticated
+        stage6_replay_reached = True
+        yield from original_iter_request_results(self, request_order=request_order)
+
+    def record_deep_replay(path: Path):
+        nonlocal deep_replay_reached
+        deep_replay_reached = True
+        return original_verify(path)
+
+    monkeypatch.setattr(
+        promotion_runtime, "authenticate_provider_history_v2", record_receipt_authentication
+    )
+    monkeypatch.setattr(IbkrHistoricalResultStream, "iter_request_results", record_stage6_replay)
+    monkeypatch.setattr(promotion_runtime, "verify_provider_history_v2", record_deep_replay)
+    promotion = tmp_path / "promotion-v2.json"
+    authority = create_ibkr_foundation_confirmatory_promotion(
+        bundle,
+        receipt=foundation_receipt,
+        provider_history_receipt=v2_receipt,
+        output=promotion,
+        authorized_by="stage8-operator",
+        authorized_at=datetime(2026, 8, 12, 12, 0, tzinfo=UTC),
+        authorization_reference="S8.4 v2 migration proof",
+        workers=1,
+    )
+    assert deep_replay_reached
+    assert stage6_replay_reached
+    document = json.loads(promotion.read_bytes())
+    assert document["stage7"]["provider_verifier_sha256"] == (provider_history_v2_verifier_sha256())
+    assert (
+        authenticate_ibkr_foundation_promotion(
+            bundle,
+            receipt=foundation_receipt,
+            promotion=promotion,
+        ).promotion_sha256
+        == authority.promotion_sha256
+    )
+
+    document["stage7"]["provider_verifier_sha256"] = (
+        provider_history_runtime.provider_history_verifier_sha256()
+    )
+    identity = dict(document)
+    identity.pop("promotion_sha256")
+    document["promotion_sha256"] = promotion_runtime._sha(identity)
+    promotion.write_bytes(promotion_runtime._canonical_bytes(document) + b"\n")
+    with pytest.raises(ValueError, match="stage7 binding changed"):
+        authenticate_ibkr_foundation_promotion(
+            bundle,
+            receipt=foundation_receipt,
+            promotion=promotion,
+        )
 
 
 def test_promoted_confirmatory_ibkr_oof_passes_generic_bundle_verification(

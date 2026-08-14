@@ -20,9 +20,11 @@ from typing import cast
 import polars as pl
 
 from qtrad.application.provider_history import (
+    ProviderHistoryObservationRows,
     ProviderHistoryObservationSummary,
     ProviderHistoryRequestEvidence,
     ProviderHistoryResultSource,
+    ProviderHistorySelection,
     ProviderHistorySource,
     ProviderHistorySourceEvidence,
     build_provider_history_dataset,
@@ -521,12 +523,31 @@ def preflight_provider_history_verification_receipt(
     return receipt_path
 
 
+def _provider_history_contract(path: Path) -> str:
+    manifest = _require_file(path, "provider-history manifest")
+    document = _mapping(
+        _parse_json(
+            _read_bounded(manifest, "provider-history manifest"), "provider-history manifest"
+        ),
+        "provider-history manifest",
+    )
+    return _string(document["contract"], "provider-history contract")
+
+
 def verify_provider_history(
     path: Path,
     *,
     receipt_output: Path | None = None,
 ) -> ProviderHistoricalDataset:
     """Deeply verify provider history and optionally persist its create-only receipt."""
+
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        verify_provider_history_v2,
+    )
+
+    if _provider_history_contract(path) == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        return verify_provider_history_v2(path, receipt_output=receipt_output).dataset
 
     manifest = _require_file(path, "provider-history manifest")
     receipt_path = (
@@ -1181,6 +1202,14 @@ def verify_provider_history_file_only(path: Path) -> ProviderHistoricalDataset:
     materialise provider features or outcomes.
     """
 
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        verify_provider_history_v2_file_only,
+    )
+
+    if _provider_history_contract(path) == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        return verify_provider_history_v2_file_only(path).dataset
+
     manifest_path = _require_file(path, "provider-history manifest")
     root = manifest_path.parent
     manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
@@ -1314,11 +1343,20 @@ def provider_history_verifier_sha256() -> str:
     )
 
 
-def is_provider_history_verifier_sha256_accepted(value: str) -> bool:
+def is_provider_history_v1_verifier_sha256_accepted(value: str) -> bool:
     return value in {
         provider_history_verifier_sha256(),
         _LEGACY_PROVIDER_HISTORY_VERIFIER_SHA256,
     }
+
+
+def is_provider_history_verifier_sha256_accepted(value: str) -> bool:
+    from qtrad.runtime.provider_history_v2 import provider_history_v2_verifier_sha256
+
+    return (
+        is_provider_history_v1_verifier_sha256_accepted(value)
+        or value == provider_history_v2_verifier_sha256()
+    )
 
 
 def provider_history_source_verification_receipt(
@@ -1413,10 +1451,19 @@ def _receipt_timestamp(value: object, field: str) -> datetime:
 def read_provider_history_source_verification_receipt(
     path: Path,
     receipt: Mapping[str, object],
+    *,
+    _verified_dataset: ProviderHistoricalDataset | None = None,
+    _verified_observations: ProviderHistoryObservationRows | None = None,
+    _verified_source_artifact: ProviderHistorySource | None = None,
+    _selection: ProviderHistorySelection | None = None,
 ) -> ProviderHistorySourceEvidence:
     """Reauthenticate unchanged bytes and restore prior compact semantic results."""
 
-    dataset = verify_provider_history_file_only(path)
+    if (_verified_dataset is None) != (_verified_observations is None):
+        raise ValueError("preverified provider-history dataset and rows must be supplied together")
+    dataset = (
+        verify_provider_history_file_only(path) if _verified_dataset is None else _verified_dataset
+    )
     _require_exact_keys(
         receipt,
         {
@@ -1456,7 +1503,11 @@ def read_provider_history_source_verification_receipt(
     )
     source_reference = _source_reference(document["source_result"])
     source_path = _safe_child(root, str(source_reference["path"]), "source result")
-    source_stream = verify_ibkr_historical_result_stream(source_path)
+    source_stream = (
+        verify_ibkr_historical_result_stream(source_path)
+        if _verified_source_artifact is None
+        else _verified_source_artifact
+    )
     result_sha256_by_request: dict[str, str] = {}
     for reference in source_stream.aggregate.request_results:
         if not reference.path.startswith("requests/") or not reference.path.endswith(".json"):
@@ -1613,10 +1664,15 @@ def read_provider_history_source_verification_receipt(
 
     return ProviderHistorySourceEvidence(
         dataset=dataset,
-        observations=_provider_history_rows(path, dataset),
+        observations=(
+            _provider_history_rows(path, dataset)
+            if _verified_observations is None
+            else _verified_observations
+        ),
         source_artifact=source_stream,
         request_evidence=tuple(request_evidence),
         observation_summary=observation_summary,
+        selection=_selection,
     )
 
 
@@ -1624,8 +1680,25 @@ def authenticate_provider_history(
     path: Path,
     *,
     receipt: Path,
+    instrument_ids: Sequence[str] | None = None,
+    interval_start: datetime | None = None,
+    interval_end: datetime | None = None,
 ) -> ProviderHistorySourceEvidence:
     """Authenticate a Stage 7 receipt without semantic replay or row decoding."""
+
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        authenticate_provider_history_v2,
+    )
+
+    if _provider_history_contract(path) == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        return authenticate_provider_history_v2(
+            path,
+            receipt=receipt,
+            instrument_ids=instrument_ids,
+            interval_start=interval_start,
+            interval_end=interval_end,
+        )
 
     receipt_path = _require_file(receipt, "provider-history verification receipt")
     receipt_bytes = _read_bounded(receipt_path, "provider-history verification receipt")
@@ -1701,7 +1774,7 @@ def authenticate_provider_history(
     if any(document[field] != value for field, value in expected.items()):
         raise ValueError("provider-history verification receipt does not match its closure")
 
-    return read_provider_history_source_verification_receipt(
+    restored = read_provider_history_source_verification_receipt(
         manifest_path,
         {
             "contract": _SOURCE_VERIFICATION_RECEIPT_CONTRACT,
@@ -1710,6 +1783,25 @@ def authenticate_provider_history(
             "request_evidence": document["request_evidence"],
             "observation_summary": document["observation_summary"],
         },
+    )
+    if not any(value is not None for value in (instrument_ids, interval_start, interval_end)):
+        return restored
+    rows = _provider_history_rows(
+        manifest_path,
+        restored.dataset,
+        instrument_ids=instrument_ids,
+        interval_start=interval_start,
+        interval_end=interval_end,
+    )
+    if not isinstance(rows, VerifiedProviderHistoryRows):
+        raise TypeError("provider-history v1 selection did not restore v1 rows")
+    return ProviderHistorySourceEvidence(
+        dataset=restored.dataset,
+        observations=rows,
+        source_artifact=restored.source_artifact,
+        request_evidence=restored.request_evidence,
+        observation_summary=restored.observation_summary,
+        selection=rows.selection,
     )
 
 
@@ -1734,6 +1826,16 @@ def read_provider_history_source_evidence(
 ) -> ProviderHistorySourceEvidence:
     """Return verified Stage 6 evidence together with its accepted Stage 7 rows."""
 
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        verify_provider_history_v2,
+    )
+
+    if _provider_history_contract(path) == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        if verified_partition_callback is not None or source_replay_workers != 1:
+            raise ValueError("provider-history v2 does not replay Stage 6 partitions")
+        return verify_provider_history_v2(path)
+
     verification = _verify_provider_history(
         path,
         verified_partition_callback=verified_partition_callback,
@@ -1756,21 +1858,32 @@ class VerifiedProviderHistoryRows:
 
     dataset: ProviderHistoricalDataset
     partitions: tuple[_ProviderHistoryPartitionInput, ...]
+    selection: ProviderHistorySelection | None = None
 
     def __len__(self) -> int:
-        return self.dataset.row_count
+        return (
+            self.dataset.row_count
+            if self.selection is None
+            else self.selection.row_count_upper_bound
+        )
 
     @property
     def instruments(self) -> tuple[str, ...]:
+        if self.selection is not None:
+            return self.selection.requested_instrument_ids
         return tuple(dict.fromkeys(part.reference.key[0] for part in self.partitions))
 
     def __iter__(self) -> Iterator[ProviderHistoricalObservation]:
-        yield from self._iter_partitions(self.partitions, expected_count=len(self))
+        for row in self._iter_partitions(self.partitions, expected_count=self.dataset.row_count):
+            if self._selected(row):
+                yield row
 
     def iter_instrument(self, instrument_id: str) -> Iterator[ProviderHistoricalObservation]:
         selected = tuple(part for part in self.partitions if part.reference.key[0] == instrument_id)
         expected_count = sum(part.row_count for part in selected)
-        yield from self._iter_partitions(selected, expected_count=expected_count)
+        for row in self._iter_partitions(selected, expected_count=expected_count):
+            if self._selected(row):
+                yield row
 
     def iter_instrument_with_positions(
         self,
@@ -1795,7 +1908,15 @@ class VerifiedProviderHistoryRows:
             self._iter_partitions(tuple(selected), expected_count=expected_count),
             offset + 1,
         ):
-            yield row, position
+            if self._selected(row):
+                yield row, position
+
+    def _selected(self, row: ProviderHistoricalObservation) -> bool:
+        return self.selection is None or (
+            row.instrument_id in self.selection.requested_instrument_ids
+            and row.interval_start >= self.selection.interval_start
+            and row.interval_end <= self.selection.interval_end
+        )
 
     @staticmethod
     def _iter_partitions(
@@ -1828,13 +1949,29 @@ class VerifiedProviderHistoryRows:
 def _provider_history_rows(
     path: Path,
     dataset: ProviderHistoricalDataset,
-) -> VerifiedProviderHistoryRows:
+    *,
+    instrument_ids: Sequence[str] | None = None,
+    interval_start: datetime | None = None,
+    interval_end: datetime | None = None,
+) -> ProviderHistoryObservationRows:
+    from qtrad.runtime.provider_history_v2 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
+        provider_history_v2_rows,
+    )
+
+    if _provider_history_contract(path) == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        return provider_history_v2_rows(
+            path,
+            dataset,
+            instrument_ids=instrument_ids,
+            interval_start=interval_start,
+            interval_end=interval_end,
+        )
+
     manifest_path = _require_file(path, "provider-history manifest")
+    manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
     document = _mapping(
-        _parse_json(
-            _read_bounded(manifest_path, "provider-history manifest"),
-            "provider-history manifest",
-        ),
+        _parse_json(manifest_bytes, "provider-history manifest"),
         "provider-history manifest",
     )
     raw_files = document["files"]
@@ -1865,7 +2002,37 @@ def _provider_history_rows(
         )
     if references_by_path:
         raise ValueError("provider-history manifest has additional partition files")
-    return VerifiedProviderHistoryRows(dataset=dataset, partitions=tuple(partitions))
+    supplied = (instrument_ids is not None, interval_start is not None, interval_end is not None)
+    if any(supplied) and not all(supplied):
+        raise ValueError("provider-history selection requires instruments and both bounds")
+    selection = None
+    if all(supplied):
+        assert instrument_ids is not None
+        assert interval_start is not None
+        assert interval_end is not None
+        requested = tuple(sorted(set(instrument_ids)))
+        selected_partitions = tuple(
+            partition
+            for partition in dataset.partitions
+            if partition.key[0] in requested
+            and partition.key[1] >= interval_start.date()
+            and partition.key[1] <= interval_end.date()
+        )
+        selected_references = tuple(partition.as_json_value() for partition in selected_partitions)
+        selection = ProviderHistorySelection.create(
+            parent_manifest_sha256=sha256_bytes(manifest_bytes),
+            parent_dataset_sha256=dataset.dataset_sha256,
+            requested_instrument_ids=requested,
+            interval_start=interval_start,
+            interval_end=interval_end,
+            selected_part_references=selected_references,
+            row_count_upper_bound=sum(partition.row_count for partition in selected_partitions),
+        )
+    return VerifiedProviderHistoryRows(
+        dataset=dataset,
+        partitions=tuple(partitions),
+        selection=selection,
+    )
 
 
 def _read_provider_history_rows(

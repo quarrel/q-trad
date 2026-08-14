@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
@@ -34,6 +34,8 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalObservation,
     ProviderHistoricalPartition,
     ProviderHistoricalPartitionReference,
+    sha256_json,
+    utc_text,
 )
 from qtrad.domain.time import require_utc
 
@@ -119,6 +121,97 @@ class ProviderHistoryRequestEvidence:
         )
 
 
+_PROVIDER_HISTORY_SELECTION_CONTRACT = "qtrad-provider-history-selection-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderHistorySelection:
+    """Authenticated physical-part selection over one semantic parent dataset."""
+
+    parent_manifest_sha256: str
+    parent_dataset_sha256: str
+    requested_instrument_ids: tuple[str, ...]
+    interval_start: datetime
+    interval_end: datetime
+    selected_part_sha256: tuple[str, ...]
+    row_count_upper_bound: int
+    selection_sha256: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        parent_manifest_sha256: str,
+        parent_dataset_sha256: str,
+        requested_instrument_ids: Sequence[str],
+        interval_start: datetime,
+        interval_end: datetime,
+        selected_part_references: Sequence[Mapping[str, JsonValue]],
+        row_count_upper_bound: int,
+    ) -> ProviderHistorySelection:
+        instruments = tuple(sorted(set(requested_instrument_ids)))
+        part_sha256 = tuple(sha256_json(reference) for reference in selected_part_references)
+        identity: dict[str, JsonValue] = {
+            "contract": _PROVIDER_HISTORY_SELECTION_CONTRACT,
+            "parent_manifest_sha256": parent_manifest_sha256,
+            "parent_dataset_sha256": parent_dataset_sha256,
+            "requested_instrument_ids": list(instruments),
+            "interval_start": utc_text(interval_start),
+            "interval_end": utc_text(interval_end),
+            "selected_part_sha256": list(part_sha256),
+            "row_count_upper_bound": row_count_upper_bound,
+        }
+        return cls(
+            parent_manifest_sha256=parent_manifest_sha256,
+            parent_dataset_sha256=parent_dataset_sha256,
+            requested_instrument_ids=instruments,
+            interval_start=interval_start,
+            interval_end=interval_end,
+            selected_part_sha256=part_sha256,
+            row_count_upper_bound=row_count_upper_bound,
+            selection_sha256=sha256_json(identity),
+        )
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.parent_manifest_sha256, "selection parent manifest identity"),
+            (self.parent_dataset_sha256, "selection parent dataset identity"),
+            (self.selection_sha256, "selection identity"),
+            *((value, "selection part identity") for value in self.selected_part_sha256),
+        ):
+            if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+                raise ValueError(f"{field} must be a lowercase SHA-256 digest")
+        if not self.requested_instrument_ids or self.requested_instrument_ids != tuple(
+            sorted(set(self.requested_instrument_ids))
+        ):
+            raise ValueError("provider-history selection instruments are not canonical")
+        require_utc(self.interval_start, "provider-history selection start")
+        require_utc(self.interval_end, "provider-history selection end")
+        if self.interval_end <= self.interval_start:
+            raise ValueError("provider-history selection interval is invalid")
+        if len(set(self.selected_part_sha256)) != len(self.selected_part_sha256):
+            raise ValueError("provider-history selected part identities are not unique")
+        if self.row_count_upper_bound < 0:
+            raise ValueError("provider-history selection row bound must not be negative")
+        if self.selection_sha256 != sha256_json(self.as_json_value(include_identity=False)):
+            raise ValueError("provider-history selection identity changed")
+
+    def as_json_value(self, *, include_identity: bool = True) -> dict[str, JsonValue]:
+        value: dict[str, JsonValue] = {
+            "contract": _PROVIDER_HISTORY_SELECTION_CONTRACT,
+            "parent_manifest_sha256": self.parent_manifest_sha256,
+            "parent_dataset_sha256": self.parent_dataset_sha256,
+            "requested_instrument_ids": list(self.requested_instrument_ids),
+            "interval_start": utc_text(self.interval_start),
+            "interval_end": utc_text(self.interval_end),
+            "selected_part_sha256": list(self.selected_part_sha256),
+            "row_count_upper_bound": self.row_count_upper_bound,
+        }
+        if include_identity:
+            value["selection_sha256"] = self.selection_sha256
+        return value
+
+
 @dataclass(frozen=True, slots=True)
 class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
@@ -128,6 +221,7 @@ class ProviderHistorySourceEvidence:
     source_artifact: ProviderHistorySource
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
     observation_summary: ProviderHistoryObservationSummary | None = None
+    selection: ProviderHistorySelection | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -141,8 +235,18 @@ class ProviderHistorySourceEvidence:
             raise ValueError("provider-history source runtime differs from its dataset")
         if self.dataset.aggregate_sha256 != self.source_artifact.aggregate.aggregate_sha256:
             raise ValueError("provider-history source aggregate differs from its dataset")
-        if len(self.observations) != self.dataset.row_count:
-            raise ValueError("provider-history source observation count differs from its dataset")
+        if self.selection is None:
+            if len(self.observations) != self.dataset.row_count:
+                raise ValueError(
+                    "provider-history source observation count differs from its dataset"
+                )
+            return
+        if (
+            self.selection.parent_dataset_sha256 != self.dataset.dataset_sha256
+            or self.selection.row_count_upper_bound != len(self.observations)
+            or self.selection.row_count_upper_bound > self.dataset.row_count
+        ):
+            raise ValueError("provider-history selection differs from its source evidence")
 
 
 def request_evidence_by_hash(
