@@ -504,6 +504,23 @@ class _ObservationSummaryBuilder:
         )
 
 
+def preflight_provider_history_verification_receipt(
+    receipt_output: Path,
+    *,
+    immutable_roots: tuple[Path, ...],
+) -> Path:
+    """Reject receipt outputs that could mutate authenticated evidence."""
+
+    receipt_path = _absolute_output_path(receipt_output)
+    if receipt_path.exists():
+        raise FileExistsError(f"provider-history path already exists: {receipt_path}")
+    if any(receipt_path.is_relative_to(_absolute_output_path(root)) for root in immutable_roots):
+        raise ValueError(
+            "provider-history receipt cannot be written inside an authenticated closure"
+        )
+    return receipt_path
+
+
 def verify_provider_history(
     path: Path,
     *,
@@ -512,14 +529,14 @@ def verify_provider_history(
     """Deeply verify provider history and optionally persist its create-only receipt."""
 
     manifest = _require_file(path, "provider-history manifest")
-    receipt_path = _absolute_output_path(receipt_output) if receipt_output is not None else None
-    if receipt_path is not None:
-        if receipt_path.exists():
-            raise FileExistsError(f"provider-history path already exists: {receipt_path}")
-        if receipt_path.is_relative_to(manifest.parent):
-            raise ValueError(
-                "provider-history receipt cannot be written inside its authenticated closure"
-            )
+    receipt_path = (
+        preflight_provider_history_verification_receipt(
+            receipt_output,
+            immutable_roots=(manifest.parent,),
+        )
+        if receipt_output is not None
+        else None
+    )
 
     verification = _verify_provider_history(manifest)
     if receipt_path is not None:

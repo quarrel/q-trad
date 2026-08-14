@@ -679,6 +679,46 @@ def test_provider_history_cli_reports_publication_then_single_verification(
     assert verification_count == 1
 
 
+def test_provider_history_cli_rejects_receipt_inside_stage6_before_publication(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    result_manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    source_root = result_manifest.parent
+    receipt = source_root / "stage7-verification-receipt.json"
+    original_tree = {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    }
+
+    def fail_if_transformation_starts(_path: Path) -> None:
+        raise AssertionError("Stage 7 transformation reached")
+
+    monkeypatch.setattr(
+        qtrad_main,
+        "verify_ibkr_historical_result_stream",
+        fail_if_transformation_starts,
+    )
+    with pytest.raises(ValueError, match="inside an authenticated closure"):
+        qtrad_main._build_provider_history(
+            historical_result_path=result_manifest,
+            availability_delay=timedelta(minutes=5),
+            output_path=tmp_path / "provider",
+            verification_receipt_path=receipt,
+        )
+
+    assert not (tmp_path / "provider").exists()
+    assert not receipt.exists()
+    assert {
+        path.relative_to(source_root).as_posix(): path.read_bytes()
+        for path in source_root.rglob("*")
+        if path.is_file()
+    } == original_tree
+
+
 def test_provider_history_verification_failure_retains_published_output(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

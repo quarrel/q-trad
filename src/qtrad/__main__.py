@@ -221,6 +221,7 @@ from qtrad.runtime.ibkr_results import (
 from qtrad.runtime.logging import configure_logging
 from qtrad.runtime.provider_history import (
     authenticate_provider_history,
+    preflight_provider_history_verification_receipt,
     publish_provider_history,
     verify_provider_history,
 )
@@ -3171,6 +3172,10 @@ def _build_provider_history(
     output_path: Path,
     verification_receipt_path: Path,
 ) -> None:
+    receipt_path = preflight_provider_history_verification_receipt(
+        verification_receipt_path,
+        immutable_roots=(output_path, historical_result_path.parent),
+    )
     source_artifact = verify_ibkr_historical_result_stream(historical_result_path)
     for _ in source_artifact.iter_request_results():
         pass
@@ -3190,15 +3195,15 @@ def _build_provider_history(
         ),
         flush=True,
     )
-    verify_provider_history(manifest_path, receipt_output=verification_receipt_path)
-    evidence = authenticate_provider_history(manifest_path, receipt=verification_receipt_path)
+    verify_provider_history(manifest_path, receipt_output=receipt_path)
+    evidence = authenticate_provider_history(manifest_path, receipt=receipt_path)
     dataset = evidence.dataset
     print(
         json.dumps(
             {
                 "contract": dataset.CONTRACT,
                 "manifest": str(manifest_path),
-                "verification_receipt": str(verification_receipt_path.resolve()),
+                "verification_receipt": str(receipt_path),
                 "dataset_sha256": dataset.dataset_sha256,
                 "availability_delay": dataset.availability_policy.delay_text,
                 "rows": dataset.row_count,
