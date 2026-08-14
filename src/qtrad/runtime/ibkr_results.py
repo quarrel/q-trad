@@ -1,4 +1,4 @@
-"""Create-only Stage 4 IBKR result publication and file-only verification."""
+"""Create-only Stage 6 IBKR result publication and file-only verification."""
 
 from __future__ import annotations
 
@@ -13,9 +13,7 @@ from pathlib import Path
 from typing import cast
 from uuid import UUID
 
-from qtrad.application.ibkr_results import (
-    IbkrHistoricalAggregateReplay,
-)
+from qtrad.application.ibkr_results import replay_ibkr_historical_aggregate_result
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_execution import (
     IbkrAttemptStatus,
@@ -23,9 +21,15 @@ from qtrad.domain.ibkr_execution import (
     IbkrRequestStatus,
     IbkrTerminalDisposition,
 )
-from qtrad.domain.ibkr_historical import IbkrHistoricalPlan, IbkrHistoricalRequest
+from qtrad.domain.ibkr_historical import (
+    HISTORICAL_PLAN_CONTRACT,
+    IbkrHistoricalPlan,
+    IbkrHistoricalRequest,
+    sha256_json,
+)
 from qtrad.domain.ibkr_results import (
     HISTORICAL_RESULT_CONTRACT,
+    HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
     MAX_IBKR_RESULT_BYTES,
     MAX_IBKR_RESULT_CHILDREN,
     MAX_IBKR_RESULT_REQUEST_BYTES,
@@ -38,6 +42,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalRequestResult,
     IbkrHistoricalResultArtifact,
+    IbkrHistoricalResultVerificationReceipt,
     canonical_json_bytes,
     sha256_bytes,
 )
@@ -46,6 +51,19 @@ from qtrad.runtime.ibkr_historical import load_ibkr_historical_plan
 _MANIFEST_NAME = "manifest.json"
 _PLAN_NAME = "plan.json"
 _REQUEST_DIRECTORY = "requests"
+_STAGE6_VERIFIER_VERSION = "1"
+_STAGE6_COMPLETED_CHECKS = (
+    "canonical_manifest",
+    "exact_declared_tree",
+    "plan_and_request_closure",
+    "request_result_semantics",
+    "aggregate_semantics",
+)
+_MAX_RECEIPT_BYTES = 64 * 1024
+
+# Temporary PR-H4 migration reader for retained Stage 6 v2 closures only.
+_LEGACY_HISTORICAL_RESULT_V2_CONTRACT = "qtrad-ibkr-historical-result-v2"
+_LEGACY_HISTORICAL_RESULT_V2_SCHEMA_VERSION = 2
 
 
 def write_ibkr_historical_result(
@@ -96,7 +114,7 @@ def publish_ibkr_historical_result(
     output_directory: Path,
     artifact: IbkrHistoricalResultArtifact,
 ) -> Path:
-    """Stage, verify, and create-only commit one result directory."""
+    """Structurally check, then atomically publish an unverified Stage 6 closure."""
 
     destination = _absolute_output_path(output_directory)
     _require_new_output_directory(destination)
@@ -105,9 +123,12 @@ def publish_ibkr_historical_result(
     )
     try:
         staged_manifest = write_ibkr_historical_result(staging, artifact)
-        verified = verify_ibkr_historical_result(staged_manifest)
-        if verified.aggregate.aggregate_sha256 != artifact.aggregate.aggregate_sha256:
-            raise RuntimeError("IBKR result changed between staging and verification")
+        staged_stream = verify_ibkr_historical_result_stream(staged_manifest)
+        if (
+            staged_stream.aggregate.result_id != artifact.aggregate.result_id
+            or staged_stream.aggregate.closure_id != artifact.aggregate.closure_id
+        ):
+            raise RuntimeError("IBKR result changed between structural publication checks")
         if destination.exists():
             raise FileExistsError(f"IBKR result output already exists: {destination}")
         os.rename(staging, destination)
@@ -119,7 +140,7 @@ def publish_ibkr_historical_result(
 
 
 class IbkrHistoricalResultStream:
-    """Read and replay one Stage 6 request-result child at a time."""
+    """Read authenticated Stage 6 request-result children without semantic replay."""
 
     def __init__(
         self,
@@ -146,11 +167,10 @@ class IbkrHistoricalResultStream:
             order = tuple(sorted(self.plan.requests, key=lambda item: item.request_sha256))
         else:
             order = tuple(request_order)
-        if len(order) != len(self.plan.requests) or {item.request_sha256 for item in order} != {
-            item.request_sha256 for item in self.plan.requests
-        }:
+        request_ids = tuple(item.request_sha256 for item in order)
+        expected_ids = {item.request_sha256 for item in self.plan.requests}
+        if len(request_ids) != len(set(request_ids)) or not set(request_ids).issubset(expected_ids):
             raise ValueError("IBKR result stream request order differs from the plan")
-        replay = IbkrHistoricalAggregateReplay(self.plan, self.plan_bytes, self.aggregate)
         for request in order:
             relative_path = f"{_REQUEST_DIRECTORY}/{request.request_sha256}.json"
             reference = self._references_by_path[relative_path]
@@ -173,9 +193,7 @@ class IbkrHistoricalResultStream:
                 raise ValueError(
                     "IBKR request result semantic identity does not match its manifest"
                 )
-            replay.accept(request, result)
             yield result
-        replay.finish()
 
 
 def _read_ibkr_historical_result_header(path: Path) -> IbkrHistoricalResultStream:
@@ -222,6 +240,120 @@ def _read_ibkr_historical_result_header(path: Path) -> IbkrHistoricalResultStrea
     )
 
 
+def _read_legacy_ibkr_historical_result_v2_header(
+    path: Path,
+    *,
+    require_exact_tree: bool = False,
+) -> IbkrHistoricalResultStream:
+    """Read retained S7.3 v2 metadata until PR-H4 migrates and deletes it.
+
+    This path is deliberately outside the current Stage 6 writer and CLI. It
+    authenticates retained v2 metadata and immediate-child declarations without
+    replaying Stage 6 semantics; PR-H4 is the deletion trigger.
+    """
+    manifest_path = _require_file(path, "legacy IBKR v2 result manifest")
+    root = manifest_path.parent
+    manifest_bytes = _read_bytes(manifest_path, "legacy IBKR v2 aggregate result")
+    document = _parse_json(manifest_bytes, "legacy IBKR v2 aggregate result")
+    _require_exact_keys(
+        document,
+        {
+            "aggregate_sha256",
+            "contract",
+            "coverage_summary",
+            "entitlement_summary",
+            "plan",
+            "request_results",
+            "runtime_sha256",
+            "schema_version",
+        },
+        "legacy IBKR v2 aggregate result",
+    )
+    if (
+        document["contract"] != _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
+        or document["schema_version"] != _LEGACY_HISTORICAL_RESULT_V2_SCHEMA_VERSION
+    ):
+        raise ValueError("legacy IBKR v2 aggregate result contract is unsupported")
+    if manifest_bytes != canonical_json_bytes(cast(dict[str, JsonValue], document)):
+        raise ValueError("legacy IBKR v2 aggregate result bytes are not canonical")
+    aggregate_sha256 = _require_legacy_sha256(
+        document["aggregate_sha256"], "legacy IBKR v2 aggregate identity"
+    )
+    plan_reference = _child_reference(document["plan"], "legacy IBKR v2 plan reference")
+    if plan_reference.path != _PLAN_NAME or plan_reference.contract != HISTORICAL_PLAN_CONTRACT:
+        raise ValueError("legacy IBKR v2 plan reference is not canonical")
+    plan_path = _safe_child(root, plan_reference.path, "legacy IBKR v2 plan child")
+    plan_bytes = _read_bytes(plan_path, "legacy IBKR v2 plan child")
+    if sha256_bytes(plan_bytes) != plan_reference.bytes_sha256:
+        raise ValueError("legacy IBKR v2 plan bytes digest does not match its reference")
+    plan = load_ibkr_historical_plan(plan_path)
+    if plan_bytes != canonical_json_bytes(plan.as_json_value()):
+        raise ValueError("legacy IBKR v2 plan bytes are not canonical")
+    if plan.plan_sha256 != plan_reference.semantic_sha256:
+        raise ValueError("legacy IBKR v2 plan semantic identity does not match its reference")
+    runtime_sha256 = _require_legacy_sha256(
+        document["runtime_sha256"], "legacy IBKR v2 runtime identity"
+    )
+    if plan.runtime_sha256 != runtime_sha256:
+        raise ValueError("legacy IBKR v2 runtime identity differs from its plan")
+    raw_request_results = document["request_results"]
+    if not isinstance(raw_request_results, list) or not raw_request_results:
+        raise ValueError("legacy IBKR v2 request-result references are missing")
+    request_results = tuple(
+        _child_reference(item, "legacy IBKR v2 request-result reference")
+        for item in raw_request_results
+    )
+    if len(request_results) > MAX_IBKR_RESULT_CHILDREN:
+        raise ValueError("legacy IBKR v2 request-result references exceed their bound")
+    request_hashes = {request.request_sha256 for request in plan.requests}
+    expected_paths = {
+        f"{_REQUEST_DIRECTORY}/{request_hash}.json" for request_hash in request_hashes
+    }
+    references_by_path = {reference.path: reference for reference in request_results}
+    if len(references_by_path) != len(request_results) or set(references_by_path) != expected_paths:
+        raise ValueError("legacy IBKR v2 request-result closure differs from its plan")
+    if any(reference.contract != REQUEST_RESULT_CONTRACT for reference in request_results):
+        raise ValueError("legacy IBKR v2 request-result path or contract is unsupported")
+    if len({reference.semantic_sha256 for reference in request_results}) != len(request_results):
+        raise ValueError("legacy IBKR v2 request-result identities are duplicated")
+    if require_exact_tree:
+        _require_exact_tree(
+            root,
+            {_REQUEST_DIRECTORY, _MANIFEST_NAME, _PLAN_NAME, *references_by_path},
+        )
+    legacy_aggregate = object.__new__(IbkrHistoricalAggregateResult)
+    object.__setattr__(legacy_aggregate, "plan", plan_reference)
+    object.__setattr__(legacy_aggregate, "runtime_sha256", runtime_sha256)
+    object.__setattr__(legacy_aggregate, "request_results", request_results)
+    object.__setattr__(
+        legacy_aggregate,
+        "coverage_summary",
+        cast(
+            dict[str, JsonValue],
+            dict(_mapping(document["coverage_summary"], "legacy coverage summary")),
+        ),
+    )
+    object.__setattr__(
+        legacy_aggregate,
+        "entitlement_summary",
+        cast(
+            dict[str, JsonValue],
+            dict(_mapping(document["entitlement_summary"], "legacy entitlement summary")),
+        ),
+    )
+    object.__setattr__(legacy_aggregate, "result_id", aggregate_sha256)
+    object.__setattr__(legacy_aggregate, "closure_id", aggregate_sha256)
+    object.__setattr__(legacy_aggregate, "publication_status", "PUBLISHED_UNVERIFIED")
+    object.__setattr__(legacy_aggregate, "aggregate_sha256", aggregate_sha256)
+    return IbkrHistoricalResultStream(
+        source_root=root,
+        plan=plan,
+        plan_bytes=plan_bytes,
+        aggregate=legacy_aggregate,
+        references_by_path=references_by_path,
+    )
+
+
 def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStream:
     """Verify a Stage 6 closure header and return a one-child-at-a-time reader."""
 
@@ -235,16 +367,180 @@ def verify_ibkr_historical_result_stream(path: Path) -> IbkrHistoricalResultStre
     return stream
 
 
-def verify_ibkr_historical_result(path: Path) -> IbkrHistoricalResultArtifact:
-    """Verify a result directory from files only; PostgreSQL is never queried."""
+def verify_ibkr_historical_result(
+    path: Path,
+    *,
+    receipt_output: Path,
+) -> IbkrHistoricalResultArtifact:
+    """Independently replay Stage 6 once and persist its receipt."""
     stream = verify_ibkr_historical_result_stream(path)
+    receipt_path = _preflight_verification_receipt(path, receipt_output)
     results = tuple(stream.iter_request_results())
-    return IbkrHistoricalResultArtifact(
+    replay_ibkr_historical_aggregate_result(
+        stream.plan,
+        stream.plan_bytes,
+        results,
+        stream.aggregate,
+    )
+    artifact = IbkrHistoricalResultArtifact(
         plan=stream.plan,
         plan_bytes=stream.plan_bytes,
         request_results=results,
         aggregate=stream.aggregate,
     )
+    receipt = _build_verification_receipt(path, stream.aggregate, stream.plan)
+    _write_create_only(
+        receipt_path,
+        canonical_json_bytes(receipt.as_json_value()),
+        "IBKR result verification receipt",
+    )
+    return artifact
+
+
+def authenticate_ibkr_historical_result(
+    path: Path,
+    *,
+    receipt: Path,
+) -> IbkrHistoricalResultStream:
+    """Authenticate Stage 6 bytes and receipt without semantic or child replay."""
+    stream = verify_ibkr_historical_result_stream(path)
+    manifest_path = _require_file(path, "IBKR result manifest")
+    receipt_path = _require_file(receipt, "IBKR result verification receipt")
+    if receipt_path.is_relative_to(manifest_path.parent):
+        raise ValueError("IBKR result verification receipt must be outside the immutable closure")
+    receipt_bytes = _read_bytes(
+        receipt_path,
+        "IBKR result verification receipt",
+        maximum=_MAX_RECEIPT_BYTES,
+    )
+    document = _parse_json(receipt_bytes, "IBKR result verification receipt")
+    if receipt_bytes != canonical_json_bytes(cast(dict[str, JsonValue], document)):
+        raise ValueError("IBKR result verification receipt is not canonical")
+    parsed = _verification_receipt_from_json(document)
+    expected_manifest_sha256 = sha256_bytes(_read_bytes(manifest_path, "IBKR aggregate result"))
+    expected_verifier_identity = sha256_json(
+        {
+            "contract": HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
+            "version": _STAGE6_VERIFIER_VERSION,
+            "completed_checks": list(_STAGE6_COMPLETED_CHECKS),
+        }
+    )
+    if (
+        parsed.result_id != stream.aggregate.result_id
+        or parsed.closure_id != stream.aggregate.closure_id
+        or parsed.result_contract != stream.aggregate.CONTRACT
+        or parsed.result_schema_version != stream.aggregate.SCHEMA_VERSION
+        or parsed.manifest_sha256 != expected_manifest_sha256
+        or parsed.plan_semantic_id != stream.aggregate.plan.semantic_sha256
+        or parsed.verifier_contract != HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT
+        or parsed.verifier_version != _STAGE6_VERIFIER_VERSION
+        or parsed.completed_checks != _STAGE6_COMPLETED_CHECKS
+        or parsed.verifier_identity != expected_verifier_identity
+    ):
+        raise ValueError("IBKR result verification receipt binding is not accepted")
+    return stream
+
+
+def _preflight_verification_receipt(manifest: Path, receipt_output: Path) -> Path:
+    manifest_path = _require_file(manifest, "IBKR result manifest")
+    receipt_path = _absolute_output_path(receipt_output)
+    if receipt_path.is_relative_to(manifest_path.parent):
+        raise ValueError("IBKR result verification receipt must be outside the immutable closure")
+    if receipt_path.exists():
+        raise FileExistsError(f"IBKR result verification receipt already exists: {receipt_path}")
+    if not receipt_path.parent.is_dir():
+        raise FileNotFoundError(
+            f"IBKR result verification receipt parent directory does not exist: "
+            f"{receipt_path.parent}"
+        )
+    return receipt_path
+
+
+def _build_verification_receipt(
+    manifest: Path,
+    aggregate: IbkrHistoricalAggregateResult,
+    plan: IbkrHistoricalPlan,
+) -> IbkrHistoricalResultVerificationReceipt:
+    manifest_path = _require_file(manifest, "IBKR result manifest")
+    manifest_sha256 = sha256_bytes(_read_bytes(manifest_path, "IBKR aggregate result"))
+    verifier_identity = sha256_json(
+        {
+            "contract": HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
+            "version": _STAGE6_VERIFIER_VERSION,
+            "completed_checks": list(_STAGE6_COMPLETED_CHECKS),
+        }
+    )
+    identity = {
+        "contract": HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
+        "result_contract": aggregate.CONTRACT,
+        "result_schema_version": aggregate.SCHEMA_VERSION,
+        "result_id": aggregate.result_id,
+        "closure_id": aggregate.closure_id,
+        "manifest_sha256": manifest_sha256,
+        "plan_semantic_id": plan.plan_sha256,
+        "verifier_contract": HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
+        "verifier_version": _STAGE6_VERIFIER_VERSION,
+        "completed_checks": list(_STAGE6_COMPLETED_CHECKS),
+        "verifier_identity": verifier_identity,
+    }
+    return IbkrHistoricalResultVerificationReceipt(
+        result_id=aggregate.result_id,
+        closure_id=aggregate.closure_id,
+        result_contract=aggregate.CONTRACT,
+        result_schema_version=aggregate.SCHEMA_VERSION,
+        manifest_sha256=manifest_sha256,
+        plan_semantic_id=plan.plan_sha256,
+        verifier_contract=HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT,
+        verifier_version=_STAGE6_VERIFIER_VERSION,
+        completed_checks=_STAGE6_COMPLETED_CHECKS,
+        verifier_identity=verifier_identity,
+        verification_id=sha256_json(identity),
+    )
+
+
+def _verification_receipt_from_json(
+    value: Mapping[str, object],
+) -> IbkrHistoricalResultVerificationReceipt:
+    _require_exact_keys(
+        value,
+        {
+            "contract",
+            "result_contract",
+            "result_schema_version",
+            "result_id",
+            "closure_id",
+            "manifest_sha256",
+            "plan_semantic_id",
+            "verifier_contract",
+            "verifier_version",
+            "completed_checks",
+            "verifier_identity",
+            "verification_id",
+        },
+        "IBKR result verification receipt",
+    )
+    if value["contract"] != HISTORICAL_RESULT_VERIFICATION_RECEIPT_CONTRACT:
+        raise ValueError("IBKR result verification receipt contract is unsupported")
+    checks = _list(value["completed_checks"], "IBKR result receipt completed checks")
+    if any(not isinstance(item, str) or not item for item in checks):
+        raise ValueError("IBKR result receipt completed checks are invalid")
+    completed_checks = tuple(cast(str, item) for item in checks)
+    receipt = IbkrHistoricalResultVerificationReceipt(
+        result_id=_string(value, "result_id"),
+        closure_id=_string(value, "closure_id"),
+        result_contract=_string(value, "result_contract"),
+        result_schema_version=_integer(value, "result_schema_version"),
+        manifest_sha256=_string(value, "manifest_sha256"),
+        plan_semantic_id=_string(value, "plan_semantic_id"),
+        verifier_contract=_string(value, "verifier_contract"),
+        verifier_version=_string(value, "verifier_version"),
+        completed_checks=completed_checks,
+        verifier_identity=_string(value, "verifier_identity"),
+        verification_id=_string(value, "verification_id"),
+    )
+    if receipt.as_json_value() != dict(value):
+        raise ValueError("IBKR result verification receipt contains non-canonical fields")
+    return receipt
 
 
 def _aggregate_from_json(value: Mapping[str, object]) -> IbkrHistoricalAggregateResult:
@@ -253,12 +549,16 @@ def _aggregate_from_json(value: Mapping[str, object]) -> IbkrHistoricalAggregate
         {
             "contract",
             "schema_version",
+            "plan_semantic_id",
+            "request_result_semantic_ids",
+            "result_id",
+            "closure_id",
+            "publication_status",
             "plan",
             "runtime_sha256",
             "request_results",
             "coverage_summary",
             "entitlement_summary",
-            "aggregate_sha256",
         },
         "IBKR aggregate result",
     )
@@ -272,15 +572,23 @@ def _aggregate_from_json(value: Mapping[str, object]) -> IbkrHistoricalAggregate
         raise ValueError("IBKR aggregate request_results must be an array")
     coverage = _json_object(value["coverage_summary"], "IBKR coverage summary")
     entitlement = _json_object(value["entitlement_summary"], "IBKR entitlement summary")
+    plan_ref = _child_reference(value["plan"], "IBKR aggregate plan")
+    request_refs = tuple(
+        _child_reference(item, "IBKR aggregate request child") for item in request_values
+    )
+    if value["plan_semantic_id"] != plan_ref.semantic_sha256:
+        raise ValueError("IBKR aggregate semantic plan identity differs from its reference")
+    if value["request_result_semantic_ids"] != [item.semantic_sha256 for item in request_refs]:
+        raise ValueError("IBKR aggregate semantic request identities differ from its references")
     return IbkrHistoricalAggregateResult(
-        plan=_child_reference(value["plan"], "IBKR aggregate plan"),
+        plan=plan_ref,
         runtime_sha256=_string(value, "runtime_sha256"),
-        request_results=tuple(
-            _child_reference(item, "IBKR aggregate request child") for item in request_values
-        ),
+        request_results=request_refs,
         coverage_summary=coverage,
         entitlement_summary=entitlement,
-        aggregate_sha256=_string(value, "aggregate_sha256"),
+        result_id=_string(value, "result_id"),
+        closure_id=_string(value, "closure_id"),
+        publication_status=_string(value, "publication_status"),
     )
 
 
@@ -631,6 +939,16 @@ def _require_exact_keys(
         raise ValueError(f"{field} has unknown or missing fields")
 
 
+def _require_legacy_sha256(value: object, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field} must be a lower-case SHA-256")
+    return value
+
+
 def _string(value: Mapping[str, object], field: str) -> str:
     item = value.get(field)
     if not isinstance(item, str) or not item:
@@ -684,7 +1002,10 @@ def _enum[T: Enum](value: object, enum_type: type[T], field: str) -> T:
 
 
 __all__ = [
+    "IbkrHistoricalResultStream",
+    "authenticate_ibkr_historical_result",
     "publish_ibkr_historical_result",
     "verify_ibkr_historical_result",
+    "verify_ibkr_historical_result_stream",
     "write_ibkr_historical_result",
 ]

@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import inspect
+import json
+from collections.abc import Sequence
 from dataclasses import fields, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -50,7 +53,9 @@ from qtrad.domain.ibkr_results import (
     sha256_bytes,
 )
 from qtrad.domain.identifiers import InstrumentId
+from qtrad.runtime import ibkr_results as ibkr_runtime
 from qtrad.runtime.ibkr_results import (
+    authenticate_ibkr_historical_result,
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
     write_ibkr_historical_result,
@@ -397,7 +402,13 @@ def test_result_builder_and_file_verifier_replay_a_create_only_closure(tmp_path:
 
     output = tmp_path / "result"
     manifest = write_ibkr_historical_result(output, artifact)
-    verified = verify_ibkr_historical_result(manifest)
+    manifest_document = json.loads(manifest.read_bytes())
+    assert manifest_document["contract"] == "qtrad-ibkr-historical-result-v3"
+    assert manifest_document["schema_version"] == 3
+    assert "aggregate_sha256" not in manifest_document
+    receipt = tmp_path / "result-receipt.json"
+    verified = verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    assert receipt.is_file()
 
     bar_result = next(
         item
@@ -446,13 +457,19 @@ def test_result_verifier_rejects_missing_and_orphan_children(tmp_path: Path) -> 
     child = next(output.joinpath("requests").glob("*.json"))
     child.unlink()
     with pytest.raises(ValueError, match=r"child closure|missing"):
-        verify_ibkr_historical_result(manifest)
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "missing-receipt.json",
+        )
 
     output = tmp_path / "orphan"
     manifest = write_ibkr_historical_result(output, artifact)
     output.joinpath("requests", "orphan.json").write_text("{}")
     with pytest.raises(ValueError, match=r"child closure|unexpected"):
-        verify_ibkr_historical_result(manifest)
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "orphan-receipt.json",
+        )
 
 
 def test_result_builder_classifies_conflicting_bar_duplicate() -> None:
@@ -590,7 +607,9 @@ def _rehash_aggregate(
     for field in fields(aggregate):
         object.__setattr__(mutated, field.name, getattr(aggregate, field.name))
     object.__setattr__(mutated, "request_results", child_refs)
-    object.__setattr__(mutated, "aggregate_sha256", sha256_json(mutated.identity_payload()))
+    object.__setattr__(mutated, "result_id", sha256_json(mutated.semantic_identity_payload()))
+    object.__setattr__(mutated, "closure_id", sha256_json(mutated.closure_identity_payload()))
+    object.__setattr__(mutated, "aggregate_sha256", mutated.result_id)
     return mutated
 
 
@@ -629,12 +648,12 @@ def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path)
     plan, snapshot = _build_fixture()
     artifact = build_ibkr_historical_result_artifact(plan, snapshot)
     output = tmp_path / "staged-result"
-
     manifest = publish_ibkr_historical_result(output, artifact)
 
-    assert verify_ibkr_historical_result(manifest).aggregate.aggregate_sha256 == (
-        artifact.aggregate.aggregate_sha256
-    )
+    assert verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "staged-result-receipt.json",
+    ).aggregate.aggregate_sha256 == (artifact.aggregate.aggregate_sha256)
     with pytest.raises(FileExistsError):
         publish_ibkr_historical_result(output, artifact)
 
@@ -665,7 +684,10 @@ def test_result_publisher_allows_realistic_large_request_child(tmp_path: Path) -
     assert len(child_bytes) <= MAX_IBKR_RESULT_REQUEST_BYTES
 
     manifest = publish_ibkr_historical_result(tmp_path / "large-child", large_artifact)
-    verified = verify_ibkr_historical_result(manifest)
+    verified = verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "large-receipt.json",
+    )
     assert verified.aggregate.aggregate_sha256 == aggregate.aggregate_sha256
 
 
@@ -677,7 +699,15 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
         ["historical", "ibkr", "result-build", "--plan", "plan.json", "--output", "result"]
     )
     verify_args = parser.parse_args(
-        ["historical", "ibkr", "verify", "--result", "result/manifest.json"]
+        [
+            "historical",
+            "ibkr",
+            "verify",
+            "--result",
+            "result/manifest.json",
+            "--receipt-output",
+            "result-verification.json",
+        ]
     )
 
     assert build_args.historical_ibkr_command == "result-build"
@@ -685,6 +715,55 @@ def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
     assert build_args.output == Path("result")
     assert verify_args.historical_ibkr_command == "verify"
     assert verify_args.result == Path("result/manifest.json")
+    assert verify_args.receipt_output == Path("result-verification.json")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["historical", "ibkr", "verify", "--result", "result/manifest.json"])
+
+
+def test_historical_result_verify_cli_reports_only_after_receipt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from qtrad.__main__ import _verify_ibkr_historical_result
+
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+
+    _verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    report = json.loads(capsys.readouterr().out)
+    assert report["verified"] is True
+    assert report["receipt"] == str(receipt)
+    assert receipt.is_file()
+
+
+def test_result_verification_requires_durable_receipt_output() -> None:
+    receipt_parameter = inspect.signature(verify_ibkr_historical_result).parameters[
+        "receipt_output"
+    ]
+    assert receipt_parameter.default is inspect.Parameter.empty
+    assert receipt_parameter.kind is inspect.Parameter.KEYWORD_ONLY
+
+
+def test_result_verification_cannot_succeed_when_receipt_write_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = write_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+
+    original_write = ibkr_runtime._write_create_only
+
+    def fail_receipt_write(path: Path, payload: bytes, field: str) -> None:
+        if field == "IBKR result verification receipt":
+            raise OSError("receipt persistence failed")
+        original_write(path, payload, field)
+
+    monkeypatch.setattr(ibkr_runtime, "_write_create_only", fail_receipt_write)
+    with pytest.raises(OSError, match="receipt persistence failed"):
+        verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    assert not receipt.exists()
 
 
 def test_result_builder_and_file_verifier_accepts_invalidated_restart(tmp_path: Path) -> None:
@@ -744,7 +823,10 @@ def test_result_builder_and_file_verifier_accepts_invalidated_restart(tmp_path: 
 
     artifact = build_ibkr_historical_result_artifact(plan, restarted)
     manifest = write_ibkr_historical_result(tmp_path / "restart", artifact)
-    verified = verify_ibkr_historical_result(manifest)
+    verified = verify_ibkr_historical_result(
+        manifest,
+        receipt_output=tmp_path / "restart-receipt.json",
+    )
     bar_result = next(
         item
         for item in verified.request_results
@@ -1280,3 +1362,271 @@ def test_aggregate_replay_rejects_duplicate_provider_request_identity_between_re
             (mutated_bar, schedule_result),
             mutated_aggregate,
         )
+
+
+def test_result_identity_separates_semantic_and_closure_fields() -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    aggregate = artifact.aggregate
+    serialized = aggregate.as_json_value()
+
+    assert serialized["contract"] == "qtrad-ibkr-historical-result-v3"
+    assert serialized["schema_version"] == 3
+    assert serialized["result_id"] == aggregate.result_id
+    assert serialized["closure_id"] == aggregate.closure_id
+    assert "aggregate_sha256" not in serialized
+
+    physical = object.__new__(IbkrHistoricalAggregateResult)
+    for field in fields(aggregate):
+        object.__setattr__(physical, field.name, getattr(aggregate, field.name))
+    physical_refs = tuple(
+        replace(
+            reference,
+            path=reference.path.replace("requests/", "repacked/"),
+            bytes_sha256="f" * 64,
+        )
+        for reference in aggregate.request_results
+    )
+    object.__setattr__(physical, "request_results", physical_refs)
+    object.__setattr__(physical, "result_id", aggregate.result_id)
+    object.__setattr__(physical, "closure_id", sha256_json(physical.closure_identity_payload()))
+    object.__setattr__(physical, "aggregate_sha256", physical.result_id)
+
+    assert physical.result_id == aggregate.result_id
+    assert physical.closure_id != aggregate.closure_id
+    assert physical.semantic_identity_payload() == aggregate.semantic_identity_payload()
+
+    semantic = object.__new__(IbkrHistoricalAggregateResult)
+    for field in fields(aggregate):
+        object.__setattr__(semantic, field.name, getattr(aggregate, field.name))
+    object.__setattr__(
+        semantic,
+        "coverage_summary",
+        {**aggregate.coverage_summary, "accepted_bar_row_count": 99},
+    )
+    object.__setattr__(semantic, "result_id", sha256_json(semantic.semantic_identity_payload()))
+    object.__setattr__(semantic, "closure_id", sha256_json(semantic.closure_identity_payload()))
+    object.__setattr__(semantic, "aggregate_sha256", semantic.result_id)
+    assert semantic.result_id != aggregate.result_id
+
+
+def test_normal_v3_reader_rejects_retained_v2_manifest() -> None:
+    retained_v2_manifest = (
+        Path(__file__).parent
+        / "fixtures"
+        / "provider-history"
+        / "v2"
+        / "source-result"
+        / "manifest.json"
+    )
+    with pytest.raises(ValueError, match="unknown or missing fields"):
+        ibkr_runtime.verify_ibkr_historical_result_stream(retained_v2_manifest)
+
+
+def test_result_publication_and_deep_verification_have_bounded_replay_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    replay_calls: list[int] = []
+    original_replay = ibkr_runtime.replay_ibkr_historical_aggregate_result
+
+    def replay_spy(
+        plan: IbkrHistoricalPlan,
+        plan_bytes: bytes,
+        request_results: Sequence[IbkrHistoricalRequestResult],
+        aggregate: IbkrHistoricalAggregateResult,
+    ) -> None:
+        replay_calls.append(1)
+        original_replay(plan, plan_bytes, request_results, aggregate)
+
+    child_reads: list[str] = []
+    original_read = ibkr_runtime._read_bytes
+
+    def read_spy(path: Path, field: str, *, maximum: int = MAX_IBKR_RESULT_BYTES) -> bytes:
+        if "requests" in path.parts:
+            child_reads.append(path.name)
+        return original_read(path, field, maximum=maximum)
+
+    monkeypatch.setattr(ibkr_runtime, "replay_ibkr_historical_aggregate_result", replay_spy)
+    monkeypatch.setattr(ibkr_runtime, "_read_bytes", read_spy)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    assert replay_calls == []
+    assert child_reads == []
+
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    assert len(replay_calls) == 1
+    assert sorted(child_reads) == sorted(f"{item.request_sha256}.json" for item in plan.requests)
+
+
+def test_result_receipt_authentication_skips_replay_and_child_reads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+
+    replay_calls: list[int] = []
+    child_reads: list[str] = []
+    original_read = ibkr_runtime._read_bytes
+
+    def replay_spy(
+        plan: IbkrHistoricalPlan,
+        plan_bytes: bytes,
+        request_results: Sequence[IbkrHistoricalRequestResult],
+        aggregate: IbkrHistoricalAggregateResult,
+    ) -> None:
+        replay_calls.append(1)
+
+    def read_spy(path: Path, field: str, *, maximum: int = MAX_IBKR_RESULT_BYTES) -> bytes:
+        if "requests" in path.parts:
+            child_reads.append(path.name)
+        return original_read(path, field, maximum=maximum)
+
+    monkeypatch.setattr(ibkr_runtime, "replay_ibkr_historical_aggregate_result", replay_spy)
+    monkeypatch.setattr(ibkr_runtime, "_read_bytes", read_spy)
+    stream = authenticate_ibkr_historical_result(manifest, receipt=receipt)
+    assert replay_calls == []
+    assert child_reads == []
+
+    request = plan.requests[0]
+    consumed = tuple(stream.iter_request_results(request_order=(request,)))
+    assert len(consumed) == 1
+    assert child_reads == [f"{request.request_sha256}.json"]
+    assert replay_calls == []
+
+
+def test_result_verification_receipt_mutation_is_rejected(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+
+    document = json.loads(receipt.read_bytes())
+    document["contract"] = "qtrad-ibkr-historical-result-verification-invalid"
+    receipt.write_bytes(canonical_json_bytes(document))
+    with pytest.raises(ValueError, match="receipt contract"):
+        authenticate_ibkr_historical_result(manifest, receipt=receipt)
+
+
+def test_receipt_backed_stream_rejects_consumed_child_tamper(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+
+    child = tmp_path / "result" / "requests" / f"{plan.requests[0].request_sha256}.json"
+    child.write_bytes(child.read_bytes() + b" ")
+    stream = authenticate_ibkr_historical_result(manifest, receipt=receipt)
+    with pytest.raises(ValueError, match="child bytes digest"):
+        next(stream.iter_request_results(request_order=(plan.requests[0],)))
+
+
+def _receipt_verification_id(document: dict[str, object]) -> str:
+    return sha256_json(
+        {
+            "contract": document["contract"],
+            "result_contract": document["result_contract"],
+            "result_schema_version": document["result_schema_version"],
+            "result_id": document["result_id"],
+            "closure_id": document["closure_id"],
+            "manifest_sha256": document["manifest_sha256"],
+            "plan_semantic_id": document["plan_semantic_id"],
+            "verifier_contract": document["verifier_contract"],
+            "verifier_version": document["verifier_version"],
+            "completed_checks": document["completed_checks"],
+            "verifier_identity": document["verifier_identity"],
+        }
+    )
+
+
+def _receipt_verifier_identity(document: dict[str, object]) -> str:
+    return sha256_json(
+        {
+            "contract": document["verifier_contract"],
+            "version": document["verifier_version"],
+            "completed_checks": document["completed_checks"],
+        }
+    )
+
+
+def test_result_receipt_rejects_wrong_manifest_and_self_consistent_id_mutations(
+    tmp_path: Path,
+) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+
+    changed_callback = replace(
+        snapshot.callbacks[0],
+        payload={**snapshot.callbacks[0].payload, "date": int(_END.timestamp())},
+    )
+    changed_artifact = build_ibkr_historical_result_artifact(
+        plan,
+        replace(snapshot, callbacks=(changed_callback, *snapshot.callbacks[1:])),
+    )
+    changed_manifest = publish_ibkr_historical_result(tmp_path / "changed", changed_artifact)
+    with pytest.raises(ValueError, match="binding"):
+        authenticate_ibkr_historical_result(changed_manifest, receipt=receipt)
+
+    for field in ("result_id", "closure_id"):
+        document = json.loads(receipt.read_bytes())
+        document[field] = "0" * 64
+        document["verification_id"] = _receipt_verification_id(document)
+        mutated = tmp_path / f"{field}.json"
+        mutated.write_bytes(canonical_json_bytes(document))
+        with pytest.raises(ValueError, match="binding"):
+            authenticate_ibkr_historical_result(manifest, receipt=mutated)
+
+
+def test_result_receipt_rejects_wrong_verifier_and_incomplete_checks(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+
+    for name, checks, version in (
+        ("wrong-version", None, "2"),
+        ("incomplete", ["canonical_manifest"], "1"),
+    ):
+        document = json.loads(receipt.read_bytes())
+        if checks is not None:
+            document["completed_checks"] = checks
+        document["verifier_version"] = version
+        document["verifier_identity"] = _receipt_verifier_identity(document)
+        document["verification_id"] = _receipt_verification_id(document)
+        mutated = tmp_path / f"{name}.json"
+        mutated.write_bytes(canonical_json_bytes(document))
+        with pytest.raises(ValueError, match="binding"):
+            authenticate_ibkr_historical_result(manifest, receipt=mutated)
+
+
+def test_result_receipt_must_remain_outside_immutable_closure(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    with pytest.raises(ValueError, match="outside"):
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "result" / "verification.json",
+        )
+
+
+def test_result_authentication_rejects_missing_or_orphan_tree_entries(tmp_path: Path) -> None:
+    plan, snapshot = _build_fixture()
+    artifact = build_ibkr_historical_result_artifact(plan, snapshot)
+    manifest = publish_ibkr_historical_result(tmp_path / "result", artifact)
+    receipt = tmp_path / "result-receipt.json"
+    verify_ibkr_historical_result(manifest, receipt_output=receipt)
+    child = next((tmp_path / "result" / "requests").glob("*.json"))
+    child.unlink()
+    with pytest.raises(ValueError, match=r"child closure|missing"):
+        authenticate_ibkr_historical_result(manifest, receipt=receipt)

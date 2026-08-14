@@ -1,4 +1,4 @@
-"""Stage 4 IBKR result construction and independent replay logic."""
+"""Stage 6 IBKR result construction and independent replay logic."""
 
 from __future__ import annotations
 
@@ -296,14 +296,22 @@ def build_ibkr_historical_aggregate_result(
         for result in sorted(request_results, key=lambda item: item.request_sha256)
     )
     coverage, entitlement = _aggregate_summaries(plan, tuple(results_by_hash.values()))
-    identity = {
+    semantic_identity: dict[str, JsonValue] = {
         "contract": HISTORICAL_RESULT_CONTRACT,
         "schema_version": IbkrHistoricalAggregateResult.SCHEMA_VERSION,
+        "plan_semantic_id": plan.plan_sha256,
+        "request_result_semantic_ids": [item.semantic_sha256 for item in child_refs],
+        "coverage_summary": coverage,
+        "entitlement_summary": entitlement,
+    }
+    result_id = _sha256_json(semantic_identity)
+    closure_identity: dict[str, JsonValue] = {
+        **semantic_identity,
+        "result_id": result_id,
         "plan": plan_ref.as_json_value(),
         "runtime_sha256": plan.runtime_sha256,
         "request_results": [item.as_json_value() for item in child_refs],
-        "coverage_summary": coverage,
-        "entitlement_summary": entitlement,
+        "publication_status": "PUBLISHED_UNVERIFIED",
     }
     return IbkrHistoricalAggregateResult(
         plan=plan_ref,
@@ -311,7 +319,8 @@ def build_ibkr_historical_aggregate_result(
         request_results=child_refs,
         coverage_summary=coverage,
         entitlement_summary=entitlement,
-        aggregate_sha256=_sha256_json(cast(dict[str, JsonValue], identity)),
+        result_id=result_id,
+        closure_id=_sha256_json(closure_identity),
     )
 
 
@@ -398,210 +407,6 @@ def replay_ibkr_historical_request_result(
         raise ValueError("IBKR request-result retry history does not replay")
     if result.error_classification != derived.error_classification:
         raise ValueError("IBKR request-result error classification does not replay")
-
-
-class IbkrHistoricalAggregateReplay:
-    """Incrementally replay a Stage 6 aggregate without retaining request results."""
-
-    def __init__(
-        self,
-        plan: IbkrHistoricalPlan,
-        plan_bytes: bytes,
-        aggregate: IbkrHistoricalAggregateResult,
-    ) -> None:
-        self._plan = plan
-        self._plan_bytes = plan_bytes
-        self._aggregate = aggregate
-        self._expected = {item.request_sha256: item for item in plan.requests}
-        self._seen: set[str] = set()
-        self._child_refs: list[IbkrHistoricalChildReference] = []
-        self._attempt_ids: set[UUID] = set()
-        self._callback_ids: set[int] = set()
-        self._marker_ids: set[int] = set()
-        self._provider_request_ids: set[tuple[UUID, int, int]] = set()
-        self._per_instrument: dict[str, dict[str, int]] = {}
-        self._evidence_counts: defaultdict[str, int] = defaultdict(int)
-        self._operational_counts: defaultdict[str, int] = defaultdict(int)
-        self._operational_successes = 0
-        self._accepted_rows = 0
-        self._provider_sessions = 0
-
-    def accept(
-        self,
-        request: IbkrHistoricalRequest,
-        result: IbkrHistoricalRequestResult,
-    ) -> None:
-        expected = self._expected.get(request.request_sha256)
-        if expected is None or expected.as_json_value() != request.as_json_value():
-            raise ValueError("IBKR aggregate replay request differs from the plan")
-        if request.request_sha256 in self._seen:
-            raise ValueError("IBKR aggregate replay request identities are duplicated")
-        if result.request_sha256 != request.request_sha256:
-            raise ValueError("IBKR aggregate replay result does not match its request")
-        replay_ibkr_historical_request_result(request, result)
-        _validate_request_result_record_identities(result)
-        self._seen.add(request.request_sha256)
-        self._validate_global_record_identities(result)
-        self._child_refs.append(
-            IbkrHistoricalChildReference(
-                path=f"requests/{result.request_sha256}.json",
-                contract=REQUEST_RESULT_CONTRACT,
-                semantic_sha256=result.result_sha256,
-                bytes_sha256=sha256_bytes(canonical_json_bytes(result.as_json_value())),
-            )
-        )
-        self._accept_summary(request, result)
-
-    def finish(self) -> None:
-        if self._seen != set(self._expected):
-            raise ValueError("IBKR aggregate replay request closure differs from the plan")
-        coverage, entitlement = self._summary_values()
-        plan_ref = IbkrHistoricalChildReference(
-            path="plan.json",
-            contract=HISTORICAL_PLAN_CONTRACT,
-            semantic_sha256=self._plan.plan_sha256,
-            bytes_sha256=sha256_bytes(self._plan_bytes),
-        )
-        child_refs = tuple(sorted(self._child_refs, key=lambda item: item.path))
-        identity: dict[str, JsonValue] = {
-            "contract": HISTORICAL_RESULT_CONTRACT,
-            "schema_version": IbkrHistoricalAggregateResult.SCHEMA_VERSION,
-            "plan": plan_ref.as_json_value(),
-            "runtime_sha256": self._plan.runtime_sha256,
-            "request_results": [item.as_json_value() for item in child_refs],
-            "coverage_summary": coverage,
-            "entitlement_summary": entitlement,
-        }
-        expected = IbkrHistoricalAggregateResult(
-            plan=plan_ref,
-            runtime_sha256=self._plan.runtime_sha256,
-            request_results=child_refs,
-            coverage_summary=coverage,
-            entitlement_summary=entitlement,
-            aggregate_sha256=_sha256_json(identity),
-        )
-        if expected.as_json_value() != self._aggregate.as_json_value():
-            raise ValueError("IBKR aggregate result does not replay from its children")
-
-    def _validate_global_record_identities(
-        self,
-        result: IbkrHistoricalRequestResult,
-    ) -> None:
-        for attempt in result.attempts:
-            if attempt.attempt_id in self._attempt_ids:
-                raise ValueError("IBKR aggregate attempt identities are duplicated")
-            self._attempt_ids.add(attempt.attempt_id)
-            identity = (
-                attempt.connection_session_id,
-                attempt.connection_generation,
-                attempt.provider_request_id,
-            )
-            if identity in self._provider_request_ids:
-                raise ValueError("IBKR aggregate provider request identities are duplicated")
-            self._provider_request_ids.add(identity)
-        for callback in result.callbacks:
-            if callback.callback_id in self._callback_ids:
-                raise ValueError("IBKR aggregate callback identities are duplicated")
-            self._callback_ids.add(callback.callback_id)
-        for marker in result.completion_markers:
-            if marker.marker_id in self._marker_ids:
-                raise ValueError("IBKR aggregate completion marker identities are duplicated")
-            self._marker_ids.add(marker.marker_id)
-
-    def _accept_summary(
-        self,
-        request: IbkrHistoricalRequest,
-        result: IbkrHistoricalRequestResult,
-    ) -> None:
-        instrument = str(request.instrument_id)
-        entry = self._per_instrument.setdefault(
-            instrument,
-            {
-                "bar_planned_request_count": 0,
-                "bar_terminal_request_count": 0,
-                "bar_successful_request_count": 0,
-                "bar_no_data_request_count": 0,
-                "bar_failed_request_count": 0,
-                "bar_rows": 0,
-                "schedule_planned_request_count": 0,
-                "schedule_terminal_request_count": 0,
-                "schedule_successful_request_count": 0,
-                "schedule_no_data_request_count": 0,
-                "schedule_failed_request_count": 0,
-                "schedule_sessions": 0,
-            },
-        )
-        prefix = "bar" if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "schedule"
-        entry[f"{prefix}_planned_request_count"] += 1
-        if result.request_status in {IbkrRequestStatus.SUCCEEDED, IbkrRequestStatus.TERMINAL}:
-            entry[f"{prefix}_terminal_request_count"] += 1
-        disposition = result.evidence_disposition
-        if disposition is IbkrHistoricalEvidenceDisposition.SUCCEEDED:
-            entry[f"{prefix}_successful_request_count"] += 1
-        elif disposition is IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED:
-            entry[f"{prefix}_no_data_request_count"] += 1
-        else:
-            entry[f"{prefix}_failed_request_count"] += 1
-        if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            entry["bar_rows"] += len(result.accepted_rows)
-        else:
-            entry["schedule_sessions"] += len(result.sessions)
-        if result.request_status is IbkrRequestStatus.SUCCEEDED:
-            self._operational_successes += 1
-        self._evidence_counts[disposition.value] += 1
-        self._operational_counts[result.terminal_disposition.value] += 1
-        self._accepted_rows += len(result.accepted_rows)
-        self._provider_sessions += len(result.sessions)
-
-    def _summary_values(self) -> tuple[dict[str, JsonValue], dict[str, JsonValue]]:
-        eligible: list[JsonValue] = []
-        for instrument, entry in sorted(self._per_instrument.items()):
-            bar_planned = entry["bar_planned_request_count"]
-            schedule_planned = entry["schedule_planned_request_count"]
-            if (
-                bar_planned > 0
-                and schedule_planned > 0
-                and entry["bar_terminal_request_count"] == bar_planned
-                and entry["schedule_terminal_request_count"] == schedule_planned
-                and entry["bar_successful_request_count"] == bar_planned
-                and entry["schedule_successful_request_count"] == schedule_planned
-                and entry["bar_rows"] > 0
-            ):
-                eligible.append(instrument)
-        coverage: dict[str, JsonValue] = {
-            "planned_request_count": len(self._plan.requests),
-            "terminal_request_count": len(self._seen),
-            "operational_successful_request_count": self._operational_successes,
-            "successful_request_count": self._evidence_counts.get(
-                IbkrHistoricalEvidenceDisposition.SUCCEEDED.value,
-                0,
-            ),
-            "no_data_request_count": self._evidence_counts.get(
-                IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED.value,
-                0,
-            ),
-            "failed_request_count": sum(
-                count
-                for disposition, count in self._evidence_counts.items()
-                if disposition
-                not in {
-                    IbkrHistoricalEvidenceDisposition.SUCCEEDED.value,
-                    IbkrHistoricalEvidenceDisposition.NO_DATA_RETURNED.value,
-                }
-            ),
-            "accepted_bar_row_count": self._accepted_rows,
-            "provider_session_count": self._provider_sessions,
-            "by_instrument": cast(
-                dict[str, JsonValue],
-                {instrument: value for instrument, value in sorted(self._per_instrument.items())},
-            ),
-        }
-        entitlement: dict[str, JsonValue] = {
-            "disposition_counts": dict(sorted(self._evidence_counts.items())),
-            "operational_disposition_counts": dict(sorted(self._operational_counts.items())),
-            "provider_history_eligible_instruments": eligible,
-        }
-        return coverage, entitlement
 
 
 def replay_ibkr_historical_aggregate_result(
