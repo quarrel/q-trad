@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -299,6 +300,23 @@ def test_ibkr_software_envelope_authenticates_oof_id_references(tmp_path: Path) 
     )
     with pytest.raises(ValueError, match="semantic identity mismatch"):
         verify_r2_reference(root, mismatched_reference)
+
+    for identity_field in ("bundle_id", "manifest_id", "dataset_id"):
+        malformed_root = tmp_path / f"ibkr-{identity_field}"
+        shutil.copytree(root, malformed_root)
+        (malformed_root / "manifest.json").unlink()
+        oof_path = malformed_root / software.synthetic_oof_bundle.path
+        payload = cast(dict[str, object], json.loads(oof_path.read_bytes()))
+        payload.pop("oof_id", None)
+        payload[identity_field] = software.synthetic_oof_bundle.semantic_id
+        oof_path.write_bytes(canonical_bytes(payload))
+        malformed_reference = replace(
+            software.synthetic_oof_bundle,
+            sha256=hashlib.sha256(canonical_bytes(payload)).hexdigest(),
+        )
+        malformed_bundle = replace(software, synthetic_oof_bundle=malformed_reference)
+        with pytest.raises(ValueError, match="canonical oof_id"):
+            write_ibkr_software_bundle(malformed_root, malformed_bundle)
 
 
 def test_ibkr_profile_preserves_stage8_universe_and_fixed_target_subset() -> None:

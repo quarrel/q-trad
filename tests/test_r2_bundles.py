@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -31,6 +32,7 @@ from qtrad.runtime.r2_bundles import (
     atomic_create,
     canonical_bytes,
     verify_r2_oof_bundle,
+    verify_r2_reference,
     verify_r2_software_bundle,
     write_r2_oof_bundle,
     write_r2_software_bundle,
@@ -78,6 +80,83 @@ def _bundle_and_children() -> tuple[R2OofBundle, dict[str, dict[str, object]]]:
         evaluation_children=(refs[5],),
     )
     return bundle, children
+
+
+def _mutated_oof_reference(
+    root: Path,
+    reference: ArtifactReference,
+    identity_field: str,
+) -> ArtifactReference:
+    path = root / reference.path
+    payload = cast(dict[str, object], json.loads(path.read_bytes()))
+    payload.pop("oof_id", None)
+    payload[identity_field] = reference.semantic_id
+    path.write_bytes(canonical_bytes(payload))
+    return replace(
+        reference,
+        sha256=hashlib.sha256(canonical_bytes(payload)).hexdigest(),
+    )
+
+
+def _software_envelope_fixture(
+    root: Path,
+) -> tuple[Path, R2SoftwareVerificationBundle, Path]:
+    synthetic, children = _bundle_and_children()
+    representative = R2OofBundle.create(
+        foundation_bundle_id=synthetic.foundation_bundle_id,
+        experiment_configuration_id="e" * 64,
+        source_class=synthetic.source_class,
+        evidence_class=synthetic.evidence_class,
+        feature_children=synthetic.feature_children,
+        preprocessing_children=synthetic.preprocessing_children,
+        fit_children=synthetic.fit_children,
+        forecast_manifests=synthetic.forecast_manifests,
+        coverage_children=synthetic.coverage_children,
+        evaluation_children=synthetic.evaluation_children,
+    )
+    write_r2_oof_bundle(root / "synthetic" / "oof", synthetic, children)
+    write_r2_oof_bundle(root / "representative" / "oof", representative, children)
+
+    def oof_reference(name: str, bundle: R2OofBundle) -> ArtifactReference:
+        path = f"{name}/oof/manifest.json"
+        content = bundle.as_json()
+        return ArtifactReference(
+            bundle.CONTRACT,
+            bundle.oof_id,
+            path,
+            hashlib.sha256(canonical_bytes(content)).hexdigest(),
+        )
+
+    def selection_reference(name: str) -> ArtifactReference:
+        selection_id = hashlib.sha256(name.encode()).hexdigest()
+        path = f"{name}/selection.json"
+        payload: dict[str, object] = {
+            "contract": R2_SELECTION_CONTRACT,
+            "manifest_id": selection_id,
+        }
+        atomic_create(root / path, canonical_bytes(payload))
+        return ArtifactReference(
+            R2_SELECTION_CONTRACT,
+            selection_id,
+            path,
+            hashlib.sha256(canonical_bytes(payload)).hexdigest(),
+        )
+
+    software = R2SoftwareVerificationBundle.create(
+        synthetic_oof_bundle=oof_reference("synthetic", synthetic),
+        representative_oof_bundle=oof_reference("representative", representative),
+        synthetic_selection=selection_reference("synthetic"),
+        representative_selection=selection_reference("representative"),
+        application_identity="qtrad-test-application",
+        python_identity="3.13",
+        numpy_identity="2",
+        sklearn_identity="1",
+        representative_integration_ready="READY",
+        evidence_disposition="IMPLEMENTATION_EVIDENCE_ONLY",
+        research_disposition="RESEARCH_EVIDENCE_PENDING",
+    )
+    manifest = write_r2_software_bundle(root, software)
+    return root, software, manifest
 
 
 def _holdout_source_payload() -> dict[str, object]:
@@ -134,6 +213,32 @@ def test_oof_bundle_round_trip_is_independently_authenticated(tmp_path: Path) ->
 
     assert verified == bundle
     assert json.loads(manifest_path.read_bytes())["source_class"] == "IG_NATIVE_CAPTURE"
+
+
+@pytest.mark.parametrize("identity_field", ["bundle_id", "manifest_id", "dataset_id"])
+def test_oof_reference_requires_canonical_oof_id(
+    tmp_path: Path,
+    identity_field: str,
+) -> None:
+    bundle, children = _bundle_and_children()
+    manifest_path = write_r2_oof_bundle(tmp_path, bundle, children)
+    reference = ArtifactReference(
+        bundle.CONTRACT,
+        bundle.oof_id,
+        "manifest.json",
+        hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+    )
+
+    verify_r2_reference(tmp_path, reference)
+    with pytest.raises(ValueError, match="semantic identity mismatch"):
+        verify_r2_reference(
+            tmp_path,
+            replace(reference, semantic_id=hashlib.sha256(b"mismatch").hexdigest()),
+        )
+
+    mutated_reference = _mutated_oof_reference(tmp_path, reference, identity_field)
+    with pytest.raises(ValueError, match="canonical oof_id"):
+        verify_r2_reference(tmp_path, mutated_reference)
 
 
 def test_oof_bundle_rejects_child_mutation_and_republication(tmp_path: Path) -> None:
@@ -347,6 +452,31 @@ def test_software_envelope_authenticates_oof_id_references(tmp_path: Path) -> No
     manifest.write_bytes(canonical_bytes(mismatched.as_json()))
     with pytest.raises(ValueError, match="semantic identity mismatch"):
         verify_r2_software_bundle(manifest)
+
+
+@pytest.mark.parametrize("identity_field", ["bundle_id", "manifest_id", "dataset_id"])
+def test_software_oof_reference_alias_rejected_on_write_and_read(
+    tmp_path: Path,
+    identity_field: str,
+) -> None:
+    root, software, _manifest = _software_envelope_fixture(tmp_path / "software")
+    malformed_root = tmp_path / f"software-{identity_field}"
+    shutil.copytree(root, malformed_root)
+    (malformed_root / "manifest.json").unlink()
+
+    malformed_reference = _mutated_oof_reference(
+        malformed_root,
+        software.representative_oof_bundle,
+        identity_field,
+    )
+    malformed_software = replace(software, representative_oof_bundle=malformed_reference)
+    with pytest.raises(ValueError, match="canonical oof_id"):
+        write_r2_software_bundle(malformed_root, malformed_software)
+
+    malformed_manifest = malformed_root / "manifest.json"
+    malformed_manifest.write_bytes(canonical_bytes(malformed_software.as_json()))
+    with pytest.raises(ValueError, match="canonical oof_id"):
+        verify_r2_software_bundle(malformed_manifest)
 
 
 def test_create_only_output_rejects_ancestor_symlink_and_oversize_payload(tmp_path: Path) -> None:

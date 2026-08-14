@@ -170,6 +170,7 @@ from qtrad.runtime.ibkr_foundation import (
 from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation_promotion
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
+    _canonical_payload_identity,
     atomic_create,
     canonical_bytes,
     reference_for_json,
@@ -1484,25 +1485,10 @@ def _forecast_payload(
 
 
 def _payload_identity(payload: Mapping[str, object]) -> str:
-    for key in (
-        "dataset_id",
-        "artifact_id",
-        "oof_id",
-        "manifest_id",
-        "selection_id",
-        "fit_id",
-        "coverage_id",
-        "summary_id",
-        "report_id",
-        "descriptor_id",
-        "scenario_id",
-        "ablation_id",
-        "source_id",
-    ):
-        value = payload.get(key)
-        if isinstance(value, str):
-            return value
-    raise ValueError("R2 child payload has no semantic identity")
+    contract = payload.get("contract")
+    if not isinstance(contract, str):
+        raise ValueError("R2 child payload has no contract")
+    return _canonical_payload_identity(contract, payload)
 
 
 def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactReference:
