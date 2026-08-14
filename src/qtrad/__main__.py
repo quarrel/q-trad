@@ -1019,17 +1019,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_verify.add_argument("--bundle", type=Path, required=True)
     foundation_verify.add_argument("--receipt-output", type=Path, required=True)
-    foundation_verify.add_argument("--provider-history-receipt", type=Path)
-    foundation_verify.add_argument("--stage7-manifest", type=Path)
-    foundation_verify.add_argument("--stage7-receipt", type=Path)
-    foundation_verify.add_argument(
-        "--replay-checkpoint-root",
-        type=Path,
-        help=(
-            "new or matching foundation-verify replay cache; "
-            "never a foundation-build --checkpoint-root"
-        ),
-    )
+    foundation_verify.add_argument("--stage7-manifest", type=Path, required=True)
+    foundation_verify.add_argument("--stage7-receipt", type=Path, required=True)
     foundation_authenticate = research_foundation_sub.add_parser(
         "authenticate", help="authenticate a verified Stage 8 foundation without replay"
     )
@@ -1062,24 +1053,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     foundation_source = foundation_build.add_mutually_exclusive_group(required=True)
     foundation_source.add_argument("--observations-manifest", type=Path)
-    foundation_source.add_argument("--provider-history-manifest", type=Path)
     foundation_source.add_argument("--stage7-manifest", type=Path)
-    foundation_build.add_argument("--provider-history-receipt", type=Path)
     foundation_build.add_argument("--stage7-receipt", type=Path)
     foundation_build.add_argument("--configuration", type=Path, required=True)
     foundation_build.add_argument("--output", type=Path, required=True)
-    foundation_build.add_argument("--checkpoint-root", type=Path)
     foundation_build.add_argument("--workers", type=int, choices=range(1, 9), default=4)
     foundation_preflight = research_foundation_sub.add_parser(
         "preflight", help="authenticate a Stage 8 build without decoding provider rows"
     )
-    foundation_preflight.add_argument("--provider-history-manifest", type=Path)
-    foundation_preflight.add_argument("--stage7-manifest", type=Path)
-    foundation_preflight.add_argument("--stage7-receipt", type=Path)
+    foundation_preflight.add_argument("--stage7-manifest", type=Path, required=True)
+    foundation_preflight.add_argument("--stage7-receipt", type=Path, required=True)
     foundation_preflight.add_argument("--configuration", type=Path, required=True)
     foundation_preflight.add_argument("--output", type=Path, required=True)
-    foundation_preflight.add_argument("--checkpoint-root", type=Path)
-    foundation_preflight.add_argument("--workers", type=int, choices=range(1, 9), default=4)
     baselines = research_sub.add_parser("baselines", help="R2 baseline research operations")
     baselines_sub = baselines.add_subparsers(dest="baselines_command", required=True)
     baselines_experiment_build = baselines_sub.add_parser(
@@ -2195,13 +2180,10 @@ def main(argv: Sequence[str] | None = None) -> None:
                 settings,
                 clock,
                 observations_manifest_path=args.observations_manifest,
-                provider_history_manifest_path=args.provider_history_manifest,
                 stage7_manifest_path=args.stage7_manifest,
                 stage7_receipt_path=args.stage7_receipt,
-                provider_history_receipt_path=args.provider_history_receipt,
                 configuration_path=args.configuration,
                 output_path=args.output,
-                checkpoint_root_path=args.checkpoint_root,
                 workers=args.workers,
             )
         )
@@ -2211,13 +2193,10 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.foundation_command == "preflight"
     ):
         _preflight_foundation_bundle(
-            provider_history_manifest_path=args.provider_history_manifest,
             stage7_manifest_path=args.stage7_manifest,
             stage7_receipt_path=args.stage7_receipt,
             configuration_path=args.configuration,
             output_path=args.output,
-            checkpoint_root_path=args.checkpoint_root,
-            workers=args.workers,
         )
     elif (
         args.command == "research"
@@ -2230,8 +2209,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 clock,
                 args.bundle,
                 receipt_output=args.receipt_output,
-                replay_checkpoint_root=args.replay_checkpoint_root,
-                provider_history_receipt=args.provider_history_receipt,
                 stage7_manifest_path=args.stage7_manifest,
                 stage7_receipt_path=args.stage7_receipt,
             )
@@ -2259,7 +2236,7 @@ def main(argv: Sequence[str] | None = None) -> None:
             json.dumps(
                 {
                     "contract": "qtrad-ibkr-foundation-confirmatory-promotion-v2",
-                    "foundation_build_sha256": authority.foundation_bundle_id,
+                    "foundation_id": authority.foundation_bundle_id,
                     "promotion_sha256": authority.promotion_sha256,
                     "output": str(args.output.resolve()),
                     "state": "CONFIRMATORY_PROMOTED",
@@ -3239,22 +3216,14 @@ async def _build_foundation_bundle(
     clock: Clock,
     *,
     observations_manifest_path: Path | None,
-    provider_history_manifest_path: Path | None,
     stage7_manifest_path: Path | None,
     stage7_receipt_path: Path | None,
-    provider_history_receipt_path: Path | None,
     configuration_path: Path,
     output_path: Path,
-    checkpoint_root_path: Path | None,
     workers: int,
 ) -> None:
     source_count = sum(
-        path is not None
-        for path in (
-            observations_manifest_path,
-            provider_history_manifest_path,
-            stage7_manifest_path,
-        )
+        path is not None for path in (observations_manifest_path, stage7_manifest_path)
     )
     if source_count != 1:
         raise ValueError("exactly one foundation source must be provided")
@@ -3262,10 +3231,9 @@ async def _build_foundation_bundle(
         raise ValueError("Stage 7 receipt requires a Stage 7 manifest")
     if stage7_manifest_path is not None and stage7_receipt_path is None:
         raise ValueError("Stage 7 manifest requires a Stage 7 receipt")
-    if provider_history_receipt_path is not None and provider_history_manifest_path is None:
-        raise ValueError("provider-history receipt requires a provider-history source")
     configuration = load_foundation_config(configuration_path)
     if stage7_manifest_path is not None:
+        assert stage7_receipt_path is not None
         build = write_ibkr_foundation(
             output_path,
             stage7_manifest=stage7_manifest_path,
@@ -3288,38 +3256,6 @@ async def _build_foundation_bundle(
                     "output": str(output_path.resolve()),
                     "foundation_id": foundation_identity,
                     "source_class": published["source_class"],
-                    "readiness_state": build.readiness.state.value,
-                    "readiness_causes": [cause.value for cause in build.readiness.causes],
-                    "coverage_summary": {
-                        "threshold": evidence["coverage_threshold"],
-                        "blocking_cells": evidence["blocking_coverage_cells"],
-                        "diagnostics": evidence["coverage_diagnostics"],
-                    },
-                    "provider_history_dataset_sha256": build.provider_history.dataset_sha256,
-                },
-                sort_keys=True,
-            )
-        )
-        return
-    if provider_history_manifest_path is not None:
-        build = write_ibkr_foundation(
-            output_path,
-            provider_manifest=provider_history_manifest_path,
-            configuration=configuration,
-            provider_history_receipt=provider_history_receipt_path,
-            checkpoint_root=checkpoint_root_path,
-            workers=workers,
-            progress_callback=_stage8_progress,
-        )
-        published = json.loads(output_path.resolve().read_bytes())
-        evidence = build.readiness.evidence
-        print(
-            json.dumps(
-                {
-                    "contract": "qtrad-stage8-foundation-publication-v1",
-                    "output": str(output_path.resolve()),
-                    "build_sha256": published["build_sha256"],
-                    "source_class": "IBKR_HISTORICAL_RESEARCH",
                     "readiness_state": build.readiness.state.value,
                     "readiness_causes": [cause.value for cause in build.readiness.causes],
                     "coverage_summary": {
@@ -3387,29 +3323,19 @@ async def _build_foundation_bundle(
 
 def _preflight_foundation_bundle(
     *,
-    provider_history_manifest_path: Path | None,
-    stage7_manifest_path: Path | None,
-    stage7_receipt_path: Path | None,
+    stage7_manifest_path: Path,
+    stage7_receipt_path: Path,
     configuration_path: Path,
     output_path: Path,
-    checkpoint_root_path: Path | None,
-    workers: int,
 ) -> None:
-    if (provider_history_manifest_path is None) == (stage7_manifest_path is None):
-        raise ValueError("exactly one Stage 7 source must be provided")
-    if stage7_manifest_path is not None and stage7_receipt_path is None:
-        raise ValueError("Stage 7 preflight requires a Stage 7 receipt")
     configuration = load_foundation_config(configuration_path)
     print(
         json.dumps(
             preflight_ibkr_foundation(
                 output_path,
-                provider_manifest=provider_history_manifest_path,
                 stage7_manifest=stage7_manifest_path,
                 stage7_receipt=stage7_receipt_path,
                 configuration=configuration,
-                checkpoint_root=checkpoint_root_path,
-                workers=workers,
             ),
             sort_keys=True,
         )
@@ -3426,8 +3352,6 @@ async def _verify_foundation_bundle(
     bundle_path: Path,
     *,
     receipt_output: Path,
-    replay_checkpoint_root: Path | None = None,
-    provider_history_receipt: Path | None = None,
     stage7_manifest_path: Path | None = None,
     stage7_receipt_path: Path | None = None,
 ) -> None:
@@ -3461,35 +3385,10 @@ async def _verify_foundation_bundle(
                 )
             )
             return
-        if (
-            isinstance(document, dict)
-            and document.get("contract") == "qtrad-ibkr-historical-foundation-v1"
+        if isinstance(document, dict) and str(document.get("contract", "")).startswith(
+            "qtrad-ibkr-historical-foundation-"
         ):
-            if receipt_output is None:
-                raise ValueError("IBKR foundation verification requires --receipt-output")
-            verified = verify_ibkr_foundation(
-                bundle_path,
-                replay_checkpoint_root=replay_checkpoint_root,
-                provider_history_receipt=provider_history_receipt,
-                receipt_output=receipt_output,
-            )
-            print(
-                json.dumps(
-                    {
-                        "contract": "qtrad-ibkr-foundation-verification-v1",
-                        "bundle": str(bundle_path.resolve()),
-                        "receipt": str(receipt_output.resolve()),
-                        "build_sha256": json.loads(bundle_path.read_text(encoding="utf-8"))[
-                            "build_sha256"
-                        ],
-                        "readiness": verified.readiness.as_json(),
-                    },
-                    sort_keys=True,
-                )
-            )
-            return
-    if provider_history_receipt is not None:
-        raise ValueError("--provider-history-receipt requires an IBKR foundation")
+            raise ValueError("normal Stage 8 verification accepts only the current v3 foundation")
     verified = await verify_foundation_bundle(
         root=settings.research_root,
         bundle_path=bundle_path,

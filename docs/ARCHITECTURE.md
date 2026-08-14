@@ -134,13 +134,7 @@ calendar month with bounded numbered parts; its separate physical manifest binds
 row counts and interval bounds while the original v1 evidence remains unchanged. The retired migration
 bridge applied the same layout-independent Stage 8 selection to v1 and v2 solely to prove equivalence.
 
-The real migration and runtime retirement are complete, so normal Stage 7/8 operation is v2-only.
-Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row
-decoder, deep verifier and new Stage 8/promotion routes are absent. Historical v1 deep verification uses
-the archived exact commit. Ordinary v2 authentication hashes selected physical parts but reads neither
-unselected parts nor Stage 6 result children. Explicit v2 deep audit retains complete semantic replay;
-the current confirmatory route is authority-only: it authenticates the exact accepted Stage 8 receipt
-and performs no Stage 6/7/8 semantic replay.
+The real migration and runtime retirement are complete for the normal writer and CLI: current Stage 7 uses the v3 provider-history receipt/source contract and current Stage 8 uses its v2 foundation manifest/receipt contract. Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row decoder and deep verifier are reachable only through explicitly named migration helpers until PR-H4 deletes that bridge. Ordinary current authentication hashes selected physical parts but reads neither unselected parts nor Stage 6 result children. Explicit current deep audit retains complete semantic replay; the current confirmatory route is authority-only: it authenticates the exact accepted Stage 8 receipt and performs no Stage 6/7/8 semantic replay.
 
 The durable IBKR historical foundation handoff is:
 

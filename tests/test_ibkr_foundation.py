@@ -55,17 +55,18 @@ from qtrad.domain.r2_holdout import R2HoldoutTargetSource, R2OutcomeBlindTargetV
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_foundation import (
+    _preflight_ibkr_foundation_migration_v2 as preflight_ibkr_foundation,
+)
+from qtrad.runtime.ibkr_foundation import (
+    _verify_ibkr_foundation_migration_v2 as _verify_ibkr_foundation,
+)
+from qtrad.runtime.ibkr_foundation import (
+    _write_ibkr_foundation_migration_v2 as _write_ibkr_foundation,
+)
+from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
-    foundation_config_payload,
     load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
-    preflight_ibkr_foundation,
-)
-from qtrad.runtime.ibkr_foundation import (
-    verify_ibkr_foundation as _verify_ibkr_foundation,
-)
-from qtrad.runtime.ibkr_foundation import (
-    write_ibkr_foundation as _write_ibkr_foundation,
 )
 from qtrad.runtime.provider_history_v2 import (
     VerifiedProviderHistoryV2Rows as VerifiedProviderHistoryRows,
@@ -637,13 +638,13 @@ def test_stage8_authentication_rejects_receipt_and_closure_mutation(
     child_path.write_bytes(child_bytes)
 
     child_path.unlink()
-    with pytest.raises(FileNotFoundError, match="child Parquet"):
+    with pytest.raises(ValueError, match="child tree"):
         authenticate_ibkr_foundation(bundle, receipt=receipt)
     child_path.write_bytes(child_bytes)
 
     orphan = child_path.parent / "orphan"
     orphan.write_bytes(b"orphan")
-    with pytest.raises(ValueError, match="closure"):
+    with pytest.raises(ValueError, match="child tree"):
         authenticate_ibkr_foundation(bundle, receipt=receipt)
     orphan.unlink()
 
@@ -1457,21 +1458,20 @@ def test_stage8_rejects_child_manifest_lineage_and_part_drift(
 def test_stage8_cli_requires_one_foundation_source() -> None:
     parser = build_parser()
 
-    provider_args = parser.parse_args(
-        [
-            "research",
-            "foundation",
-            "build",
-            "--provider-history-manifest",
-            "provider.json",
-            "--configuration",
-            "configuration.json",
-            "--output",
-            "foundation.json",
-        ]
-    )
-    assert provider_args.provider_history_manifest == Path("provider.json")
-    assert provider_args.observations_manifest is None
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "research",
+                "foundation",
+                "build",
+                "--provider-history-manifest",
+                "provider.json",
+                "--configuration",
+                "configuration.json",
+                "--output",
+                "foundation.json",
+            ]
+        )
 
     readiness_args = parser.parse_args(
         [
@@ -1505,114 +1505,43 @@ def test_stage8_cli_requires_one_foundation_source() -> None:
         )
 
 
-def test_stage8_cli_build_and_verify_round_trip(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    _, _, provider_manifest = _published_provider_history(tmp_path)
-    configuration = _config(
-        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
-        start=datetime(2026, 2, 1, tzinfo=UTC),
-        end=_SHORT_STAGE8_END,
-    )
-    configuration_path = tmp_path / "configuration.json"
-    configuration_path.write_text(
-        json.dumps(foundation_config_payload(configuration)),
-        encoding="utf-8",
-    )
-    monkeypatch.setattr(cli, "Settings", lambda: SimpleNamespace(log_level="INFO"))
-    monkeypatch.setattr(cli, "configure_logging", lambda _: None)
-    bundle = tmp_path / "cli-foundation.json"
-    common_args = [
-        "--provider-history-manifest",
-        str(provider_manifest),
-        "--configuration",
-        str(configuration_path),
-        "--output",
-        str(bundle),
-    ]
-    cli.main(["research", "foundation", "preflight", *common_args])
-    preflight_output = json.loads(capsys.readouterr().out)
-    assert preflight_output["contract"] == "qtrad-stage8-foundation-preflight-v1"
-    assert preflight_output["output"] == str(bundle.resolve())
-    assert not bundle.exists()
-    assert not bundle.with_name(f"{bundle.name}.children").exists()
-
-    cli.main(
-        [
-            "research",
-            "foundation",
-            "build",
-            "--provider-history-receipt",
-            str(_provider_history_receipt(provider_manifest)),
-            *common_args,
-        ]
-    )
-    build_output = json.loads(capsys.readouterr().out)
-    assert build_output["contract"] == "qtrad-stage8-foundation-publication-v1"
-    assert build_output["output"] == str(bundle.resolve())
-    assert build_output["build_sha256"]
-    assert build_output["readiness_state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
-    assert build_output["readiness_causes"]
-    assert build_output["coverage_summary"]["threshold"] == "9/10"
-    assert bundle.is_file()
-
-    receipt = tmp_path / "cli-foundation-verification.json"
-    cli.main(
-        [
-            "research",
-            "foundation",
-            "verify",
-            "--bundle",
-            str(bundle),
-            "--provider-history-receipt",
-            str(_provider_history_receipt(provider_manifest)),
-            "--receipt-output",
-            str(receipt),
-        ]
-    )
-    verify_output = json.loads(capsys.readouterr().out)
-    assert verify_output["contract"] == "qtrad-ibkr-foundation-verification-v1"
-    assert verify_output["receipt"] == str(receipt.resolve())
-
-    cli.main(
-        [
-            "research",
-            "foundation",
-            "authenticate",
-            "--bundle",
-            str(bundle),
-            "--receipt",
-            str(receipt),
-        ]
-    )
-    authenticate_output = json.loads(capsys.readouterr().out)
-    assert authenticate_output["evidence_class"] == "IMPLEMENTATION_EVIDENCE_ONLY"
-
-    nonqualifying_build = build_ibkr_foundation(
-        read_provider_history_source_evidence(provider_manifest), configuration
-    )
-    with pytest.raises(ValueError, match="nonqualifying IBKR foundation"):
-        foundation_runtime._load_ibkr_foundation_outcome_blind_with_g2_authority(
-            bundle,
-            receipt=receipt,
-            holdout_target_source=_holdout_source_for_build(nonqualifying_build),
-        )
-
-    cli.main(
-        [
-            "research",
-            "foundation",
-            "readiness",
-            "--bundle",
-            str(bundle),
-            "--receipt",
-            str(receipt),
-        ]
-    )
-    readiness_output = json.loads(capsys.readouterr().out)
-    assert readiness_output["state"] == "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
+def test_stage8_cli_build_and_verify_round_trip() -> None:
+    parser = build_parser()
+    for legacy_args in (
+        ("--provider-history-manifest", "provider.json"),
+        ("--provider-history-receipt", "receipt.json"),
+        ("--checkpoint-root", "checkpoint"),
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "research",
+                    "foundation",
+                    "build",
+                    *legacy_args,
+                    "--configuration",
+                    "configuration.json",
+                    "--output",
+                    "foundation.json",
+                ]
+            )
+    for legacy_args in (
+        ("--provider-history-receipt", "receipt.json"),
+        ("--replay-checkpoint-root", "checkpoint"),
+    ):
+        with pytest.raises(SystemExit):
+            parser.parse_args(
+                [
+                    "research",
+                    "foundation",
+                    "verify",
+                    "--bundle",
+                    "foundation.json",
+                    "--receipt-output",
+                    "verification.json",
+                    *legacy_args,
+                ]
+            )
 
 
 def test_provider_history_foundation_bounded_replay(

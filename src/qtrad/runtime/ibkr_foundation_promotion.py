@@ -7,7 +7,7 @@ import json
 import subprocess
 from collections.abc import Mapping
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import cast
 
 from qtrad.domain.events import JsonValue
@@ -19,8 +19,8 @@ from qtrad.domain.ibkr_foundation import (
 from qtrad.domain.provider_history import PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT
 from qtrad.domain.r2_readiness import EvidenceClass
 from qtrad.runtime.ibkr_foundation import (
+    _verify_ibkr_foundation_migration_v2,
     authenticate_ibkr_foundation,
-    verify_ibkr_foundation,
 )
 from qtrad.runtime.provider_history import (
     is_provider_history_v1_verifier_sha256_accepted,
@@ -536,6 +536,26 @@ def _require_detached_source() -> None:
         raise RuntimeError("cannot establish detached source identity")
 
 
+def _preflight_v3_promotion_output(output: Path, foundation: Path) -> Path:
+    """Validate the operator-selected lexical destination before authority work."""
+
+    destination = output if output.is_absolute() else Path.cwd() / output
+    if any(part in {".", "..", ""} for part in PurePosixPath(destination).parts):
+        raise ValueError(f"promotion output path is not canonical: {output}")
+    for ancestor in (destination, *destination.parents):
+        if ancestor.is_symlink():
+            raise ValueError(f"promotion output path contains a symlink: {output}")
+        if ancestor != destination and ancestor.exists() and not ancestor.is_dir():
+            raise ValueError(f"promotion output ancestor is not a directory: {output}")
+    if destination.exists():
+        raise FileExistsError(f"create-only promotion output already exists: {destination}")
+    foundation_path = foundation if foundation.is_absolute() else Path.cwd() / foundation
+    closure_root = foundation_path.parent / f"{foundation_path.name}.children"
+    if destination.is_relative_to(closure_root):
+        raise ValueError("promotion cannot be written inside the authenticated closure")
+    return destination
+
+
 def _create_v3_promotion(
     foundation: Path,
     *,
@@ -545,9 +565,7 @@ def _create_v3_promotion(
     authorized_at: datetime,
     authorization_reference: str,
 ) -> VerifiedIbkrFoundationPromotion:
-    resolved_output = output.resolve()
-    if output.is_symlink() or resolved_output.exists():
-        raise FileExistsError(f"create-only promotion output already exists: {resolved_output}")
+    resolved_output = _preflight_v3_promotion_output(output, foundation)
     authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
     stage8, readiness, _foundation_ids = _foundation_v3_bindings(foundation, receipt)
     if (
@@ -591,7 +609,7 @@ def _create_v3_promotion(
     return _v3_authority(document)
 
 
-def create_ibkr_foundation_confirmatory_promotion(
+def _create_ibkr_foundation_confirmatory_promotion_migration_v2(
     foundation: Path,
     *,
     receipt: Path,
@@ -603,7 +621,10 @@ def create_ibkr_foundation_confirmatory_promotion(
     replay_checkpoint_root: Path | None = None,
     workers: int = 4,
 ) -> VerifiedIbkrFoundationPromotion:
-    """Cumulatively replay S6-S8 once and create the S8.4 authority."""
+    """Temporary migration-only cumulative replay for retained v1/v2 authorities.
+
+    This private path is outside normal promotion and is deleted by PR-H4.
+    """
     if _foundation_v3_contract(foundation):
         return _create_v3_promotion(
             foundation,
@@ -648,7 +669,7 @@ def create_ibkr_foundation_confirmatory_promotion(
     authenticate_provider_history_v2(provider_path, receipt=provider_history_receipt)
     replay_provider_history_v2_stage6(provider_path)
     verify_provider_history_v2(provider_path)
-    replay = verify_ibkr_foundation(
+    replay = _verify_ibkr_foundation_migration_v2(
         foundation,
         provider_history_receipt=provider_history_receipt,
         replay_checkpoint_root=replay_checkpoint_root,
@@ -681,6 +702,29 @@ def create_ibkr_foundation_confirmatory_promotion(
     document = {**identity, "promotion_sha256": _sha(identity)}
     atomic_create(resolved_output, _canonical_bytes(document) + b"\n")
     return _authority(document)
+
+
+def create_ibkr_foundation_confirmatory_promotion(
+    foundation: Path,
+    *,
+    receipt: Path,
+    output: Path,
+    authorized_by: str,
+    authorized_at: datetime,
+    authorization_reference: str,
+) -> VerifiedIbkrFoundationPromotion:
+    """Create current Stage 8 confirmatory authority without semantic replay."""
+
+    if not _foundation_v3_contract(foundation):
+        raise ValueError("current confirmatory promotion requires a Stage 8 v3 foundation")
+    return _create_v3_promotion(
+        foundation,
+        receipt=receipt,
+        output=output,
+        authorized_by=authorized_by,
+        authorized_at=authorized_at,
+        authorization_reference=authorization_reference,
+    )
 
 
 __all__ = [
