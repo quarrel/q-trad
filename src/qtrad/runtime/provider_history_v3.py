@@ -28,13 +28,18 @@ from qtrad.application.provider_history import (
     ProviderHistorySourceEvidence,
 )
 from qtrad.domain.events import JsonValue
-from qtrad.domain.ibkr_historical import IbkrHistoricalRequestKind
+from qtrad.domain.ibkr_historical import (
+    IbkrContractFingerprint,
+    IbkrHistoricalRequestKind,
+    IbkrPlannedContract,
+)
 from qtrad.domain.ibkr_results import (
     IbkrHistoricalEvidenceDisposition,
     IbkrHistoricalRequestResult,
     canonical_json_bytes,
     sha256_bytes,
 )
+from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.provider_history import (
     PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT,
     PROVIDER_HISTORY_AVAILABILITY_SELECTOR_CONTRACT,
@@ -128,6 +133,7 @@ STAGE6_FIELDS = {
     "plan_sha256",
     "runtime_sha256",
     "requests",
+    "eligible_contracts",
     "coverage_summary",
     "entitlement_summary",
     "request_evidence",
@@ -278,11 +284,12 @@ class _PlanSummary:
     contract_selection_sha256: str
     runtime_sha256: str
     plan_sha256: str
+    eligible_contracts: tuple[IbkrPlannedContract, ...]
     requests: tuple[object, ...]
 
 
 @dataclass(frozen=True, slots=True)
-class _AggregateSummary:
+class _Stage6SourceResultSummary:
     result_id: str
     closure_id: str
     coverage_summary: dict[str, JsonValue]
@@ -292,7 +299,7 @@ class _AggregateSummary:
 @dataclass(frozen=True, slots=True)
 class _SourceSummary:
     plan: _PlanSummary
-    aggregate: _AggregateSummary
+    source_result: _Stage6SourceResultSummary
     verification_id: str
     request_results: tuple[object, ...] = ()
 
@@ -394,6 +401,7 @@ def verify_provider_history(
     """Deeply verify Stage 7 against its explicit Stage 6 parent and receipt."""
     manifest = _read_manifest(path)
     _require_exact_tree(path.parent, {MANIFEST_NAME, *(part.path for part in manifest.parts)})
+    receipt_path = _preflight_receipt(receipt_output, path)
     stream = authenticate_ibkr_historical_result(stage6_manifest, receipt=stage6_receipt)
     policy = manifest.dataset.availability_policy
     if availability_policy != policy:
@@ -422,7 +430,6 @@ def verify_provider_history(
     observation_summary = _observation_summary_from_document(summary["observation_summary"])
     result = _source_evidence(manifest, rows, evidence, observation_summary)
     receipt = _receipt_document(manifest)
-    receipt_path = _preflight_receipt(receipt_output, path)
     _write_create_only(receipt_path, canonical_json_bytes(receipt))
     return result
 
@@ -689,6 +696,12 @@ def _stage6_document(
         "plan_sha256": stream.plan.plan_sha256,
         "runtime_sha256": stream.plan.runtime_sha256,
         "requests": requests,
+        "eligible_contracts": [
+            contract.as_json_value()
+            for contract in sorted(
+                stream.plan.eligible_contracts, key=lambda item: str(item.instrument_id)
+            )
+        ],
         "coverage_summary": stream.aggregate.coverage_summary,
         "entitlement_summary": stream.aggregate.entitlement_summary,
         "request_evidence": [_request_evidence_json(item) for item in evidence],
@@ -946,9 +959,10 @@ def _source_evidence(
         contract_selection_sha256=_string(stage6["contract_selection_sha256"], "Stage 6 selection"),
         runtime_sha256=_string(stage6["runtime_sha256"], "Stage 6 runtime"),
         plan_sha256=_string(stage6["plan_sha256"], "Stage 6 plan"),
+        eligible_contracts=_planned_contracts_from_stage6(stage6["eligible_contracts"]),
         requests=requests,
     )
-    aggregate = _AggregateSummary(
+    source_result = _Stage6SourceResultSummary(
         result_id=_string(stage6["result_id"], "Stage 6 result"),
         closure_id=_string(stage6["closure_id"], "Stage 6 closure"),
         coverage_summary=cast(
@@ -960,7 +974,7 @@ def _source_evidence(
     )
     source = _SourceSummary(
         plan=plan,
-        aggregate=aggregate,
+        source_result=source_result,
         verification_id=_string(stage6["verification_id"], "Stage 6 verification"),
     )
     return ProviderHistorySourceEvidence(
@@ -971,6 +985,65 @@ def _source_evidence(
         observation_summary=observation_summary,
         selection=getattr(rows, "selection", None),
     )
+
+
+def _planned_contracts_from_stage6(value: object) -> tuple[IbkrPlannedContract, ...]:
+    raw_contracts = value
+    if not isinstance(raw_contracts, list) or not raw_contracts:
+        raise TypeError("Stage 6 eligible contracts must be a non-empty list")
+    result: list[IbkrPlannedContract] = []
+    previous_instrument: str | None = None
+    fingerprint_fields = {
+        "con_id",
+        "symbol",
+        "security_type",
+        "currency",
+        "exchange",
+        "primary_exchange",
+        "local_symbol",
+        "trading_class",
+        "multiplier",
+        "underlying_con_id",
+        "contract_month",
+    }
+    for raw_contract in raw_contracts:
+        contract = _mapping(raw_contract, "Stage 6 eligible contract")
+        _require_exact_keys(contract, {"instrument_id", "fingerprint"}, "Stage 6 eligible contract")
+        instrument_text = _string(contract["instrument_id"], "Stage 6 eligible contract instrument")
+        if previous_instrument is not None and instrument_text <= previous_instrument:
+            raise ValueError("Stage 6 eligible contracts are not canonical")
+        previous_instrument = instrument_text
+        fingerprint = _mapping(contract["fingerprint"], "Stage 6 contract fingerprint")
+        _require_exact_keys(fingerprint, fingerprint_fields, "Stage 6 contract fingerprint")
+        result.append(
+            IbkrPlannedContract(
+                instrument_id=InstrumentId(instrument_text),
+                fingerprint=IbkrContractFingerprint(
+                    con_id=_integer(fingerprint["con_id"], "contract con_id"),
+                    symbol=_string(fingerprint["symbol"], "contract symbol"),
+                    security_type=_string(fingerprint["security_type"], "contract security_type"),
+                    currency=_string(fingerprint["currency"], "contract currency"),
+                    exchange=_string(fingerprint["exchange"], "contract exchange"),
+                    primary_exchange=_optional_string_value(
+                        fingerprint["primary_exchange"], "contract primary_exchange"
+                    ),
+                    local_symbol=_string(fingerprint["local_symbol"], "contract local_symbol"),
+                    trading_class=_optional_string_value(
+                        fingerprint["trading_class"], "contract trading_class"
+                    ),
+                    multiplier=_optional_string_value(
+                        fingerprint["multiplier"], "contract multiplier"
+                    ),
+                    underlying_con_id=_optional_integer_value(
+                        fingerprint["underlying_con_id"], "contract underlying_con_id"
+                    ),
+                    contract_month=_optional_string_value(
+                        fingerprint["contract_month"], "contract contract_month"
+                    ),
+                ),
+            )
+        )
+    return tuple(result)
 
 
 def _request_evidence_from_stage6(
@@ -1037,6 +1110,7 @@ def _receipt_document(manifest: ProviderHistoryV3Manifest) -> dict[str, JsonValu
     source_summary = {
         "stage6_result_id": manifest.dataset.stage6_result_id,
         "stage6_verification_id": manifest.dataset.stage6_verification_id,
+        "eligible_contracts": manifest.stage6["eligible_contracts"],
         "availability_policy": manifest.dataset.availability_policy.as_json_value(),
         "observation_summary": manifest.stage6["observation_summary"],
     }
@@ -1123,7 +1197,7 @@ def _publish(
 
 
 def _preflight_receipt(path: Path, manifest: Path) -> Path:
-    result = path.resolve()
+    result = _validate_output_path(path)
     if result.exists():
         raise FileExistsError(f"provider-history receipt already exists: {result}")
     if result.is_relative_to(manifest.resolve().parent):
@@ -1139,15 +1213,7 @@ def _require_exact_tree(root: Path, expected: set[str]) -> None:
     rooted = root.absolute()
     if rooted.resolve() != rooted:
         raise ValueError("provider-history v3 closure root escapes its path")
-    actual: set[str] = set()
-    for item in root.rglob("*"):
-        if item.is_symlink():
-            raise ValueError("provider-history v3 closure tree contains a symlink")
-        if item.is_dir():
-            continue
-        if not item.is_file():
-            raise ValueError("provider-history v3 closure tree contains unsupported entry")
-        actual.add(item.relative_to(root).as_posix())
+    allowed_directories = {""}
     for relative in expected:
         relative_path = Path(relative)
         if (
@@ -1156,10 +1222,24 @@ def _require_exact_tree(root: Path, expected: set[str]) -> None:
             or any(part in {"", ".", ".."} for part in relative_path.parts)
         ):
             raise ValueError("provider-history v3 closure path is not canonical")
+        allowed_directories.update(
+            parent.as_posix() for parent in relative_path.parents if parent != Path(".")
+        )
         candidate = (root / relative_path).absolute()
         if candidate.resolve(strict=False) != candidate:
             raise ValueError("provider-history v3 closure path escapes its root")
-    if actual != expected:
+    actual_files: set[str] = set()
+    actual_directories: set[str] = {""}
+    for item in root.rglob("*"):
+        if item.is_symlink():
+            raise ValueError("provider-history v3 closure tree contains a symlink")
+        if item.is_dir():
+            actual_directories.add(item.relative_to(root).as_posix())
+            continue
+        if not item.is_file():
+            raise ValueError("provider-history v3 closure tree contains unsupported entry")
+        actual_files.add(item.relative_to(root).as_posix())
+    if actual_files != expected or actual_directories != allowed_directories:
         raise ValueError("provider-history v3 closure tree changed")
 
 
@@ -1220,6 +1300,18 @@ def _string(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise TypeError(f"{field} must be a non-empty string")
     return value
+
+
+def _optional_string_value(value: object, field: str) -> str | None:
+    if value is not None and (not isinstance(value, str) or not value):
+        raise TypeError(f"{field} must be a non-empty string when present")
+    return value if value is None else cast(str, value)
+
+
+def _optional_integer_value(value: object, field: str) -> int | None:
+    if value is not None and (isinstance(value, bool) or not isinstance(value, int)):
+        raise TypeError(f"{field} must be an integer when present")
+    return value if value is None else cast(int, value)
 
 
 def _integer(value: object, field: str) -> int:

@@ -14,6 +14,7 @@ from qtrad.application.foundation import build_asof_panel, build_frozen_targets
 from qtrad.application.provider_history import (
     ProviderHistoryRequestEvidence,
     ProviderHistorySourceEvidence,
+    provider_history_stage6_summary,
     request_evidence_by_hash,
 )
 from qtrad.application.r2_readiness import R2_MINIMUM_COVERAGE, r2_research_blocks
@@ -211,8 +212,8 @@ def evaluate_ibkr_foundation_readiness(
 
     candidate_names = {str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS}
     source_artifact = source_evidence.source_artifact
+    source_summary = provider_history_stage6_summary(source_evidence)
     plan = source_artifact.plan
-    aggregate = source_artifact.aggregate
     results_by_hash = request_evidence_by_hash(source_evidence)
     requests_by_instrument: dict[
         str,
@@ -253,14 +254,26 @@ def evaluate_ibkr_foundation_readiness(
         else:
             common_times.intersection_update(valid_target_times[candidate])
 
-    raw_eligible = aggregate.entitlement_summary["provider_history_eligible_instruments"]
+    raw_eligible = source_summary.entitlement_summary.get("provider_history_eligible_instruments")
     if not isinstance(raw_eligible, list) or any(
         not isinstance(item, str) or not item for item in raw_eligible
     ):
-        raise ValueError("IBKR aggregate provider-history eligibility summary is invalid")
+        raise ValueError("IBKR source-result provider-history eligibility summary is invalid")
     eligible_instruments = frozenset(raw_eligible)
     if len(eligible_instruments) != len(raw_eligible):
-        raise ValueError("IBKR aggregate provider-history eligibility summary is not unique")
+        raise ValueError("IBKR source-result provider-history eligibility summary is not unique")
+    source_identity_evidence: dict[str, JsonValue]
+    if source_summary.result_id is not None:
+        source_identity_evidence = {
+            "source_result_id": source_summary.result_id,
+            "source_closure_id": source_summary.closure_id,
+            "source_verification_id": source_summary.verification_id,
+        }
+    else:
+        legacy_aggregate = source_summary.legacy_aggregate_sha256
+        if legacy_aggregate is None:
+            raise ValueError("IBKR v2 source aggregate identity is missing")
+        source_identity_evidence = {"source_aggregate_sha256": legacy_aggregate}
 
     causes: set[IBKRFoundationReadinessCause] = set()
     active_intervals = active_intervals or {}
@@ -394,9 +407,9 @@ def evaluate_ibkr_foundation_readiness(
             "source_contract_selection_sha256": plan.contract_selection_sha256,
             "source_plan_sha256": plan.plan_sha256,
             "source_runtime_sha256": plan.runtime_sha256,
-            "source_aggregate_sha256": aggregate.aggregate_sha256,
-            "source_coverage_summary": aggregate.coverage_summary,
-            "source_entitlement_summary": aggregate.entitlement_summary,
+            **source_identity_evidence,
+            "source_coverage_summary": dict(source_summary.coverage_summary),
+            "source_entitlement_summary": dict(source_summary.entitlement_summary),
             "request_evidence": request_evidence,
         },
     )

@@ -1,14 +1,20 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
 
 from qtrad.__main__ import build_parser
+from qtrad.application.ibkr_foundation import build_ibkr_foundation
 from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
+from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.domain.foundation import FoundationConfig
 from qtrad.domain.ibkr_results import canonical_json_bytes
 from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_DECLARED_DELAY,
@@ -17,6 +23,8 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalDatasetV3,
     ProviderHistoricalObservation,
 )
+from qtrad.domain.research import ObservationDataset
+from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
 from qtrad.runtime.ibkr_results import (
     verify_ibkr_historical_result,
     write_ibkr_historical_result,
@@ -29,6 +37,7 @@ from qtrad.runtime.provider_history_v3 import (
     verify_provider_history_file_only,
 )
 from tests.test_ibkr_historical_results import _build_fixture
+from tests.test_r1_foundation import _config
 
 
 def _stage6_closure(tmp_path: Path) -> tuple[Path, Path]:
@@ -212,3 +221,127 @@ def test_v3_publish_rejects_symlinked_output_ancestor(tmp_path: Path) -> None:
             output=linked / "stage7",
         )
     assert not (outside / "stage7").exists()
+
+
+def test_v3_orphan_directory_rejected_across_auth_routes(tmp_path: Path) -> None:
+    manifest, stage6_manifest, stage6_receipt = _stage7_closure(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    verify_provider_history(
+        manifest,
+        stage6_manifest=stage6_manifest,
+        stage6_receipt=stage6_receipt,
+        receipt_output=stage7_receipt,
+    )
+    orphan_root = tmp_path / "orphan-directory"
+    shutil.copytree(manifest.parent, orphan_root)
+    (orphan_root / "orphan-dir").mkdir()
+
+    with pytest.raises(ValueError, match="closure tree changed"):
+        verify_provider_history_file_only(orphan_root / "manifest.json")
+    with pytest.raises(ValueError, match="closure tree changed"):
+        authenticate_provider_history_v3(orphan_root / "manifest.json", receipt=stage7_receipt)
+    with pytest.raises(ValueError, match="closure tree changed"):
+        verify_provider_history(
+            orphan_root / "manifest.json",
+            stage6_manifest=stage6_manifest,
+            stage6_receipt=stage6_receipt,
+            receipt_output=tmp_path / "orphan-directory-receipt.json",
+        )
+
+
+def test_v3_receipt_output_rejects_noncanonical_and_symlink_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, stage6_manifest, stage6_receipt = _stage7_closure(tmp_path)
+    outside = tmp_path.parent / f"{tmp_path.name}-receipt-outside"
+    linked = tmp_path / "receipt-link"
+    linked.symlink_to(outside, target_is_directory=True)
+
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    def reject_stage6_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Stage 6 replay reached before receipt preflight")
+
+    monkeypatch.setattr(runtime, "authenticate_ibkr_historical_result", reject_stage6_replay)
+    for receipt_output in (
+        tmp_path / ".." / outside.name / "receipt.json",
+        linked / "receipt.json",
+    ):
+        with pytest.raises(ValueError, match="output path"):
+            verify_provider_history(
+                manifest,
+                stage6_manifest=stage6_manifest,
+                stage6_receipt=stage6_receipt,
+                receipt_output=receipt_output,
+            )
+    assert not outside.exists()
+
+
+def _stage8_configuration() -> FoundationConfig:
+    return _config(
+        cast(ObservationDataset, SimpleNamespace(dataset_id="0" * 64)),
+        start=datetime(2026, 2, 1, tzinfo=UTC),
+        end=datetime(2026, 2, 1, tzinfo=UTC) + timedelta(minutes=30),
+    )
+
+
+def _authenticated_v3_source(
+    tmp_path: Path,
+) -> tuple[Path, ProviderHistorySourceEvidence]:
+    manifest, stage6_manifest, stage6_receipt = _stage7_closure(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    verify_provider_history(
+        manifest,
+        stage6_manifest=stage6_manifest,
+        stage6_receipt=stage6_receipt,
+        receipt_output=stage7_receipt,
+    )
+    source = authenticate_provider_history_v3(manifest, receipt=stage7_receipt)
+    return manifest, source
+
+
+def test_v3_source_evidence_feeds_normal_stage8_without_stage6_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, source = _authenticated_v3_source(tmp_path)
+    assert source.dataset.stage6_result_id
+    source_result = getattr(source.source_artifact, "source_result", None)
+    assert source_result is not None
+    assert source_result.result_id == source.dataset.stage6_result_id
+    assert source.source_artifact.plan.eligible_contracts
+
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    def reject_stage6_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Stage 6 replay reopened from normal Stage 8 build")
+
+    monkeypatch.setattr(runtime, "authenticate_ibkr_historical_result", reject_stage6_replay)
+    build = build_ibkr_foundation(source, _stage8_configuration())
+    assert build.provider_history.dataset_sha256 == source.dataset.dataset_sha256
+    assert build.readiness.evidence["source_result_id"] == source.dataset.stage6_result_id
+    assert "source_aggregate_sha256" not in build.readiness.evidence
+
+
+def test_v3_source_evidence_feeds_bounded_stage8_without_stage6_reopen(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    manifest, source = _authenticated_v3_source(tmp_path)
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    def reject_stage6_replay(*_args: object, **_kwargs: object) -> object:
+        raise AssertionError("Stage 6 replay reopened from bounded Stage 8 build")
+
+    monkeypatch.setattr(runtime, "authenticate_ibkr_historical_result", reject_stage6_replay)
+    build, child_references = build_bounded_provider_foundation(
+        source_evidence=source,
+        configuration=_stage8_configuration(),
+        child_root=tmp_path / "bounded-temporary",
+        bundle_root=tmp_path,
+        child_name="bounded-foundation",
+        provider_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
+        workers=1,
+    )
+    assert build.provider_history.dataset_sha256 == source.dataset.dataset_sha256
+    assert build.readiness.evidence["source_result_id"] == source.dataset.stage6_result_id
+    assert "source_aggregate_sha256" not in build.readiness.evidence
+    assert all(child_references.values())

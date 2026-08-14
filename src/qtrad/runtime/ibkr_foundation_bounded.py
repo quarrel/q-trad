@@ -48,6 +48,7 @@ from qtrad.application.ibkr_foundation import (
 from qtrad.application.provider_history import (
     ProviderHistoryObservationRows,
     ProviderHistorySourceEvidence,
+    provider_history_stage6_summary,
 )
 from qtrad.application.walk_forward import _hash_json
 from qtrad.domain.folds import FOLD_DATASET_CONTRACT, Fold, FoldDataset, membership_hash
@@ -76,7 +77,7 @@ _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
     "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
 )
 _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "ab4d736a99cd280de19e316e9324d838a0fcebc5657937abda5de65d031eecad"
+    "970b9b08a80d240f038c8fcc9d1ffd6b305e3c90583e3f3f2cc1f889f6ea0060"
 )
 _DERIVATION_CHUNK = timedelta(days=7)
 _DEFAULT_WORKERS = 4
@@ -844,12 +845,26 @@ def _foundation_child_lineage(
     source_evidence: ProviderHistorySourceEvidence,
     provider_manifest_sha256: str,
 ) -> dict[str, object]:
-    return {
+    source_summary = provider_history_stage6_summary(source_evidence)
+    lineage: dict[str, object] = {
         "provider_manifest_sha256": provider_manifest_sha256,
         "provider_dataset_sha256": source_evidence.dataset.dataset_sha256,
         "plan_sha256": source_evidence.source_artifact.plan.plan_sha256,
-        "aggregate_sha256": source_evidence.source_artifact.aggregate.aggregate_sha256,
     }
+    if source_summary.result_id is not None:
+        lineage.update(
+            {
+                "stage6_result_id": source_summary.result_id,
+                "stage6_closure_id": source_summary.closure_id,
+                "stage6_verification_id": source_summary.verification_id,
+            }
+        )
+    else:
+        legacy_aggregate = source_summary.legacy_aggregate_sha256
+        if legacy_aggregate is None:
+            raise ValueError("IBKR v2 source aggregate identity is missing")
+        lineage["aggregate_sha256"] = legacy_aggregate
+    return lineage
 
 
 def _sorted_groups(

@@ -18,7 +18,10 @@ import polars as pl
 
 from qtrad.adapters.parquet.observations import _observation_from_row
 from qtrad.application.ibkr_foundation import IBKRFoundationBuild, build_ibkr_foundation
-from qtrad.application.provider_history import ProviderHistorySourceEvidence
+from qtrad.application.provider_history import (
+    ProviderHistorySourceEvidence,
+    provider_history_stage6_summary,
+)
 from qtrad.application.r2_ibkr_historical import (
     _availability_dataset_id,
     ibkr_availability_evidence,
@@ -1546,12 +1549,26 @@ def _child_lineage(
     source_evidence: ProviderHistorySourceEvidence,
     provider_manifest_sha256: str,
 ) -> dict[str, JsonValue]:
-    return {
+    source_summary = provider_history_stage6_summary(source_evidence)
+    lineage: dict[str, JsonValue] = {
         "provider_manifest_sha256": provider_manifest_sha256,
         "provider_dataset_sha256": build.provider_history.dataset_sha256,
         "plan_sha256": source_evidence.source_artifact.plan.plan_sha256,
-        "aggregate_sha256": source_evidence.source_artifact.aggregate.aggregate_sha256,
     }
+    if source_summary.result_id is not None:
+        lineage.update(
+            {
+                "stage6_result_id": source_summary.result_id,
+                "stage6_closure_id": source_summary.closure_id,
+                "stage6_verification_id": source_summary.verification_id,
+            }
+        )
+    else:
+        legacy_aggregate = source_summary.legacy_aggregate_sha256
+        if legacy_aggregate is None:
+            raise ValueError("IBKR v2 source aggregate identity is missing")
+        lineage["aggregate_sha256"] = legacy_aggregate
+    return lineage
 
 
 def _write_children(
