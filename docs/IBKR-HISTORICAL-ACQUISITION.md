@@ -847,10 +847,11 @@ After later permission changes, create a new plan referencing the original contr
 ## Stage 7 — Provider-history observation construction
 
 A complete Stage 7 semantic verification must issue create-only reusable evidence bound to the exact
-provider-history manifest, closure, immediate source identities and accepted verifier contract.
-Ordinary descendants authenticate that receipt and the exact unchanged closure without replaying
-Stage 6. Complete replay is reserved for confirmatory promotion, explicit deep audit or verifier
-revocation.
+provider-history manifest, closure identity, immediate source identities and accepted verifier contract.
+Ordinary descendants authenticate that receipt, the canonical manifest and declared exact tree without
+replaying Stage 6; they reject structural/path violations and hash exact child bytes when consumed.
+Complete semantic replay is reserved for exceptional deep audit after verifier revocation, a potentially
+relevant defect or an explicit operator request.
 
 **Form:** research-input pull request.
 
@@ -921,8 +922,10 @@ Every structurally valid Stage 8 foundation is retained whether readiness is qua
 nonqualifying. Readiness gates downstream authority, not publication. Stage 8 independently
 verifies its own transformation once from authenticated immediate Stage 7 evidence and issues a
 reusable receipt; ordinary consumers authenticate that receipt rather than repeat data-scale replay.
-Complete cumulative Stage 6-to-Stage 8 replay occurs only at confirmatory promotion, explicit deep
-audit or verifier revocation.
+Complete cumulative Stage 6-to-Stage 8 replay is reserved for exceptional deep audit after verifier
+revocation, a potentially relevant defect or an explicit operator request. Confirmatory promotion
+instead authenticates the accepted Stage 8 receipt, qualifying readiness, verifier acceptance and
+operator authorisation without semantic replay.
 
 **Form:** foundation integration pull request.
 

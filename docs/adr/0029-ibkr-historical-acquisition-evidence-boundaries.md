@@ -265,15 +265,17 @@ The receipt must bind at least:
 
 A later consumer may restore the established semantic result when it:
 
-1. independently authenticates the exact artefact bytes and complete file tree;
-2. independently authenticates the receipt;
-3. confirms that the receipt names the exact artefact and immediate inputs; and
-4. confirms that the verifier contract and claim-scoped verifier identity remain
-   accepted and have not been revoked.
+1. independently authenticates the canonical manifest, declared exact tree and closure identity;
+2. rejects missing, additional or orphaned entries, symlinks and path escapes;
+3. independently authenticates the receipt;
+4. confirms that the receipt names the exact artefact and immediate inputs;
+5. confirms that the verifier contract and claim-scoped verifier identity remain accepted and have not
+   been revoked; and
+6. hashes and validates the exact bytes of each child when the current operation consumes that child.
 
-This is not equivalent to trusting a caller-supplied pass flag. The receipt is
-immutable evidence whose applicability is re-established against the unchanged
-artefact closure.
+This is not equivalent to trusting a caller-supplied pass flag. The receipt is immutable evidence whose
+applicability is re-established against the declared unchanged closure. Structural authentication does
+not read or hash unconsumed child bodies.
 
 #### 3. Independent replay is boundary-local by default
 
@@ -306,7 +308,8 @@ immutable artefacts through accepted semantic-verification receipts.
 Before an artefact may support `CONFIRMATORY` evidence, irreversible holdout
 access or a confirmatory conclusion:
 
-- authenticate the exact artefact closure and accepted verification receipt;
+- authenticate the canonical manifest, declared exact tree, closure identity and accepted verification
+  receipt, rejecting structural/path violations and hashing child bodies only if promotion consumes them;
 - confirm the required completed-check set, verifier acceptance, evidence class and readiness class;
 - record explicit operator authorisation; and
 - create a promotion binding the exact semantic, closure and verification identities.
