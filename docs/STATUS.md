@@ -1,9 +1,9 @@
 # Current status
 
-**Updated:** 2026-08-11
+**Updated:** 2026-08-14
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
 **Parallel track:** the full Stage 6 acquisition/result closure and Stage 7 provider-history dataset are retained; Stage 8 block-coverage readiness is corrected, but foundation publication, reusable receipts and confirmatory promotion remain pending
-**Native capture:** full reviewed B5 universe deployment and qualification are complete; weekly Gateway reauthentication remains a separate pending gate
+**Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
 
@@ -168,7 +168,7 @@ remains offline/replay.
   substantiate native IG fills, spreads or slippage.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Final-image B3 and B4 parents were refreshed and independently replayed before the full-universe promotion.
 - Controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, and retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts. Backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`.
-- Snapshot plus independent three-restore replay authenticated the qualification-bound B3 and B4 parents and current B5 store before minting `B5_FULL_UNIVERSE` with canonical artifact SHA-256 `efb6f465221659cb0b1c65d6e0df12ac01d20a9227d07e606e8febf78152ed24`. The qualification file SHA-256 is `87c4860dbc97b7e73e1849ed58ba528b1b630cdd13207393fec32ebfb1eb9218`; verifier output SHA-256 is `dbca7ba916fa2c1a97fecc2dd1ef71f73621ddf87cbe6313ca7f416b41949a67`. Continuous capture initially resumed 20/20 on commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but its last callback was 2026-08-10 22:30:00 UTC when the active Gateway auto-restarted. It did not reconstruct subscriptions and later failed closed; the subsequent interval is an explicit collection gap.
+- Snapshot plus independent three-restore replay authenticated the qualification-bound B3 and B4 parents and current B5 store before minting `B5_FULL_UNIVERSE` with canonical artifact SHA-256 `efb6f465221659cb0b1c65d6e0df12ac01d20a9227d07e606e8febf78152ed24`. The qualification file SHA-256 is `87c4860dbc97b7e73e1849ed58ba528b1b630cdd13207393fec32ebfb1eb9218`; verifier output SHA-256 is `dbca7ba916fa2c1a97fecc2dd1ef71f73621ddf87cbe6313ca7f416b41949a67`. Continuous capture initially resumed 20/20 on commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but its last callback was 2026-08-10 22:30:00 UTC when the active Gateway auto-restarted. It did not reconstruct subscriptions and later failed closed; the subsequent interval is an explicit collection gap. PR #117 subsequently completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily restarts on 2026-08-12 and 2026-08-13 each reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops.
 - The 22 non-VIX markets remain potentially tradable subject to experiment role, reviewed product
   economics, sessions, conversion and data quality. China A50 and Taiwan are now captured; the
   AUD-denominated VIX is captured context-only. Korea 200 has no eligible demo listing, and all
@@ -199,7 +199,7 @@ remains offline/replay.
   closure and Stage 7 provider-history dataset are retained. No Stage 8 foundation or qualifying
   confirmatory authority is retained. IBKR history stays provenance-distinct and cannot substantiate
   native IG fills, spreads or slippage.
-- `B5_FULL_UNIVERSE` qualifies only the retained twenty-contract native-capture session. PR #116 corrected clean socket-closure detection, bounded health output and canonical Gateway ownership, and its immutable image is running. During the 2026-08-12 rollout, overlapping restore work contended with live persistence: session `536b9af2-af43-4b86-bdd0-313d8b6f3a9b` retained 66,380 of 116,381 callbacks and explicitly recorded 50,001 drops before failing closed. Preserve both this gap and the earlier post-2026-08-10 22:30 UTC gap. The resumed collector reached a fresh 20/20 LIVE session with zero new drops, but deployment remains blocked on refreshed liquid-hours authority and a controlled restore-backed apply.
+- `B5_FULL_UNIVERSE` qualifies only the retained twenty-contract native-capture session. PR #116 corrected clean socket-closure detection, bounded health output and canonical Gateway ownership. During its 2026-08-12 rollout, overlapping restore work contended with live persistence: session `536b9af2-af43-4b86-bdd0-313d8b6f3a9b` retained 66,380 of 116,381 callbacks and explicitly recorded 50,001 drops before failing closed. Preserve both this gap and the earlier post-2026-08-10 22:30 UTC gap. PR #117 deployed restore isolation and root-space retention through the controlled restore-backed apply. The current paper account has no distinct weekly 2FA expiry; two natural daily Gateway restarts have demonstrated exact 20/20 LIVE reconstruction and zero unexplained loss.
 
 ## Next actions
 
@@ -211,9 +211,8 @@ remains offline/replay.
    the separately identified provider-history repack/pruning work without provider reacquisition.
 4. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication; real F2 requires the confirmatory-promotion attestation, and holdout evidence remains pending.
-5. Deploy the restore-isolation follow-up: one locked maintenance boundary must quiesce ingest and health recovery, compose the exact B3/B4 authorities into B5 preflight/apply, preserve terminal persistence loss as an operator action, wait boundedly for Gateway readiness, retain bounded previous-boot journals and enforce root-space retention. Refresh expired liquid-hours authority, then require a controlled and natural paper-account daily restart with exact 20/20 LIVE reconstruction and zero unexplained loss.
-6. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
-7. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
+5. Continue proportionate read-only observation of `capture-v4` delivery, gaps, loss and lag.
+6. Run R2.B, R2.C and later R2 integration/verification against representative and qualifying bundles
    with explicit `IMPLEMENTATION_EVIDENCE_ONLY`, insufficient-history or source-limited dispositions.
 
 ## Evidence and current authorities
@@ -224,7 +223,7 @@ remains offline/replay.
 - Current capture procedure: `docs/CAPTURE_OPERATIONS_RUNBOOK.md`
 - R0 native coverage and retained historical-source decision: `docs/R0_DATA_READINESS.md`
 - IBKR normative historical implementation plan: `docs/IBKR-HISTORICAL-ACQUISITION.md`
-- IBKR native collector programme/status boundary: `docs/R2_LANEB_IMPLEMENTATION_PLAN.md`
+- Completed IBKR native collector programme: `docs/archive/R2_LANEB_IMPLEMENTATION_PLAN.md`
 - IBKR native operational interfaces: `ops/ibkr/README.md`
 - Independent IBKR source decision: `docs/adr/0028-independent-ibkr-market-data-source.md`
 - China A50/Korea 200/Taiwan/VIX/Bitcoin review: `docs/archive/capture-v4/APAC_REVIEW.md`

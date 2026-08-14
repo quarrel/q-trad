@@ -1,4 +1,4 @@
-Lane B has reached its full reviewed native-capture universe. B1–B5 are implemented and merged, the twenty-contract `capture-ibkr-v1` release is deployed on the independent IBKR runtime, and its bounded qualification passed on 2026-08-10. This plan records the achieved boundary and the remaining lifecycle evidence.
+Lane B is complete. B1–B5 are implemented and merged, the twenty-contract `capture-ibkr-v1` release is deployed on the independent IBKR runtime, bounded B5 qualification passed on 2026-08-10, and the applicable paper-account Gateway restart lifecycle passed on 2026-08-12 and 2026-08-13. This archived plan records the achieved boundary.
 
 The implemented pieces are:
 
@@ -9,7 +9,7 @@ The implemented pieces are:
   under `ops/ibkr`; and
 * a distinct IBKR runtime/store with no fabricated sides, trade-volume semantics or broker-order surface.
 
-The next native-capture gate is the complete weekly Gateway reauthentication lifecycle, not another collector architecture or universe expansion.
+No further native-collector implementation or qualification gate remains in Lane B. Continued collection and later R2-IBKR-NATIVE research remain separate work.
 
 # Lane B — IBKR native collector
 
@@ -26,7 +26,7 @@ capture_source_id = "ibkr-paper-v1"
 using the q-trad ingest/canonical-event infrastructure, official direct TWS API, `IbkrSession`,
 PostgreSQL storage, read-only health API and the independent `ops/ibkr` host runtime.
 
-The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy native IBKR collector preserving every callback needed for later replay. Exact-two B3, fixed-six B4 and full-universe B5 qualified on 2026-08-10. A complete weekly reauthentication boundary and R2-IBKR-NATIVE remain later gates.
+The first useful outcome was deliberately **not “capture complete.”** It was a trustworthy native IBKR collector preserving every callback needed for later replay. Exact-two B3, fixed-six B4 and full-universe B5 qualified on 2026-08-10. The current paper account has no distinct weekly 2FA expiry; natural daily Gateway restarts on 2026-08-12 and 2026-08-13 completed its applicable authentication/restart lifecycle. R2-IBKR-NATIVE remains a later, separate gate.
 
 ---
 
@@ -686,29 +686,13 @@ stream/version integrity
 
 Run restore at a time that does not interfere with ingestion.
 
-## Weekly Gateway lifecycle
+## Paper-account Gateway lifecycle
 
-This is deliberately a **later qualification gate**.
+The original normative plan assumed a live-account-style weekly 2FA expiry. The deployed paper account has no distinct weekly 2FA event, so repeating the ordinary daily Gateway restart is the applicable lifecycle boundary.
 
-The normative plan says capture isn't formally complete until a full weekly reauthentication boundary has been observed:
+Natural restarts on 2026-08-12 and 2026-08-13 each caused the old collector session to close cleanly and fully persist with zero drops. Systemd started one replacement collector, which created a new connection generation and reconstructed all twenty subscriptions as LIVE without unexplained loss. The first old session persisted 2,122,213 callbacks; the second persisted 7,137,500.
 
-```text
-authentication expires
-→ collector fails closed
-→ operator alert
-→ manual login
-→ new connection generation
-→ subscriptions reconstructed exactly
-→ unavailable interval explicitly accounted
-```
-
-Until then report:
-
-```text
-GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED
-```
-
-but continue collecting useful native history.
+A future live-account deployment would require separate qualification of its actual 2FA expiry, operator alert, manual login recovery and unavailable-interval accounting. That is outside this paper-account Lane B completion.
 
 ---
 
@@ -757,10 +741,10 @@ Completed on 2026-08-10:
 10. Promoted through B5 full universe and repeated the controlled reconnect, zero-loss and three-restore boundary.
 ```
 
-Next:
+Completed on 2026-08-12 and 2026-08-13:
 
 ```text
-11. With separate authority: complete weekly Gateway reauthentication qualification.
+11. Demonstrated two natural paper-account Gateway restarts with exact 20/20 LIVE reconstruction and zero unexplained loss.
 ```
 
 ---

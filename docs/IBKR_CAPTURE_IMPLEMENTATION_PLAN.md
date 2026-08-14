@@ -314,8 +314,9 @@ official IBKR TWS API distribution**. Before account-gated implementation begins
   fixtures, evidence or version control;
 - authenticate a paper session, expose its read-only socket only to the intended host, and confirm the
   configured port and positive non-zero client ID without enabling an order path;
-- qualify the weekly reauthentication lifecycle separately; until a complete boundary has been
-  observed, retain `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED`; and
+- qualify the account's authentication lifecycle separately: a live account requires its periodic 2FA
+  expiry boundary; a paper account with no distinct expiry requires repeated scheduled Gateway restart
+  recovery with exact subscription reconstruction and interval accounting; and
 - supply the pinned official wheel and fixture-test it against the direct API transport's bounded
   callback/request lifecycle, sanitised errors and exact-contract evidence before an explicitly
   authorised live capability probe.
@@ -412,11 +413,11 @@ and explicit upgrades. It does not automate credentials or 2FA.
 Qualify progressively with two instruments, six confirmatory instruments and then the accepted full
 universe. Require exact source/universe/image identity, recovery testing, backup/restore verification,
 no unexplained gaps or drops and at least one complete multi-region trading cycle. Capture completion
-also requires observation across at least one complete weekly reauthentication boundary: expiry is
-detected, capture fails closed while authentication is unavailable, the operator alert is delivered,
-manual login recovery creates a new connection generation, subscriptions are reconstructed exactly
-and any unavailable interval is accounted for without hidden loss. Until that boundary is observed,
-report `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED`; the host and capture track are not complete.
+also requires the configured account's complete authentication lifecycle. For a live account this means
+observing periodic 2FA expiry, fail-closed capture, operator alert, manual login recovery, a new
+connection generation, exact subscription reconstruction and explicit unavailable-interval accounting.
+For a paper account with no distinct periodic expiry, repeated scheduled Gateway restarts must instead
+show clean closure, a new generation, exact reconstruction and zero unexplained loss.
 
 ### Stage 7 — R2-IBKR-NATIVE
 
@@ -519,9 +520,8 @@ independent verification and host lifecycle pass fixture evidence without claimi
 foundation can enter the frozen source-specific R2 workflow.
 
 **Capture complete:** the accepted universe streams into its independent canonical store with
-truthful health, reconnect recovery, backup and restore evidence, and the operator-authenticated
-Gateway lifecycle has passed a complete weekly reauthentication boundary. A host observed for less
-than that boundary remains `GATEWAY_WEEKLY_LIFECYCLE_UNQUALIFIED` and is not capture-complete.
+truthful health, reconnect recovery, backup and restore evidence, and the configured account's
+authentication lifecycle has passed the account-specific boundary in the 2026-08-14 amendment below.
 
 **Research objective complete:** R2 reports a verified positive, negative or inconclusive IBKR
 historical result and, where justified, an IBKR-native comparison, without exceeding source evidence.
@@ -550,3 +550,13 @@ recovery action and sanitised attributes; `/api/v1/system` exposes them for the 
 The `ops/ibkr` templates describe q-trad-2 mount, localhost socket, immutable-image, systemd and
 operator-intervention assertions. Licensed archives, host wrappers and credentials remain a
 separate deployment operation.
+
+## 15. Paper-account Gateway lifecycle amendment (2026-08-14)
+
+**Original requirement:** capture completion required a complete weekly reauthentication boundary with authentication expiry, fail-closed capture, operator alert, manual login, a new generation, exact subscription reconstruction and explicit gap accounting.
+
+**Revised requirement:** retain that boundary for an account that actually has periodic 2FA expiry. When the configured paper account has no distinct periodic expiry, qualify its real lifecycle through at least two natural scheduled Gateway restarts, each proving clean old-session closure, complete persistence, one replacement collector generation, exact subscription reconstruction and zero unexplained loss.
+
+**Rationale and approval:** the operator confirmed that the deployed paper account has no 2FA requirement and that its weekend recovery is no different from its daily recovery. This account-specific amendment was approved in the Lane B session and reconciled on 2026-08-14.
+
+**Evidence impact:** this does not alter callback, persistence, gap, source-separation or no-order semantics. The 2026-08-12 and 2026-08-13 natural restarts satisfy the revised paper-account gate. Any future live-account deployment remains unqualified until its actual 2FA lifecycle is observed.
