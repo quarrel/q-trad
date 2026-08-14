@@ -139,7 +139,8 @@ Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its w
 decoder, deep verifier and new Stage 8/promotion routes are absent. Historical v1 deep verification uses
 the archived exact commit. Ordinary v2 authentication hashes selected physical parts but reads neither
 unselected parts nor Stage 6 result children. Explicit v2 deep audit retains complete semantic replay;
-the current confirmatory route still does so only as legacy implementation pending migration.
+the current confirmatory route is authority-only: it authenticates the exact accepted Stage 8 receipt
+and performs no Stage 6/7/8 semantic replay.
 
 The durable IBKR historical foundation handoff is:
 
@@ -149,12 +150,11 @@ The durable IBKR historical foundation handoff is:
 The receipt binds the exact foundation, provider and child closure, configuration, readiness and
 claim-scoped verifier semantics. Authentication rechecks that closure without Stage 7 or Stage 8
 semantic replay. Its authority is `IMPLEMENTATION_EVIDENCE_ONLY`. For a qualifying foundation,
-real IBKR F2 currently uses the operator-authorised `foundation promote-confirmatory` legacy replay
-from a clean detached immutable runtime, followed by cheap `authenticate-promotion` checks. The active
-migration replaces that replay with authentication of the exact accepted Stage 8 receipt, qualifying
-readiness, verifier acceptance and operator authorisation. The create-only promotion binds the distinct
-semantic, closure, verification and promotion identities; confirmatory OOF construction carries that
-authority.
+real IBKR F2 currently uses the operator-authorised `foundation promote-confirmatory` authority-only
+route from a clean detached immutable runtime, followed by cheap `authenticate-promotion` checks. It
+binds the exact accepted Stage 8 receipt, qualifying readiness, verifier acceptance and operator
+authorisation. The create-only promotion binds the distinct semantic, closure, verification and promotion
+identities; confirmatory OOF construction carries that authority.
 
 Each foundation binds one `MarketDataSourceClass`; historical, IBKR-native and IG-native observations
 remain separate through feature construction, modelling and reporting. That source dimension is

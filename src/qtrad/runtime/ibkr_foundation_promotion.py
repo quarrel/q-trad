@@ -248,6 +248,187 @@ def _authority(document: Mapping[str, object]) -> VerifiedIbkrFoundationPromotio
     )
 
 
+_PROMOTION_V3_CONTRACT = "qtrad-ibkr-foundation-confirmatory-promotion-v2"
+_PROMOTION_V3_SCHEMA_VERSION = 2
+_PROMOTION_V3_VERIFIER_CONTRACT = "qtrad-stage8-confirmatory-promotion-verifier-v2"
+_PROMOTION_V3_CHECKS = (
+    "stage8-receipt-authentication",
+    "qualifying-readiness",
+    "confirmatory-source-class",
+    "operator-authorization",
+)
+_FOUNDATION_V3_CONTRACT = "qtrad-ibkr-historical-foundation-v2"
+
+
+def _promotion_v3_verifier_identity() -> str:
+    return _sha(
+        {
+            "contract": _PROMOTION_V3_VERIFIER_CONTRACT,
+            "version": 1,
+            "completed_checks": list(_PROMOTION_V3_CHECKS),
+        }
+    )
+
+
+def _foundation_v3_bindings(
+    foundation: Path,
+    receipt: Path,
+) -> tuple[dict[str, JsonValue], dict[str, JsonValue], dict[str, JsonValue]]:
+    _foundation_path, foundation_bytes, foundation_document = _document(
+        foundation, "IBKR foundation"
+    )
+    _receipt_path, receipt_bytes, receipt_document = _document(receipt, "IBKR foundation receipt")
+    if foundation_document.get("contract") != _FOUNDATION_V3_CONTRACT:
+        raise ValueError("Stage 8 v3 foundation is required for current promotion")
+    payload = _mapping(foundation_document.get("payload"), "Stage 8 foundation payload")
+    readiness = cast(dict[str, JsonValue], _mapping(payload.get("readiness"), "Stage 8 readiness"))
+    foundation_id = _sha256(foundation_document.get("foundation_id"), "Stage 8 foundation identity")
+    closure_id = _sha256(foundation_document.get("closure_id"), "Stage 8 closure identity")
+    receipt_id = _sha256(receipt_document.get("verification_id"), "Stage 8 verification identity")
+    stage8: dict[str, JsonValue] = {
+        "foundation_id": foundation_id,
+        "closure_id": closure_id,
+        "foundation_manifest_sha256": hashlib.sha256(foundation_bytes).hexdigest(),
+        "verification_receipt_sha256": hashlib.sha256(receipt_bytes).hexdigest(),
+        "verification_id": receipt_id,
+        "verifier_contract": _text(
+            receipt_document.get("verifier_contract"), "Stage 8 verifier contract"
+        ),
+        "verifier_version": cast(JsonValue, receipt_document.get("verifier_version")),
+        "verifier_identity": _sha256(
+            receipt_document.get("verifier_identity"), "Stage 8 verifier identity"
+        ),
+        "evidence_class": _text(receipt_document.get("evidence_class"), "Stage 8 evidence class"),
+    }
+    if (
+        stage8["verifier_contract"] != "qtrad-stage8-foundation-semantic-verifier-v2"
+        or stage8["verifier_version"] != 1
+        or stage8["evidence_class"] != EvidenceClass.IMPLEMENTATION.value
+    ):
+        raise ValueError("Stage 8 verification receipt is not accepted")
+    return (
+        stage8,
+        readiness,
+        {
+            "foundation_id": foundation_id,
+            "closure_id": closure_id,
+            "foundation_manifest_sha256": stage8["foundation_manifest_sha256"],
+            "verification_receipt_sha256": stage8["verification_receipt_sha256"],
+            "verification_id": receipt_id,
+        },
+    )
+
+
+def _v3_authority(
+    document: Mapping[str, object],
+) -> VerifiedIbkrFoundationPromotion:
+    stage8 = _mapping(document["stage8"], "promotion Stage 8 binding")
+    return VerifiedIbkrFoundationPromotion._create(
+        _IBKR_FOUNDATION_PROMOTION_AUTHORITY_TOKEN,
+        foundation_bundle_id=_sha256(stage8.get("foundation_id"), "promoted foundation identity"),
+        promotion_sha256=_sha256(document.get("promotion_sha256"), "promotion identity"),
+    )
+
+
+def _authenticate_v3_promotion(
+    foundation: Path,
+    *,
+    receipt: Path,
+    promotion: Path,
+) -> VerifiedIbkrFoundationPromotion:
+    authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    stage8, readiness, foundation_ids = _foundation_v3_bindings(foundation, receipt)
+    _promotion_path, promotion_bytes, document = _document(promotion, "IBKR confirmatory promotion")
+    expected_fields = {
+        "contract",
+        "schema_version",
+        "profile",
+        "stage8",
+        "readiness",
+        "runtime",
+        "operator_authorization",
+        "verifier_contract",
+        "verifier_version",
+        "verifier_identity",
+        "completed_checks",
+        "evidence_class",
+        "promotion_sha256",
+    }
+    if set(document) != expected_fields:
+        raise ValueError("IBKR v3 confirmatory promotion fields are not exact")
+    identity = dict(document)
+    claimed = _sha256(identity.pop("promotion_sha256"), "promotion identity")
+    if claimed != _sha(identity):
+        raise ValueError("IBKR v3 promotion identity does not match")
+    if (
+        document["contract"] != _PROMOTION_V3_CONTRACT
+        or document["schema_version"] != _PROMOTION_V3_SCHEMA_VERSION
+        or document["profile"] != "CONFIRMATORY"
+        or document["evidence_class"] != EvidenceClass.CONFIRMATORY.value
+        or document["verifier_contract"] != _PROMOTION_V3_VERIFIER_CONTRACT
+        or document["verifier_version"] != 1
+        or document["verifier_identity"] != _promotion_v3_verifier_identity()
+        or document["completed_checks"] != list(_PROMOTION_V3_CHECKS)
+    ):
+        raise ValueError("IBKR v3 promotion contract or verifier is not accepted")
+    if _mapping(document["stage8"], "promotion Stage 8 binding") != stage8:
+        raise ValueError("IBKR v3 promotion Stage 8 binding changed")
+    if _mapping(document["readiness"], "promotion readiness") != readiness:
+        raise ValueError("IBKR v3 promotion readiness changed")
+    if (
+        readiness.get("state") != IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY.value
+        or readiness.get("causes") != []
+    ):
+        raise ValueError("nonqualifying IBKR foundation cannot be promoted")
+    if (
+        _mapping(document["stage8"], "promotion Stage 8 binding")["evidence_class"]
+        != EvidenceClass.IMPLEMENTATION.value
+    ):
+        raise ValueError("IBKR v3 promotion requires an implementation verification receipt")
+    _validate_runtime_and_operator(document)
+    if promotion_bytes != _canonical_bytes(document) + b"\n":
+        raise ValueError("IBKR v3 confirmatory promotion bytes changed")
+    _ = authentication
+    _ = foundation_ids
+    return _v3_authority(document)
+
+
+def _validate_runtime_and_operator(document: Mapping[str, object]) -> None:
+    runtime = _mapping(document["runtime"], "promotion runtime")
+    if set(runtime) != {"application_commit", "application_identity", "image_identity"}:
+        raise ValueError("IBKR v3 promotion runtime fields are not exact")
+    if _runtime(cast(Mapping[str, str], runtime)) != runtime:
+        raise ValueError("IBKR v3 promotion runtime identity is invalid")
+    operator = _mapping(document["operator_authorization"], "promotion operator authorization")
+    if set(operator) != {"authorized_by", "authorized_at", "authorization_reference"}:
+        raise ValueError("IBKR v3 promotion authorization fields are not exact")
+    try:
+        authorized_at = datetime.fromisoformat(
+            _text(operator["authorized_at"], "promotion authorization time")
+        )
+    except ValueError as error:
+        raise ValueError("promotion authorization time is not ISO-8601") from error
+    if (
+        _operator_authorization(
+            authorized_by=_text(operator["authorized_by"], "promotion authorizer"),
+            authorized_at=authorized_at,
+            authorization_reference=_text(
+                operator["authorization_reference"], "promotion authorization reference"
+            ),
+        )
+        != operator
+    ):
+        raise ValueError("IBKR v3 promotion authorization is invalid")
+
+
+def _foundation_v3_contract(path: Path) -> bool:
+    try:
+        _resolved, _bytes, document = _document(path, "IBKR foundation")
+    except (FileNotFoundError, ValueError):
+        return False
+    return document.get("contract") == _FOUNDATION_V3_CONTRACT
+
+
 def authenticate_ibkr_foundation_promotion(
     foundation: Path,
     *,
@@ -255,6 +436,8 @@ def authenticate_ibkr_foundation_promotion(
     promotion: Path,
 ) -> VerifiedIbkrFoundationPromotion:
     """Authenticate S8.4 without repeating cumulative semantic replay."""
+    if _foundation_v3_contract(foundation):
+        return _authenticate_v3_promotion(foundation, receipt=receipt, promotion=promotion)
 
     authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
     bindings, _provider_path, _provider_contract = _bindings(foundation, receipt, authentication)
@@ -353,6 +536,61 @@ def _require_detached_source() -> None:
         raise RuntimeError("cannot establish detached source identity")
 
 
+def _create_v3_promotion(
+    foundation: Path,
+    *,
+    receipt: Path,
+    output: Path,
+    authorized_by: str,
+    authorized_at: datetime,
+    authorization_reference: str,
+) -> VerifiedIbkrFoundationPromotion:
+    resolved_output = output.resolve()
+    if output.is_symlink() or resolved_output.exists():
+        raise FileExistsError(f"create-only promotion output already exists: {resolved_output}")
+    authentication = authenticate_ibkr_foundation(foundation, receipt=receipt)
+    stage8, readiness, _foundation_ids = _foundation_v3_bindings(foundation, receipt)
+    if (
+        readiness.get("state") != IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY.value
+        or readiness.get("causes") != []
+    ):
+        raise ValueError("nonqualifying IBKR foundation cannot be promoted")
+    foundation_path = foundation.resolve()
+    closure_root = foundation_path.parent / f"{foundation_path.name}.children"
+    if resolved_output.is_relative_to(closure_root.resolve()):
+        raise ValueError("promotion cannot be written inside the authenticated closure")
+    foundation_document = _mapping(_document(foundation, "IBKR foundation")[2], "IBKR foundation")
+    if foundation_document.get("source_class") != "IBKR_HISTORICAL_RESEARCH":
+        raise ValueError("confirmatory promotion requires the accepted IBKR source class")
+    operator = _operator_authorization(
+        authorized_by=authorized_by,
+        authorized_at=authorized_at,
+        authorization_reference=authorization_reference,
+    )
+    from qtrad.runtime.r2_verification import runtime_identities
+
+    runtime = _runtime(runtime_identities())
+    _require_detached_source()
+    identity: dict[str, JsonValue] = {
+        "contract": _PROMOTION_V3_CONTRACT,
+        "schema_version": _PROMOTION_V3_SCHEMA_VERSION,
+        "profile": "CONFIRMATORY",
+        "stage8": stage8,
+        "readiness": readiness,
+        "runtime": runtime,
+        "operator_authorization": operator,
+        "verifier_contract": _PROMOTION_V3_VERIFIER_CONTRACT,
+        "verifier_version": 1,
+        "verifier_identity": _promotion_v3_verifier_identity(),
+        "completed_checks": list(_PROMOTION_V3_CHECKS),
+        "evidence_class": EvidenceClass.CONFIRMATORY.value,
+    }
+    document = {**identity, "promotion_sha256": _sha(identity)}
+    atomic_create(resolved_output, _canonical_bytes(document) + b"\n")
+    _ = authentication
+    return _v3_authority(document)
+
+
 def create_ibkr_foundation_confirmatory_promotion(
     foundation: Path,
     *,
@@ -366,6 +604,15 @@ def create_ibkr_foundation_confirmatory_promotion(
     workers: int = 4,
 ) -> VerifiedIbkrFoundationPromotion:
     """Cumulatively replay S6-S8 once and create the S8.4 authority."""
+    if _foundation_v3_contract(foundation):
+        return _create_v3_promotion(
+            foundation,
+            receipt=receipt,
+            output=output,
+            authorized_by=authorized_by,
+            authorized_at=authorized_at,
+            authorization_reference=authorization_reference,
+        )
 
     resolved_output = output.resolve()
     if output.is_symlink() or resolved_output.exists():
