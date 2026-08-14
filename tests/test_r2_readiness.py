@@ -446,8 +446,10 @@ def test_outcome_blind_holdout_gap_remains_in_coverage_denominator() -> None:
 
 def test_experiment_round_trip_preserves_semantic_identity(tmp_path: Path) -> None:
     original = experiment()
+    payload = original.as_json()
+    assert payload["foundation_semantic_id"] == original.r1_bundle_id
     path = tmp_path / "experiment.json"
-    path.write_text(json.dumps(original.as_json()), encoding="utf-8")
+    path.write_text(json.dumps(payload), encoding="utf-8")
 
     loaded = load_r2_experiment(path)
 
@@ -460,6 +462,11 @@ def test_unknown_field_and_semantic_tampering_fail_closed() -> None:
     payload["unexpected"] = True
     with pytest.raises(ValueError, match="unknown or missing"):
         decode_r2_experiment(payload)
+
+    foundation_tampered = experiment().as_json()
+    foundation_tampered["foundation_semantic_id"] = "f" * 64
+    with pytest.raises(ValueError, match="foundation semantic identity"):
+        decode_r2_experiment(foundation_tampered)
 
     decision = _decision(FeatureFamily.LOCAL_RETURNS.value, FeatureEligibility.ELIGIBLE)
     with pytest.raises(ValueError, match="does not authenticate"):

@@ -479,6 +479,7 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
         (
             payload[key]
             for key in (
+                "oof_id",
                 "manifest_id",
                 "bundle_id",
                 "dataset_id",

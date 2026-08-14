@@ -1319,6 +1319,27 @@ def test_final_fit_and_seal_identity_exclude_build_provenance(tmp_path: Path) ->
     assert alternate_fit.fit_id == fit.fit_id
     assert alternate_fit.semantic_json() == fit.semantic_json()
 
+    physical_preprocessing = dict(fit.preprocessing)
+    physical_preprocessing["foundation_bundle_id"] = _id("different-foundation")
+    alternate_foundation = R2FinalFit.create(
+        **{**fit_values, "preprocessing": physical_preprocessing}
+    )
+    assert alternate_foundation.fit_id == fit.fit_id
+    assert alternate_foundation.semantic_json() == fit.semantic_json()
+    assert alternate_foundation.as_json()["preprocessing"] != fit.as_json()["preprocessing"]
+
+    scientific_preprocessing = dict(fit.preprocessing)
+    scientific_preprocessing["training_feature_dataset_id"] = _id("different-training-features")
+    changed_preprocessing = R2FinalFit.create(
+        **{**fit_values, "preprocessing": scientific_preprocessing}
+    )
+    assert changed_preprocessing.fit_id != fit.fit_id
+
+    changed_selection = R2FinalFit.create(
+        **{**fit_values, "selection_manifest_id": _id("different-selection")}
+    )
+    assert changed_selection.fit_id != fit.fit_id
+
     seal_values = {
         item.name: getattr(seal, item.name) for item in fields(seal) if item.name != "seal_id"
     }

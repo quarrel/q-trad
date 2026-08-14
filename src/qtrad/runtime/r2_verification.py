@@ -1487,6 +1487,7 @@ def _payload_identity(payload: Mapping[str, object]) -> str:
     for key in (
         "dataset_id",
         "artifact_id",
+        "oof_id",
         "manifest_id",
         "selection_id",
         "fit_id",

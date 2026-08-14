@@ -81,6 +81,12 @@ def _json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     return converted
 
 
+def _final_fit_semantic_preprocessing(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Exclude the physical R1 foundation binding from final-fit semantics."""
+
+    return _json_object({key: item for key, item in value.items() if key != "foundation_bundle_id"})
+
+
 def _contract_json(value: object) -> JsonValue:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -3224,12 +3230,14 @@ class R2FinalFit:
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
             "schema_version": 1,
-            **{
-                key: _contract_json(value)
-                for key, value in raw.items()
-                if key != "runtime_identities"
-            },
         }
+        for key, value in raw.items():
+            if key == "runtime_identities":
+                continue
+            if key == "preprocessing":
+                semantic[key] = _final_fit_semantic_preprocessing(cast(Mapping[str, object], value))
+            else:
+                semantic[key] = _contract_json(value)
         constructor = cast(Callable[..., R2FinalFit], cls)
         return constructor(**raw, fit_id=_semantic_id(semantic))
 
@@ -3248,7 +3256,7 @@ class R2FinalFit:
             "purged_target_ids": list(self.purged_target_ids),
             "inner_fit_target_ids": list(self.inner_fit_target_ids),
             "inner_validation_target_ids": list(self.inner_validation_target_ids),
-            "preprocessing": _json_object(self.preprocessing),
+            "preprocessing": _final_fit_semantic_preprocessing(self.preprocessing),
             "alpha_candidate_scores": [item.as_json() for item in self.alpha_candidate_scores],
             "selected_alpha": self.selected_alpha,
             "sample_weights": [[target_id, weight] for target_id, weight in self.sample_weights],
@@ -3264,6 +3272,7 @@ class R2FinalFit:
     def as_json(self) -> dict[str, JsonValue]:
         return {
             **self.semantic_json(),
+            "preprocessing": _json_object(self.preprocessing),
             "runtime_identities": _json_object(self.runtime_identities),
             "fit_id": self.fit_id,
         }
