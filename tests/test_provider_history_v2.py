@@ -1,13 +1,20 @@
 from __future__ import annotations
 
+import hashlib
+import io
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime
+from decimal import Decimal
 from pathlib import Path
+from typing import cast
 
+import polars as pl
 import pytest
 
 import qtrad.runtime.provider_history_v2 as provider_history_v2_runtime
+from qtrad.domain.events import JsonValue
 from qtrad.runtime.provider_history_v2 import (
     authenticate_provider_history_v2,
     verify_provider_history_v2,
@@ -78,6 +85,109 @@ def test_selected_part_is_hashed_and_unselected_parts_are_not_read(
             interval_start=start,
             interval_end=end,
         )
+
+
+def test_deep_verifier_rejects_exact_tree_changes(tmp_path: Path) -> None:
+    orphan_root = tmp_path / "orphan"
+    shutil.copytree(_FIXTURE_ROOT / "v2", orphan_root)
+    orphan_manifest = orphan_root / "manifest.json"
+    (orphan_root / "orphan").write_bytes(b"orphan")
+    with pytest.raises(ValueError, match="tree differs"):
+        verify_provider_history_v2(orphan_manifest)
+
+    missing_root = tmp_path / "missing"
+    shutil.copytree(_FIXTURE_ROOT / "v2", missing_root)
+    missing_manifest = missing_root / "manifest.json"
+    missing_document = json.loads(missing_manifest.read_bytes())
+    (missing_root / missing_document["parts"][0]["path"]).unlink()
+    with pytest.raises(FileNotFoundError, match="not a regular file"):
+        verify_provider_history_v2(missing_manifest)
+
+
+def test_deep_verifier_rejects_rehashed_physical_and_semantic_mutations(
+    tmp_path: Path,
+) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    original_manifest = manifest.read_bytes()
+    original_document = json.loads(original_manifest)
+    original_reference = provider_history_v2_runtime.ProviderHistoryV2PartReference.from_json_value(
+        original_document["parts"][0]
+    )
+    part = manifest.parent / original_reference.path
+    original_part = part.read_bytes()
+
+    def publish_document(document: dict[str, object]) -> None:
+        identity = dict(document)
+        identity.pop("physical_manifest_sha256")
+        document["physical_manifest_sha256"] = provider_history_v2_runtime._sha256_json(identity)
+        manifest.write_bytes(
+            provider_history_v2_runtime.canonical_json_bytes(cast(dict[str, JsonValue], document))
+        )
+
+    document = json.loads(original_manifest)
+    document["parts"][0]["path"] = "non-canonical.parquet"
+    publish_document(document)
+    with pytest.raises(ValueError, match="path is not canonical"):
+        verify_provider_history_v2(manifest)
+
+    document = json.loads(original_manifest)
+    document["parts"][0]["row_count"] += 1
+    publish_document(document)
+    with pytest.raises(ValueError, match="row count changed"):
+        verify_provider_history_v2(manifest)
+
+    empty = io.BytesIO()
+    pl.read_parquet(io.BytesIO(original_part)).slice(0, 0).write_parquet(empty)
+    empty_payload = empty.getvalue()
+    part.write_bytes(empty_payload)
+    document = json.loads(original_manifest)
+    document["parts"][0]["bytes_sha256"] = hashlib.sha256(empty_payload).hexdigest()
+    publish_document(document)
+    with pytest.raises(ValueError, match="row count changed"):
+        verify_provider_history_v2(manifest)
+
+    part.write_bytes(original_part)
+    rows = list(provider_history_v2_runtime._read_v2_part(part, original_reference))
+    first = rows[0]
+    changed = replace(
+        first,
+        open=first.open + Decimal(1),
+        high=first.high + Decimal(1),
+        low=first.low + Decimal(1),
+        close=first.close + Decimal(1),
+        _identity_validation_bypass=True,
+    )
+    rows[0] = replace(
+        changed,
+        observation_sha256=provider_history_v2_runtime.sha256_json(changed.identity_payload()),
+        _identity_validation_bypass=False,
+    )
+    frame = pl.read_parquet(io.BytesIO(original_part)).with_row_index("_row")
+    frame = frame.with_columns(
+        *(
+            pl.when(pl.col("_row") == 0)
+            .then(pl.lit(str(getattr(rows[0], field))))
+            .otherwise(pl.col(field))
+            .alias(field)
+            for field in ("open", "high", "low", "close")
+        ),
+        pl.when(pl.col("_row") == 0)
+        .then(pl.lit(rows[0].observation_sha256))
+        .otherwise(pl.col("observation_sha256"))
+        .alias("observation_sha256"),
+    ).drop("_row")
+    changed_buffer = io.BytesIO()
+    frame.write_parquet(changed_buffer)
+    changed_payload = changed_buffer.getvalue()
+    part.write_bytes(changed_payload)
+    document = json.loads(original_manifest)
+    document["parts"][0]["bytes_sha256"] = hashlib.sha256(changed_payload).hexdigest()
+    document["parts"][0]["ordered_row_sha256"] = provider_history_v2_runtime.sha256_json(
+        {"observation_sha256": [row.observation_sha256 for row in rows]}
+    )
+    publish_document(document)
+    with pytest.raises(ValueError, match="semantic dataset identity changed"):
+        verify_provider_history_v2(manifest)
 
 
 def test_fixture_is_forward_only_v2(tmp_path: Path) -> None:

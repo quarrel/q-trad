@@ -69,21 +69,15 @@ from qtrad.domain.ibkr_foundation import IBKR_CONFIRMATORY_INSTRUMENTS
 from qtrad.domain.market_data import PriceBasis
 from qtrad.domain.provider_history import ProviderHistoricalObservation
 from qtrad.domain.research import ObservationDataset, ObservationRow
-from qtrad.runtime.provider_history import (
-    provider_history_source_verification_receipt,
-    read_provider_history_source_verification_receipt,
-)
 
 _CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-checkpoint-v1"
 _REPLAY_CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-replay-checkpoint-v1"
-_SOURCE_VERIFICATION_NAME = "source-verification.json"
 _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
     "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
 )
 _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "5adb9aef36746f1f718c1fd041ced6ffada3e262bb544940e77aac1b5b1b2204"
+    "ab4d736a99cd280de19e316e9324d838a0fcebc5657937abda5de65d031eecad"
 )
-_MAX_SOURCE_VERIFICATION_BYTES = 64 * 1024 * 1024
 _DERIVATION_CHUNK = timedelta(days=7)
 _DEFAULT_WORKERS = 4
 _MAX_WORKERS = 8
@@ -169,42 +163,6 @@ class _Progress:
         )
 
 
-def _read_source_verification(root: Path | None) -> dict[str, object] | None:
-    if root is None:
-        return None
-    path = root / _SOURCE_VERIFICATION_NAME
-    if not path.exists():
-        return None
-    if not path.is_file() or path.is_symlink():
-        raise ValueError("Stage 8 source-verification checkpoint must be a regular file")
-    if path.stat().st_size > _MAX_SOURCE_VERIFICATION_BYTES:
-        raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
-    encoded = path.read_bytes()
-    try:
-        value = json.loads(encoded)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ValueError("Stage 8 source-verification checkpoint is invalid JSON") from error
-    if not isinstance(value, dict):
-        raise ValueError("Stage 8 source-verification checkpoint must be an object")
-    if encoded != _runtime()._json_bytes(value) + b"\n":
-        raise ValueError("Stage 8 source-verification checkpoint is not canonical")
-    return value
-
-
-def _store_source_verification(root: Path | None, receipt: Mapping[str, object]) -> None:
-    if root is None:
-        return
-    encoded = _runtime()._json_bytes(receipt) + b"\n"
-    if len(encoded) > _MAX_SOURCE_VERIFICATION_BYTES:
-        raise ValueError("Stage 8 source-verification checkpoint exceeds its byte bound")
-    path = root / _SOURCE_VERIFICATION_NAME
-    if path.exists():
-        if _read_source_verification(root) != dict(receipt):
-            raise ValueError("Stage 8 source-verification checkpoint content changed")
-        return
-    _runtime()._write_create_only(path, encoded)
-
-
 class _Stage8Checkpoint:
     """Disposable, identity-bound canonical per-instrument staging."""
 
@@ -252,12 +210,6 @@ class _Stage8Checkpoint:
         else:
             root.mkdir(parents=True, exist_ok=False)
             _runtime()._write_create_only(root / "identity.json", encoded)
-
-    def source_verification(self) -> dict[str, object] | None:
-        return _read_source_verification(self.root)
-
-    def store_source_verification(self, receipt: Mapping[str, object]) -> None:
-        _store_source_verification(self.root, receipt)
 
     def observation(self, instrument: str) -> _ObservationCheckpoint | None:
         directory = self._instrument_directory("observations", instrument)
@@ -451,176 +403,6 @@ def prepare_stage8_checkpoint(
     )
 
 
-@dataclass(slots=True)
-class _ObservationCaptureState:
-    path: Path
-    source_start: datetime | None = None
-    source_end: datetime | None = None
-
-
-class _Stage8ObservationCapture:
-    """Stage authenticated rows for checkpoint publication after full verification."""
-
-    def __init__(
-        self,
-        checkpoint: _Stage8Checkpoint,
-        *,
-        provider_dataset_sha256: str,
-    ) -> None:
-        if checkpoint.root is None:
-            raise AssertionError("Stage 8 observation capture requires a checkpoint root")
-        self._checkpoint = checkpoint
-        self._provider_dataset_sha256 = provider_dataset_sha256
-        self._temporary = Path(mkdtemp(prefix=".verified-observations-", dir=str(checkpoint.root)))
-        self._states: dict[str, _ObservationCaptureState | None] = {}
-        self._finished = False
-
-    def add_partition(
-        self,
-        rows: tuple[ProviderHistoricalObservation, ...],
-        row_offset: int,
-    ) -> None:
-        if self._finished:
-            raise ValueError("Stage 8 observation capture is already finished")
-        if not rows:
-            return
-        instrument = rows[0].instrument_id
-        if any(row.instrument_id != instrument for row in rows):
-            raise ValueError("verified provider partition contains multiple instruments")
-        if instrument not in self._states:
-            cached = self._checkpoint.observation(instrument)
-            if cached is not None:
-                self._states[instrument] = None
-            else:
-                digest = hashlib.sha256(instrument.encode("utf-8")).hexdigest()
-                self._states[instrument] = _ObservationCaptureState(
-                    path=self._temporary / f"{digest}.jsonl"
-                )
-        state = self._states[instrument]
-        if state is None:
-            return
-        with state.path.open("a", encoding="utf-8") as stream:
-            for position, provider_row in enumerate(rows, row_offset + 1):
-                row = _adapt_observation(
-                    provider_row,
-                    self._provider_dataset_sha256,
-                    position,
-                )
-                state.source_start = (
-                    row.interval_start
-                    if state.source_start is None
-                    else min(state.source_start, row.interval_start)
-                )
-                state.source_end = (
-                    row.interval_end
-                    if state.source_end is None
-                    else max(state.source_end, row.interval_end)
-                )
-                stream.write(_canonical_row(row.as_json()))
-                stream.write("\n")
-
-    def complete(self) -> None:
-        if self._finished:
-            raise ValueError("Stage 8 observation capture is already finished")
-        try:
-            for instrument, state in sorted(self._states.items()):
-                if state is None:
-                    continue
-                self._checkpoint.store_observation(
-                    instrument,
-                    state.path,
-                    source_start=state.source_start,
-                    source_end=state.source_end,
-                )
-        finally:
-            self._finished = True
-            shutil.rmtree(self._temporary, ignore_errors=True)
-
-    def abort(self) -> None:
-        if self._finished:
-            return
-        self._finished = True
-        shutil.rmtree(self._temporary, ignore_errors=True)
-
-
-def prepare_stage8_observation_capture(
-    root: Path,
-    *,
-    provider_manifest_sha256: str,
-    provider_dataset_sha256: str,
-    configuration_id: str,
-) -> _Stage8ObservationCapture:
-    """Authenticate a checkpoint and prepare fused verified-row capture."""
-
-    checkpoint = _Stage8Checkpoint(
-        root,
-        provider_manifest_sha256=provider_manifest_sha256,
-        provider_dataset_sha256=provider_dataset_sha256,
-        configuration_id=configuration_id,
-    )
-    return _Stage8ObservationCapture(
-        checkpoint,
-        provider_dataset_sha256=provider_dataset_sha256,
-    )
-
-
-def read_stage8_source_verification(
-    root: Path,
-    *,
-    provider_manifest: Path,
-    provider_manifest_sha256: str,
-    provider_dataset_sha256: str,
-    configuration_id: str,
-) -> ProviderHistorySourceEvidence | None:
-    """Restore a completed semantic pass only after byte-level reauthentication."""
-
-    checkpoint = _Stage8Checkpoint(
-        root,
-        provider_manifest_sha256=provider_manifest_sha256,
-        provider_dataset_sha256=provider_dataset_sha256,
-        configuration_id=configuration_id,
-    )
-    receipt = checkpoint.source_verification()
-    if receipt is None:
-        return None
-    evidence = read_provider_history_source_verification_receipt(provider_manifest, receipt)
-    observation_row_count = 0
-    instruments = tuple(
-        dict.fromkeys(partition.key[0] for partition in evidence.dataset.partitions)
-    )
-    for instrument in instruments:
-        observation = checkpoint.observation(instrument)
-        if observation is None:
-            raise ValueError("Stage 8 source-verification checkpoint observations are incomplete")
-        observation_row_count += observation.rows.row_count
-    if observation_row_count != evidence.dataset.row_count:
-        raise ValueError(
-            "Stage 8 source-verification checkpoint observation count differs from its dataset"
-        )
-    return evidence
-
-
-def store_stage8_source_verification(
-    root: Path,
-    *,
-    source_evidence: ProviderHistorySourceEvidence,
-    provider_manifest_sha256: str,
-    provider_dataset_sha256: str,
-    configuration_id: str,
-) -> None:
-    """Publish a receipt only after semantic verification and observation capture complete."""
-
-    checkpoint = _Stage8Checkpoint(
-        root,
-        provider_manifest_sha256=provider_manifest_sha256,
-        provider_dataset_sha256=provider_dataset_sha256,
-        configuration_id=configuration_id,
-    )
-    checkpoint.store_source_verification(
-        provider_history_source_verification_receipt(source_evidence)
-    )
-
-
 class _ReplayCheckpoint:
     """Identity-bound cache of child parts already matched to one published bundle."""
 
@@ -658,12 +440,6 @@ class _ReplayCheckpoint:
         else:
             root.mkdir(parents=True, exist_ok=False)
             _runtime()._write_create_only(root / "identity.json", encoded)
-
-    def source_verification(self) -> dict[str, object] | None:
-        return _read_source_verification(self.root)
-
-    def store_source_verification(self, receipt: Mapping[str, object]) -> None:
-        _store_source_verification(self.root, receipt)
 
     def part(
         self,
@@ -769,53 +545,6 @@ def prepare_stage8_replay_checkpoint(
         provider_dataset_sha256=provider_dataset_sha256,
         configuration_id=configuration_id,
         published_bundle_sha256=published_bundle_sha256,
-    )
-
-
-def read_stage8_replay_source_verification(
-    root: Path,
-    *,
-    provider_manifest: Path,
-    provider_manifest_sha256: str,
-    provider_dataset_sha256: str,
-    configuration_id: str,
-    published_bundle_sha256: str,
-) -> ProviderHistorySourceEvidence | None:
-    """Restore a completed verifier source replay after byte-level reauthentication."""
-
-    checkpoint = _ReplayCheckpoint(
-        root,
-        provider_manifest_sha256=provider_manifest_sha256,
-        provider_dataset_sha256=provider_dataset_sha256,
-        configuration_id=configuration_id,
-        published_bundle_sha256=published_bundle_sha256,
-    )
-    receipt = checkpoint.source_verification()
-    if receipt is None:
-        return None
-    return read_provider_history_source_verification_receipt(provider_manifest, receipt)
-
-
-def store_stage8_replay_source_verification(
-    root: Path,
-    *,
-    source_evidence: ProviderHistorySourceEvidence,
-    provider_manifest_sha256: str,
-    provider_dataset_sha256: str,
-    configuration_id: str,
-    published_bundle_sha256: str,
-) -> None:
-    """Persist a completed verifier source replay before Stage 8 derivation."""
-
-    checkpoint = _ReplayCheckpoint(
-        root,
-        provider_manifest_sha256=provider_manifest_sha256,
-        provider_dataset_sha256=provider_dataset_sha256,
-        configuration_id=configuration_id,
-        published_bundle_sha256=published_bundle_sha256,
-    )
-    checkpoint.store_source_verification(
-        provider_history_source_verification_receipt(source_evidence)
     )
 
 
