@@ -29,6 +29,7 @@ _KEYS = frozenset(
         "name",
         "r1_bundle_id",
         "observation_dataset_id",
+        "foundation_semantic_id",
         "foundation_configuration_id",
         "panel_dataset_id",
         "target_dataset_id",
@@ -94,10 +95,14 @@ def decode_r2_experiment(payload: Mapping[str, object]) -> R2ExperimentConfig:
     eligibility = _mapping(payload["feature_eligibility"])
     if set(coverage) != {item.value for item in families} or set(eligibility) != set(coverage):
         raise ValueError("R2 feature-family mappings must use the complete declared family set")
+    r1_bundle_id = _text(payload["r1_bundle_id"])
+    foundation_semantic_id = _text(payload["foundation_semantic_id"])
+    if foundation_semantic_id != r1_bundle_id:
+        raise ValueError("R2 experiment foundation semantic identity does not match r1_bundle_id")
     return R2ExperimentConfig(
         name=_text(payload["name"]),
         schema_version=_int(payload["schema_version"]),
-        r1_bundle_id=_text(payload["r1_bundle_id"]),
+        r1_bundle_id=r1_bundle_id,
         observation_dataset_id=_text(payload["observation_dataset_id"]),
         foundation_configuration_id=_text(payload["foundation_configuration_id"]),
         panel_dataset_id=_text(payload["panel_dataset_id"]),

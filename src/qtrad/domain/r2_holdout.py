@@ -81,6 +81,12 @@ def _json_object(value: Mapping[str, object]) -> dict[str, JsonValue]:
     return converted
 
 
+def _final_fit_semantic_preprocessing(value: Mapping[str, object]) -> dict[str, JsonValue]:
+    """Exclude the physical R1 foundation binding from final-fit semantics."""
+
+    return _json_object({key: item for key, item in value.items() if key != "foundation_bundle_id"})
+
+
 def _contract_json(value: object) -> JsonValue:
     if isinstance(value, datetime):
         return value.isoformat()
@@ -248,7 +254,6 @@ class R2FinalFittingPolicy:
             "solver_identity": solver_identity,
             "training_prediction_threshold": normalised_training_prediction_threshold,
             "failure_disposition_policy": failure_disposition_policy,
-            "runtime_identities": runtime_identities,
         }
         return cls(
             pre_holdout_membership_policy=pre_holdout_membership_policy,
@@ -283,11 +288,14 @@ class R2FinalFittingPolicy:
             "solver_identity": _json_object(self.solver_identity),
             "training_prediction_threshold": self.training_prediction_threshold,
             "failure_disposition_policy": self.failure_disposition_policy,
-            "runtime_identities": _json_object(self.runtime_identities),
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "policy_id": self.policy_id}
+        return {
+            **self.semantic_json(),
+            "runtime_identities": _json_object(self.runtime_identities),
+            "policy_id": self.policy_id,
+        }
 
     @classmethod
     def from_json(cls, value: object) -> R2FinalFittingPolicy:
@@ -447,7 +455,7 @@ class R2HoldoutSelectionManifest:
 
     experiment_configuration_id: str
     foundation_bundle_id: str
-    oof_bundle_id: str
+    oof_id: str
     evaluation_report_id: str
     prior_selection_manifest_id: str
     source_class: MarketDataSourceClass
@@ -488,7 +496,7 @@ class R2HoldoutSelectionManifest:
         for value, field in (
             (self.experiment_configuration_id, "experiment configuration ID"),
             (self.foundation_bundle_id, "foundation bundle ID"),
-            (self.oof_bundle_id, "OOF bundle ID"),
+            (self.oof_id, "OOF semantic ID"),
             (self.evaluation_report_id, "evaluation report ID"),
             (self.prior_selection_manifest_id, "prior selection manifest ID"),
             (self.manifest_id, "holdout selection manifest ID"),
@@ -681,21 +689,21 @@ class R2HoldoutSelectionManifest:
             )
         )
         raw["questions"] = tuple(cast(Sequence[R2HoldoutQuestion], raw["questions"]))
-        semantic: dict[str, JsonValue] = {
-            "contract": cls.CONTRACT,
-            "schema_version": cls.SCHEMA_VERSION,
-            **{key: _contract_json(value) for key, value in raw.items() if key != "manifest_id"},
-        }
+        provisional = object.__new__(cls)
+        for field, value in raw.items():
+            object.__setattr__(provisional, field, value)
         constructor = cast(Callable[..., R2HoldoutSelectionManifest], cls)
-        return constructor(**raw, manifest_id=_semantic_id(semantic))
+        return constructor(
+            **raw,
+            manifest_id=_semantic_id(provisional.semantic_json()),
+        )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return {
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
             "experiment_configuration_id": self.experiment_configuration_id,
-            "foundation_bundle_id": self.foundation_bundle_id,
-            "oof_bundle_id": self.oof_bundle_id,
+            "oof_id": self.oof_id,
             "evaluation_report_id": self.evaluation_report_id,
             "prior_selection_manifest_id": self.prior_selection_manifest_id,
             "source_class": self.source_class.value,
@@ -722,7 +730,7 @@ class R2HoldoutSelectionManifest:
                     decision_time,
                     horizon_seconds,
                     disposition,
-                ) in (self.holdout_opportunity_registry)
+                ) in self.holdout_opportunity_registry
             ],
             "configuration_registry": [
                 [
@@ -743,20 +751,25 @@ class R2HoldoutSelectionManifest:
             "metric_policy": _json_object(self.metric_policy),
             "threshold_policy": _json_object(self.threshold_policy),
             "evaluation_policy": _json_object(self.evaluation_policy),
-            "final_fitting_policy": self.final_fitting_policy.as_json(),
+            "final_fitting_policy": self.final_fitting_policy.semantic_json(),
             "questions": [item.as_json() for item in self.questions],
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "experiment_count": self.experiment_count,
-            "runtime_identities": _json_object(self.runtime_identities),
-            "frozen_metadata": _json_object(self.frozen_metadata),
-            "frozen_at": self.frozen_at.isoformat(),
-            "frozen_by": self.frozen_by,
             "state": self.state.value,
             "holdout_outcomes_accessed": self.holdout_outcomes_accessed,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "manifest_id": self.manifest_id}
+        return {
+            **self.semantic_json(),
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "runtime_identities": _json_object(self.runtime_identities),
+            "frozen_metadata": _json_object(self.frozen_metadata),
+            "frozen_at": self.frozen_at.isoformat(),
+            "frozen_by": self.frozen_by,
+            "final_fitting_policy": self.final_fitting_policy.as_json(),
+            "manifest_id": self.manifest_id,
+        }
 
     @classmethod
     def from_json(cls, value: object) -> R2HoldoutSelectionManifest:
@@ -768,7 +781,7 @@ class R2HoldoutSelectionManifest:
             "schema_version",
             "experiment_configuration_id",
             "foundation_bundle_id",
-            "oof_bundle_id",
+            "oof_id",
             "evaluation_report_id",
             "prior_selection_manifest_id",
             "source_class",
@@ -844,7 +857,7 @@ class R2HoldoutSelectionManifest:
         return cls(
             experiment_configuration_id=str(raw["experiment_configuration_id"]),
             foundation_bundle_id=str(raw["foundation_bundle_id"]),
-            oof_bundle_id=str(raw["oof_bundle_id"]),
+            oof_id=str(raw["oof_id"]),
             evaluation_report_id=str(raw["evaluation_report_id"]),
             prior_selection_manifest_id=str(raw["prior_selection_manifest_id"]),
             source_class=MarketDataSourceClass(str(raw["source_class"])),
@@ -3217,8 +3230,14 @@ class R2FinalFit:
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
             "schema_version": 1,
-            **{key: _contract_json(value) for key, value in raw.items()},
         }
+        for key, value in raw.items():
+            if key == "runtime_identities":
+                continue
+            if key == "preprocessing":
+                semantic[key] = _final_fit_semantic_preprocessing(cast(Mapping[str, object], value))
+            else:
+                semantic[key] = _contract_json(value)
         constructor = cast(Callable[..., R2FinalFit], cls)
         return constructor(**raw, fit_id=_semantic_id(semantic))
 
@@ -3237,7 +3256,7 @@ class R2FinalFit:
             "purged_target_ids": list(self.purged_target_ids),
             "inner_fit_target_ids": list(self.inner_fit_target_ids),
             "inner_validation_target_ids": list(self.inner_validation_target_ids),
-            "preprocessing": _json_object(self.preprocessing),
+            "preprocessing": _final_fit_semantic_preprocessing(self.preprocessing),
             "alpha_candidate_scores": [item.as_json() for item in self.alpha_candidate_scores],
             "selected_alpha": self.selected_alpha,
             "sample_weights": [[target_id, weight] for target_id, weight in self.sample_weights],
@@ -3246,13 +3265,17 @@ class R2FinalFit:
             "disposition": self.disposition.value,
             "failure_reason": self.failure_reason,
             "diagnostics": _json_object(self.diagnostics),
-            "runtime_identities": _json_object(self.runtime_identities),
             "evidence_class": self.evidence_class.value,
             "holdout_scope": self.holdout_scope.value,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "fit_id": self.fit_id}
+        return {
+            **self.semantic_json(),
+            "preprocessing": _json_object(self.preprocessing),
+            "runtime_identities": _json_object(self.runtime_identities),
+            "fit_id": self.fit_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -3624,7 +3647,11 @@ class R2HoldoutForecastSeal:
         semantic: dict[str, JsonValue] = {
             "contract": cls.CONTRACT,
             "schema_version": 1,
-            **{key: _contract_json(value) for key, value in raw.items()},
+            **{
+                key: _contract_json(value)
+                for key, value in raw.items()
+                if key not in {"runtime_identities", "prepared_at", "prepared_by"}
+            },
         }
         constructor = cast(Callable[..., R2HoldoutForecastSeal], cls)
         return constructor(**raw, seal_id=_semantic_id(semantic))
@@ -3651,15 +3678,18 @@ class R2HoldoutForecastSeal:
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,
             "holdout_scope": self.holdout_scope.value,
-            "runtime_identities": _json_object(self.runtime_identities),
-            "prepared_at": self.prepared_at.isoformat(),
-            "prepared_by": self.prepared_by,
             "state": self.state.value,
             "holdout_outcomes_accessed": self.holdout_outcomes_accessed,
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "seal_id": self.seal_id}
+        return {
+            **self.semantic_json(),
+            "runtime_identities": _json_object(self.runtime_identities),
+            "prepared_at": self.prepared_at.isoformat(),
+            "prepared_by": self.prepared_by,
+            "seal_id": self.seal_id,
+        }
 
     @classmethod
     def from_json(cls, value: object) -> R2HoldoutForecastSeal:
@@ -3842,7 +3872,7 @@ class R2ConfirmatoryOpenedMarker:
     selection_manifest_id: str
     seal_id: str
     opened_marker_id: str
-    oof_bundle_id: str
+    oof_id: str
     foundation_bundle_id: str
     experiment_configuration_id: str
     evaluation_report_id: str
@@ -3869,7 +3899,7 @@ class R2ConfirmatoryOpenedMarker:
             (self.selection_manifest_id, "confirmatory selection ID"),
             (self.seal_id, "confirmatory seal ID"),
             (self.opened_marker_id, "confirmatory opened marker ID"),
-            (self.oof_bundle_id, "confirmatory OOF bundle ID"),
+            (self.oof_id, "confirmatory OOF semantic ID"),
             (self.foundation_bundle_id, "confirmatory foundation bundle ID"),
             (self.experiment_configuration_id, "confirmatory experiment ID"),
             (self.evaluation_report_id, "confirmatory F2 evaluation ID"),
@@ -3906,7 +3936,7 @@ class R2ConfirmatoryOpenedMarker:
         selection_manifest_id: str,
         seal_id: str,
         opened_marker_id: str,
-        oof_bundle_id: str,
+        oof_id: str,
         foundation_bundle_id: str,
         experiment_configuration_id: str,
         evaluation_report_id: str,
@@ -3927,7 +3957,7 @@ class R2ConfirmatoryOpenedMarker:
             "selection_manifest_id": selection_manifest_id,
             "seal_id": seal_id,
             "opened_marker_id": opened_marker_id,
-            "oof_bundle_id": oof_bundle_id,
+            "oof_id": oof_id,
             "foundation_bundle_id": foundation_bundle_id,
             "experiment_configuration_id": experiment_configuration_id,
             "evaluation_report_id": evaluation_report_id,
@@ -3949,7 +3979,7 @@ class R2ConfirmatoryOpenedMarker:
             selection_manifest_id=selection_manifest_id,
             seal_id=seal_id,
             opened_marker_id=opened_marker_id,
-            oof_bundle_id=oof_bundle_id,
+            oof_id=oof_id,
             foundation_bundle_id=foundation_bundle_id,
             experiment_configuration_id=experiment_configuration_id,
             evaluation_report_id=evaluation_report_id,
@@ -3976,7 +4006,7 @@ class R2ConfirmatoryOpenedMarker:
             "selection_manifest_id": self.selection_manifest_id,
             "seal_id": self.seal_id,
             "opened_marker_id": self.opened_marker_id,
-            "oof_bundle_id": self.oof_bundle_id,
+            "oof_id": self.oof_id,
             "foundation_bundle_id": self.foundation_bundle_id,
             "experiment_configuration_id": self.experiment_configuration_id,
             "evaluation_report_id": self.evaluation_report_id,
@@ -4005,7 +4035,7 @@ class R2ConfirmatoryOpenedMarker:
             selection_manifest_id=str(value["selection_manifest_id"]),
             seal_id=str(value["seal_id"]),
             opened_marker_id=str(value["opened_marker_id"]),
-            oof_bundle_id=str(value["oof_bundle_id"]),
+            oof_id=str(value["oof_id"]),
             foundation_bundle_id=str(value["foundation_bundle_id"]),
             experiment_configuration_id=str(value["experiment_configuration_id"]),
             evaluation_report_id=str(value["evaluation_report_id"]),

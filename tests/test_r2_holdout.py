@@ -198,7 +198,7 @@ def _selection(
     selection = freeze_holdout_selection(
         prior_selection=prior,
         foundation_bundle_id=_id("foundation"),
-        oof_bundle_id=_id("oof"),
+        oof_id=_id("oof"),
         source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
         evidence_class=EvidenceClass.IMPLEMENTATION,
         holdout_scope=HoldoutScope.DISPOSABLE_FIXTURE,
@@ -1261,3 +1261,95 @@ def test_zero_return_retains_shared_eligibility_when_model_features_are_missing(
     assert any(row.opportunity_id == unavailable for row in zero_coverage.rows)
     assert any(row.opportunity_id == unavailable for row in local_coverage.rows)
     assert verify_holdout_preparation(tmp_path).seal_id
+
+
+def test_holdout_semantic_identity_excludes_runtime_provenance() -> None:
+    from dataclasses import fields
+
+    selection, question, _ = _selection()
+
+    def rebuild(**changes: object) -> R2HoldoutSelectionManifest:
+        values = {
+            item.name: getattr(selection, item.name)
+            for item in fields(selection)
+            if item.name != "manifest_id"
+        }
+        return R2HoldoutSelectionManifest.create(**{**values, **changes})
+
+    provenance_only = rebuild(
+        foundation_bundle_id=_id("different-foundation"),
+        runtime_identities={"application": "different-build"},
+        frozen_metadata={"fixture": "different"},
+        frozen_at=NOW + timedelta(minutes=1),
+        frozen_by="different-operator",
+    )
+    assert provenance_only.manifest_id == selection.manifest_id
+    assert provenance_only.semantic_json() == selection.semantic_json()
+
+    changed_threshold = rebuild(threshold_policy={"threshold": 0.1})
+    assert changed_threshold.manifest_id != selection.manifest_id
+
+    changed_question = R2HoldoutQuestion.create(
+        question=question.question + " (changed)",
+        candidate_configuration_id=question.candidate_configuration_id,
+        comparator_configuration_id=question.comparator_configuration_id,
+        metric=question.metric,
+        support_policy=question.support_policy,
+        direction=question.direction,
+        threshold=question.threshold,
+        minimum_support=question.minimum_support,
+        minimum_coverage=question.minimum_coverage,
+        conclusion_policy=question.conclusion_policy,
+    )
+    changed_questions = rebuild(questions=(changed_question,))
+    assert changed_questions.manifest_id != selection.manifest_id
+
+
+def test_final_fit_and_seal_identity_exclude_build_provenance(tmp_path: Path) -> None:
+    from dataclasses import fields
+
+    _selection_value, _opportunities, fits, _forecasts, _coverage, seal = _prepared(tmp_path)
+    fit = fits[0]
+    fit_values = {
+        item.name: getattr(fit, item.name) for item in fields(fit) if item.name != "fit_id"
+    }
+    alternate_fit = R2FinalFit.create(
+        **{**fit_values, "runtime_identities": {"application": "different-build"}}
+    )
+    assert alternate_fit.fit_id == fit.fit_id
+    assert alternate_fit.semantic_json() == fit.semantic_json()
+
+    physical_preprocessing = dict(fit.preprocessing)
+    physical_preprocessing["foundation_bundle_id"] = _id("different-foundation")
+    alternate_foundation = R2FinalFit.create(
+        **{**fit_values, "preprocessing": physical_preprocessing}
+    )
+    assert alternate_foundation.fit_id == fit.fit_id
+    assert alternate_foundation.semantic_json() == fit.semantic_json()
+    assert alternate_foundation.as_json()["preprocessing"] != fit.as_json()["preprocessing"]
+
+    scientific_preprocessing = dict(fit.preprocessing)
+    scientific_preprocessing["training_feature_dataset_id"] = _id("different-training-features")
+    changed_preprocessing = R2FinalFit.create(
+        **{**fit_values, "preprocessing": scientific_preprocessing}
+    )
+    assert changed_preprocessing.fit_id != fit.fit_id
+
+    changed_selection = R2FinalFit.create(
+        **{**fit_values, "selection_manifest_id": _id("different-selection")}
+    )
+    assert changed_selection.fit_id != fit.fit_id
+
+    seal_values = {
+        item.name: getattr(seal, item.name) for item in fields(seal) if item.name != "seal_id"
+    }
+    alternate_seal = type(seal).create(
+        **{
+            **seal_values,
+            "runtime_identities": {"application": "different-build"},
+            "prepared_at": NOW + timedelta(minutes=1),
+            "prepared_by": "different-operator",
+        }
+    )
+    assert alternate_seal.seal_id == seal.seal_id
+    assert alternate_seal.semantic_json() == seal.semantic_json()

@@ -105,13 +105,13 @@ def build_ibkr_software_bundle(
         synthetic_oof_bundle=reference_for_json(
             path="synthetic/oof/manifest.json",
             contract=synthetic_oof.CONTRACT,
-            semantic_id=synthetic_oof.bundle_id,
+            semantic_id=synthetic_oof.oof_id,
             content=synthetic_oof.as_json(),
         ),
         representative_oof_bundle=reference_for_json(
             path="representative/oof/manifest.json",
             contract=representative_oof.CONTRACT,
-            semantic_id=representative_oof.bundle_id,
+            semantic_id=representative_oof.oof_id,
             content=representative_oof.as_json(),
         ),
         synthetic_selection=_selection_reference(
@@ -282,7 +282,7 @@ def _verify_selection(
 ) -> None:
     if payload.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("IBKR software selection is not a typed SelectionManifest")
-    if payload.get("oof_bundle_id") != oof.bundle_id:
+    if payload.get("oof_id") != oof.oof_id:
         raise ValueError("IBKR software selection does not bind its OOF bundle")
     if payload.get("foundation_bundle_id") != oof.foundation_bundle_id:
         raise ValueError("IBKR software selection does not bind its foundation")

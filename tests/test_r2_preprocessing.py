@@ -1093,10 +1093,10 @@ def test_fold_fit_verifier_rejects_rehashed_coefficient_tampering() -> None:
     verified, features, config, fold = _bound_fixture()
     selection = _build_bound_selection(verified, features, config, fold)
     fit = _build_local_fold(verified, features, config, selection).fit
-    payload = fit.semantic_json()
-    coefficients = cast(list[JsonValue], payload["coefficients"])
+    semantic = fit.semantic_json()
+    coefficients = cast(list[JsonValue], semantic["coefficients"])
     coefficients[0] = cast(float, coefficients[0]) + 1.0
-    tampered = {**payload, "artifact_id": fold_fit_id(payload)}
+    tampered = {**fit.as_json(), "coefficients": coefficients, "artifact_id": fold_fit_id(semantic)}
 
     with pytest.raises(ValueError, match="numerically"):
         _verify_local_fit(verified, features, config, selection, tampered)
@@ -1239,3 +1239,23 @@ def test_stability_verifier_rejects_rehashed_mean_and_sign_count_tampering() -> 
     for tampered in (altered_mean, altered_sign):
         with pytest.raises(ValueError, match="authenticated fold-fit replay"):
             verify_coefficient_stability_summary(tampered, (fit,))
+
+
+def test_preprocessing_and_fold_fit_ids_exclude_build_provenance() -> None:
+    verified, features, config, fold = _bound_fixture()
+    selection = _build_bound_selection(verified, features, config, fold)
+    changed_selection = replace(
+        selection,
+        application_image_identity="qtrad@sha256:" + "9" * 64,
+        sklearn_library_identity="scikit-learn==other-build",
+    )
+    assert changed_selection.artifact_id == selection.artifact_id
+
+    fit = _build_local_fold(verified, features, config, selection).fit
+    changed_fit = replace(
+        fit,
+        application_image_identity="qtrad@sha256:" + "a" * 64,
+        numpy_library_identity="numpy==other-build",
+        sklearn_library_identity="scikit-learn==other-build",
+    )
+    assert changed_fit.artifact_id == fit.artifact_id

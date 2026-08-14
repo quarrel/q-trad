@@ -10,18 +10,137 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 from typing import cast
 
+from qtrad.domain.r2_baselines import (
+    R2_COEFFICIENT_STABILITY_CONTRACT,
+    R2_FOLD_FIT_CONTRACT,
+    R2_FORECAST_COVERAGE_CONTRACT,
+)
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
     R2ForecastManifest,
     R2OofBundle,
     R2SoftwareVerificationBundle,
 )
-from qtrad.domain.r2_evaluation import R2_SELECTION_CONTRACT
-from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+from qtrad.domain.r2_evaluation import (
+    R2_EVALUATION_CONTRACT,
+    R2_LOCAL_COMPARATOR_CONTRACT,
+    R2_SELECTION_CONTRACT,
+)
+from qtrad.domain.r2_features import R2_FEATURE_DATASET_CONTRACT
+from qtrad.domain.r2_holdout import (
+    R2_CONFIRMATORY_OPENED_CONTRACT,
+    R2_FINAL_FIT_CONTRACT,
+    R2_HOLDOUT_BUNDLE_CONTRACT,
+    R2_HOLDOUT_CONSUMED_CONTRACT,
+    R2_HOLDOUT_COVERAGE_CONTRACT,
+    R2_HOLDOUT_EVALUATION_CONTRACT,
+    R2_HOLDOUT_FEATURES_CONTRACT,
+    R2_HOLDOUT_FORECAST_CONTRACT,
+    R2_HOLDOUT_FORECAST_SEAL_CONTRACT,
+    R2_HOLDOUT_OPENED_CONTRACT,
+    R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT,
+    R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT,
+    R2_HOLDOUT_SELECTION_CONTRACT,
+    R2_HOLDOUT_TARGET_PROJECTION_CONTRACT,
+    R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT,
+    R2HoldoutTargetSource,
+)
 from qtrad.domain.r2_models import R2_PREPROCESSING_SELECTION_CONTRACT
 
 _MAX_BYTES = 64 * 1024 * 1024
 R2_EVALUATION_REGISTER_CONTRACT = "qtrad-r2-evaluation-register-v2"
+
+_IDENTITY_FIELDS = frozenset(
+    {
+        "oof_id",
+        "manifest_id",
+        "bundle_id",
+        "dataset_id",
+        "artifact_id",
+        "selection_id",
+        "fit_id",
+        "coverage_id",
+        "summary_id",
+        "report_id",
+        "descriptor_id",
+        "scenario_id",
+        "ablation_id",
+        "source_id",
+        "seal_id",
+        "marker_id",
+        "outcome_evidence_id",
+        "projection_id",
+        "registry_id",
+    }
+)
+
+_IDENTITY_FIELD_BY_CONTRACT: dict[str, str] = {
+    R2OofBundle.CONTRACT: "oof_id",
+    R2ForecastManifest.CONTRACT: "manifest_id",
+    R2SoftwareVerificationBundle.CONTRACT: "bundle_id",
+    "qtrad-r2-software-verification-v2": "bundle_id",
+    R2_SELECTION_CONTRACT: "manifest_id",
+    R2_EVALUATION_CONTRACT: "report_id",
+    R2_LOCAL_COMPARATOR_CONTRACT: "manifest_id",
+    R2_FEATURE_DATASET_CONTRACT: "dataset_id",
+    "qtrad-research-forecasts-v1": "dataset_id",
+    R2_PREPROCESSING_SELECTION_CONTRACT: "artifact_id",
+    R2_FOLD_FIT_CONTRACT: "artifact_id",
+    R2_FORECAST_COVERAGE_CONTRACT: "dataset_id",
+    R2_COEFFICIENT_STABILITY_CONTRACT: "summary_id",
+    R2_EVALUATION_REGISTER_CONTRACT: "report_id",
+    "qtrad-r2-oof-run-descriptor-v1": "descriptor_id",
+    "qtrad-r2-pooled-ablation-v1": "ablation_id",
+    R2HoldoutTargetSource.CONTRACT: "source_id",
+    R2_HOLDOUT_SELECTION_CONTRACT: "manifest_id",
+    R2_HOLDOUT_FEATURES_CONTRACT: "dataset_id",
+    R2_FINAL_FIT_CONTRACT: "fit_id",
+    R2_HOLDOUT_FORECAST_CONTRACT: "dataset_id",
+    R2_HOLDOUT_COVERAGE_CONTRACT: "coverage_id",
+    R2_HOLDOUT_FORECAST_SEAL_CONTRACT: "seal_id",
+    R2_HOLDOUT_OPENED_CONTRACT: "marker_id",
+    R2_HOLDOUT_CONSUMED_CONTRACT: "marker_id",
+    R2_CONFIRMATORY_OPENED_CONTRACT: "marker_id",
+    R2_HOLDOUT_EVALUATION_CONTRACT: "evaluation_id",
+    R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT: "outcome_evidence_id",
+    R2_HOLDOUT_BUNDLE_CONTRACT: "bundle_id",
+    R2_HOLDOUT_TARGET_PROJECTION_CONTRACT: "projection_id",
+    R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT: "projection_id",
+    R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT: "registry_id",
+}
+
+
+def _identity_field_for_contract(contract: str) -> str:
+    field = _IDENTITY_FIELD_BY_CONTRACT.get(contract)
+    if field is None and contract.startswith("qtrad-test-child-"):
+        field = "artifact_id"
+    if field is None:
+        raise ValueError(f"R2 child contract has no canonical identity field: {contract}")
+    return field
+
+
+def _canonical_payload_identity(contract: str, payload: Mapping[str, object]) -> str:
+    if payload.get("contract") != contract:
+        raise ValueError(f"R2 child payload contract mismatch: expected {contract}")
+    if contract == R2_EVALUATION_CONTRACT:
+        candidates = tuple(field for field in ("manifest_id", "report_id") if field in payload)
+        if len(candidates) != 1:
+            raise ValueError(
+                f"R2 child contract {contract} must expose exactly one evaluation identity"
+            )
+        field = candidates[0]
+    else:
+        field = _identity_field_for_contract(contract)
+    value = payload.get(field)
+    if not isinstance(value, str):
+        raise ValueError(f"R2 child contract {contract} requires canonical {field}")
+    unexpected = sorted(_IDENTITY_FIELDS.intersection(payload) - {field})
+    if unexpected:
+        fields = ", ".join(unexpected)
+        raise ValueError(
+            f"R2 child contract {contract} has non-canonical identity field(s): {fields}"
+        )
+    return value
 
 
 def canonical_bytes(value: Mapping[str, object]) -> bytes:
@@ -201,7 +320,8 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         "coverage_children",
         "evaluation_children",
         "holdout_target_source",
-        "bundle_id",
+        "oof_id",
+        "closure_id",
     }:
         raise ValueError("R2 OOF bundle has unknown or missing fields")
     if (
@@ -226,7 +346,8 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         source_class=_source(payload["source_class"]),
         evidence_class=_evidence(payload["evidence_class"]),
         **refs,
-        bundle_id=_text(payload["bundle_id"]),
+        oof_id=_text(payload["oof_id"]),
+        closure_id=_text(payload["closure_id"]),
         holdout_target_source=(
             None
             if payload["holdout_target_source"] is None
@@ -402,7 +523,7 @@ def _allow_bound_selection(root: Path, bundle: R2OofBundle) -> None:
     if selection.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("R2 bundle contains an unexpected selection child")
     if (
-        selection.get("oof_bundle_id") != bundle.bundle_id
+        selection.get("oof_id") != bundle.oof_id
         or selection.get("foundation_bundle_id") != bundle.foundation_bundle_id
         or selection.get("experiment_configuration_id") != bundle.experiment_configuration_id
         or selection.get("source_class") != bundle.source_class.value
@@ -473,28 +594,10 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
     payload = _load_object(candidate)
     if payload.get("contract") != reference.contract:
         raise ValueError(f"R2 bundle child contract mismatch: {reference.path}")
-    identity = next(
-        (
-            payload[key]
-            for key in (
-                "manifest_id",
-                "bundle_id",
-                "dataset_id",
-                "artifact_id",
-                "selection_id",
-                "fit_id",
-                "coverage_id",
-                "summary_id",
-                "report_id",
-                "descriptor_id",
-                "scenario_id",
-                "ablation_id",
-                "source_id",
-            )
-            if key in payload
-        ),
-        None,
-    )
+    try:
+        identity = _canonical_payload_identity(reference.contract, payload)
+    except ValueError as exc:
+        raise ValueError(f"R2 bundle child identity is invalid: {reference.path}: {exc}") from exc
     if identity != reference.semantic_id:
         raise ValueError(f"R2 bundle child semantic identity mismatch: {reference.path}")
 

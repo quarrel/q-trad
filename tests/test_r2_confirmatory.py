@@ -1523,7 +1523,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             "frozen_by": prior_selection.frozen_by,
             "market_data_source_class": prior_selection.market_data_source_class,
             "foundation_bundle_id": prior_selection.foundation_bundle_id,
-            "oof_bundle_id": prior_selection.oof_bundle_id,
+            "oof_id": prior_selection.oof_id,
         }
         values.update(overrides)
         return cast(Any, SelectionManifest.create)(**values)

@@ -177,7 +177,7 @@ class R2ExperimentConfig:
         if not self.name or self.schema_version != self.SCHEMA_VERSION:
             raise ValueError("R2 experiment name and schema version are invalid")
         for value, field in (
-            (self.r1_bundle_id, "R1 bundle ID"),
+            (self.r1_bundle_id, "foundation ID"),
             (self.observation_dataset_id, "observation dataset ID"),
             (self.foundation_configuration_id, "foundation configuration ID"),
             (self.panel_dataset_id, "panel dataset ID"),
@@ -334,22 +334,37 @@ class R2ExperimentConfig:
             raise ValueError("R2.A requires the complete ordered baseline model family")
 
     @property
-    def configuration_id(self) -> str:
-        return _hash_json(self.as_json())
+    def foundation_semantic_id(self) -> str:
+        """Return the F1 semantic identity of the immediate R1 foundation."""
 
-    def as_json(self) -> dict[str, JsonValue]:
-        payload: dict[str, JsonValue] = {
+        return self.r1_bundle_id
+
+    @property
+    def configuration_id(self) -> str:
+        """Return the identity of the declared scientific R2 experiment.
+
+        Runtime/build identities are retained in as_json as provenance, but
+        never participate in this semantic digest.
+        """
+
+        return _hash_json(self.semantic_json())
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        """Return only fields that change the scientific R2 experiment meaning."""
+
+        return {
             "contract": self.CONTRACT,
             "schema_version": self.schema_version,
             "name": self.name,
-            "r1_bundle_id": self.r1_bundle_id,
-            "observation_dataset_id": self.observation_dataset_id,
+            # F1's foundation ID is the complete semantic identity of the
+            # immediate R1 foundation; closure and receipt identities remain
+            # separate from this R2 experiment digest.
+            "foundation_semantic_id": self.foundation_semantic_id,
             "foundation_configuration_id": self.foundation_configuration_id,
+            "observation_dataset_id": self.observation_dataset_id,
             "panel_dataset_id": self.panel_dataset_id,
             "target_dataset_id": self.target_dataset_id,
             "fold_dataset_id": self.fold_dataset_id,
-            "r1_application_version": self.r1_application_version,
-            "r1_image_identity": self.r1_image_identity,
             "ordered_instruments": list(self.ordered_instruments),
             "instrument_roles": {
                 item: InstrumentRole(self.instrument_roles[item]).value
@@ -393,6 +408,16 @@ class R2ExperimentConfig:
             "evidence_class": self.evidence_class.value,
             "market_data_source_class": self.market_data_source_class.value,
             "model_families": [item.value for item in self.model_families],
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        """Return the semantic declaration plus separately labelled provenance."""
+
+        payload = {
+            **self.semantic_json(),
+            "r1_bundle_id": self.r1_bundle_id,
+            "r1_application_version": self.r1_application_version,
+            "r1_image_identity": self.r1_image_identity,
         }
         if self.source_adapter_identity is not None:
             payload["source_adapter_identity"] = dict(self.source_adapter_identity)
