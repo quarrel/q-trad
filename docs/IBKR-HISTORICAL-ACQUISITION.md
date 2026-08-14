@@ -1186,6 +1186,47 @@ Confirmatory IBKR experiment, feature, readiness and OOF commands require both
 `--foundation-receipt` and `--foundation-promotion`. The staged OOF retains both so real F2 replay
 can authenticate promotion before any G2 authority is constructed.
 
+## 6.1 PR-H4 retained-file migration (operator-only)
+
+PR-H4 migrates the named retained Stage 6/7/8 evidence without provider or database access. The
+migration implementation is private and migration-only (qtrad.runtime.ibkr_historical_migration);
+there is deliberately no normal CLI or current writer compatibility path. The operator must construct
+MigrationPaths with the exact retained source files and a new, absent destination attempt directory.
+
+Run the read-only preflight first and review its MigrationPlan:
+
+~~~text
+plan_retained_ibkr_migration(paths, implementation_commit=<reviewed commit>)
+~~~
+
+Only after the root operator has audited the plan and supplied explicit UTC promotion authorisation
+may migrate_retained_ibkr_evidence(...) run. It creates every destination file exactly once and never
+modifies a retained source. A failed attempt is abandoned; choose a fresh absent destination rather
+than retrying or selectively completing it.
+
+The expected durable outputs under the create-only destination are:
+
+~~~text
+stage6-result-v3/manifest.json
+stage6-result-v3-verification-receipt.json
+provider-history-v3/manifest.json
+provider-history-v3-verification-receipt.json
+foundation-v3.json and foundation-v3.json.children/
+foundation-v3-verification-receipt.json
+foundation-v3-confirmatory-promotion.json
+migration-equivalence-record.json
+~~~
+
+The migration record must contain the exact implementation commit, old/new semantic and closure
+identities, verification and promotion identities, scientific equivalence projections, deterministic
+child/part/row work counts, and zero provider calls, database reacquisition, holdout access and
+retained-evidence mutations. Stage 6, Stage 7 and Stage 8 deep verification each run once; promotion
+performs authority authentication only and records zero semantic replay.
+
+Do not delete the temporary legacy readers or migration bridge until the real retained run has produced
+and independently reviewed this record. Successful review is the PR-H4 deletion trigger; failed or
+partial attempts remain immutable evidence and require a separately named fresh attempt.
+
 # 7. Explicitly deferred work
 
 The following remain outside this plan:
