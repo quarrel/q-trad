@@ -35,6 +35,27 @@ Later continuous shadow flow:
 No broker-order port, provider order operation, production broker endpoint or live-account connection
 exists.
 
+## Evidence handoff target
+
+Before the first real confirmatory R2 run, the active simplification programme is migrating the Stage
+6 through R2 evidence path to this architecture:
+
+```text
+build boundary -> structural publication -> one independent verification -> create-only receipt
+next boundary -> authenticate immediate-parent proof -> consume needed children -> transform once
+promotion -> authenticate exact receipt + readiness + operator authorisation -> create-only authority
+```
+
+Each child binds its immediate parent's semantic, closure and verification or promotion identities and
+proves only its own transformation. Semantic, closure, verification and promotion identities remain
+distinct; execution provenance is separate. Manifests declare exact closure bytes, while ordinary
+consumers hash and validate only the children they actually consume. Promotion does not repeat semantic
+replay. Deep audit is exceptional after verifier revocation, a potentially relevant defect or an
+explicit operator request. Compatibility exists only for named retained evidence and is deleted after
+migration; there are no dual writers or generic evidence framework.
+
+This is the target architecture, not a claim that the staged implementation migrations are complete.
+
 ## Shape
 
 One codebase and application image contains separately testable modules and command roles.
@@ -103,8 +124,9 @@ configuration-independent receipt. Semantic-verification or receipt-write failur
 closure but grants no downstream authority. The receipt binds the exact provider manifest, dataset and
 Stage 6 identities, availability policy, semantic summaries and claim-scoped verifier check set. Ordinary
 consumers authenticate the unchanged closure and receipt without decoding Parquet rows or replaying Stage
-6; explicit re-verification and confirmatory cumulative replay remain separate operations. `foundation
-build` accepts this receipt as its immediate Stage 7 authority.
+6. The current confirmatory route still performs cumulative replay and is scheduled for replacement;
+target promotion authenticates the accepted receipt without semantic replay. `foundation build` accepts
+this receipt as its immediate Stage 7 authority.
 
 The authenticated retained v1 closure was repacked create-only into the explicit v2 physical contract
 without replaying Stage 6 or changing semantic dataset identity. V2 groups observations by instrument and
@@ -116,8 +138,8 @@ The real migration and runtime retirement are complete, so normal Stage 7/8 oper
 Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row
 decoder, deep verifier and new Stage 8/promotion routes are absent. Historical v1 deep verification uses
 the archived exact commit. Ordinary v2 authentication hashes selected physical parts but reads neither
-unselected parts nor Stage 6 result children. Explicit v2 verification and confirmatory promotion retain
-complete audit and semantic replay.
+unselected parts nor Stage 6 result children. Explicit v2 deep audit retains complete semantic replay;
+the current confirmatory route still does so only as legacy implementation pending migration.
 
 The durable IBKR historical foundation handoff is:
 
@@ -127,11 +149,12 @@ The durable IBKR historical foundation handoff is:
 The receipt binds the exact foundation, provider and child closure, configuration, readiness and
 claim-scoped verifier semantics. Authentication rechecks that closure without Stage 7 or Stage 8
 semantic replay. Its authority is `IMPLEMENTATION_EVIDENCE_ONLY`. For a qualifying foundation,
-real IBKR F2 instead requires one operator-authorised `foundation promote-confirmatory` cumulative
-replay from a clean detached immutable runtime, followed by cheap `authenticate-promotion` checks.
-The create-only promotion binds the exact Stage 6–8 roots, the contract-specific Stage 7 verifier,
-qualifying readiness, runtime and authorization; confirmatory OOF construction and replay must carry
-that attestation.
+real IBKR F2 currently uses the operator-authorised `foundation promote-confirmatory` legacy replay
+from a clean detached immutable runtime, followed by cheap `authenticate-promotion` checks. The active
+migration replaces that replay with authentication of the exact accepted Stage 8 receipt, qualifying
+readiness, verifier acceptance and operator authorisation. The create-only promotion binds the distinct
+semantic, closure, verification and promotion identities; confirmatory OOF construction carries that
+authority.
 
 Each foundation binds one `MarketDataSourceClass`; historical, IBKR-native and IG-native observations
 remain separate through feature construction, modelling and reporting. That source dimension is

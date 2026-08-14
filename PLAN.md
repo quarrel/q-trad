@@ -53,6 +53,11 @@ work and records only the milestone sequence needed to reach the next trustworth
   create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
   and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
   No real holdout, research conclusion or effectiveness evidence exists.
+- Before the first real confirmatory R2 run, the active
+  `docs/R2_EVIDENCE_HANDOFF_SIMPLIFICATION_PLAN.md` programme is replacing cumulative Stage 6 through R2
+  replay with immediate-parent receipt authentication. Each boundary will transform and independently
+  verify once; ordinary descendants will authenticate that proof, and promotion will grant authority
+  without semantic replay. These migrations are active work, not completed implementation.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,

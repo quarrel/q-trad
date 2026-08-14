@@ -847,10 +847,11 @@ After later permission changes, create a new plan referencing the original contr
 ## Stage 7 — Provider-history observation construction
 
 A complete Stage 7 semantic verification must issue create-only reusable evidence bound to the exact
-provider-history manifest, closure, immediate source identities and accepted verifier contract.
-Ordinary descendants authenticate that receipt and the exact unchanged closure without replaying
-Stage 6. Complete replay is reserved for confirmatory promotion, explicit deep audit or verifier
-revocation.
+provider-history manifest, closure identity, immediate source identities and accepted verifier contract.
+Ordinary descendants authenticate that receipt, the canonical manifest and declared exact tree without
+replaying Stage 6; they reject structural/path violations and hash exact child bytes when consumed.
+Complete semantic replay is reserved for exceptional deep audit after verifier revocation, a potentially
+relevant defect or an explicit operator request.
 
 **Form:** research-input pull request.
 
@@ -921,8 +922,10 @@ Every structurally valid Stage 8 foundation is retained whether readiness is qua
 nonqualifying. Readiness gates downstream authority, not publication. Stage 8 independently
 verifies its own transformation once from authenticated immediate Stage 7 evidence and issues a
 reusable receipt; ordinary consumers authenticate that receipt rather than repeat data-scale replay.
-Complete cumulative Stage 6-to-Stage 8 replay occurs only at confirmatory promotion, explicit deep
-audit or verifier revocation.
+Complete cumulative Stage 6-to-Stage 8 replay is reserved for exceptional deep audit after verifier
+revocation, a potentially relevant defect or an explicit operator request. Confirmatory promotion
+instead authenticates the accepted Stage 8 receipt, qualifying readiness, verifier acceptance and
+operator authorisation without semantic replay.
 
 **Form:** foundation integration pull request.
 
@@ -1102,8 +1105,9 @@ After the first full run:
 4. Independently verify the Stage 8 transformation once, persist its create-only receipt, and prove the
    ordinary authentication path performs no data-scale replay.
 5. Record the readiness disposition. If it qualifies and confirmatory use is separately authorised,
-   perform one cumulative replay from an immutable runtime and persist the confirmatory-promotion
-   attestation; otherwise retain the valid nonqualifying foundation and stop.
+   authenticate the exact accepted Stage 8 receipt, verifier acceptance, readiness and operator
+   authorisation, then persist the create-only confirmatory promotion; otherwise retain the valid
+   nonqualifying foundation and stop.
 6. Back up PostgreSQL and immutable artefacts; store raw market data outside Git.
 7. Commit only sanitised identities, dispositions and documentation.
 8. Update `PLAN.md`, `docs/STATUS.md`, `docs/ARCHITECTURE.md` and this runbook with the exact verified
@@ -1186,15 +1190,25 @@ The following remain outside this plan:
 * confirmatory holdout execution;
 * any effectiveness claim.
 
-## Accepted amendment history — Verification reuse and Stage 8 publication
+## Accepted amendment history
+
+### Verification reuse and Stage 8 publication
 
 - **Status:** Accepted
 - **Date:** 2026-08-11
 - **Approval:** PR #108
 - **Decision:** `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`, Amendment 1
 
-The accepted amendment is integrated into Stage 7, Stage 8 and operational completion above. It
-separates artefact validity, execution provenance, scientific readiness and confirmatory authority;
-uses reusable claim-scoped verification receipts for ordinary descendants; retains valid foundations
-regardless of readiness; and reserves cumulative replay for confirmatory promotion, explicit audit or
-verifier revocation. No Stage 6 or Stage 7 immutable evidence was invalidated.
+This amendment separates artefact validity, execution provenance, scientific readiness and confirmatory
+authority; uses reusable claim-scoped verification receipts for ordinary descendants; and retains valid
+foundations regardless of readiness. No Stage 6 or Stage 7 immutable evidence was invalidated.
+
+### Immediate-parent verification and replay-free promotion
+
+- **Status:** Accepted
+- **Date:** 2026-08-14
+- **Decision:** `docs/adr/0029-ibkr-historical-acquisition-evidence-boundaries.md`, Amendment 2
+
+This amendment makes receipts the immediate-parent authority, reserves cumulative semantic replay for
+exceptional deep audit, and makes confirmatory promotion an authentication and operator-authorisation
+step rather than another verifier run. The implementation migration remains active work.
