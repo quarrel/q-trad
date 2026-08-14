@@ -19,6 +19,7 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
     ArtifactReference,
+    R2ForecastManifest,
     R2OofBundle,
 )
 from qtrad.domain.r2_holdout import R2HoldoutTargetSource
@@ -273,6 +274,83 @@ def test_create_only_output_rejects_ancestor_symlink_and_oversize_payload(tmp_pa
 
     with pytest.raises(ValueError, match="64 MiB"):
         atomic_create(tmp_path / "large.json", b"x" * (64 * 1024 * 1024 + 1))
+
+
+def test_forecast_manifest_identity_ignores_child_layout_and_digest() -> None:
+    first_child = ArtifactReference(
+        "qtrad-research-forecasts-v1",
+        "a" * 64,
+        "forecast/first.json",
+        "b" * 64,
+    )
+    second_child = ArtifactReference(
+        first_child.contract,
+        first_child.semantic_id,
+        "alternate/forecast.json",
+        "c" * 64,
+    )
+    first = R2ForecastManifest.create(
+        forecast_dataset_id="d" * 64,
+        experiment_configuration_id="e" * 64,
+        source_class=MarketDataSourceClass.IG_NATIVE_CAPTURE,
+        evidence_class=EvidenceClass.IMPLEMENTATION,
+        forecast_child=first_child,
+    )
+    second = R2ForecastManifest.create(
+        forecast_dataset_id=first.forecast_dataset_id,
+        experiment_configuration_id=first.experiment_configuration_id,
+        source_class=first.source_class,
+        evidence_class=first.evidence_class,
+        forecast_child=second_child,
+    )
+    assert second.manifest_id == first.manifest_id
+    child_payload = second.as_json()["forecast_child"]
+    assert isinstance(child_payload, dict)
+    assert child_payload["path"] == "alternate/forecast.json"
+
+
+def test_oof_id_is_semantic_and_closure_id_binds_physical_children() -> None:
+    base, _children = _bundle_and_children()
+
+    def physical_reference(reference: ArtifactReference) -> ArtifactReference:
+        return ArtifactReference(
+            reference.contract,
+            reference.semantic_id,
+            f"alternate/{reference.path}",
+            "e" * 64,
+        )
+
+    alternate = R2OofBundle.create(
+        foundation_bundle_id=base.foundation_bundle_id,
+        experiment_configuration_id=base.experiment_configuration_id,
+        source_class=base.source_class,
+        evidence_class=base.evidence_class,
+        feature_children=tuple(physical_reference(item) for item in base.feature_children),
+        preprocessing_children=tuple(
+            physical_reference(item) for item in base.preprocessing_children
+        ),
+        fit_children=tuple(physical_reference(item) for item in base.fit_children),
+        forecast_manifests=tuple(physical_reference(item) for item in base.forecast_manifests),
+        coverage_children=tuple(physical_reference(item) for item in base.coverage_children),
+        evaluation_children=tuple(physical_reference(item) for item in base.evaluation_children),
+    )
+    assert alternate.oof_id == base.oof_id
+    assert alternate.closure_id != base.closure_id
+
+    different_parent = R2OofBundle.create(
+        foundation_bundle_id="f" * 64,
+        experiment_configuration_id=base.experiment_configuration_id,
+        source_class=base.source_class,
+        evidence_class=base.evidence_class,
+        feature_children=base.feature_children,
+        preprocessing_children=base.preprocessing_children,
+        fit_children=base.fit_children,
+        forecast_manifests=base.forecast_manifests,
+        coverage_children=base.coverage_children,
+        evaluation_children=base.evaluation_children,
+    )
+    assert different_parent.oof_id == base.oof_id
+    assert different_parent.closure_id != base.closure_id
 
 
 def test_synthetic_oof_build_is_replayed_from_typed_pipeline(tmp_path: Path) -> None:

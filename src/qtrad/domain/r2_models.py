@@ -525,12 +525,12 @@ class R2PreprocessingSelection:
 
     @classmethod
     def create(cls, **values: object) -> "R2PreprocessingSelection":
-        semantic = _preprocessing_selection_json(values)
+        semantic = _preprocessing_selection_semantic_json(values)
         arguments = cast(_R2PreprocessingSelectionArguments, values)
         return cls(**arguments, artifact_id=preprocessing_selection_id(semantic))
 
     def semantic_json(self) -> dict[str, JsonValue]:
-        return _preprocessing_selection_json(
+        return _preprocessing_selection_semantic_json(
             {
                 "r2_feature_dataset_id": self.r2_feature_dataset_id,
                 "target_dataset_id": self.target_dataset_id,
@@ -550,6 +550,7 @@ class R2PreprocessingSelection:
                 "preprocessing_schema": self.preprocessing_schema,
                 "evidence_class": self.evidence_class,
                 "market_data_source_class": self.market_data_source_class,
+                # Application/library identities are execution provenance.
                 "application_image_identity": self.application_image_identity,
                 "sklearn_library_identity": self.sklearn_library_identity,
                 "preprocessing_policy": self.preprocessing_policy,
@@ -569,7 +570,21 @@ class R2PreprocessingSelection:
         )
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "artifact_id": self.artifact_id}
+        return {
+            **self.semantic_json(),
+            "application_image_identity": self.application_image_identity,
+            "sklearn_library_identity": self.sklearn_library_identity,
+            "artifact_id": self.artifact_id,
+        }
+
+
+def _preprocessing_selection_semantic_json(values: dict[str, object]) -> dict[str, JsonValue]:
+    payload = _preprocessing_selection_json(values)
+    # Runtime identities remain persisted provenance but are not scientific
+    # identity. This keeps an equivalent fit stable across build images.
+    payload.pop("application_image_identity", None)
+    payload.pop("sklearn_library_identity", None)
+    return payload
 
 
 def _preprocessing_selection_json(values: dict[str, object]) -> dict[str, JsonValue]:

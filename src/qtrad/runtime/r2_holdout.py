@@ -81,6 +81,13 @@ def _load_object(path: Path) -> dict[str, object]:
 
 def _semantic_id(payload: Mapping[str, object], identity_key: str) -> str:
     semantic = {key: value for key, value in payload.items() if key != identity_key}
+    contract = payload.get("contract")
+    if contract == "qtrad-r2-final-fit-v1":
+        semantic.pop("runtime_identities", None)
+    elif contract == "qtrad-r2-holdout-forecast-seal-v1":
+        semantic.pop("runtime_identities", None)
+        semantic.pop("prepared_at", None)
+        semantic.pop("prepared_by", None)
     encoded = json.dumps(semantic, sort_keys=True, separators=(",", ":")).encode()
     return sha256(encoded).hexdigest()
 
@@ -636,7 +643,7 @@ _SELECTION_FIELDS = {
     "schema_version",
     "experiment_configuration_id",
     "foundation_bundle_id",
-    "oof_bundle_id",
+    "oof_id",
     "evaluation_report_id",
     "prior_selection_manifest_id",
     "source_class",
@@ -866,14 +873,20 @@ def write_holdout_selection(output: Path, manifest: R2HoldoutSelectionManifest) 
 
 
 def verify_holdout_selection(path: Path) -> R2HoldoutSelectionManifest:
-    payload = _verify_child(
-        path.parent,
-        path.name,
-        contract=R2_HOLDOUT_SELECTION_CONTRACT,
-        identity_key="manifest_id",
-        expected_fields=_SELECTION_FIELDS,
-    )
-    return R2HoldoutSelectionManifest.from_json(payload)
+    payload = _load_object(path)
+    if set(payload) != _SELECTION_FIELDS:
+        raise ValueError(f"{R2_HOLDOUT_SELECTION_CONTRACT} child has unknown or missing fields")
+    if (
+        payload.get("contract") != R2_HOLDOUT_SELECTION_CONTRACT
+        or payload.get("schema_version") != 1
+    ):
+        raise ValueError(f"{R2_HOLDOUT_SELECTION_CONTRACT} child contract is unsupported")
+    manifest = R2HoldoutSelectionManifest.from_json(payload)
+    if payload["manifest_id"] != manifest.manifest_id:
+        raise ValueError(
+            f"{R2_HOLDOUT_SELECTION_CONTRACT} child identity does not authenticate its content"
+        )
+    return manifest
 
 
 def _preparation_claim(
@@ -2959,7 +2972,7 @@ def load_prior_selection_manifest(path: Path) -> object:
         "frozen_by",
         "manifest_id",
     }
-    optional = {"source_class", "foundation_bundle_id", "oof_bundle_id"}
+    optional = {"source_class", "foundation_bundle_id", "oof_id"}
     if set(payload) - expected - optional or not expected <= set(payload):
         raise ValueError("prior R2 selection has unknown or missing fields")
     if payload["contract"] != "qtrad-r2-selection-v2" or payload["schema_version"] != 1:
@@ -2968,7 +2981,7 @@ def load_prior_selection_manifest(path: Path) -> object:
     raw_decisions = _object_list(payload["decisions"], "prior R2 selection decisions")
     source = payload.get("source_class")
     foundation = payload.get("foundation_bundle_id")
-    oof = payload.get("oof_bundle_id")
+    oof = payload.get("oof_id")
     return SelectionManifest(
         experiment_configuration_id=str(payload["experiment_configuration_id"]),
         evidence_class=EvidenceClass(str(payload["evidence_class"])),
@@ -3011,7 +3024,7 @@ def load_prior_selection_manifest(path: Path) -> object:
         manifest_id=str(payload["manifest_id"]),
         market_data_source_class=(None if source is None else MarketDataSourceClass(str(source))),
         foundation_bundle_id=None if foundation is None else str(foundation),
-        oof_bundle_id=None if oof is None else str(oof),
+        oof_id=None if oof is None else str(oof),
     )
 
 

@@ -29,6 +29,7 @@ _KEYS = frozenset(
         "name",
         "r1_bundle_id",
         "observation_dataset_id",
+        "foundation_semantic_id",
         "foundation_configuration_id",
         "panel_dataset_id",
         "target_dataset_id",

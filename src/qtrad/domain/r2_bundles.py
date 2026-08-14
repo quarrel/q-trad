@@ -57,6 +57,15 @@ class ArtifactReference:
             "sha256": self.sha256,
         }
 
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.contract,
+            "semantic_id": self.semantic_id,
+        }
+
+    def closure_json(self) -> dict[str, JsonValue]:
+        return self.as_json()
+
     @classmethod
     def from_json(cls, value: object) -> ArtifactReference:
         if not isinstance(value, dict):
@@ -128,7 +137,7 @@ class R2ForecastManifest:
             "experiment_configuration_id": experiment_configuration_id,
             "source_class": source_class.value,
             "evidence_class": evidence_class.value,
-            "forecast_child": forecast_child.as_json(),
+            "forecast_child": forecast_child.semantic_json(),
         }
         return cls(
             forecast_dataset_id=forecast_dataset_id,
@@ -147,11 +156,15 @@ class R2ForecastManifest:
             "experiment_configuration_id": self.experiment_configuration_id,
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,
-            "forecast_child": self.forecast_child.as_json(),
+            "forecast_child": self.forecast_child.semantic_json(),
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "manifest_id": self.manifest_id}
+        return {
+            **self.semantic_json(),
+            "forecast_child": self.forecast_child.as_json(),
+            "manifest_id": self.manifest_id,
+        }
 
     @classmethod
     def from_json(cls, value: object) -> R2ForecastManifest:
@@ -193,7 +206,8 @@ class R2OofBundle:
     forecast_manifests: tuple[ArtifactReference, ...]
     coverage_children: tuple[ArtifactReference, ...]
     evaluation_children: tuple[ArtifactReference, ...]
-    bundle_id: str
+    oof_id: str
+    closure_id: str
     holdout_target_source: ArtifactReference | None = None
 
     CONTRACT: ClassVar[str] = R2_OOF_BUNDLE_CONTRACT
@@ -203,7 +217,8 @@ class R2OofBundle:
         for value, field in (
             (self.foundation_bundle_id, "foundation bundle ID"),
             (self.experiment_configuration_id, "experiment configuration ID"),
-            (self.bundle_id, "OOF bundle ID"),
+            (self.oof_id, "OOF semantic ID"),
+            (self.closure_id, "OOF closure ID"),
         ):
             _sha256(value, field)
         references = (
@@ -235,8 +250,10 @@ class R2OofBundle:
             "qtrad-r2-holdout-target-source-v1"
         ):
             raise ValueError("OOF holdout target source has an unexpected contract")
-        if self.bundle_id != _semantic_id(self.semantic_json()):
-            raise ValueError("OOF bundle ID does not authenticate its content")
+        if self.oof_id != _semantic_id(self.semantic_json()):
+            raise ValueError("OOF semantic ID does not authenticate its content")
+        if self.closure_id != _semantic_id(self.closure_json()):
+            raise ValueError("OOF closure ID does not authenticate its content")
 
     @classmethod
     def create(cls, **values: Any) -> R2OofBundle:
@@ -262,10 +279,21 @@ class R2OofBundle:
         semantic = {
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
-            "foundation_bundle_id": values["foundation_bundle_id"],
             "experiment_configuration_id": values["experiment_configuration_id"],
             "source_class": values["source_class"].value,
             "evidence_class": values["evidence_class"].value,
+            "holdout_target_source": (
+                None
+                if values.get("holdout_target_source") is None
+                else values["holdout_target_source"].semantic_json()
+            ),
+            **{key: [item.semantic_json() for item in value] for key, value in refs.items()},
+        }
+        oof_id = _semantic_id(semantic)
+        closure = {
+            **semantic,
+            "foundation_bundle_id": values["foundation_bundle_id"],
+            "oof_id": oof_id,
             "holdout_target_source": (
                 None
                 if values.get("holdout_target_source") is None
@@ -285,7 +313,8 @@ class R2OofBundle:
             coverage_children=refs["coverage_children"],
             evaluation_children=refs["evaluation_children"],
             holdout_target_source=values.get("holdout_target_source"),
-            bundle_id=_semantic_id(semantic),
+            oof_id=oof_id,
+            closure_id=_semantic_id(closure),
         )
 
     @classmethod
@@ -307,7 +336,8 @@ class R2OofBundle:
             "coverage_children",
             "evaluation_children",
             "holdout_target_source",
-            "bundle_id",
+            "oof_id",
+            "closure_id",
         }
         if set(raw) != expected:
             raise ValueError("R2 OOF bundle has unknown or missing fields")
@@ -338,17 +368,37 @@ class R2OofBundle:
                 if raw["holdout_target_source"] is None
                 else ArtifactReference.from_json(raw["holdout_target_source"])
             ),
-            bundle_id=_string(raw["bundle_id"]),
+            oof_id=_string(raw["oof_id"]),
+            closure_id=_string(raw["closure_id"]),
         )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return {
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
-            "foundation_bundle_id": self.foundation_bundle_id,
             "experiment_configuration_id": self.experiment_configuration_id,
             "source_class": self.source_class.value,
             "evidence_class": self.evidence_class.value,
+            "feature_children": [item.semantic_json() for item in self.feature_children],
+            "preprocessing_children": [
+                item.semantic_json() for item in self.preprocessing_children
+            ],
+            "fit_children": [item.semantic_json() for item in self.fit_children],
+            "forecast_manifests": [item.semantic_json() for item in self.forecast_manifests],
+            "coverage_children": [item.semantic_json() for item in self.coverage_children],
+            "evaluation_children": [item.semantic_json() for item in self.evaluation_children],
+            "holdout_target_source": (
+                None
+                if self.holdout_target_source is None
+                else self.holdout_target_source.semantic_json()
+            ),
+        }
+
+    def closure_json(self) -> dict[str, JsonValue]:
+        return {
+            **self.semantic_json(),
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "oof_id": self.oof_id,
             "feature_children": [item.as_json() for item in self.feature_children],
             "preprocessing_children": [item.as_json() for item in self.preprocessing_children],
             "fit_children": [item.as_json() for item in self.fit_children],
@@ -361,7 +411,21 @@ class R2OofBundle:
         }
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "bundle_id": self.bundle_id}
+        return {
+            **self.semantic_json(),
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "feature_children": [item.as_json() for item in self.feature_children],
+            "preprocessing_children": [item.as_json() for item in self.preprocessing_children],
+            "fit_children": [item.as_json() for item in self.fit_children],
+            "forecast_manifests": [item.as_json() for item in self.forecast_manifests],
+            "coverage_children": [item.as_json() for item in self.coverage_children],
+            "evaluation_children": [item.as_json() for item in self.evaluation_children],
+            "holdout_target_source": (
+                None if self.holdout_target_source is None else self.holdout_target_source.as_json()
+            ),
+            "oof_id": self.oof_id,
+            "closure_id": self.closure_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -421,9 +485,16 @@ class R2SoftwareVerificationBundle:
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
             **{
-                key: value.as_json() if isinstance(value, ArtifactReference) else value
+                key: (value.semantic_json() if isinstance(value, ArtifactReference) else value)
                 for key, value in values.items()
-                if key != "bundle_id"
+                if key
+                not in {
+                    "bundle_id",
+                    "application_identity",
+                    "python_identity",
+                    "numpy_identity",
+                    "sklearn_identity",
+                }
             },
         }
         return cls(**values, bundle_id=_semantic_id(semantic))
@@ -472,6 +543,18 @@ class R2SoftwareVerificationBundle:
         return {
             "contract": self.CONTRACT,
             "schema_version": self.SCHEMA_VERSION,
+            "synthetic_oof_bundle": self.synthetic_oof_bundle.semantic_json(),
+            "representative_oof_bundle": self.representative_oof_bundle.semantic_json(),
+            "synthetic_selection": self.synthetic_selection.semantic_json(),
+            "representative_selection": self.representative_selection.semantic_json(),
+            "representative_integration_ready": self.representative_integration_ready,
+            "evidence_disposition": self.evidence_disposition,
+            "research_disposition": self.research_disposition,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            **self.semantic_json(),
             "synthetic_oof_bundle": self.synthetic_oof_bundle.as_json(),
             "representative_oof_bundle": self.representative_oof_bundle.as_json(),
             "synthetic_selection": self.synthetic_selection.as_json(),
@@ -480,13 +563,8 @@ class R2SoftwareVerificationBundle:
             "python_identity": self.python_identity,
             "numpy_identity": self.numpy_identity,
             "sklearn_identity": self.sklearn_identity,
-            "representative_integration_ready": self.representative_integration_ready,
-            "evidence_disposition": self.evidence_disposition,
-            "research_disposition": self.research_disposition,
+            "bundle_id": self.bundle_id,
         }
-
-    def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "bundle_id": self.bundle_id}
 
 
 def _string(value: object) -> str:

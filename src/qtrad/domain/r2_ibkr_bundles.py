@@ -94,10 +94,19 @@ class R2IbkrHistoricalSoftwareVerificationBundle:
             "contract": cls.CONTRACT,
             "schema_version": cls.SCHEMA_VERSION,
             **{
-                key: value.as_json()
-                if isinstance(value, ArtifactReference)
-                else (value.value if isinstance(value, MarketDataSourceClass) else value)
+                key: (
+                    value.semantic_json()
+                    if isinstance(value, ArtifactReference)
+                    else (value.value if isinstance(value, MarketDataSourceClass) else value)
+                )
                 for key, value in values.items()
+                if key
+                not in {
+                    "application_identity",
+                    "python_identity",
+                    "numpy_identity",
+                    "sklearn_identity",
+                }
             },
         }
         return cls(**values, bundle_id=_semantic_id(semantic))
@@ -155,6 +164,18 @@ class R2IbkrHistoricalSoftwareVerificationBundle:
             "schema_version": self.SCHEMA_VERSION,
             "market_data_source_class": self.market_data_source_class.value,
             "representative_profile": self.representative_profile,
+            "synthetic_oof_bundle": self.synthetic_oof_bundle.semantic_json(),
+            "representative_oof_bundle": self.representative_oof_bundle.semantic_json(),
+            "synthetic_selection": self.synthetic_selection.semantic_json(),
+            "representative_selection": self.representative_selection.semantic_json(),
+            "representative_integration_ready": self.representative_integration_ready,
+            "evidence_disposition": self.evidence_disposition,
+            "research_disposition": self.research_disposition,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {
+            **self.semantic_json(),
             "synthetic_oof_bundle": self.synthetic_oof_bundle.as_json(),
             "representative_oof_bundle": self.representative_oof_bundle.as_json(),
             "synthetic_selection": self.synthetic_selection.as_json(),
@@ -163,13 +184,8 @@ class R2IbkrHistoricalSoftwareVerificationBundle:
             "python_identity": self.python_identity,
             "numpy_identity": self.numpy_identity,
             "sklearn_identity": self.sklearn_identity,
-            "representative_integration_ready": self.representative_integration_ready,
-            "evidence_disposition": self.evidence_disposition,
-            "research_disposition": self.research_disposition,
+            "bundle_id": self.bundle_id,
         }
-
-    def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "bundle_id": self.bundle_id}
 
 
 def _semantic_id(value: object) -> str:

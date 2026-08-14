@@ -914,7 +914,7 @@ class SelectionManifest:
     manifest_id: str
     market_data_source_class: MarketDataSourceClass | None = None
     foundation_bundle_id: str | None = None
-    oof_bundle_id: str | None = None
+    oof_id: str | None = None
 
     CONTRACT: ClassVar[str] = R2_SELECTION_CONTRACT
 
@@ -925,11 +925,11 @@ class SelectionManifest:
             (self.local_comparator_manifest_id, "selection local-comparator ID"),
             (self.manifest_id, "selection manifest ID"),
         ]
-        if self.foundation_bundle_id is not None and self.oof_bundle_id is not None:
+        if self.foundation_bundle_id is not None and self.oof_id is not None:
             identity_values.extend(
                 (
                     (self.foundation_bundle_id, "selection foundation ID"),
-                    (self.oof_bundle_id, "selection OOF ID"),
+                    (self.oof_id, "selection OOF ID"),
                 )
             )
         for value, field in identity_values:
@@ -1021,7 +1021,7 @@ class SelectionManifest:
         frozen_by: str,
         market_data_source_class: MarketDataSourceClass | None = None,
         foundation_bundle_id: str | None = None,
-        oof_bundle_id: str | None = None,
+        oof_id: str | None = None,
     ) -> "SelectionManifest":
         evaluated_ids = tuple(sorted(evaluated_configuration_ids))
         selected_ids = tuple(sorted(selected_configuration_ids))
@@ -1050,7 +1050,7 @@ class SelectionManifest:
             ("frozen_by", frozen_by),
             ("market_data_source_class", market_data_source_class),
             ("foundation_bundle_id", foundation_bundle_id),
-            ("oof_bundle_id", oof_bundle_id),
+            ("oof_id", oof_id),
         ):
             object.__setattr__(provisional, field, value)
         identity = semantic_id(provisional.semantic_json())
@@ -1075,7 +1075,7 @@ class SelectionManifest:
             frozen_by=frozen_by,
             market_data_source_class=market_data_source_class,
             foundation_bundle_id=foundation_bundle_id,
-            oof_bundle_id=oof_bundle_id,
+            oof_id=oof_id,
             manifest_id=identity,
         )
 
@@ -1098,26 +1098,30 @@ class SelectionManifest:
             "final_fitting_procedure": self.final_fitting_procedure,
             "holdout_range": [item.isoformat() for item in self.holdout_range],
             "holdout_state_verification": self.holdout_state_verification,
-            "application_image_identity": self.application_image_identity,
-            "frozen_at": self.frozen_at.isoformat(),
-            "frozen_by": self.frozen_by,
         }
         if self.market_data_source_class is not None:
-            if self.foundation_bundle_id is None or self.oof_bundle_id is None:
+            if self.foundation_bundle_id is None or self.oof_id is None:
                 raise ValueError("source-bound selections require foundation and OOF IDs")
             payload.update(
                 {
                     "source_class": self.market_data_source_class.value,
-                    "foundation_bundle_id": self.foundation_bundle_id,
-                    "oof_bundle_id": self.oof_bundle_id,
+                    "oof_id": self.oof_id,
                 }
             )
-        elif self.foundation_bundle_id is not None or self.oof_bundle_id is not None:
+        elif self.foundation_bundle_id is not None or self.oof_id is not None:
             raise ValueError("selection lineage IDs require a source class")
         return payload
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "manifest_id": self.manifest_id}
+        return {
+            **self.semantic_json(),
+            "application_image_identity": self.application_image_identity,
+            "frozen_at": self.frozen_at.isoformat(),
+            "frozen_by": self.frozen_by,
+            "foundation_bundle_id": self.foundation_bundle_id,
+            "oof_id": self.oof_id,
+            "manifest_id": self.manifest_id,
+        }
 
 
 def _bucket_json(

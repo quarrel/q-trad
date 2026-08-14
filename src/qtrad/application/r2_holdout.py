@@ -80,7 +80,7 @@ class VerifiedConfirmatoryHoldoutAuthority:
         "_forecast_bucket_policy",
         "_metric_policy",
         "_minimum_correlation_rows",
-        "_oof_bundle_id",
+        "_oof_id",
         "_selection_state",
     )
     _comparison_registry: tuple[tuple[ModelFamily, ModelFamily], ...]
@@ -90,7 +90,7 @@ class VerifiedConfirmatoryHoldoutAuthority:
     _forecast_bucket_policy: str
     _metric_policy: str
     _minimum_correlation_rows: int
-    _oof_bundle_id: str
+    _oof_id: str
     _selection_state: bytes
 
     def __init__(self) -> None:
@@ -106,7 +106,7 @@ class VerifiedConfirmatoryHoldoutAuthority:
         cls,
         token: object,
         *,
-        oof_bundle_id: str,
+        oof_id: str,
         evaluation_report_id: str,
         configuration_registry: Sequence[
             tuple[str, ModelFamily, str | None, str | None, str | None]
@@ -158,10 +158,10 @@ class VerifiedConfirmatoryHoldoutAuthority:
             holdout_range=holdout_range,
             source_class=source_class,
             foundation_bundle_id=foundation_bundle_id,
-            oof_bundle_id=oof_bundle_id,
+            oof_id=oof_id,
         )
         instance = object.__new__(cls)
-        object.__setattr__(instance, "_oof_bundle_id", oof_bundle_id)
+        object.__setattr__(instance, "_oof_id", oof_id)
         object.__setattr__(instance, "_evaluation_report_id", evaluation_report_id)
         object.__setattr__(instance, "_configuration_registry", registry)
         object.__setattr__(instance, "_comparison_registry", comparison_registry)
@@ -207,7 +207,7 @@ class VerifiedConfirmatoryHoldoutAuthority:
         holdout_range: tuple[datetime, datetime],
         source_class: MarketDataSourceClass,
         foundation_bundle_id: str,
-        oof_bundle_id: str,
+        oof_id: str,
     ) -> bytes:
         primary_metric = selection_policy.get("primary_metric")
         secondary_metrics = selection_policy.get("secondary_metrics")
@@ -257,13 +257,13 @@ class VerifiedConfirmatoryHoldoutAuthority:
             "holdout_range": [item.isoformat() for item in holdout_range],
             "source_class": source_class.value,
             "foundation_bundle_id": foundation_bundle_id,
-            "oof_bundle_id": oof_bundle_id,
+            "oof_id": oof_id,
         }
         return json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
 
     @property
-    def oof_bundle_id(self) -> str:
-        return self._oof_bundle_id
+    def oof_id(self) -> str:
+        return self._oof_id
 
     @property
     def evaluation_report_id(self) -> str:
@@ -303,7 +303,7 @@ class VerifiedConfirmatoryHoldoutAuthority:
                 holdout_range=selection.holdout_range,
                 source_class=cast(MarketDataSourceClass, selection.market_data_source_class),
                 foundation_bundle_id=cast(str, selection.foundation_bundle_id),
-                oof_bundle_id=cast(str, selection.oof_bundle_id),
+                oof_id=cast(str, selection.oof_id),
             )
         except (TypeError, ValueError):
             return False
@@ -599,7 +599,7 @@ def freeze_holdout_selection(
     *,
     prior_selection: SelectionManifest,
     foundation_bundle_id: str,
-    oof_bundle_id: str,
+    oof_id: str,
     source_class: MarketDataSourceClass,
     evidence_class: EvidenceClass,
     holdout_scope: HoldoutScope,
@@ -651,7 +651,7 @@ def freeze_holdout_selection(
             raise ValueError("verified OOF lineage differs from the prior selection inputs")
         if foundation_bundle_id != verified_oof_bundle.foundation_bundle_id:
             raise ValueError("foundation ID differs from the verified OOF bundle")
-        if oof_bundle_id != verified_oof_bundle.bundle_id:
+        if oof_id != verified_oof_bundle.oof_id:
             raise ValueError("OOF ID differs from the verified OOF bundle")
         source_reference = verified_oof_bundle.holdout_target_source
         if (
@@ -668,12 +668,12 @@ def freeze_holdout_selection(
         ):
             raise ValueError("verified foundation ID differs from the prior selection")
         if (
-            prior_selection.oof_bundle_id is not None
-            and prior_selection.oof_bundle_id != verified_oof_bundle.bundle_id
+            prior_selection.oof_id is not None
+            and prior_selection.oof_id != verified_oof_bundle.oof_id
         ):
             raise ValueError("verified OOF ID differs from the prior selection")
         foundation_bundle_id = verified_oof_bundle.foundation_bundle_id
-        oof_bundle_id = verified_oof_bundle.bundle_id
+        oof_id = verified_oof_bundle.oof_id
         if verified_experiment is None:
             raise ValueError("verified OOF selection freeze requires the verified experiment")
         _verify_final_policy_against_experiment(
@@ -688,7 +688,7 @@ def freeze_holdout_selection(
         if holdout_scope is HoldoutScope.CONFIRMATORY:
             if (
                 confirmatory_authority is None
-                or confirmatory_authority.oof_bundle_id != verified_oof_bundle.bundle_id
+                or confirmatory_authority.oof_id != verified_oof_bundle.oof_id
                 or confirmatory_authority.evaluation_report_id
                 != prior_selection.evaluation_report_id
             ):
@@ -815,7 +815,7 @@ def freeze_holdout_selection(
         runtime_identities = {
             "application_image_identity": prior_selection.application_image_identity,
             "foundation_bundle_id": foundation_bundle_id,
-            "oof_bundle_id": oof_bundle_id,
+            "oof_id": oof_id,
             "final_fitting_policy_id": final_fitting_policy.policy_id,
         }
     else:
@@ -927,7 +927,7 @@ def freeze_holdout_selection(
     return R2HoldoutSelectionManifest.create(
         experiment_configuration_id=prior_selection.experiment_configuration_id,
         foundation_bundle_id=foundation_bundle_id,
-        oof_bundle_id=oof_bundle_id,
+        oof_id=oof_id,
         evaluation_report_id=prior_selection.evaluation_report_id,
         prior_selection_manifest_id=prior_selection.manifest_id,
         source_class=source_class,
@@ -1173,7 +1173,7 @@ def materialise_confirmatory_holdout_features(
         selection.holdout_scope is not HoldoutScope.CONFIRMATORY
         or selection.evidence_class is not EvidenceClass.CONFIRMATORY
         or tuple(selection.configuration_registry) != authority.configuration_registry
-        or selection.oof_bundle_id != authority.oof_bundle_id
+        or selection.oof_id != authority.oof_id
         or selection.evaluation_report_id != authority.evaluation_report_id
     ):
         raise ValueError("confirmatory holdout selection differs from verified F2 authority")

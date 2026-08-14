@@ -370,10 +370,21 @@ def test_selection_freeze_retains_rejections_and_contains_no_holdout_data(
     assert "holdout_consumption_ids" not in payload
     assert manifest.holdout_state_verification == HOLDOUT_STATE_VERIFICATION_PENDING
 
-    with pytest.raises(ValueError, match="does not authenticate"):
-        replace(
-            manifest,
-            frozen_at=manifest.frozen_at.replace(tzinfo=UTC) + timedelta(seconds=1),
+    changed_freeze = replace(
+        manifest,
+        frozen_at=manifest.frozen_at.replace(tzinfo=UTC) + timedelta(seconds=1),
+    )
+    assert changed_freeze.manifest_id == manifest.manifest_id
+    with pytest.raises(ValueError, match="persisted R2 selection bytes differ"):
+        verify_persisted_r2_selection(
+            path,
+            changed_freeze,
+            report,
+            local_manifest,
+            config,
+            expected_secondary_metrics=("MAE", "SPEARMAN", "COVERAGE", "STABILITY"),
+            expected_final_fitting_procedure="REFIT_PRE_HOLDOUT_HISTORY_WITH_FROZEN_PREPROCESSING_V1",
+            expected_application_image_identity=_FINAL_APPLICATION_IMAGE,
         )
 
 
@@ -552,6 +563,19 @@ def test_selection_verifier_rejects_rehashed_policy_mutations() -> None:
         frozen_at=config.holdout_range[1] + timedelta(days=1),
         frozen_by="r2-f1-fixture",
     )
+    other_image = semantic_id({"image": "other"})
+    provenance_changed = replace(manifest, application_image_identity=other_image)
+    assert provenance_changed.manifest_id == manifest.manifest_id
+    with pytest.raises(ValueError, match="selection image identity"):
+        verify_selection_manifest(
+            provenance_changed,
+            report,
+            local_manifest,
+            config,
+            expected_secondary_metrics=secondary,
+            expected_final_fitting_procedure=fitting,
+            expected_application_image_identity=_FINAL_APPLICATION_IMAGE,
+        )
 
     rehashed_mutations = []
 
@@ -573,17 +597,6 @@ def test_selection_verifier_rejects_rehashed_policy_mutations() -> None:
         replace(
             manifest,
             final_fitting_procedure="UNDECLARED_REFIT",
-            manifest_id=semantic_id(semantic),
-        )
-    )
-
-    other_image = semantic_id({"image": "other"})
-    semantic = manifest.semantic_json()
-    semantic["application_image_identity"] = other_image
-    rehashed_mutations.append(
-        replace(
-            manifest,
-            application_image_identity=other_image,
             manifest_id=semantic_id(semantic),
         )
     )

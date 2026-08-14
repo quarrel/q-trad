@@ -264,11 +264,11 @@ class R2FoldFit:
     @classmethod
     def create(cls, **values: object) -> "R2FoldFit":
         arguments = cast(_R2FoldFitArguments, values)
-        payload = _fold_fit_json(arguments)
+        payload = _fold_fit_semantic_json(arguments)
         return cls(**arguments, artifact_id=fold_fit_id(payload))
 
     def semantic_json(self) -> dict[str, JsonValue]:
-        return _fold_fit_json(
+        return _fold_fit_semantic_json(
             _R2FoldFitArguments(
                 r2_feature_dataset_id=self.r2_feature_dataset_id,
                 target_dataset_id=self.target_dataset_id,
@@ -305,7 +305,13 @@ class R2FoldFit:
         )
 
     def as_json(self) -> dict[str, JsonValue]:
-        return {**self.semantic_json(), "artifact_id": self.artifact_id}
+        return {
+            **self.semantic_json(),
+            "application_image_identity": self.application_image_identity,
+            "numpy_library_identity": self.numpy_library_identity,
+            "sklearn_library_identity": self.sklearn_library_identity,
+            "artifact_id": self.artifact_id,
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -684,6 +690,16 @@ def _fold_fit_json(values: _R2FoldFitArguments) -> dict[str, JsonValue]:
             }
         ),
     )
+
+
+def _fold_fit_semantic_json(
+    values: _R2FoldFitArguments,
+) -> dict[str, JsonValue]:
+    payload = _fold_fit_json(values)
+    payload.pop("application_image_identity", None)
+    payload.pop("numpy_library_identity", None)
+    payload.pop("sklearn_library_identity", None)
+    return payload
 
 
 def _coverage_row_json(values: _ForecastCoverageArguments) -> dict[str, JsonValue]:

@@ -473,7 +473,7 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     manifest = freeze_holdout_selection(
         prior_selection=prior,
         foundation_bundle_id=verified_oof.foundation_bundle_id,
-        oof_bundle_id=verified_oof.bundle_id,
+        oof_id=verified_oof.oof_id,
         source_class=verified_oof.source_class,
         evidence_class=verified_oof.evidence_class,
         holdout_scope=HoldoutScope(args.holdout_scope),
@@ -1220,9 +1220,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_holdout_selection.add_argument(
         "--oof-bundle", dest="oof_bundle", type=Path, required=False
     )
-    baselines_holdout_selection.add_argument(
-        "--oof-bundle-id", "--oof-id", dest="oof_bundle_id", required=False
-    )
+    baselines_holdout_selection.add_argument("--oof-id", dest="oof_id", required=False)
     baselines_holdout_selection.add_argument(
         "--source-class",
         choices=tuple(item.value for item in MarketDataSourceClass),
@@ -2352,7 +2350,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(
             json.dumps(
                 {
-                    "bundle_id": authority.bundle.bundle_id,
+                    "oof_id": authority.bundle.oof_id,
                     "experiment_configuration_id": authority.experiment_configuration_id,
                     "foundation_bundle_id": authority.foundation_bundle_id,
                     "evidence_class": authority.evidence_class.value,

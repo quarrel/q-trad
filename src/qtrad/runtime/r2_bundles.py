@@ -201,7 +201,8 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         "coverage_children",
         "evaluation_children",
         "holdout_target_source",
-        "bundle_id",
+        "oof_id",
+        "closure_id",
     }:
         raise ValueError("R2 OOF bundle has unknown or missing fields")
     if (
@@ -226,7 +227,8 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         source_class=_source(payload["source_class"]),
         evidence_class=_evidence(payload["evidence_class"]),
         **refs,
-        bundle_id=_text(payload["bundle_id"]),
+        oof_id=_text(payload["oof_id"]),
+        closure_id=_text(payload["closure_id"]),
         holdout_target_source=(
             None
             if payload["holdout_target_source"] is None
@@ -402,7 +404,7 @@ def _allow_bound_selection(root: Path, bundle: R2OofBundle) -> None:
     if selection.get("contract") != R2_SELECTION_CONTRACT:
         raise ValueError("R2 bundle contains an unexpected selection child")
     if (
-        selection.get("oof_bundle_id") != bundle.bundle_id
+        selection.get("oof_id") != bundle.oof_id
         or selection.get("foundation_bundle_id") != bundle.foundation_bundle_id
         or selection.get("experiment_configuration_id") != bundle.experiment_configuration_id
         or selection.get("source_class") != bundle.source_class.value

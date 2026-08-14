@@ -3018,7 +3018,7 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     )
     confirmatory_holdout_authority = VerifiedConfirmatoryHoldoutAuthority._create(
         _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN,
-        oof_bundle_id=bundle.bundle_id,
+        oof_id=bundle.oof_id,
         evaluation_report_id=report_id,
         configuration_registry=registry,
         evaluation_policy=evaluation_policy,
@@ -3230,12 +3230,12 @@ def _build_confirmatory_selection(
         frozen_by=frozen_by,
         market_data_source_class=verified_f2.source_class,
         foundation_bundle_id=verified_f2.foundation_bundle_id,
-        oof_bundle_id=verified_f2.bundle.bundle_id,
+        oof_id=verified_f2.bundle.oof_id,
     )
     selection = freeze_holdout_selection(
         prior_selection=prior_selection,
         foundation_bundle_id=verified_f2.foundation_bundle_id,
-        oof_bundle_id=verified_f2.bundle.bundle_id,
+        oof_id=verified_f2.bundle.oof_id,
         source_class=verified_f2.source_class,
         evidence_class=EvidenceClass.CONFIRMATORY,
         holdout_scope=HoldoutScope.CONFIRMATORY,
@@ -3254,7 +3254,7 @@ def _build_confirmatory_selection(
         frozen_metadata={
             "source_class": verified_f2.source_class.value,
             "evidence_class": EvidenceClass.CONFIRMATORY.value,
-            "oof_bundle_id": verified_f2.bundle.bundle_id,
+            "oof_id": verified_f2.bundle.oof_id,
             "operator": frozen_by,
         },
         frozen_at=frozen_at,
@@ -3711,7 +3711,7 @@ def _confirmatory_opened_marker(
         selection_manifest_id=selection.manifest_id,
         seal_id=preparation.seal.seal_id,
         opened_marker_id=opened.marker_id,
-        oof_bundle_id=selection.oof_bundle_id,
+        oof_id=selection.oof_id,
         foundation_bundle_id=selection.foundation_bundle_id,
         experiment_configuration_id=selection.experiment_configuration_id,
         evaluation_report_id=selection.evaluation_report_id,
@@ -4126,7 +4126,7 @@ def selection_freeze(
         frozen_by=frozen_by,
         market_data_source_class=bundle.source_class,
         foundation_bundle_id=bundle.foundation_bundle_id,
-        oof_bundle_id=bundle.bundle_id,
+        oof_id=bundle.oof_id,
     )
     atomic_create(output, canonical_bytes(cast(dict[str, object], manifest.as_json())))
     return output
@@ -4243,7 +4243,7 @@ def build_software_bundle(
     representative_oof_ref = reference_for_json(
         path="representative/oof/manifest.json",
         contract=representative_oof.CONTRACT,
-        semantic_id=representative_oof.bundle_id,
+        semantic_id=representative_oof.oof_id,
         content=representative_oof.as_json(),
     )
     representative_selection_ref = _selection_reference(
@@ -4252,7 +4252,7 @@ def build_software_bundle(
     synthetic_oof_ref = reference_for_json(
         path="synthetic/oof/manifest.json",
         contract=synthetic_bundle.CONTRACT,
-        semantic_id=synthetic_bundle.bundle_id,
+        semantic_id=synthetic_bundle.oof_id,
         content=synthetic_bundle.as_json(),
     )
     identities = runtime_identities()
@@ -4562,7 +4562,7 @@ def _verify_software_bundle_envelope(path: Path) -> R2SoftwareVerificationBundle
             raise ValueError("software selection child is not a typed SelectionManifest")
         if payload.get("manifest_id") != selection_reference.semantic_id:
             raise ValueError("software selection manifest ID does not match its reference")
-        if payload.get("oof_bundle_id") != oof.bundle_id:
+        if payload.get("oof_id") != oof.oof_id:
             raise ValueError("software selection does not bind its OOF bundle")
         if payload.get("foundation_bundle_id") != oof.foundation_bundle_id:
             raise ValueError("software selection does not bind its foundation")

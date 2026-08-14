@@ -14,6 +14,7 @@ from qtrad.application.r2_readiness import (
 )
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import AvailabilityBasis, InstrumentRole, ReturnDisposition
+from qtrad.domain.market_data import MarketDataSourceClass
 from qtrad.domain.r2_holdout import HoldoutOpportunityDisposition
 from qtrad.domain.r2_readiness import (
     EligibilityDecision,
@@ -665,3 +666,37 @@ def test_v1_experiment_contract_is_rejected() -> None:
     payload["contract"] = "qtrad-r2-experiment-config-v1"
     with pytest.raises(ValueError, match="contract"):
         decode_r2_experiment(payload)
+
+
+def test_experiment_semantic_identity_excludes_build_provenance() -> None:
+    config = experiment()
+    provenance_only = replace(
+        config,
+        r1_application_version="0.2.0",
+        r1_image_identity="qtrad@sha256:" + "2" * 64,
+        source_adapter_identity={"adapter": "different-build"},
+    )
+    assert provenance_only.configuration_id == config.configuration_id
+    assert provenance_only.semantic_json() == config.semantic_json()
+    assert config.semantic_json()["foundation_semantic_id"] == config.r1_bundle_id
+    assert (
+        config.semantic_json()["foundation_configuration_id"] == config.foundation_configuration_id
+    )
+
+    thresholds = dict(config.feature_coverage_thresholds)
+    thresholds[FeatureFamily.LOCAL_RETURNS] = 0.8
+    variants = (
+        replace(config, r1_bundle_id="9" * 64),
+        replace(config, target_dataset_id="9" * 64),
+        replace(config, fold_dataset_id="8" * 64),
+        replace(config, feature_coverage_thresholds=thresholds),
+        replace(config, ridge_tolerance=1e-7),
+        replace(config, model_selection_policy="different-model-policy"),
+        replace(config, holdout_range=(END - timedelta(weeks=3), END)),
+        replace(config, evidence_class=EvidenceClass.CONFIRMATORY),
+        replace(
+            config,
+            market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        ),
+    )
+    assert all(item.configuration_id != config.configuration_id for item in variants)
