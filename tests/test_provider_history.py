@@ -18,7 +18,7 @@ from qtrad.domain.ibkr_historical import (
 )
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.provider_history import ProviderHistoricalDataset
-from qtrad.runtime.provider_history import authenticate_provider_history
+from qtrad.runtime.provider_history import authenticate_provider_history, verify_provider_history
 from qtrad.runtime.provider_history_v2 import _read_provider_history_v2_manifest
 
 _FIXTURE_ROOT = Path(__file__).parent / "fixtures" / "provider-history"
@@ -111,6 +111,16 @@ def test_retained_v1_receipt_authenticates_without_rows(tmp_path: Path) -> None:
 
     assert isinstance(authenticated, ProviderHistoricalDataset)
     assert not hasattr(authenticated, "observations")
+
+
+def test_normal_provider_history_v2_routes_are_migration_only(tmp_path: Path) -> None:
+    _, _, manifest = _published_provider_history(tmp_path)
+    receipt = _provider_history_receipt(manifest)
+
+    with pytest.raises(ValueError, match="migration-only verifier"):
+        verify_provider_history(manifest, receipt_output=tmp_path / "v2-verify.json")
+    with pytest.raises(ValueError, match="migration-only authenticator"):
+        authenticate_provider_history(manifest, receipt=receipt)
 
 
 @pytest.mark.parametrize("command", ["build-provider-history", "repack-provider-history"])

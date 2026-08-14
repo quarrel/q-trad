@@ -1,4 +1,8 @@
-"""Provider-history v2 verification and pruned reads."""
+"""Retained provider-history v2 migration reader and verifier.
+
+The normal Stage 7 path is v3; v2 remains only for the retained Stage 8
+foundation checkpoint and confirmatory-promotion authorities until PR-H4 deletes it.
+"""
 
 from __future__ import annotations
 
@@ -9,7 +13,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import polars as pl
 
@@ -309,8 +313,25 @@ def verify_provider_history_v2(
     path: Path,
     *,
     receipt_output: Path | None = None,
+    stage6_manifest: Path | None = None,
+    stage6_receipt: Path | None = None,
 ) -> ProviderHistorySourceEvidence:
-    """Independently decode v2 physical parts and reconstruct semantic identity."""
+    """Retained v2 verifier; current v3 dispatch is never a v2 write path."""
+    contract = _provider_contract(path)
+    if contract == "qtrad-provider-historical-observations-v3":
+        if stage6_manifest is None or stage6_receipt is None or receipt_output is None:
+            raise ValueError(
+                "Stage 7 verification requires Stage 6 manifest, receipt and receipt output"
+            )
+        from qtrad.runtime.provider_history_v3 import verify_provider_history
+
+        return verify_provider_history(
+            path,
+            stage6_manifest=stage6_manifest,
+            stage6_receipt=stage6_receipt,
+            receipt_output=receipt_output,
+        )
+    # Retained-v2 reconstruction continues below; PR-H4 is its deletion trigger.
 
     receipt_path: Path | None = None
     if receipt_output is not None:
@@ -405,7 +426,17 @@ def authenticate_provider_history_v2(
     interval_start: datetime | None = None,
     interval_end: datetime | None = None,
 ) -> ProviderHistorySourceEvidence:
-    """Cheaply authenticate v2 and optionally restore one pruned row selection."""
+    """Authenticate retained v2 or current v3 without reopening Stage 6."""
+    if _provider_contract(path) == "qtrad-provider-historical-observations-v3":
+        from qtrad.runtime.provider_history_v3 import authenticate_provider_history_v3
+
+        return authenticate_provider_history_v3(
+            path,
+            receipt=receipt,
+            instrument_ids=instrument_ids,
+            interval_start=interval_start,
+            interval_end=interval_end,
+        )
 
     manifest = _read_provider_history_v2_manifest(path)
     receipt_path = _require_file(receipt, "provider-history v2 verification receipt")
@@ -485,14 +516,18 @@ def provider_history_v2_verification_receipt(
 
 
 def _read_provider_history_v2_manifest(path: Path) -> _V2Manifest:
-    """Authenticate canonical v2 metadata without reading closure children."""
+    """Read retained v2 metadata; v3 dispatch is migration-facing only."""
 
-    manifest_path = _require_file(path, "provider-history v2 manifest")
-    manifest_bytes = _read_bounded(manifest_path, "provider-history v2 manifest")
+    manifest_path = _require_file(path, "provider-history manifest")
+    manifest_bytes = _read_bounded(manifest_path, "provider-history manifest")
     document = _mapping(
-        _parse_json(manifest_bytes, "provider-history v2 manifest"),
-        "provider-history v2 manifest",
+        _parse_json(manifest_bytes, "provider-history manifest"),
+        "provider-history manifest",
     )
+    if document.get("contract") == "qtrad-provider-historical-observations-v3":
+        from qtrad.runtime.provider_history_v3 import _read_manifest
+
+        return cast(_V2Manifest, _read_manifest(path))
     if canonical_json_bytes(cast(dict[str, JsonValue], document)) != manifest_bytes:
         raise ValueError("provider-history v2 manifest is not canonical")
     _require_exact_keys(document, _V2_MANIFEST_FIELDS, "provider-history v2 manifest")
@@ -582,8 +617,11 @@ def replay_provider_history_v2_stage6(path: Path) -> None:
 
 
 def verify_provider_history_v2_file_only(path: Path) -> _V2Manifest:
-    """Audit every byte in the complete v2 closure without semantic row replay."""
+    """Audit retained v2 closure; current v3 uses its direct tree verifier."""
+    if _provider_contract(path) == "qtrad-provider-historical-observations-v3":
+        from qtrad.runtime.provider_history_v3 import verify_provider_history_file_only
 
+        return cast(_V2Manifest, verify_provider_history_file_only(path))
     manifest = _read_provider_history_v2_manifest(path)
     source_stream, source_manifest_bytes = _read_provider_history_v2_source_header(manifest)
     source_root = source_stream.source_root
@@ -636,6 +674,19 @@ def provider_history_v2_rows(
     interval_start: datetime | None = None,
     interval_end: datetime | None = None,
 ) -> VerifiedProviderHistoryV2Rows:
+    if _provider_contract(path) == "qtrad-provider-historical-observations-v3":
+        from qtrad.runtime.provider_history_v3 import provider_history_v3_rows
+
+        return cast(
+            VerifiedProviderHistoryV2Rows,
+            provider_history_v3_rows(
+                path,
+                cast(Any, dataset),
+                instrument_ids=instrument_ids,
+                interval_start=interval_start,
+                interval_end=interval_end,
+            ),
+        )
     manifest = verify_provider_history_v2_file_only(path)
     return _selected_provider_history_v2_rows(
         manifest,
@@ -821,3 +872,14 @@ def _utc(value: object, field: str) -> datetime:
     if result.tzinfo != UTC:
         raise ValueError(f"{field} must be UTC")
     return result
+
+
+def _provider_contract(path: Path) -> str:
+    manifest = _require_file(path, "provider-history manifest")
+    document = _mapping(
+        _parse_json(
+            _read_bounded(manifest, "provider-history manifest"), "provider-history manifest"
+        ),
+        "provider-history manifest",
+    )
+    return _string(document["contract"], "provider-history contract")

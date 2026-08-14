@@ -6,7 +6,7 @@ import json
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import cast
+from typing import Any, cast
 
 import polars as pl
 
@@ -190,12 +190,33 @@ def verify_provider_history(
     path: Path,
     *,
     receipt_output: Path | None = None,
-) -> ProviderHistoricalDataset:
-    """Deeply verify current provider history and optionally persist its receipt."""
+    stage6_manifest: Path | None = None,
+    stage6_receipt: Path | None = None,
+) -> Any:
+    """Verify current Stage 7 with its explicit Stage 6 parent when required."""
+    contract = _provider_history_contract(path)
+    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    from qtrad.runtime.provider_history_v3 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT,
+    )
+    from qtrad.runtime.provider_history_v3 import (
+        verify_provider_history as verify_provider_history_v3,
+    )
 
-    from qtrad.runtime.provider_history_v2 import verify_provider_history_v2
-
-    return verify_provider_history_v2(path, receipt_output=receipt_output).dataset
+    if contract == PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT:
+        if stage6_manifest is None or stage6_receipt is None or receipt_output is None:
+            raise ValueError(
+                "Stage 7 verification requires Stage 6 manifest, receipt and receipt output"
+            )
+        return verify_provider_history_v3(
+            path,
+            stage6_manifest=stage6_manifest,
+            stage6_receipt=stage6_receipt,
+            receipt_output=receipt_output,
+        )
+    if contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        raise ValueError("retained provider-history v2 requires its migration-only verifier")
+    raise ValueError("provider-history contract is unsupported")
 
 
 def _dataset_from_manifest(
@@ -1014,20 +1035,23 @@ def authenticate_provider_history(
 ) -> ProviderHistoricalDataset | ProviderHistorySourceEvidence:
     """Authenticate current history or the retained v1 receipt without replay."""
 
-    from qtrad.runtime.provider_history_v2 import (
-        PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT,
-        authenticate_provider_history_v2,
+    from qtrad.runtime.provider_history_v2 import PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT
+    from qtrad.runtime.provider_history_v3 import (
+        PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT,
+        authenticate_provider_history_v3,
     )
 
     contract = _provider_history_contract(path)
-    if contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
-        return authenticate_provider_history_v2(
+    if contract == PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT:
+        return authenticate_provider_history_v3(
             path,
             receipt=receipt,
             instrument_ids=instrument_ids,
             interval_start=interval_start,
             interval_end=interval_end,
         )
+    if contract == PROVIDER_HISTORICAL_OBSERVATIONS_V2_CONTRACT:
+        raise ValueError("retained provider-history v2 requires its migration-only authenticator")
     if contract != PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT:
         raise ValueError("provider-history contract is unsupported")
     if any(value is not None for value in (instrument_ids, interval_start, interval_end)):
