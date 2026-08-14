@@ -455,3 +455,40 @@ def test_stage8_public_authentication_is_current_v3_only(tmp_path: Path) -> None
             receipt=tmp_path / "receipt.json",
             promotion=tmp_path / "promotion.json",
         )
+
+
+def test_stage8_v3_cli_authenticate_promotion_reports_current_identity(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from types import SimpleNamespace
+
+    import qtrad.__main__ as cli
+
+    monkeypatch.setattr(
+        cli,
+        "authenticate_ibkr_foundation_promotion",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            foundation_bundle_id="f" * 64,
+            promotion_sha256="p" * 64,
+        ),
+    )
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "authenticate-promotion",
+            "--bundle",
+            "foundation.json",
+            "--receipt",
+            "foundation-receipt.json",
+            "--promotion",
+            "promotion.json",
+        ]
+    )
+    output = json.loads(capsys.readouterr().out)
+    assert output == {
+        "contract": "qtrad-ibkr-foundation-confirmatory-promotion-v2",
+        "foundation_id": "f" * 64,
+        "promotion_sha256": "p" * 64,
+        "state": "CONFIRMATORY_PROMOTED",
+    }

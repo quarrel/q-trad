@@ -2257,7 +2257,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         print(
             json.dumps(
                 {
-                    "foundation_build_sha256": authority.foundation_bundle_id,
+                    "contract": "qtrad-ibkr-foundation-confirmatory-promotion-v2",
+                    "foundation_id": authority.foundation_bundle_id,
                     "promotion_sha256": authority.promotion_sha256,
                     "state": "CONFIRMATORY_PROMOTED",
                 },
