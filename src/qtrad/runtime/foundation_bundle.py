@@ -2109,11 +2109,13 @@ async def _verify_g2_feature_source(
             "holdout_end": authority.holdout_range[1].isoformat(),
         },
     )
+    _guard_foundation_manifest(authority.root, authority.observation_reference)
     _guard_foundation_child(authority.root, observation_manifest)
     observation_rows = tuple(
         _observation_from_row(cast(Mapping[str, object], row))
         for row in await store.read_rows(authority.observation_reference.manifest_id)
     )
+    _guard_foundation_manifest(authority.root, authority.panel_reference)
     _guard_foundation_child(authority.root, panel_manifest)
     panel_rows = tuple(
         _panel_row(row) for row in await store.read_rows(authority.panel_reference.manifest_id)
@@ -2189,6 +2191,7 @@ async def _verify_confirmatory_target_dataset(
             "foundation_configuration_id": authority.foundation_configuration_id,
         },
     )
+    _guard_foundation_manifest(authority.root, reference)
     _guard_foundation_child(authority.root, manifest)
     rows = tuple(
         _target(cast(Mapping[str, object], row))
