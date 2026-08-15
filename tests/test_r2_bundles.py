@@ -35,8 +35,10 @@ from qtrad.runtime.r2_bundles import (
 )
 from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
+    authenticate_r2_oof,
     selection_freeze,
     verify_oof_bundle,
+    verify_r2_oof_semantics,
 )
 
 
@@ -409,6 +411,75 @@ def test_synthetic_oof_build_is_replayed_from_typed_pipeline(
         verify_oof_bundle(manifest_path).source_class
         is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
     )
+
+
+def test_oof_semantic_receipt_is_replayed_once_and_authenticated_cheaply(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        verification,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "fixture-application",
+            "image_identity": "sha256:" + "1" * 64,
+            "python_identity": "fixture-python",
+            "numpy_identity": "fixture-numpy",
+            "sklearn_identity": "fixture-sklearn",
+        },
+    )
+    manifest_path = _build_synthetic_oof(tmp_path / "oof")
+    receipt_path = tmp_path / "oof-receipt.json"
+    replay_calls = 0
+    original_replay = verification._replay_synthetic_oof
+
+    def count_replay(path: Path) -> None:
+        nonlocal replay_calls
+        replay_calls += 1
+        original_replay(path)
+
+    monkeypatch.setattr(verification, "_replay_synthetic_oof", count_replay)
+    verify_r2_oof_semantics(manifest_path, receipt_output=receipt_path)
+    assert replay_calls == 1
+    assert receipt_path.is_file()
+    with pytest.raises(FileExistsError):
+        verify_r2_oof_semantics(manifest_path, receipt_output=receipt_path)
+    assert replay_calls == 1
+
+    def reject_replay(_: Path) -> None:
+        raise AssertionError("ordinary OOF authentication replayed semantic work")
+
+    monkeypatch.setattr(verification, "_replay_synthetic_oof", reject_replay)
+    assert authenticate_r2_oof(manifest_path, receipt=receipt_path).oof_id
+
+    receipt_payload = cast(dict[str, object], json.loads(receipt_path.read_bytes()))
+    receipt_payload["oof_id"] = "0" * 64
+    receipt_identity = {
+        key: value for key, value in receipt_payload.items() if key != "verification_id"
+    }
+    receipt_payload["verification_id"] = hashlib.sha256(
+        json.dumps(receipt_identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    mutated_receipt = tmp_path / "mutated-receipt.json"
+    mutated_receipt.write_bytes(canonical_bytes(receipt_payload))
+    with pytest.raises(ValueError, match="binding"):
+        authenticate_r2_oof(manifest_path, receipt=mutated_receipt)
+
+    bundle = verify_r2_oof_bundle(manifest_path)
+    descriptor_ref = next(
+        reference
+        for reference in bundle.evaluation_children
+        if reference.contract == verification.OOF_DESCRIPTOR_CONTRACT
+    )
+    descriptor_path = manifest_path.parent / descriptor_ref.path
+    descriptor_bytes = descriptor_path.read_bytes()
+    descriptor_path.write_bytes(descriptor_bytes + b"\\n")
+    with pytest.raises(ValueError, match="digest mismatch"):
+        authenticate_r2_oof(manifest_path, receipt=receipt_path)
+    descriptor_path.write_bytes(descriptor_bytes)
+
+    (manifest_path.parent / "replay-inputs" / "research").mkdir(parents=True)
+    with pytest.raises(ValueError, match="orphaned directory"):
+        authenticate_r2_oof(manifest_path, receipt=receipt_path)
 
 
 def test_oof_rejects_empty_orphan_directories(tmp_path: Path) -> None:

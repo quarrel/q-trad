@@ -427,6 +427,190 @@ class R2OofBundle:
         }
 
 
+R2_OOF_VERIFICATION_RECEIPT_CONTRACT = "qtrad-r2-oof-verification-receipt-v1"
+
+
+@dataclass(frozen=True, slots=True)
+class R2OofVerificationReceipt:
+    """Create-only proof for one semantically verified R2 OOF closure."""
+
+    oof_contract: str
+    oof_schema_version: int
+    oof_id: str
+    closure_id: str
+    manifest_sha256: str
+    experiment_semantic_id: str
+    foundation_semantic_id: str
+    foundation_verification_id: str
+    foundation_promotion_id: str | None
+    source_class: MarketDataSourceClass
+    evidence_class: EvidenceClass
+    verifier_contract: str
+    verifier_version: str
+    completed_checks: tuple[str, ...]
+    numerical_identity: str
+    verification_id: str
+
+    CONTRACT: ClassVar[str] = R2_OOF_VERIFICATION_RECEIPT_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        for value, field in (
+            (self.oof_id, "OOF ID"),
+            (self.closure_id, "OOF closure ID"),
+            (self.manifest_sha256, "OOF manifest digest"),
+            (self.experiment_semantic_id, "experiment semantic ID"),
+            (self.foundation_semantic_id, "foundation semantic ID"),
+            (self.foundation_verification_id, "foundation verification ID"),
+            (self.numerical_identity, "numerical verifier identity"),
+            (self.verification_id, "OOF verification ID"),
+        ):
+            _sha256(value, field)
+        if not self.oof_contract or self.oof_schema_version <= 0:
+            raise ValueError("OOF receipt must bind a supported artefact contract")
+        if not self.verifier_contract or not self.verifier_version:
+            raise ValueError("OOF receipt must bind a verifier contract and version")
+        if not self.completed_checks or any(not item for item in self.completed_checks):
+            raise ValueError("OOF receipt completed checks must be non-empty strings")
+        if tuple(self.completed_checks) != tuple(dict.fromkeys(self.completed_checks)):
+            raise ValueError("OOF receipt completed checks must be unique")
+        if self.foundation_promotion_id is not None:
+            _sha256(self.foundation_promotion_id, "foundation promotion ID")
+        if self.verification_id != _semantic_id(self.semantic_json()):
+            raise ValueError("OOF verification ID does not authenticate its content")
+
+    @classmethod
+    def create(cls, **values: Any) -> R2OofVerificationReceipt:
+        expected = {
+            "oof_contract",
+            "oof_schema_version",
+            "oof_id",
+            "closure_id",
+            "manifest_sha256",
+            "experiment_semantic_id",
+            "foundation_semantic_id",
+            "foundation_verification_id",
+            "foundation_promotion_id",
+            "source_class",
+            "evidence_class",
+            "verifier_contract",
+            "verifier_version",
+            "completed_checks",
+            "numerical_identity",
+        }
+        if set(values) != expected:
+            raise ValueError("OOF receipt create arguments are incomplete or unexpected")
+        semantic = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            **{
+                key: (
+                    value.value
+                    if isinstance(value, (MarketDataSourceClass, EvidenceClass))
+                    else list(value)
+                    if key == "completed_checks"
+                    else value
+                )
+                for key, value in values.items()
+            },
+        }
+        return cls(**values, verification_id=_semantic_id(semantic))
+
+    @classmethod
+    def from_json(cls, value: object) -> R2OofVerificationReceipt:
+        if not isinstance(value, dict):
+            raise ValueError("R2 OOF verification receipt must be an object")
+        raw = cast(dict[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "oof_contract",
+            "oof_schema_version",
+            "oof_id",
+            "closure_id",
+            "manifest_sha256",
+            "experiment_semantic_id",
+            "foundation_semantic_id",
+            "foundation_verification_id",
+            "foundation_promotion_id",
+            "source_class",
+            "evidence_class",
+            "verifier_contract",
+            "verifier_version",
+            "completed_checks",
+            "numerical_identity",
+            "verification_id",
+        }
+        if set(raw) != expected:
+            raise ValueError("R2 OOF verification receipt has unknown or missing fields")
+        if raw["contract"] != cls.CONTRACT or raw["schema_version"] != cls.SCHEMA_VERSION:
+            raise ValueError("R2 OOF verification receipt contract is unsupported")
+        checks_raw = raw["completed_checks"]
+        if not isinstance(checks_raw, list):
+            raise ValueError("R2 OOF verification receipt checks are invalid")
+        checks_items = cast(list[object], checks_raw)
+        if not all(isinstance(item, str) for item in checks_items):
+            raise ValueError("R2 OOF verification receipt checks are invalid")
+        checks = cast(tuple[str, ...], tuple(checks_items))
+        receipt = cls(
+            oof_contract=_string(raw["oof_contract"]),
+            oof_schema_version=_integer(raw["oof_schema_version"]),
+            oof_id=_string(raw["oof_id"]),
+            closure_id=_string(raw["closure_id"]),
+            manifest_sha256=_string(raw["manifest_sha256"]),
+            experiment_semantic_id=_string(raw["experiment_semantic_id"]),
+            foundation_semantic_id=_string(raw["foundation_semantic_id"]),
+            foundation_verification_id=_string(raw["foundation_verification_id"]),
+            foundation_promotion_id=_nullable_string(raw["foundation_promotion_id"]),
+            source_class=MarketDataSourceClass(_string(raw["source_class"])),
+            evidence_class=EvidenceClass(_string(raw["evidence_class"])),
+            verifier_contract=_string(raw["verifier_contract"]),
+            verifier_version=_string(raw["verifier_version"]),
+            completed_checks=checks,
+            numerical_identity=_string(raw["numerical_identity"]),
+            verification_id=_string(raw["verification_id"]),
+        )
+        if receipt.as_json() != raw:
+            raise ValueError("R2 OOF verification receipt is not canonical")
+        return receipt
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "oof_contract": self.oof_contract,
+            "oof_schema_version": self.oof_schema_version,
+            "oof_id": self.oof_id,
+            "closure_id": self.closure_id,
+            "manifest_sha256": self.manifest_sha256,
+            "experiment_semantic_id": self.experiment_semantic_id,
+            "foundation_semantic_id": self.foundation_semantic_id,
+            "foundation_verification_id": self.foundation_verification_id,
+            "foundation_promotion_id": self.foundation_promotion_id,
+            "source_class": self.source_class.value,
+            "evidence_class": self.evidence_class.value,
+            "verifier_contract": self.verifier_contract,
+            "verifier_version": self.verifier_version,
+            "completed_checks": list(self.completed_checks),
+            "numerical_identity": self.numerical_identity,
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "verification_id": self.verification_id}
+
+
+def _integer(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("expected an integer")
+    return value
+
+
+def _nullable_string(value: object) -> str | None:
+    if value is None:
+        return None
+    return _string(value)
+
+
 def _string(value: object) -> str:
     if not isinstance(value, str):
         raise TypeError("expected a string")
