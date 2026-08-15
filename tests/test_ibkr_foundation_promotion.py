@@ -113,3 +113,52 @@ def test_promotion_authentication_rejects_legacy_contract_without_fallback(
             receipt=tmp_path / "receipt.json",
             promotion=tmp_path / "promotion.json",
         )
+
+
+def test_current_v3_qualifying_promotion_mutation_and_reuse_are_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
+    monkeypatch.setattr(promotion_runtime, "_require_detached_source", lambda: None)
+    original_bindings = promotion_runtime._foundation_v3_bindings
+    stage8, readiness, identities = original_bindings(foundation, receipt)
+    qualifying_readiness = {**readiness, "state": "QUALIFYING_HISTORY_READY", "causes": []}
+    monkeypatch.setattr(
+        promotion_runtime,
+        "_foundation_v3_bindings",
+        lambda *_args, **_kwargs: (stage8, qualifying_readiness, identities),
+    )
+    output = tmp_path / "qualifying-promotion.json"
+    authority = create_ibkr_foundation_confirmatory_promotion(
+        foundation,
+        receipt=receipt,
+        output=output,
+        authorized_by="operator",
+        authorized_at=datetime(2026, 8, 15, tzinfo=UTC),
+        authorization_reference="b15-qualifying",
+    )
+    assert authority.promotion_sha256
+    authenticated = authenticate_ibkr_foundation_promotion(
+        foundation,
+        receipt=receipt,
+        promotion=output,
+    )
+    assert authenticated.promotion_sha256 == authority.promotion_sha256
+    with pytest.raises(FileExistsError):
+        create_ibkr_foundation_confirmatory_promotion(
+            foundation,
+            receipt=receipt,
+            output=output,
+            authorized_by="operator",
+            authorized_at=datetime(2026, 8, 15, tzinfo=UTC),
+            authorization_reference="b15-reuse",
+        )
+    document = json.loads(output.read_bytes())
+    document["operator_authorization"]["authorized_by"] = "tampered"
+    output.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="promotion"):
+        authenticate_ibkr_foundation_promotion(
+            foundation,
+            receipt=receipt,
+            promotion=output,
+        )

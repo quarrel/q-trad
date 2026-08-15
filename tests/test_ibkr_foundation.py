@@ -226,12 +226,13 @@ def test_stage8_cli_requires_current_stage7_parent() -> None:
 def test_stage8_readiness_without_valid_folds_is_insufficient(tmp_path: Path) -> None:
     foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
     build = load_ibkr_foundation(foundation, receipt=receipt)
-    assert build.readiness.state in {
-        IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY,
-        IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION,
-    }
-    assert isinstance(build.readiness.evidence["fold_count"], int)
-    assert build.readiness.evidence["fold_count"] >= 0
+    assert (
+        build.readiness.state
+        is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
+    )
+    assert build.readiness.causes
+    assert build.readiness.evidence["fold_count"] == 0
+    assert build.readiness.evidence["coverage_diagnostics"]
 
 
 def _coverage_fixture(
@@ -304,3 +305,177 @@ def test_stage8_coverage_deduplicates_and_orders_inputs() -> None:
     assert cell == reversed_cell
     assert cells == reversed_cells
     assert blocking == reversed_blocking
+
+
+def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.runtime.provider_history_v3 as provider_history_v3_runtime
+    from qtrad.application.ibkr_foundation import build_ibkr_foundation
+    from qtrad.application.r2_ibkr_historical import (
+        _availability_dataset_id,
+        ibkr_availability_evidence,
+    )
+    from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+    from qtrad.runtime.ibkr_foundation import load_ibkr_foundation_outcome_blind_with_identity
+
+    stage7_manifest, source = _authenticated_v3_source(tmp_path)
+    configuration = _stage8_configuration()
+    full_build = build_ibkr_foundation(source, configuration)
+    foundation = tmp_path / "foundation.json"
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    write_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=configuration,
+        workers=1,
+    )
+    receipt = tmp_path / "foundation-receipt.json"
+    verify_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=receipt,
+        workers=1,
+    )
+    availability = ibkr_availability_evidence(full_build)
+    gaps = tuple(
+        (
+            str(item["instrument_id"]),
+            datetime.fromisoformat(str(item["interval_start"])),
+            datetime.fromisoformat(str(item["interval_end"])),
+        )
+        for item in full_build.provider_gaps
+    )
+    holdout_source = R2HoldoutTargetSource.create_from_target_dataset(
+        cast(Any, full_build.targets),
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=900,
+        target_instruments=tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+        panel=cast(Any, full_build.panel),
+        source_active_intervals=full_build.active_intervals,
+        data_gaps=gaps,
+        availability_evidence_id=_availability_dataset_id(
+            cast(Any, full_build.observations).dataset_id, availability
+        ),
+    )
+    original_read_child_rows = foundation_runtime._read_child_rows
+    child_reads: list[Path] = []
+
+    def guarded_read_child_rows(
+        path: Path, *, expected_row_count: int
+    ) -> tuple[dict[str, Any], ...]:
+        child_reads.append(path)
+        assert not {"observations", "panel", "targets"}.intersection(path.parts)
+        return original_read_child_rows(path, expected_row_count=expected_row_count)
+
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", guarded_read_child_rows)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "build_ibkr_foundation",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("outcome-blind loading rebuilt Stage 8")
+        ),
+    )
+    monkeypatch.setattr(
+        provider_history_v3_runtime,
+        "_read_part",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("outcome-blind loading decoded Stage 7 provider rows")
+        ),
+    )
+    blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
+        foundation,
+        receipt=receipt,
+        holdout_target_source=holdout_source,
+    )
+    assert build_id
+    assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
+    assert child_reads
+
+
+def test_stage8_readiness_records_zero_fold_insufficiency_and_coverage() -> None:
+    cell, cells, blocking = _coverage_fixture(20)
+    assert cell["passed"] is False
+    assert cell["coverage"] == "0"
+    assert cell["opportunity_counts"]["GAP"] >= 1
+    assert cells and blocking
+
+
+def test_stage8_cli_build_and_verify_round_trip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    configuration = _stage8_configuration()
+    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    foundation = tmp_path / "foundation.json"
+    config_path = tmp_path / "configuration.json"
+    receipt = tmp_path / "foundation-receipt.json"
+    config_path.write_text(
+        json.dumps(foundation_runtime.foundation_config_payload(configuration)) + "\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("QTRAD_RESEARCH_ROOT", str(tmp_path))
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "build",
+            "--stage7-manifest",
+            str(stage7_manifest),
+            "--stage7-receipt",
+            str(stage7_receipt),
+            "--configuration",
+            str(config_path),
+            "--output",
+            str(foundation),
+            "--workers",
+            "1",
+        ]
+    )
+    cli.main(
+        [
+            "research",
+            "foundation",
+            "verify",
+            "--bundle",
+            str(foundation),
+            "--stage7-manifest",
+            str(stage7_manifest),
+            "--stage7-receipt",
+            str(stage7_receipt),
+            "--receipt-output",
+            str(receipt),
+        ]
+    )
+    assert json.loads(foundation.read_bytes())["contract"] == "qtrad-ibkr-historical-foundation-v2"
+    assert receipt.is_file()
+
+
+def test_stage8_bounded_derivation_reports_deterministic_work_counts(tmp_path: Path) -> None:
+    from collections.abc import Mapping
+
+    stage7_manifest, source = _authenticated_v3_source(tmp_path)
+    events: list[Mapping[str, object]] = []
+    _build, references = build_bounded_provider_foundation(
+        source_evidence=source,
+        configuration=_stage8_configuration(),
+        child_root=tmp_path / "bounded-children",
+        bundle_root=tmp_path,
+        child_name="foundation",
+        provider_manifest_sha256=__import__("hashlib")
+        .sha256(stage7_manifest.read_bytes())
+        .hexdigest(),
+        workers=1,
+        progress_callback=events.append,
+    )
+    observation_events = [
+        event
+        for event in events
+        if event["phase"] == "observations" and event["event"] == "completed"
+    ]
+    assert observation_events
+    assert len({event["instrument_id"] for event in observation_events}) == len(observation_events)
+    assert sum(cast(int, event["row_count"]) for event in observation_events) > 0
+    assert references
