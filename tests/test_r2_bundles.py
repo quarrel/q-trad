@@ -12,7 +12,6 @@ from typing import cast
 import pytest
 
 import qtrad.runtime.r2_verification as verification
-
 from qtrad.domain.foundation import (
     ExcursionDisposition,
     ReturnDisposition,
