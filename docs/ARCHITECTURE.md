@@ -54,7 +54,7 @@ replay. Deep audit is exceptional after verifier revocation, a potentially relev
 explicit operator request. Compatibility exists only for named retained evidence and is deleted after
 migration; there are no dual writers or generic evidence framework.
 
-This is the target architecture, not a claim that the staged implementation migrations are complete.
+The Stage 6–8 implementation migrations for the retained IBKR packet are complete; this remains the target architecture for any future boundary migration.
 
 ## Shape
 
@@ -127,13 +127,7 @@ consumers authenticate the unchanged closure and receipt without decoding Parque
 6. Confirmatory promotion authenticates the accepted Stage 8 receipt, qualifying readiness and explicit operator authority without semantic replay.
 `foundation build` accepts this receipt as its immediate Stage 7 authority.
 
-The authenticated retained v1 closure was repacked create-only into the explicit v2 physical contract
-without replaying Stage 6 or changing semantic dataset identity. V2 groups observations by instrument and
-calendar month with bounded numbered parts; its separate physical manifest binds paths, bytes, encoding,
-row counts and interval bounds while the original v1 evidence remains unchanged. The retired migration
-bridge applied the same layout-independent Stage 8 selection to v1 and v2 solely to prove equivalence.
-
-The real migration and runtime retirement are complete for the normal writer and CLI: current Stage 7 uses the v3 provider-history receipt/source contract and current Stage 8 uses its v2 foundation manifest/receipt contract. Retained v1 evidence exposes only cheap exact-tree/receipt authentication; its writer, repacker, row decoder and deep verifier are reachable only through explicitly named migration helpers until PR-H4 deletes that bridge. Public Stage 8 authentication, loading and promotion reject v1/v2; `_authenticate_ibkr_foundation_migration_v2`, `_verify_ibkr_foundation_migration_v2`, `_write_ibkr_foundation_migration_v2` and `_authenticate_ibkr_foundation_promotion_migration_v2` remain private migration-only entry points. Ordinary current authentication hashes selected physical parts but reads neither unselected parts nor Stage 6 result children. Explicit current deep audit retains complete semantic replay; confirmatory promotion is authority-only: it authenticates the exact accepted Stage 8 receipt and performs no Stage 6/7/8 semantic replay.
+The retained v1/v2 compatibility bridge was used only for the named H4 retained-file operation and was deleted after the immutable invalidation record (`3610c94...`) was independently authenticated. The retained closures and invalidation record remain archived and immutable; current runtime authentication, loading and promotion reject superseded contracts. Normal current Stage 7/8 paths are v3-only, bind immediate-parent identities, and perform no cumulative ancestry replay.
 
 The durable IBKR historical foundation handoff is:
 

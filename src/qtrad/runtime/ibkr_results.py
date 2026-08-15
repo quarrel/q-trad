@@ -22,7 +22,6 @@ from qtrad.domain.ibkr_execution import (
     IbkrTerminalDisposition,
 )
 from qtrad.domain.ibkr_historical import (
-    HISTORICAL_PLAN_CONTRACT,
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
     sha256_json,
@@ -60,10 +59,6 @@ _STAGE6_COMPLETED_CHECKS = (
     "aggregate_semantics",
 )
 _MAX_RECEIPT_BYTES = 64 * 1024
-
-# Temporary PR-H4 migration reader for retained Stage 6 v2 closures only.
-_LEGACY_HISTORICAL_RESULT_V2_CONTRACT = "qtrad-ibkr-historical-result-v2"
-_LEGACY_HISTORICAL_RESULT_V2_SCHEMA_VERSION = 2
 
 
 def write_ibkr_historical_result(
@@ -236,120 +231,6 @@ def _read_ibkr_historical_result_header(path: Path) -> IbkrHistoricalResultStrea
         plan=plan,
         plan_bytes=plan_bytes,
         aggregate=aggregate,
-        references_by_path=references_by_path,
-    )
-
-
-def _read_legacy_ibkr_historical_result_v2_header(
-    path: Path,
-    *,
-    require_exact_tree: bool = False,
-) -> IbkrHistoricalResultStream:
-    """Read retained S7.3 v2 metadata until PR-H4 migrates and deletes it.
-
-    This path is deliberately outside the current Stage 6 writer and CLI. It
-    authenticates retained v2 metadata and immediate-child declarations without
-    replaying Stage 6 semantics; PR-H4 is the deletion trigger.
-    """
-    manifest_path = _require_file(path, "legacy IBKR v2 result manifest")
-    root = manifest_path.parent
-    manifest_bytes = _read_bytes(manifest_path, "legacy IBKR v2 aggregate result")
-    document = _parse_json(manifest_bytes, "legacy IBKR v2 aggregate result")
-    _require_exact_keys(
-        document,
-        {
-            "aggregate_sha256",
-            "contract",
-            "coverage_summary",
-            "entitlement_summary",
-            "plan",
-            "request_results",
-            "runtime_sha256",
-            "schema_version",
-        },
-        "legacy IBKR v2 aggregate result",
-    )
-    if (
-        document["contract"] != _LEGACY_HISTORICAL_RESULT_V2_CONTRACT
-        or document["schema_version"] != _LEGACY_HISTORICAL_RESULT_V2_SCHEMA_VERSION
-    ):
-        raise ValueError("legacy IBKR v2 aggregate result contract is unsupported")
-    if manifest_bytes != canonical_json_bytes(cast(dict[str, JsonValue], document)):
-        raise ValueError("legacy IBKR v2 aggregate result bytes are not canonical")
-    aggregate_sha256 = _require_legacy_sha256(
-        document["aggregate_sha256"], "legacy IBKR v2 aggregate identity"
-    )
-    plan_reference = _child_reference(document["plan"], "legacy IBKR v2 plan reference")
-    if plan_reference.path != _PLAN_NAME or plan_reference.contract != HISTORICAL_PLAN_CONTRACT:
-        raise ValueError("legacy IBKR v2 plan reference is not canonical")
-    plan_path = _safe_child(root, plan_reference.path, "legacy IBKR v2 plan child")
-    plan_bytes = _read_bytes(plan_path, "legacy IBKR v2 plan child")
-    if sha256_bytes(plan_bytes) != plan_reference.bytes_sha256:
-        raise ValueError("legacy IBKR v2 plan bytes digest does not match its reference")
-    plan = load_ibkr_historical_plan(plan_path)
-    if plan_bytes != canonical_json_bytes(plan.as_json_value()):
-        raise ValueError("legacy IBKR v2 plan bytes are not canonical")
-    if plan.plan_sha256 != plan_reference.semantic_sha256:
-        raise ValueError("legacy IBKR v2 plan semantic identity does not match its reference")
-    runtime_sha256 = _require_legacy_sha256(
-        document["runtime_sha256"], "legacy IBKR v2 runtime identity"
-    )
-    if plan.runtime_sha256 != runtime_sha256:
-        raise ValueError("legacy IBKR v2 runtime identity differs from its plan")
-    raw_request_results = document["request_results"]
-    if not isinstance(raw_request_results, list) or not raw_request_results:
-        raise ValueError("legacy IBKR v2 request-result references are missing")
-    request_results = tuple(
-        _child_reference(item, "legacy IBKR v2 request-result reference")
-        for item in raw_request_results
-    )
-    if len(request_results) > MAX_IBKR_RESULT_CHILDREN:
-        raise ValueError("legacy IBKR v2 request-result references exceed their bound")
-    request_hashes = {request.request_sha256 for request in plan.requests}
-    expected_paths = {
-        f"{_REQUEST_DIRECTORY}/{request_hash}.json" for request_hash in request_hashes
-    }
-    references_by_path = {reference.path: reference for reference in request_results}
-    if len(references_by_path) != len(request_results) or set(references_by_path) != expected_paths:
-        raise ValueError("legacy IBKR v2 request-result closure differs from its plan")
-    if any(reference.contract != REQUEST_RESULT_CONTRACT for reference in request_results):
-        raise ValueError("legacy IBKR v2 request-result path or contract is unsupported")
-    if len({reference.semantic_sha256 for reference in request_results}) != len(request_results):
-        raise ValueError("legacy IBKR v2 request-result identities are duplicated")
-    if require_exact_tree:
-        _require_exact_tree(
-            root,
-            {_REQUEST_DIRECTORY, _MANIFEST_NAME, _PLAN_NAME, *references_by_path},
-        )
-    legacy_aggregate = object.__new__(IbkrHistoricalAggregateResult)
-    object.__setattr__(legacy_aggregate, "plan", plan_reference)
-    object.__setattr__(legacy_aggregate, "runtime_sha256", runtime_sha256)
-    object.__setattr__(legacy_aggregate, "request_results", request_results)
-    object.__setattr__(
-        legacy_aggregate,
-        "coverage_summary",
-        cast(
-            dict[str, JsonValue],
-            dict(_mapping(document["coverage_summary"], "legacy coverage summary")),
-        ),
-    )
-    object.__setattr__(
-        legacy_aggregate,
-        "entitlement_summary",
-        cast(
-            dict[str, JsonValue],
-            dict(_mapping(document["entitlement_summary"], "legacy entitlement summary")),
-        ),
-    )
-    object.__setattr__(legacy_aggregate, "result_id", aggregate_sha256)
-    object.__setattr__(legacy_aggregate, "closure_id", aggregate_sha256)
-    object.__setattr__(legacy_aggregate, "publication_status", "PUBLISHED_UNVERIFIED")
-    object.__setattr__(legacy_aggregate, "aggregate_sha256", aggregate_sha256)
-    return IbkrHistoricalResultStream(
-        source_root=root,
-        plan=plan,
-        plan_bytes=plan_bytes,
-        aggregate=legacy_aggregate,
         references_by_path=references_by_path,
     )
 
@@ -937,16 +818,6 @@ def _require_exact_keys(
 ) -> None:
     if set(value) != expected:
         raise ValueError(f"{field} has unknown or missing fields")
-
-
-def _require_legacy_sha256(value: object, field: str) -> str:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{field} must be a lower-case SHA-256")
-    return value
 
 
 def _string(value: Mapping[str, object], field: str) -> str:
