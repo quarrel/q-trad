@@ -53,11 +53,8 @@ work and records only the milestone sequence needed to reach the next trustworth
   create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption
   and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
   No real holdout, research conclusion or effectiveness evidence exists.
-- Before the first real confirmatory R2 run, the active
-  `docs/R2_EVIDENCE_HANDOFF_SIMPLIFICATION_PLAN.md` programme is replacing cumulative Stage 6 through R2
-  replay with immediate-parent receipt authentication. Each boundary will transform and independently
-  verify once; ordinary descendants will authenticate that proof, and promotion will grant authority
-  without semantic replay. These migrations are active work, not completed implementation.
+- Before the first real confirmatory R2 run, the active evidence-handoff simplification programme has converged the Stage 6 through R2 boundaries on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
+- PR-C1 is implementation-complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; a clean full gate and merge remain release checks.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,
@@ -66,15 +63,8 @@ work and records only the milestone sequence needed to reach the next trustworth
   adapter, callback normalization, immutable canary evidence and file-only canary/profile operations.
   Account-gated capability review, host deployment and the bounded Stage 5 canary are now complete:
   all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases passed with the frozen 300-second profile.
-  The full Stage 6 result closure and original Stage 7 v1 provider-history evidence remain retained.
-  Stage 7 now has reusable verification receipts and cheap authentication; exact-head S7.3 validation
-  repacked the 3,376,258-row dataset create-only into 120 v2 physical parts while preserving dataset
-  identity `2f7f6199...a0e7e3` and aggregate identity `2ca2fbd0...22a0c`. Live Stage 7/8 operation is
-  v2-only: v1 construction, deep replay, row decoding and repacking are retired, while exact-tree/receipt
-  authentication remains for retained evidence. The retained Stage 8 foundation is
-  `QUALIFYING_HISTORY_READY`, has an implementation-only receipt, and has a separately authenticated
-  S8.4 confirmatory-promotion attestation. No real holdout result or effectiveness claim exists, and IBKR
-  evidence cannot substantiate an IG-native conclusion.
+- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward.
+- Current Stage 7 and Stage 8 construction, verification, authentication and promotion are v3-only. They bind immediate-parent semantic, closure and verification identities, consume only selected children, and do not reopen superseded ancestry. No real holdout result or effectiveness claim exists, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones
 
@@ -169,17 +159,8 @@ chronology ambiguity before those contracts are fixed.
 - The account-gated exact-contract capability review, matched read-only host deployment and Stage 5
   canary are complete. The canary passed all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases,
   and the 300-second request profile is frozen.
-- The full Stage 6 result closure, original Stage 7 v1 closure and its reusable receipt remain retained.
-  S7.3 exact-head commit `f0e882bbcd19aabbefb1add2d87a03daae7670e8` published and independently
-  verified the semantically identical v2 closure: 3,376,258 rows and 2,948 logical partitions now occupy
-  120 physical parts. A bounded receipt-backed Stage 8 build selected 14 of those parts without provider
-  reacquisition or mutation of the retained v1 foundation. New construction, verification and authority
-  paths are v2-only; retained v1 evidence supports cheap authentication only.
-- The retained Stage 8 build `9893e785...38d47` is `QUALIFYING_HISTORY_READY`. Receipt
-  `56228947...ffd01` grants only `IMPLEMENTATION_EVIDENCE_ONLY`; promotion
-  `1a1d09d9...81e2` is the separate `CONFIRMATORY` capability required before real IBKR F2.
-  No real holdout result, effectiveness claim or downstream R2 result has been created; keep
-  `R2-IBKR-HISTORICAL` source-specific and distinct from IG-native evidence.
+- The full Stage 6 closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 invalidation record `3610c94...` documents the scientific divergence and superseded promotion; no qualifying authority is carried forward.
+- Current Stage 7/8 runtime is v3-only: construction and deep verification use explicit immediate-parent receipts, ordinary authentication is cheap and selected-child bounded, and promotion is authority-only without semantic replay. The R2-IBKR-HISTORICAL experiment remains source-specific and depends on independently verified lower-stage evidence; no real holdout result or effectiveness claim exists.
 - The independent IBKR native top-of-book collector reached its full reviewed B5 universe on 2026-08-10. Exact-main controlled B5 session `971facc4-cab4-413a-a29a-27c7f7ac89e1` received and persisted 24,056 callbacks with zero failed, dropped or reconciliation-loss callbacks, crossed generation 1 to 2, retained fresh post-reconnect LIVE bid/ask evidence for all twenty contracts, and passed snapshot plus independent three-restore replay to mint `B5_FULL_UNIVERSE`.
 - The qualifying backup `qtrad-ibkr-20260810T153222Z.dump` has SHA-256 `f4ca959639ca4f10be4c19c07d795fc9987e887620247670cdabd3f7f0116e5d`. Continuous capture initially resumed 20/20 on application commit `af8037dff4e5557462eb359f962eb32f20cd0d7a`, but stopped receiving at the 2026-08-10 22:30 UTC Gateway auto-restart and later failed closed. Preserve that gap. PR #116 restored socket-death detection and canonical Gateway ownership; its 2026-08-12 rollout exposed a second explicit gap when concurrent restore work saturated persistence. PR #117 then completed the restore-isolated exact-20 deployment at commit `4e11e76e33cdeefd21ad0c266493c5d31c94536f` and configuration hash `4826925a13b92129303a40a3120ac4763551875b169dc8ccc7cb21bafa360a50`. Natural daily Gateway restarts on 2026-08-12 and 2026-08-13 each replaced the collector process and reconstructed 20/20 LIVE subscriptions with the old session fully persisted and zero drops. This is the applicable lifecycle gate for the current paper account, which has no distinct weekly 2FA expiry.
 - Use the hardened interfaces in `ops/ibkr/README.md` for maintenance stops, bounded capture,

@@ -14,7 +14,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, cast
+from typing import cast
 from uuid import UUID, uuid4
 
 import uvicorn
@@ -3102,10 +3102,6 @@ def _verify_provider_history(
     stage6_receipt: Path,
     receipt_output: Path,
 ) -> None:
-    from qtrad.domain.provider_history import (
-        ProviderHistoricalDataset,
-        ProviderHistoricalDatasetV3,
-    )
 
     authenticated = verify_provider_history(
         manifest_path,
@@ -3113,10 +3109,7 @@ def _verify_provider_history(
         stage6_receipt=stage6_receipt,
         receipt_output=receipt_output,
     )
-    if isinstance(authenticated, (ProviderHistoricalDataset, ProviderHistoricalDatasetV3)):
-        dataset = authenticated
-    else:
-        dataset = cast(Any, authenticated).dataset
+    dataset = authenticated.dataset
     print(
         json.dumps(
             {
@@ -3134,18 +3127,12 @@ def _verify_provider_history(
 
 
 def _authenticate_provider_history(manifest_path: Path, receipt_path: Path) -> None:
-    from qtrad.domain.provider_history import ProviderHistoricalDataset
-
     authenticated = authenticate_provider_history(manifest_path, receipt=receipt_path)
-    dataset = (
-        authenticated
-        if isinstance(authenticated, ProviderHistoricalDataset)
-        else authenticated.dataset
-    )
+    dataset = authenticated.dataset
     print(
         json.dumps(
             {
-                "contract": "qtrad-provider-history-authentication-v1",
+                "contract": "qtrad-provider-history-v3-authentication-v1",
                 "manifest": str(manifest_path),
                 "receipt": str(receipt_path),
                 "dataset_sha256": dataset.dataset_sha256,

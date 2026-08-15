@@ -1797,9 +1797,12 @@ Focused confirmatory F2/G1/G2 suite plus clean `ops/dev/verify.sh`.
 Ensure the programme leaves one understandable architecture rather than a set of new receipts layered
 on top of old cumulative code.
 
+**Implementation status (2026-08-15): COMPLETE pending the clean full release gate.** The retained H4 packet has an immutable scientific invalidation record; current Stage 6–8 and R1/R2 paths are converged on immediate-parent receipts, with obsolete compatibility and recursive replay code deleted.
+
+
 ## Dependencies
 
-- PR-H4 merged with real historical migration complete;
+- PR-H4 merged with retained-packet migration/invalidation complete;
 - PR-R4 merged;
 - all new active contracts authoritative.
 
@@ -1905,6 +1908,7 @@ promotion -> replay everything since acquisition
 
 Before moving to the first real confirmatory R2 execution, all must hold:
 
+
 1. Exactly one normal active Stage 6/7/8 contract each.
 2. Exactly one normal active R1 bundle contract.
 3. Exactly one normal active R2 experiment/OOF contract.
@@ -1913,8 +1917,8 @@ Before moving to the first real confirmatory R2 execution, all must hold:
 6. No whole-application commit/image in scientific identity absent a documented numerical reason.
 7. Stage 8 and F2 promotions perform zero semantic replay.
 8. G1/G2 holdout safety semantics unchanged.
-9. Real historical chain has been migrated and independently verified under the new contracts.
-10. Clean `ops/dev/verify.sh` passes.
+9. The retained historical chain has been migrated and independently verified under the new contracts, or has an immutable invalidation record when scientific equivalence fails.
+10. Clean `ops/dev/verify.sh` passes; this remains the root-owned release gate.
 
 Once these are true, the next major action should be the real qualifying R2/F2 scientific workflow,
 not another infrastructure hardening tranche unless a concrete failure blocks it.

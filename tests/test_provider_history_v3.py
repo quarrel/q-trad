@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import shutil
 from datetime import UTC, datetime, timedelta
@@ -24,7 +23,6 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalObservation,
 )
 from qtrad.domain.research import ObservationDataset
-from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
 from qtrad.runtime.ibkr_results import (
     verify_ibkr_historical_result,
     write_ibkr_historical_result,
@@ -320,28 +318,3 @@ def test_v3_source_evidence_feeds_normal_stage8_without_stage6_reopen(
     assert build.provider_history.dataset_sha256 == source.dataset.dataset_sha256
     assert build.readiness.evidence["source_result_id"] == source.dataset.stage6_result_id
     assert "source_aggregate_sha256" not in build.readiness.evidence
-
-
-def test_v3_source_evidence_feeds_bounded_stage8_without_stage6_reopen(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    manifest, source = _authenticated_v3_source(tmp_path)
-    import qtrad.runtime.provider_history_v3 as runtime
-
-    def reject_stage6_replay(*_args: object, **_kwargs: object) -> object:
-        raise AssertionError("Stage 6 replay reopened from bounded Stage 8 build")
-
-    monkeypatch.setattr(runtime, "authenticate_ibkr_historical_result", reject_stage6_replay)
-    build, child_references = build_bounded_provider_foundation(
-        source_evidence=source,
-        configuration=_stage8_configuration(),
-        child_root=tmp_path / "bounded-temporary",
-        bundle_root=tmp_path,
-        child_name="bounded-foundation",
-        provider_manifest_sha256=hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        workers=1,
-    )
-    assert build.provider_history.dataset_sha256 == source.dataset.dataset_sha256
-    assert build.readiness.evidence["source_result_id"] == source.dataset.stage6_result_id
-    assert "source_aggregate_sha256" not in build.readiness.evidence
-    assert all(child_references.values())

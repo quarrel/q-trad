@@ -425,7 +425,7 @@ def test_result_builder_and_file_verifier_replay_a_create_only_closure(tmp_path:
         if item.request_payload["kind"] == IbkrHistoricalRequestKind.SCHEDULE.value
     )
     assert schedule_result.session_state == "INACTIVE"
-    assert verified.aggregate.aggregate_sha256 == artifact.aggregate.aggregate_sha256
+    assert verified.aggregate.result_id == artifact.aggregate.result_id
     with pytest.raises(FileExistsError):
         write_ibkr_historical_result(output, artifact)
 
@@ -609,7 +609,6 @@ def _rehash_aggregate(
     object.__setattr__(mutated, "request_results", child_refs)
     object.__setattr__(mutated, "result_id", sha256_json(mutated.semantic_identity_payload()))
     object.__setattr__(mutated, "closure_id", sha256_json(mutated.closure_identity_payload()))
-    object.__setattr__(mutated, "aggregate_sha256", mutated.result_id)
     return mutated
 
 
@@ -650,10 +649,13 @@ def test_result_publisher_stages_and_verifies_create_only_output(tmp_path: Path)
     output = tmp_path / "staged-result"
     manifest = publish_ibkr_historical_result(output, artifact)
 
-    assert verify_ibkr_historical_result(
-        manifest,
-        receipt_output=tmp_path / "staged-result-receipt.json",
-    ).aggregate.aggregate_sha256 == (artifact.aggregate.aggregate_sha256)
+    assert (
+        verify_ibkr_historical_result(
+            manifest,
+            receipt_output=tmp_path / "staged-result-receipt.json",
+        ).aggregate.result_id
+        == artifact.aggregate.result_id
+    )
     with pytest.raises(FileExistsError):
         publish_ibkr_historical_result(output, artifact)
 
@@ -688,7 +690,7 @@ def test_result_publisher_allows_realistic_large_request_child(tmp_path: Path) -
         manifest,
         receipt_output=tmp_path / "large-receipt.json",
     )
-    assert verified.aggregate.aggregate_sha256 == aggregate.aggregate_sha256
+    assert verified.aggregate.result_id == aggregate.result_id
 
 
 def test_ibkr_result_cli_parser_exposes_build_and_file_only_verify() -> None:
@@ -1390,7 +1392,6 @@ def test_result_identity_separates_semantic_and_closure_fields() -> None:
     object.__setattr__(physical, "request_results", physical_refs)
     object.__setattr__(physical, "result_id", aggregate.result_id)
     object.__setattr__(physical, "closure_id", sha256_json(physical.closure_identity_payload()))
-    object.__setattr__(physical, "aggregate_sha256", physical.result_id)
 
     assert physical.result_id == aggregate.result_id
     assert physical.closure_id != aggregate.closure_id
@@ -1406,7 +1407,6 @@ def test_result_identity_separates_semantic_and_closure_fields() -> None:
     )
     object.__setattr__(semantic, "result_id", sha256_json(semantic.semantic_identity_payload()))
     object.__setattr__(semantic, "closure_id", sha256_json(semantic.closure_identity_payload()))
-    object.__setattr__(semantic, "aggregate_sha256", semantic.result_id)
     assert semantic.result_id != aggregate.result_id
 
 

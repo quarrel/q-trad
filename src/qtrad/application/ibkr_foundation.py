@@ -41,7 +41,7 @@ from qtrad.domain.ibkr_historical import IbkrHistoricalRequest, IbkrHistoricalRe
 from qtrad.domain.ibkr_results import IbkrHistoricalEvidenceDisposition
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.provider_history import (
-    ProviderHistoricalDataset,
+    ProviderHistoricalDatasetV3,
     ProviderHistoricalObservation,
 )
 from qtrad.domain.r2_holdout import (
@@ -67,7 +67,7 @@ class IBKRFoundationBuild:
     folds: FoldDataset
     target_index: R2HoldoutTargetIndex | None
     causal_metadata: R2HoldoutCausalMetadata | None
-    provider_history: ProviderHistoricalDataset
+    provider_history: ProviderHistoricalDatasetV3
     active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]]
     provider_gaps: tuple[Mapping[str, JsonValue], ...]
     readiness: IBKRFoundationReadiness
@@ -224,7 +224,6 @@ def evaluate_ibkr_foundation_readiness(
         if result is None:
             raise ValueError("IBKR source evidence is missing a planned request result")
         requests_by_instrument.setdefault(str(request.instrument_id), []).append((request, result))
-
     rows_by_candidate = {
         candidate: sum(
             partition.row_count
@@ -262,19 +261,11 @@ def evaluate_ibkr_foundation_readiness(
     eligible_instruments = frozenset(raw_eligible)
     if len(eligible_instruments) != len(raw_eligible):
         raise ValueError("IBKR source-result provider-history eligibility summary is not unique")
-    source_identity_evidence: dict[str, JsonValue]
-    if source_summary.result_id is not None:
-        source_identity_evidence = {
-            "source_result_id": source_summary.result_id,
-            "source_closure_id": source_summary.closure_id,
-            "source_verification_id": source_summary.verification_id,
-        }
-    else:
-        legacy_aggregate = source_summary.legacy_aggregate_sha256
-        if legacy_aggregate is None:
-            raise ValueError("IBKR v2 source aggregate identity is missing")
-        source_identity_evidence = {"source_aggregate_sha256": legacy_aggregate}
-
+    source_identity_evidence = {
+        "source_result_id": source_summary.result_id,
+        "source_closure_id": source_summary.closure_id,
+        "source_verification_id": source_summary.verification_id,
+    }
     causes: set[IBKRFoundationReadinessCause] = set()
     active_intervals = active_intervals or {}
 

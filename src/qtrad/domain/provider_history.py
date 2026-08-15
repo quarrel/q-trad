@@ -197,7 +197,6 @@ class ProviderHistoricalObservation:
     close: Decimal
     request_sha256: str
     result_sha256: str
-    aggregate_sha256: str
     attempt_id: UUID
     attempt_started_at: datetime
     attempt_completed_at: datetime
@@ -238,7 +237,6 @@ class ProviderHistoricalObservation:
         _require_sha256(self.plan_sha256, "provider-history plan identity")
         _require_sha256(self.request_sha256, "provider-history request identity")
         _require_sha256(self.result_sha256, "provider-history request-result identity")
-        _require_sha256(self.aggregate_sha256, "provider-history aggregate identity")
         _require_sha256(self.observation_sha256, "provider-history observation identity")
         require_utc(self.interval_start, "provider-history interval start")
         require_utc(self.interval_end, "provider-history interval end")
@@ -324,7 +322,6 @@ class ProviderHistoricalObservation:
             "callback_sequence": self.callback_sequence,
             "request_sha256": self.request_sha256,
             "result_sha256": self.result_sha256,
-            "aggregate_sha256": self.aggregate_sha256,
             "attempt_id": str(self.attempt_id),
             "attempt_started_at": utc_text(self.attempt_started_at),
             "attempt_completed_at": utc_text(self.attempt_completed_at),
@@ -380,7 +377,6 @@ class ProviderHistoricalObservation:
             "callback_sequence",
             "request_sha256",
             "result_sha256",
-            "aggregate_sha256",
             "attempt_id",
             "attempt_started_at",
             "attempt_completed_at",
@@ -415,7 +411,6 @@ class ProviderHistoricalObservation:
             close=_decimal(str(data["close"]), "close"),
             request_sha256=str(data["request_sha256"]),
             result_sha256=str(data["result_sha256"]),
-            aggregate_sha256=str(data["aggregate_sha256"]),
             attempt_id=UUID(str(data["attempt_id"])),
             attempt_started_at=_parse_time(str(data["attempt_started_at"]), "attempt_started_at"),
             attempt_completed_at=_parse_time(
@@ -579,98 +574,6 @@ class ProviderHistoricalPartitionReference:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ProviderHistoricalDataset:
-    """Root semantic identity over ordered provider-history partition references."""
-
-    partitions: tuple[ProviderHistoricalPartitionReference, ...]
-    contract_selection_sha256: str
-    plan_sha256: str
-    runtime_sha256: str
-    aggregate_sha256: str
-    availability_policy: ProviderHistoricalAvailabilityPolicy
-    row_count: int
-    dataset_sha256: str
-    _identity_validation_bypass: bool = field(default=False, repr=False, compare=False)
-
-    CONTRACT = PROVIDER_HISTORICAL_OBSERVATIONS_CONTRACT
-    SCHEMA_VERSION = PROVIDER_HISTORY_SCHEMA_VERSION
-
-    def __post_init__(self) -> None:
-        for field_name, value in (
-            ("contract selection identity", self.contract_selection_sha256),
-            ("plan identity", self.plan_sha256),
-            ("runtime identity", self.runtime_sha256),
-            ("aggregate identity", self.aggregate_sha256),
-            ("dataset identity", self.dataset_sha256),
-        ):
-            _require_sha256(value, f"provider-history {field_name}")
-        if tuple(sorted(self.partitions, key=lambda item: item.key)) != self.partitions:
-            raise ValueError("provider-history partition references must be in canonical order")
-        keys = [partition.key for partition in self.partitions]
-        if len(set(keys)) != len(keys):
-            raise ValueError("provider-history partition references must be unique")
-        if self.row_count < 0 or self.row_count != sum(
-            partition.row_count for partition in self.partitions
-        ):
-            raise ValueError("provider-history dataset row count is inconsistent")
-        if not self._identity_validation_bypass and self.dataset_sha256 != sha256_json(
-            self.identity_payload()
-        ):
-            raise ValueError("provider-history dataset identity does not match canonical content")
-
-    def identity_payload(self) -> dict[str, JsonValue]:
-        return {
-            "contract": self.CONTRACT,
-            "schema_version": self.SCHEMA_VERSION,
-            "source_class": PROVIDER_HISTORY_SOURCE_CLASS,
-            "provider": PROVIDER_HISTORY_PROVIDER,
-            "environment": PROVIDER_HISTORY_ENVIRONMENT,
-            "contract_selection_sha256": self.contract_selection_sha256,
-            "plan_sha256": self.plan_sha256,
-            "runtime_sha256": self.runtime_sha256,
-            "aggregate_sha256": self.aggregate_sha256,
-            "availability_policy": self.availability_policy.as_json_value(),
-            "partitions": [partition.as_json_value() for partition in self.partitions],
-        }
-
-    def as_json_value(self) -> dict[str, JsonValue]:
-        return {
-            **self.identity_payload(),
-            "row_count": self.row_count,
-            "dataset_sha256": self.dataset_sha256,
-        }
-
-    @classmethod
-    def create(
-        cls,
-        partitions: tuple[ProviderHistoricalPartitionReference, ...],
-        *,
-        contract_selection_sha256: str,
-        plan_sha256: str,
-        runtime_sha256: str,
-        aggregate_sha256: str,
-        availability_policy: ProviderHistoricalAvailabilityPolicy,
-    ) -> ProviderHistoricalDataset:
-        ordered = tuple(sorted(partitions, key=lambda item: item.key))
-        provisional = cls(
-            partitions=ordered,
-            contract_selection_sha256=contract_selection_sha256,
-            plan_sha256=plan_sha256,
-            runtime_sha256=runtime_sha256,
-            aggregate_sha256=aggregate_sha256,
-            availability_policy=availability_policy,
-            row_count=sum(partition.row_count for partition in ordered),
-            dataset_sha256="0" * 64,
-            _identity_validation_bypass=True,
-        )
-        return replace(
-            provisional,
-            dataset_sha256=sha256_json(provisional.identity_payload()),
-            _identity_validation_bypass=False,
-        )
-
-
 def row_sort_key(row: ProviderHistoricalObservation) -> tuple[str, datetime, str]:
     return (row.instrument_id, row.interval_start, row.request_sha256)
 
@@ -679,8 +582,7 @@ def canonical_json(value: Mapping[str, JsonValue]) -> bytes:
     return canonical_json_bytes(value)
 
 
-# Stage 7 v3 identity contract. The retained classes above remain available only
-# to read the named v1 migration evidence; normal Stage 7 uses this contract.
+# Stage 7 v3 identity contract.
 PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT = "qtrad-provider-historical-observations-v3"
 PROVIDER_HISTORY_V3_SCHEMA_VERSION = 3
 
@@ -711,19 +613,6 @@ class ProviderHistoricalDatasetV3:
 
     CONTRACT = PROVIDER_HISTORICAL_OBSERVATIONS_V3_CONTRACT
     SCHEMA_VERSION = PROVIDER_HISTORY_V3_SCHEMA_VERSION
-
-    @property
-    def plan_sha256(self) -> str:
-        return self.stage6_plan_sha256
-
-    @property
-    def runtime_sha256(self) -> str:
-        return self.stage6_runtime_sha256
-
-    @property
-    def aggregate_sha256(self) -> str:
-        """Compatibility metadata only; never serialised or used for identity."""
-        return self.stage6_result_id
 
     def __post_init__(self) -> None:
         for value, field_name in (

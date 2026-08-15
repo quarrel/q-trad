@@ -4,14 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta
-from typing import Any, Protocol, cast
+from datetime import datetime
+from typing import Protocol, cast
 
 from qtrad.domain.events import JsonValue
 from qtrad.domain.ibkr_historical import (
     IbkrHistoricalPlan,
     IbkrHistoricalRequest,
-    IbkrHistoricalRequestKind,
 )
 from qtrad.domain.ibkr_results import (
     IbkrHistoricalAggregateResult,
@@ -204,7 +203,7 @@ class ProviderHistorySelection:
 class ProviderHistorySourceEvidence:
     """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
 
-    dataset: Any
+    dataset: ProviderHistoricalDatasetV3
     observations: ProviderHistoryObservationRows
     source_artifact: ProviderHistorySource
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
@@ -212,44 +211,27 @@ class ProviderHistorySourceEvidence:
     selection: ProviderHistorySelection | None = None
 
     def __post_init__(self) -> None:
-        if isinstance(self.dataset, ProviderHistoricalDatasetV3):
-            source_result = getattr(self.source_artifact, "source_result", None)
-            if source_result is None:
-                raise ValueError("provider-history v3 source result summary is missing")
-            if (
-                self.dataset.contract_selection_sha256
-                != self.source_artifact.plan.contract_selection_sha256
-            ):
-                raise ValueError(
-                    "provider-history v3 source contract selection differs from its dataset"
-                )
-            if self.dataset.stage6_result_id != source_result.result_id:
-                raise ValueError("provider-history v3 Stage 6 result differs from its dataset")
-            if self.dataset.stage6_closure_id != source_result.closure_id:
-                raise ValueError("provider-history v3 Stage 6 closure differs from its dataset")
-            if (
-                getattr(self.source_artifact, "verification_id", None)
-                != self.dataset.stage6_verification_id
-            ):
-                raise ValueError(
-                    "provider-history v3 Stage 6 verification differs from its dataset"
-                )
-            if self.dataset.stage6_plan_sha256 != self.source_artifact.plan.plan_sha256:
-                raise ValueError("provider-history v3 Stage 6 plan differs from its dataset")
-        else:
-            if (
-                self.dataset.contract_selection_sha256
-                != self.source_artifact.plan.contract_selection_sha256
-            ):
-                raise ValueError(
-                    "provider-history source contract selection differs from its dataset"
-                )
-            if self.dataset.plan_sha256 != self.source_artifact.plan.plan_sha256:
-                raise ValueError("provider-history source plan differs from its dataset")
-            if self.dataset.runtime_sha256 != self.source_artifact.plan.runtime_sha256:
-                raise ValueError("provider-history source runtime differs from its dataset")
-            if self.dataset.aggregate_sha256 != self.source_artifact.aggregate.aggregate_sha256:
-                raise ValueError("provider-history source aggregate differs from its dataset")
+        source_result = getattr(self.source_artifact, "source_result", None)
+        if source_result is None:
+            raise ValueError("provider-history v3 source result summary is missing")
+        if (
+            self.dataset.contract_selection_sha256
+            != self.source_artifact.plan.contract_selection_sha256
+        ):
+            raise ValueError(
+                "provider-history v3 source contract selection differs from its dataset"
+            )
+        if self.dataset.stage6_result_id != source_result.result_id:
+            raise ValueError("provider-history v3 Stage 6 result differs from its dataset")
+        if self.dataset.stage6_closure_id != source_result.closure_id:
+            raise ValueError("provider-history v3 Stage 6 closure differs from its dataset")
+        if (
+            getattr(self.source_artifact, "verification_id", None)
+            != self.dataset.stage6_verification_id
+        ):
+            raise ValueError("provider-history v3 Stage 6 verification differs from its dataset")
+        if self.dataset.stage6_plan_sha256 != self.source_artifact.plan.plan_sha256:
+            raise ValueError("provider-history v3 Stage 6 plan differs from its dataset")
         if self.selection is None:
             if len(self.observations) != self.dataset.row_count:
                 raise ValueError(
@@ -283,101 +265,31 @@ def request_evidence_by_hash(
     return result
 
 
-def provider_history_partition_row_bounds(
-    source: ProviderHistorySource,
-) -> dict[tuple[str, date], int]:
-    eligible_instruments = _provider_history_eligible_instruments(source)
-    return _partition_row_bounds(source, eligible_instruments)
-
-
-def _partition_row_bounds(
-    source: ProviderHistorySource,
-    eligible_instruments: frozenset[str],
-) -> dict[tuple[str, date], int]:
-    bounds: dict[tuple[str, date], int] = {}
-    for request in source.plan.requests:
-        if (
-            request.kind is not IbkrHistoricalRequestKind.MIDPOINT_BARS
-            or str(request.instrument_id) not in eligible_instruments
-        ):
-            continue
-        day = request.interval_start.replace(hour=0, minute=0, second=0, microsecond=0)
-        while day < request.interval_end:
-            next_day = day + timedelta(days=1)
-            overlap_start = max(request.interval_start, day)
-            overlap_end = min(request.interval_end, next_day)
-            minutes = int((overlap_end - overlap_start).total_seconds() // 60)
-            if minutes:
-                key = (str(request.instrument_id), day.date())
-                bounds[key] = bounds.get(key, 0) + minutes
-            day = next_day
-    return bounds
-
-
-def _provider_history_eligible_instruments(
-    source: ProviderHistorySource,
-) -> frozenset[str]:
-    source_result = getattr(source, "source_result", None)
-    if source_result is None:
-        source_result = source.aggregate
-    raw_value: object = source_result.entitlement_summary.get(
-        "provider_history_eligible_instruments"
-    )
-    if not isinstance(raw_value, list):
-        raise ValueError("IBKR source-result eligibility summary is invalid")
-    raw: list[object] = cast(list[object], raw_value)
-    eligible_items: list[str] = []
-    for item in raw:
-        if not isinstance(item, str) or not item:
-            raise ValueError("IBKR source-result eligibility summary is invalid")
-        eligible_items.append(item)
-    eligible = frozenset(eligible_items)
-    if len(eligible) != len(raw):
-        raise ValueError("IBKR source-result eligibility summary is not unique")
-    return eligible
-
-
 @dataclass(frozen=True, slots=True)
 class ProviderHistoryStage6Summary:
-    """Minimal Stage 6 identity and entitlement handoff for Stage 8."""
+    """Minimal Stage 6 result identity and entitlement handoff for Stage 8."""
 
-    result_id: str | None
-    closure_id: str | None
-    verification_id: str | None
+    result_id: str
+    closure_id: str
+    verification_id: str
     coverage_summary: Mapping[str, JsonValue]
     entitlement_summary: Mapping[str, JsonValue]
-    legacy_aggregate_sha256: str | None
 
 
 def provider_history_stage6_summary(
     source_evidence: ProviderHistorySourceEvidence,
 ) -> ProviderHistoryStage6Summary:
-    """Return explicit Stage 6 source-result metadata for current consumers.
-
-    The v2 aggregate branch is retained only for named migration readers and is
-    deliberately not represented as a v3 result identity.
-    """
-
-    if isinstance(source_evidence.dataset, ProviderHistoricalDatasetV3):
-        source_result = getattr(source_evidence.source_artifact, "source_result", None)
-        if source_result is None:
-            raise ValueError("provider-history v3 source result summary is missing")
-        verification_id = getattr(source_evidence.source_artifact, "verification_id", None)
-        return ProviderHistoryStage6Summary(
-            result_id=source_result.result_id,
-            closure_id=source_result.closure_id,
-            verification_id=verification_id,
-            coverage_summary=cast(Mapping[str, JsonValue], source_result.coverage_summary),
-            entitlement_summary=cast(Mapping[str, JsonValue], source_result.entitlement_summary),
-            legacy_aggregate_sha256=None,
-        )
-
-    aggregate = source_evidence.source_artifact.aggregate
+    """Return the authenticated Stage 6 identity and source summaries."""
+    source_result = getattr(source_evidence.source_artifact, "source_result", None)
+    if source_result is None:
+        raise ValueError("provider-history v3 source result summary is missing")
+    verification_id = getattr(source_evidence.source_artifact, "verification_id", None)
+    if not isinstance(verification_id, str) or not verification_id:
+        raise ValueError("provider-history v3 verification identity is missing")
     return ProviderHistoryStage6Summary(
-        result_id=None,
-        closure_id=None,
-        verification_id=None,
-        coverage_summary=aggregate.coverage_summary,
-        entitlement_summary=aggregate.entitlement_summary,
-        legacy_aggregate_sha256=aggregate.aggregate_sha256,
+        result_id=source_result.result_id,
+        closure_id=source_result.closure_id,
+        verification_id=verification_id,
+        coverage_summary=cast(Mapping[str, JsonValue], source_result.coverage_summary),
+        entitlement_summary=cast(Mapping[str, JsonValue], source_result.entitlement_summary),
     )
