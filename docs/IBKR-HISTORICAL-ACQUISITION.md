@@ -1265,3 +1265,29 @@ foundations regardless of readiness. No Stage 6 or Stage 7 immutable evidence wa
 This amendment makes receipts the immediate-parent authority, reserves cumulative semantic replay for
 exceptional deep audit, and makes confirmatory promotion an authentication and operator-authorisation
 step rather than another verifier run. The implementation migration remains active work.
+
+
+## 3.4 Retained v2 migration invalidation (attempt 3)
+
+The retained-file H4 migration attempt rooted at
+`/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04-attempt3`
+is permanently abandoned after its Stage 8 equivalence check identified a scientific divergence.
+The diagnosed mismatch is bound by the packet-specific migration-only invalidation helper:
+
+* target return dispositions changed from `VALID` to `UNAVAILABLE_BY_FREEZE` (all four horizons);
+* chronological folds changed from nine to zero; and
+* readiness changed from `QUALIFYING_HISTORY_READY` with no causes to
+  `INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION` with explicit insufficient-support, coverage,
+  duration and confirmatory-target causes.
+
+A separately authorised run may authenticate the immutable attempt failure record, retained v2
+Stage 8 receipt/promotion and all current v3 receipts/closures, then create exactly one fresh
+`migration-invalidation-record.json` completion record. It must perform no Stage 6/7 replay, no
+Stage 8 row decode or semantic verifier replay, write no replacement
+promotion, and leave the retained v2 authority and abandoned attempt untouched. The completion
+root must be absent before the run and is never reused after a failure. Do not resume or create an
+attempt-4 destination. The old promotion is explicitly superseded and is not carried forward.
+
+After the operator-authorised invalidation record is independently authenticated, the temporary
+retained-v2 migration readers and this packet-specific invalidation bridge are deletion candidates
+under the PR-H4 cleanup trigger; no normal current CLI or writer may mint or consume v2 evidence.

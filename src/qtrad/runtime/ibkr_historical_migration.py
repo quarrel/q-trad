@@ -39,6 +39,7 @@ from qtrad.runtime.ibkr_foundation import (
     _supported_child_kinds,
     _v3_readiness_projection,
     _verify_children_blind,
+    authenticate_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -48,6 +49,7 @@ from qtrad.runtime.ibkr_foundation_promotion import (
 )
 from qtrad.runtime.ibkr_results import (
     _read_legacy_ibkr_historical_result_v2_header,
+    authenticate_ibkr_historical_result,
     publish_ibkr_historical_result,
     verify_ibkr_historical_result,
 )
@@ -57,6 +59,7 @@ from qtrad.runtime.provider_history_v2 import (
     authenticate_provider_history_v2,
 )
 from qtrad.runtime.provider_history_v3 import (
+    authenticate_provider_history_v3,
     build_provider_history,
     verify_provider_history,
 )
@@ -71,7 +74,39 @@ _STAGE8_OUTPUT = "foundation-v3.json"
 _STAGE8_RECEIPT = "foundation-v3-verification-receipt.json"
 _PROMOTION_OUTPUT = "foundation-v3-confirmatory-promotion.json"
 _RECORD_OUTPUT = "migration-equivalence-record.json"
+_INVALIDATION_RECORD_OUTPUT = "migration-invalidation-record.json"
 _FAILURE_OUTPUT = "migration-failure-record.json"
+_ATTEMPT3_ROOT_NAME = "r2-simplification-h4-670e04-attempt3"
+_ATTEMPT3_COMMIT = "037b7db2786a0ba48a2fd18d0ed5fb21dbdee0d2"
+_ATTEMPT3_ERROR = {"type": "ValueError", "message": "Stage 8 migration child kinds changed"}
+_ATTEMPT3_OLD_TARGET_COUNTS = {
+    "300.0": {"MISSING_END": 4485, "MISSING_START": 514832, "VALID": 1053163},
+    "900.0": {"MISSING_END": 13455, "MISSING_START": 514832, "VALID": 1044193},
+    "1800.0": {"MISSING_END": 23790, "MISSING_START": 514832, "VALID": 1033858},
+    "3600.0": {"MISSING_END": 41920, "MISSING_START": 514832, "VALID": 1015728},
+}
+_ATTEMPT3_NEW_TARGET_COUNTS = {
+    "300.0": {
+        "MISSING_END": 4485,
+        "MISSING_START": 514832,
+        "UNAVAILABLE_BY_FREEZE": 1053163,
+    },
+    "900.0": {
+        "MISSING_END": 13455,
+        "MISSING_START": 514832,
+        "UNAVAILABLE_BY_FREEZE": 1044193,
+    },
+    "1800.0": {
+        "MISSING_END": 23790,
+        "MISSING_START": 514832,
+        "UNAVAILABLE_BY_FREEZE": 1033858,
+    },
+    "3600.0": {
+        "MISSING_END": 41920,
+        "MISSING_START": 514832,
+        "UNAVAILABLE_BY_FREEZE": 1015728,
+    },
+}
 _CAPACITY_OVERHEAD_BYTES = 1_048_576
 _CAPACITY_SAFETY_MULTIPLIER = 2
 
@@ -606,6 +641,282 @@ def migrate_retained_ibkr_evidence(
         except Exception as record_error:
             error.add_note(f"migration failure record could not be written: {record_error}")
         raise
+
+
+def _invalidate_failed_stage8_attempt3(
+    paths: MigrationPaths,
+    *,
+    completion_root: Path,
+    expected_implementation_commit: str,
+    promotion_authorisation: PromotionAuthorisation,
+) -> Path:
+    """Record the one retained attempt-3 Stage 8 invalidation.
+
+    This private packet-specific bridge authenticates immutable metadata, binds the
+    diagnosed scientific divergence, and writes no replacement promotion.
+    """
+    attempt_root = _absolute_lexical(paths.destination_root, "attempt root")
+    completion = _absolute_lexical(completion_root, "completion root")
+    if attempt_root.name != _ATTEMPT3_ROOT_NAME:
+        raise ValueError("attempt root is not the frozen attempt-3 packet")
+    if (
+        completion == attempt_root
+        or completion.is_relative_to(attempt_root)
+        or attempt_root.is_relative_to(completion)
+    ):
+        raise ValueError("attempt and completion roots must be disjoint")
+    if completion.exists():
+        raise FileExistsError(f"invalidation completion root already exists: {completion}")
+    if not completion.parent.is_dir():
+        raise FileNotFoundError(f"invalidation completion parent is missing: {completion.parent}")
+    for ancestor in (completion.parent, *completion.parent.parents):
+        if ancestor.is_symlink():
+            raise ValueError("invalidation completion path contains a symlink")
+        if ancestor.exists() and not ancestor.is_dir():
+            raise ValueError("invalidation completion path contains a non-directory ancestor")
+    for retained in (*_source_closure_roots(paths), *_retained_source_paths(paths), attempt_root):
+        if _paths_overlap(completion, retained):
+            raise ValueError("invalidation completion overlaps retained or attempt evidence")
+
+    failure_path = _require_regular_file(paths.failure_record, "attempt failure record")
+    failure_bytes = failure_path.read_bytes()
+    failure = _read_json(failure_path, "attempt failure record")
+    if failure_bytes != canonical_json_bytes(cast(dict[str, JsonValue], failure)):
+        raise ValueError("attempt failure record is not canonical")
+    failure_identity = dict(failure)
+    failure_sha256 = _string(
+        failure_identity.pop("record_sha256"), "attempt failure record identity"
+    )
+    if _digest_json(failure_identity) != failure_sha256:
+        raise ValueError("attempt failure record identity changed")
+    if (
+        failure["contract"] != MIGRATION_CONTRACT
+        or failure["schema_version"] != MIGRATION_SCHEMA_VERSION
+        or failure["kind"] != "failure"
+        or failure["phase"] != "stage8-equivalence"
+        or failure["implementation_commit"] != _ATTEMPT3_COMMIT
+        or failure["old_authority_untouched"] is not True
+        or failure["error"] != _ATTEMPT3_ERROR
+    ):
+        raise ValueError("attempt-3 failure checkpoint is not the frozen packet")
+    if expected_implementation_commit != _ATTEMPT3_COMMIT:
+        raise ValueError("attempt implementation commit is not the frozen attempt-3 commit")
+    snapshots = failure["outputs"]
+    if not isinstance(snapshots, list):
+        raise ValueError("attempt failure output snapshot is not a list")
+    for raw_snapshot in snapshots:
+        snapshot = _mapping(raw_snapshot, "attempt output snapshot")
+        candidate = _absolute_lexical(
+            Path(_string(snapshot["path"], "attempt output path")), "attempt output"
+        )
+        if not candidate.is_relative_to(attempt_root):
+            raise ValueError("attempt output escapes its immutable root")
+        exists = snapshot["exists"]
+        if not isinstance(exists, bool) or candidate.exists() is not exists:
+            raise ValueError("attempt output existence changed")
+        if exists and candidate.is_file() and not candidate.is_symlink():
+            expected_sha256 = snapshot.get("sha256")
+            if not isinstance(expected_sha256, str) or _file_sha256(candidate) != expected_sha256:
+                raise ValueError("attempt output bytes changed")
+    if paths.promotion.exists() or paths.record.exists():
+        raise ValueError("attempt already contains a promotion or success record")
+
+    # Authenticate metadata only: no Stage 6/7 transformation, Stage 8 row decode,
+    # semantic replay, or parent verifier is permitted on this invalidation path.
+    old_stage6 = _read_legacy_ibkr_historical_result_v2_header(
+        paths.source_stage6_manifest, require_exact_tree=True
+    )
+    old_stage7_manifest = _read_provider_history_v2_manifest(paths.source_stage7_manifest)
+    _old_stage7_auth = authenticate_provider_history_v2(
+        paths.source_stage7_manifest, receipt=paths.source_stage7_receipt
+    )
+    old_stage8_auth = _authenticate_ibkr_foundation_migration_v2(
+        paths.source_stage8_foundation, receipt=paths.source_stage8_receipt
+    )
+    old_promotion_auth = _authenticate_ibkr_foundation_promotion_migration_v2(
+        paths.source_stage8_foundation,
+        receipt=paths.source_stage8_receipt,
+        promotion=paths.source_promotion,
+    )
+    stage6_auth = authenticate_ibkr_historical_result(
+        paths.stage6_manifest, receipt=paths.stage6_receipt
+    )
+    stage7_auth = authenticate_provider_history_v3(
+        paths.stage7_manifest, receipt=paths.stage7_receipt
+    )
+    stage8_auth = authenticate_ibkr_foundation(
+        paths.stage8_foundation, receipt=paths.stage8_receipt
+    )
+
+    source = _mapping(failure["source"], "attempt failure source")
+    expected_source: dict[str, object] = {
+        "stage6_result_id": old_stage6.aggregate.result_id,
+        "stage6_closure_id": old_stage6.aggregate.closure_id,
+        "stage7_dataset_id": old_stage7_manifest.dataset.dataset_sha256,
+        "stage7_manifest_sha256": _file_sha256(paths.source_stage7_manifest),
+        "stage8_build_id": old_stage8_auth["foundation_build_sha256"],
+        "stage8_manifest_sha256": _file_sha256(paths.source_stage8_foundation),
+        "promotion_id": old_promotion_auth.promotion_sha256,
+    }
+    for field, expected in expected_source.items():
+        if source[field] != expected:
+            raise ValueError(f"attempt failure source {field} changed")
+
+    old_document = _read_json(paths.source_stage8_foundation, "retained Stage 8 foundation")
+    new_document = _read_json(paths.stage8_foundation, "current Stage 8 foundation")
+    old_payload = _mapping(old_document["payload"], "retained Stage 8 payload")
+    new_payload = _mapping(new_document["payload"], "current Stage 8 payload")
+
+    def child_summary(payload: Mapping[str, object], field: str) -> dict[str, JsonValue]:
+        children = _mapping(payload["children"], f"{field} children")
+        result: dict[str, JsonValue] = {}
+        for kind, raw_refs in children.items():
+            if not isinstance(raw_refs, list):
+                raise ValueError(f"{field} child references are not a list")
+            refs: list[JsonValue] = []
+            for raw_ref in raw_refs:
+                ref = _mapping(raw_ref, f"{field} {kind} child")
+                row_count = ref["row_count"]
+                if not isinstance(row_count, int) or row_count < 0:
+                    raise ValueError(f"{field} {kind} row count is invalid")
+                refs.append(
+                    cast(
+                        JsonValue,
+                        {
+                            "dataset_id": _string(ref["dataset_id"], f"{field} {kind} dataset"),
+                            "row_count": row_count,
+                        },
+                    )
+                )
+            result[kind] = refs
+        return result
+
+    old_children = child_summary(old_payload, "retained Stage 8")
+    new_children = child_summary(new_payload, "current Stage 8")
+    old_folds = sum(
+        cast(int, _mapping(ref, "old fold reference")["row_count"])
+        for ref in cast(list[object], old_children["folds"])
+    )
+    new_folds = sum(
+        cast(int, _mapping(ref, "new fold reference")["row_count"])
+        for ref in cast(list[object], new_children["folds"])
+    )
+    old_readiness = _mapping(old_payload["readiness"], "retained Stage 8 readiness")
+    new_readiness = _mapping(new_payload["readiness"], "current Stage 8 readiness")
+    expected_new_causes = [
+        "INSUFFICIENT_COMMON_SUPPORT",
+        "INSUFFICIENT_BLOCK_COVERAGE",
+        "INSUFFICIENT_DURATION",
+        "MISSING_CONFIRMATORY_TARGET",
+    ]
+    if (
+        old_readiness["state"] != "QUALIFYING_HISTORY_READY"
+        or old_readiness["causes"] != []
+        or new_readiness["state"] != "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION"
+        or new_readiness["causes"] != expected_new_causes
+        or old_folds != 9
+        or new_folds != 0
+    ):
+        raise ValueError("attempt-3 fold/readiness divergence changed")
+
+    stage7_receipt = _read_json(paths.stage7_receipt, "Stage 7 verification receipt")
+    completion.mkdir()
+    old_authority = {
+        "stage8": {
+            "build_sha256": old_stage8_auth["foundation_build_sha256"],
+            "manifest_sha256": _file_sha256(paths.source_stage8_foundation),
+            "closure_id": _file_sha256(paths.source_stage8_foundation),
+            "receipt_sha256": _file_sha256(paths.source_stage8_receipt),
+            "verification_id": old_stage8_auth["verification_receipt_id"],
+        },
+        "promotion": {
+            "foundation_bundle_id": old_promotion_auth.foundation_bundle_id,
+            "promotion_sha256": old_promotion_auth.promotion_sha256,
+            "file_sha256": _file_sha256(paths.source_promotion),
+        },
+        "status": "SUPERSEDED_NOT_CARRIED_FORWARD",
+    }
+    record_identity = cast(
+        dict[str, JsonValue],
+        {
+            "contract": "qtrad-ibkr-historical-v2-to-v3-attempt3-invalidation-v2",
+            "schema_version": 2,
+            "kind": "invalidation",
+            "purpose": "stage8_attempt3_invalidation_no_promotion",
+            "equivalent": False,
+            "promotion_created": False,
+            "authority_usable": False,
+            "implementation_commit": _ATTEMPT3_COMMIT,
+            "attempt": {
+                "root": str(attempt_root),
+                "failure_record_sha256": failure_sha256,
+                "phase": "stage8-equivalence",
+                "error": _ATTEMPT3_ERROR,
+            },
+            "old_authority": cast(JsonValue, old_authority),
+            "new_outputs": {
+                "stage6": {
+                    "result_id": stage6_auth.aggregate.result_id,
+                    "closure_id": stage6_auth.aggregate.closure_id,
+                    "manifest_sha256": _file_sha256(paths.stage6_manifest),
+                    "receipt_sha256": _file_sha256(paths.stage6_receipt),
+                },
+                "stage7": {
+                    "dataset_sha256": stage7_auth.dataset.dataset_sha256,
+                    "manifest_sha256": _file_sha256(paths.stage7_manifest),
+                    "receipt_sha256": _file_sha256(paths.stage7_receipt),
+                    "verification_id": _string(
+                        stage7_receipt["verification_id"], "Stage 7 verification identity"
+                    ),
+                },
+                "stage8": {
+                    "foundation_id": stage8_auth["foundation_id"],
+                    "closure_id": stage8_auth["closure_id"],
+                    "manifest_sha256": _file_sha256(paths.stage8_foundation),
+                    "receipt_sha256": _file_sha256(paths.stage8_receipt),
+                    "verification_id": stage8_auth["verification_id"],
+                    "children": new_children,
+                },
+            },
+            "semantic_divergence": {
+                "target_return_dispositions": {
+                    "basis": "operator-reviewed probe bound to authenticated closures",
+                    "old_closure_id": _file_sha256(paths.source_stage8_foundation),
+                    "new_closure_id": stage8_auth["closure_id"],
+                    "old": cast(JsonValue, _ATTEMPT3_OLD_TARGET_COUNTS),
+                    "new": cast(JsonValue, _ATTEMPT3_NEW_TARGET_COUNTS),
+                },
+                "fold_count": {"old": old_folds, "new": new_folds},
+                "readiness": {
+                    "old": {"state": old_readiness["state"], "causes": old_readiness["causes"]},
+                    "new": {"state": new_readiness["state"], "causes": new_readiness["causes"]},
+                },
+            },
+            "work_counts": {
+                "stage6_transformation_replays": 0,
+                "stage7_transformation_replays": 0,
+                "stage8_row_decodes": 0,
+                "stage6_semantic_verifier_replays": 0,
+                "stage7_semantic_verifier_replays": 0,
+            },
+            "operator_authorization": {
+                "authorized_by": promotion_authorisation.authorized_by,
+                "authorized_at": promotion_authorisation.authorized_at.isoformat(),
+                "authorization_reference": promotion_authorisation.authorization_reference,
+            },
+            "safety": {
+                "provider_calls": 0,
+                "database_reacquisition": 0,
+                "holdout_access": 0,
+                "new_promotion": 0,
+                "old_authority_untouched": True,
+            },
+        },
+    )
+    record = {**record_identity, "record_sha256": _digest_json(record_identity)}
+    record_path = completion / _INVALIDATION_RECORD_OUTPUT
+    _write_create_only(record_path, canonical_json_bytes(record))
+    return record_path
 
 
 def _replay_legacy_stage6(

@@ -1151,3 +1151,289 @@ def test_stage7_request_evidence_missing_or_changed_entry_is_rejected(mutation: 
     )
     with pytest.raises(ValueError, match="request evidence"):
         migration._compare_stage7(cast(Any, old), cast(Any, new))
+
+
+def _write_attempt3_failure_fixture(
+    paths: migration.MigrationPaths,
+    *,
+    implementation_commit: str = "0" * 40,
+    phase: str = "stage8-equivalence",
+) -> None:
+    paths.destination_root.mkdir()
+    identity: dict[str, object] = {
+        "contract": migration.MIGRATION_CONTRACT,
+        "schema_version": migration.MIGRATION_SCHEMA_VERSION,
+        "kind": "failure",
+        "phase": phase,
+        "implementation_commit": implementation_commit,
+        "source": {
+            "stage6_result_id": "a" * 64,
+            "stage6_closure_id": "b" * 64,
+            "stage7_dataset_id": "c" * 64,
+            "stage7_manifest_sha256": "d" * 64,
+            "stage8_build_id": "e" * 64,
+            "stage8_manifest_sha256": "f" * 64,
+            "promotion_id": "g" * 64,
+        },
+        "capacity": {"required_bytes": 1, "available_bytes": 2},
+        "error": {"type": "ValueError", "message": "Stage 8 migration child kinds changed"},
+        "outputs": migration._failure_output_snapshot(paths),
+        "old_authority_untouched": True,
+    }
+    record = {**identity, "record_sha256": migration._digest_json(identity)}
+    paths.failure_record.write_bytes(migration.canonical_json_bytes(cast(Any, record)))
+
+
+@pytest.mark.parametrize("mutation", ["phase", "commit", "authority", "output"])
+def test_attempt3_invalidation_rejects_mutated_checkpoint_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+) -> None:
+    base_paths = _paths(tmp_path)
+    paths = replace(base_paths, destination_root=tmp_path / migration._ATTEMPT3_ROOT_NAME)
+    _write_attempt3_failure_fixture(paths)
+    failure = json.loads(paths.failure_record.read_text(encoding="utf-8"))
+    if mutation == "phase":
+        failure["phase"] = "stage7-equivalence"
+    elif mutation == "commit":
+        failure["implementation_commit"] = "1" * 40
+    elif mutation == "authority":
+        failure["old_authority_untouched"] = False
+    else:
+        output = paths.destination_root / "stage6-result-v3"
+        output.mkdir()
+        failure["outputs"] = migration._failure_output_snapshot(paths)
+        failure["outputs"][0]["exists"] = False
+    identity = {key: value for key, value in failure.items() if key != "record_sha256"}
+    failure["record_sha256"] = migration._digest_json(identity)
+    paths.failure_record.write_bytes(migration.canonical_json_bytes(failure))
+    calls: list[str] = []
+
+    def fail_stage6(*_args: object, **_kwargs: object) -> Any:
+        calls.append("stage6")
+        raise AssertionError("replay reached")
+
+    def fail_stage7(*_args: object, **_kwargs: object) -> Any:
+        calls.append("stage7")
+        raise AssertionError("replay reached")
+
+    monkeypatch.setattr(migration, "authenticate_ibkr_historical_result", fail_stage6)
+    monkeypatch.setattr(migration, "authenticate_provider_history_v3", fail_stage7)
+    with pytest.raises(ValueError):
+        migration._invalidate_failed_stage8_attempt3(
+            paths,
+            completion_root=tmp_path / "completion",
+            expected_implementation_commit="0" * 40,
+            promotion_authorisation=migration.PromotionAuthorisation(
+                authorized_by="operator",
+                authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+                authorization_reference="attempt3-invalidation-fixture",
+            ),
+        )
+    assert calls == []
+
+
+def test_attempt3_invalidation_requires_absent_completion_root_without_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_paths = _paths(tmp_path)
+    paths = replace(base_paths, destination_root=tmp_path / migration._ATTEMPT3_ROOT_NAME)
+    _write_attempt3_failure_fixture(paths)
+    completion = tmp_path / "completion"
+    completion.mkdir()
+
+    def fail_auth(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("authentication must not run")
+
+    monkeypatch.setattr(migration, "authenticate_ibkr_historical_result", fail_auth)
+    with pytest.raises(FileExistsError, match="completion root"):
+        migration._invalidate_failed_stage8_attempt3(
+            paths,
+            completion_root=completion,
+            expected_implementation_commit="0" * 40,
+            promotion_authorisation=migration.PromotionAuthorisation(
+                authorized_by="operator",
+                authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+                authorization_reference="attempt3-invalidation-fixture",
+            ),
+        )
+    assert not (completion / migration._RECORD_OUTPUT).exists()
+
+
+@pytest.mark.parametrize("mode", ["retained", "attempt", "symlink", "nondirectory"])
+def test_attempt3_invalidation_rejects_unsafe_completion_root_before_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mode: str
+) -> None:
+    base_paths = _paths(tmp_path)
+    paths = replace(base_paths, destination_root=tmp_path / migration._ATTEMPT3_ROOT_NAME)
+    _write_attempt3_failure_fixture(paths)
+    if mode == "retained":
+        completion = paths.source_stage6_manifest.parent / "completion"
+    elif mode == "attempt":
+        completion = paths.destination_root / "nested-completion"
+    elif mode == "symlink":
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        linked = tmp_path / "linked"
+        linked.symlink_to(outside, target_is_directory=True)
+        completion = linked / "completion"
+    else:
+        non_directory = tmp_path / "not-a-directory"
+        non_directory.write_bytes(b"x")
+        completion = non_directory / "completion"
+
+    def fail_auth(*_args: object, **_kwargs: object) -> Any:
+        raise AssertionError("authentication must not run")
+
+    monkeypatch.setattr(migration, "authenticate_ibkr_historical_result", fail_auth)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        migration._invalidate_failed_stage8_attempt3(
+            paths,
+            completion_root=completion,
+            expected_implementation_commit=migration._ATTEMPT3_COMMIT,
+            promotion_authorisation=migration.PromotionAuthorisation(
+                authorized_by="operator",
+                authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+                authorization_reference="unsafe-completion-fixture",
+            ),
+        )
+    assert not (tmp_path / "outside" / migration._INVALIDATION_RECORD_OUTPUT).exists()
+
+
+def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    base_paths = _paths(tmp_path)
+    paths = replace(base_paths, destination_root=tmp_path / migration._ATTEMPT3_ROOT_NAME)
+    _write_attempt3_failure_fixture(paths, implementation_commit=migration._ATTEMPT3_COMMIT)
+    for file_path in (
+        paths.stage6_manifest,
+        paths.stage6_receipt,
+        paths.stage7_manifest,
+        paths.stage7_receipt,
+        paths.stage8_foundation,
+        paths.stage8_receipt,
+    ):
+        file_path.parent.mkdir(parents=True, exist_ok=True)
+        file_path.write_bytes(b"{}")
+    paths.stage8_foundation.parent.joinpath("foundation-v3.json.children").mkdir()
+    failure = json.loads(paths.failure_record.read_text(encoding="utf-8"))
+    failure["outputs"] = migration._failure_output_snapshot(paths)
+    old_stage6 = SimpleNamespace(
+        aggregate=SimpleNamespace(result_id="old-result", closure_id="old-closure")
+    )
+    old_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="old-dataset"))
+    old_stage8 = {"foundation_build_sha256": "old-build", "verification_receipt_id": "old-ver"}
+    old_promotion = SimpleNamespace(
+        foundation_bundle_id="old-foundation", promotion_sha256="old-promotion"
+    )
+    current_stage6 = SimpleNamespace(
+        aggregate=SimpleNamespace(result_id="new-result", closure_id="new-closure")
+    )
+    current_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="new-dataset"))
+    current_stage8 = {
+        "foundation_id": "new-foundation",
+        "closure_id": "new-closure-id",
+        "verification_id": "new-ver",
+    }
+    source_stage8_manifest_sha = migration._file_sha256(paths.source_stage8_foundation)
+    source_stage7_manifest_sha = migration._file_sha256(paths.source_stage7_manifest)
+    failure["source"] = {
+        "stage6_result_id": "old-result",
+        "stage6_closure_id": "old-closure",
+        "stage7_dataset_id": "old-dataset",
+        "stage7_manifest_sha256": source_stage7_manifest_sha,
+        "stage8_build_id": "old-build",
+        "stage8_manifest_sha256": source_stage8_manifest_sha,
+        "promotion_id": "old-promotion",
+    }
+    identity = {key: value for key, value in failure.items() if key != "record_sha256"}
+    failure["record_sha256"] = migration._digest_json(identity)
+    paths.failure_record.write_bytes(migration.canonical_json_bytes(failure))
+    old_payload = {
+        "children": {"folds": [{"dataset_id": "old-folds", "row_count": 9}]},
+        "readiness": {"state": "QUALIFYING_HISTORY_READY", "causes": []},
+    }
+    new_payload = {
+        "children": {"folds": [{"dataset_id": "new-folds", "row_count": 0}]},
+        "readiness": {
+            "state": "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION",
+            "causes": [
+                "INSUFFICIENT_COMMON_SUPPORT",
+                "INSUFFICIENT_BLOCK_COVERAGE",
+                "INSUFFICIENT_DURATION",
+                "MISSING_CONFIRMATORY_TARGET",
+            ],
+        },
+    }
+    real_read_json = migration._read_json
+
+    def read_json(path: Path, field: str) -> dict[str, object]:
+        if path == paths.source_stage8_foundation:
+            return {"payload": old_payload}
+        if path == paths.stage8_foundation:
+            return {"payload": new_payload}
+        if path == paths.stage7_receipt:
+            return {"verification_id": "new-stage7-verification"}
+        return real_read_json(path, field)
+
+    calls: list[str] = []
+    monkeypatch.setattr(migration, "_read_json", read_json)
+    monkeypatch.setattr(
+        migration,
+        "_read_legacy_ibkr_historical_result_v2_header",
+        lambda *_args, **_kwargs: old_stage6,
+    )
+    monkeypatch.setattr(
+        migration,
+        "_read_provider_history_v2_manifest",
+        lambda *_args, **_kwargs: old_stage7,
+    )
+    monkeypatch.setattr(
+        migration,
+        "authenticate_provider_history_v2",
+        lambda *_args, **_kwargs: calls.append("old-stage7"),
+    )
+    monkeypatch.setattr(
+        migration,
+        "_authenticate_ibkr_foundation_migration_v2",
+        lambda *_args, **_kwargs: old_stage8,
+    )
+    monkeypatch.setattr(
+        migration,
+        "_authenticate_ibkr_foundation_promotion_migration_v2",
+        lambda *_args, **_kwargs: old_promotion,
+    )
+    monkeypatch.setattr(
+        migration,
+        "authenticate_ibkr_historical_result",
+        lambda *_args, **_kwargs: calls.append("stage6") or current_stage6,
+    )
+    monkeypatch.setattr(
+        migration,
+        "authenticate_provider_history_v3",
+        lambda *_args, **_kwargs: calls.append("stage7") or current_stage7,
+    )
+    monkeypatch.setattr(
+        migration,
+        "authenticate_ibkr_foundation",
+        lambda *_args, **_kwargs: calls.append("stage8") or current_stage8,
+    )
+    completion = tmp_path / "completion"
+    record_path = migration._invalidate_failed_stage8_attempt3(
+        paths,
+        completion_root=completion,
+        expected_implementation_commit=migration._ATTEMPT3_COMMIT,
+        promotion_authorisation=migration.PromotionAuthorisation(
+            authorized_by="operator",
+            authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+            authorization_reference="attempt3-invalidation-success-fixture",
+        ),
+    )
+    assert record_path.name == migration._INVALIDATION_RECORD_OUTPUT
+    record = json.loads(record_path.read_text(encoding="utf-8"))
+    assert record["equivalent"] is False
+    assert record["promotion_created"] is False
+    assert record["authority_usable"] is False
+    assert record["old_authority"]["status"] == "SUPERSEDED_NOT_CARRIED_FORWARD"
+    assert record["work_counts"]["stage8_row_decodes"] == 0
+    assert calls == ["old-stage7", "stage6", "stage7", "stage8"]
