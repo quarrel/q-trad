@@ -78,13 +78,13 @@ from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
     _materialise_synthetic_feature_manifests,
     _synthetic_pipeline_inputs,
+    audit_confirmatory_f2,
     authenticate_confirmatory_f2_promotion,
     build_oof_bundle,
     create_confirmatory_f2_promotion,
     freeze_confirmatory_selection,
     prepare_confirmatory_g2,
     reveal_confirmatory_g2,
-    verify_confirmatory_f2,
     verify_confirmatory_g1,
     verify_confirmatory_g2_feature_source,
     verify_confirmatory_g2_preparation,
@@ -770,7 +770,7 @@ def test_confirmatory_g2_cli_accepts_only_authority_and_operational_inputs(
     tail: tuple[str, ...],
 ) -> None:
     parsed = build_parser().parse_args(
-        ("research", "baselines", command, "--f2-bundle", "f2", *tail)
+        ("research", "baselines", command, "--f2-promotion", "f2", *tail)
     )
 
     assert parsed.baselines_command == command
@@ -800,7 +800,7 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         qualifying=True,
     )
 
-    authority = verify_confirmatory_f2(bundle_path)
+    authority = audit_confirmatory_f2(bundle_path)
     assert not hasattr(authority, "g2_feature_source_authority")
     assert not hasattr(foundation_runtime, "verify_g2_feature_source")
     with pytest.raises(TypeError, match="requires VerifiedConfirmatoryG1"):
@@ -1394,13 +1394,13 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
         ),
     )
     with pytest.raises(ValueError, match="independently replayed outcome-blind readiness"):
-        verify_confirmatory_f2(bundle_path)
+        audit_confirmatory_f2(bundle_path)
     monkeypatch.setattr(verification, "evaluate_outcome_blind_confirmatory_readiness", ready_report)
 
-    authority = verify_confirmatory_f2(bundle_path)
+    authority = audit_confirmatory_f2(bundle_path)
 
     assert type(authority) is VerifiedConfirmatoryF2
-    with pytest.raises(TypeError, match="constructed only by verify_confirmatory_f2"):
+    with pytest.raises(TypeError, match="constructed only by audit_confirmatory_f2"):
         VerifiedConfirmatoryF2()
     assert authority.evidence_class is EvidenceClass.CONFIRMATORY
     assert authority.descriptor["run_kind"] == CONFIRMATORY_RUN_KIND
@@ -1417,7 +1417,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
             ReadinessState.NOT_READY
         )
 
-    with pytest.raises(ValueError, match="require verify_confirmatory_f2"):
+    with pytest.raises(ValueError, match="require an authenticated F2 promotion"):
         verification.verify_oof_bundle(bundle_path)
 
     def reject_full_target_decoder(_: Path) -> dict[str, object]:
@@ -1643,7 +1643,7 @@ def test_confirmatory_verifier_rejects_implementation_bundle(
     )
     implementation = _build_synthetic_oof(tmp_path / "implementation" / "oof")
     with pytest.raises(ValueError, match="CONFIRMATORY evidence"):
-        verify_confirmatory_f2(implementation)
+        audit_confirmatory_f2(implementation)
 
 
 def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
@@ -1897,3 +1897,87 @@ def test_confirmatory_f2_promotion_rejects_reuse_and_mutation(
         with pytest.raises((ValueError, FileNotFoundError)):
             authenticate_confirmatory_f2_promotion(promotion_path)
         promotion_path.write_bytes(canonical_bytes(original))
+
+    canonical_promotion = canonical_bytes(original)
+    oof_authenticator = verification._authenticate_r2_oof_with_receipt
+    oof_calls: list[object] = []
+
+    def forbidden_oof_auth(*_: object, **__: object) -> Any:
+        oof_calls.append(object())
+        raise AssertionError("non-canonical promotion must not authenticate OOF")
+
+    monkeypatch.setattr(verification, "_authenticate_r2_oof_with_receipt", forbidden_oof_auth)
+    promotion_path.write_bytes(json.dumps(original, indent=2).encode("utf-8") + b"\n")
+    with pytest.raises(ValueError, match="not canonical"):
+        authenticate_confirmatory_f2_promotion(promotion_path)
+    reordered = dict(reversed(tuple(original.items())))
+    promotion_path.write_bytes(
+        (json.dumps(reordered, separators=(",", ":")) + "\n").encode("utf-8")
+    )
+    with pytest.raises(ValueError, match="not canonical"):
+        authenticate_confirmatory_f2_promotion(promotion_path)
+    assert oof_calls == []
+    promotion_path.write_bytes(canonical_promotion)
+    monkeypatch.setattr(verification, "_authenticate_r2_oof_with_receipt", oof_authenticator)
+
+    promotion_alias = tmp_path / "promotion-alias"
+    promotion_alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ValueError, match="symlink"):
+        authenticate_confirmatory_f2_promotion(promotion_alias / promotion_path.name)
+
+    receipt_alias = tmp_path / "receipt-alias"
+    receipt_alias.symlink_to(tmp_path, target_is_directory=True)
+    promotion_path.write_bytes(
+        canonical_bytes(
+            {
+                **original,
+                "runtime_locators": {
+                    "oof_bundle": str(bundle_path),
+                    "oof_receipt": str(receipt_alias / receipt_path.name),
+                },
+            }
+        )
+    )
+    with pytest.raises(ValueError, match="symlink"):
+        authenticate_confirmatory_f2_promotion(promotion_path)
+    promotion_path.write_bytes(canonical_promotion)
+
+    monkeypatch.setattr(verification, "_authenticate_r2_oof_with_receipt", forbidden_oof_auth)
+    invalid_outputs = (
+        bundle_path.parent / "partial.json",
+        tmp_path / "nested" / ".." / "partial-traversal.json",
+        promotion_alias / "partial-symlink.json",
+    )
+    for invalid_output in invalid_outputs:
+        with pytest.raises((ValueError, FileNotFoundError)):
+            create_confirmatory_f2_promotion(
+                bundle_path,
+                oof_receipt=receipt_path,
+                output=invalid_output,
+                authorized_by="fixture-operator",
+                authorized_at=datetime.now(UTC),
+            )
+        assert not invalid_output.exists()
+    assert oof_calls == []
+    monkeypatch.setattr(verification, "_authenticate_r2_oof_with_receipt", oof_authenticator)
+
+    parent_authenticator = verification._authenticate_confirmatory_parent
+    parent_calls: list[object] = []
+
+    def forbidden_parent(*_: object, **__: object) -> Any:
+        parent_calls.append(object())
+        raise AssertionError("promotion output preflight must precede parent authority")
+
+    monkeypatch.setattr(verification, "_authenticate_confirmatory_parent", forbidden_parent)
+    parent_output = tmp_path / "research" / "partial-parent.json"
+    with pytest.raises(ValueError, match="outside authenticated evidence boundaries"):
+        create_confirmatory_f2_promotion(
+            bundle_path,
+            oof_receipt=receipt_path,
+            output=parent_output,
+            authorized_by="fixture-operator",
+            authorized_at=datetime.now(UTC),
+        )
+    assert parent_calls == []
+    assert not parent_output.exists()
+    monkeypatch.setattr(verification, "_authenticate_confirmatory_parent", parent_authenticator)

@@ -483,7 +483,7 @@ class VerifiedConfirmatoryF2:
     _selection_decisions: tuple[SelectionDecision, ...]
 
     def __init__(self) -> None:
-        raise TypeError("VerifiedConfirmatoryF2 is constructed only by verify_confirmatory_f2")
+        raise TypeError("VerifiedConfirmatoryF2 is constructed only by audit_confirmatory_f2")
 
     def __setattr__(self, name: str, value: object) -> None:
         raise AttributeError("VerifiedConfirmatoryF2 is immutable")
@@ -3154,9 +3154,70 @@ def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     )
 
 
-def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
-    """Run the exceptional F2 deep audit; ordinary consumers use a promotion receipt."""
-    return audit_confirmatory_f2(path)
+def _canonical_path(
+    path: Path,
+    field: str,
+    *,
+    directory: bool = False,
+    allow_missing: bool = False,
+    require_absolute: bool = False,
+) -> Path:
+    """Return a rooted canonical path after validating every path component."""
+    if require_absolute and not path.is_absolute():
+        raise ValueError(f"{field} must be an absolute path")
+    if any(part in {".", ".."} for part in path.parts):
+        raise ValueError(f"{field} path contains traversal")
+    candidate = path if path.is_absolute() else Path.cwd() / path
+    if not candidate.is_absolute() or not candidate.parts:
+        raise ValueError(f"{field} path is unsafe")
+    parts = candidate.parts[1:]
+    current = Path(candidate.anchor)
+    for index, part in enumerate(parts):
+        current /= part
+        if current.is_symlink():
+            raise ValueError(f"{field} path must not traverse a symlink")
+        if index < len(parts) - 1 and (not current.exists() or not current.is_dir()):
+            raise ValueError(f"{field} path has a non-directory ancestor")
+    resolved = candidate.resolve(strict=False)
+    root = Path(candidate.anchor).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"{field} path escapes its root")
+    if not candidate.exists():
+        if candidate.is_symlink():
+            raise ValueError(f"{field} path must not be a symlink")
+        if not allow_missing:
+            raise FileNotFoundError(f"{field} path is unavailable: {candidate}")
+        if not candidate.parent.is_dir() or candidate.parent.is_symlink():
+            raise FileNotFoundError(f"{field} parent directory is unavailable: {candidate.parent}")
+        return resolved
+    if directory:
+        if not candidate.is_dir():
+            raise ValueError(f"{field} must be a regular directory")
+    elif not candidate.is_file():
+        raise ValueError(f"{field} must be a regular file")
+    return resolved
+
+
+def _preflight_promotion_output(output: Path, *, forbidden_roots: Sequence[Path] = ()) -> Path:
+    candidate = _canonical_path(
+        output,
+        "F2 promotion output",
+        allow_missing=True,
+    )
+    if candidate.exists() or candidate.is_symlink():
+        raise FileExistsError(candidate)
+    for root in forbidden_roots:
+        canonical_root = _canonical_path(
+            root,
+            "F2 promotion forbidden boundary",
+            directory=True,
+            require_absolute=True,
+        )
+        if candidate == canonical_root or candidate.is_relative_to(canonical_root):
+            raise ValueError(
+                "F2 promotion output must be outside authenticated evidence boundaries"
+            )
+    return candidate
 
 
 def _promotion_runtime_path(
@@ -3165,15 +3226,47 @@ def _promotion_runtime_path(
     raw = locators.get(name)
     if not isinstance(raw, str):
         raise ValueError(f"F2 promotion runtime locator is missing: {name}")
-    path = Path(raw)
-    if not path.is_absolute() or path.is_symlink():
-        raise ValueError(f"F2 promotion runtime locator is unsafe: {name}")
-    if directory:
-        if not path.is_dir():
-            raise ValueError(f"F2 promotion runtime directory is unavailable: {name}")
-    elif not path.is_file():
-        raise ValueError(f"F2 promotion runtime file is unavailable: {name}")
-    return path
+    return _canonical_path(
+        Path(raw),
+        f"F2 promotion runtime {name}",
+        directory=directory,
+        require_absolute=True,
+    )
+
+
+def _promotion_parent_boundaries(descriptor: Mapping[str, object]) -> tuple[Path, ...]:
+    runtime_raw = descriptor.get("runtime_inputs")
+    if not isinstance(runtime_raw, dict):
+        raise ValueError("F2 descriptor has no immediate-parent runtime locators")
+    runtime = cast(dict[str, object], runtime_raw)
+    expected_keys = {
+        "foundation",
+        "foundation_receipt",
+        "foundation_promotion",
+        "experiment",
+        "research_root",
+        "feature_manifests",
+    }
+    if set(runtime) != expected_keys:
+        raise ValueError("F2 runtime locators are incomplete or contain unknown fields")
+    locators: dict[str, str] = {}
+    for key in ("foundation", "foundation_receipt", "experiment", "research_root"):
+        value = runtime[key]
+        if not isinstance(value, str):
+            raise ValueError(f"F2 runtime locator is malformed: {key}")
+        locators[key] = value
+    boundaries = [
+        _promotion_runtime_path(locators, key).parent
+        for key in ("foundation", "foundation_receipt")
+    ]
+    boundaries.append(_promotion_runtime_path(locators, "research_root", directory=True))
+    raw_promotion = runtime["foundation_promotion"]
+    if raw_promotion is not None:
+        if not isinstance(raw_promotion, str):
+            raise ValueError("F2 foundation promotion locator is malformed")
+        locators["foundation_promotion"] = raw_promotion
+        boundaries.append(_promotion_runtime_path(locators, "foundation_promotion").parent)
+    return tuple(dict.fromkeys(boundaries))
 
 
 def _confirmatory_descriptor_inputs(
@@ -3528,9 +3621,26 @@ def _promotion_register_reference(bundle: R2OofBundle, report_id: str) -> Artifa
 
 def _promotion_runtime_locators(oof_path: Path, receipt_path: Path) -> dict[str, str]:
     return {
-        "oof_bundle": str(oof_path.resolve(strict=True)),
-        "oof_receipt": str(receipt_path.resolve(strict=True)),
+        "oof_bundle": str(_canonical_path(oof_path, "OOF bundle")),
+        "oof_receipt": str(_canonical_path(receipt_path, "OOF verification receipt")),
     }
+
+
+def _load_canonical_promotion(path: Path) -> dict[str, object]:
+    promotion_path = _canonical_path(path, "F2 promotion")
+    encoded = promotion_path.read_bytes()
+    if len(encoded) > 64 * 1024:
+        raise ValueError("F2 promotion exceeds the size limit")
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("F2 promotion is not valid JSON") from error
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError("F2 promotion must be a JSON object")
+    payload = cast(dict[str, object], value)
+    if encoded != canonical_bytes(payload):
+        raise ValueError("F2 promotion is not canonical")
+    return payload
 
 
 def authenticate_confirmatory_f2_promotion(
@@ -3538,19 +3648,21 @@ def authenticate_confirmatory_f2_promotion(
     *,
     oof_bundle: Path | None = None,
     oof_receipt: Path | None = None,
-    bundle: Path | None = None,
-    receipt: Path | None = None,
     _readiness_report: R2ReadinessReport | None = None,
 ) -> VerifiedConfirmatoryF2Promotion:
     """Restore a confirmatory F2 capability by authenticating its OOF receipt only."""
-    if oof_bundle is not None and bundle is not None:
-        raise ValueError("duplicate OOF bundle paths")
-    if oof_receipt is not None and receipt is not None:
-        raise ValueError("duplicate OOF receipt paths")
-    promotion_document = ConfirmatoryF2Promotion.from_json(_load_selection(promotion))
+    promotion_document = ConfirmatoryF2Promotion.from_json(_load_canonical_promotion(promotion))
     locators = promotion_document.runtime_locators
-    oof_path = oof_bundle or bundle or _promotion_runtime_path(locators, "oof_bundle")
-    receipt_path = oof_receipt or receipt or _promotion_runtime_path(locators, "oof_receipt")
+    oof_path = (
+        _canonical_path(oof_bundle, "OOF bundle")
+        if oof_bundle is not None
+        else _promotion_runtime_path(locators, "oof_bundle")
+    )
+    receipt_path = (
+        _canonical_path(oof_receipt, "OOF verification receipt")
+        if oof_receipt is not None
+        else _promotion_runtime_path(locators, "oof_receipt")
+    )
     bundle_value, descriptor, parsed_receipt = _authenticate_r2_oof_with_receipt(
         oof_path, receipt=receipt_path
     )
@@ -3643,15 +3755,25 @@ def create_confirmatory_f2_promotion(
     authorized_at: datetime,
 ) -> VerifiedConfirmatoryF2Promotion:
     """Create one durable F2 promotion after cheap receipt authentication."""
+    oof_path = _canonical_path(oof_bundle, "OOF bundle")
+    receipt_path = _canonical_path(oof_receipt, "OOF verification receipt")
+    output_path = _preflight_promotion_output(
+        output,
+        forbidden_roots=(oof_path.parent,),
+    )
     bundle_value, descriptor, parsed_receipt = _authenticate_r2_oof_with_receipt(
-        oof_bundle, receipt=oof_receipt
+        oof_path, receipt=receipt_path
     )
     if (
         parsed_receipt.evidence_class is not EvidenceClass.CONFIRMATORY
         or parsed_receipt.completed_checks != R2_CONFIRMATORY_OOF_COMPLETED_CHECKS
     ):
         raise ValueError("F2 promotion requires the current qualifying OOF receipt checks")
-    source, experiment = _confirmatory_descriptor_inputs(oof_bundle, bundle_value, descriptor)
+    source, experiment = _confirmatory_descriptor_inputs(oof_path, bundle_value, descriptor)
+    output_path = _preflight_promotion_output(
+        output_path,
+        forbidden_roots=(oof_path.parent, *_promotion_parent_boundaries(descriptor)),
+    )
     authority = asyncio.run(
         _authenticate_confirmatory_parent(
             descriptor=descriptor, source=source, experiment=experiment
@@ -3670,12 +3792,9 @@ def create_confirmatory_f2_promotion(
         _registry,
         _local_comparator_manifest_id,
         _holdout_authority,
-    ) = _persisted_confirmatory_f2_inputs(
-        path=oof_bundle, bundle=bundle_value, experiment=experiment
-    )
+    ) = _persisted_confirmatory_f2_inputs(path=oof_path, bundle=bundle_value, experiment=experiment)
     register_ref = _promotion_register_reference(bundle_value, register_id)
-    if output.exists() or output.is_symlink():
-        raise FileExistsError(output)
+    output_path = _preflight_promotion_output(output_path)
     promotion_document = ConfirmatoryF2Promotion.create(
         oof_id=bundle_value.oof_id,
         oof_closure_id=bundle_value.closure_id,
@@ -3699,11 +3818,11 @@ def create_confirmatory_f2_promotion(
         confirmatory_oof_ready=report.confirmatory_oof_ready.value,
         authorized_by=authorized_by,
         authorized_at=authorized_at,
-        runtime_locators=_promotion_runtime_locators(oof_bundle, oof_receipt),
+        runtime_locators=_promotion_runtime_locators(oof_path, receipt_path),
     )
-    atomic_create(output, canonical_bytes(promotion_document.as_json()))
+    atomic_create(output_path, canonical_bytes(promotion_document.as_json()))
     return authenticate_confirmatory_f2_promotion(
-        output, oof_bundle=oof_bundle, oof_receipt=oof_receipt, _readiness_report=report
+        output_path, oof_bundle=oof_path, oof_receipt=receipt_path, _readiness_report=report
     )
 
 
@@ -5026,27 +5145,22 @@ def _replay_synthetic_oof(path: Path) -> None:
 
 
 def _oof_manifest_path(path: Path) -> Path:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError("R2 OOF manifest must be a regular non-symlink file")
-    return path
+    return _canonical_path(path, "R2 OOF manifest")
 
 
 def _oof_receipt_output(manifest: Path, output: Path) -> Path:
     manifest_path = _oof_manifest_path(manifest)
-    root = manifest_path.parent.resolve()
-    candidate = output.resolve(strict=False)
-    if candidate.is_relative_to(root):
+    root = manifest_path.parent
+    candidate = _canonical_path(
+        output,
+        "R2 OOF verification receipt",
+        allow_missing=True,
+    )
+    if candidate == root or candidate.is_relative_to(root):
         raise ValueError("R2 OOF verification receipt must be outside the immutable closure")
-    if output.exists() or output.is_symlink():
-        raise FileExistsError(f"R2 OOF verification receipt already exists: {output}")
-    if not output.parent.is_dir() or output.parent.is_symlink():
-        raise FileNotFoundError(
-            f"R2 OOF verification receipt parent directory does not exist: {output.parent}"
-        )
-    for ancestor in (output, *output.parents):
-        if ancestor.is_symlink():
-            raise ValueError("R2 OOF verification receipt output path traverses a symlink")
-    return output
+    if candidate.exists() or candidate.is_symlink():
+        raise FileExistsError(f"R2 OOF verification receipt already exists: {candidate}")
+    return candidate
 
 
 def _oof_numerical_identity(descriptor: Mapping[str, object]) -> str:
@@ -5211,13 +5325,12 @@ def _authenticate_oof_closure(
 
 def _load_oof_verification_receipt(manifest: Path, receipt_path: Path) -> R2OofVerificationReceipt:
     manifest_path = _oof_manifest_path(manifest)
-    root = manifest_path.parent.resolve()
-    candidate = receipt_path.resolve(strict=False)
-    if candidate.is_relative_to(root):
+    root = manifest_path.parent
+    receipt = _canonical_path(receipt_path, "R2 OOF verification receipt")
+    candidate = receipt.resolve(strict=False)
+    if candidate == root or candidate.is_relative_to(root):
         raise ValueError("R2 OOF verification receipt must be outside the immutable closure")
-    if receipt_path.is_symlink() or not receipt_path.is_file():
-        raise ValueError("R2 OOF verification receipt must be a regular non-symlink file")
-    encoded = receipt_path.read_bytes()
+    encoded = receipt.read_bytes()
     if len(encoded) > 64 * 1024:
         raise ValueError("R2 OOF verification receipt exceeds the size limit")
     try:
@@ -5322,7 +5435,7 @@ def verify_oof_bundle(path: Path) -> R2OofBundle:
     elif run_kind == "REPRESENTATIVE":
         _replay_representative_oof(path)
     elif run_kind == CONFIRMATORY_RUN_KIND:
-        raise ValueError("confirmatory OOF bundles require verify_confirmatory_f2")
+        raise ValueError("confirmatory OOF bundles require an authenticated F2 promotion")
     else:
         raise ValueError("OOF descriptor has an unsupported run kind")
     return bundle

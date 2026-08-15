@@ -95,7 +95,8 @@ class VerifiedConfirmatoryHoldoutAuthority:
 
     def __init__(self) -> None:
         raise TypeError(
-            "VerifiedConfirmatoryHoldoutAuthority is constructed only by verify_confirmatory_f2"
+            "VerifiedConfirmatoryHoldoutAuthority is constructed only by "
+            "an authenticated F2 authority"
         )
 
     def __setattr__(self, name: str, value: object) -> None:

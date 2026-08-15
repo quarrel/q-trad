@@ -1138,7 +1138,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_selection.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
     baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
 
@@ -1148,7 +1147,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_g1_verify.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_g1_verify.add_argument("--selection", type=Path, required=True)
 
     baselines_confirmatory_g2_prepare = baselines_sub.add_parser(
@@ -1157,7 +1155,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_g2_prepare.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_g2_prepare.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_g2_prepare.add_argument("--prepared-by", required=True)
     baselines_confirmatory_g2_prepare.add_argument("--output", type=Path, required=True)
@@ -1168,7 +1165,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_g2_verify.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_g2_verify.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_g2_verify.add_argument("--preparation", type=Path, required=True)
 
@@ -1178,7 +1174,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_reveal.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_reveal.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_reveal.add_argument("--preparation", type=Path, required=True)
     baselines_confirmatory_reveal.add_argument("--expected-selection-id", required=True)
@@ -1193,7 +1188,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     f2_authority = baselines_confirmatory_r2h.add_mutually_exclusive_group(required=True)
     f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
-    f2_authority.add_argument("--f2-bundle", dest="f2_promotion", type=Path)
     baselines_confirmatory_r2h.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_r2h.add_argument("--preparation", type=Path, required=True)
 
