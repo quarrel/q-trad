@@ -39,6 +39,10 @@ def _paths(tmp_path: Path, destination: Path | None = None) -> migration.Migrati
     )
 
 
+def test_attempt3_root_name_matches_immutable_packet_literal() -> None:
+    assert migration._ATTEMPT3_ROOT_NAME == "r2-simplification-h4-670e04e-attempt3"
+
+
 def test_migration_paths_are_explicit_create_only_outputs(tmp_path: Path) -> None:
     paths = _paths(tmp_path)
     assert paths.output_paths() == (
