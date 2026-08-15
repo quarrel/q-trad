@@ -257,9 +257,12 @@ from qtrad.runtime.r2_readiness import (
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
     AuthenticatedR2Foundation,
+    audit_confirmatory_f2,
+    authenticate_confirmatory_f2_promotion,
     authenticate_ibkr_foundation_for_r2,
     authenticate_r1_foundation_for_r2,
     build_oof_bundle,
+    create_confirmatory_f2_promotion,
     freeze_confirmatory_selection,
     holdout_configuration_registry,
     holdout_evaluation_policy,
@@ -268,7 +271,6 @@ from qtrad.runtime.r2_verification import (
     reveal_confirmatory_g2,
     runtime_identities,
     selection_freeze,
-    verify_confirmatory_f2,
     verify_confirmatory_g1,
     verify_confirmatory_g2_preparation,
     verify_confirmatory_r2h,
@@ -1113,41 +1115,56 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_oof_verify.add_argument("--bundle", type=Path, required=True)
 
-    baselines_confirmatory_f2_verify = baselines_sub.add_parser(
-        "confirmatory-f2-verify",
-        help="independently verify and replay a confirmatory F2 OOF authority",
+    baselines_confirmatory_f2_promote = baselines_sub.add_parser(
+        "confirmatory-f2-promote",
+        help="create a receipt-authenticated confirmatory F2 promotion",
     )
-    baselines_confirmatory_f2_verify.add_argument("--bundle", type=Path, required=True)
+    baselines_confirmatory_f2_promote.add_argument("--oof-bundle", type=Path, required=True)
+    baselines_confirmatory_f2_promote.add_argument("--oof-receipt", type=Path, required=True)
+    baselines_confirmatory_f2_promote.add_argument("--authorized-by", required=True)
+    baselines_confirmatory_f2_promote.add_argument(
+        "--authorized-at", type=_utc_timestamp_argument, required=True
+    )
+    baselines_confirmatory_f2_promote.add_argument("--output", type=Path, required=True)
+    baselines_confirmatory_f2_audit = baselines_sub.add_parser(
+        "confirmatory-f2-audit",
+        help="exceptionally deep-audit and replay a confirmatory F2 OOF authority",
+    )
+    baselines_confirmatory_f2_audit.add_argument("--bundle", type=Path, required=True)
 
     baselines_confirmatory_selection = baselines_sub.add_parser(
         "confirmatory-selection-freeze",
-        help="derive confirmatory G1 selection from verified F2 only",
+        help="derive confirmatory G1 selection from a receipt-authenticated F2 promotion",
     )
-    baselines_confirmatory_selection.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_selection.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_selection.add_argument("--frozen-by", required=True)
     baselines_confirmatory_selection.add_argument("--output", type=Path, required=True)
 
     baselines_confirmatory_g1_verify = baselines_sub.add_parser(
         "confirmatory-g1-verify",
-        help="independently replay persisted confirmatory G1 against verified F2",
+        help="verify persisted confirmatory G1 selection against an F2 promotion",
     )
-    baselines_confirmatory_g1_verify.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_g1_verify.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_g1_verify.add_argument("--selection", type=Path, required=True)
 
     baselines_confirmatory_g2_prepare = baselines_sub.add_parser(
         "confirmatory-g2-prepare",
         help="prepare and seal outcome-blind confirmatory G2 evidence",
     )
-    baselines_confirmatory_g2_prepare.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_g2_prepare.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_g2_prepare.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_g2_prepare.add_argument("--prepared-by", required=True)
     baselines_confirmatory_g2_prepare.add_argument("--output", type=Path, required=True)
 
     baselines_confirmatory_g2_verify = baselines_sub.add_parser(
         "confirmatory-g2-preparation-verify",
-        help="independently replay an unopened confirmatory G2 preparation",
+        help="verify an unopened confirmatory G2 preparation against an F2 promotion",
     )
-    baselines_confirmatory_g2_verify.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_g2_verify.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_g2_verify.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_g2_verify.add_argument("--preparation", type=Path, required=True)
 
@@ -1155,7 +1172,8 @@ def build_parser() -> argparse.ArgumentParser:
         "confirmatory-g2-reveal",
         help="irreversibly reveal and evaluate one verified confirmatory G2 preparation",
     )
-    baselines_confirmatory_reveal.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_reveal.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_reveal.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_reveal.add_argument("--preparation", type=Path, required=True)
     baselines_confirmatory_reveal.add_argument("--expected-selection-id", required=True)
@@ -1166,9 +1184,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     baselines_confirmatory_r2h = baselines_sub.add_parser(
         "confirmatory-r2h-verify",
-        help="independently verify the terminal confirmatory G2 lifecycle",
+        help="verify the terminal confirmatory G2 lifecycle against an F2 promotion",
     )
-    baselines_confirmatory_r2h.add_argument("--f2-bundle", type=Path, required=True)
+    f2_authority = baselines_confirmatory_r2h.add_mutually_exclusive_group(required=True)
+    f2_authority.add_argument("--f2-promotion", dest="f2_promotion", type=Path)
     baselines_confirmatory_r2h.add_argument("--selection", type=Path, required=True)
     baselines_confirmatory_r2h.add_argument("--preparation", type=Path, required=True)
 
@@ -2308,9 +2327,31 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "baselines"
-        and args.baselines_command == "confirmatory-f2-verify"
+        and args.baselines_command == "confirmatory-f2-promote"
     ):
-        authority = verify_confirmatory_f2(args.bundle)
+        authority = create_confirmatory_f2_promotion(
+            args.oof_bundle,
+            oof_receipt=args.oof_receipt,
+            output=args.output,
+            authorized_by=args.authorized_by,
+            authorized_at=args.authorized_at,
+        )
+        print(
+            json.dumps(
+                {
+                    "promotion_id": authority.promotion.promotion_id,
+                    "oof_id": authority.promotion.oof_id,
+                    "verification_id": authority.promotion.oof_verification_id,
+                },
+                sort_keys=True,
+            )
+        )
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "confirmatory-f2-audit"
+    ):
+        authority = audit_confirmatory_f2(args.bundle)
         print(
             json.dumps(
                 {
@@ -2328,7 +2369,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-selection-freeze"
     ):
-        authority = verify_confirmatory_f2(args.f2_bundle)
+        authority = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         freeze_confirmatory_selection(
             verified_f2=authority,
             output=args.output,
@@ -2340,7 +2381,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-g1-verify"
     ):
-        f2 = verify_confirmatory_f2(args.f2_bundle)
+        f2 = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
         print(json.dumps({"selection_manifest_id": g1.selection.manifest_id}, sort_keys=True))
     elif (
@@ -2348,7 +2389,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-g2-prepare"
     ):
-        f2 = verify_confirmatory_f2(args.f2_bundle)
+        f2 = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
         manifest = prepare_confirmatory_g2(
             verified_g1=g1,
@@ -2361,7 +2402,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-g2-preparation-verify"
     ):
-        f2 = verify_confirmatory_f2(args.f2_bundle)
+        f2 = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
         preparation = verify_confirmatory_g2_preparation(
             verified_g1=g1,
@@ -2373,7 +2414,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-g2-reveal"
     ):
-        f2 = verify_confirmatory_f2(args.f2_bundle)
+        f2 = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
         preparation = verify_confirmatory_g2_preparation(
             verified_g1=g1,
@@ -2404,7 +2445,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "confirmatory-r2h-verify"
     ):
-        f2 = verify_confirmatory_f2(args.f2_bundle)
+        f2 = authenticate_confirmatory_f2_promotion(args.f2_promotion)
         g1 = verify_confirmatory_g1(verified_f2=f2, path=args.selection)
         report = verify_confirmatory_r2h(verified_g1=g1, path=args.preparation)
         print(
