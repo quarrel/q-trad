@@ -867,7 +867,9 @@ It references the frozen selection manifest and contains:
 
 The top-level R2 bundles remain thin. They reference independently manifested children rather than duplicating rows.
 
-A software verification bundle may reference:
+R2 scientific verification is owned directly by the OOF contract and its boundary-specific verification receipt. The current implementation does not introduce a separate software-verification bundle or copy OOF trees; execution provenance remains inspectable metadata, while semantic verification authenticates the persisted OOF authority.
+
+A confirmatory research bundle may reference:
 
 - configuration;
 - synthetic fixtures;
