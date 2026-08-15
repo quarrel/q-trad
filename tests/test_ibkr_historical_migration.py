@@ -620,6 +620,11 @@ def test_disposable_migration_orchestrator_uses_each_boundary_once(
     persisted = json.loads(paths.record.read_text(encoding="utf-8"))
     assert persisted["work_counts"] == result.record["work_counts"]
     classification = cast(dict[str, object], persisted["identity_classification"])
+    stage7_classification = cast(dict[str, object], classification["stage7"])
+    assert stage7_classification["schedule_evidence_relocation"] == {
+        "contract": "fixture",
+        "equivalent": True,
+    }
     stage8_classification = cast(dict[str, object], classification["stage8"])
     readiness_authority = cast(dict[str, object], stage8_classification["readiness_authority"])
     assert readiness_authority["old"] == {"source_aggregate_sha256": "a" * 64}
