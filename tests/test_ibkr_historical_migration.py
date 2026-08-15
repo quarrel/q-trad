@@ -1444,6 +1444,34 @@ def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
     assert record["finalizer_implementation_commit"] == "1" * 40
     authenticated = migration.authenticate_migration_invalidation_record(record_path)
     assert authenticated["record_sha256"] == record["record_sha256"]
+    valid_bytes = migration.canonical_json_bytes(record)
+    failure_bytes = paths.failure_record.read_bytes()
+    divergence_mutation = json.loads(valid_bytes)
+    divergence_mutation["semantic_divergence"]["fold_count"]["old"] = 8
+    divergence_identity = {
+        key: value for key, value in divergence_mutation.items() if key != "record_sha256"
+    }
+    divergence_mutation["record_sha256"] = migration._digest_json(divergence_identity)
+    record_path.write_bytes(migration.canonical_json_bytes(divergence_mutation))
+    with pytest.raises(ValueError, match=r"(target disposition|fold count)"):
+        migration.authenticate_migration_invalidation_record(record_path)
+    timestamp_mutation = json.loads(valid_bytes)
+    timestamp_mutation["operator_authorization"]["authorized_at"] = "2026-08-14T00:00:00"
+    timestamp_identity = {
+        key: value for key, value in timestamp_mutation.items() if key != "record_sha256"
+    }
+    timestamp_mutation["record_sha256"] = migration._digest_json(timestamp_identity)
+    record_path.write_bytes(migration.canonical_json_bytes(timestamp_mutation))
+    with pytest.raises(ValueError, match="must be UTC"):
+        migration.authenticate_migration_invalidation_record(record_path)
+    record_path.write_bytes(valid_bytes)
+    paths.failure_record.write_bytes(b"{}")
+    with pytest.raises(ValueError, match="failure record bytes changed"):
+        migration.authenticate_migration_invalidation_record(record_path)
+    paths.failure_record.write_bytes(failure_bytes)
+    (paths.destination_root / migration._RECORD_OUTPUT).write_bytes(b"marker")
+    with pytest.raises(ValueError, match="success or promotion"):
+        migration.authenticate_migration_invalidation_record(record_path)
     mutated = dict(record)
     mutated["finalizer_implementation_commit"] = "2" * 40
     record_path.write_bytes(migration.canonical_json_bytes(mutated))

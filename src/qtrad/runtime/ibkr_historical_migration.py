@@ -12,7 +12,7 @@ import json
 import os
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, cast
@@ -684,11 +684,12 @@ def _invalidate_failed_stage8_attempt3(
     if failure_bytes != canonical_json_bytes(cast(dict[str, JsonValue], failure)):
         raise ValueError("attempt failure record is not canonical")
     failure_identity = dict(failure)
-    failure_sha256 = _string(
+    failure_identity_sha256 = _string(
         failure_identity.pop("record_sha256"), "attempt failure record identity"
     )
-    if _digest_json(failure_identity) != failure_sha256:
+    if _digest_json(failure_identity) != failure_identity_sha256:
         raise ValueError("attempt failure record identity changed")
+    failure_sha256 = sha256(failure_bytes).hexdigest()
     if (
         failure["contract"] != MIGRATION_CONTRACT
         or failure["schema_version"] != MIGRATION_SCHEMA_VERSION
@@ -1840,6 +1841,111 @@ __all__ = [
 ]
 
 
+def _authenticate_attempt3_failure_checkpoint(attempt_root: Path, expected_sha256: str) -> None:
+    """Authenticate the immutable attempt-3 failure checkpoint metadata only."""
+    root = _absolute_lexical(attempt_root, "attempt-3 failure root")
+    if root.name != _ATTEMPT3_ROOT_NAME or not root.is_dir():
+        raise ValueError("attempt-3 failure root is not the frozen packet")
+    if root.is_symlink():
+        raise ValueError("attempt-3 failure root must not be a symlink")
+    failure_path = _require_regular_file(root / _FAILURE_OUTPUT, "attempt-3 failure record")
+    failure_bytes = failure_path.read_bytes()
+    if sha256(failure_bytes).hexdigest() != expected_sha256:
+        raise ValueError("attempt-3 failure record bytes changed")
+    failure = _read_json(failure_path, "attempt-3 failure record")
+    if failure_bytes != canonical_json_bytes(cast(dict[str, JsonValue], failure)):
+        raise ValueError("attempt-3 failure record is not canonical")
+    identity = dict(failure)
+    failure_record_sha256 = _string(
+        identity.pop("record_sha256"), "attempt-3 failure record identity"
+    )
+    if _digest_json(identity) != failure_record_sha256:
+        raise ValueError("attempt-3 failure record identity changed")
+    if set(failure) != {
+        "contract",
+        "schema_version",
+        "kind",
+        "phase",
+        "implementation_commit",
+        "source",
+        "capacity",
+        "error",
+        "outputs",
+        "old_authority_untouched",
+        "record_sha256",
+    }:
+        raise ValueError("attempt-3 failure record fields are not exact")
+    if (
+        failure["contract"] != MIGRATION_CONTRACT
+        or failure["schema_version"] != MIGRATION_SCHEMA_VERSION
+        or failure["kind"] != "failure"
+        or failure["phase"] != "stage8-equivalence"
+        or failure["implementation_commit"] != _ATTEMPT3_COMMIT
+        or failure["old_authority_untouched"] is not True
+        or failure["error"] != _ATTEMPT3_ERROR
+    ):
+        raise ValueError("attempt-3 failure checkpoint binding changed")
+    source = _mapping(failure["source"], "attempt-3 failure source")
+    source_fields = {
+        "stage6_result_id",
+        "stage6_closure_id",
+        "stage7_dataset_id",
+        "stage7_manifest_sha256",
+        "stage8_build_id",
+        "stage8_manifest_sha256",
+        "promotion_id",
+    }
+    if set(source) != source_fields:
+        raise ValueError("attempt-3 failure source fields are not exact")
+    for field in source_fields:
+        value = _string(source[field], f"attempt-3 failure source {field}")
+        if len(value) != 64 or any(character not in "0123456789abcdef" for character in value):
+            raise ValueError(f"attempt-3 failure source {field} is not a SHA-256 digest")
+    capacity = _mapping(failure["capacity"], "attempt-3 failure capacity")
+    if set(capacity) != {"required_bytes", "available_bytes"}:
+        raise ValueError("attempt-3 failure capacity fields are not exact")
+    for field in ("required_bytes", "available_bytes"):
+        value = capacity[field]
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            raise ValueError("attempt-3 failure capacity changed")
+    outputs = failure["outputs"]
+    if not isinstance(outputs, list):
+        raise ValueError("attempt-3 failure outputs are not a list")
+    for raw_output in outputs:
+        output = _mapping(raw_output, "attempt-3 failure output snapshot")
+        if set(output) - {"path", "exists", "bytes", "sha256"} or not {
+            "path",
+            "exists",
+        }.issubset(output):
+            raise ValueError("attempt-3 failure output fields are not exact")
+        output_path = _absolute_lexical(
+            Path(_string(output["path"], "attempt-3 output path")), "attempt-3 output"
+        )
+        if not output_path.is_relative_to(root):
+            raise ValueError("attempt-3 failure output escapes its root")
+        if not isinstance(output["exists"], bool):
+            raise ValueError("attempt-3 failure output existence is invalid")
+        if output["exists"]:
+            if "sha256" in output:
+                if set(output) != {"path", "exists", "bytes", "sha256"}:
+                    raise ValueError("attempt-3 existing output snapshot is incomplete")
+                if (
+                    isinstance(output["bytes"], bool)
+                    or not isinstance(output["bytes"], int)
+                    or output["bytes"] < 0
+                ):
+                    raise ValueError("attempt-3 output byte count is invalid")
+                digest_value = _string(output["sha256"], "attempt-3 output digest")
+                if len(digest_value) != 64 or any(
+                    character not in "0123456789abcdef" for character in digest_value
+                ):
+                    raise ValueError("attempt-3 output digest is not a SHA-256 digest")
+            elif set(output) != {"path", "exists"} or not output_path.is_dir():
+                raise ValueError("attempt-3 existing directory snapshot is invalid")
+    if (root / _RECORD_OUTPUT).exists() or (root / _PROMOTION_OUTPUT).exists():
+        raise ValueError("attempt-3 success or promotion is present")
+
+
 def authenticate_migration_invalidation_record(path: Path) -> dict[str, JsonValue]:
     """Authenticate the packet-specific attempt-3 invalidation record."""
     candidate = _require_regular_file(path, "migration invalidation record")
@@ -1902,9 +2008,11 @@ def authenticate_migration_invalidation_record(path: Path) -> dict[str, JsonValu
     attempt = _mapping(document["attempt"], "invalidation attempt")
     if set(attempt) != {"root", "failure_record_sha256", "phase", "error"}:
         raise ValueError("invalidation attempt fields are not exact")
-    if Path(_string(attempt["root"], "invalidation attempt root")).name != _ATTEMPT3_ROOT_NAME:
+    attempt_root = Path(_string(attempt["root"], "invalidation attempt root"))
+    if attempt_root.name != _ATTEMPT3_ROOT_NAME:
         raise ValueError("invalidation attempt root binding changed")
-    digest(attempt["failure_record_sha256"], "invalidation failure record")
+    failure_record_sha256 = digest(attempt["failure_record_sha256"], "invalidation failure record")
+    _authenticate_attempt3_failure_checkpoint(attempt_root, failure_record_sha256)
     if attempt["phase"] != "stage8-equivalence" or attempt["error"] != _ATTEMPT3_ERROR:
         raise ValueError("invalidation attempt binding changed")
 
@@ -1979,6 +2087,41 @@ def authenticate_migration_invalidation_record(path: Path) -> dict[str, JsonValu
             if not isinstance(ref["row_count"], int) or ref["row_count"] < 0:
                 raise ValueError("invalidation Stage 8 child row count is invalid")
 
+    divergence = _mapping(document["semantic_divergence"], "invalidation semantic divergence")
+    if set(divergence) != {"target_return_dispositions", "fold_count", "readiness"}:
+        raise ValueError("invalidation semantic divergence fields are not exact")
+    targets = _mapping(divergence["target_return_dispositions"], "invalidation target dispositions")
+    if set(targets) != {"basis", "old_closure_id", "new_closure_id", "old", "new"}:
+        raise ValueError("invalidation target disposition fields are not exact")
+    if targets["basis"] != "operator-reviewed probe bound to authenticated closures":
+        raise ValueError("invalidation target disposition basis changed")
+    old_closure_id = digest(targets["old_closure_id"], "invalidation old divergence closure")
+    new_closure_id = digest(targets["new_closure_id"], "invalidation new divergence closure")
+    if old_closure_id != old_stage8["closure_id"] or new_closure_id != stage8["closure_id"]:
+        raise ValueError("invalidation divergence closure binding changed")
+    if targets["old"] != cast(JsonValue, _ATTEMPT3_OLD_TARGET_COUNTS) or targets["new"] != cast(
+        JsonValue, _ATTEMPT3_NEW_TARGET_COUNTS
+    ):
+        raise ValueError("invalidation target disposition counts changed")
+    folds = _mapping(divergence["fold_count"], "invalidation fold count")
+    if set(folds) != {"old", "new"} or folds["old"] != 9 or folds["new"] != 0:
+        raise ValueError("invalidation fold count changed")
+    readiness = _mapping(divergence["readiness"], "invalidation readiness")
+    if set(readiness) != {"old", "new"}:
+        raise ValueError("invalidation readiness fields are not exact")
+    expected_old_readiness = {"state": "QUALIFYING_HISTORY_READY", "causes": []}
+    expected_new_readiness = {
+        "state": "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION",
+        "causes": [
+            "INSUFFICIENT_COMMON_SUPPORT",
+            "INSUFFICIENT_BLOCK_COVERAGE",
+            "INSUFFICIENT_DURATION",
+            "MISSING_CONFIRMATORY_TARGET",
+        ],
+    }
+    if readiness["old"] != expected_old_readiness or readiness["new"] != expected_new_readiness:
+        raise ValueError("invalidation readiness divergence changed")
+
     work_counts = _mapping(document["work_counts"], "invalidation work counts")
     expected_counts = {
         "stage6_transformation_replays",
@@ -2016,6 +2159,13 @@ def authenticate_migration_invalidation_record(path: Path) -> dict[str, JsonValu
     operator = _mapping(document["operator_authorization"], "invalidation operator authorization")
     if set(operator) != {"authorized_by", "authorized_at", "authorization_reference"}:
         raise ValueError("invalidation operator authorization fields are not exact")
-    for field in operator:
-        _string(operator[field], f"invalidation operator {field}")
+    _string(operator["authorized_by"], "invalidation operator authorized_by")
+    authorized_at = _string(operator["authorized_at"], "invalidation operator authorized_at")
+    try:
+        parsed_authorized_at = datetime.fromisoformat(authorized_at)
+    except ValueError as error:
+        raise ValueError("invalidation operator authorized_at is not ISO-8601") from error
+    if parsed_authorized_at.tzinfo is None or parsed_authorized_at.utcoffset() != timedelta(0):
+        raise ValueError("invalidation operator authorized_at must be UTC")
+    _string(operator["authorization_reference"], "invalidation operator authorization_reference")
     return cast(dict[str, JsonValue], document)
