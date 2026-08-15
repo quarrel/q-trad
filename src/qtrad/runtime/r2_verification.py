@@ -1956,10 +1956,16 @@ def _materialise_synthetic_feature_manifests(
     return paths
 
 
-def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
+def _build_ibkr_synthetic_oof_from_fixture(
+    output: Path,
+    *,
+    runtime_provenance: Mapping[str, str] | None = None,
+) -> Path:
     """Build an independent deterministic IBKR synthetic OOF child."""
     fixture_name = "r2-ibkr-historical-synthetic"
-    identities = runtime_identities()
+    identities = (
+        dict(runtime_provenance) if runtime_provenance is not None else runtime_identities()
+    )
     application_identity = identities["application_identity"]
     image_identity = identities["image_identity"]
     foundation_bundle_id = sha256(f"{fixture_name}-r1".encode()).hexdigest()
@@ -1994,10 +2000,15 @@ def _build_ibkr_synthetic_oof_from_fixture(output: Path) -> Path:
             output=output,
             run_kind="SYNTHETIC",
             representative_profile=IBKR_HISTORICAL_PROFILE,
+            runtime_provenance=identities,
         )
 
 
-def _build_synthetic_oof(output: Path) -> Path:
+def _build_synthetic_oof(
+    output: Path,
+    *,
+    runtime_provenance: Mapping[str, str] | None = None,
+) -> Path:
     verified, experiment, datasets = _synthetic_pipeline_inputs()
     created_at = datetime(2026, 1, 1, tzinfo=UTC)
     clock = cast(Clock, SimpleNamespace(now=lambda: created_at))
@@ -2014,6 +2025,7 @@ def _build_synthetic_oof(output: Path) -> Path:
             clock=clock,
             output=output,
             run_kind="SYNTHETIC",
+            runtime_provenance=runtime_provenance,
         )
 
 
@@ -4363,10 +4375,15 @@ def _replay_synthetic_oof(path: Path) -> None:
         return
     with TemporaryDirectory() as temporary:
         expected_root = Path(temporary) / "oof"
+        persisted_provenance = {
+            field: cast(str, descriptor[field]) for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
+        }
         if descriptor.get("representative_profile") == IBKR_HISTORICAL_PROFILE:
-            _build_ibkr_synthetic_oof_from_fixture(expected_root)
+            _build_ibkr_synthetic_oof_from_fixture(
+                expected_root, runtime_provenance=persisted_provenance
+            )
         else:
-            _build_synthetic_oof(expected_root)
+            _build_synthetic_oof(expected_root, runtime_provenance=persisted_provenance)
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError("synthetic OOF bundle does not replay to the authenticated pipeline")
 

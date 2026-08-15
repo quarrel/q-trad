@@ -11,6 +11,8 @@ from typing import cast
 
 import pytest
 
+import qtrad.runtime.r2_verification as verification
+
 from qtrad.domain.foundation import (
     ExcursionDisposition,
     ReturnDisposition,
@@ -384,8 +386,21 @@ def test_oof_id_is_semantic_and_closure_id_binds_physical_children() -> None:
     assert different_parent.closure_id != base.closure_id
 
 
-def test_synthetic_oof_build_is_replayed_from_typed_pipeline(tmp_path: Path) -> None:
+def test_synthetic_oof_build_is_replayed_from_typed_pipeline(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     manifest_path = _build_synthetic_oof(tmp_path / "oof")
+    monkeypatch.setattr(
+        verification,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "current-drifted-application",
+            "image_identity": "sha256:" + "f" * 64,
+            "python_identity": "current-drifted-python",
+            "numpy_identity": "current-drifted-numpy",
+            "sklearn_identity": "current-drifted-sklearn",
+        },
+    )
     selection_freeze(
         oof_bundle_path=manifest_path,
         frozen_by="synthetic-test",
