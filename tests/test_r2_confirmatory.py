@@ -42,7 +42,6 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_evaluation import ConfigurationDisposition, SelectionManifest
 from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
-from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.domain.r2_holdout import (
     HOLDOUT_ACKNOWLEDGEMENT,
     HoldoutScope,
@@ -51,6 +50,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutTargetSource,
     R2OutcomeBlindTargetView,
 )
+from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.domain.r2_readiness import (
     EvidenceClass,
     FeatureFamily,
