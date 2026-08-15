@@ -53,7 +53,7 @@ orders or production broker connectivity.
   and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
   No real holdout, research conclusion or effectiveness evidence exists.
 - Before the first real confirmatory R2 run, the active evidence-handoff simplification programme has converged the Stage 6 through R2 boundaries on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
-- PR-C1 is implementation-complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; a clean full gate and merge remain release checks.
+- PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,

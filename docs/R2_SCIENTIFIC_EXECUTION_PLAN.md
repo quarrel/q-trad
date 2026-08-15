@@ -1,6 +1,6 @@
 # q-trad R2 decision-grade scientific execution plan
 
-**Status:** proposed execution authority after completion of the R2 evidence-handoff simplification programme  
+**Status:** ACTIVE execution authority; PR-C1 evidence-handoff simplification and PR-S0 run enablement are merged and complete
 **Scope:** first real decision-grade `R2-IBKR-HISTORICAL` run through F2, G1, unopened G2, irreversible reveal and R2.H  
 **Safety boundary:** offline research only; IBKR paper historical market data; no broker orders, production trading endpoint or real-capital operation  
 **Primary scientific question:** do the fixed local or pooled Ridge controls produce stable out-of-sample information about 15-minute future midpoint returns beyond the zero-return control?  
@@ -160,13 +160,13 @@ The instruction to execute this plan does not by itself authorise irreversible h
 
 # 3. PR-S0 — scientific-run enablement and active-authority cleanup
 
-**Form:** one small prerequisite PR before real scientific artefacts are created.
+**State:** COMPLETE and merged as PR-S0; this section records the accepted prerequisite boundary for the first real run.
 
 This PR must not alter any scientific contract, threshold, model, feature or evidence semantics.
 
 ## 3.1 Documentation cleanup
 
-Update current authority so agents do not follow stale pre-run state:
+The completed PR-S0 reconciles current authority so agents do not follow stale pre-run state:
 
 - `AGENTS.md`: simplification is complete; immediate priority is first decision-grade R2 execution under this plan.
 - `PLAN.md` / `docs/STATUS.md`: record the H4 invalidation as the current Stage 8 state and state that no replacement Stage 8 promotion exists yet.
@@ -185,7 +185,7 @@ Current runtime already has the one-time semantic verifier:
 verify_r2_oof_semantics(path, receipt_output=...)
 ```
 
-but the current `research baselines oof-verify` CLI does not expose its create-only receipt output. Add only:
+The completed `research baselines oof-verify` CLI exposes the existing create-only receipt output:
 
 ```text
 qtrad research baselines oof-verify \
@@ -205,9 +205,9 @@ authenticate using receipt replay    = 0
 
 ### B. Outcome-blind holdout-target-source persistence
 
-`oof-build` requires an authenticated `R2HoldoutTargetSource` path. If exact-head CLI still has no supported way to persist that current contract from the verified/promoted Stage 8 authority, expose the **smallest existing outcome-blind application path** as a create-only command.
+`oof-build` requires an authenticated `R2HoldoutTargetSource` path. PR-S0 now persists that current contract from the verified/promoted Stage 8 authority through the smallest existing outcome-blind application path:
 
-Recommended surface:
+Supported surface:
 
 ```text
 qtrad research baselines holdout-target-source \
@@ -228,7 +228,7 @@ Requirements:
 - print only path/identity/count metadata; and
 - create-only output.
 
-If a supported current command already exists under another name, use it and make no code change.
+PR-S0 would have reused an existing supported command name if one existed; no compatibility alias is retained.
 
 ## 3.3 Validation
 

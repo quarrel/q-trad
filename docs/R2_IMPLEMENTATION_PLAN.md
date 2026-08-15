@@ -1996,7 +1996,7 @@ qtrad research baselines oof-build
 
 qtrad research baselines oof-verify
     --bundle
-
+    --receipt-output
 qtrad research baselines selection-freeze
     --oof-bundle
     --output

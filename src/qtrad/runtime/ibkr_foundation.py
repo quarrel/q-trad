@@ -547,14 +547,20 @@ def _load_authenticated_ibkr_foundation_v3(
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     child_kinds = _supported_child_kinds(authenticated.children)
     child_ids = _child_reference_dataset_ids(authenticated.children, child_kinds=child_kinds)
+    decoded_child_kinds = tuple(
+        kind
+        for kind in (*_BASE_CHILD_KINDS, "target-index", "causal-metadata")
+        if kind in child_kinds
+    )
     decoded = _verify_children_blind(
         authenticated.path.parent,
         authenticated.children,
         child_ids,
         authenticated.lineage,
         decode_rows=False,
-        decode_base=True,
         child_kinds=child_kinds,
+        decode_kinds=decoded_child_kinds,
+        byte_kinds=decoded_child_kinds,
     )
     configuration = authenticated.configuration
     provider_dataset = authenticated.provider_dataset
@@ -817,9 +823,10 @@ def _load_ibkr_foundation_outcome_blind(
     """Load the IBKR foundation without decoding outcome-bearing children.
 
     The normal loader above is intentionally complete and is used after the
-    marker is opened.  Representative OOF must use this narrower path: target,
-    panel and observation children are authenticated by manifest/file bytes,
-    while only the persisted outcome-blind projections and folds are decoded.
+    marker is opened. Representative OOF consumes only the persisted
+    outcome-blind projections and folds; G2 and protected target Parquet bytes
+    are consumed only when their explicit flags request those rows. All other
+    children remain manifest/tree-authenticated without byte reads.
     """
 
     if not _is_v3_foundation(path):
@@ -836,13 +843,20 @@ def _load_ibkr_foundation_outcome_blind(
     expected_lineage = authenticated_v3.lineage
     build_id = authenticated_v3.foundation_id
     child_ids = _child_reference_dataset_ids(children)
+    consumed_child_kinds = (
+        "folds",
+        *_FOUNDATION_EXTENSION_CHILD_KINDS,
+        *(_G2_EXTENSION_CHILD_KINDS if decode_g2 else ()),
+        *(("targets",) if decode_target else ()),
+    )
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
         expected_lineage,
-        decode_g2=decode_g2,
-        decode_target=decode_target,
+        decode_rows=False,
+        decode_kinds=consumed_child_kinds,
+        byte_kinds=consumed_child_kinds,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
         raise ValueError("IBKR foundation observation child differs from configuration")

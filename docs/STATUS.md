@@ -192,7 +192,7 @@ remains offline/replay.
 
 ## Next actions
 
-1. PR-C1 convergence is implementation-complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate and merge remain release checks.
+1. PR-C1 convergence is merged and complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate remains the release check.
 2. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
    holdout execution and effectiveness evidence remain separately authorised and pending.
