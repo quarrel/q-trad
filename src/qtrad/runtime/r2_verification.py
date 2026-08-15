@@ -173,6 +173,7 @@ from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     _canonical_payload_identity,
+    _reject_orphan_files,
     atomic_create,
     canonical_bytes,
     reference_for_json,
@@ -4500,6 +4501,94 @@ def _build_oof_verification_receipt(
     )
 
 
+def _oof_declared_references(bundle: R2OofBundle) -> tuple[ArtifactReference, ...]:
+    return (
+        *bundle.feature_children,
+        *bundle.preprocessing_children,
+        *bundle.fit_children,
+        *bundle.forecast_manifests,
+        *bundle.coverage_children,
+        *bundle.evaluation_children,
+        *((bundle.holdout_target_source,) if bundle.holdout_target_source is not None else ()),
+    )
+
+
+def _safe_oof_child(root: Path, reference: ArtifactReference) -> Path:
+    root = root.resolve()
+    candidate = root / reference.path
+    try:
+        candidate.relative_to(root)
+    except ValueError as error:
+        raise ValueError("R2 OOF child path escapes its closure") from error
+    current = root
+    for part in reference.path.split("/"):
+        current /= part
+        if current.is_symlink():
+            raise ValueError("R2 OOF child path traverses a symlink")
+    if not candidate.is_file():
+        raise ValueError(f"R2 OOF child is missing or not a regular file: {reference.path}")
+    return candidate
+
+
+def _read_oof_consumed_json(
+    root: Path, reference: ArtifactReference
+) -> dict[str, object]:
+    candidate = _safe_oof_child(root, reference)
+    encoded = candidate.read_bytes()
+    if len(encoded) > 64 * 1024 * 1024:
+        raise ValueError("R2 OOF child exceeds the size limit")
+    if sha256(encoded).hexdigest() != reference.sha256:
+        raise ValueError(f"R2 OOF child digest mismatch: {reference.path}")
+    try:
+        value = json.loads(encoded)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError(f"R2 OOF child is not valid JSON: {reference.path}") from error
+    if not isinstance(value, dict):
+        raise ValueError(f"R2 OOF child is not a JSON object: {reference.path}")
+    payload = cast(dict[str, object], value)
+    if encoded != canonical_bytes(payload):
+        raise ValueError(f"R2 OOF child is not canonical: {reference.path}")
+    if payload.get("contract") != reference.contract:
+        raise ValueError(f"R2 OOF child contract mismatch: {reference.path}")
+    if _canonical_payload_identity(reference.contract, payload) != reference.semantic_id:
+        raise ValueError(f"R2 OOF child semantic identity mismatch: {reference.path}")
+    return payload
+
+
+def _authenticate_oof_closure(
+    manifest: Path,
+) -> tuple[R2OofBundle, dict[str, object]]:
+    manifest_path = _oof_manifest_path(manifest)
+    root = manifest_path.parent
+    if root.is_symlink():
+        raise ValueError("R2 OOF closure root must not be a symlink")
+    manifest_payload = _load_selection(manifest_path)
+    manifest_bytes = manifest_path.read_bytes()
+    if manifest_bytes != canonical_bytes(manifest_payload):
+        raise ValueError("R2 OOF manifest is not canonical")
+    bundle = R2OofBundle.from_json(manifest_payload)
+    allowed_paths = {"manifest.json"}
+    descriptor: dict[str, object] | None = None
+    descriptor_count = 0
+    for reference in _oof_declared_references(bundle):
+        allowed_paths.add(reference.path)
+        if reference.contract == OOF_DESCRIPTOR_CONTRACT:
+            descriptor_count += 1
+            descriptor = _read_oof_consumed_json(root, reference)
+        elif reference.contract == R2ForecastManifest.CONTRACT:
+            forecast_payload = _read_oof_consumed_json(root, reference)
+            forecast_manifest = R2ForecastManifest.from_json(forecast_payload)
+            nested = forecast_manifest.forecast_child
+            allowed_paths.add(nested.path)
+            _safe_oof_child(root, nested)
+        else:
+            _safe_oof_child(root, reference)
+    _reject_orphan_files(root, allowed_paths)
+    if descriptor_count != 1 or descriptor is None:
+        raise ValueError("R2 OOF closure must contain exactly one run descriptor")
+    return bundle, descriptor
+
+
 def _load_oof_verification_receipt(manifest: Path, receipt_path: Path) -> R2OofVerificationReceipt:
     manifest_path = _oof_manifest_path(manifest)
     root = manifest_path.parent.resolve()
@@ -4579,14 +4668,9 @@ def verify_r2_oof_semantics(
 
 def authenticate_r2_oof(path: Path, *, receipt: Path) -> R2OofBundle:
     """Authenticate an R2 OOF closure and receipt without semantic replay."""
-    manifest_path = _oof_manifest_path(path)
-    manifest_payload = _load_selection(manifest_path)
-    if manifest_path.read_bytes() != canonical_bytes(manifest_payload):
-        raise ValueError("R2 OOF manifest is not canonical")
-    bundle = verify_r2_oof_bundle(manifest_path)
-    descriptor = _oof_child_payload(manifest_path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    parsed = _load_oof_verification_receipt(manifest_path, receipt)
-    _validate_oof_verification_receipt(manifest_path, bundle, descriptor, parsed)
+    bundle, descriptor = _authenticate_oof_closure(path)
+    parsed = _load_oof_verification_receipt(path, receipt)
+    _validate_oof_verification_receipt(path, bundle, descriptor, parsed)
     return bundle
 
 
