@@ -3,15 +3,17 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 import qtrad.runtime.ibkr_foundation_promotion as promotion_runtime
+from qtrad.runtime.ibkr_foundation import verify_ibkr_foundation
 from qtrad.runtime.ibkr_foundation_promotion import (
     authenticate_ibkr_foundation_promotion,
     create_ibkr_foundation_confirmatory_promotion,
 )
-from tests.test_ibkr_foundation import _verified_fixture
+from tests.test_ibkr_foundation import _foundation_fixture, _verified_fixture
 
 
 def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
@@ -119,15 +121,36 @@ def test_current_v3_qualifying_promotion_mutation_and_reuse_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
-    monkeypatch.setattr(promotion_runtime, "_require_detached_source", lambda: None)
-    original_bindings = promotion_runtime._foundation_v3_bindings
-    stage8, readiness, identities = original_bindings(foundation, receipt)
-    qualifying_readiness = {**readiness, "state": "QUALIFYING_HISTORY_READY", "causes": []}
+    from dataclasses import replace
+
+    import qtrad.application.ibkr_foundation as foundation_application
+    from qtrad.domain.ibkr_foundation import IBKRFoundationReadinessState
+
+    original_evaluate = foundation_application.evaluate_ibkr_foundation_readiness
+
+    def qualifying_evaluate(*args: Any, **kwargs: Any) -> Any:
+        readiness = original_evaluate(*args, **kwargs)
+        return replace(
+            readiness,
+            state=IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY,
+            causes=(),
+        )
+
     monkeypatch.setattr(
-        promotion_runtime,
-        "_foundation_v3_bindings",
-        lambda *_args, **_kwargs: (stage8, qualifying_readiness, identities),
+        foundation_application,
+        "evaluate_ibkr_foundation_readiness",
+        qualifying_evaluate,
     )
+    foundation, stage7_manifest, stage7_receipt = _foundation_fixture(tmp_path)
+    receipt = tmp_path / "foundation-receipt.json"
+    verify_ibkr_foundation(
+        foundation,
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        receipt_output=receipt,
+        workers=1,
+    )
+    monkeypatch.setattr(promotion_runtime, "_require_detached_source", lambda: None)
     output = tmp_path / "qualifying-promotion.json"
     authority = create_ibkr_foundation_confirmatory_promotion(
         foundation,
