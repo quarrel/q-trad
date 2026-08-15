@@ -912,10 +912,9 @@ def _stage7_observation_projection(
         _json_value(schedule)
     disposition = _string(value["gap_disposition"], "provider observation gap disposition")
     if legacy:
-        if disposition == "BAR_ACCEPTED":
-            disposition = "SUCCEEDED"
-        elif disposition != "SUCCEEDED":
+        if disposition != "BAR_ACCEPTED":
             raise ValueError("retained Stage 7 disposition changed")
+        disposition = "SUCCEEDED"
     elif disposition != "SUCCEEDED":
         raise ValueError("new Stage 7 disposition changed")
     projected: dict[str, JsonValue] = {}

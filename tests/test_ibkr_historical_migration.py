@@ -282,6 +282,12 @@ def test_stage8_readiness_projection_requires_exact_schema() -> None:
 
 def test_stage7_equivalence_excludes_physical_observation_identity() -> None:
     old = _stage7_evidence(observation_sha256="a" * 64)
+    old = SimpleNamespace(
+        **{
+            **vars(old),
+            "observations": (replace(old.observations[0], gap_disposition="BAR_ACCEPTED"),),
+        }
+    )
     new = _stage7_evidence(observation_sha256="b" * 64)
     result = migration._compare_stage7(cast(Any, old), cast(Any, new))
     assert result["row_count"] == 1
@@ -289,9 +295,16 @@ def test_stage7_equivalence_excludes_physical_observation_identity() -> None:
 
 
 def test_stage7_equivalence_rejects_semantic_observation_change() -> None:
+    old = _stage7_evidence(close="1.1000")
+    old = SimpleNamespace(
+        **{
+            **vars(old),
+            "observations": (replace(old.observations[0], gap_disposition="BAR_ACCEPTED"),),
+        }
+    )
     with pytest.raises(ValueError, match="observation semantics"):
         migration._compare_stage7(
-            cast(Any, _stage7_evidence(close="1.1000")),
+            cast(Any, old),
             cast(Any, _stage7_evidence(close="1.1001")),
         )
 
