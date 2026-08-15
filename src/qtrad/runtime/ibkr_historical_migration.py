@@ -820,6 +820,7 @@ def _invalidate_failed_stage8_attempt3(
         raise ValueError("attempt-3 fold/readiness divergence changed")
 
     stage7_receipt = _read_json(paths.stage7_receipt, "Stage 7 verification receipt")
+    finalizer_implementation_commit = derive_qtrad_commit(require_clean=True)
     completion.mkdir()
     old_authority = {
         "stage8": {
@@ -846,7 +847,8 @@ def _invalidate_failed_stage8_attempt3(
             "equivalent": False,
             "promotion_created": False,
             "authority_usable": False,
-            "implementation_commit": _ATTEMPT3_COMMIT,
+            "failure_implementation_commit": _ATTEMPT3_COMMIT,
+            "finalizer_implementation_commit": finalizer_implementation_commit,
             "attempt": {
                 "root": str(attempt_root),
                 "failure_record_sha256": failure_sha256,
@@ -1832,6 +1834,188 @@ __all__ = [
     "MigrationWorkCounts",
     "PromotionAuthorisation",
     "authenticate_migration_equivalence_record",
+    "authenticate_migration_invalidation_record",
     "migrate_retained_ibkr_evidence",
     "plan_retained_ibkr_migration",
 ]
+
+
+def authenticate_migration_invalidation_record(path: Path) -> dict[str, JsonValue]:
+    """Authenticate the packet-specific attempt-3 invalidation record."""
+    candidate = _require_regular_file(path, "migration invalidation record")
+    payload = candidate.read_bytes()
+    document = _read_json(candidate, "migration invalidation record")
+    if payload != canonical_json_bytes(cast(dict[str, JsonValue], document)):
+        raise ValueError("migration invalidation record is not canonical")
+    expected_fields = {
+        "contract",
+        "schema_version",
+        "kind",
+        "purpose",
+        "equivalent",
+        "promotion_created",
+        "authority_usable",
+        "failure_implementation_commit",
+        "finalizer_implementation_commit",
+        "attempt",
+        "old_authority",
+        "new_outputs",
+        "semantic_divergence",
+        "work_counts",
+        "operator_authorization",
+        "safety",
+        "record_sha256",
+    }
+    if set(document) != expected_fields:
+        raise ValueError("migration invalidation record fields are not exact")
+    identity = dict(document)
+    record_sha256 = _string(identity.pop("record_sha256"), "invalidation record identity")
+    if _digest_json(identity) != record_sha256:
+        raise ValueError("migration invalidation record identity changed")
+    if (
+        document["contract"] != "qtrad-ibkr-historical-v2-to-v3-attempt3-invalidation-v2"
+        or document["schema_version"] != 2
+        or document["kind"] != "invalidation"
+        or document["purpose"] != "stage8_attempt3_invalidation_no_promotion"
+        or document["equivalent"] is not False
+        or document["promotion_created"] is not False
+        or document["authority_usable"] is not False
+    ):
+        raise ValueError("migration invalidation record contract or authority changed")
+
+    def digest(value: object, field: str) -> str:
+        text = _string(value, field)
+        if len(text) != 64 or any(character not in "0123456789abcdef" for character in text):
+            raise ValueError(f"{field} must be a lower-case SHA-256 digest")
+        return text
+
+    if document["failure_implementation_commit"] != _ATTEMPT3_COMMIT:
+        raise ValueError("invalidation failure implementation commit changed")
+    finalizer_commit = _string(
+        document["finalizer_implementation_commit"], "invalidation finalizer commit"
+    )
+    if len(finalizer_commit) != 40 or any(
+        character not in "0123456789abcdef" for character in finalizer_commit
+    ):
+        raise ValueError("invalidation finalizer commit is not a lowercase 40-character SHA-1")
+
+    attempt = _mapping(document["attempt"], "invalidation attempt")
+    if set(attempt) != {"root", "failure_record_sha256", "phase", "error"}:
+        raise ValueError("invalidation attempt fields are not exact")
+    if Path(_string(attempt["root"], "invalidation attempt root")).name != _ATTEMPT3_ROOT_NAME:
+        raise ValueError("invalidation attempt root binding changed")
+    digest(attempt["failure_record_sha256"], "invalidation failure record")
+    if attempt["phase"] != "stage8-equivalence" or attempt["error"] != _ATTEMPT3_ERROR:
+        raise ValueError("invalidation attempt binding changed")
+
+    old_authority = _mapping(document["old_authority"], "invalidation old authority")
+    if set(old_authority) != {"stage8", "promotion", "status"}:
+        raise ValueError("invalidation old authority fields are not exact")
+    if old_authority["status"] != "SUPERSEDED_NOT_CARRIED_FORWARD":
+        raise ValueError("invalidation old authority status changed")
+    old_stage8 = _mapping(old_authority["stage8"], "invalidation old Stage 8")
+    if set(old_stage8) != {
+        "build_sha256",
+        "manifest_sha256",
+        "closure_id",
+        "receipt_sha256",
+        "verification_id",
+    }:
+        raise ValueError("invalidation old Stage 8 fields are not exact")
+    for field in (
+        "build_sha256",
+        "manifest_sha256",
+        "closure_id",
+        "receipt_sha256",
+        "verification_id",
+    ):
+        digest(old_stage8[field], f"invalidation old Stage 8 {field}")
+    old_promotion = _mapping(old_authority["promotion"], "invalidation old promotion")
+    if set(old_promotion) != {"foundation_bundle_id", "promotion_sha256", "file_sha256"}:
+        raise ValueError("invalidation old promotion fields are not exact")
+    for field in ("foundation_bundle_id", "promotion_sha256", "file_sha256"):
+        digest(old_promotion[field], f"invalidation old promotion {field}")
+
+    new_outputs = _mapping(document["new_outputs"], "invalidation new outputs")
+    if set(new_outputs) != {"stage6", "stage7", "stage8"}:
+        raise ValueError("invalidation new outputs fields are not exact")
+    stage6 = _mapping(new_outputs["stage6"], "invalidation Stage 6 output")
+    if set(stage6) != {"result_id", "closure_id", "manifest_sha256", "receipt_sha256"}:
+        raise ValueError("invalidation Stage 6 output fields are not exact")
+    for field in stage6:
+        digest(stage6[field], f"invalidation Stage 6 {field}")
+    stage7 = _mapping(new_outputs["stage7"], "invalidation Stage 7 output")
+    if set(stage7) != {"dataset_sha256", "manifest_sha256", "receipt_sha256", "verification_id"}:
+        raise ValueError("invalidation Stage 7 output fields are not exact")
+    for field in stage7:
+        digest(stage7[field], f"invalidation Stage 7 {field}")
+    stage8 = _mapping(new_outputs["stage8"], "invalidation Stage 8 output")
+    if set(stage8) != {
+        "foundation_id",
+        "closure_id",
+        "manifest_sha256",
+        "receipt_sha256",
+        "verification_id",
+        "children",
+    }:
+        raise ValueError("invalidation Stage 8 output fields are not exact")
+    for field in (
+        "foundation_id",
+        "closure_id",
+        "manifest_sha256",
+        "receipt_sha256",
+        "verification_id",
+    ):
+        digest(stage8[field], f"invalidation Stage 8 {field}")
+    children = _mapping(stage8["children"], "invalidation Stage 8 children")
+    for kind, raw_refs in children.items():
+        if not isinstance(raw_refs, list):
+            raise ValueError(f"invalidation Stage 8 {kind} children are not a list")
+        for raw_ref in raw_refs:
+            ref = _mapping(raw_ref, f"invalidation Stage 8 {kind} child")
+            if set(ref) != {"dataset_id", "row_count"}:
+                raise ValueError("invalidation Stage 8 child fields are not exact")
+            digest(ref["dataset_id"], f"invalidation Stage 8 {kind} dataset")
+            if not isinstance(ref["row_count"], int) or ref["row_count"] < 0:
+                raise ValueError("invalidation Stage 8 child row count is invalid")
+
+    work_counts = _mapping(document["work_counts"], "invalidation work counts")
+    expected_counts = {
+        "stage6_transformation_replays",
+        "stage7_transformation_replays",
+        "stage8_row_decodes",
+        "stage6_semantic_verifier_replays",
+        "stage7_semantic_verifier_replays",
+    }
+    if set(work_counts) != expected_counts or any(
+        work_counts[field] != 0 for field in expected_counts
+    ):
+        raise ValueError("invalidation work counts are not zero")
+    safety = _mapping(document["safety"], "invalidation safety")
+    if (
+        set(safety)
+        != {
+            "provider_calls",
+            "database_reacquisition",
+            "holdout_access",
+            "new_promotion",
+            "old_authority_untouched",
+        }
+        or any(
+            safety[field] != 0
+            for field in (
+                "provider_calls",
+                "database_reacquisition",
+                "holdout_access",
+                "new_promotion",
+            )
+        )
+        or safety["old_authority_untouched"] is not True
+    ):
+        raise ValueError("invalidation safety authority changed")
+    operator = _mapping(document["operator_authorization"], "invalidation operator authorization")
+    if set(operator) != {"authorized_by", "authorized_at", "authorization_reference"}:
+        raise ValueError("invalidation operator authorization fields are not exact")
+    for field in operator:
+        _string(operator[field], f"invalidation operator {field}")
+    return cast(dict[str, JsonValue], document)

@@ -1318,43 +1318,39 @@ def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
     paths.stage8_foundation.parent.joinpath("foundation-v3.json.children").mkdir()
     failure = json.loads(paths.failure_record.read_text(encoding="utf-8"))
     failure["outputs"] = migration._failure_output_snapshot(paths)
-    old_stage6 = SimpleNamespace(
-        aggregate=SimpleNamespace(result_id="old-result", closure_id="old-closure")
-    )
-    old_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="old-dataset"))
-    old_stage8 = {"foundation_build_sha256": "old-build", "verification_receipt_id": "old-ver"}
-    old_promotion = SimpleNamespace(
-        foundation_bundle_id="old-foundation", promotion_sha256="old-promotion"
-    )
+    old_stage6 = SimpleNamespace(aggregate=SimpleNamespace(result_id="a" * 64, closure_id="b" * 64))
+    old_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="c" * 64))
+    old_stage8 = {"foundation_build_sha256": "d" * 64, "verification_receipt_id": "e" * 64}
+    old_promotion = SimpleNamespace(foundation_bundle_id="f" * 64, promotion_sha256="0" * 64)
     current_stage6 = SimpleNamespace(
-        aggregate=SimpleNamespace(result_id="new-result", closure_id="new-closure")
+        aggregate=SimpleNamespace(result_id="1" * 64, closure_id="2" * 64)
     )
-    current_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="new-dataset"))
+    current_stage7 = SimpleNamespace(dataset=SimpleNamespace(dataset_sha256="3" * 64))
     current_stage8 = {
-        "foundation_id": "new-foundation",
-        "closure_id": "new-closure-id",
-        "verification_id": "new-ver",
+        "foundation_id": "4" * 64,
+        "closure_id": "5" * 64,
+        "verification_id": "6" * 64,
     }
     source_stage8_manifest_sha = migration._file_sha256(paths.source_stage8_foundation)
     source_stage7_manifest_sha = migration._file_sha256(paths.source_stage7_manifest)
     failure["source"] = {
-        "stage6_result_id": "old-result",
-        "stage6_closure_id": "old-closure",
-        "stage7_dataset_id": "old-dataset",
+        "stage6_result_id": "a" * 64,
+        "stage6_closure_id": "b" * 64,
+        "stage7_dataset_id": "c" * 64,
         "stage7_manifest_sha256": source_stage7_manifest_sha,
-        "stage8_build_id": "old-build",
+        "stage8_build_id": "d" * 64,
         "stage8_manifest_sha256": source_stage8_manifest_sha,
-        "promotion_id": "old-promotion",
+        "promotion_id": "0" * 64,
     }
     identity = {key: value for key, value in failure.items() if key != "record_sha256"}
     failure["record_sha256"] = migration._digest_json(identity)
     paths.failure_record.write_bytes(migration.canonical_json_bytes(failure))
     old_payload = {
-        "children": {"folds": [{"dataset_id": "old-folds", "row_count": 9}]},
+        "children": {"folds": [{"dataset_id": "8" * 64, "row_count": 9}]},
         "readiness": {"state": "QUALIFYING_HISTORY_READY", "causes": []},
     }
     new_payload = {
-        "children": {"folds": [{"dataset_id": "new-folds", "row_count": 0}]},
+        "children": {"folds": [{"dataset_id": "9" * 64, "row_count": 0}]},
         "readiness": {
             "state": "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION",
             "causes": [
@@ -1373,7 +1369,7 @@ def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
         if path == paths.stage8_foundation:
             return {"payload": new_payload}
         if path == paths.stage7_receipt:
-            return {"verification_id": "new-stage7-verification"}
+            return {"verification_id": "7" * 64}
         return real_read_json(path, field)
 
     calls: list[str] = []
@@ -1418,6 +1414,12 @@ def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
         "authenticate_ibkr_foundation",
         lambda *_args, **_kwargs: calls.append("stage8") or current_stage8,
     )
+    commit_calls: list[dict[str, bool]] = []
+    monkeypatch.setattr(
+        migration,
+        "derive_qtrad_commit",
+        lambda **kwargs: commit_calls.append(kwargs) or "1" * 40,
+    )
     completion = tmp_path / "completion"
     record_path = migration._invalidate_failed_stage8_attempt3(
         paths,
@@ -1437,3 +1439,13 @@ def test_attempt3_invalidation_writes_bound_no_promotion_record_without_replay(
     assert record["old_authority"]["status"] == "SUPERSEDED_NOT_CARRIED_FORWARD"
     assert record["work_counts"]["stage8_row_decodes"] == 0
     assert calls == ["old-stage7", "stage6", "stage7", "stage8"]
+    assert commit_calls == [{"require_clean": True}]
+    assert record["failure_implementation_commit"] == migration._ATTEMPT3_COMMIT
+    assert record["finalizer_implementation_commit"] == "1" * 40
+    authenticated = migration.authenticate_migration_invalidation_record(record_path)
+    assert authenticated["record_sha256"] == record["record_sha256"]
+    mutated = dict(record)
+    mutated["finalizer_implementation_commit"] = "2" * 40
+    record_path.write_bytes(migration.canonical_json_bytes(mutated))
+    with pytest.raises(ValueError, match="identity changed"):
+        migration.authenticate_migration_invalidation_record(record_path)
