@@ -9,6 +9,7 @@ fixtures.
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,10 +18,18 @@ from pathlib import Path
 from typing import Any, cast
 
 from qtrad.application.ibkr_foundation import IBKRFoundationBuild
-from qtrad.application.ibkr_results import build_ibkr_historical_aggregate_result
+from qtrad.application.ibkr_historical import derive_qtrad_commit
+from qtrad.application.ibkr_results import (
+    build_ibkr_historical_aggregate_result,
+    replay_ibkr_historical_request_result,
+)
 from qtrad.application.provider_history import ProviderHistorySourceEvidence
 from qtrad.domain.events import JsonValue
-from qtrad.domain.ibkr_results import IbkrHistoricalResultArtifact, canonical_json_bytes
+from qtrad.domain.ibkr_results import (
+    IbkrHistoricalRequestResult,
+    IbkrHistoricalResultArtifact,
+    canonical_json_bytes,
+)
 from qtrad.runtime.ibkr_foundation import (
     _authenticate_foundation_manifest,
     _authenticate_ibkr_foundation_migration_v2,
@@ -61,6 +70,9 @@ _STAGE8_OUTPUT = "foundation-v3.json"
 _STAGE8_RECEIPT = "foundation-v3-verification-receipt.json"
 _PROMOTION_OUTPUT = "foundation-v3-confirmatory-promotion.json"
 _RECORD_OUTPUT = "migration-equivalence-record.json"
+_FAILURE_OUTPUT = "migration-failure-record.json"
+_CAPACITY_OVERHEAD_BYTES = 1_048_576
+_CAPACITY_SAFETY_MULTIPLIER = 2
 
 # These values are lineage, physical, or implementation identities.  They are
 # deliberately excluded from the scientific observation projection.
@@ -158,6 +170,10 @@ class MigrationPaths:
     def record(self) -> Path:
         return self.destination_root / _RECORD_OUTPUT
 
+    @property
+    def failure_record(self) -> Path:
+        return self.destination_root / _FAILURE_OUTPUT
+
     def output_paths(self) -> tuple[Path, ...]:
         return (
             self.destination_root,
@@ -188,6 +204,8 @@ class MigrationPlan:
     source_stage8_build_id: str
     source_stage8_manifest_sha256: str
     source_promotion_id: str
+    capacity_required_bytes: int
+    capacity_available_bytes: int
 
     def as_json_value(self) -> dict[str, JsonValue]:
         return {
@@ -204,6 +222,10 @@ class MigrationPlan:
                 "stage8_build_id": self.source_stage8_build_id,
                 "stage8_manifest_sha256": self.source_stage8_manifest_sha256,
                 "promotion_id": self.source_promotion_id,
+            },
+            "capacity": {
+                "required_bytes": self.capacity_required_bytes,
+                "available_bytes": self.capacity_available_bytes,
             },
             "destination_root": str(self.paths.destination_root),
             "outputs": [str(path) for path in self.paths.output_paths()[1:]],
@@ -222,6 +244,7 @@ class MigrationWorkCounts:
     new_stage7_rows_decoded: int
     old_stage8_child_rows_read: int
     new_stage8_child_rows_read: int
+    old_stage6_semantic_replays: int
     stage6_semantic_replays: int
     stage7_semantic_replays: int
     stage8_semantic_replays: int
@@ -237,11 +260,29 @@ class MigrationWorkCounts:
             "new_stage7_rows_decoded": self.new_stage7_rows_decoded,
             "old_stage8_child_rows_read": self.old_stage8_child_rows_read,
             "new_stage8_child_rows_read": self.new_stage8_child_rows_read,
+            "old_stage6_semantic_replays": self.old_stage6_semantic_replays,
             "stage6_semantic_replays": self.stage6_semantic_replays,
             "stage7_semantic_replays": self.stage7_semantic_replays,
             "stage8_semantic_replays": self.stage8_semantic_replays,
             "promotion_semantic_replays": self.promotion_semantic_replays,
         }
+
+
+@dataclass(slots=True)
+class _MigrationCounters:
+    old_stage6_request_children: int = 0
+    new_stage6_request_children: int = 0
+    old_stage7_parts_read: int = 0
+    new_stage7_parts_read: int = 0
+    old_stage7_rows_decoded: int = 0
+    new_stage7_rows_decoded: int = 0
+    old_stage8_child_rows_read: int = 0
+    new_stage8_child_rows_read: int = 0
+    old_stage6_semantic_replays: int = 0
+    stage6_semantic_replays: int = 0
+    stage7_semantic_replays: int = 0
+    stage8_semantic_replays: int = 0
+    promotion_semantic_replays: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -279,6 +320,9 @@ class MigrationResult:
             new_stage8_child_rows_read=_integer(
                 value["new_stage8_child_rows_read"], "new Stage 8 row count"
             ),
+            old_stage6_semantic_replays=_integer(
+                value["old_stage6_semantic_replays"], "old Stage 6 replay count"
+            ),
             stage6_semantic_replays=_integer(
                 value["stage6_semantic_replays"], "Stage 6 replay count"
             ),
@@ -299,10 +343,9 @@ def plan_retained_ibkr_migration(
     *,
     implementation_commit: str,
 ) -> MigrationPlan:
-    """Preflight retained paths and create-only destinations without writing."""
+    """Preflight retained paths, identity and capacity without writing."""
 
-    if not implementation_commit or len(implementation_commit) < 7:
-        raise ValueError("migration implementation commit is required")
+    _require_implementation_commit(implementation_commit)
     for path, field in (
         (paths.source_stage6_manifest, "retained Stage 6 manifest"),
         (paths.source_stage7_manifest, "retained Stage 7 manifest"),
@@ -313,6 +356,7 @@ def plan_retained_ibkr_migration(
     ):
         _require_regular_file(path, field)
     _preflight_destination(paths)
+    capacity_required_bytes, capacity_available_bytes = _capacity_preflight(paths)
 
     stage6 = _read_legacy_ibkr_historical_result_v2_header(
         paths.source_stage6_manifest, require_exact_tree=True
@@ -322,8 +366,8 @@ def plan_retained_ibkr_migration(
         raise ValueError("retained Stage 7 migration input must be provider-history v2")
     stage8_document = _read_json(paths.source_stage8_foundation, "retained Stage 8 foundation")
     promotion_document = _read_json(paths.source_promotion, "retained Stage 8 promotion")
-    source_stage8_build_id = _string(stage8_document.get("build_sha256"), "retained Stage 8 build")
-    source_promotion_id = _string(promotion_document.get("promotion_sha256"), "retained promotion")
+    source_stage8_build_id = _string(stage8_document["build_sha256"], "retained Stage 8 build")
+    source_promotion_id = _string(promotion_document["promotion_sha256"], "retained promotion")
     return MigrationPlan(
         implementation_commit=implementation_commit,
         paths=paths,
@@ -336,6 +380,8 @@ def plan_retained_ibkr_migration(
         source_stage8_build_id=source_stage8_build_id,
         source_stage8_manifest_sha256=_file_sha256(paths.source_stage8_foundation),
         source_promotion_id=source_promotion_id,
+        capacity_required_bytes=capacity_required_bytes,
+        capacity_available_bytes=capacity_available_bytes,
     )
 
 
@@ -347,8 +393,8 @@ def migrate_retained_ibkr_evidence(
 ) -> MigrationResult:
     """Migrate retained files once into the current v3 chain.
 
-    The destination root is create-only.  A failure leaves any already-published
-    destination unclaimed; callers must choose a fresh attempt directory.
+    The destination root is create-only.  A failure writes one durable failure
+    record and leaves the attempt unclaimable; callers must choose a fresh root.
     """
 
     plan = plan_retained_ibkr_migration(
@@ -368,105 +414,170 @@ def migrate_retained_ibkr_evidence(
         paths.source_stage7_manifest,
         receipt=paths.source_stage7_receipt,
     )
-
-    paths.destination_root.mkdir()
+    old_stage7_manifest = _read_provider_history_v2_manifest(paths.source_stage7_manifest)
+    old_authenticated_manifest = _authenticate_foundation_manifest(
+        paths.source_stage8_foundation,
+        provider_closure=False,
+    )
     stage6_stream = _read_legacy_ibkr_historical_result_v2_header(
         paths.source_stage6_manifest, require_exact_tree=True
     )
     old_results = tuple(stage6_stream.iter_request_results())
     if len(old_results) != plan.source_stage6_request_count:
         raise ValueError("retained Stage 6 child count changed during migration")
-    current_aggregate = build_ibkr_historical_aggregate_result(
-        stage6_stream.plan,
-        stage6_stream.plan_bytes,
-        old_results,
+    counters = _MigrationCounters(
+        old_stage6_request_children=len(old_results),
+        old_stage7_parts_read=len(old_stage7_manifest.parts),
+        old_stage7_rows_decoded=len(old_stage7_evidence.observations),
     )
-    artifact = IbkrHistoricalResultArtifact(
-        plan=stage6_stream.plan,
-        plan_bytes=stage6_stream.plan_bytes,
-        request_results=old_results,
-        aggregate=current_aggregate,
-    )
-    published_stage6 = publish_ibkr_historical_result(
-        paths.stage6_manifest.parent,
-        artifact,
-    )
-    verify_ibkr_historical_result(
-        published_stage6,
-        receipt_output=paths.stage6_receipt,
-    )
+    stage6_equivalence = _replay_legacy_stage6(stage6_stream, old_results)
+    counters.old_stage6_semantic_replays += 1
 
-    published_stage7 = build_provider_history(
-        published_stage6,
-        stage6_receipt=paths.stage6_receipt,
-        output=paths.stage7_manifest.parent,
-    )
-    new_stage7_evidence = verify_provider_history(
-        published_stage7,
-        stage6_manifest=published_stage6,
-        stage6_receipt=paths.stage6_receipt,
-        receipt_output=paths.stage7_receipt,
-    )
-    stage7_equivalence = _compare_stage7(
-        old_stage7_evidence,
-        new_stage7_evidence,
-    )
+    paths.destination_root.mkdir()
+    phase = "stage6-build"
+    try:
+        current_aggregate = build_ibkr_historical_aggregate_result(
+            stage6_stream.plan,
+            stage6_stream.plan_bytes,
+            old_results,
+        )
+        artifact = IbkrHistoricalResultArtifact(
+            plan=stage6_stream.plan,
+            plan_bytes=stage6_stream.plan_bytes,
+            request_results=old_results,
+            aggregate=current_aggregate,
+        )
+        phase = "stage6-publication"
+        published_stage6 = publish_ibkr_historical_result(
+            paths.stage6_manifest.parent,
+            artifact,
+        )
+        phase = "stage6-verification"
+        counters.stage6_semantic_replays += 1
+        verified_stage6 = verify_ibkr_historical_result(
+            published_stage6,
+            receipt_output=paths.stage6_receipt,
+        )
+        counters.new_stage6_request_children = len(verified_stage6.request_results)
 
-    old_authenticated_manifest = _authenticate_foundation_manifest(
-        paths.source_stage8_foundation,
-        provider_closure=False,
-    )
-    write_ibkr_foundation(
-        paths.stage8_foundation,
-        stage7_manifest=published_stage7,
-        stage7_receipt=paths.stage7_receipt,
-        configuration=old_authenticated_manifest.configuration,
-    )
-    verified_build = verify_ibkr_foundation(
-        paths.stage8_foundation,
-        stage7_manifest=published_stage7,
-        stage7_receipt=paths.stage7_receipt,
-        receipt_output=paths.stage8_receipt,
-    )
-    stage8_equivalence, old_stage8_rows, new_stage8_rows = _compare_stage8(
-        old_authenticated_manifest,
-        verified_build,
-    )
+        phase = "stage7-build"
+        published_stage7 = build_provider_history(
+            published_stage6,
+            stage6_receipt=paths.stage6_receipt,
+            output=paths.stage7_manifest.parent,
+        )
+        phase = "stage7-verification"
+        counters.stage7_semantic_replays += 1
+        new_stage7_evidence = verify_provider_history(
+            published_stage7,
+            stage6_manifest=published_stage6,
+            stage6_receipt=paths.stage6_receipt,
+            receipt_output=paths.stage7_receipt,
+        )
+        counters.new_stage7_parts_read = len(new_stage7_evidence.dataset.partitions)
+        counters.new_stage7_rows_decoded = len(new_stage7_evidence.observations)
+        phase = "stage7-equivalence"
+        stage7_equivalence = _compare_stage7(
+            old_stage7_evidence,
+            new_stage7_evidence,
+        )
 
-    new_promotion_auth = create_ibkr_foundation_confirmatory_promotion(
-        paths.stage8_foundation,
-        receipt=paths.stage8_receipt,
-        output=paths.promotion,
-        authorized_by=promotion_authorisation.authorized_by,
-        authorized_at=promotion_authorisation.authorized_at,
-        authorization_reference=promotion_authorisation.authorization_reference,
-    )
-    record = _migration_record(
-        plan=plan,
-        old_stage8_auth=old_stage8_auth,
-        old_promotion_auth=old_promotion_auth,
-        new_promotion_auth=new_promotion_auth,
-        stage7_equivalence=stage7_equivalence,
-        stage8_equivalence=stage8_equivalence,
-        work_counts=MigrationWorkCounts(
-            old_stage6_request_children=len(old_results),
-            new_stage6_request_children=len(old_results),
-            old_stage7_parts_read=len(
-                _read_provider_history_v2_manifest(paths.source_stage7_manifest).parts
+        phase = "stage8-build"
+        write_ibkr_foundation(
+            paths.stage8_foundation,
+            stage7_manifest=published_stage7,
+            stage7_receipt=paths.stage7_receipt,
+            configuration=old_authenticated_manifest.configuration,
+        )
+        phase = "stage8-verification"
+        counters.stage8_semantic_replays += 1
+        verified_build = verify_ibkr_foundation(
+            paths.stage8_foundation,
+            stage7_manifest=published_stage7,
+            stage7_receipt=paths.stage7_receipt,
+            receipt_output=paths.stage8_receipt,
+        )
+        phase = "stage8-equivalence"
+        stage8_equivalence, old_stage8_rows, new_stage8_rows = _compare_stage8(
+            old_authenticated_manifest,
+            verified_build,
+        )
+        counters.old_stage8_child_rows_read = old_stage8_rows
+        counters.new_stage8_child_rows_read = new_stage8_rows
+
+        phase = "promotion"
+        new_promotion_auth = create_ibkr_foundation_confirmatory_promotion(
+            paths.stage8_foundation,
+            receipt=paths.stage8_receipt,
+            output=paths.promotion,
+            authorized_by=promotion_authorisation.authorized_by,
+            authorized_at=promotion_authorisation.authorized_at,
+            authorization_reference=promotion_authorisation.authorization_reference,
+        )
+        phase = "record"
+        record = _migration_record(
+            plan=plan,
+            old_stage8_auth=old_stage8_auth,
+            old_promotion_auth=old_promotion_auth,
+            new_promotion_auth=new_promotion_auth,
+            promotion_authorisation=promotion_authorisation,
+            stage6_equivalence=stage6_equivalence,
+            stage7_equivalence=stage7_equivalence,
+            stage8_equivalence=stage8_equivalence,
+            work_counts=MigrationWorkCounts(
+                old_stage6_request_children=counters.old_stage6_request_children,
+                new_stage6_request_children=counters.new_stage6_request_children,
+                old_stage7_parts_read=counters.old_stage7_parts_read,
+                new_stage7_parts_read=counters.new_stage7_parts_read,
+                old_stage7_rows_decoded=counters.old_stage7_rows_decoded,
+                new_stage7_rows_decoded=counters.new_stage7_rows_decoded,
+                old_stage8_child_rows_read=counters.old_stage8_child_rows_read,
+                new_stage8_child_rows_read=counters.new_stage8_child_rows_read,
+                old_stage6_semantic_replays=counters.old_stage6_semantic_replays,
+                stage6_semantic_replays=counters.stage6_semantic_replays,
+                stage7_semantic_replays=counters.stage7_semantic_replays,
+                stage8_semantic_replays=counters.stage8_semantic_replays,
+                promotion_semantic_replays=counters.promotion_semantic_replays,
             ),
-            old_stage7_rows_decoded=len(old_stage7_evidence.observations),
-            new_stage7_parts_read=len(new_stage7_evidence.dataset.partitions),
-            new_stage7_rows_decoded=len(new_stage7_evidence.observations),
-            old_stage8_child_rows_read=old_stage8_rows,
-            new_stage8_child_rows_read=new_stage8_rows,
-            stage6_semantic_replays=1,
-            stage7_semantic_replays=1,
-            stage8_semantic_replays=1,
-            promotion_semantic_replays=0,
-        ),
-    )
-    _write_create_only(paths.record, canonical_json_bytes(record))
-    return MigrationResult(record_path=paths.record, record=record)
+        )
+        _write_create_only(paths.record, canonical_json_bytes(record))
+        return MigrationResult(record_path=paths.record, record=record)
+    except Exception as error:
+        try:
+            _write_failure_record(paths, plan, phase=phase, error=error)
+        except Exception as record_error:
+            error.add_note(f"migration failure record could not be written: {record_error}")
+        raise
+
+
+def _replay_legacy_stage6(
+    stream: object,
+    results: tuple[IbkrHistoricalRequestResult, ...],
+) -> dict[str, JsonValue]:
+    plan = cast(Any, stream).plan
+    aggregate = cast(Any, stream).aggregate
+    plan_bytes = cast(bytes, cast(Any, stream).plan_bytes)
+    expected_requests = tuple(sorted(plan.requests, key=lambda item: item.request_sha256))
+    actual_results = tuple(sorted(results, key=lambda item: item.request_sha256))
+    if len(actual_results) != len(expected_requests):
+        raise ValueError("retained Stage 6 v2 replay request count changed")
+    for request, result in zip(expected_requests, actual_results, strict=True):
+        replay_ibkr_historical_request_result(request, result)
+    rebuilt = build_ibkr_historical_aggregate_result(plan, plan_bytes, actual_results)
+    old_semantic = {
+        "plan_semantic_id": aggregate.plan.semantic_sha256,
+        "request_result_semantic_ids": [item.semantic_sha256 for item in aggregate.request_results],
+        "coverage_summary": _json_value(aggregate.coverage_summary),
+        "entitlement_summary": _json_value(aggregate.entitlement_summary),
+    }
+    rebuilt_semantic = rebuilt.semantic_identity_payload()
+    if any(old_semantic[key] != rebuilt_semantic[key] for key in old_semantic):
+        raise ValueError("retained Stage 6 v2 semantic replay is not equivalent")
+    return {
+        "old_semantic_projection_sha256": _digest_json(old_semantic),
+        "new_semantic_projection_sha256": _digest_json(rebuilt_semantic),
+        "equivalent": True,
+    }
 
 
 def _compare_stage7(
@@ -684,6 +795,8 @@ def _migration_record(
     old_stage8_auth: Mapping[str, JsonValue],
     old_promotion_auth: object,
     new_promotion_auth: object,
+    promotion_authorisation: PromotionAuthorisation,
+    stage6_equivalence: Mapping[str, JsonValue],
     stage7_equivalence: Mapping[str, JsonValue],
     stage8_equivalence: Mapping[str, JsonValue],
     work_counts: MigrationWorkCounts,
@@ -699,65 +812,146 @@ def _migration_record(
     old_stage7 = _read_provider_history_v2_manifest(plan.paths.source_stage7_manifest)
     new_stage7 = _read_json(plan.paths.stage7_manifest, "new Stage 7 manifest")
     stage6 = _read_json(plan.paths.stage6_manifest, "new Stage 6 manifest")
+    new_stage6_receipt = _read_json(plan.paths.stage6_receipt, "new Stage 6 receipt")
+
+    identity_classification: dict[str, JsonValue] = {
+        "stage6": {
+            "semantic": {
+                "old": plan.source_stage6_result_id,
+                "new": _string(stage6["result_id"], "new Stage 6 result"),
+                "equivalent": True,
+                "explanation": (
+                    "v3 separates semantic result_id from the retained v2 aggregate identity."
+                ),
+            },
+            "closure": {
+                "old": plan.source_stage6_closure_id,
+                "new": _string(stage6["closure_id"], "new Stage 6 closure"),
+                "equivalent": False,
+                "explanation": (
+                    "v3 closure_id binds the newly published manifest tree and child bytes."
+                ),
+            },
+        },
+        "stage7": {
+            "semantic": {
+                "old": old_stage7.dataset.dataset_sha256,
+                "new": _string(
+                    _mapping(new_stage7["dataset"], "new Stage 7 dataset")["dataset_sha256"],
+                    "new Stage 7 dataset",
+                ),
+                "equivalent": True,
+                "explanation": (
+                    "v3 dataset identity is rebuilt from the retained scientific "
+                    "observation projection."
+                ),
+            },
+            "closure": {
+                "old": _string(
+                    old_stage7.document["physical_manifest_sha256"], "old Stage 7 closure"
+                ),
+                "new": _string(new_stage7["closure_id"], "new Stage 7 closure"),
+                "equivalent": False,
+                "explanation": "v3 closure binds only the direct Stage 7 manifest and parts.",
+            },
+        },
+        "stage8": {
+            "semantic": {
+                "old": _string(old_stage8_manifest["build_sha256"], "old Stage 8 foundation"),
+                "new": _string(new_foundation["foundation_id"], "new foundation"),
+                "equivalent": True,
+                "explanation": (
+                    "v3 foundation_id is a semantic identity; the retained build "
+                    "hash covered the old payload contract."
+                ),
+            },
+            "closure": {
+                "old": _file_sha256(plan.paths.source_stage8_foundation),
+                "new": _string(new_foundation["closure_id"], "new foundation closure"),
+                "equivalent": False,
+                "explanation": "v3 closure_id binds the new foundation manifest and child tree.",
+            },
+        },
+    }
     record_identity: dict[str, JsonValue] = {
         "contract": MIGRATION_CONTRACT,
         "schema_version": MIGRATION_SCHEMA_VERSION,
         "implementation_commit": plan.implementation_commit,
+        "capacity": {
+            "required_bytes": plan.capacity_required_bytes,
+            "available_bytes": plan.capacity_available_bytes,
+        },
+        "source": {
+            "stage6_result_id": plan.source_stage6_result_id,
+            "stage6_closure_id": plan.source_stage6_closure_id,
+            "stage7_dataset_id": old_stage7.dataset.dataset_sha256,
+            "stage7_closure_id": _string(
+                old_stage7.document["physical_manifest_sha256"], "old Stage 7 closure"
+            ),
+            "stage8_foundation_id": _string(
+                old_stage8_manifest["build_sha256"], "old Stage 8 foundation"
+            ),
+            "promotion_id": _string(old_promotion["promotion_sha256"], "old promotion"),
+        },
         "stage6": {
             "old_result_id": plan.source_stage6_result_id,
             "old_closure_id": plan.source_stage6_closure_id,
             "old_manifest_sha256": _file_sha256(plan.paths.source_stage6_manifest),
-            "new_result_id": _string(stage6.get("result_id"), "new Stage 6 result"),
-            "new_closure_id": _string(stage6.get("closure_id"), "new Stage 6 closure"),
+            "new_result_id": _string(stage6["result_id"], "new Stage 6 result"),
+            "new_closure_id": _string(stage6["closure_id"], "new Stage 6 closure"),
             "new_verification_id": _string(
-                _read_json(plan.paths.stage6_receipt, "new Stage 6 receipt").get("verification_id"),
-                "new Stage 6 verification",
+                new_stage6_receipt["verification_id"], "new Stage 6 verification"
             ),
         },
         "stage7": {
             "old_dataset_id": old_stage7.dataset.dataset_sha256,
             "old_manifest_sha256": _file_sha256(plan.paths.source_stage7_manifest),
             "old_closure_id": _string(
-                old_stage7.document.get("physical_manifest_sha256"),
-                "old Stage 7 closure",
+                old_stage7.document["physical_manifest_sha256"], "old Stage 7 closure"
             ),
             "old_verification_id": _string(
-                _read_json(plan.paths.source_stage7_receipt, "old Stage 7 receipt").get(
+                _read_json(plan.paths.source_stage7_receipt, "old Stage 7 receipt")[
                     "receipt_sha256"
-                ),
+                ],
                 "old Stage 7 verification",
             ),
             "new_dataset_id": _string(
-                _mapping(new_stage7.get("dataset"), "new Stage 7 dataset").get("dataset_sha256"),
+                _mapping(new_stage7["dataset"], "new Stage 7 dataset")["dataset_sha256"],
                 "new Stage 7 dataset",
             ),
-            "new_closure_id": _string(new_stage7.get("closure_id"), "new Stage 7 closure"),
+            "new_closure_id": _string(new_stage7["closure_id"], "new Stage 7 closure"),
             "new_verification_id": _string(
-                _read_json(plan.paths.stage7_receipt, "new Stage 7 receipt").get("verification_id"),
-                "new Stage 7 verification",
+                new_receipt["verification_id"], "new Stage 7 verification"
             ),
         },
         "stage8": {
             "old_foundation_id": _string(
-                old_stage8_manifest.get("build_sha256"), "old Stage 8 foundation"
+                old_stage8_manifest["build_sha256"], "old Stage 8 foundation"
             ),
             "old_closure_id": _file_sha256(plan.paths.source_stage8_foundation),
             "old_verification_id": _string(
-                old_receipt.get("receipt_sha256"), "old Stage 8 verification"
+                old_receipt["receipt_sha256"], "old Stage 8 verification"
             ),
-            "new_foundation_id": _string(new_foundation.get("foundation_id"), "new foundation"),
-            "new_closure_id": _string(new_foundation.get("closure_id"), "new foundation closure"),
+            "new_foundation_id": _string(new_foundation["foundation_id"], "new foundation"),
+            "new_closure_id": _string(new_foundation["closure_id"], "new foundation closure"),
             "new_verification_id": _string(
-                new_receipt.get("verification_id"), "new Stage 8 verification"
+                new_receipt["verification_id"], "new Stage 8 verification"
             ),
         },
         "promotion": {
-            "old_promotion_id": _string(old_promotion.get("promotion_sha256"), "old promotion"),
-            "new_promotion_id": _string(new_promotion.get("promotion_sha256"), "new promotion"),
+            "old_promotion_id": _string(old_promotion["promotion_sha256"], "old promotion"),
+            "new_promotion_id": _string(new_promotion["promotion_sha256"], "new promotion"),
         },
+        "identity_classification": identity_classification,
         "equivalence": {
+            "stage6": dict(stage6_equivalence),
             "stage7": dict(stage7_equivalence),
             "stage8": dict(stage8_equivalence),
+        },
+        "operator_authorization": {
+            "authorized_by": promotion_authorisation.authorized_by,
+            "authorized_at": promotion_authorisation.authorized_at.isoformat(),
+            "authorization_reference": promotion_authorisation.authorization_reference,
         },
         "work_counts": work_counts.as_json_value(),
         "safety": {
@@ -765,7 +959,7 @@ def _migration_record(
             "database_reacquisitions": 0,
             "holdout_access": 0,
             "retained_evidence_mutations": 0,
-            "promotion_semantic_replays": 0,
+            "promotion_semantic_replays": work_counts.promotion_semantic_replays,
             "old_authority_authenticated": bool(old_stage8_auth and old_promotion_auth),
             "new_authority_created": bool(new_promotion_auth),
         },
@@ -776,10 +970,172 @@ def _migration_record(
     }
 
 
+def _failure_output_snapshot(paths: MigrationPaths) -> list[JsonValue]:
+    snapshots: list[JsonValue] = []
+    for candidate in paths.output_paths()[1:]:
+        path = _absolute_lexical(candidate, "migration output")
+        entry: dict[str, JsonValue] = {
+            "path": str(path),
+            "exists": path.exists(),
+        }
+        if path.is_file() and not path.is_symlink():
+            payload = path.read_bytes()
+            entry["bytes"] = len(payload)
+            entry["sha256"] = sha256(payload).hexdigest()
+        snapshots.append(entry)
+    return snapshots
+
+
+def _write_failure_record(
+    paths: MigrationPaths,
+    plan: MigrationPlan,
+    *,
+    phase: str,
+    error: Exception,
+) -> None:
+    identity: dict[str, JsonValue] = {
+        "contract": MIGRATION_CONTRACT,
+        "schema_version": MIGRATION_SCHEMA_VERSION,
+        "kind": "failure",
+        "phase": phase,
+        "implementation_commit": plan.implementation_commit,
+        "source": {
+            "stage6_result_id": plan.source_stage6_result_id,
+            "stage6_closure_id": plan.source_stage6_closure_id,
+            "stage7_dataset_id": plan.source_stage7_dataset_id,
+            "stage7_manifest_sha256": plan.source_stage7_manifest_sha256,
+            "stage8_build_id": plan.source_stage8_build_id,
+            "stage8_manifest_sha256": plan.source_stage8_manifest_sha256,
+            "promotion_id": plan.source_promotion_id,
+        },
+        "capacity": {
+            "required_bytes": plan.capacity_required_bytes,
+            "available_bytes": plan.capacity_available_bytes,
+        },
+        "error": {
+            "type": type(error).__name__,
+            "message": str(error),
+        },
+        "outputs": _failure_output_snapshot(paths),
+        "old_authority_untouched": True,
+    }
+    record = {**identity, "record_sha256": _digest_json(identity)}
+    _write_create_only(paths.failure_record, canonical_json_bytes(record))
+
+
+def authenticate_migration_equivalence_record(path: Path) -> dict[str, JsonValue]:
+    """Authenticate one durable successful migration/equivalence record."""
+    document = _read_json(path, "migration equivalence record")
+    if document["contract"] != MIGRATION_CONTRACT:
+        raise ValueError("migration equivalence record contract mismatch")
+    if document["schema_version"] != MIGRATION_SCHEMA_VERSION:
+        raise ValueError("migration equivalence record schema mismatch")
+    record_sha256 = _string(document["record_sha256"], "migration record identity")
+    identity = dict(document)
+    identity.pop("record_sha256")
+    if _digest_json(identity) != record_sha256:
+        raise ValueError("migration equivalence record identity changed")
+    for field in (
+        "implementation_commit",
+        "capacity",
+        "stage6",
+        "stage7",
+        "stage8",
+        "promotion",
+        "identity_classification",
+        "equivalence",
+        "operator_authorization",
+        "work_counts",
+        "safety",
+    ):
+        if field not in document:
+            raise ValueError(f"migration equivalence record missing required field: {field}")
+    if document.get("kind") == "failure":
+        raise ValueError("migration equivalence record is a failure record")
+    return cast(dict[str, JsonValue], document)
+
+
 def _write_create_only(path: Path, payload: bytes) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("xb") as handle:
         handle.write(payload)
+
+
+def _require_implementation_commit(value: str) -> str:
+    if len(value) != 40 or any(character not in "0123456789abcdef" for character in value):
+        raise ValueError("migration implementation commit must be a lowercase 40-character SHA-1")
+    actual = derive_qtrad_commit(require_clean=True)
+    if actual != value:
+        raise ValueError(
+            "migration implementation commit does not match the clean checked-out runtime"
+        )
+    return actual
+
+
+def _source_closure_roots(paths: MigrationPaths) -> tuple[Path, ...]:
+    source_paths = (
+        paths.source_stage6_manifest,
+        paths.source_stage7_manifest,
+        paths.source_stage7_receipt,
+        paths.source_stage8_foundation,
+        paths.source_stage8_receipt,
+        paths.source_promotion,
+    )
+    candidates = {
+        _absolute_lexical(path.parent, "retained source closure") for path in source_paths
+    }
+    roots: list[Path] = []
+    for candidate in sorted(candidates, key=lambda item: (len(item.parts), str(item))):
+        if not any(candidate == root or candidate in root.parents for root in roots):
+            roots.append(candidate)
+    return tuple(roots)
+
+
+def _retained_source_paths(paths: MigrationPaths) -> tuple[Path, ...]:
+    files: set[Path] = set()
+    for path, field in (
+        (paths.source_stage6_manifest, "retained Stage 6 manifest"),
+        (paths.source_stage7_manifest, "retained Stage 7 manifest"),
+        (paths.source_stage7_receipt, "retained Stage 7 receipt"),
+        (paths.source_stage8_foundation, "retained Stage 8 foundation"),
+        (paths.source_stage8_receipt, "retained Stage 8 receipt"),
+        (paths.source_promotion, "retained Stage 8 promotion"),
+    ):
+        files.add(_require_regular_file(path, field))
+    for root in _source_closure_roots(paths):
+        if root.is_file():
+            files.add(root)
+            continue
+        pending = [root]
+        while pending:
+            current = pending.pop()
+            for entry in current.iterdir():
+                if entry.is_symlink():
+                    raise ValueError(f"retained closure contains a symlink: {entry}")
+                if entry.is_dir():
+                    pending.append(entry)
+                elif entry.is_file():
+                    files.add(entry)
+                else:
+                    raise ValueError(f"retained closure contains unsupported entry: {entry}")
+    return tuple(sorted(files, key=str))
+
+
+def _paths_overlap(left: Path, right: Path) -> bool:
+    return left == right or left in right.parents or right in left.parents
+
+
+def _capacity_preflight(paths: MigrationPaths) -> tuple[int, int]:
+    source_bytes = sum(path.stat().st_size for path in _retained_source_paths(paths))
+    required = max(1, source_bytes) * _CAPACITY_SAFETY_MULTIPLIER + _CAPACITY_OVERHEAD_BYTES
+    statvfs = os.statvfs(str(paths.destination_root.parent))
+    available = statvfs.f_bavail * statvfs.f_frsize
+    if available < required:
+        raise OSError(
+            f"migration destination filesystem capacity is insufficient: "
+            f"required={required} available={available}"
+        )
+    return required, available
 
 
 def _preflight_destination(paths: MigrationPaths) -> None:
@@ -788,10 +1144,15 @@ def _preflight_destination(paths: MigrationPaths) -> None:
         raise FileExistsError(f"migration destination root already exists: {destination}")
     if not destination.parent.is_dir():
         raise FileNotFoundError(f"migration destination parent is missing: {destination.parent}")
-    for path in paths.output_paths()[1:]:
-        _absolute_lexical(path, "migration destination")
-        if path.exists():
-            raise FileExistsError(f"migration destination already exists: {path}")
+    for source in (*_source_closure_roots(paths), *_retained_source_paths(paths)):
+        if _paths_overlap(destination, source):
+            raise ValueError(
+                f"migration destination overlaps retained source closure or file: {destination}"
+            )
+    for path in (*paths.output_paths()[1:], paths.failure_record):
+        candidate = _absolute_lexical(path, "migration destination")
+        if candidate.exists():
+            raise FileExistsError(f"migration destination already exists: {candidate}")
 
 
 def _absolute_lexical(path: Path, field: str) -> Path:
@@ -889,6 +1250,7 @@ __all__ = [
     "MigrationResult",
     "MigrationWorkCounts",
     "PromotionAuthorisation",
+    "authenticate_migration_equivalence_record",
     "migrate_retained_ibkr_evidence",
     "plan_retained_ibkr_migration",
 ]
