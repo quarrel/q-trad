@@ -566,7 +566,16 @@ def test_old_stage6_replay_uses_existing_request_replay_once(
         migration._replay_legacy_stage6(stream, cast(Any, (result,)))
 
 
-@pytest.mark.parametrize("failure_phase", ["stage6", "stage7"])
+@pytest.mark.parametrize(
+    "failure_phase",
+    [
+        "old-stage8-authentication",
+        "old-stage7-authentication",
+        "old-stage6-semantic-replay",
+        "stage6-build",
+        "stage7-verification",
+    ],
+)
 def test_execution_failure_writes_create_only_failure_record(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -611,21 +620,39 @@ def test_execution_failure_writes_create_only_failure_record(
     fake_stage7 = _stage7_evidence()
     fake_stage7.dataset.partitions = (object(),)
     monkeypatch.setattr(migration, "plan_retained_ibkr_migration", lambda *_args, **_kwargs: plan)
-    monkeypatch.setattr(
-        migration,
-        "_authenticate_ibkr_foundation_migration_v2",
-        lambda *_args, **_kwargs: {"authenticated": True},
-    )
+    if failure_phase == "old-stage8-authentication":
+        monkeypatch.setattr(
+            migration,
+            "_authenticate_ibkr_foundation_migration_v2",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("old-stage8-authentication failure")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            migration,
+            "_authenticate_ibkr_foundation_migration_v2",
+            lambda *_args, **_kwargs: {"authenticated": True},
+        )
     monkeypatch.setattr(
         migration,
         "_authenticate_ibkr_foundation_promotion_migration_v2",
         lambda *_args, **_kwargs: {"authenticated": True},
     )
-    monkeypatch.setattr(
-        migration,
-        "authenticate_provider_history_v2",
-        lambda *_args, **_kwargs: fake_stage7,
-    )
+    if failure_phase == "old-stage7-authentication":
+        monkeypatch.setattr(
+            migration,
+            "authenticate_provider_history_v2",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("old-stage7-authentication failure")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            migration,
+            "authenticate_provider_history_v2",
+            lambda *_args, **_kwargs: fake_stage7,
+        )
     monkeypatch.setattr(
         migration,
         "_read_provider_history_v2_manifest",
@@ -641,16 +668,25 @@ def test_execution_failure_writes_create_only_failure_record(
         "_read_legacy_ibkr_historical_result_v2_header",
         lambda *_args, **_kwargs: _Stream(),
     )
-    monkeypatch.setattr(
-        migration,
-        "_replay_legacy_stage6",
-        lambda *_args, **_kwargs: {},
-    )
-    if failure_phase == "stage6":
+    if failure_phase == "old-stage6-semantic-replay":
+        monkeypatch.setattr(
+            migration,
+            "_replay_legacy_stage6",
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                RuntimeError("old-stage6-semantic-replay failure")
+            ),
+        )
+    else:
+        monkeypatch.setattr(
+            migration,
+            "_replay_legacy_stage6",
+            lambda *_args, **_kwargs: {},
+        )
+    if failure_phase == "stage6-build":
         monkeypatch.setattr(
             migration,
             "build_ibkr_historical_aggregate_result",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stage6 build failure")),
+            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stage6-build failure")),
         )
     else:
         monkeypatch.setattr(
@@ -674,11 +710,20 @@ def test_execution_failure_writes_create_only_failure_record(
             "build_provider_history",
             lambda *_args, **_kwargs: paths.stage7_manifest,
         )
-        monkeypatch.setattr(
-            migration,
-            "verify_provider_history",
-            lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("stage7 verify failure")),
-        )
+        if failure_phase == "stage7-verification":
+            monkeypatch.setattr(
+                migration,
+                "verify_provider_history",
+                lambda *_args, **_kwargs: (_ for _ in ()).throw(
+                    RuntimeError("stage7-verification failure")
+                ),
+            )
+        else:
+            monkeypatch.setattr(
+                migration,
+                "verify_provider_history",
+                lambda *_args, **_kwargs: fake_stage7,
+            )
 
     with pytest.raises(RuntimeError, match=failure_phase):
         migration.migrate_retained_ibkr_evidence(
@@ -694,9 +739,21 @@ def test_execution_failure_writes_create_only_failure_record(
     assert paths.failure_record.is_file()
     failure = json.loads(paths.failure_record.read_text(encoding="utf-8"))
     assert failure["kind"] == "failure"
-    assert failure["phase"].startswith(failure_phase)
+    assert failure["phase"] == failure_phase
     assert failure["old_authority_untouched"] is True
     assert not paths.record.exists()
+    failure_bytes = paths.failure_record.read_bytes()
+    with pytest.raises(FileExistsError, match="destination root"):
+        migration.migrate_retained_ibkr_evidence(
+            paths,
+            implementation_commit="a" * 40,
+            promotion_authorisation=migration.PromotionAuthorisation(
+                authorized_by="operator",
+                authorized_at=datetime(2026, 8, 14, tzinfo=UTC),
+                authorization_reference="failure-fixture-reuse",
+            ),
+        )
+    assert paths.failure_record.read_bytes() == failure_bytes
     assert {
         path: path.read_bytes()
         for path in (

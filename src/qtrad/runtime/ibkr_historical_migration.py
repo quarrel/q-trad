@@ -401,41 +401,56 @@ def migrate_retained_ibkr_evidence(
         paths,
         implementation_commit=implementation_commit,
     )
-    old_stage8_auth = _authenticate_ibkr_foundation_migration_v2(
-        paths.source_stage8_foundation,
-        receipt=paths.source_stage8_receipt,
-    )
-    old_promotion_auth = _authenticate_ibkr_foundation_promotion_migration_v2(
-        paths.source_stage8_foundation,
-        receipt=paths.source_stage8_receipt,
-        promotion=paths.source_promotion,
-    )
-    old_stage7_evidence = authenticate_provider_history_v2(
-        paths.source_stage7_manifest,
-        receipt=paths.source_stage7_receipt,
-    )
-    old_stage7_manifest = _read_provider_history_v2_manifest(paths.source_stage7_manifest)
-    old_authenticated_manifest = _authenticate_foundation_manifest(
-        paths.source_stage8_foundation,
-        provider_closure=False,
-    )
-    stage6_stream = _read_legacy_ibkr_historical_result_v2_header(
-        paths.source_stage6_manifest, require_exact_tree=True
-    )
-    old_results = tuple(stage6_stream.iter_request_results())
-    if len(old_results) != plan.source_stage6_request_count:
-        raise ValueError("retained Stage 6 child count changed during migration")
-    counters = _MigrationCounters(
-        old_stage6_request_children=len(old_results),
-        old_stage7_parts_read=len(old_stage7_manifest.parts),
-        old_stage7_rows_decoded=len(old_stage7_evidence.observations),
-    )
-    stage6_equivalence = _replay_legacy_stage6(stage6_stream, old_results)
-    counters.old_stage6_semantic_replays += 1
-
+    # Read-only plan/preflight failures above this boundary do not create an attempt.
+    # Once the fresh root exists, every migration-phase failure is durably classified.
+    if paths.destination_root.exists():
+        raise FileExistsError(
+            f"migration destination root already exists: {paths.destination_root}"
+        )
     paths.destination_root.mkdir()
-    phase = "stage6-build"
+    phase = "old-stage8-authentication"
     try:
+        old_stage8_auth = _authenticate_ibkr_foundation_migration_v2(
+            paths.source_stage8_foundation,
+            receipt=paths.source_stage8_receipt,
+        )
+        phase = "old-promotion-authentication"
+        old_promotion_auth = _authenticate_ibkr_foundation_promotion_migration_v2(
+            paths.source_stage8_foundation,
+            receipt=paths.source_stage8_receipt,
+            promotion=paths.source_promotion,
+        )
+        phase = "old-stage7-authentication"
+        old_stage7_evidence = authenticate_provider_history_v2(
+            paths.source_stage7_manifest,
+            receipt=paths.source_stage7_receipt,
+        )
+        phase = "old-stage7-manifest"
+        old_stage7_manifest = _read_provider_history_v2_manifest(paths.source_stage7_manifest)
+        phase = "old-stage8-manifest-authentication"
+        old_authenticated_manifest = _authenticate_foundation_manifest(
+            paths.source_stage8_foundation,
+            provider_closure=False,
+        )
+        phase = "old-stage6-header"
+        stage6_stream = _read_legacy_ibkr_historical_result_v2_header(
+            paths.source_stage6_manifest,
+            require_exact_tree=True,
+        )
+        phase = "old-stage6-child-read"
+        old_results = tuple(stage6_stream.iter_request_results())
+        if len(old_results) != plan.source_stage6_request_count:
+            raise ValueError("retained Stage 6 child count changed during migration")
+        counters = _MigrationCounters(
+            old_stage6_request_children=len(old_results),
+            old_stage7_parts_read=len(old_stage7_manifest.parts),
+            old_stage7_rows_decoded=len(old_stage7_evidence.observations),
+        )
+        phase = "old-stage6-semantic-replay"
+        stage6_equivalence = _replay_legacy_stage6(stage6_stream, old_results)
+        counters.old_stage6_semantic_replays += 1
+
+        phase = "stage6-build"
         current_aggregate = build_ibkr_historical_aggregate_result(
             stage6_stream.plan,
             stage6_stream.plan_bytes,
