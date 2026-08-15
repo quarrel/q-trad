@@ -86,11 +86,9 @@ from qtrad.domain.r2_bundles import (
     ArtifactReference,
     R2ForecastManifest,
     R2OofBundle,
-    R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import (
     R2_EVALUATION_CONTRACT,
-    R2_SELECTION_CONTRACT,
     ConfigurationDisposition,
     ConfigurationRecord,
     MetricAvailability,
@@ -178,9 +176,7 @@ from qtrad.runtime.r2_bundles import (
     canonical_bytes,
     reference_for_json,
     verify_r2_oof_bundle,
-    verify_r2_software_bundle,
     write_r2_oof_bundle,
-    write_r2_software_bundle,
 )
 from qtrad.runtime.r2_holdout import (
     _reveal_confirmatory_holdout,
@@ -201,6 +197,15 @@ _OOF_SELECTION_PRIMARY_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
 _OOF_SELECTION_SECONDARY_METRICS = ("RMSE",)
 _OOF_SELECTION_FINAL_FITTING_PROCEDURE = "PENDING_R2_H_INTEGRATION"
 _IMAGE_IDENTITY_CONTRACT = "qtrad-runtime-image-identity-v1"
+R2_CLAIM_VERIFIER_CONTRACTS = MappingProxyType(
+    {
+        "feature": "qtrad-r2-feature-verifier-v1",
+        "preprocessing": "qtrad-r2-preprocessing-verifier-v1",
+        "fit": "qtrad-r2-fit-verifier-v1",
+        "oof": "qtrad-r2-oof-semantic-verifier-v1",
+        "evaluation": "qtrad-r2-evaluation-verifier-v1",
+    }
+)
 _REQUIRED_FEATURE_SETS = frozenset({"L0", "L1", "P0", "P1"})
 _CAPTURE_V4_UNIVERSE = (
     "fx:aud-usd",
@@ -857,8 +862,8 @@ def _image_identity_manifest(path: Path | None = None) -> Mapping[str, object]:
     return cast(Mapping[str, object], payload)
 
 
-def runtime_identities() -> dict[str, str]:
-    """Derive identities from the running source tree and authenticated deployment manifest."""
+def execution_provenance() -> dict[str, str]:
+    """Return authenticated process provenance without scientific policy fields."""
     repository = Path(__file__).resolve().parents[2]
     try:
         result = subprocess.run(
@@ -891,13 +896,32 @@ def runtime_identities() -> dict[str, str]:
         or any(character not in "0123456789abcdef" for character in image_digest[7:])
     ):
         raise RuntimeError("image identity manifest does not contain a verified sha256 digest")
-    application = f"qtrad-{__version__}+git:{commit}+image:{image_digest}"
     return {
-        "application_identity": application,
-        "image_identity": image_digest,
-        "python_identity": sys.version.split()[0],
-        "numpy_identity": numpy.__version__,
-        "sklearn_identity": sklearn.__version__,
+        "git_commit": commit,
+        "image_digest": image_digest,
+        "application_identity": f"qtrad-{__version__}+git:{commit}+image:{image_digest}",
+    }
+
+
+def numerical_environment() -> dict[str, str]:
+    """Return numerical-library provenance kept separate from scientific policy."""
+    return {
+        "python_version": sys.version.split()[0],
+        "numpy_version": numpy.__version__,
+        "sklearn_version": sklearn.__version__,
+    }
+
+
+def runtime_identities() -> dict[str, str]:
+    """Return the adapter-facing view of split runtime provenance."""
+    execution = execution_provenance()
+    numerical = numerical_environment()
+    return {
+        "application_identity": execution["application_identity"],
+        "image_identity": execution["image_digest"],
+        "python_identity": numerical["python_version"],
+        "numpy_identity": numerical["numpy_version"],
+        "sklearn_identity": numerical["sklearn_version"],
     }
 
 
@@ -4127,143 +4151,6 @@ def selection_freeze(
     return output
 
 
-def _copy_tree(source: Path, destination: Path) -> None:
-    if source.is_symlink() or not source.is_dir():
-        raise ValueError("bundle source must be a regular directory")
-    if destination.exists() or destination.is_symlink():
-        raise FileExistsError(f"software output child already exists: {destination}")
-    for source_path in sorted(source.rglob("*")):
-        relative = source_path.relative_to(source)
-        target = destination / relative
-        if source_path.is_symlink():
-            raise ValueError("software bundle cannot copy symlink children")
-        if source_path.is_dir():
-            target.mkdir(parents=True, exist_ok=True)
-        elif source_path.is_file():
-            target.parent.mkdir(parents=True, exist_ok=True)
-            atomic_create(target, source_path.read_bytes())
-        else:
-            raise ValueError("software bundle child must be a regular file or directory")
-
-
-def _copy_file(source: Path, destination: Path) -> dict[str, object]:
-    if source.is_symlink() or not source.is_file():
-        raise ValueError("selection must be a regular non-symlink file")
-    payload = _load_selection(source)
-    atomic_create(destination, canonical_bytes(payload))
-    return payload
-
-
-def _selection_reference(path: str, payload: dict[str, object]) -> ArtifactReference:
-    identity = next(
-        (
-            payload[key]
-            for key in ("selection_id", "artifact_id", "manifest_id", "bundle_id")
-            if key in payload
-        ),
-        None,
-    )
-    if not isinstance(identity, str):
-        raise ValueError("selection manifest has no semantic identity")
-    contract = payload.get("contract")
-    if not isinstance(contract, str):
-        raise ValueError("selection manifest has no contract")
-    return reference_for_json(
-        path=path,
-        contract=contract,
-        semantic_id=identity,
-        content=payload,
-    )
-
-
-def build_software_bundle(
-    *,
-    representative_oof_bundle_path: Path,
-    representative_selection_path: Path,
-    output: Path,
-) -> Path:
-    """Build the top-level software bundle after independently verifying the representative run."""
-    representative_oof = verify_r2_oof_bundle(representative_oof_bundle_path)
-    _replay_representative_oof(representative_oof_bundle_path)
-    if representative_oof.source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
-        raise ValueError("representative software integration must use IG_NATIVE_CAPTURE")
-    if representative_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
-        raise ValueError("representative software integration must use implementation evidence")
-    descriptor = _oof_child_payload(
-        representative_oof_bundle_path, representative_oof, OOF_DESCRIPTOR_CONTRACT
-    )
-    if descriptor.get("run_kind") != "REPRESENTATIVE":
-        raise ValueError("representative software integration requires a representative run")
-    if descriptor.get("feature_sets") != sorted(_REQUIRED_FEATURE_SETS):
-        raise ValueError("representative run must cover exactly L0/L1/P0/P1")
-    expected_targets = {
-        "fx:aud-usd",
-        "fx:eur-usd",
-        "index:australia-200",
-        "index:us-500",
-        "commodity:spot-gold",
-        "commodity:us-crude",
-    }
-    target_instruments = descriptor.get("target_instruments")
-    if not isinstance(target_instruments, list) or set(target_instruments) != expected_targets:
-        raise ValueError("representative run is not the fixed capture-v4 integration")
-    selection = _load_selection(representative_selection_path)
-    if selection.get("contract") != R2_SELECTION_CONTRACT:
-        raise ValueError("representative selection must be a typed SelectionManifest")
-    evaluation_payload = _oof_child_payload(
-        representative_oof_bundle_path, representative_oof, R2_EVALUATION_CONTRACT
-    )
-    if selection.get("evaluation_report_id") != evaluation_payload.get("report_id"):
-        raise ValueError("representative selection does not bind the supplied OOF report")
-    output.mkdir(parents=True, exist_ok=False)
-    _copy_tree(representative_oof_bundle_path.parent, output / "representative" / "oof")
-    representative_selection_target = output / "representative" / "selection.json"
-    representative_selection_target.parent.mkdir(parents=True, exist_ok=True)
-    representative_selection = _copy_file(
-        representative_selection_path, representative_selection_target
-    )
-    identities = runtime_identities()
-
-    synthetic_root = output / "synthetic" / "oof"
-    synthetic_manifest = _build_synthetic_oof(synthetic_root)
-    synthetic_selection_path = output / "synthetic" / "selection.json"
-    selection_freeze(
-        oof_bundle_path=synthetic_manifest,
-        frozen_by="software-verification",
-        output=synthetic_selection_path,
-    )
-    synthetic_bundle = verify_r2_oof_bundle(synthetic_manifest)
-    synthetic_selection_payload = _load_selection(synthetic_selection_path)
-    synthetic_ref = _selection_reference("synthetic/selection.json", synthetic_selection_payload)
-    representative_oof_ref = reference_for_json(
-        path="representative/oof/manifest.json",
-        contract=representative_oof.CONTRACT,
-        semantic_id=representative_oof.oof_id,
-        content=representative_oof.as_json(),
-    )
-    representative_selection_ref = _selection_reference(
-        "representative/selection.json", representative_selection
-    )
-    synthetic_oof_ref = reference_for_json(
-        path="synthetic/oof/manifest.json",
-        contract=synthetic_bundle.CONTRACT,
-        semantic_id=synthetic_bundle.oof_id,
-        content=synthetic_bundle.as_json(),
-    )
-    identities = runtime_identities()
-    software = R2SoftwareVerificationBundle.create(
-        synthetic_oof_bundle=synthetic_oof_ref,
-        representative_oof_bundle=representative_oof_ref,
-        synthetic_selection=synthetic_ref,
-        representative_selection=representative_selection_ref,
-        **identities,
-        representative_integration_ready="READY",
-        evidence_disposition="IMPLEMENTATION_EVIDENCE_ONLY",
-        research_disposition="RESEARCH_EVIDENCE_PENDING",
-    )
-    return write_r2_software_bundle(output, software)
-
-
 def _tree_bytes(root: Path) -> dict[str, bytes]:
     return {
         candidate.relative_to(root).as_posix(): candidate.read_bytes()
@@ -4501,89 +4388,6 @@ def verify_oof_bundle(path: Path) -> R2OofBundle:
     else:
         raise ValueError("OOF descriptor has an unsupported run kind")
     return bundle
-
-
-def _verify_software_bundle_envelope(path: Path) -> R2SoftwareVerificationBundle:
-    """Verify both nested OOF integrations and their holdout-free selections."""
-    software = verify_r2_software_bundle(path)
-    identities = runtime_identities()
-    for key, expected in identities.items():
-        if getattr(software, key) != expected:
-            raise ValueError(f"software bundle {key} differs from the running environment")
-    if software.representative_integration_ready != "READY":
-        raise ValueError("software bundle representative integration is not READY")
-    if software.evidence_disposition != "IMPLEMENTATION_EVIDENCE_ONLY":
-        raise ValueError("software bundle evidence disposition is not implementation-only")
-    if software.research_disposition != "RESEARCH_EVIDENCE_PENDING":
-        raise ValueError("software bundle research disposition is not pending")
-    root = path.parent
-    synthetic = root / software.synthetic_oof_bundle.path
-    representative = root / software.representative_oof_bundle.path
-    synthetic_oof = verify_oof_bundle(synthetic)
-    representative_oof = verify_r2_oof_bundle(representative)
-    if synthetic_oof.source_class is not MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
-        raise ValueError("synthetic software integration must use IBKR_HISTORICAL_RESEARCH")
-    if representative_oof.source_class is not MarketDataSourceClass.IG_NATIVE_CAPTURE:
-        raise ValueError("representative software integration must use IG_NATIVE_CAPTURE")
-    if synthetic_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
-        raise ValueError("synthetic software integration must use implementation evidence")
-    if representative_oof.evidence_class is not EvidenceClass.IMPLEMENTATION:
-        raise ValueError("representative software integration must use implementation evidence")
-    expected_targets = {
-        "fx:aud-usd",
-        "fx:eur-usd",
-        "index:australia-200",
-        "index:us-500",
-        "commodity:spot-gold",
-        "commodity:us-crude",
-    }
-    for oof, oof_path, selection_reference in (
-        (synthetic_oof, synthetic, software.synthetic_selection),
-        (representative_oof, representative, software.representative_selection),
-    ):
-        descriptor = _oof_child_payload(oof_path, oof, OOF_DESCRIPTOR_CONTRACT)
-        if descriptor.get("feature_sets") != sorted(_REQUIRED_FEATURE_SETS):
-            raise ValueError("software OOF child does not cover exactly L0/L1/P0/P1")
-        target_instruments = descriptor.get("target_instruments")
-        if oof is representative_oof and (
-            not isinstance(target_instruments, list) or set(target_instruments) != expected_targets
-        ):
-            raise ValueError("representative software OOF child has the wrong target universe")
-        payload = _load_selection(root / selection_reference.path)
-        if payload.get("contract") != R2_SELECTION_CONTRACT:
-            raise ValueError("software selection child is not a typed SelectionManifest")
-        if payload.get("manifest_id") != selection_reference.semantic_id:
-            raise ValueError("software selection manifest ID does not match its reference")
-        if payload.get("oof_id") != oof.oof_id:
-            raise ValueError("software selection does not bind its OOF bundle")
-        if payload.get("foundation_bundle_id") != oof.foundation_bundle_id:
-            raise ValueError("software selection does not bind its foundation")
-        if payload.get("source_class") != oof.source_class.value:
-            raise ValueError("software selection source class differs from its OOF bundle")
-        if payload.get("evidence_class") != oof.evidence_class.value:
-            raise ValueError("software selection evidence class differs from its OOF bundle")
-        if payload.get("holdout_state_verification") != "PENDING_R2_H_INTEGRATION":
-            raise ValueError("software selection must leave holdout verification pending")
-        evaluation_payload = _oof_child_payload(oof_path, oof, R2_EVALUATION_CONTRACT)
-        if payload.get("evaluation_report_id") != evaluation_payload.get("report_id"):
-            raise ValueError("software selection does not bind the OOF evaluation report")
-        if payload.get("application_image_identity") != identities["application_identity"]:
-            raise ValueError("software selection identity differs from the running application")
-    return software
-
-
-def verify_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
-    software = _verify_software_bundle_envelope(path)
-    representative = path.parent / software.representative_oof_bundle.path
-    _replay_representative_oof(representative)
-    return software
-
-
-async def verify_software_bundle_async(path: Path) -> R2SoftwareVerificationBundle:
-    software = _verify_software_bundle_envelope(path)
-    representative = path.parent / software.representative_oof_bundle.path
-    await _replay_representative_oof_async(representative)
-    return software
 
 
 def load_experiment_and_feature_paths(

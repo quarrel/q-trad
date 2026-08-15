@@ -24,10 +24,23 @@ from qtrad.runtime.r2_verification import (
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
     _validate_representative_fold_layout,
+    execution_provenance,
+    numerical_environment,
     require_ibkr_adapter_runtime_identity,
     runtime_identities,
     verify_oof_bundle,
 )
+
+
+def test_runtime_provenance_is_split_and_inspectable() -> None:
+    execution = execution_provenance()
+    numerical = numerical_environment()
+    assert set(execution) == {"git_commit", "image_digest", "application_identity"}
+    assert set(numerical) == {"python_version", "numpy_version", "sklearn_version"}
+    assert len(execution["git_commit"]) == 40
+    assert execution["image_digest"].startswith("sha256:")
+    assert numerical["python_version"]
+    assert runtime_identities()["application_identity"] == execution["application_identity"]
 
 
 def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:

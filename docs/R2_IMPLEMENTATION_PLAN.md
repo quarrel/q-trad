@@ -1809,7 +1809,7 @@ Synthetic fixtures and a representative R1 bundle are sufficient.
 - selection-manifest mechanics proven using disposable fixture holdouts;
 - no confirmatory model-selection claim.
 
-Software implementation may be considered complete after R2.F1 and the corresponding R2.H software-verification work are complete.
+Software implementation may be considered complete after R2.F1 and its direct OOF integration authority are complete; the retired recursive software-verification envelope is not a dependency.
 
 ### R2.F2 — Confirmatory chronological OOF experiment
 
