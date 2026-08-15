@@ -37,6 +37,7 @@ from qtrad.runtime.ibkr_foundation import (
     _child_reference_dataset_ids,
     _child_rows,
     _supported_child_kinds,
+    _v3_readiness_projection,
     _verify_children_blind,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -74,6 +75,48 @@ _FAILURE_OUTPUT = "migration-failure-record.json"
 _CAPACITY_OVERHEAD_BYTES = 1_048_576
 _CAPACITY_SAFETY_MULTIPLIER = 2
 
+_STAGE8_READINESS_FIELDS = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "state",
+        "causes",
+        "candidate_instruments",
+        "groups",
+        "common_support_start",
+        "common_support_end",
+        "common_support_rows",
+        "rows_by_candidate",
+        "evidence",
+    }
+)
+_STAGE8_READINESS_EVIDENCE_FIELDS = (
+    "provider_row_count",
+    "provider_gap_count",
+    "total_provider_gap_count",
+    "raw_provider_gaps",
+    "coverage_cells",
+    "coverage_threshold",
+    "blocking_coverage_cells",
+    "coverage_diagnostics",
+    "target_row_count",
+    "fold_count",
+    "primary_horizon_seconds",
+    "request_evidence",
+    "source_coverage_summary",
+    "source_entitlement_summary",
+)
+_STAGE8_READINESS_COMMON_AUTHORITY_FIELDS = (
+    "source_contract_selection_sha256",
+    "source_plan_sha256",
+    "source_runtime_sha256",
+)
+_STAGE8_READINESS_V2_AUTHORITY_FIELDS = ("source_aggregate_sha256",)
+_STAGE8_READINESS_V3_AUTHORITY_FIELDS = (
+    "source_result_id",
+    "source_closure_id",
+    "source_verification_id",
+)
 # These values are lineage, physical, or implementation identities.  They are
 # deliberately excluded from the scientific observation projection.
 _OBSERVATION_NON_SEMANTIC_FIELDS = frozenset(
@@ -633,6 +676,60 @@ def _compare_stage7(
     }
 
 
+def _stage8_readiness_semantic_projection(value: object, field: str) -> dict[str, JsonValue]:
+    readiness = _mapping(value, field)
+    if set(readiness) != _STAGE8_READINESS_FIELDS:
+        raise ValueError(f"{field} has unexpected schema")
+    evidence = _mapping(readiness["evidence"], f"{field} evidence")
+    semantic_fields = set(_STAGE8_READINESS_EVIDENCE_FIELDS)
+    common_fields = set(_STAGE8_READINESS_COMMON_AUTHORITY_FIELDS)
+    v2_fields = set(_STAGE8_READINESS_V2_AUTHORITY_FIELDS)
+    v3_fields = set(_STAGE8_READINESS_V3_AUTHORITY_FIELDS)
+    if frozenset(evidence) not in (
+        frozenset(semantic_fields | common_fields | v2_fields),
+        frozenset(semantic_fields | common_fields | v3_fields),
+    ):
+        raise ValueError(f"{field} evidence has unexpected schema")
+    for authority_field in (
+        *_STAGE8_READINESS_COMMON_AUTHORITY_FIELDS,
+        *_STAGE8_READINESS_V2_AUTHORITY_FIELDS,
+        *_STAGE8_READINESS_V3_AUTHORITY_FIELDS,
+    ):
+        if authority_field in evidence:
+            _string(evidence[authority_field], f"{field} evidence {authority_field}")
+    return _v3_readiness_projection(readiness)
+
+
+def _stage8_readiness_authority(value: object, field: str) -> dict[str, JsonValue]:
+    _stage8_readiness_semantic_projection(value, field)
+    evidence = _mapping(_mapping(value, field)["evidence"], f"{field} evidence")
+    authority_fields = set(evidence) & (
+        set(_STAGE8_READINESS_COMMON_AUTHORITY_FIELDS)
+        | set(_STAGE8_READINESS_V2_AUTHORITY_FIELDS)
+        | set(_STAGE8_READINESS_V3_AUTHORITY_FIELDS)
+    )
+    return {
+        key: _string(evidence[key], f"{field} evidence {key}") for key in sorted(authority_fields)
+    }
+
+
+def _compare_stage8_readiness(
+    old_value: object, new_value: object
+) -> tuple[dict[str, JsonValue], dict[str, JsonValue], dict[str, JsonValue]]:
+    old_projection = _stage8_readiness_semantic_projection(old_value, "retained readiness")
+    new_projection = _stage8_readiness_semantic_projection(new_value, "new readiness")
+    if old_projection != new_projection:
+        raise ValueError("Stage 8 migration readiness semantics changed")
+    return (
+        old_projection,
+        new_projection,
+        {
+            "old": _stage8_readiness_authority(old_value, "retained readiness"),
+            "new": _stage8_readiness_authority(new_value, "new readiness"),
+        },
+    )
+
+
 def _compare_stage8(
     old_manifest: _AuthenticatedFoundationManifest,
     new_build: IBKRFoundationBuild,
@@ -656,10 +753,9 @@ def _compare_stage8(
         }
         old_count += old_kind_count
         new_count += new_kind_count
-    old_readiness = _mapping(old_manifest.payload["readiness"], "retained readiness")
-    new_readiness = new_build.readiness.as_json()
-    if old_readiness != new_readiness:
-        raise ValueError("Stage 8 migration readiness changed")
+    _old_readiness_projection, new_readiness_projection, readiness_authority = (
+        _compare_stage8_readiness(old_manifest.payload["readiness"], new_build.readiness.as_json())
+    )
     old_active_intervals = _json_value(old_manifest.payload["active_intervals"])
     new_active_intervals = _active_intervals_json(new_build.active_intervals)
     if old_active_intervals != new_active_intervals:
@@ -670,7 +766,8 @@ def _compare_stage8(
         raise ValueError("Stage 8 migration provider gaps changed")
     return (
         {
-            "readiness": cast(JsonValue, new_readiness),
+            "readiness": cast(JsonValue, new_readiness_projection),
+            "readiness_authority": cast(JsonValue, readiness_authority),
             "active_intervals": old_active_intervals,
             "provider_gaps": old_gaps,
             "children": child_projection,
@@ -829,6 +926,15 @@ def _migration_record(
     stage6 = _read_json(plan.paths.stage6_manifest, "new Stage 6 manifest")
     new_stage6_receipt = _read_json(plan.paths.stage6_receipt, "new Stage 6 receipt")
 
+    stage8_readiness_authority = _mapping(
+        stage8_equivalence["readiness_authority"], "Stage 8 readiness authority"
+    )
+    old_stage8_readiness_authority = _mapping(
+        stage8_readiness_authority["old"], "old Stage 8 readiness authority"
+    )
+    new_stage8_readiness_authority = _mapping(
+        stage8_readiness_authority["new"], "new Stage 8 readiness authority"
+    )
     identity_classification: dict[str, JsonValue] = {
         "stage6": {
             "semantic": {
@@ -885,6 +991,16 @@ def _migration_record(
                 "new": _string(new_foundation["closure_id"], "new foundation closure"),
                 "equivalent": False,
                 "explanation": "v3 closure_id binds the new foundation manifest and child tree.",
+            },
+            "readiness_authority": {
+                "old": _json_value(old_stage8_readiness_authority),
+                "new": _json_value(new_stage8_readiness_authority),
+                "equivalent": False,
+                "explanation": (
+                    "v2 aggregate and v3 result/closure/verification plus source "
+                    "contract/plan/runtime identities are authority or provenance "
+                    "fields excluded from semantic readiness equivalence."
+                ),
             },
         },
     }

@@ -165,6 +165,110 @@ def _stage7_evidence(
     )
 
 
+def _stage8_readiness(*, lineage: str) -> dict[str, object]:
+    evidence: dict[str, object] = {
+        "provider_row_count": 10,
+        "provider_gap_count": 0,
+        "total_provider_gap_count": 0,
+        "raw_provider_gaps": [],
+        "coverage_cells": [{"instrument_id": "fx:aud-usd", "passed": True}],
+        "coverage_threshold": 1.0,
+        "blocking_coverage_cells": [],
+        "coverage_diagnostics": {},
+        "target_row_count": 10,
+        "fold_count": 1,
+        "primary_horizon_seconds": 60,
+        "request_evidence": {},
+        "source_coverage_summary": {},
+        "source_entitlement_summary": {},
+        "source_contract_selection_sha256": "c" * 64,
+        "source_plan_sha256": "p" * 64,
+        "source_runtime_sha256": "t" * 64,
+    }
+    if lineage == "v2":
+        evidence["source_aggregate_sha256"] = "a" * 64
+    else:
+        evidence.update(
+            {
+                "source_result_id": "r" * 64,
+                "source_closure_id": "l" * 64,
+                "source_verification_id": "v" * 64,
+            }
+        )
+    candidates = [
+        "fx:aud-usd",
+        "fx:eur-usd",
+        "index:australia-200",
+        "index:us-500",
+        "commodity:spot-gold",
+        "commodity:us-crude",
+    ]
+    return {
+        "contract": "qtrad-ibkr-historical-foundation-v1",
+        "schema_version": 1,
+        "state": "INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION",
+        "causes": ["INSUFFICIENT_ROWS"],
+        "candidate_instruments": candidates,
+        "groups": ["FX", "indices", "commodities"],
+        "common_support_start": "2026-01-01T00:00:00+00:00",
+        "common_support_end": "2026-01-02T00:00:00+00:00",
+        "common_support_rows": 10,
+        "rows_by_candidate": dict.fromkeys(candidates, 10),
+        "evidence": evidence,
+    }
+
+
+def test_stage8_readiness_lineage_change_is_not_semantic() -> None:
+    old = _stage8_readiness(lineage="v2")
+    new = _stage8_readiness(lineage="v3")
+    old_projection, new_projection, authority = migration._compare_stage8_readiness(old, new)
+    assert old_projection == new_projection
+    assert authority == {
+        "old": {
+            "source_aggregate_sha256": "a" * 64,
+            "source_contract_selection_sha256": "c" * 64,
+            "source_plan_sha256": "p" * 64,
+            "source_runtime_sha256": "t" * 64,
+        },
+        "new": {
+            "source_closure_id": "l" * 64,
+            "source_contract_selection_sha256": "c" * 64,
+            "source_plan_sha256": "p" * 64,
+            "source_result_id": "r" * 64,
+            "source_runtime_sha256": "t" * 64,
+            "source_verification_id": "v" * 64,
+        },
+    }
+
+
+@pytest.mark.parametrize("mutation", ["state", "causes", "support", "coverage"])
+def test_stage8_readiness_semantic_mutation_is_rejected(mutation: str) -> None:
+    old = _stage8_readiness(lineage="v2")
+    new = _stage8_readiness(lineage="v3")
+    if mutation == "state":
+        new["state"] = "QUALIFYING_HISTORY_READY"
+    elif mutation == "causes":
+        new["causes"] = []
+    elif mutation == "support":
+        new["common_support_rows"] = 11
+    else:
+        evidence = cast(dict[str, object], new["evidence"])
+        evidence["coverage_cells"] = [{"instrument_id": "fx:aud-usd", "passed": False}]
+    with pytest.raises(ValueError, match="readiness semantics"):
+        migration._compare_stage8_readiness(old, new)
+
+
+def test_stage8_readiness_projection_requires_exact_schema() -> None:
+    unknown = _stage8_readiness(lineage="v2")
+    unknown["unexpected"] = True
+    with pytest.raises(ValueError, match="unexpected schema"):
+        migration._stage8_readiness_semantic_projection(unknown, "readiness")
+    missing = _stage8_readiness(lineage="v2")
+    del missing["state"]
+    with pytest.raises(ValueError, match="unexpected schema"):
+        migration._stage8_readiness_semantic_projection(missing, "readiness")
+
+
 def test_stage7_equivalence_excludes_physical_observation_identity() -> None:
     old = _stage7_evidence(observation_sha256="a" * 64)
     new = _stage7_evidence(observation_sha256="b" * 64)
@@ -423,7 +527,23 @@ def test_disposable_migration_orchestrator_uses_each_boundary_once(
     monkeypatch.setattr(
         migration,
         "_compare_stage8",
-        lambda *_args, **_kwargs: calls.append("stage8-compare") or ({}, 1, 1),
+        lambda *_args, **_kwargs: (
+            calls.append("stage8-compare")
+            or (
+                {
+                    "readiness_authority": {
+                        "old": {"source_aggregate_sha256": "a" * 64},
+                        "new": {
+                            "source_result_id": "r" * 64,
+                            "source_closure_id": "c" * 64,
+                            "source_verification_id": "v" * 64,
+                        },
+                    }
+                },
+                1,
+                1,
+            )
+        ),
     )
     monkeypatch.setattr(
         migration,
@@ -467,6 +587,15 @@ def test_disposable_migration_orchestrator_uses_each_boundary_once(
     assert paths.record.is_file()
     persisted = json.loads(paths.record.read_text(encoding="utf-8"))
     assert persisted["work_counts"] == result.record["work_counts"]
+    classification = cast(dict[str, object], persisted["identity_classification"])
+    stage8_classification = cast(dict[str, object], classification["stage8"])
+    readiness_authority = cast(dict[str, object], stage8_classification["readiness_authority"])
+    assert readiness_authority["old"] == {"source_aggregate_sha256": "a" * 64}
+    assert readiness_authority["new"] == {
+        "source_closure_id": "c" * 64,
+        "source_result_id": "r" * 64,
+        "source_verification_id": "v" * 64,
+    }
     monkeypatch.setattr(migration, "_read_json", real_read_json)
     authenticated = migration.authenticate_migration_equivalence_record(paths.record)
     assert authenticated["operator_authorization"] == {
