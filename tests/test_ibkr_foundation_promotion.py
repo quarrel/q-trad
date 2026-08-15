@@ -120,7 +120,6 @@ def test_promotion_authentication_rejects_legacy_contract_without_fallback(
 def test_current_v3_qualifying_promotion_mutation_and_reuse_are_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    foundation, _stage7_manifest, _stage7_receipt, receipt = _verified_fixture(tmp_path)
     from dataclasses import replace
 
     import qtrad.application.ibkr_foundation as foundation_application
