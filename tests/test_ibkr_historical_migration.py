@@ -129,12 +129,16 @@ class _Observation:
     gap_disposition: str = "SUCCEEDED"
 
     def as_json_value(self) -> dict[str, object]:
-        schedule = self.schedule_evidence or {
-            "request_sha256": ["r" * 64],
-            "result_sha256": ["s" * 64],
-            "schedule_state": "ACTIVE",
-            "sessions": [{"active": True}],
-        }
+        schedule = (
+            self.schedule_evidence
+            if self.schedule_evidence is not None
+            else {
+                "request_sha256": ["r" * 64],
+                "result_sha256": ["s" * 64],
+                "schedule_state": "ACTIVE",
+                "sessions": [{"active": True}],
+            }
+        )
         return {
             "instrument_id": "fx:aud-usd",
             "close": self.close,
@@ -145,7 +149,10 @@ class _Observation:
 
 
 def _stage7_evidence(
-    *, close: str = "1.1000", observation_sha256: str = "a" * 64
+    *,
+    close: str = "1.1000",
+    observation_sha256: str = "a" * 64,
+    schedule_evidence: dict[str, object] | None = None,
 ) -> SimpleNamespace:
     summary = SimpleNamespace(
         accepted_intervals_by_request=(
@@ -170,7 +177,7 @@ def _stage7_evidence(
     )
     return SimpleNamespace(
         dataset=dataset,
-        observations=(_Observation(close, observation_sha256),),
+        observations=(_Observation(close, observation_sha256, schedule_evidence),),
         observation_summary=summary,
         request_evidence=(evidence,),
     )
@@ -288,7 +295,7 @@ def test_stage7_equivalence_excludes_physical_observation_identity() -> None:
             "observations": (replace(old.observations[0], gap_disposition="BAR_ACCEPTED"),),
         }
     )
-    new = _stage7_evidence(observation_sha256="b" * 64)
+    new = _stage7_evidence(observation_sha256="b" * 64, schedule_evidence={})
     result = migration._compare_stage7(cast(Any, old), cast(Any, new))
     assert result["row_count"] == 1
     assert result["old_semantic_projection_sha256"] == result["new_semantic_projection_sha256"]
@@ -305,7 +312,7 @@ def test_stage7_equivalence_rejects_semantic_observation_change() -> None:
     with pytest.raises(ValueError, match="observation semantics"):
         migration._compare_stage7(
             cast(Any, old),
-            cast(Any, _stage7_evidence(close="1.1001")),
+            cast(Any, _stage7_evidence(close="1.1001", schedule_evidence={})),
         )
 
 
@@ -977,7 +984,9 @@ def test_stage7_schedule_relocation_normalizes_only_legacy_disposition() -> None
     old = _stage7_evidence()
     old_row = replace(old.observations[0], gap_disposition="BAR_ACCEPTED")
     old = SimpleNamespace(**{**vars(old), "observations": (old_row,)})
-    result = migration._compare_stage7(cast(Any, old), cast(Any, _stage7_evidence()))
+    result = migration._compare_stage7(
+        cast(Any, old), cast(Any, _stage7_evidence(schedule_evidence={}))
+    )
     relocation = cast(dict[str, object], result["schedule_evidence_relocation"])
     assert relocation["equivalent"] is True
     assert relocation["legacy_disposition_normalization"] == {"BAR_ACCEPTED": "SUCCEEDED"}
@@ -1002,13 +1011,44 @@ def test_stage7_schedule_relocation_rejects_mutations(mutation: str) -> None:
     )
     mutated = SimpleNamespace(**{**vars(old), "observations": (old_row,)})
     with pytest.raises(ValueError):
-        migration._compare_stage7(cast(Any, mutated), cast(Any, _stage7_evidence()))
+        migration._compare_stage7(
+            cast(Any, mutated), cast(Any, _stage7_evidence(schedule_evidence={}))
+        )
 
 
 def test_stage7_request_evidence_result_identity_is_compared() -> None:
     old = _stage7_evidence()
-    new = _stage7_evidence()
+    new = _stage7_evidence(schedule_evidence={})
     new_evidence = SimpleNamespace(**{**vars(new.request_evidence[0]), "result_sha256": "x" * 64})
     new = SimpleNamespace(**{**vars(new), "request_evidence": (new_evidence,)})
     with pytest.raises(ValueError, match=r"request.*evidence"):
         migration._compare_stage7(cast(Any, old), cast(Any, new))
+
+
+@pytest.mark.parametrize(
+    "schedule_evidence",
+    [
+        {"schedule_state": "INACTIVE"},
+        {
+            "request_sha256": ["r" * 64],
+            "result_sha256": ["s" * 64],
+            "schedule_state": "ACTIVE",
+            "sessions": [],
+        },
+    ],
+)
+def test_stage7_current_schedule_evidence_must_be_empty(
+    schedule_evidence: dict[str, object],
+) -> None:
+    old = _stage7_evidence()
+    old = SimpleNamespace(
+        **{
+            **vars(old),
+            "observations": (replace(old.observations[0], gap_disposition="BAR_ACCEPTED"),),
+        }
+    )
+    with pytest.raises(ValueError, match="new Stage 7 schedule evidence"):
+        migration._compare_stage7(
+            cast(Any, old),
+            cast(Any, _stage7_evidence(schedule_evidence=schedule_evidence)),
+        )

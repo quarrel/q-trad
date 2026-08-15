@@ -909,7 +909,8 @@ def _stage7_observation_projection(
             ):
                 raise ValueError("retained Stage 7 provider session state changed")
     else:
-        _json_value(schedule)
+        if schedule:
+            raise ValueError("new Stage 7 schedule evidence must be empty")
     disposition = _string(value["gap_disposition"], "provider observation gap disposition")
     if legacy:
         if disposition != "BAR_ACCEPTED":
