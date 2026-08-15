@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any, cast
 
 import pytest
 
@@ -229,12 +230,13 @@ def test_stage8_readiness_without_valid_folds_is_insufficient(tmp_path: Path) ->
         IBKRFoundationReadinessState.QUALIFYING_HISTORY_READY,
         IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION,
     }
+    assert isinstance(build.readiness.evidence["fold_count"], int)
     assert build.readiness.evidence["fold_count"] >= 0
 
 
 def _coverage_fixture(
     gap_count: int,
-) -> tuple[dict[str, object], list[dict[str, object]], set[str]]:
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], tuple[str, ...]]:
     start = datetime(2026, 2, 1, tzinfo=UTC)
     instrument = str(IBKR_CONFIRMATORY_INSTRUMENTS[0])
     rows = tuple(
@@ -276,13 +278,16 @@ def _coverage_fixture(
     active = {
         str(item): ((start, start + timedelta(days=30)),) for item in IBKR_CONFIRMATORY_INSTRUMENTS
     }
-    cells, blocking, _diagnostics = _ibkr_opportunity_coverage(
-        targets=SimpleNamespace(rows=rows),
-        active_intervals=active,
-        provider_gaps=gaps,
-        primary_horizon=timedelta(minutes=1),
-        folds=(fold,),
-        holdout_range=(start + timedelta(days=2), start + timedelta(days=3)),
+    cells, blocking, _diagnostics = cast(
+        Any,
+        _ibkr_opportunity_coverage(
+            targets=cast(Any, SimpleNamespace(rows=rows)),
+            active_intervals=active,
+            provider_gaps=cast(Any, gaps),
+            primary_horizon=timedelta(minutes=1),
+            folds=(fold,),
+            holdout_range=(start + timedelta(days=2), start + timedelta(days=3)),
+        ),
     )
     return cells[0], cells, blocking
 

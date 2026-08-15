@@ -42,7 +42,7 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
                 authorization_reference="review-approval",
             )
         return
-    assert authority.promotion_id
+    assert authority.promotion_sha256
     assert output.is_file()
     with pytest.raises(FileExistsError):
         create_ibkr_foundation_confirmatory_promotion(
@@ -58,7 +58,7 @@ def test_qualifying_promotion_is_create_only_and_authenticates_without_replay(
         receipt=receipt,
         promotion=output,
     )
-    assert authenticated.promotion_id == authority.promotion_id
+    assert authenticated.promotion_sha256 == authority.promotion_sha256
 
 
 def test_promotion_fails_closed_before_replay_and_rejects_nonqualifying(
