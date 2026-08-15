@@ -1120,6 +1120,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_oof_verify.add_argument(
         "--receipt-output",
         type=Path,
+        required=True,
         help="create-only semantic verification receipt",
     )
     baselines_holdout_target_source = baselines_sub.add_parser(

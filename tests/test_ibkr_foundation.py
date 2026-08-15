@@ -391,6 +391,18 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
             cast(Any, full_build.observations).dataset_id, availability
         ),
     )
+    original_bounded_bytes = foundation_runtime._bounded_bytes
+    parquet_reads: list[Path] = []
+
+    def guarded_bounded_bytes(path: Path, limit: int, field: str) -> bytes:
+        if path.suffix == ".parquet":
+            parquet_reads.append(path)
+        return original_bounded_bytes(path, limit, field)
+
+    monkeypatch.setattr(foundation_runtime, "_bounded_bytes", guarded_bounded_bytes)
+    authenticate_ibkr_foundation(foundation, receipt=receipt)
+    assert parquet_reads == []
+
     original_read_child_rows = foundation_runtime._read_child_rows
     child_reads: list[Path] = []
 
@@ -421,6 +433,22 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
         receipt=receipt,
         target_instruments=tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
     )
+    safe_kinds = {
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+        "pre-holdout-target",
+    }
+    read_kinds = {kind for path in parquet_reads for kind in safe_kinds if kind in path.parts}
+    assert read_kinds == safe_kinds
+    assert len(parquet_reads) == len(set(parquet_reads))
+    assert not any(
+        forbidden in path.parts
+        for path in parquet_reads
+        for forbidden in {"folds", "targets", "g2-observations", "g2-panel"}
+    )
+    parquet_reads.clear()
     assert blind_source == holdout_source
     blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
         foundation,

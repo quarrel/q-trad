@@ -543,7 +543,7 @@ def _load_authenticated_ibkr_foundation_v3(
     *,
     receipt: Path,
 ) -> tuple[IBKRFoundationBuild, str]:
-    authenticated = _read_v3_manifest(path)
+    authenticated = _read_v3_manifest(path, child_byte_kinds=())
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     child_kinds = _supported_child_kinds(authenticated.children)
     child_ids = _child_reference_dataset_ids(authenticated.children, child_kinds=child_kinds)
@@ -677,7 +677,7 @@ def build_ibkr_holdout_target_source(
     """Build an outcome-blind holdout source from authenticated Stage 8 projections."""
     if not _is_v3_foundation(path):
         raise ValueError("current Stage 8 v3 outcome-blind loading is required")
-    authenticated_v3 = _read_v3_manifest(path)
+    authenticated_v3 = _read_v3_manifest(path, child_byte_kinds=())
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     root = authenticated_v3.path.parent
     provider_dataset = authenticated_v3.provider_dataset
@@ -693,6 +693,9 @@ def build_ibkr_holdout_target_source(
         expected_lineage,
         decode_g2=False,
         decode_target=False,
+        decode_rows=False,
+        decode_kinds=_FOUNDATION_EXTENSION_CHILD_KINDS,
+        byte_kinds=_FOUNDATION_EXTENSION_CHILD_KINDS,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
         raise ValueError("IBKR foundation observation child differs from configuration")
@@ -821,7 +824,7 @@ def _load_ibkr_foundation_outcome_blind(
 
     if not _is_v3_foundation(path):
         raise ValueError("current Stage 8 v3 outcome-blind loading is required")
-    authenticated_v3 = _read_v3_manifest(path)
+    authenticated_v3 = _read_v3_manifest(path, child_byte_kinds=())
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     manifest_path = authenticated_v3.path
     receipt_path = receipt.resolve()
@@ -1613,6 +1616,8 @@ def _verify_children_blind(
     decode_rows: bool = True,
     decode_base: bool = False,
     child_kinds: Sequence[str] | None = None,
+    byte_kinds: Sequence[str] | None = None,
+    decode_kinds: Sequence[str] | None = None,
 ) -> dict[str, tuple[dict[str, JsonValue], ...]]:
     """Verify child bytes while decoding only explicitly requested rows."""
 
@@ -1620,6 +1625,9 @@ def _verify_children_blind(
     if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
     _preflight_child_tree(bundle_root, children, kinds)
+    byte_verified_kinds = set(kinds if byte_kinds is None else byte_kinds)
+    if not byte_verified_kinds.issubset(kinds):
+        raise ValueError("IBKR foundation byte-verification child set is unsupported")
     decoded_kinds = (
         {
             "folds",
@@ -1638,6 +1646,10 @@ def _verify_children_blind(
         decoded_kinds.update(_G2_EXTENSION_CHILD_KINDS)
     if decode_target:
         decoded_kinds.add("targets")
+    if decode_kinds is not None:
+        decoded_kinds = set(decode_kinds)
+    if not decoded_kinds.issubset(byte_verified_kinds):
+        raise ValueError("IBKR foundation decoded children require byte verification")
     decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
@@ -1711,27 +1723,30 @@ def _verify_children_blind(
                 manifest_file,
                 "IBKR foundation child Parquet",
             )
-            parquet_bytes = _bounded_bytes(
-                file_path,
-                _MAX_CHILD_FILE_BYTES,
-                "IBKR foundation child Parquet",
-            )
-            if hashlib.sha256(parquet_bytes).hexdigest() != _text(
-                manifest["file_sha256"], "child Parquet hash"
-            ):
-                raise ValueError("IBKR foundation child Parquet bytes changed")
-            if pl.read_parquet_schema(file_path) != {"payload": pl.String}:
-                raise ValueError("IBKR foundation child Parquet schema is unsupported")
-            if kind in decoded_kinds:
-                rows = _read_child_rows(
+            if kind in byte_verified_kinds:
+                parquet_bytes = _bounded_bytes(
                     file_path,
-                    expected_row_count=manifest_row_count,
+                    _MAX_CHILD_FILE_BYTES,
+                    "IBKR foundation child Parquet",
                 )
-                if _sha([_canonical_row(row) for row in rows]) != _text(
-                    manifest["rows_sha256"], "child row hash"
+                if hashlib.sha256(parquet_bytes).hexdigest() != _text(
+                    manifest["file_sha256"], "child Parquet hash"
                 ):
-                    raise ValueError("IBKR foundation child row identity does not match")
-                observed_rows.extend(rows)
+                    raise ValueError("IBKR foundation child Parquet bytes changed")
+                if pl.read_parquet_schema(file_path) != {"payload": pl.String}:
+                    raise ValueError("IBKR foundation child Parquet schema is unsupported")
+                if kind in decoded_kinds:
+                    rows = _read_child_rows(
+                        file_path,
+                        expected_row_count=manifest_row_count,
+                    )
+                    if _sha([_canonical_row(row) for row in rows]) != _text(
+                        manifest["rows_sha256"], "child row hash"
+                    ):
+                        raise ValueError("IBKR foundation child row identity does not match")
+                    observed_rows.extend(rows)
+            elif kind in decoded_kinds:
+                raise ValueError("IBKR foundation decoded children require byte verification")
             expected_files.update({manifest_reference, manifest_file})
         if kind in decoded_kinds:
             decoded[kind] = tuple(observed_rows)
@@ -2398,7 +2413,12 @@ def _v3_receipt_output(path: Path, foundation: Path) -> Path:
     return output
 
 
-def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _AuthenticatedFoundationV3:
+def _read_v3_manifest(
+    path: Path,
+    *,
+    verify_children: bool = True,
+    child_byte_kinds: Sequence[str] | None = None,
+) -> _AuthenticatedFoundationV3:
     manifest_path = _regular_file(path, "IBKR foundation manifest")
     manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
     document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
@@ -2496,6 +2516,7 @@ def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _Authentic
             lineage,
             decode_rows=False,
             child_kinds=kinds,
+            byte_kinds=child_byte_kinds,
         )
     return _AuthenticatedFoundationV3(
         manifest_path,
@@ -2513,7 +2534,7 @@ def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _Authentic
 
 
 def _authenticate_ibkr_foundation_v3(path: Path, *, receipt: Path) -> dict[str, JsonValue]:
-    authenticated = _read_v3_manifest(path)
+    authenticated = _read_v3_manifest(path, child_byte_kinds=())
     receipt_path = _regular_file(receipt, "Stage 8 verification receipt")
     receipt_bytes = _bounded_bytes(
         receipt_path, _MAX_MANIFEST_BYTES, "Stage 8 verification receipt"

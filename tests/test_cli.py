@@ -1219,6 +1219,8 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
         ]
     )
     assert oof_verify.receipt_output == Path("oof-receipt.json")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["research", "baselines", "oof-verify", "--bundle", "oof"])
     target_source = parser.parse_args(
         [
             "research",
