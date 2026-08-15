@@ -14,20 +14,32 @@ import pytest
 import qtrad.runtime.r2_verification as verification
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
-from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_verification import (
-    _image_identity_manifest as _production_image_identity_manifest,
-)
-from qtrad.runtime.r2_verification import (
+    _descriptor_payload,
     _materialise_synthetic_feature_manifests,
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
     _validate_representative_fold_layout,
-    require_ibkr_adapter_runtime_identity,
+    execution_provenance,
+    numerical_environment,
     runtime_identities,
     verify_oof_bundle,
 )
+from qtrad.runtime.r2_verification import (
+    _image_identity_manifest as _production_image_identity_manifest,
+)
+
+
+def test_runtime_provenance_is_split_and_inspectable() -> None:
+    execution = execution_provenance()
+    numerical = numerical_environment()
+    assert set(execution) == {"git_commit", "image_digest", "application_identity"}
+    assert set(numerical) == {"python_version", "numpy_version", "sklearn_version"}
+    assert len(execution["git_commit"]) == 40
+    assert execution["image_digest"].startswith("sha256:")
+    assert numerical["python_version"]
+    assert runtime_identities()["application_identity"] == execution["application_identity"]
 
 
 def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -36,29 +48,59 @@ def test_image_digest_environment_is_not_authoritative(monkeypatch: pytest.Monke
     assert "image:sha256:" + "0" * 64 in identities["application_identity"]
 
 
-def test_persisted_ibkr_adapter_identity_matches_current_runtime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = {
-        "application_identity": "qtrad-test-application",
-        "image_identity": "sha256:" + "1" * 64,
+def test_descriptor_identity_excludes_execution_provenance_but_binds_science() -> None:
+    _, experiment, _ = _synthetic_pipeline_inputs()
+    identities = {
+        "application_identity": "qtrad-test+git:" + "1" * 40,
+        "image_identity": "sha256:" + "2" * 64,
+        "python_identity": "3.13.0",
+        "numpy_identity": "2.0.0",
+        "sklearn_identity": "1.6.0",
     }
-    adapter = IBKRHistoricalAdapterIdentity.create(
+    descriptor = _descriptor_payload(
         foundation_bundle_id="a" * 64,
-        application_identity=runtime["application_identity"],
-        image_identity=runtime["image_identity"],
+        experiment=experiment,
+        feature_names=("L0", "L1"),
+        run_kind="SYNTHETIC",
+        identities=identities,
     )
-    monkeypatch.setattr(verification, "runtime_identities", lambda: runtime)
-    require_ibkr_adapter_runtime_identity(adapter)
+    changed_provenance = dict(identities)
+    changed_provenance.update(
+        {
+            "application_identity": "qtrad-test+git:" + "f" * 40,
+            "image_identity": "sha256:" + "3" * 64,
+            "python_identity": "3.14.0",
+            "numpy_identity": "2.1.0",
+            "sklearn_identity": "1.7.0",
+        }
+    )
+    drifted = _descriptor_payload(
+        foundation_bundle_id="a" * 64,
+        experiment=experiment,
+        feature_names=("L0", "L1"),
+        run_kind="SYNTHETIC",
+        identities=changed_provenance,
+    )
+    assert descriptor["descriptor_id"] == drifted["descriptor_id"]
+    assert descriptor["application_identity"] != drifted["application_identity"]
+    assert descriptor["numpy_identity"] != drifted["numpy_identity"]
 
-    for field in ("application_identity", "image_identity"):
-        drifted = dict(runtime)
-        drifted[field] = "runtime-drift"
-        monkeypatch.setattr(
-            verification, "runtime_identities", lambda identities=drifted: identities
-        )
-        with pytest.raises(ValueError, match=field):
-            require_ibkr_adapter_runtime_identity(adapter)
+    model_changed = _descriptor_payload(
+        foundation_bundle_id="a" * 64,
+        experiment=replace(experiment, model_selection_policy="DIFFERENT_MODEL_SELECTION_V2"),
+        feature_names=("L0", "L1"),
+        run_kind="SYNTHETIC",
+        identities=identities,
+    )
+    feature_changed = _descriptor_payload(
+        foundation_bundle_id="a" * 64,
+        experiment=experiment,
+        feature_names=("L0", "P1"),
+        run_kind="SYNTHETIC",
+        identities=identities,
+    )
+    assert descriptor["descriptor_id"] != model_changed["descriptor_id"]
+    assert descriptor["descriptor_id"] != feature_changed["descriptor_id"]
 
 
 def test_image_identity_manifest_digest_is_authenticated(

@@ -235,7 +235,6 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
-from qtrad.runtime.r2_bundles import verify_r2_oof_bundle
 from qtrad.runtime.r2_holdout import (
     load_holdout_policy,
     load_holdout_questions,
@@ -250,10 +249,6 @@ from qtrad.runtime.r2_holdout import (
     write_built_holdout_bundle,
     write_holdout_selection,
 )
-from qtrad.runtime.r2_ibkr_verification import (
-    build_ibkr_software_bundle,
-    verify_ibkr_software_bundle,
-)
 from qtrad.runtime.r2_readiness import (
     load_r2_experiment,
     write_r2_experiment,
@@ -265,13 +260,11 @@ from qtrad.runtime.r2_verification import (
     authenticate_ibkr_foundation_for_r2,
     authenticate_r1_foundation_for_r2,
     build_oof_bundle,
-    build_software_bundle,
     freeze_confirmatory_selection,
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
     prepare_confirmatory_g2,
-    require_ibkr_adapter_runtime_identity,
     reveal_confirmatory_g2,
     runtime_identities,
     selection_freeze,
@@ -280,8 +273,6 @@ from qtrad.runtime.r2_verification import (
     verify_confirmatory_g2_preparation,
     verify_confirmatory_r2h,
     verify_oof_bundle,
-    verify_software_bundle,
-    verify_software_bundle_async,
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -1082,7 +1073,6 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_readiness.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_readiness.add_argument("--foundation-promotion", type=Path)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
-    baselines_readiness.add_argument("--software-bundle", type=Path)
     baselines_readiness.add_argument("--output", type=Path, required=True)
     baselines_features = baselines_sub.add_parser(
         "features", help="materialise and verify an OOF R2 raw-feature child"
@@ -1301,18 +1291,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_verify.add_argument("--root", type=Path, required=True)
 
-    baselines_software_build = baselines_sub.add_parser(
-        "software-build", help="build the R2 synthetic and representative verification bundle"
-    )
-    baselines_software_build.add_argument("--representative-oof-bundle", type=Path, required=True)
-    baselines_software_build.add_argument("--representative-selection", type=Path, required=True)
-    baselines_software_build.add_argument("--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,))
-    baselines_software_build.add_argument("--output", type=Path, required=True)
-    baselines_software_verify = baselines_sub.add_parser(
-        "software-verify", help="independently replay the R2 software bundle"
-    )
-    baselines_software_verify.add_argument("--bundle", type=Path, required=True)
-    baselines_software_verify.add_argument("--profile", choices=(IBKR_HISTORICAL_PROFILE_ARGUMENT,))
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
 
@@ -2294,7 +2272,6 @@ def main(argv: Sequence[str] | None = None) -> None:
                 foundation_receipt_path=args.foundation_receipt,
                 foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
-                software_bundle_path=args.software_bundle,
                 output_path=args.output,
             )
         )
@@ -2489,38 +2466,6 @@ def main(argv: Sequence[str] | None = None) -> None:
     elif (
         args.command == "research"
         and args.research_command == "baselines"
-        and args.baselines_command == "software-build"
-    ):
-        if args.profile is None:
-            build_software_bundle(
-                representative_oof_bundle_path=args.representative_oof_bundle,
-                representative_selection_path=args.representative_selection,
-                output=args.output,
-            )
-        else:
-            if args.profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
-                raise ValueError("unsupported software verification profile")
-            build_ibkr_software_bundle(
-                representative_oof_bundle_path=args.representative_oof_bundle,
-                representative_selection_path=args.representative_selection,
-                output=args.output,
-            )
-        print(json.dumps({"software_bundle": str(args.output / "manifest.json")}, sort_keys=True))
-    elif (
-        args.command == "research"
-        and args.research_command == "baselines"
-        and args.baselines_command == "software-verify"
-    ):
-        if args.profile is None:
-            bundle = verify_software_bundle(args.bundle)
-        else:
-            if args.profile != IBKR_HISTORICAL_PROFILE_ARGUMENT:
-                raise ValueError("unsupported software verification profile")
-            bundle = verify_ibkr_software_bundle(args.bundle)
-        print(json.dumps(bundle.as_json(), sort_keys=True))
-    elif (
-        args.command == "research"
-        and args.research_command == "baselines"
         and args.baselines_command == "features"
     ):
         asyncio.run(
@@ -2651,7 +2596,6 @@ async def _report_r2_readiness(
     *,
     foundation_bundle_path: Path,
     experiment_path: Path,
-    software_bundle_path: Path | None,
     output_path: Path,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
@@ -2666,22 +2610,6 @@ async def _report_r2_readiness(
         experiment=experiment,
     )
     software_verified = False
-    if software_bundle_path is not None:
-        if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE:
-            software = verify_ibkr_software_bundle(software_bundle_path)
-        else:
-            software = await verify_software_bundle_async(software_bundle_path)
-        representative = verify_r2_oof_bundle(
-            software_bundle_path.parent / software.representative_oof_bundle.path
-        )
-        software_verified = (
-            representative.foundation_bundle_id == verified.bundle.foundation_id
-            and representative.experiment_configuration_id == experiment.configuration_id
-            and representative.source_class is experiment.market_data_source_class
-            and representative.evidence_class is experiment.evidence_class
-        )
-        if not software_verified:
-            raise ValueError("software bundle does not bind the exact foundation and experiment")
     report = evaluate_r2_readiness(
         cast(VerifiedFoundation, verified), experiment, software_verified=software_verified
     )
@@ -2737,7 +2665,6 @@ async def _load_r2_foundation_inputs(
         and foundation_promotion_path is not None
     ):
         raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
-    require_ibkr_adapter_runtime_identity(adapter_identity)
     target_source = None
     if outcome_blind:
         from qtrad.domain.r2_holdout import R2HoldoutTargetSource

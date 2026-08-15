@@ -1177,7 +1177,7 @@ def test_parser_rejects_non_demo_ingestion_environment() -> None:
         cli.build_parser().parse_args(["ingest", "--environment", "live"])
 
 
-def test_parser_accepts_r2_replay_and_software_operations() -> None:
+def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> None:
     parser = cli.build_parser()
 
     oof = parser.parse_args(
@@ -1203,19 +1203,19 @@ def test_parser_accepts_r2_replay_and_software_operations() -> None:
             "run",
         ]
     )
-    software = parser.parse_args(
-        [
-            "research",
-            "baselines",
-            "software-verify",
-            "--bundle",
-            "software/manifest.json",
-        ]
-    )
 
     assert oof.baselines_command == "oof-build"
     assert oof.feature_manifest == ["L0=l0.json", "L1=l1.json", "P0=p0.json", "P1=p1.json"]
-    assert software.baselines_command == "software-verify"
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "research",
+                "baselines",
+                "software-verify",
+                "--bundle",
+                "software/manifest.json",
+            ]
+        )
 
 
 @pytest.mark.asyncio

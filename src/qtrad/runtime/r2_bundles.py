@@ -19,7 +19,6 @@ from qtrad.domain.r2_bundles import (
     ArtifactReference,
     R2ForecastManifest,
     R2OofBundle,
-    R2SoftwareVerificationBundle,
 )
 from qtrad.domain.r2_evaluation import (
     R2_EVALUATION_CONTRACT,
@@ -77,8 +76,6 @@ _IDENTITY_FIELDS = frozenset(
 _IDENTITY_FIELD_BY_CONTRACT: dict[str, str] = {
     R2OofBundle.CONTRACT: "oof_id",
     R2ForecastManifest.CONTRACT: "manifest_id",
-    R2SoftwareVerificationBundle.CONTRACT: "bundle_id",
-    "qtrad-r2-software-verification-v2": "bundle_id",
     R2_SELECTION_CONTRACT: "manifest_id",
     R2_EVALUATION_CONTRACT: "report_id",
     R2_LOCAL_COMPARATOR_CONTRACT: "manifest_id",
@@ -313,10 +310,28 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
             descriptor_payload = {
                 key: value
                 for key, value in child.items()
-                if key not in {"descriptor_id", "runtime_inputs"}
+                if key
+                not in {
+                    "descriptor_id",
+                    "runtime_inputs",
+                    "application_identity",
+                    "image_identity",
+                    "python_identity",
+                    "numpy_identity",
+                    "sklearn_identity",
+                }
             }
             if sha256(canonical_bytes(descriptor_payload)).hexdigest() != descriptor_id:
                 raise ValueError("R2 OOF descriptor ID does not authenticate its semantic content")
+            for provenance_field in (
+                "application_identity",
+                "image_identity",
+                "python_identity",
+                "numpy_identity",
+                "sklearn_identity",
+            ):
+                if not isinstance(child.get(provenance_field), str) or not child[provenance_field]:
+                    raise ValueError(f"R2 OOF descriptor provenance is missing {provenance_field}")
             if (
                 child.get("foundation_bundle_id") != bundle.foundation_bundle_id
                 or child.get("experiment_configuration_id") != bundle.experiment_configuration_id
@@ -428,76 +443,6 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     return bundle
 
 
-def write_r2_software_bundle(output: Path, bundle: R2SoftwareVerificationBundle) -> Path:
-    for ref in (
-        bundle.synthetic_oof_bundle,
-        bundle.representative_oof_bundle,
-        bundle.synthetic_selection,
-        bundle.representative_selection,
-    ):
-        _verify_reference(output, ref)
-    path = output / "manifest.json"
-    atomic_create(path, canonical_bytes(bundle.as_json()))
-    return path
-
-
-def verify_r2_software_bundle(path: Path) -> R2SoftwareVerificationBundle:
-    payload = _load_object(path)
-    expected = {
-        "contract",
-        "schema_version",
-        "synthetic_oof_bundle",
-        "representative_oof_bundle",
-        "synthetic_selection",
-        "representative_selection",
-        "application_identity",
-        "python_identity",
-        "numpy_identity",
-        "sklearn_identity",
-        "representative_integration_ready",
-        "evidence_disposition",
-        "research_disposition",
-        "bundle_id",
-    }
-    if set(payload) != expected:
-        raise ValueError("R2 software bundle has unknown or missing fields")
-    if (
-        payload["contract"] != R2SoftwareVerificationBundle.CONTRACT
-        or payload["schema_version"] != 1
-    ):
-        raise ValueError("R2 software bundle contract is unsupported")
-    bundle = R2SoftwareVerificationBundle(
-        synthetic_oof_bundle=ArtifactReference.from_json(payload["synthetic_oof_bundle"]),
-        representative_oof_bundle=ArtifactReference.from_json(payload["representative_oof_bundle"]),
-        synthetic_selection=ArtifactReference.from_json(payload["synthetic_selection"]),
-        representative_selection=ArtifactReference.from_json(payload["representative_selection"]),
-        application_identity=_text(payload["application_identity"]),
-        python_identity=_text(payload["python_identity"]),
-        numpy_identity=_text(payload["numpy_identity"]),
-        sklearn_identity=_text(payload["sklearn_identity"]),
-        representative_integration_ready=_text(payload["representative_integration_ready"]),
-        evidence_disposition=_text(payload["evidence_disposition"]),
-        research_disposition=_text(payload["research_disposition"]),
-        bundle_id=_text(payload["bundle_id"]),
-    )
-    for ref in (
-        bundle.synthetic_oof_bundle,
-        bundle.representative_oof_bundle,
-        bundle.synthetic_selection,
-        bundle.representative_selection,
-    ):
-        _verify_reference(path.parent, ref)
-    _reject_software_orphans(
-        path.parent,
-        {
-            "manifest.json",
-            bundle.synthetic_selection.path,
-            bundle.representative_selection.path,
-        },
-    )
-    return bundle
-
-
 def _all_oof_references(bundle: R2OofBundle) -> tuple[ArtifactReference, ...]:
     return (
         *bundle.feature_children,
@@ -555,21 +500,6 @@ def _reject_orphan_files(root: Path, allowed_paths: set[str]) -> None:
                 continue
             if relative not in allowed_paths:
                 raise ValueError(f"R2 bundle contains an orphaned child: {relative}")
-
-
-def _reject_software_orphans(root: Path, allowed_paths: set[str]) -> None:
-    for candidate in root.rglob("*"):
-        if candidate.is_symlink():
-            raise ValueError(
-                f"R2 software bundle contains a symlink: {candidate.relative_to(root)}"
-            )
-        if candidate.is_file():
-            relative = candidate.relative_to(root).as_posix()
-            if relative in allowed_paths:
-                continue
-            if relative.startswith("synthetic/oof/") or relative.startswith("representative/oof/"):
-                continue
-            raise ValueError(f"R2 software bundle contains an orphaned child: {relative}")
 
 
 def _verify_reference(root: Path, reference: ArtifactReference) -> None:

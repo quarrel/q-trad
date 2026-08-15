@@ -1566,8 +1566,8 @@ Expected files:
 
 - `runtime_identities()` and callers in R2;
 - R2 preprocessing/fit/forecast verifier identity definitions;
-- `src/qtrad/runtime/r2_ibkr_verification.py`;
-- software-verification bundle domain/runtime types;
+- `src/qtrad/runtime/r2_ibkr_verification.py` (deleted outcome; no active replacement);
+- software-verification bundle domain/runtime types (deleted outcome; claims are owned by the direct OOF contract/receipt);
 - relevant tests.
 
 Avoid OOF receipt code owned by PR-R2 except shared field wiring.

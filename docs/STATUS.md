@@ -123,13 +123,12 @@ remains offline/replay.
   verifier independently replays the comparator set, metrics, decisions, holdout comparator IDs, fitting
   policy and image identity. The manifest contains no holdout features, outcomes or caller-asserted empty
   external state; trusted absence verification is explicitly PENDING_R2_H_INTEGRATION. Rehashed semantic
-  mutation and child mutation tests pass. The source/evidence-bound forecast-manifest, OOF-bundle and
-  software-verification contracts now have create-only persistence, orphan/symlink/path-escape rejection,
-  independent child authentication and CLI round-trip coverage. The generic synthetic software path is
-  verified locally. The source-specific IBKR path now adds the fixed six-instrument profile, verified Stage 8
-  file-only adaptation, profile-bound OOF replay and an implementation-only v2 R2.H envelope verifier; no
-  fresh representative execution or qualifying bundle exists, so R2.F1/R2.H remain pending. No confirmatory
-  model-selection or effectiveness claim is made.
+  The source/evidence-bound forecast-manifest and OOF-bundle paths have create-only persistence,
+  exact-tree authentication and independent child checks. The obsolete recursive software-verification
+  envelope and copied OOF trees were removed by PR-R3; ordinary readiness remains pending the direct
+  OOF integration authority owned by PR-R2. Current software provenance is inspectable separately from
+  scientific semantic IDs, and no fresh representative execution or qualifying bundle exists, so
+  R2.F1/R2.H remain pending. No confirmatory model-selection or effectiveness claim is made.
 - The disposable R2.G2 holdout machinery is implemented with versioned selection, outcome-blind feature
   preparation, pre-holdout final fits, sealed forecast/coverage children, marker-first reveal and
   irreversible consumption. Its focused evidence is implementation-only fixture evidence; no real
