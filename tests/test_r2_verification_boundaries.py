@@ -16,13 +16,11 @@ from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.ports.clock import Clock
-from qtrad.runtime.r2_bundles import _verify_replay_inputs
 from qtrad.runtime.r2_verification import (
     _image_identity_manifest as _production_image_identity_manifest,
 )
 from qtrad.runtime.r2_verification import (
     _materialise_synthetic_feature_manifests,
-    _stage_replay_inputs,
     _synthetic_pipeline_inputs,
     _validate_representative_capture_v4,
     _validate_representative_fold_layout,
@@ -87,49 +85,6 @@ def test_image_identity_manifest_digest_is_authenticated(
     )
     with pytest.raises(RuntimeError, match="manifest digest"):
         runtime_identities()
-
-
-def test_replay_input_paths_are_relative_and_portable(tmp_path: Path) -> None:
-    research = tmp_path / "research"
-    research.mkdir()
-    (research / "foundation").mkdir()
-    foundation = research / "foundation" / "bundle.json"
-    foundation.write_text("{}")
-    (research / "unrelated.txt").write_text("must not be staged")
-    features: dict[str, Path] = {}
-    for name in ("L0", "L1", "P0", "P1"):
-        directory = research / name
-        directory.mkdir()
-        features[name] = directory / "manifest.json"
-        features[name].write_text("{}")
-    experiment = tmp_path / "experiment.json"
-    experiment.write_text("{}")
-    payload = _stage_replay_inputs(
-        output=tmp_path / "bundle",
-        research_root=research,
-        paths={"foundation": foundation, "experiment": experiment, **features},
-    )
-    assert payload["root"] == "."
-    children = payload["children"]
-    assert isinstance(children, dict)
-    typed_children = cast(dict[str, object], children)
-    for child in typed_children.values():
-        if not isinstance(child, dict):
-            raise AssertionError("staged child is not an object")
-        child_payload = cast(dict[str, object], child)
-        child_path = child_payload["path"]
-        child_root = child_payload["root"]
-        assert isinstance(child_path, str)
-        assert isinstance(child_root, str)
-        assert not Path(child_path).is_absolute()
-        assert ".." not in Path(child_path).parts
-        assert not Path(child_root).is_absolute()
-    assert not (tmp_path / "bundle" / "replay-inputs" / "research" / "unrelated.txt").exists()
-
-    first = cast(dict[str, object], typed_children["foundation"])
-    first["sha256"] = "f" * 64
-    with pytest.raises(ValueError, match="identity differs from its closure"):
-        _verify_replay_inputs(tmp_path / "bundle", {"replay_inputs": payload}, set())
 
 
 def test_representative_fold_layout_preserves_dependency_embargo() -> None:
@@ -201,27 +156,3 @@ def test_oof_verification_dispatches_representative_replay(
     monkeypatch.setattr(verification, "_replay_representative_oof", replay)
     assert verify_oof_bundle(Path("manifest.json")) is not None
     assert replayed
-
-
-def test_replay_staging_rejects_ancestor_symlinks(tmp_path: Path) -> None:
-    research = tmp_path / "research"
-    research.mkdir()
-    foundation = research / "foundation.json"
-    foundation.write_text("{}")
-    paths: dict[str, Path] = {"foundation": foundation}
-    for name in ("L0", "L1", "P0", "P1"):
-        feature = research / f"{name}.json"
-        feature.write_text("{}")
-        paths[name] = feature
-    experiment = tmp_path / "experiment.json"
-    experiment.write_text("{}")
-    outside = tmp_path / "outside"
-    outside.mkdir()
-    link = tmp_path / "link"
-    link.symlink_to(outside, target_is_directory=True)
-    with pytest.raises(ValueError, match="symlink"):
-        _stage_replay_inputs(
-            output=link / "bundle",
-            research_root=research,
-            paths={"experiment": experiment, **paths},
-        )

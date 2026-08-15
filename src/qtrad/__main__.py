@@ -76,10 +76,8 @@ from qtrad.application.r2_features import (
 from qtrad.application.r2_holdout import freeze_holdout_selection
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_historical_experiment,
-    build_ibkr_r2_foundation_inputs,
 )
 from qtrad.application.r2_readiness import (
-    R1FoundationBindings,
     VerifiedFoundation,
     evaluate_r2_readiness,
 )
@@ -131,11 +129,9 @@ from qtrad.runtime.deployment import load_capture_deployment_descriptor
 from qtrad.runtime.foundation_bundle import (
     load_foundation_config,
     persist_foundation_bundle,
-    restore_authenticated_foundation_bundle,
     verify_foundation_bundle,
     verify_foundation_configuration_evidence,
     verify_observation_build_evidence,
-    verify_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_b3 import (
     b3_preflight,
@@ -172,7 +168,6 @@ from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     load_ibkr_foundation,
-    load_ibkr_foundation_outcome_blind_with_identity,
     load_ibkr_foundation_with_identity,
     preflight_ibkr_foundation,
     verify_ibkr_foundation,
@@ -266,6 +261,9 @@ from qtrad.runtime.r2_readiness import (
 )
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
+    AuthenticatedR2Foundation,
+    authenticate_ibkr_foundation_for_r2,
+    authenticate_r1_foundation_for_r2,
     build_oof_bundle,
     build_software_bundle,
     freeze_confirmatory_selection,
@@ -2701,68 +2699,59 @@ async def _load_r2_foundation_inputs(
     holdout_target_source: object | None = None,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
-) -> VerifiedFoundation | R2FoundationInputs:
+) -> AuthenticatedR2Foundation:
+    if foundation_receipt_path is None:
+        raise ValueError("R2 work requires a foundation verification receipt")
     if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
-        if foundation_receipt_path is None:
-            raise ValueError("non-IBKR R2 work requires a foundation verification receipt")
-        return await restore_authenticated_foundation_bundle(
+        if foundation_promotion_path is not None:
+            raise ValueError("R1 foundations do not accept a promotion attestation")
+        target_source = None
+        if outcome_blind:
+            from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+
+            if not isinstance(holdout_target_source, R2HoldoutTargetSource):
+                raise ValueError("blind R1 foundation loading requires a holdout target source")
+            target_source = holdout_target_source
+        return await authenticate_r1_foundation_for_r2(
             root=settings.research_root,
             bundle_path=foundation_bundle_path,
+            receipt_path=foundation_receipt_path,
             clock=clock,
-            receipt=foundation_receipt_path,
+            evidence_class=experiment.evidence_class,
+            outcome_blind=outcome_blind,
+            holdout_target_source=target_source,
         )
 
-    if foundation_receipt_path is None:
-        raise ValueError("IBKR historical R2 work requires a Stage 8 verification receipt")
-    promotion_authority = None
-    if experiment.evidence_class is EvidenceClass.CONFIRMATORY:
-        if foundation_promotion_path is None:
-            raise ValueError(
-                "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
-            )
-        promotion_authority = authenticate_ibkr_foundation_promotion(
-            foundation_bundle_path,
-            receipt=foundation_receipt_path,
-            promotion=foundation_promotion_path,
+    if experiment.source_adapter_identity is None:
+        raise ValueError("IBKR experiment is missing its persisted IBKR adapter identity")
+    adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
+    if (
+        experiment.evidence_class is EvidenceClass.CONFIRMATORY
+        and foundation_promotion_path is None
+    ):
+        raise ValueError(
+            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
         )
-    elif foundation_promotion_path is not None:
+    if (
+        experiment.evidence_class is not EvidenceClass.CONFIRMATORY
+        and foundation_promotion_path is not None
+    ):
         raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
+    require_ibkr_adapter_runtime_identity(adapter_identity)
+    target_source = None
     if outcome_blind:
         from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
         if not isinstance(holdout_target_source, R2HoldoutTargetSource):
             raise ValueError("blind IBKR foundation loading requires a holdout target source")
-        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_outcome_blind_with_identity(
-            foundation_bundle_path,
-            receipt=foundation_receipt_path,
-            holdout_target_source=holdout_target_source,
-        )
-    else:
-        stage8_foundation, foundation_bundle_id = load_ibkr_foundation_with_identity(
-            foundation_bundle_path,
-            receipt=foundation_receipt_path,
-        )
-    if experiment.r1_bundle_id != foundation_bundle_id:
-        raise ValueError("IBKR experiment does not bind the verified Stage 8 foundation")
-    if experiment.source_adapter_identity is None:
-        raise ValueError("IBKR experiment is missing its persisted IBKR adapter identity")
-    adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
-    if adapter_identity.foundation_bundle_id != foundation_bundle_id:
-        raise ValueError("IBKR adapter identity does not bind the verified Stage 8 foundation")
-    expected = build_ibkr_historical_experiment(
-        stage8_foundation,
-        foundation_bundle_id=foundation_bundle_id,
+        target_source = holdout_target_source
+    return authenticate_ibkr_foundation_for_r2(
+        foundation_path=foundation_bundle_path,
+        receipt_path=foundation_receipt_path,
         adapter_identity=adapter_identity,
         evidence_class=experiment.evidence_class,
-        promotion_authority=promotion_authority,
-    )
-    if expected.as_json() != experiment.as_json():
-        raise ValueError("IBKR experiment does not match the verified Stage 8 foundation")
-    require_ibkr_adapter_runtime_identity(adapter_identity)
-    return build_ibkr_r2_foundation_inputs(
-        stage8_foundation,
-        foundation_bundle_id=foundation_bundle_id,
-        adapter_identity=adapter_identity,
+        holdout_target_source=target_source,
+        promotion_path=foundation_promotion_path,
     )
 
 
@@ -2796,27 +2785,19 @@ async def _build_r2_oof(
     holdout_target_source = R2HoldoutTargetSource.from_json(
         _load_holdout_cli_object(holdout_target_source_path)
     )
-    if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
-        verified = await verify_outcome_blind_foundation_bundle(
-            root=settings.research_root,
-            bundle_path=foundation_bundle_path,
-            clock=clock,
-            holdout_target_source=holdout_target_source,
-            receipt=foundation_receipt_path,
-        )
-    else:
-        verified = await _load_r2_foundation_inputs(
-            settings,
-            clock,
-            foundation_bundle_path=foundation_bundle_path,
-            foundation_receipt_path=foundation_receipt_path,
-            foundation_promotion_path=foundation_promotion_path,
-            experiment=experiment,
-            outcome_blind=True,
-            holdout_target_source=holdout_target_source,
-        )
+    foundation_authority = await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        foundation_receipt_path=foundation_receipt_path,
+        foundation_promotion_path=foundation_promotion_path,
+        experiment=experiment,
+        outcome_blind=True,
+        holdout_target_source=holdout_target_source,
+    )
     manifest = build_oof_bundle(
-        verified=cast(R1FoundationBindings, verified),
+        verified=foundation_authority.semantic_inputs,
+        foundation_authority=foundation_authority,
         experiment=experiment,
         feature_manifest_paths=feature_paths,
         research_root=settings.research_root,
@@ -2832,18 +2813,8 @@ async def _build_r2_oof(
             if experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
             else None
         ),
-        replay_inputs={
-            "foundation": foundation_bundle_path,
-            "foundation_receipt": foundation_receipt_path,
-            **(
-                {"foundation_promotion": foundation_promotion_path}
-                if foundation_promotion_path is not None
-                else {}
-            ),
-            "experiment": experiment_path,
-            **feature_paths,
-        },
         holdout_target_source=holdout_target_source,
+        experiment_path=experiment_path,
     )
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))
 

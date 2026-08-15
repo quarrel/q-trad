@@ -1276,8 +1276,8 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
 ) -> None:
     config = experiment()
     foundation = _replay_foundation(config)
-    restore_bundle = AsyncMock(return_value=foundation)
-    monkeypatch.setattr(cli, "restore_authenticated_foundation_bundle", restore_bundle)
+    foundation_authentication = AsyncMock(return_value=foundation)
+    monkeypatch.setattr(cli, "authenticate_r1_foundation_for_r2", foundation_authentication)
     verify_bundle = AsyncMock(return_value=foundation)
     monkeypatch.setattr(cli, "_verify_foundation_bundle_runtime", verify_bundle, raising=False)
     monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
@@ -1308,7 +1308,7 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     )
     verified = json.loads(capsys.readouterr().out)
     assert verified == built
-    assert restore_bundle.await_count == 2
+    assert foundation_authentication.await_count == 2
     assert verify_bundle.await_count == 0
 
 
