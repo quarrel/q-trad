@@ -191,8 +191,7 @@ remains offline/replay.
 
 ## Next actions
 
-1. The R2 integration/verification workstream owns the post-S7.3 recursive-verification architecture
-   audit across R1 and R2; consolidate replay only where it preserves independent authority boundaries.
+1. PR-C1 convergence is implementation-complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate and merge remain release checks.
 2. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
    holdout execution and effectiveness evidence remain separately authorised and pending.

@@ -32,8 +32,6 @@ from qtrad.domain.folds import FoldDataset
 from qtrad.domain.foundation import FoundationConfig, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_INSTRUMENTS,
-    IBKR_FOUNDATION_CONTRACT,
-    IBKR_FOUNDATION_SCHEMA_VERSION,
     IBKRFoundationReadiness,
     IBKRFoundationReadinessCause,
     IBKRFoundationReadinessState,
@@ -41,7 +39,6 @@ from qtrad.domain.ibkr_foundation import (
 from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.provider_history import (
     ProviderHistoricalAvailabilityPolicy,
-    ProviderHistoricalDataset,
     ProviderHistoricalDatasetV3,
 )
 from qtrad.domain.r2_holdout import (
@@ -74,9 +71,6 @@ _MAX_CHILD_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
 _CHILD_DIRECTORY_SUFFIX = ".children"
-_BOUNDED_PROVIDER_HISTORY_ROWS = 500_000
-_FOUNDATION_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v1"
-_FOUNDATION_VERIFICATION_SCHEMA_VERSION = 1
 _FOUNDATION_V3_CONTRACT = "qtrad-ibkr-historical-foundation-v2"
 _FOUNDATION_V3_SCHEMA_VERSION = 2
 _FOUNDATION_V3_VERIFICATION_CONTRACT = "qtrad-ibkr-foundation-verification-v2"
@@ -84,17 +78,6 @@ _FOUNDATION_V3_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v2
 _FOUNDATION_V3_VERIFIER_VERSION = 1
 _FOUNDATION_V3_CHECKS = (
     "stage7-receipt-authentication",
-    "stage8-independent-derivation",
-    "foundation-metadata-equivalence",
-    "child-byte-closure",
-    "child-semantic-equivalence",
-    "readiness-equivalence",
-)
-_FOUNDATION_AUTHENTICATION_CONTRACT = "qtrad-ibkr-foundation-authentication-v1"
-_FOUNDATION_VERIFIER_CONTRACT = "qtrad-stage8-foundation-semantic-verifier-v1"
-_FOUNDATION_VERIFIER_VERSION = 1
-_FOUNDATION_VERIFIER_COMPLETED_CHECKS = (
-    "provider-history-independent-replay",
     "stage8-independent-derivation",
     "foundation-metadata-equivalence",
     "child-byte-closure",
@@ -126,7 +109,7 @@ _BASE_CHILD_KINDS = (
     "targets",
     "folds",
 )
-_LEGACY_EXTENSION_CHILD_KINDS = (
+_FOUNDATION_EXTENSION_CHILD_KINDS = (
     "target-index",
     "causal-metadata",
     "blind-observations",
@@ -134,8 +117,8 @@ _LEGACY_EXTENSION_CHILD_KINDS = (
     "pre-holdout-target",
 )
 _G2_EXTENSION_CHILD_KINDS = ("g2-observations", "g2-panel")
-_LEGACY_CHILD_KINDS = _BASE_CHILD_KINDS + _LEGACY_EXTENSION_CHILD_KINDS
-_CHILD_KINDS = _LEGACY_CHILD_KINDS + _G2_EXTENSION_CHILD_KINDS
+_FOUNDATION_CHILD_KINDS = _BASE_CHILD_KINDS + _FOUNDATION_EXTENSION_CHILD_KINDS
+_CHILD_KINDS = _FOUNDATION_CHILD_KINDS + _G2_EXTENSION_CHILD_KINDS
 _ProgressCallback = Callable[[Mapping[str, object]], None]
 _CHILD_FIELDS = {
     "contract",
@@ -451,60 +434,6 @@ def _sha(value: object) -> str:
     return hashlib.sha256(_json_bytes(value)).hexdigest()
 
 
-def _build_payload(
-    build: IBKRFoundationBuild,
-    source_evidence: ProviderHistorySourceEvidence,
-    children: Mapping[str, JsonValue],
-) -> dict[str, JsonValue]:
-    source = source_evidence.source_artifact
-    provider_dataset = build.provider_history
-    return {
-        "configuration": foundation_config_payload(build.configuration),
-        "provider_history": {
-            "dataset_sha256": provider_dataset.dataset_sha256,
-            "row_count": provider_dataset.row_count,
-            "contract_selection_sha256": provider_dataset.contract_selection_sha256,
-            "plan_sha256": provider_dataset.plan_sha256,
-            "runtime_sha256": provider_dataset.runtime_sha256,
-            "aggregate_sha256": provider_dataset.aggregate_sha256,
-        },
-        "source_evidence": {
-            "eligible_contracts": [
-                contract.as_json_value() for contract in source.plan.eligible_contracts
-            ],
-            "coverage_summary": source.aggregate.coverage_summary,
-            "entitlement_summary": source.aggregate.entitlement_summary,
-        },
-        "children": dict(children),
-        "active_intervals": {
-            instrument: [[start.isoformat(), end.isoformat()] for start, end in intervals]
-            for instrument, intervals in sorted(build.active_intervals.items())
-        },
-        "provider_gaps": [dict(gap) for gap in build.provider_gaps],
-        "readiness": build.readiness.as_json(),
-    }
-
-
-def _manifest_payload(
-    build: IBKRFoundationBuild,
-    source_evidence: ProviderHistorySourceEvidence,
-    children: Mapping[str, JsonValue],
-    provider_manifest: Path,
-    bundle_root: Path,
-) -> dict[str, JsonValue]:
-    payload = _build_payload(build, source_evidence, children)
-    provider_path = _relative_path(bundle_root, provider_manifest, "provider-history manifest")
-    return {
-        "contract": IBKR_FOUNDATION_CONTRACT,
-        "schema_version": IBKR_FOUNDATION_SCHEMA_VERSION,
-        "source_class": "IBKR_HISTORICAL_RESEARCH",
-        "provider_history_manifest": provider_path,
-        "provider_history_sha256": hashlib.sha256(provider_manifest.read_bytes()).hexdigest(),
-        "build_sha256": _sha(payload),
-        "payload": payload,
-    }
-
-
 def preflight_ibkr_foundation(
     output: Path,
     *,
@@ -570,9 +499,9 @@ def ibkr_foundation_verifier_identity() -> str:
 
     return _sha(
         {
-            "contract": _FOUNDATION_VERIFIER_CONTRACT,
-            "version": _FOUNDATION_VERIFIER_VERSION,
-            "completed_checks": list(_FOUNDATION_VERIFIER_COMPLETED_CHECKS),
+            "contract": _FOUNDATION_V3_VERIFIER_CONTRACT,
+            "version": _FOUNDATION_V3_VERIFIER_VERSION,
+            "completed_checks": list(_FOUNDATION_V3_CHECKS),
         }
     )
 
@@ -627,7 +556,7 @@ def _load_authenticated_ibkr_foundation_v3(
         child_kinds=child_kinds,
     )
     configuration = authenticated.configuration
-    provider_dataset = cast(ProviderHistoricalDataset, authenticated.provider_dataset)
+    provider_dataset = authenticated.provider_dataset
     observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
     source_start = (
         min(row.interval_start for row in observation_rows)
@@ -767,7 +696,7 @@ def _load_ibkr_foundation_outcome_blind(
     manifest_path = authenticated_v3.path
     receipt_path = receipt.resolve()
     root = manifest_path.parent
-    provider_dataset = cast(ProviderHistoricalDataset, authenticated_v3.provider_dataset)
+    provider_dataset = authenticated_v3.provider_dataset
     payload = authenticated_v3.payload
     configuration = authenticated_v3.configuration
     children = authenticated_v3.children
@@ -1081,7 +1010,7 @@ def _verify_ibkr_confirmatory_target_dataset(
 
 def _supported_child_kinds(children: Mapping[str, object]) -> tuple[str, ...]:
     child_set = set(children)
-    for kinds in (_BASE_CHILD_KINDS, _LEGACY_CHILD_KINDS, _CHILD_KINDS):
+    for kinds in (_BASE_CHILD_KINDS, _FOUNDATION_CHILD_KINDS, _CHILD_KINDS):
         if child_set == set(kinds):
             return kinds
     raise ValueError("IBKR foundation child set is incomplete or unsupported")
@@ -1242,57 +1171,6 @@ def _timestamp(value: object, field: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() != UTC.utcoffset(parsed):
         raise ValueError(f"{field} must use UTC")
     return parsed
-
-
-def _child_lineage(
-    build: IBKRFoundationBuild,
-    source_evidence: ProviderHistorySourceEvidence,
-    provider_manifest_sha256: str,
-) -> dict[str, JsonValue]:
-    source_summary = provider_history_stage6_summary(source_evidence)
-    lineage: dict[str, JsonValue] = {
-        "provider_manifest_sha256": provider_manifest_sha256,
-        "provider_dataset_sha256": build.provider_history.dataset_sha256,
-        "plan_sha256": source_evidence.source_artifact.plan.plan_sha256,
-    }
-    if source_summary.result_id is not None:
-        lineage.update(
-            {
-                "stage6_result_id": source_summary.result_id,
-                "stage6_closure_id": source_summary.closure_id,
-                "stage6_verification_id": source_summary.verification_id,
-            }
-        )
-    else:
-        legacy_aggregate = source_summary.legacy_aggregate_sha256
-        if legacy_aggregate is None:
-            raise ValueError("IBKR v2 source aggregate identity is missing")
-        lineage["aggregate_sha256"] = legacy_aggregate
-    return lineage
-
-
-def _write_children(
-    child_root: Path,
-    bundle_root: Path,
-    build: IBKRFoundationBuild,
-    source_evidence: ProviderHistorySourceEvidence,
-    provider_manifest: Path,
-) -> dict[str, JsonValue]:
-    provider_manifest_sha256 = hashlib.sha256(provider_manifest.read_bytes()).hexdigest()
-    lineage = _child_lineage(build, source_evidence, provider_manifest_sha256)
-    rows = _child_rows(build)
-    dataset_ids = _child_dataset_ids(build)
-    children: dict[str, JsonValue] = {}
-    for kind in _CHILD_KINDS:
-        children[kind] = _write_child_parts(
-            child_root,
-            bundle_root,
-            kind,
-            rows[kind],
-            dataset_ids[kind],
-            lineage,
-        )
-    return children
 
 
 def _payload_byte_count(payload: str) -> int:

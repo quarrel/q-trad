@@ -426,8 +426,6 @@ class IbkrHistoricalAggregateResult:
     result_id: str
     closure_id: str
     publication_status: str = "PUBLISHED_UNVERIFIED"
-    # Kept as an in-memory alias for current callers; never serialised.
-    aggregate_sha256: str | None = None
 
     CONTRACT = HISTORICAL_RESULT_CONTRACT
     SCHEMA_VERSION = RESULT_SCHEMA_VERSION
@@ -454,8 +452,6 @@ class IbkrHistoricalAggregateResult:
         _require_sha256(self.closure_id, "IBKR aggregate closure identity")
         if self.closure_id != sha256_json(self.closure_identity_payload()):
             raise ValueError("IBKR aggregate closure identity does not match physical content")
-        if self.aggregate_sha256 is None:
-            object.__setattr__(self, "aggregate_sha256", self.result_id)
 
     def semantic_identity_payload(self) -> dict[str, JsonValue]:
         """Return only scientific Stage 6 meaning, excluding physical references."""

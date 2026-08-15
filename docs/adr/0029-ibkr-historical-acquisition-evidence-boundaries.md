@@ -479,7 +479,4 @@ explicit promotion authority over it.
 
 ### Consequences
 
-This amendment changes authority for the planned Stage 6 through R2 handoffs; it does not claim those
-implementation migrations are complete. Scientific, source-class, causal, holdout, create-only and
-exact-consumed-byte controls remain unchanged. Existing immutable evidence is migrated through new
-artefacts and receipts where required, without provider reacquisition or in-place mutation.
+This amendment's Stage 6 through R2 implementation migrations are complete in the current runtime. The retained H4 packet produced an immutable scientific invalidation record (`3610c94...`) rather than a carried-forward qualifying promotion; the clean full gate remains the release check. Scientific, source-class, causal, holdout, create-only and exact-consumed-byte controls remain unchanged. Existing immutable evidence is preserved without provider reacquisition or in-place mutation.

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -26,10 +24,6 @@ from qtrad.runtime.ibkr_foundation import (
     load_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
-)
-from qtrad.runtime.ibkr_foundation_bounded import (
-    build_bounded_provider_foundation,
-    verify_bounded_provider_foundation,
 )
 from tests.test_provider_history_v3 import _authenticated_v3_source, _stage8_configuration
 
@@ -155,26 +149,6 @@ def test_stage8_outcome_blind_loader_does_not_decode_full_children(tmp_path: Pat
     loaded = load_ibkr_foundation(foundation, receipt=receipt)
     assert loaded.observations.rows
     assert loaded.targets.rows
-
-
-def test_stage8_bounded_derivation_matches_generic_source(tmp_path: Path) -> None:
-    stage7_manifest, source = _authenticated_v3_source(tmp_path)
-    from qtrad.application.ibkr_foundation import build_ibkr_foundation
-
-    generic = build_ibkr_foundation(source, _stage8_configuration())
-    bounded, references = build_bounded_provider_foundation(
-        source_evidence=source,
-        configuration=_stage8_configuration(),
-        child_root=tmp_path / "bounded-children",
-        bundle_root=tmp_path,
-        child_name="foundation",
-        provider_manifest_sha256=__import__("hashlib")
-        .sha256(stage7_manifest.read_bytes())
-        .hexdigest(),
-        workers=1,
-    )
-    assert bounded.readiness.as_json() == generic.readiness.as_json()
-    assert references
 
 
 def test_stage8_child_manifest_mutation_is_rejected(tmp_path: Path) -> None:
@@ -507,115 +481,3 @@ def test_stage8_cli_build_and_verify_round_trip(
     )
     assert json.loads(foundation.read_bytes())["contract"] == "qtrad-ibkr-historical-foundation-v2"
     assert receipt.is_file()
-
-
-def test_stage8_bounded_derivation_reports_deterministic_work_counts(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    import qtrad.runtime.provider_history_v3 as stage7_runtime
-
-    stage7_manifest, source = _authenticated_v3_source(tmp_path)
-    stage7_receipt = tmp_path / "stage7-receipt.json"
-    selected_counts = {"reads": 0, "hashes": 0, "decodes": 0}
-    original_read_part = stage7_runtime._read_part
-
-    def counted_read_part(*args: Any, **kwargs: Any) -> Any:
-        selected_counts["reads"] += 1
-        selected_counts["hashes"] += 1
-        result = original_read_part(*args, **kwargs)
-        selected_counts["decodes"] += 1
-        return result
-
-    monkeypatch.setattr(stage7_runtime, "_read_part", counted_read_part)
-    source_rows = tuple(source.observations)
-    selected_source = stage7_runtime.authenticate_provider_history_v3(
-        stage7_manifest,
-        receipt=stage7_receipt,
-        instrument_ids=("fx:aud-usd",),
-        interval_start=min(row.interval_start for row in source_rows),
-        interval_end=max(row.interval_end for row in source_rows),
-    )
-    source_artifact = cast(Any, source.source_artifact)
-    source_for_manifest = replace(
-        source,
-        source_artifact=SimpleNamespace(
-            plan=source_artifact.plan,
-            source_result=source_artifact.source_result,
-            verification_id=source_artifact.verification_id,
-            aggregate=SimpleNamespace(
-                coverage_summary=source_artifact.source_result.coverage_summary,
-                entitlement_summary=source_artifact.source_result.entitlement_summary,
-            ),
-        ),
-    )
-    assert selected_source.observations
-    assert selected_counts == {"reads": 1, "hashes": 1, "decodes": 1}
-
-    parent_replays = {"stage7_deep_verifier": 0}
-
-    def reject_stage7_replay(*_args: object, **_kwargs: object) -> Any:
-        parent_replays["stage7_deep_verifier"] += 1
-        raise AssertionError("bounded Stage 8 reopened Stage 7 deep verification")
-
-    monkeypatch.setattr(stage7_runtime, "verify_provider_history", reject_stage7_replay)
-
-    def run_once(name: str) -> tuple[tuple[tuple[tuple[str, str], ...], ...], dict[str, object]]:
-        events: list[Mapping[str, object]] = []
-        build, references = build_bounded_provider_foundation(
-            source_evidence=source,
-            configuration=_stage8_configuration(),
-            child_root=tmp_path / f"{name}-scratch",
-            bundle_root=tmp_path,
-            child_name=name,
-            provider_manifest_sha256=__import__("hashlib")
-            .sha256(stage7_manifest.read_bytes())
-            .hexdigest(),
-            workers=1,
-            progress_callback=events.append,
-        )
-        document = foundation_runtime._manifest_payload(
-            build,
-            source_for_manifest,
-            cast(Mapping[str, Any], references),
-            stage7_manifest,
-            tmp_path,
-        )
-        bundle_path = tmp_path / f"{name}.json"
-        bundle_path.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
-        payload = cast(dict[str, object], document["payload"])
-        replay = verify_bounded_provider_foundation(
-            source_evidence=source_for_manifest,
-            configuration=_stage8_configuration(),
-            bundle_path=bundle_path,
-            document=document,
-            payload=payload,
-            replay_checkpoint_root=tmp_path / f"{name}-replay",
-            workers=1,
-        )
-        normalized = tuple(
-            tuple(
-                sorted(
-                    (key, str(value))
-                    for key, value in event.items()
-                    if key not in {"elapsed_seconds", "maximum_rss_kib"}
-                )
-            )
-            for event in events
-        )
-        return normalized, {
-            "observation_dataset_id": replay.observations.dataset_id,
-            "panel_dataset_id": replay.panel.dataset_id,
-            "target_dataset_id": replay.targets.dataset_id,
-            "event_count": len(events),
-        }
-
-    first_events, first_work = run_once("bounded-one")
-    second_events, second_work = run_once("bounded-two")
-    assert first_events == second_events
-    assert first_work == second_work
-    assert cast(int, first_work["event_count"]) > 0
-    assert any(
-        dict(event)["phase"] == "observations" and dict(event)["event"] == "completed"
-        for event in first_events
-    )
-    assert parent_replays == {"stage7_deep_verifier": 0}
