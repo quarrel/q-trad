@@ -3056,7 +3056,9 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         evaluation_policy=cast(Mapping[str, JsonValue], evaluation_policy),
         confirmatory_holdout_authority=confirmatory_holdout_authority,
         readiness_report=readiness_report,
-        runtime_identities=identities,
+        runtime_identities={
+            field: cast(str, descriptor[field]) for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
+        },
         selection_policy=selection_policy,
     )
 
