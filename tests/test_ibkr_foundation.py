@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +27,10 @@ from qtrad.runtime.ibkr_foundation import (
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
-from qtrad.runtime.ibkr_foundation_bounded import build_bounded_provider_foundation
+from qtrad.runtime.ibkr_foundation_bounded import (
+    build_bounded_provider_foundation,
+    verify_bounded_provider_foundation,
+)
 from tests.test_provider_history_v3 import _authenticated_v3_source, _stage8_configuration
 
 
@@ -230,9 +235,60 @@ def test_stage8_readiness_without_valid_folds_is_insufficient(tmp_path: Path) ->
         build.readiness.state
         is IBKRFoundationReadinessState.INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION
     )
-    assert build.readiness.causes
-    assert build.readiness.evidence["fold_count"] == 0
-    assert build.readiness.evidence["coverage_diagnostics"]
+    assert tuple(cause.value for cause in build.readiness.causes) == (
+        "SESSION_EVIDENCE_UNAVAILABLE",
+        "INSUFFICIENT_COMMON_SUPPORT",
+        "INSUFFICIENT_BLOCK_COVERAGE",
+        "INSUFFICIENT_DURATION",
+        "INSUFFICIENT_ROWS",
+        "MISSING_CONFIRMATORY_TARGET",
+    )
+    evidence = cast(dict[str, Any], build.readiness.evidence)
+    assert evidence["provider_gap_count"] == 0
+    assert evidence["total_provider_gap_count"] == 0
+    assert evidence["raw_provider_gaps"] == []
+    assert evidence["request_evidence"]["fx:aud-usd"] == {
+        "planned": True,
+        "bar_dispositions": ["SUCCEEDED"],
+        "schedule_dispositions": ["SUCCEEDED"],
+        "eligible": True,
+        "contract_ids": [42],
+        "bar_row_count": 1,
+        "schedule_session_count": 0,
+    }
+    assert evidence["source_coverage_summary"]["provider_session_count"] == 0
+    assert evidence["source_coverage_summary"]["successful_request_count"] == 2
+    assert evidence["coverage_threshold"] == "9/10"
+    assert evidence["fold_count"] == 0
+    assert evidence["coverage_diagnostics"] == {
+        "authoritative": False,
+        "blocking_cell_count": 6,
+        "candidate_count": 6,
+        "cell_count": 6,
+        "context_gap_count": 0,
+        "opportunity_counts": {
+            "ELIGIBLE": 0,
+            "GAP": 0,
+            "INACTIVE": 6,
+            "OTHER_INELIGIBLE": 0,
+        },
+    }
+    assert evidence["blocking_coverage_cells"] == [
+        f"{instrument}/holdout" for instrument in IBKR_CONFIRMATORY_INSTRUMENTS
+    ]
+    assert all(
+        cell["opportunity_counts"]
+        == {
+            "ELIGIBLE": 0,
+            "GAP": 0,
+            "INACTIVE": 1,
+            "OTHER_INELIGIBLE": 0,
+        }
+        and cell["coverage"] is None
+        and cell["passed"] is False
+        and cell["threshold"] == "9/10"
+        for cell in evidence["coverage_cells"]
+    )
 
 
 def _coverage_fixture(
@@ -453,29 +509,113 @@ def test_stage8_cli_build_and_verify_round_trip(
     assert receipt.is_file()
 
 
-def test_stage8_bounded_derivation_reports_deterministic_work_counts(tmp_path: Path) -> None:
-    from collections.abc import Mapping
+def test_stage8_bounded_derivation_reports_deterministic_work_counts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import qtrad.runtime.provider_history_v3 as stage7_runtime
 
     stage7_manifest, source = _authenticated_v3_source(tmp_path)
-    events: list[Mapping[str, object]] = []
-    _build, references = build_bounded_provider_foundation(
-        source_evidence=source,
-        configuration=_stage8_configuration(),
-        child_root=tmp_path / "bounded-children",
-        bundle_root=tmp_path,
-        child_name="foundation",
-        provider_manifest_sha256=__import__("hashlib")
-        .sha256(stage7_manifest.read_bytes())
-        .hexdigest(),
-        workers=1,
-        progress_callback=events.append,
+    stage7_receipt = tmp_path / "stage7-receipt.json"
+    selected_counts = {"reads": 0, "hashes": 0, "decodes": 0}
+    original_read_part = stage7_runtime._read_part
+
+    def counted_read_part(*args: Any, **kwargs: Any) -> Any:
+        selected_counts["reads"] += 1
+        selected_counts["hashes"] += 1
+        result = original_read_part(*args, **kwargs)
+        selected_counts["decodes"] += 1
+        return result
+
+    monkeypatch.setattr(stage7_runtime, "_read_part", counted_read_part)
+    source_rows = tuple(source.observations)
+    selected_source = stage7_runtime.authenticate_provider_history_v3(
+        stage7_manifest,
+        receipt=stage7_receipt,
+        instrument_ids=("fx:aud-usd",),
+        interval_start=min(row.interval_start for row in source_rows),
+        interval_end=max(row.interval_end for row in source_rows),
     )
-    observation_events = [
-        event
-        for event in events
-        if event["phase"] == "observations" and event["event"] == "completed"
-    ]
-    assert observation_events
-    assert len({event["instrument_id"] for event in observation_events}) == len(observation_events)
-    assert sum(cast(int, event["row_count"]) for event in observation_events) > 0
-    assert references
+    source_artifact = cast(Any, source.source_artifact)
+    source_for_manifest = replace(
+        source,
+        source_artifact=SimpleNamespace(
+            plan=source_artifact.plan,
+            source_result=source_artifact.source_result,
+            verification_id=source_artifact.verification_id,
+            aggregate=SimpleNamespace(
+                coverage_summary=source_artifact.source_result.coverage_summary,
+                entitlement_summary=source_artifact.source_result.entitlement_summary,
+            ),
+        ),
+    )
+    assert selected_source.observations
+    assert selected_counts == {"reads": 1, "hashes": 1, "decodes": 1}
+
+    parent_replays = {"stage7_deep_verifier": 0}
+
+    def reject_stage7_replay(*_args: object, **_kwargs: object) -> Any:
+        parent_replays["stage7_deep_verifier"] += 1
+        raise AssertionError("bounded Stage 8 reopened Stage 7 deep verification")
+
+    monkeypatch.setattr(stage7_runtime, "verify_provider_history", reject_stage7_replay)
+
+    def run_once(name: str) -> tuple[tuple[tuple[tuple[str, str], ...], ...], dict[str, object]]:
+        events: list[Mapping[str, object]] = []
+        build, references = build_bounded_provider_foundation(
+            source_evidence=source,
+            configuration=_stage8_configuration(),
+            child_root=tmp_path / f"{name}-scratch",
+            bundle_root=tmp_path,
+            child_name=name,
+            provider_manifest_sha256=__import__("hashlib")
+            .sha256(stage7_manifest.read_bytes())
+            .hexdigest(),
+            workers=1,
+            progress_callback=events.append,
+        )
+        document = foundation_runtime._manifest_payload(
+            build,
+            source_for_manifest,
+            cast(Mapping[str, Any], references),
+            stage7_manifest,
+            tmp_path,
+        )
+        bundle_path = tmp_path / f"{name}.json"
+        bundle_path.write_text(json.dumps(document, sort_keys=True) + "\n", encoding="utf-8")
+        payload = cast(dict[str, object], document["payload"])
+        replay = verify_bounded_provider_foundation(
+            source_evidence=source_for_manifest,
+            configuration=_stage8_configuration(),
+            bundle_path=bundle_path,
+            document=document,
+            payload=payload,
+            replay_checkpoint_root=tmp_path / f"{name}-replay",
+            workers=1,
+        )
+        normalized = tuple(
+            tuple(
+                sorted(
+                    (key, str(value))
+                    for key, value in event.items()
+                    if key not in {"elapsed_seconds", "maximum_rss_kib"}
+                )
+            )
+            for event in events
+        )
+        return normalized, {
+            "observation_dataset_id": replay.observations.dataset_id,
+            "panel_dataset_id": replay.panel.dataset_id,
+            "target_dataset_id": replay.targets.dataset_id,
+            "event_count": len(events),
+        }
+
+    first_events, first_work = run_once("bounded-one")
+    second_events, second_work = run_once("bounded-two")
+    assert first_events == second_events
+    assert first_work == second_work
+    assert cast(int, first_work["event_count"]) > 0
+    assert any(
+        dict(event)["phase"] == "observations" and dict(event)["event"] == "completed"
+        for event in first_events
+    )
+    assert parent_replays == {"stage7_deep_verifier": 0}
