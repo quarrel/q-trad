@@ -78,7 +78,9 @@ from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
     _materialise_synthetic_feature_manifests,
     _synthetic_pipeline_inputs,
+    authenticate_confirmatory_f2_promotion,
     build_oof_bundle,
+    create_confirmatory_f2_promotion,
     freeze_confirmatory_selection,
     prepare_confirmatory_g2,
     reveal_confirmatory_g2,
@@ -1767,3 +1769,131 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
     assert parent_calls == {"semantic": 0, "folds": 0}
     assert call_counts == {"feature_recompute": 8, "local_fit": 2, "pooled_fit": 2}
     assert not (bundle_path.parent / "replay-inputs").exists()
+
+
+def test_confirmatory_f2_promotion_authenticates_receipt_without_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        verification,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "fixture-application",
+            "image_identity": "sha256:" + "1" * 64,
+            "python_identity": "fixture-python",
+            "numpy_identity": "fixture-numpy",
+            "sklearn_identity": "fixture-sklearn",
+        },
+    )
+    bundle_path, _, _, _, _ = _build_confirmatory_fixture(tmp_path, qualifying=True)
+    receipt_path = tmp_path / "oof-receipt.json"
+    verification.verify_r2_oof_semantics(bundle_path, receipt_output=receipt_path)
+    promotion_path = tmp_path / "f2-promotion.json"
+    promoted = create_confirmatory_f2_promotion(
+        bundle_path,
+        oof_receipt=receipt_path,
+        output=promotion_path,
+        authorized_by="fixture-operator",
+        authorized_at=datetime.now(UTC),
+    )
+    assert promoted.promotion.promotion_id
+
+    def forbidden_replay(*_: object, **__: object) -> None:
+        raise AssertionError("ordinary F2 authentication must not replay OOF")
+
+    monkeypatch.setattr(verification, "_replay_confirmatory_oof", forbidden_replay)
+    monkeypatch.setattr(
+        verification,
+        "evaluate_outcome_blind_confirmatory_readiness",
+        forbidden_replay,
+    )
+    for module, name in (
+        (foundation_runtime, "verify_foundation_bundle"),
+        (foundation_runtime, "_verify_foundation_bundle"),
+        (foundation_runtime, "verify_outcome_blind_foundation_bundle"),
+        (foundation_runtime, "build_asof_panel"),
+        (foundation_runtime, "build_frozen_targets"),
+        (ibkr_foundation_runtime, "verify_ibkr_foundation"),
+        (ibkr_foundation_runtime, "_verify_ibkr_foundation_v3"),
+        (ibkr_foundation_runtime, "build_ibkr_foundation"),
+    ):
+        monkeypatch.setattr(module, name, forbidden_replay)
+    for module in (foundation_runtime, ibkr_foundation_runtime):
+        monkeypatch.setattr(module, "build_expanding_folds", forbidden_replay)
+    restored = authenticate_confirmatory_f2_promotion(promotion_path)
+    assert restored.promotion.promotion_id == promoted.promotion.promotion_id
+    selection_path = tmp_path / "selection.json"
+    freeze_confirmatory_selection(
+        verified_f2=restored,
+        output=selection_path,
+        frozen_by="fixture-operator",
+    )
+    assert selection_path.is_file()
+    verified_g1 = verify_confirmatory_g1(verified_f2=restored, path=selection_path)
+    preparation_root = tmp_path / "preparation"
+    prepare_confirmatory_g2(
+        verified_g1=verified_g1,
+        output=preparation_root,
+        prepared_by="fixture-operator",
+    )
+    verified_preparation = verify_confirmatory_g2_preparation(
+        verified_g1=verified_g1,
+        path=preparation_root,
+    )
+    assert verified_preparation.seal.holdout_outcomes_accessed is False
+
+
+def test_confirmatory_f2_promotion_rejects_reuse_and_mutation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        verification,
+        "runtime_identities",
+        lambda: {
+            "application_identity": "fixture-application",
+            "image_identity": "sha256:" + "1" * 64,
+            "python_identity": "fixture-python",
+            "numpy_identity": "fixture-numpy",
+            "sklearn_identity": "fixture-sklearn",
+        },
+    )
+    bundle_path, _, _, _, _ = _build_confirmatory_fixture(tmp_path, qualifying=True)
+    receipt_path = tmp_path / "oof-receipt.json"
+    verification.verify_r2_oof_semantics(bundle_path, receipt_output=receipt_path)
+    promotion_path = tmp_path / "f2-promotion.json"
+    create_confirmatory_f2_promotion(
+        bundle_path,
+        oof_receipt=receipt_path,
+        output=promotion_path,
+        authorized_by="fixture-operator",
+        authorized_at=datetime.now(UTC),
+    )
+    with pytest.raises(FileExistsError):
+        create_confirmatory_f2_promotion(
+            bundle_path,
+            oof_receipt=receipt_path,
+            output=promotion_path,
+            authorized_by="fixture-operator",
+            authorized_at=datetime.now(UTC),
+        )
+
+    original = cast(dict[str, object], json.loads(promotion_path.read_text(encoding="utf-8")))
+    mutated_cases = (
+        ("wrong parent promotion", {"foundation_promotion_id": "0" * 64}),
+        ("malformed authorization", {"authorized_by": ""}),
+        (
+            "missing OOF path",
+            {
+                "runtime_locators": {
+                    "oof_bundle": str(tmp_path / "missing.json"),
+                    "oof_receipt": str(receipt_path),
+                }
+            },
+        ),
+    )
+    for _label, updates in mutated_cases:
+        mutated = {**original, **updates}
+        promotion_path.write_bytes(canonical_bytes(mutated))
+        with pytest.raises((ValueError, FileNotFoundError)):
+            authenticate_confirmatory_f2_promotion(promotion_path)
+        promotion_path.write_bytes(canonical_bytes(original))

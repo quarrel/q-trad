@@ -88,6 +88,7 @@ from qtrad.domain.r2_bundles import (
     R2OofBundle,
     R2OofVerificationReceipt,
 )
+from qtrad.domain.r2_confirmatory import ConfirmatoryF2Promotion
 from qtrad.domain.r2_evaluation import (
     R2_EVALUATION_CONTRACT,
     ConfigurationDisposition,
@@ -106,6 +107,7 @@ from qtrad.domain.r2_features import (
     feature_set_id,
 )
 from qtrad.domain.r2_holdout import (
+    R2_HOLDOUT_TARGET_SOURCE_CONTRACT,
     HoldoutDirection,
     HoldoutScope,
     R2ConfirmatoryOpenedMarker,
@@ -202,6 +204,11 @@ R2_OOF_COMPLETED_CHECKS = (
     "immediate_parent_authority",
     "causal_holdout_exclusion",
 )
+R2_CONFIRMATORY_OOF_COMPLETED_CHECKS = (
+    *R2_OOF_COMPLETED_CHECKS,
+    "f2_readiness",
+    "f2_inner_validation_register",
+)
 type ConfirmatoryG2FeatureSourceAuthority = G2FeatureSourceAuthority | IBKRG2FeatureSourceAuthority
 _IMPLEMENTATION_RUN_KINDS = frozenset({"SYNTHETIC", "REPRESENTATIVE"})
 _OOF_SELECTION_PRIMARY_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
@@ -266,6 +273,7 @@ _DEPLOYMENT_IMAGE_IDENTITY_PATH = Path("/run/qtrad/image-identity.json")
 
 
 _VERIFIED_CONFIRMATORY_F2_TOKEN = object()
+_VERIFIED_CONFIRMATORY_F2_PROMOTION_TOKEN = object()
 _VERIFIED_CONFIRMATORY_G1_TOKEN = object()
 _VERIFIED_CONFIRMATORY_G1_PROVENANCE = object()
 _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN = object()
@@ -640,6 +648,45 @@ class VerifiedConfirmatoryF2:
     @property
     def selection_policy(self) -> Mapping[str, JsonValue]:
         return self._selection_policy
+
+
+class VerifiedConfirmatoryF2Promotion(VerifiedConfirmatoryF2):
+    """Typed capability restored from a durable confirmatory F2 promotion."""
+
+    __slots__ = ("_promotion",)
+
+    _promotion: ConfirmatoryF2Promotion
+
+    @classmethod
+    def _create_promotion(
+        cls,
+        token: object,
+        *,
+        promotion: ConfirmatoryF2Promotion,
+        **values: object,
+    ) -> VerifiedConfirmatoryF2Promotion:
+        if token is not _VERIFIED_CONFIRMATORY_F2_PROMOTION_TOKEN:
+            raise TypeError(
+                "VerifiedConfirmatoryF2Promotion is constructed only by its authenticator"
+            )
+        instance = VerifiedConfirmatoryF2._create.__func__(
+            cls,
+            _VERIFIED_CONFIRMATORY_F2_TOKEN,
+            **cast(Any, values),
+        )
+        object.__setattr__(instance, "_promotion", promotion)
+        return cast(VerifiedConfirmatoryF2Promotion, instance)
+
+    @property
+    def promotion(self) -> ConfirmatoryF2Promotion:
+        return self._promotion
+
+
+def _has_confirmatory_f2_promotion_provenance(value: object) -> bool:
+    return (
+        type(value) is VerifiedConfirmatoryF2Promotion
+        and getattr(value, "_promotion", None) is not None
+    )
 
 
 class _VerifiedConfirmatoryG2FeatureAccess:
@@ -2520,7 +2567,10 @@ def _load_selection(path: Path) -> dict[str, object]:
 
 def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) -> dict[str, object]:
     matches: list[dict[str, object]] = []
-    for reference in (*bundle.evaluation_children, *bundle.forecast_manifests):
+    references = [*bundle.evaluation_children, *bundle.forecast_manifests]
+    if bundle.holdout_target_source is not None:
+        references.append(bundle.holdout_target_source)
+    for reference in references:
         if reference.contract != contract:
             continue
         payload = _load_selection(bundle_path.parent / reference.path)
@@ -2574,6 +2624,8 @@ def holdout_configuration_registry(
     expected_evaluation_report_id: str | None = None,
     expected_selected_configuration_ids: Sequence[str] | None = None,
     expected_holdout_configuration_ids: Sequence[str] | None = None,
+    evaluation_payload: Mapping[str, object] | None = None,
+    register_payload: Mapping[str, object] | None = None,
 ) -> tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...]:
     """Return the authenticated OOF configuration registry for holdout freezing."""
     if expected_evaluation_report_id is not None:
@@ -2584,7 +2636,11 @@ def holdout_configuration_registry(
         }
         if expected_evaluation_report_id not in evaluation_reference_ids:
             raise ValueError("prior selection report is not an authenticated OOF evaluation child")
-    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    evaluation = (
+        evaluation_payload
+        if evaluation_payload is not None
+        else _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    )
     if (
         expected_evaluation_report_id is not None
         and evaluation.get("report_id") != expected_evaluation_report_id
@@ -2593,10 +2649,14 @@ def holdout_configuration_registry(
     if expected_selected_configuration_ids is not None or (
         expected_holdout_configuration_ids is not None
     ):
-        register = _oof_child_payload(
-            oof_bundle_path,
-            bundle,
-            R2_EVALUATION_REGISTER_CONTRACT,
+        register = (
+            register_payload
+            if register_payload is not None
+            else _oof_child_payload(
+                oof_bundle_path,
+                bundle,
+                R2_EVALUATION_REGISTER_CONTRACT,
+            )
         )
         if (
             expected_evaluation_report_id is not None
@@ -2874,8 +2934,8 @@ def _complete_confirmatory_readiness(
     )
 
 
-def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
-    """Verify and replay a qualifying, outcome-blind confirmatory F2 authority."""
+def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
+    """Exceptional deep audit that replays a qualifying confirmatory F2 authority."""
     bundle = verify_r2_oof_bundle(path)
     if bundle.evidence_class is not EvidenceClass.CONFIRMATORY:
         raise ValueError("confirmatory F2 requires CONFIRMATORY evidence")
@@ -3094,6 +3154,559 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     )
 
 
+def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
+    """Run the exceptional F2 deep audit; ordinary consumers use a promotion receipt."""
+    return audit_confirmatory_f2(path)
+
+
+def _promotion_runtime_path(
+    locators: Mapping[str, str], name: str, *, directory: bool = False
+) -> Path:
+    raw = locators.get(name)
+    if not isinstance(raw, str):
+        raise ValueError(f"F2 promotion runtime locator is missing: {name}")
+    path = Path(raw)
+    if not path.is_absolute() or path.is_symlink():
+        raise ValueError(f"F2 promotion runtime locator is unsafe: {name}")
+    if directory:
+        if not path.is_dir():
+            raise ValueError(f"F2 promotion runtime directory is unavailable: {name}")
+    elif not path.is_file():
+        raise ValueError(f"F2 promotion runtime file is unavailable: {name}")
+    return path
+
+
+def _confirmatory_descriptor_inputs(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    descriptor: Mapping[str, object],
+) -> tuple[R2HoldoutTargetSource, R2ExperimentConfig]:
+    if (
+        bundle.evidence_class is not EvidenceClass.CONFIRMATORY
+        or descriptor.get("run_kind") != CONFIRMATORY_RUN_KIND
+        or descriptor.get("evidence_class") != EvidenceClass.CONFIRMATORY.value
+        or descriptor.get("holdout_excluded") is not True
+    ):
+        raise ValueError("F2 promotion requires a confirmatory outcome-blind OOF descriptor")
+    if bundle.holdout_target_source is None:
+        raise ValueError("F2 promotion requires an authenticated target source")
+    source_payload = _oof_child_payload(
+        bundle_path,
+        bundle,
+        R2_HOLDOUT_TARGET_SOURCE_CONTRACT,
+    )
+    source = R2HoldoutTargetSource.from_json(source_payload)
+    if source.source_id != bundle.holdout_target_source.semantic_id:
+        raise ValueError("confirmatory target source identity differs from its reference")
+    expected_values = {
+        "foundation_bundle_id": bundle.foundation_bundle_id,
+        "experiment_configuration_id": bundle.experiment_configuration_id,
+        "source_class": bundle.source_class.value,
+        "evidence_class": bundle.evidence_class.value,
+        "target_dataset_id": source.source_target_dataset_id,
+        "observation_dataset_id": source.observation_dataset_id,
+        "foundation_configuration_id": source.foundation_configuration_id,
+        "target_instruments": list(source.target_instruments),
+        "primary_horizon_seconds": source.primary_horizon_seconds,
+        "holdout_range": [item.isoformat() for item in source.holdout_range],
+    }
+    for key, expected in expected_values.items():
+        if descriptor.get(key) != expected:
+            raise ValueError(f"F2 descriptor has an unauthenticated {key}")
+    experiment = load_r2_experiment(_descriptor_experiment_path(descriptor))
+    if (
+        experiment.configuration_id != bundle.experiment_configuration_id
+        or experiment.evidence_class is not EvidenceClass.CONFIRMATORY
+        or experiment.market_data_source_class is not bundle.source_class
+        or experiment.target_dataset_id != source.source_target_dataset_id
+        or experiment.observation_dataset_id != source.observation_dataset_id
+        or experiment.foundation_configuration_id != source.foundation_configuration_id
+        or tuple(experiment.target_instruments) != source.target_instruments
+        or experiment.holdout_range != source.holdout_range
+        or int(experiment.primary_horizon.total_seconds()) != source.primary_horizon_seconds
+    ):
+        raise ValueError("F2 target source differs from the exact experiment")
+    descriptor_values: dict[str, object] = {
+        "r1_bundle_id": experiment.r1_bundle_id,
+        "foundation_configuration_id": experiment.foundation_configuration_id,
+        "panel_dataset_id": experiment.panel_dataset_id,
+        "fold_dataset_id": experiment.fold_dataset_id,
+        "ordered_instruments": list(experiment.ordered_instruments),
+        "instrument_roles": {
+            instrument: role.value for instrument, role in experiment.instrument_roles.items()
+        },
+        "horizons_seconds": [int(horizon.total_seconds()) for horizon in experiment.horizons],
+        "feature_windows_seconds": [
+            int(window.total_seconds()) for window in experiment.feature_windows
+        ],
+        "acceptance_thresholds": dict(experiment.acceptance_thresholds),
+        "alpha_grid": list(experiment.alpha_grid),
+        "inner_validation_policy": experiment.inner_validation_policy,
+        "preprocessing_policy": experiment.preprocessing_policy,
+        "pooled_weighting_policy": experiment.pooled_weighting_policy,
+        "ridge_solver": experiment.ridge_solver,
+        "ridge_tolerance": experiment.ridge_tolerance,
+        "ridge_max_iterations": experiment.ridge_max_iterations,
+        "minimum_training_rows": experiment.minimum_training_rows,
+        "minimum_inner_validation_rows": experiment.minimum_inner_validation_rows,
+        "minimum_outer_validation_rows": experiment.minimum_outer_validation_rows,
+        "model_selection_policy": experiment.model_selection_policy,
+        "metric_policy": experiment.metric_policy,
+        "forecast_bucket_policy": experiment.forecast_bucket_policy,
+        "state_bucket_policy": experiment.state_bucket_policy,
+    }
+    for key, expected in descriptor_values.items():
+        if descriptor.get(key) != expected:
+            raise ValueError(f"F2 descriptor differs for {key}")
+    return source, experiment
+
+
+async def _authenticate_confirmatory_parent(
+    *,
+    descriptor: Mapping[str, object],
+    source: R2HoldoutTargetSource,
+    experiment: R2ExperimentConfig,
+) -> AuthenticatedR2Foundation:
+    raw_authority = descriptor.get("foundation_authority")
+    if not isinstance(raw_authority, dict):
+        raise ValueError("F2 descriptor has no authenticated foundation authority")
+    runtime_raw = descriptor.get("runtime_inputs")
+    if not isinstance(runtime_raw, dict):
+        raise ValueError("F2 descriptor has no immediate-parent runtime locators")
+    runtime = cast(dict[str, object], runtime_raw)
+    expected_keys = {
+        "foundation",
+        "foundation_receipt",
+        "foundation_promotion",
+        "experiment",
+        "research_root",
+        "feature_manifests",
+    }
+    if set(runtime) != expected_keys:
+        raise ValueError("F2 runtime locators are incomplete or contain unknown fields")
+    locators: dict[str, str] = {}
+    for key in ("foundation", "foundation_receipt", "experiment"):
+        value = runtime[key]
+        if not isinstance(value, str):
+            raise ValueError(f"F2 runtime locator is malformed: {key}")
+        locators[key] = value
+    research_root_raw = runtime["research_root"]
+    if not isinstance(research_root_raw, str):
+        raise ValueError("F2 research root locator is malformed")
+    locators["research_root"] = research_root_raw
+    foundation_path = _promotion_runtime_path(locators, "foundation")
+    receipt_path = _promotion_runtime_path(locators, "foundation_receipt")
+    experiment_path = _promotion_runtime_path(locators, "experiment")
+    research_root = _promotion_runtime_path(locators, "research_root", directory=True)
+    raw_promotion = runtime["foundation_promotion"]
+    promotion_path: Path | None
+    if raw_promotion is None:
+        promotion_path = None
+    elif isinstance(raw_promotion, str):
+        locators["foundation_promotion"] = raw_promotion
+        promotion_path = _promotion_runtime_path(locators, "foundation_promotion")
+    else:
+        raise ValueError("F2 foundation promotion locator is malformed")
+    if experiment_path != _descriptor_experiment_path(descriptor):
+        raise ValueError("F2 experiment locator differs from its descriptor")
+    clock = cast(Clock, SimpleNamespace(now=lambda: datetime.now(UTC)))
+    if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
+        adapter_payload = experiment.source_adapter_identity
+        if not isinstance(adapter_payload, Mapping):
+            raise ValueError("IBKR experiment has no persisted adapter identity")
+        authority = authenticate_ibkr_foundation_for_r2(
+            foundation_path=foundation_path,
+            receipt_path=receipt_path,
+            adapter_identity=IBKRHistoricalAdapterIdentity.from_json(adapter_payload),
+            evidence_class=EvidenceClass.CONFIRMATORY,
+            holdout_target_source=source,
+            promotion_path=promotion_path,
+        )
+    else:
+        if promotion_path is not None:
+            raise ValueError("native confirmatory authority cannot include a Stage 8 promotion")
+        authority = await authenticate_r1_foundation_for_r2(
+            root=research_root,
+            bundle_path=foundation_path,
+            receipt_path=receipt_path,
+            clock=clock,
+            evidence_class=EvidenceClass.CONFIRMATORY,
+            outcome_blind=True,
+            holdout_target_source=source,
+        )
+    if authority.identity_json() != cast(dict[str, JsonValue], raw_authority):
+        raise ValueError("F2 foundation authority differs from its descriptor")
+    verify_exact_r1_bindings(authority.semantic_inputs, experiment)
+    if authority.g2_feature_source is None:
+        raise ValueError("F2 foundation has no authenticated G2 feature source")
+    return authority
+
+
+def _confirmatory_ready_report(
+    *,
+    authority: AuthenticatedR2Foundation,
+    source: R2HoldoutTargetSource,
+    experiment: R2ExperimentConfig,
+) -> R2ReadinessReport:
+    report = evaluate_outcome_blind_confirmatory_readiness(
+        experiment=experiment,
+        target_source=source,
+        folds=authority.semantic_inputs.folds,
+        source_active=authority.semantic_inputs.source_active_intervals,
+        r1_bundle_id=experiment.r1_bundle_id,
+    )
+    if report.confirmatory_data_ready is not ReadinessState.READY:
+        raise ValueError("F2 promotion requires qualifying confirmatory readiness")
+    report = _complete_confirmatory_readiness(report)
+    if (
+        report.inner_validation_rows_ready is not ReadinessState.READY
+        or report.confirmatory_oof_ready is not ReadinessState.READY
+    ):
+        raise ValueError("F2 promotion requires complete inner-validation and OOF readiness")
+    return report
+
+
+def _promotion_readiness_report(
+    *,
+    promotion: ConfirmatoryF2Promotion,
+    experiment: R2ExperimentConfig,
+) -> R2ReadinessReport:
+    """Expose receipt-bound F2 readiness without replaying any parent transformation."""
+    feature_states = {
+        family: (
+            ReadinessState.PARTIALLY_READY
+            if decision.state is FeatureEligibility.PENDING
+            else ReadinessState.READY
+        )
+        for family, decision in experiment.feature_eligibility.items()
+    }
+    return R2ReadinessReport(
+        experiment_configuration_id=experiment.configuration_id,
+        r1_bundle_id=experiment.r1_bundle_id,
+        software_contract_ready=ReadinessState.READY,
+        representative_integration_ready=ReadinessState.READY,
+        confirmatory_data_ready=ReadinessState(promotion.confirmatory_data_ready),
+        inner_validation_rows_ready=ReadinessState(promotion.inner_validation_rows_ready),
+        confirmatory_oof_ready=ReadinessState(promotion.confirmatory_oof_ready),
+        locked_holdout_ready=ReadinessState.NOT_READY,
+        feature_family_states=feature_states,
+        coverage_matrix={},
+        usable_common_week_count=0,
+        active_source_duration_seconds={},
+        unmet_conditions=(),
+        evidence_class=EvidenceClass.CONFIRMATORY,
+        market_data_source_class=experiment.market_data_source_class,
+    )
+
+
+def _persisted_confirmatory_f2_inputs(
+    *,
+    path: Path,
+    bundle: R2OofBundle,
+    experiment: R2ExperimentConfig,
+) -> tuple[
+    tuple[ConfigurationRecord, ...],
+    tuple[SelectionDecision, ...],
+    tuple[str, ...],
+    tuple[str, ...],
+    dict[str, JsonValue],
+    str,
+    str,
+    dict[str, JsonValue],
+    tuple[tuple[str, ModelFamily, str | None, str | None, str | None], ...],
+    str,
+    VerifiedConfirmatoryHoldoutAuthority,
+]:
+    register = _oof_child_payload(path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
+    evaluation = _oof_child_payload(path, bundle, R2_EVALUATION_CONTRACT)
+    raw_configurations = register.get("configurations")
+    if not isinstance(raw_configurations, list) or not raw_configurations:
+        raise ValueError("F2 register has no complete configuration set")
+    configurations = tuple(_configuration_record_from_payload(item) for item in raw_configurations)
+    configuration_ids = tuple(item.configuration_id for item in configurations)
+    if len(set(configuration_ids)) != len(configuration_ids) or {
+        item.model_family for item in configurations
+    } != set(ModelFamily):
+        raise ValueError("F2 configuration register is incomplete")
+    decisions = _selection_decisions_from_payload(register.get("selection_decisions"))
+    decision_ids = tuple(item.configuration_id for item in decisions)
+    if len(set(decision_ids)) != len(decision_ids) or set(decision_ids) != set(configuration_ids):
+        raise ValueError("F2 selection decisions do not cover the register")
+    selected_ids = tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition is ConfigurationDisposition.SELECTED_CANDIDATE
+    )
+    holdout_ids = tuple(
+        item.configuration_id
+        for item in decisions
+        if item.disposition
+        in (
+            ConfigurationDisposition.SELECTED_CANDIDATE,
+            ConfigurationDisposition.RETAINED_CONTROL,
+        )
+    )
+    stored_selected = register.get("selection_selected_configuration_ids")
+    stored_holdout = register.get("selection_holdout_comparator_configuration_ids")
+    if (
+        not isinstance(stored_selected, list)
+        or not isinstance(stored_holdout, list)
+        or not all(isinstance(item, str) for item in (*stored_selected, *stored_holdout))
+        or tuple(sorted(stored_selected)) != selected_ids
+        or tuple(sorted(stored_holdout)) != holdout_ids
+    ):
+        raise ValueError("F2 register selection is not authenticated")
+    selection_policy = _authenticated_selection_policy(register, experiment)
+    report_id = register.get("selection_evaluation_report_id")
+    register_id = register.get("report_id")
+    if not isinstance(report_id, str) or not isinstance(register_id, str):
+        raise ValueError("F2 register has no authenticated evaluation report")
+    local_ref = register.get("local_comparator")
+    if not isinstance(local_ref, dict) or not isinstance(local_ref.get("semantic_id"), str):
+        raise ValueError("F2 register has no authenticated local comparator")
+    local_ref_payload = cast(dict[str, object], local_ref)
+    local_id = str(local_ref_payload["semantic_id"])
+    evaluation_policy = holdout_evaluation_policy(
+        path,
+        bundle,
+        expected_evaluation_report_id=report_id,
+        evaluation_payload=evaluation,
+    )
+    registry = holdout_configuration_registry(
+        path,
+        bundle,
+        expected_evaluation_report_id=report_id,
+        expected_selected_configuration_ids=selected_ids,
+        expected_holdout_configuration_ids=holdout_ids,
+        evaluation_payload=evaluation,
+        register_payload=register,
+    )
+    authority = VerifiedConfirmatoryHoldoutAuthority._create(
+        _VERIFIED_CONFIRMATORY_HOLDOUT_AUTHORITY_TOKEN,
+        oof_id=bundle.oof_id,
+        evaluation_report_id=report_id,
+        configuration_registry=registry,
+        evaluation_policy=evaluation_policy,
+        experiment_configuration_id=bundle.experiment_configuration_id,
+        evidence_class=bundle.evidence_class,
+        local_comparator_manifest_id=local_id,
+        evaluated_configuration_ids=tuple(item.configuration_id for item in configurations),
+        selection_decisions=decisions,
+        selected_configuration_ids=selected_ids,
+        holdout_comparator_configuration_ids=holdout_ids,
+        selection_policy=selection_policy,
+        holdout_range=experiment.holdout_range,
+        source_class=bundle.source_class,
+        foundation_bundle_id=bundle.foundation_bundle_id,
+    )
+    return (
+        configurations,
+        decisions,
+        selected_ids,
+        holdout_ids,
+        selection_policy,
+        report_id,
+        register_id,
+        evaluation_policy,
+        registry,
+        local_id,
+        authority,
+    )
+
+
+def _promotion_register_reference(bundle: R2OofBundle, report_id: str) -> ArtifactReference:
+    matches = tuple(
+        reference
+        for reference in bundle.evaluation_children
+        if reference.contract == R2_EVALUATION_REGISTER_CONTRACT
+        and reference.semantic_id == report_id
+    )
+    if len(matches) != 1:
+        raise ValueError("F2 bundle must contain exactly one authenticated evaluation register")
+    return matches[0]
+
+
+def _promotion_runtime_locators(oof_path: Path, receipt_path: Path) -> dict[str, str]:
+    return {
+        "oof_bundle": str(oof_path.resolve(strict=True)),
+        "oof_receipt": str(receipt_path.resolve(strict=True)),
+    }
+
+
+def authenticate_confirmatory_f2_promotion(
+    promotion: Path,
+    *,
+    oof_bundle: Path | None = None,
+    oof_receipt: Path | None = None,
+    bundle: Path | None = None,
+    receipt: Path | None = None,
+    _readiness_report: R2ReadinessReport | None = None,
+) -> VerifiedConfirmatoryF2Promotion:
+    """Restore a confirmatory F2 capability by authenticating its OOF receipt only."""
+    if oof_bundle is not None and bundle is not None:
+        raise ValueError("duplicate OOF bundle paths")
+    if oof_receipt is not None and receipt is not None:
+        raise ValueError("duplicate OOF receipt paths")
+    promotion_document = ConfirmatoryF2Promotion.from_json(_load_selection(promotion))
+    locators = promotion_document.runtime_locators
+    oof_path = oof_bundle or bundle or _promotion_runtime_path(locators, "oof_bundle")
+    receipt_path = oof_receipt or receipt or _promotion_runtime_path(locators, "oof_receipt")
+    bundle_value, descriptor, parsed_receipt = _authenticate_r2_oof_with_receipt(
+        oof_path, receipt=receipt_path
+    )
+    if (
+        parsed_receipt.verification_id != promotion_document.oof_verification_id
+        or parsed_receipt.oof_id != promotion_document.oof_id
+        or parsed_receipt.closure_id != promotion_document.oof_closure_id
+        or parsed_receipt.manifest_sha256 != promotion_document.oof_manifest_sha256
+        or parsed_receipt.foundation_semantic_id != promotion_document.foundation_semantic_id
+        or parsed_receipt.foundation_verification_id
+        != promotion_document.foundation_verification_id
+        or parsed_receipt.foundation_promotion_id != promotion_document.foundation_promotion_id
+        or parsed_receipt.source_class is not promotion_document.source_class
+        or parsed_receipt.evidence_class is not EvidenceClass.CONFIRMATORY
+        or parsed_receipt.verifier_contract != promotion_document.oof_verifier_contract
+        or parsed_receipt.verifier_version != promotion_document.oof_verifier_version
+        or parsed_receipt.numerical_identity != promotion_document.oof_numerical_identity
+        or parsed_receipt.completed_checks != promotion_document.required_oof_checks
+    ):
+        raise ValueError("F2 promotion does not bind the exact OOF receipt")
+    source, experiment = _confirmatory_descriptor_inputs(oof_path, bundle_value, descriptor)
+    authority = asyncio.run(
+        _authenticate_confirmatory_parent(
+            descriptor=descriptor, source=source, experiment=experiment
+        )
+    )
+    report = (
+        _readiness_report
+        if _readiness_report is not None
+        else _promotion_readiness_report(promotion=promotion_document, experiment=experiment)
+    )
+    (
+        configurations,
+        decisions,
+        selected_ids,
+        holdout_ids,
+        selection_policy,
+        report_id,
+        register_id,
+        evaluation_policy,
+        registry,
+        local_comparator_manifest_id,
+        holdout_authority,
+    ) = _persisted_confirmatory_f2_inputs(path=oof_path, bundle=bundle_value, experiment=experiment)
+    register_ref = _promotion_register_reference(bundle_value, register_id)
+    if (
+        promotion_document.evaluation_register_semantic_id != register_ref.semantic_id
+        or promotion_document.evaluation_register_sha256 != register_ref.sha256
+        or promotion_document.evaluation_report_id != report_id
+        or promotion_document.confirmatory_data_ready != report.confirmatory_data_ready.value
+        or promotion_document.inner_validation_rows_ready
+        != report.inner_validation_rows_ready.value
+        or promotion_document.confirmatory_oof_ready != report.confirmatory_oof_ready.value
+        or promotion_document.experiment_semantic_id != experiment.configuration_id
+        or promotion_document.source_class is not bundle_value.source_class
+    ):
+        raise ValueError("F2 promotion claims differ from authenticated persisted inputs")
+    return VerifiedConfirmatoryF2Promotion._create_promotion(
+        _VERIFIED_CONFIRMATORY_F2_PROMOTION_TOKEN,
+        promotion=promotion_document,
+        bundle=bundle_value,
+        holdout_target_source=source,
+        g2_feature_source_authority=authority.g2_feature_source,
+        descriptor=cast(Mapping[str, JsonValue], descriptor),
+        evaluation_report_id=report_id,
+        experiment=experiment,
+        local_comparator_manifest_id=local_comparator_manifest_id,
+        outcome_blind_foundation=authority.semantic_inputs,
+        evaluated_configurations=configurations,
+        selection_decisions=decisions,
+        selected_configuration_ids=selected_ids,
+        holdout_comparator_configuration_ids=holdout_ids,
+        configuration_registry=registry,
+        evaluation_policy=evaluation_policy,
+        confirmatory_holdout_authority=holdout_authority,
+        readiness_report=report,
+        runtime_identities={
+            field: cast(str, descriptor[field]) for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
+        },
+        selection_policy=selection_policy,
+    )
+
+
+def create_confirmatory_f2_promotion(
+    oof_bundle: Path,
+    *,
+    oof_receipt: Path,
+    output: Path,
+    authorized_by: str,
+    authorized_at: datetime,
+) -> VerifiedConfirmatoryF2Promotion:
+    """Create one durable F2 promotion after cheap receipt authentication."""
+    bundle_value, descriptor, parsed_receipt = _authenticate_r2_oof_with_receipt(
+        oof_bundle, receipt=oof_receipt
+    )
+    if (
+        parsed_receipt.evidence_class is not EvidenceClass.CONFIRMATORY
+        or parsed_receipt.completed_checks != R2_CONFIRMATORY_OOF_COMPLETED_CHECKS
+    ):
+        raise ValueError("F2 promotion requires the current qualifying OOF receipt checks")
+    source, experiment = _confirmatory_descriptor_inputs(oof_bundle, bundle_value, descriptor)
+    authority = asyncio.run(
+        _authenticate_confirmatory_parent(
+            descriptor=descriptor, source=source, experiment=experiment
+        )
+    )
+    report = _confirmatory_ready_report(authority=authority, source=source, experiment=experiment)
+    (
+        _configurations,
+        _decisions,
+        _selected_ids,
+        _holdout_ids,
+        _selection_policy,
+        report_id,
+        register_id,
+        _evaluation_policy,
+        _registry,
+        _local_comparator_manifest_id,
+        _holdout_authority,
+    ) = _persisted_confirmatory_f2_inputs(
+        path=oof_bundle, bundle=bundle_value, experiment=experiment
+    )
+    register_ref = _promotion_register_reference(bundle_value, register_id)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+    promotion_document = ConfirmatoryF2Promotion.create(
+        oof_id=bundle_value.oof_id,
+        oof_closure_id=bundle_value.closure_id,
+        oof_manifest_sha256=parsed_receipt.manifest_sha256,
+        oof_verification_id=parsed_receipt.verification_id,
+        experiment_semantic_id=experiment.configuration_id,
+        foundation_semantic_id=parsed_receipt.foundation_semantic_id,
+        foundation_verification_id=parsed_receipt.foundation_verification_id,
+        foundation_promotion_id=parsed_receipt.foundation_promotion_id,
+        source_class=bundle_value.source_class,
+        evidence_class=EvidenceClass.CONFIRMATORY,
+        oof_verifier_contract=parsed_receipt.verifier_contract,
+        oof_verifier_version=parsed_receipt.verifier_version,
+        oof_numerical_identity=parsed_receipt.numerical_identity,
+        required_oof_checks=R2_CONFIRMATORY_OOF_COMPLETED_CHECKS,
+        evaluation_register_semantic_id=register_ref.semantic_id,
+        evaluation_register_sha256=register_ref.sha256,
+        evaluation_report_id=report_id,
+        confirmatory_data_ready=report.confirmatory_data_ready.value,
+        inner_validation_rows_ready=report.inner_validation_rows_ready.value,
+        confirmatory_oof_ready=report.confirmatory_oof_ready.value,
+        authorized_by=authorized_by,
+        authorized_at=authorized_at,
+        runtime_locators=_promotion_runtime_locators(oof_bundle, oof_receipt),
+    )
+    atomic_create(output, canonical_bytes(promotion_document.as_json()))
+    return authenticate_confirmatory_f2_promotion(
+        output, oof_bundle=oof_bundle, oof_receipt=oof_receipt, _readiness_report=report
+    )
+
+
 def _build_confirmatory_selection(
     *,
     verified_f2: VerifiedConfirmatoryF2,
@@ -3101,8 +3714,8 @@ def _build_confirmatory_selection(
     frozen_by: str,
 ) -> R2HoldoutSelectionManifest:
     """Derive the only confirmatory G1 permitted by one verified F2 authority."""
-    if type(verified_f2) is not VerifiedConfirmatoryF2:
-        raise TypeError("confirmatory selection requires VerifiedConfirmatoryF2")
+    if not isinstance(verified_f2, VerifiedConfirmatoryF2):
+        raise TypeError("confirmatory selection requires an authenticated F2 capability")
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
     source = verified_f2.holdout_target_source
@@ -3330,10 +3943,10 @@ def verify_confirmatory_g1(
     verified_f2: VerifiedConfirmatoryF2,
     path: Path,
 ) -> VerifiedConfirmatoryG1:
-    """Independently replay a persisted G1 freeze against its verified F2 authority."""
+    """Prove G1 policy and compare it with the persisted selection."""
 
-    if type(verified_f2) is not VerifiedConfirmatoryF2:
-        raise TypeError("confirmatory G1 verification requires VerifiedConfirmatoryF2")
+    if not isinstance(verified_f2, VerifiedConfirmatoryF2):
+        raise TypeError("confirmatory G1 verification requires an authenticated F2 capability")
     selection = R2HoldoutSelectionManifest.from_json(_load_selection(path))
     if (
         selection.holdout_scope is not HoldoutScope.CONFIRMATORY
@@ -3958,10 +4571,15 @@ def holdout_evaluation_policy(
     bundle: R2OofBundle,
     *,
     expected_evaluation_report_id: str | None = None,
+    evaluation_payload: Mapping[str, object] | None = None,
 ) -> dict[str, JsonValue]:
     """Return authenticated evaluation controls and immediate comparison pairs."""
 
-    evaluation = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    evaluation = (
+        evaluation_payload
+        if evaluation_payload is not None
+        else _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_CONTRACT)
+    )
     if (
         expected_evaluation_report_id is not None
         and evaluation.get("report_id") != expected_evaluation_report_id
@@ -4481,6 +5099,11 @@ def _build_oof_verification_receipt(
     foundation_id, foundation_verification_id, foundation_promotion_id = _oof_foundation_authority(
         bundle, descriptor
     )
+    completed_checks = (
+        R2_CONFIRMATORY_OOF_COMPLETED_CHECKS
+        if descriptor.get("run_kind") == CONFIRMATORY_RUN_KIND
+        else R2_OOF_COMPLETED_CHECKS
+    )
     return R2OofVerificationReceipt.create(
         oof_contract=bundle.CONTRACT,
         oof_schema_version=bundle.SCHEMA_VERSION,
@@ -4495,7 +5118,7 @@ def _build_oof_verification_receipt(
         evidence_class=bundle.evidence_class,
         verifier_contract=R2_OOF_VERIFIER_CONTRACT,
         verifier_version=R2_OOF_VERIFIER_VERSION,
-        completed_checks=R2_OOF_COMPLETED_CHECKS,
+        completed_checks=completed_checks,
         numerical_identity=_oof_numerical_identity(descriptor),
     )
 
@@ -4619,6 +5242,11 @@ def _validate_oof_verification_receipt(
     foundation_id, foundation_verification_id, foundation_promotion_id = _oof_foundation_authority(
         bundle, descriptor
     )
+    expected_checks = (
+        R2_CONFIRMATORY_OOF_COMPLETED_CHECKS
+        if descriptor.get("run_kind") == CONFIRMATORY_RUN_KIND
+        else R2_OOF_COMPLETED_CHECKS
+    )
     expected = {
         "oof_contract": bundle.CONTRACT,
         "oof_schema_version": bundle.SCHEMA_VERSION,
@@ -4633,7 +5261,7 @@ def _validate_oof_verification_receipt(
         "evidence_class": bundle.evidence_class,
         "verifier_contract": R2_OOF_VERIFIER_CONTRACT,
         "verifier_version": R2_OOF_VERIFIER_VERSION,
-        "completed_checks": R2_OOF_COMPLETED_CHECKS,
+        "completed_checks": expected_checks,
         "numerical_identity": _oof_numerical_identity(descriptor),
     }
     for field, value in expected.items():
@@ -4661,13 +5289,20 @@ def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -
     return bundle
 
 
+def _authenticate_r2_oof_with_receipt(
+    path: Path, *, receipt: Path
+) -> tuple[R2OofBundle, dict[str, object], R2OofVerificationReceipt]:
+    bundle, descriptor = _authenticate_oof_closure(path)
+    parsed = _load_oof_verification_receipt(path, receipt)
+    _validate_oof_verification_receipt(path, bundle, descriptor, parsed)
+    return bundle, descriptor, parsed
+
+
 def _authenticate_r2_oof_with_descriptor(
     path: Path, *, receipt: Path
 ) -> tuple[R2OofBundle, dict[str, object]]:
     """Authenticate one OOF closure and return the consumed descriptor for its caller."""
-    bundle, descriptor = _authenticate_oof_closure(path)
-    parsed = _load_oof_verification_receipt(path, receipt)
-    _validate_oof_verification_receipt(path, bundle, descriptor, parsed)
+    bundle, descriptor, _ = _authenticate_r2_oof_with_receipt(path, receipt=receipt)
     return bundle, descriptor
 
 
