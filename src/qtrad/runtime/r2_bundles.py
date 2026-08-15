@@ -310,10 +310,28 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
             descriptor_payload = {
                 key: value
                 for key, value in child.items()
-                if key not in {"descriptor_id", "runtime_inputs"}
+                if key
+                not in {
+                    "descriptor_id",
+                    "runtime_inputs",
+                    "application_identity",
+                    "image_identity",
+                    "python_identity",
+                    "numpy_identity",
+                    "sklearn_identity",
+                }
             }
             if sha256(canonical_bytes(descriptor_payload)).hexdigest() != descriptor_id:
                 raise ValueError("R2 OOF descriptor ID does not authenticate its semantic content")
+            for provenance_field in (
+                "application_identity",
+                "image_identity",
+                "python_identity",
+                "numpy_identity",
+                "sklearn_identity",
+            ):
+                if not isinstance(child.get(provenance_field), str) or not child[provenance_field]:
+                    raise ValueError(f"R2 OOF descriptor provenance is missing {provenance_field}")
             if (
                 child.get("foundation_bundle_id") != bundle.foundation_bundle_id
                 or child.get("experiment_configuration_id") != bundle.experiment_configuration_id

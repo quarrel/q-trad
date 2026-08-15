@@ -206,6 +206,15 @@ R2_CLAIM_VERIFIER_CONTRACTS = MappingProxyType(
         "evaluation": "qtrad-r2-evaluation-verifier-v1",
     }
 )
+_OOF_DESCRIPTOR_PROVENANCE_FIELDS = frozenset(
+    {
+        "application_identity",
+        "image_identity",
+        "python_identity",
+        "numpy_identity",
+        "sklearn_identity",
+    }
+)
 _REQUIRED_FEATURE_SETS = frozenset({"L0", "L1", "P0", "P1"})
 _CAPTURE_V4_UNIVERSE = (
     "fx:aud-usd",
@@ -925,16 +934,6 @@ def runtime_identities() -> dict[str, str]:
     }
 
 
-def require_ibkr_adapter_runtime_identity(
-    adapter_identity: IBKRHistoricalAdapterIdentity,
-) -> None:
-    """Require the persisted adapter identities to match the running environment."""
-    identities = runtime_identities()
-    for field in ("application_identity", "image_identity"):
-        if getattr(adapter_identity, field) != identities[field]:
-            raise ValueError(f"IBKR adapter {field} differs from the running environment")
-
-
 def parse_feature_manifest_arguments(arguments: list[str]) -> dict[str, Path]:
     """Parse and validate repeated NAME=PATH arguments without accepting duplicates."""
     parsed: dict[str, Path] = {}
@@ -1163,11 +1162,6 @@ def _descriptor_payload(
         "evidence_class": experiment.evidence_class.value,
         "feature_sets": list(feature_names),
         "run_kind": run_kind,
-        "application_identity": identities["application_identity"],
-        "image_identity": identities["image_identity"],
-        "python_identity": identities["python_identity"],
-        "numpy_identity": identities["numpy_identity"],
-        "sklearn_identity": identities["sklearn_identity"],
         "holdout_range": [item.isoformat() for item in experiment.holdout_range],
         "acceptance_thresholds": dict(experiment.acceptance_thresholds),
         "ordered_instruments": list(experiment.ordered_instruments),
@@ -1201,7 +1195,8 @@ def _descriptor_payload(
     if representative_profile is not None:
         semantic["representative_profile"] = representative_profile
     descriptor_id = sha256(canonical_bytes(semantic)).hexdigest()
-    return {**semantic, "descriptor_id": descriptor_id}
+    provenance = {field: identities[field] for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS}
+    return {**semantic, **provenance, "descriptor_id": descriptor_id}
 
 
 def _validate_representative_ibkr_historical_v1(
@@ -2452,6 +2447,7 @@ def build_oof_bundle(
                 key: value
                 for key, value in descriptor.items()
                 if key not in {"descriptor_id", "runtime_inputs"}
+                and key not in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
             }
         )
     ).hexdigest()
@@ -2726,7 +2722,7 @@ def _qualified_inner_validation_selections(
     bundle: R2OofBundle,
     experiment: R2ExperimentConfig,
     folds: FoldDataset,
-    runtime_values: Mapping[str, str],
+    descriptor_values: Mapping[str, object],
 ) -> tuple[R2PreprocessingSelection, ...]:
     """Authenticate the complete R2.C inner-split register needed for F2 readiness."""
 
@@ -2758,8 +2754,8 @@ def _qualified_inner_validation_selections(
             or selection.horizon != experiment.primary_horizon
             or selection.evidence_class is not EvidenceClass.CONFIRMATORY
             or selection.market_data_source_class is not experiment.market_data_source_class
-            or selection.application_image_identity != runtime_values["application_identity"]
-            or selection.sklearn_library_identity != runtime_values["sklearn_identity"]
+            or selection.application_image_identity != descriptor_values["application_identity"]
+            or selection.sklearn_library_identity != descriptor_values["sklearn_identity"]
             or selection.outer_fold_id not in expected_fold_ids
         ):
             raise ValueError("confirmatory F2 preprocessing child has incompatible lineage")
@@ -2951,23 +2947,12 @@ def verify_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
             "confirmatory F2 requires independently replayed outcome-blind readiness: "
             + "; ".join(readiness_report.unmet_conditions)
         )
-    identities = runtime_identities()
-    for key in (
-        "application_identity",
-        "image_identity",
-        "python_identity",
-        "numpy_identity",
-        "sklearn_identity",
-    ):
-        if descriptor.get(key) != identities[key]:
-            raise ValueError(f"confirmatory F2 runtime identity differs for {key}")
-
     _qualified_inner_validation_selections(
         path,
         bundle,
         experiment,
         replayed_folds,
-        identities,
+        descriptor,
     )
     readiness_report = _complete_confirmatory_readiness(readiness_report)
     if (
@@ -4267,7 +4252,6 @@ async def _replay_authority_oof_async(
         if not isinstance(adapter_payload, Mapping):
             raise ValueError("IBKR experiment has no persisted adapter identity")
         adapter_identity = IBKRHistoricalAdapterIdentity.from_json(adapter_payload)
-        require_ibkr_adapter_runtime_identity(adapter_identity)
         authority = authenticate_ibkr_foundation_for_r2(
             foundation_path=foundation_path,
             receipt_path=receipt_path,

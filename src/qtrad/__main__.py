@@ -265,7 +265,6 @@ from qtrad.runtime.r2_verification import (
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
     prepare_confirmatory_g2,
-    require_ibkr_adapter_runtime_identity,
     reveal_confirmatory_g2,
     runtime_identities,
     selection_freeze,
@@ -2666,7 +2665,6 @@ async def _load_r2_foundation_inputs(
         and foundation_promotion_path is not None
     ):
         raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
-    require_ibkr_adapter_runtime_identity(adapter_identity)
     target_source = None
     if outcome_blind:
         from qtrad.domain.r2_holdout import R2HoldoutTargetSource
