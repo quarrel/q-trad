@@ -4468,7 +4468,7 @@ def _oof_foundation_authority(
         raise ValueError("R2 OOF descriptor foundation authority is incomplete")
     if foundation_id != bundle.foundation_bundle_id:
         raise ValueError("R2 OOF descriptor foundation authority differs from its bundle")
-    return foundation_id, verification_id, cast(str | None, promotion_id)
+    return foundation_id, verification_id, promotion_id
 
 
 def _build_oof_verification_receipt(
@@ -4530,9 +4530,7 @@ def _safe_oof_child(root: Path, reference: ArtifactReference) -> Path:
     return candidate
 
 
-def _read_oof_consumed_json(
-    root: Path, reference: ArtifactReference
-) -> dict[str, object]:
+def _read_oof_consumed_json(root: Path, reference: ArtifactReference) -> dict[str, object]:
     candidate = _safe_oof_child(root, reference)
     encoded = candidate.read_bytes()
     if len(encoded) > 64 * 1024 * 1024:
@@ -4644,9 +4642,7 @@ def _validate_oof_verification_receipt(
             raise ValueError(f"R2 OOF verification receipt binding is not accepted: {field}")
 
 
-def verify_r2_oof_semantics(
-    path: Path, *, receipt_output: Path | None = None
-) -> R2OofBundle:
+def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -> R2OofBundle:
     """Replay one R2 OOF transformation and optionally issue its create-only receipt."""
     bundle = verify_r2_oof_bundle(path)
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
