@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -658,14 +658,38 @@ def _compare_stage7(
     new_summary_json = _observation_summary_json(new_summary)
     if old_summary_json != new_summary_json:
         raise ValueError("Stage 7 migration observation summary changed")
-    old_digest, old_count = _observation_digest(old.observations)
-    new_digest, new_count = _observation_digest(new.observations)
+    new_request_index = _request_evidence_index(new.request_evidence)
+    old_digest, old_count = _observation_digest(
+        old.observations,
+        projection=lambda value: _stage7_observation_projection(
+            value, request_index=new_request_index, legacy=True
+        ),
+    )
+    new_digest, new_count = _observation_digest(
+        new.observations,
+        projection=lambda value: _stage7_observation_projection(
+            value, request_index=None, legacy=False
+        ),
+    )
     if (old_digest, old_count) != (new_digest, new_count):
         raise ValueError("Stage 7 migration observation semantics changed")
     old_evidence = _evidence_digest(old.request_evidence)
     new_evidence = _evidence_digest(new.request_evidence)
     if old_evidence != new_evidence:
         raise ValueError("Stage 7 migration request evidence changed")
+    relocation: dict[str, JsonValue] = {
+        "contract": "qtrad-stage7-schedule-evidence-relocation-v1",
+        "source": "retained v2 row schedule_evidence",
+        "destination": "authenticated v3 Stage 6 request_evidence",
+        "rows_checked": old_count,
+        "equivalent": True,
+        "legacy_disposition_normalization": {"BAR_ACCEPTED": "SUCCEEDED"},
+        "explanation": (
+            "Each retained row schedule request/result/session payload was matched to the "
+            "authenticated current request evidence; current rows carry this summary at the "
+            "Stage 6 request level."
+        ),
+    }
     return {
         "row_count": old_count,
         "old_semantic_projection_sha256": old_digest,
@@ -673,6 +697,7 @@ def _compare_stage7(
         "availability_policy": cast(JsonValue, old_policy),
         "observation_summary": old_summary_json,
         "request_evidence_sha256": old_evidence,
+        "schedule_evidence_relocation": relocation,
     }
 
 
@@ -827,17 +852,100 @@ def _observation_summary_json(summary: object) -> dict[str, JsonValue]:
     }
 
 
-def _observation_digest(rows: object) -> tuple[str, int]:
+_SCHEDULE_EVIDENCE_FIELDS = frozenset(
+    {"request_sha256", "result_sha256", "schedule_state", "sessions"}
+)
+
+
+def _stage7_observation_projection(
+    value: Mapping[str, object],
+    *,
+    request_index: Mapping[str, Mapping[str, JsonValue]] | None,
+    legacy: bool,
+) -> dict[str, JsonValue]:
+    schedule = _mapping(value["schedule_evidence"], "provider observation schedule evidence")
+    if request_index is not None:
+        if set(schedule) != _SCHEDULE_EVIDENCE_FIELDS:
+            raise ValueError("retained Stage 7 schedule evidence schema changed")
+        request_ids_value = schedule["request_sha256"]
+        result_ids_value = schedule["result_sha256"]
+        sessions_value = schedule["sessions"]
+        if not isinstance(request_ids_value, list) or not isinstance(result_ids_value, list):
+            raise ValueError("retained Stage 7 schedule request/result identities changed")
+        if len(request_ids_value) != len(result_ids_value):
+            raise ValueError("retained Stage 7 schedule request/result identities changed")
+        request_ids = [
+            _string(item, "retained Stage 7 schedule request identity")
+            for item in request_ids_value
+        ]
+        result_ids = [
+            _string(item, "retained Stage 7 schedule result identity") for item in result_ids_value
+        ]
+        sessions = _json_value(sessions_value)
+        if not isinstance(sessions, list):
+            raise ValueError("retained Stage 7 schedule sessions changed")
+        if _string(schedule["schedule_state"], "retained Stage 7 schedule state") != "ACTIVE":
+            raise ValueError("retained Stage 7 schedule state changed")
+        reconstructed_sessions: list[JsonValue] = []
+        for request_id, result_id in zip(request_ids, result_ids, strict=True):
+            evidence = request_index.get(request_id)
+            if evidence is None or evidence["result_sha256"] != result_id:
+                raise ValueError("retained Stage 7 schedule request/result evidence changed")
+            evidence_sessions = evidence["sessions"]
+            if not isinstance(evidence_sessions, list):
+                raise ValueError("authenticated Stage 6 request sessions changed")
+            reconstructed_sessions.extend(evidence_sessions)
+        if reconstructed_sessions != sessions:
+            raise ValueError("retained Stage 7 schedule sessions changed")
+        for session in sessions:
+            session_mapping = _mapping(session, "retained Stage 7 schedule session")
+            if session_mapping.get("active") is not True:
+                raise ValueError("retained Stage 7 schedule session state changed")
+            provider_session = session_mapping.get("provider_session")
+            if (
+                provider_session is not None
+                and _mapping(provider_session, "retained Stage 7 provider session").get("active")
+                is not True
+            ):
+                raise ValueError("retained Stage 7 provider session state changed")
+    else:
+        _json_value(schedule)
+    disposition = _string(value["gap_disposition"], "provider observation gap disposition")
+    if legacy:
+        if disposition == "BAR_ACCEPTED":
+            disposition = "SUCCEEDED"
+        elif disposition != "SUCCEEDED":
+            raise ValueError("retained Stage 7 disposition changed")
+    elif disposition != "SUCCEEDED":
+        raise ValueError("new Stage 7 disposition changed")
+    projected: dict[str, JsonValue] = {}
+    for key, item in value.items():
+        if key == "schedule_evidence" or key in _OBSERVATION_NON_SEMANTIC_FIELDS:
+            continue
+        projected[key] = _json_value(item)
+    projected["gap_disposition"] = disposition
+    return projected
+
+
+def _observation_digest(
+    rows: object,
+    *,
+    projection: Callable[[Mapping[str, object]], dict[str, JsonValue]] | None = None,
+) -> tuple[str, int]:
     digest = sha256()
     count = 0
     iterator = iter(cast(Iterable[object], rows))
     for row in iterator:
         value = _mapping(cast(Any, row).as_json_value(), "provider observation")
-        projected = {
-            key: _json_value(item)
-            for key, item in value.items()
-            if key not in _OBSERVATION_NON_SEMANTIC_FIELDS
-        }
+        projected = (
+            projection(value)
+            if projection is not None
+            else {
+                key: _json_value(item)
+                for key, item in value.items()
+                if key not in _OBSERVATION_NON_SEMANTIC_FIELDS
+            }
+        )
         encoded = canonical_json_bytes(projected)
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
@@ -866,36 +974,54 @@ def _project_child_mapping(value: Mapping[str, object]) -> dict[str, JsonValue]:
     return projected
 
 
-def _evidence_digest(value: object) -> str:
-    entries: list[dict[str, JsonValue]] = []
+def _request_evidence_entry(item: object) -> dict[str, JsonValue]:
+    if isinstance(item, Mapping):
+        mapping = cast(Mapping[str, object], item)
+        request_sha256 = _string(mapping["request_sha256"], "request identity")
+        result_sha256 = _string(mapping["result_sha256"], "result identity")
+        disposition_value = mapping["evidence_disposition"]
+        accepted_row_count_value = mapping["accepted_row_count"]
+        sessions_value = mapping["sessions"]
+    else:
+        evidence = cast(Any, item)
+        request_sha256 = _string(evidence.request_sha256, "request identity")
+        result_sha256 = _string(evidence.result_sha256, "result identity")
+        disposition_value = evidence.evidence_disposition
+        accepted_row_count_value = evidence.accepted_row_count
+        sessions_value = evidence.sessions
+    disposition_candidate = cast(Any, disposition_value)
+    evidence_disposition = _string(
+        disposition_candidate.value
+        if hasattr(disposition_candidate, "value")
+        else disposition_candidate,
+        "evidence disposition",
+    )
+    accepted_row_count = _integer(accepted_row_count_value, "accepted row count")
+    sessions = _json_value(sessions_value)
+    if not isinstance(sessions, list):
+        raise ValueError("request evidence sessions must be a list")
+    return {
+        "request_sha256": request_sha256,
+        "result_sha256": result_sha256,
+        "evidence_disposition": evidence_disposition,
+        "accepted_row_count": accepted_row_count,
+        "sessions": sessions,
+    }
+
+
+def _request_evidence_index(value: object) -> dict[str, dict[str, JsonValue]]:
+    index: dict[str, dict[str, JsonValue]] = {}
     for item in cast(Iterable[object], value):
-        if isinstance(item, Mapping):
-            mapping = item
-            request_sha256 = _string(mapping.get("request_sha256"), "request identity")
-            evidence_disposition = _string(
-                mapping.get("evidence_disposition"), "evidence disposition"
-            )
-            accepted_row_count = _integer(mapping.get("accepted_row_count"), "accepted row count")
-            sessions = _json_value(mapping.get("sessions"))
-        else:
-            evidence = cast(Any, item)
-            request_sha256 = _string(evidence.request_sha256, "request identity")
-            evidence_disposition = _string(
-                evidence.evidence_disposition.value
-                if hasattr(evidence.evidence_disposition, "value")
-                else evidence.evidence_disposition,
-                "evidence disposition",
-            )
-            accepted_row_count = _integer(evidence.accepted_row_count, "accepted row count")
-            sessions = _json_value(evidence.sessions)
-        entries.append(
-            {
-                "request_sha256": request_sha256,
-                "evidence_disposition": evidence_disposition,
-                "accepted_row_count": accepted_row_count,
-                "sessions": sessions,
-            }
-        )
+        entry = _request_evidence_entry(item)
+        request_sha256 = cast(str, entry["request_sha256"])
+        if request_sha256 in index:
+            raise ValueError("duplicate Stage 7 request evidence identity")
+        index[request_sha256] = entry
+    return index
+
+
+def _evidence_digest(value: object) -> str:
+    entries = [_request_evidence_entry(item) for item in cast(Iterable[object], value)]
     return _file_sha256_bytes(
         canonical_json_bytes(cast(dict[str, JsonValue], {"entries": entries}))
     )
@@ -934,6 +1060,10 @@ def _migration_record(
     )
     new_stage8_readiness_authority = _mapping(
         stage8_readiness_authority["new"], "new Stage 8 readiness authority"
+    )
+    stage7_schedule_relocation = _mapping(
+        stage7_equivalence["schedule_evidence_relocation"],
+        "Stage 7 schedule evidence relocation",
     )
     identity_classification: dict[str, JsonValue] = {
         "stage6": {
@@ -975,6 +1105,7 @@ def _migration_record(
                 "equivalent": False,
                 "explanation": "v3 closure binds only the direct Stage 7 manifest and parts.",
             },
+            "schedule_evidence_relocation": _json_value(stage7_schedule_relocation),
         },
         "stage8": {
             "semantic": {

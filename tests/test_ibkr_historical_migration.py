@@ -125,12 +125,22 @@ class _Policy:
 class _Observation:
     close: str
     observation_sha256: str
+    schedule_evidence: dict[str, object] | None = None
+    gap_disposition: str = "SUCCEEDED"
 
-    def as_json_value(self) -> dict[str, str]:
+    def as_json_value(self) -> dict[str, object]:
+        schedule = self.schedule_evidence or {
+            "request_sha256": ["r" * 64],
+            "result_sha256": ["s" * 64],
+            "schedule_state": "ACTIVE",
+            "sessions": [{"active": True}],
+        }
         return {
             "instrument_id": "fx:aud-usd",
             "close": self.close,
             "observation_sha256": self.observation_sha256,
+            "schedule_evidence": schedule,
+            "gap_disposition": self.gap_disposition,
         }
 
 
@@ -153,9 +163,10 @@ def _stage7_evidence(
     )
     evidence = SimpleNamespace(
         request_sha256="r" * 64,
+        result_sha256="s" * 64,
         evidence_disposition="ACCEPTED",
         accepted_row_count=1,
-        sessions=({"session": "closed"},),
+        sessions=({"active": True},),
     )
     return SimpleNamespace(
         dataset=dataset,
@@ -512,7 +523,15 @@ def test_disposable_migration_orchestrator_uses_each_boundary_once(
     monkeypatch.setattr(
         migration,
         "_compare_stage7",
-        lambda *_args, **_kwargs: calls.append("stage7-compare") or {},
+        lambda *_args, **_kwargs: (
+            calls.append("stage7-compare")
+            or {
+                "schedule_evidence_relocation": {
+                    "contract": "fixture",
+                    "equivalent": True,
+                }
+            }
+        ),
     )
     monkeypatch.setattr(
         migration,
@@ -934,3 +953,44 @@ def test_migration_record_schema_and_contract_are_bound(tmp_path: Path) -> None:
         )
         path.write_bytes(json.dumps(bad_contract).encode())
         migration.authenticate_migration_equivalence_record(path)
+
+
+def test_stage7_schedule_relocation_normalizes_only_legacy_disposition() -> None:
+    old = _stage7_evidence()
+    old_row = replace(old.observations[0], gap_disposition="BAR_ACCEPTED")
+    old = SimpleNamespace(**{**vars(old), "observations": (old_row,)})
+    result = migration._compare_stage7(cast(Any, old), cast(Any, _stage7_evidence()))
+    relocation = cast(dict[str, object], result["schedule_evidence_relocation"])
+    assert relocation["equivalent"] is True
+    assert relocation["legacy_disposition_normalization"] == {"BAR_ACCEPTED": "SUCCEEDED"}
+
+
+@pytest.mark.parametrize("mutation", ["request", "result", "sessions", "state", "disposition"])
+def test_stage7_schedule_relocation_rejects_mutations(mutation: str) -> None:
+    old = _stage7_evidence()
+    schedule = cast(dict[str, object], old.observations[0].as_json_value()["schedule_evidence"])
+    if mutation == "request":
+        schedule["request_sha256"] = ["x" * 64]
+    elif mutation == "result":
+        schedule["result_sha256"] = ["x" * 64]
+    elif mutation == "sessions":
+        schedule["sessions"] = []
+    elif mutation == "state":
+        schedule["schedule_state"] = "INACTIVE"
+    old_row = replace(
+        old.observations[0],
+        schedule_evidence=schedule,
+        gap_disposition="MISSING" if mutation == "disposition" else "BAR_ACCEPTED",
+    )
+    mutated = SimpleNamespace(**{**vars(old), "observations": (old_row,)})
+    with pytest.raises(ValueError):
+        migration._compare_stage7(cast(Any, mutated), cast(Any, _stage7_evidence()))
+
+
+def test_stage7_request_evidence_result_identity_is_compared() -> None:
+    old = _stage7_evidence()
+    new = _stage7_evidence()
+    new_evidence = SimpleNamespace(**{**vars(new.request_evidence[0]), "result_sha256": "x" * 64})
+    new = SimpleNamespace(**{**vars(new), "request_evidence": (new_evidence,)})
+    with pytest.raises(ValueError, match=r"request.*evidence"):
+        migration._compare_stage7(cast(Any, old), cast(Any, new))
