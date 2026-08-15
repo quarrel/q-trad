@@ -881,6 +881,10 @@ def _stage7_observation_projection(
         result_ids = [
             _string(item, "retained Stage 7 schedule result identity") for item in result_ids_value
         ]
+        if not request_ids or not result_ids:
+            raise ValueError("retained Stage 7 schedule request/result identities changed")
+        if len(set(request_ids)) != len(request_ids) or len(set(result_ids)) != len(result_ids):
+            raise ValueError("retained Stage 7 schedule request/result identities changed")
         sessions = _json_value(sessions_value)
         if not isinstance(sessions, list):
             raise ValueError("retained Stage 7 schedule sessions changed")

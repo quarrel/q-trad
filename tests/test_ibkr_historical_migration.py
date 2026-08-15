@@ -1052,3 +1052,31 @@ def test_stage7_current_schedule_evidence_must_be_empty(
             cast(Any, old),
             cast(Any, _stage7_evidence(schedule_evidence=schedule_evidence)),
         )
+
+
+@pytest.mark.parametrize("mutation", ["empty", "duplicate-request", "duplicate-result"])
+def test_stage7_schedule_reconstruction_rejects_identity_multiplicity(
+    mutation: str,
+) -> None:
+    old = _stage7_evidence()
+    schedule = cast(dict[str, object], old.observations[0].as_json_value()["schedule_evidence"])
+    if mutation == "empty":
+        schedule["request_sha256"] = []
+        schedule["result_sha256"] = []
+    elif mutation == "duplicate-request":
+        schedule["request_sha256"] = ["r" * 64, "r" * 64]
+        schedule["result_sha256"] = ["s" * 64, "s" * 64]
+    else:
+        schedule["request_sha256"] = ["r" * 64, "x" * 64]
+        schedule["result_sha256"] = ["s" * 64, "s" * 64]
+    old_row = replace(
+        old.observations[0],
+        schedule_evidence=schedule,
+        gap_disposition="BAR_ACCEPTED",
+    )
+    old = SimpleNamespace(**{**vars(old), "observations": (old_row,)})
+    with pytest.raises(ValueError, match="request/result identities"):
+        migration._compare_stage7(
+            cast(Any, old),
+            cast(Any, _stage7_evidence(schedule_evidence={})),
+        )
