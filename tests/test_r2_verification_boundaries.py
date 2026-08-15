@@ -16,9 +16,6 @@ from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_verification import (
-    _image_identity_manifest as _production_image_identity_manifest,
-)
-from qtrad.runtime.r2_verification import (
     _descriptor_payload,
     _materialise_synthetic_feature_manifests,
     _synthetic_pipeline_inputs,
@@ -28,6 +25,9 @@ from qtrad.runtime.r2_verification import (
     numerical_environment,
     runtime_identities,
     verify_oof_bundle,
+)
+from qtrad.runtime.r2_verification import (
+    _image_identity_manifest as _production_image_identity_manifest,
 )
 
 
