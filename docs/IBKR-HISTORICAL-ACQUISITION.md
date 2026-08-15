@@ -1270,7 +1270,7 @@ step rather than another verifier run. The implementation migration remains acti
 ## 3.4 Retained v2 migration invalidation (attempt 3)
 
 The retained-file H4 migration attempt rooted at
-`/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04-attempt3`
+`/workspace/tmp/ibkr-historical-r2-20260810T081317Z/remediation/r2-simplification-h4-670e04e-attempt3`
 is permanently abandoned after its Stage 8 equivalence check identified a scientific divergence.
 The diagnosed mismatch is bound by the packet-specific migration-only invalidation helper:
 
