@@ -2030,6 +2030,7 @@ def build_oof_bundle(
     representative_profile: str | None = None,
     holdout_target_source: R2HoldoutTargetSource | None = None,
     experiment_path: Path | None = None,
+    runtime_provenance: Mapping[str, str] | None = None,
 ) -> Path:
     """Build and persist the complete R2.C--F1 OOF run from authenticated children."""
     if run_kind not in {*_IMPLEMENTATION_RUN_KINDS, CONFIRMATORY_RUN_KIND}:
@@ -2085,7 +2086,14 @@ def build_oof_bundle(
             )
     if set(datasets) != _REQUIRED_FEATURE_SETS:
         raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
-    identities = runtime_identities()
+    if runtime_provenance is not None and (
+        set(runtime_provenance) != _OOF_DESCRIPTOR_PROVENANCE_FIELDS
+        or any(not value for value in runtime_provenance.values())
+    ):
+        raise ValueError("OOF replay runtime provenance is incomplete")
+    identities = (
+        dict(runtime_provenance) if runtime_provenance is not None else runtime_identities()
+    )
     local_datasets = tuple(datasets[name] for name in ("L0", "L1"))
     pooled_datasets = (datasets["P0"], datasets["P1"])
     selections_local = tuple(
@@ -4304,6 +4312,9 @@ async def _replay_authority_oof_async(
             run_kind=expected_run_kind,
             holdout_target_source=holdout_target_source,
             experiment_path=experiment_path,
+            runtime_provenance={
+                field: cast(str, descriptor[field]) for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
+            },
         )
         if _tree_bytes(path.parent) != _tree_bytes(expected_root):
             raise ValueError("OOF bundle does not replay to the authenticated pipeline")

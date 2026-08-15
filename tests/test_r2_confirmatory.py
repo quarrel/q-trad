@@ -1722,6 +1722,17 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
         promotion_path=promotion_path,
     )
     monkeypatch.setattr(verification, "authenticate_ibkr_foundation_for_r2", lambda **_: authority)
+    drifted_runtime = dict(identities)
+    drifted_runtime.update(
+        {
+            "application_identity": "current-drifted-application",
+            "image_identity": "sha256:" + "f" * 64,
+            "python_identity": "current-drifted-python",
+            "numpy_identity": "current-drifted-numpy",
+            "sklearn_identity": "current-drifted-sklearn",
+        }
+    )
+    monkeypatch.setattr(verification, "runtime_identities", lambda: drifted_runtime)
 
     parent_calls = {"semantic": 0, "folds": 0}
 
