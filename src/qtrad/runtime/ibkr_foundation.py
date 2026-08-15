@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import cast
 
 import polars as pl
@@ -29,7 +30,7 @@ from qtrad.application.r2_ibkr_historical import (
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import FoldDataset
-from qtrad.domain.foundation import FoundationConfig, PanelDataset, TargetDataset
+from qtrad.domain.foundation import FoundationConfig, InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_INSTRUMENTS,
     IBKRFoundationReadiness,
@@ -665,6 +666,135 @@ def load_ibkr_foundation_with_identity(
     """Load an authenticated foundation and return its build identity."""
 
     return _load_authenticated_ibkr_foundation(path, receipt=receipt)
+
+
+def build_ibkr_holdout_target_source(
+    path: Path,
+    *,
+    receipt: Path,
+    target_instruments: Sequence[str] | None = None,
+) -> R2HoldoutTargetSource:
+    """Build an outcome-blind holdout source from authenticated Stage 8 projections."""
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 outcome-blind loading is required")
+    authenticated_v3 = _read_v3_manifest(path)
+    _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+    root = authenticated_v3.path.parent
+    provider_dataset = authenticated_v3.provider_dataset
+    payload = authenticated_v3.payload
+    configuration = authenticated_v3.configuration
+    children = authenticated_v3.children
+    expected_lineage = authenticated_v3.lineage
+    child_ids = _child_reference_dataset_ids(children)
+    decoded = _verify_children_blind(
+        root,
+        children,
+        child_ids,
+        expected_lineage,
+        decode_g2=False,
+        decode_target=False,
+    )
+    if child_ids["observations"] != configuration.observation_dataset_id:
+        raise ValueError("IBKR foundation observation child differs from configuration")
+    if child_ids["blind-observations"] != _blind_observation_projection_id(
+        source_dataset_id=child_ids["observations"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-observations"],
+    ):
+        raise ValueError("IBKR blind observation projection identity is invalid")
+    if child_ids["blind-panel"] != _blind_panel_projection_id(
+        source_dataset_id=child_ids["panel"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-panel"],
+    ):
+        raise ValueError("IBKR blind panel projection identity is invalid")
+    target_index = R2HoldoutTargetIndex.from_rows(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        rows=decoded["target-index"],
+    )
+    if target_index.dataset_id != child_ids["target-index"]:
+        raise ValueError("IBKR holdout target index identity is invalid")
+    causal_metadata = R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=child_ids["panel"],
+        rows=decoded["causal-metadata"],
+    )
+    if causal_metadata.dataset_id != child_ids["causal-metadata"]:
+        raise ValueError("IBKR holdout causal metadata identity is invalid")
+    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(decoded["pre-holdout-target"][0])
+    primary_horizon_seconds = int(configuration.primary_vertical_horizon.total_seconds())
+    configured_target_instruments = tuple(
+        instrument_id
+        for instrument_id in configuration.ordered_instruments
+        if InstrumentRole(configuration.instrument_roles[instrument_id]) is InstrumentRole.TARGET
+    )
+    selected_target_instruments = (
+        configured_target_instruments if target_instruments is None else tuple(target_instruments)
+    )
+    if set(selected_target_instruments) != set(configured_target_instruments):
+        raise ValueError("holdout target source instruments differ from Stage 8 configuration")
+    target_instruments = selected_target_instruments
+    projection_mismatches: list[str] = []
+    if pre_holdout_target.source_target_dataset_id != child_ids["targets"]:
+        projection_mismatches.append("source target")
+    if pre_holdout_target.observation_dataset_id != child_ids["observations"]:
+        projection_mismatches.append("observation")
+    if pre_holdout_target.foundation_configuration_id != configuration.configuration_id:
+        projection_mismatches.append("configuration")
+    if pre_holdout_target.holdout_start != configuration.holdout_range[0]:
+        projection_mismatches.append("holdout start")
+    if pre_holdout_target.primary_horizon_seconds != primary_horizon_seconds:
+        projection_mismatches.append("horizon")
+    if pre_holdout_target.target_instruments != tuple(sorted(target_instruments)):
+        projection_mismatches.append("instruments")
+    if pre_holdout_target.projection_id != child_ids["pre-holdout-target"]:
+        projection_mismatches.append("projection ID")
+    if projection_mismatches:
+        raise ValueError(
+            "IBKR pre-holdout target projection is not source-authenticated: "
+            + ", ".join(projection_mismatches)
+        )
+    active_intervals = _decode_active_intervals(payload["active_intervals"])
+    provider_gaps = tuple(
+        cast(Mapping[str, JsonValue], _mapping(item, "IBKR provider gap"))
+        for item in _sequence(payload["provider_gaps"])
+    )
+    availability_build = cast(
+        IBKRFoundationBuild,
+        SimpleNamespace(
+            configuration=configuration,
+            active_intervals=active_intervals,
+            provider_gaps=provider_gaps,
+            provider_history=provider_dataset,
+        ),
+    )
+    availability = ibkr_availability_evidence(availability_build)
+    opportunities = R2HoldoutTargetSource._derive_opportunities_from_r1_evidence(
+        target_index.targets,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=primary_horizon_seconds,
+        target_instruments=target_instruments,
+        panel=None,
+        causal_metadata=causal_metadata,
+        source_active_intervals=active_intervals,
+        data_gaps=_data_gap_tuples(provider_gaps),
+    )
+    return R2HoldoutTargetSource.create(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=primary_horizon_seconds,
+        target_instruments=target_instruments,
+        targets=target_index.targets,
+        pre_holdout_target_dataset=pre_holdout_target.projected_target_dataset,
+        opportunities=opportunities,
+        causal_panel_dataset_id=child_ids["panel"],
+        availability_evidence_id=_availability_dataset_id(child_ids["observations"], availability),
+        target_index_dataset_id=target_index.dataset_id,
+        causal_metadata_dataset_id=causal_metadata.dataset_id,
+    )
 
 
 def _load_ibkr_foundation_outcome_blind(

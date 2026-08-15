@@ -21,6 +21,7 @@ from qtrad.domain.ibkr_foundation import (
 )
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
+    build_ibkr_holdout_target_source,
     load_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -415,10 +416,16 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
             AssertionError("outcome-blind loading decoded Stage 7 provider rows")
         ),
     )
+    blind_source = build_ibkr_holdout_target_source(
+        foundation,
+        receipt=receipt,
+        target_instruments=tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+    )
+    assert blind_source == holdout_source
     blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
         foundation,
         receipt=receipt,
-        holdout_target_source=holdout_source,
+        holdout_target_source=blind_source,
     )
     assert build_id
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows

@@ -8,8 +8,7 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
 orders or production broker connectivity.
 
-`docs/TRADING_RESEARCH.md` defines the stable research programme. This file selects the current
-work and records only the milestone sequence needed to reach the next trustworthy decision.
+`docs/TRADING_RESEARCH.md` defines the stable research programme. `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md` is the active decision-grade execution authority. This file selects the current work and records only the milestone sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
@@ -63,7 +62,7 @@ work and records only the milestone sequence needed to reach the next trustworth
   adapter, callback normalization, immutable canary evidence and file-only canary/profile operations.
   Account-gated capability review, host deployment and the bounded Stage 5 canary are now complete:
   all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases passed with the frozen 300-second profile.
-- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward.
+- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward, and no replacement Stage 8 promotion exists yet.
 - Current Stage 7 and Stage 8 construction, verification, authentication and promotion are v3-only. They bind immediate-parent semantic, closure and verification identities, consume only selected children, and do not reopen superseded ancestry. No real holdout result or effectiveness claim exists, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones

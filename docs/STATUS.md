@@ -2,7 +2,8 @@
 
 **Updated:** 2026-08-15
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion after a reviewed scientific divergence, and temporary v1/v2 readers/bridges are deleted. Current normal Stage 7/8 runtime is v3-only.
+**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion after a reviewed scientific divergence, and temporary v1/v2 readers/bridges are deleted. Current normal Stage 7/8 runtime is v3-only; no replacement Stage 8 promotion exists yet.
+**Decision-grade execution authority:** `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.

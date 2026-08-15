@@ -167,6 +167,7 @@ from qtrad.runtime.ibkr_canary import (
 from qtrad.runtime.ibkr_capability import load_ibkr_capability_probe_spec
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
+    build_ibkr_holdout_target_source,
     load_ibkr_foundation,
     load_ibkr_foundation_with_identity,
     preflight_ibkr_foundation,
@@ -235,6 +236,7 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
+from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 from qtrad.runtime.r2_holdout import (
     load_holdout_policy,
     load_holdout_questions,
@@ -275,6 +277,7 @@ from qtrad.runtime.r2_verification import (
     verify_confirmatory_g2_preparation,
     verify_confirmatory_r2h,
     verify_oof_bundle,
+    verify_r2_oof_semantics,
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -1114,7 +1117,20 @@ def build_parser() -> argparse.ArgumentParser:
         "oof-verify", help="independently verify an R2 OOF bundle"
     )
     baselines_oof_verify.add_argument("--bundle", type=Path, required=True)
-
+    baselines_oof_verify.add_argument(
+        "--receipt-output",
+        type=Path,
+        help="create-only semantic verification receipt",
+    )
+    baselines_holdout_target_source = baselines_sub.add_parser(
+        "holdout-target-source",
+        help="build an outcome-blind IBKR holdout target source",
+    )
+    baselines_holdout_target_source.add_argument("--foundation-bundle", type=Path, required=True)
+    baselines_holdout_target_source.add_argument("--foundation-receipt", type=Path, required=True)
+    baselines_holdout_target_source.add_argument("--foundation-promotion", type=Path, required=True)
+    baselines_holdout_target_source.add_argument("--experiment", type=Path, required=True)
+    baselines_holdout_target_source.add_argument("--output", type=Path, required=True)
     baselines_confirmatory_f2_promote = baselines_sub.add_parser(
         "confirmatory-f2-promote",
         help="create a receipt-authenticated confirmatory F2 promotion",
@@ -2322,8 +2338,20 @@ def main(argv: Sequence[str] | None = None) -> None:
         and args.research_command == "baselines"
         and args.baselines_command == "oof-verify"
     ):
-        bundle = verify_oof_bundle(args.bundle)
+        bundle = verify_r2_oof_semantics(args.bundle, receipt_output=args.receipt_output)
         print(json.dumps(bundle.as_json(), sort_keys=True))
+    elif (
+        args.command == "research"
+        and args.research_command == "baselines"
+        and args.baselines_command == "holdout-target-source"
+    ):
+        _build_holdout_target_source_cli(
+            foundation_bundle_path=args.foundation_bundle,
+            foundation_receipt_path=args.foundation_receipt,
+            foundation_promotion_path=args.foundation_promotion,
+            experiment_path=args.experiment,
+            output_path=args.output,
+        )
     elif (
         args.command == "research"
         and args.research_command == "baselines"
@@ -2635,6 +2663,64 @@ def _build_ibkr_historical_experiment_cli(
     )
     write_r2_experiment(output_path, experiment)
     print(json.dumps({"experiment": str(output_path)}, sort_keys=True))
+
+
+def _build_holdout_target_source_cli(
+    *,
+    foundation_bundle_path: Path,
+    foundation_receipt_path: Path,
+    foundation_promotion_path: Path,
+    experiment_path: Path,
+    output_path: Path,
+) -> None:
+    experiment = load_r2_experiment(experiment_path)
+    if experiment.market_data_source_class is not IBKR_HISTORICAL_SOURCE:
+        raise ValueError("holdout target source requires the IBKR historical experiment")
+    promotion = authenticate_ibkr_foundation_promotion(
+        foundation_bundle_path,
+        receipt=foundation_receipt_path,
+        promotion=foundation_promotion_path,
+    )
+    if promotion.foundation_bundle_id != experiment.r1_bundle_id:
+        raise ValueError("Stage 8 promotion differs from the experiment foundation")
+    source = build_ibkr_holdout_target_source(
+        foundation_bundle_path,
+        receipt=foundation_receipt_path,
+        target_instruments=experiment.target_instruments,
+    )
+    bindings = (
+        (source.source_target_dataset_id, experiment.target_dataset_id, "target dataset"),
+        (source.observation_dataset_id, experiment.observation_dataset_id, "observation dataset"),
+        (
+            source.foundation_configuration_id,
+            experiment.foundation_configuration_id,
+            "foundation configuration",
+        ),
+        (source.holdout_range, experiment.holdout_range, "holdout range"),
+        (
+            source.primary_horizon_seconds,
+            int(experiment.primary_horizon.total_seconds()),
+            "primary horizon",
+        ),
+        (source.target_instruments, experiment.target_instruments, "target instruments"),
+    )
+    for actual, expected, label in bindings:
+        if actual != expected:
+            raise ValueError(f"holdout target source differs from experiment: {label}")
+    atomic_create(output_path, canonical_bytes(source.as_json()))
+    print(
+        json.dumps(
+            {
+                "contract": source.CONTRACT,
+                "output": str(output_path.resolve()),
+                "source_id": source.source_id,
+                "target_count": len(source.targets),
+                "opportunity_count": len(source.opportunities),
+                "pre_holdout_target_count": len(source.pre_holdout_target_dataset.rows),
+            },
+            sort_keys=True,
+        )
+    )
 
 
 async def _report_r2_readiness(
