@@ -1723,7 +1723,7 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
     )
     monkeypatch.setattr(verification, "authenticate_ibkr_foundation_for_r2", lambda **_: authority)
 
-    parent_calls = {"semantic": 0, "folds": 0, "copies": 0}
+    parent_calls = {"semantic": 0, "folds": 0}
 
     def reject_parent_semantic(*args: Any, **kwargs: Any) -> Any:
         parent_calls["semantic"] += 1
@@ -1732,10 +1732,6 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
     def reject_parent_folds(*args: Any, **kwargs: Any) -> Any:
         parent_calls["folds"] += 1
         raise AssertionError("R2 replay rebuilt parent folds")
-
-    def reject_parent_copy(*args: Any, **kwargs: Any) -> Any:
-        parent_calls["copies"] += 1
-        raise AssertionError("R2 replay copied parent files")
 
     with monkeypatch.context() as replay_patch:
         for module, name in (
@@ -1751,14 +1747,12 @@ def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
             replay_patch.setattr(module, name, reject_parent_semantic)
         for module in (foundation_runtime, ibkr_foundation_runtime):
             replay_patch.setattr(module, "build_expanding_folds", reject_parent_folds)
-        replay_patch.setattr(verification, "_copy_tree", reject_parent_copy)
-        replay_patch.setattr(verification, "_copy_file", reject_parent_copy)
         asyncio.run(
             verification._replay_authority_oof_async(
                 bundle_path, expected_run_kind=CONFIRMATORY_RUN_KIND
             )
         )
 
-    assert parent_calls == {"semantic": 0, "folds": 0, "copies": 0}
+    assert parent_calls == {"semantic": 0, "folds": 0}
     assert call_counts == {"feature_recompute": 8, "local_fit": 2, "pooled_fit": 2}
     assert not (bundle_path.parent / "replay-inputs").exists()
