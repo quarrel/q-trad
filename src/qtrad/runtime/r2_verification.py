@@ -4434,7 +4434,7 @@ def _oof_receipt_output(manifest: Path, output: Path) -> Path:
 
 def _oof_numerical_identity(descriptor: Mapping[str, object]) -> str:
     numerical = {
-        key: descriptor.get(key)
+        key: descriptor[key]
         for key in (
             "numpy_identity",
             "sklearn_identity",
