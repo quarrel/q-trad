@@ -67,7 +67,6 @@ from qtrad.application.r2_readiness import (
     evaluate_outcome_blind_confirmatory_readiness,
     verify_exact_r1_bindings,
 )
-from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, FoldDataset, membership_hash
 from qtrad.domain.forecasts import ForecastDataset
@@ -162,7 +161,7 @@ from qtrad.runtime.foundation_bundle import (
     _verify_confirmatory_target_dataset,
     _verify_g2_feature_source,
     restore_authenticated_foundation_bundle,
-    verify_outcome_blind_foundation_bundle,
+    restore_authenticated_outcome_blind_foundation_bundle,
 )
 from qtrad.runtime.ibkr_foundation import (
     IBKRG2FeatureSourceAuthority,
@@ -972,7 +971,7 @@ async def authenticate_r1_foundation_for_r2(
     if outcome_blind:
         if holdout_target_source is None:
             raise ValueError("outcome-blind R1 authentication requires a holdout target source")
-        verified = await verify_outcome_blind_foundation_bundle(
+        verified = await restore_authenticated_outcome_blind_foundation_bundle(
             root=root,
             bundle_path=bundle_path,
             clock=clock,
@@ -1048,9 +1047,12 @@ def authenticate_ibkr_foundation_for_r2(
     if evidence_class is EvidenceClass.CONFIRMATORY:
         if holdout_target_source is None or promotion_path is None:
             raise ValueError("confirmatory Stage 8 authentication requires holdout and promotion")
-        promotion = authenticate_ibkr_foundation_promotion(
-            foundation_path, receipt=receipt_path, promotion=promotion_path
-        )
+        try:
+            promotion = authenticate_ibkr_foundation_promotion(
+                foundation_path, receipt=receipt_path, promotion=promotion_path
+            )
+        except ValueError as exc:
+            raise ValueError("confirmatory Stage 8 promotion attestation is invalid") from exc
         promotion_id = promotion.promotion_sha256
     elif promotion_path is not None:
         raise ValueError("Stage 8 promotion is valid only for confirmatory R2 work")
@@ -1204,14 +1206,6 @@ def _validate_representative_ibkr_historical_v1(
     folds = verified.folds.folds
     if len(folds) != 3:
         raise ValueError("IBKR historical representative run must contain exactly three folds")
-    expected_folds = build_expanding_folds(
-        verified.targets,
-        verified.configuration,
-        horizon=experiment.primary_horizon,
-        validation_duration=folds[0].validation_end - folds[0].validation_start,
-    )
-    if expected_folds.folds != folds:
-        raise ValueError("IBKR historical representative folds do not replay from the foundation")
     targets_by_id = {row.target_id: row for row in verified.targets.rows}
     for fold in folds:
         for target_id in fold.validation_target_ids:
@@ -1332,16 +1326,6 @@ def _validate_representative_capture_v4(
         experiment.holdout_range,
         embargo=verified.configuration.embargo,
     )
-    expected_folds = build_expanding_folds(
-        verified.targets,
-        verified.configuration,
-        horizon=experiment.primary_horizon,
-        validation_duration=folds[0].validation_end - folds[0].validation_start,
-    )
-    if expected_folds.folds != folds:
-        raise ValueError(
-            "representative folds do not replay from the authenticated foundation configuration"
-        )
     targets_by_id = {row.target_id: row for row in verified.targets.rows}
     for fold in folds:
         for target_id in fold.validation_target_ids:

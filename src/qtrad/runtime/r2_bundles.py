@@ -544,8 +544,13 @@ def _reject_orphan_files(root: Path, allowed_paths: set[str]) -> None:
     for candidate in root.rglob("*"):
         if candidate.is_symlink():
             raise ValueError(f"R2 bundle contains a symlink: {candidate.relative_to(root)}")
-        if candidate.is_file():
-            relative = candidate.relative_to(root).as_posix()
+        relative = candidate.relative_to(root).as_posix()
+        if candidate.is_dir():
+            if not any(
+                path == relative or path.startswith(relative + "/") for path in allowed_paths
+            ):
+                raise ValueError(f"R2 bundle contains an orphaned directory: {relative}")
+        elif candidate.is_file():
             if relative == "selection.json":
                 continue
             if relative not in allowed_paths:

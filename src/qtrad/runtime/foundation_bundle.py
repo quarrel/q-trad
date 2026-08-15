@@ -1724,7 +1724,7 @@ async def verify_foundation_bundle(
     return verified
 
 
-async def verify_outcome_blind_foundation_bundle(
+async def restore_authenticated_outcome_blind_foundation_bundle(
     *,
     root: Path,
     bundle_path: Path,
@@ -1732,7 +1732,7 @@ async def verify_outcome_blind_foundation_bundle(
     holdout_target_source: R2HoldoutTargetSource,
     receipt: Path | FoundationVerificationReceipt,
 ) -> OutcomeBlindVerifiedFoundationBundle:
-    """Verify only authenticated outcome-blind R1 projections needed by F2."""
+    """Restore receipt-authenticated outcome-blind R1 projections without replay."""
     bundle = await authenticate_foundation_bundle(
         root=root,
         bundle_path=bundle_path,
@@ -2056,6 +2056,24 @@ async def verify_outcome_blind_foundation_bundle(
             load_foundation_verification_receipt(receipt) if isinstance(receipt, Path) else receipt
         ),
         g2_feature_source=g2_feature_source,
+    )
+
+
+async def verify_outcome_blind_foundation_bundle(
+    *,
+    root: Path,
+    bundle_path: Path,
+    clock: Clock,
+    holdout_target_source: R2HoldoutTargetSource,
+    receipt: Path | FoundationVerificationReceipt,
+) -> OutcomeBlindVerifiedFoundationBundle:
+    """Verify the authenticated outcome-blind R1 projection contract."""
+    return await restore_authenticated_outcome_blind_foundation_bundle(
+        root=root,
+        bundle_path=bundle_path,
+        clock=clock,
+        holdout_target_source=holdout_target_source,
+        receipt=receipt,
     )
 
 

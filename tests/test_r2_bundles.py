@@ -580,3 +580,12 @@ def test_synthetic_oof_build_is_replayed_from_typed_pipeline(tmp_path: Path) -> 
         verify_oof_bundle(manifest_path).source_class
         is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
     )
+
+
+def test_oof_rejects_empty_orphan_directories(tmp_path: Path) -> None:
+    bundle, children = _bundle_and_children()
+    root = tmp_path / "oof"
+    manifest_path = write_r2_oof_bundle(root, bundle, children)
+    (root / "replay-inputs" / "research").mkdir(parents=True)
+    with pytest.raises(ValueError, match="orphaned directory"):
+        verify_r2_oof_bundle(manifest_path)

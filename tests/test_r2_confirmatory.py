@@ -18,6 +18,7 @@ import pytest
 
 import qtrad.application.r2_holdout as holdout_application
 import qtrad.runtime.foundation_bundle as foundation_runtime
+import qtrad.runtime.ibkr_foundation as ibkr_foundation_runtime
 import qtrad.runtime.r2_holdout as holdout_runtime
 import qtrad.runtime.r2_verification as verification
 from qtrad.__main__ import build_parser
@@ -41,6 +42,7 @@ from qtrad.domain.foundation import (
 from qtrad.domain.market_data import BarProvenance, DataQuality, PriceBasis
 from qtrad.domain.r2_evaluation import ConfigurationDisposition, SelectionManifest
 from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
+from qtrad.domain.r2_ibkr_historical import IBKRHistoricalAdapterIdentity
 from qtrad.domain.r2_holdout import (
     HOLDOUT_ACKNOWLEDGEMENT,
     HoldoutScope,
@@ -205,6 +207,7 @@ def _build_confirmatory_fixture(
     replay_foundation_path: Path | None = None,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
+    market_data_source_class: MarketDataSourceClass | None = None,
 ) -> tuple[
     Path,
     Any,
@@ -213,6 +216,11 @@ def _build_confirmatory_fixture(
     dict[str, tuple[tuple[datetime, datetime], ...]],
 ]:
     qualifying_shape = qualifying and not compact
+    source_class = market_data_source_class or (
+        MarketDataSourceClass.IG_NATIVE_CAPTURE
+        if qualifying
+        else MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
+    )
     target_names = (
         tuple(f"index:synthetic-{index}" for index in range(6))
         if qualifying
@@ -228,11 +236,7 @@ def _build_confirmatory_fixture(
         evidence_class=EvidenceClass.CONFIRMATORY,
         include_holdout_target=compact or not qualifying,
         qualifying_confirmatory=qualifying_shape,
-        market_data_source_class=(
-            MarketDataSourceClass.IG_NATIVE_CAPTURE
-            if qualifying
-            else MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
-        ),
+        market_data_source_class=source_class,
     )
     fixture_verified = cast(Any, verified)
     # Keep the qualifying selection hierarchy without its 16-week readiness shape.
@@ -627,18 +631,35 @@ def _build_confirmatory_fixture(
     receipt_payload = cast(
         dict[str, object], json.loads(local_foundation_receipt_path.read_bytes())
     )
+    promotion_id: str | None = None
+    promotion_path = foundation_promotion_path
+    closure_id = foundation_bundle.closure_id
     verification_id = receipt_payload.get("verification_id")
     if not isinstance(verification_id, str):
         raise ValueError("fixture receipt has no verification identity")
+    if foundation_promotion_path is not None:
+        promotion_payload = cast(
+            dict[str, object], json.loads(foundation_promotion_path.read_bytes())
+        )
+        promotion_value = promotion_payload.get("promotion_sha256")
+        if (
+            not isinstance(promotion_value, str)
+            or len(promotion_value) != 64
+            or any(character not in "0123456789abcdef" for character in promotion_value)
+        ):
+            raise ValueError("fixture promotion has no promotion identity")
+        promotion_id = promotion_value
     foundation_authority = AuthenticatedR2Foundation(
         foundation_id=foundation_bundle.foundation_id,
-        closure_id=foundation_bundle.closure_id,
+        closure_id=closure_id,
         verification_id=verification_id,
         source_class=experiment.market_data_source_class,
         evidence_class=experiment.evidence_class,
         semantic_inputs=verification._foundation_inputs(fixture_verified),
         bundle_path=foundation_path_for_authority,
         receipt_path=local_foundation_receipt_path,
+        promotion_id=promotion_id,
+        promotion_path=promotion_path,
     )
     bundle_path = build_oof_bundle(
         verified=fixture_verified,
@@ -649,7 +670,11 @@ def _build_confirmatory_fixture(
         clock=cast(Clock, SimpleNamespace(now=lambda: experiment.holdout_range[0])),
         output=root / "oof",
         run_kind=CONFIRMATORY_RUN_KIND,
-        representative_profile=(None if qualifying else verification.IBKR_HISTORICAL_PROFILE),
+        representative_profile=(
+            verification.IBKR_HISTORICAL_PROFILE
+            if source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH
+            else None
+        ),
         holdout_target_source=target_source,
         experiment_path=experiment_path,
     )
@@ -1617,3 +1642,123 @@ def test_confirmatory_verifier_rejects_implementation_bundle(
     implementation = _build_synthetic_oof(tmp_path / "implementation" / "oof")
     with pytest.raises(ValueError, match="CONFIRMATORY evidence"):
         verify_confirmatory_f2(implementation)
+
+
+def test_ibkr_authority_replay_uses_only_immediate_parent_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    identities = {
+        "application_identity": "fixture-application",
+        "image_identity": "sha256:" + "1" * 64,
+        "python_identity": "fixture-python",
+        "numpy_identity": "fixture-numpy",
+        "sklearn_identity": "fixture-sklearn",
+    }
+    call_counts = {"feature_recompute": 0, "local_fit": 0, "pooled_fit": 0}
+    original_verify_rows = verification.verify_raw_feature_rows
+    original_local_fit = verification.build_local_ridge_oof
+    original_pooled_fit = verification.build_pooled_ridge_oof
+
+    def spy_verify_rows(*args: Any, **kwargs: Any) -> int:
+        call_counts["feature_recompute"] += 1
+        return original_verify_rows(*args, **kwargs)
+
+    def spy_local_fit(*args: Any, **kwargs: Any) -> Any:
+        call_counts["local_fit"] += 1
+        return original_local_fit(*args, **kwargs)
+
+    def spy_pooled_fit(*args: Any, **kwargs: Any) -> Any:
+        call_counts["pooled_fit"] += 1
+        return original_pooled_fit(*args, **kwargs)
+
+    monkeypatch.setattr(verification, "runtime_identities", lambda: identities)
+    monkeypatch.setattr(verification, "verify_raw_feature_rows", spy_verify_rows)
+    monkeypatch.setattr(verification, "build_local_ridge_oof", spy_local_fit)
+    monkeypatch.setattr(verification, "build_pooled_ridge_oof", spy_pooled_fit)
+    replay_foundation_path = tmp_path / "replay-foundation.json"
+    promotion_path = tmp_path / "promotion.json"
+    promotion_path.write_bytes(canonical_bytes({"promotion_sha256": "c" * 64}))
+    bundle_path, fixture_verified, _, _, _ = _build_confirmatory_fixture(
+        tmp_path,
+        qualifying=True,
+        market_data_source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        replay_foundation_path=replay_foundation_path,
+        foundation_promotion_path=promotion_path,
+    )
+    replay_foundation_path.write_bytes(
+        (tmp_path / "research" / "fixture-foundation.json").read_bytes()
+    )
+    assert call_counts == {"feature_recompute": 4, "local_fit": 1, "pooled_fit": 1}
+
+    experiment_path = tmp_path / "experiment.json"
+    experiment_payload = cast(dict[str, object], json.loads(experiment_path.read_bytes()))
+    adapter = IBKRHistoricalAdapterIdentity.create(
+        foundation_bundle_id=fixture_verified.bundle.foundation_id,
+        application_identity=identities["application_identity"],
+        image_identity=identities["image_identity"],
+    )
+    experiment_payload["source_adapter_identity"] = adapter.as_json()
+    experiment_path.write_bytes(canonical_bytes(experiment_payload))
+
+    oof_bundle = verification.verify_r2_oof_bundle(bundle_path)
+    descriptor = verification._oof_child_payload(
+        bundle_path, oof_bundle, verification.OOF_DESCRIPTOR_CONTRACT
+    )
+    raw_authority = cast(dict[str, object], descriptor["foundation_authority"])
+    authority = AuthenticatedR2Foundation(
+        foundation_id=cast(str, raw_authority["foundation_id"]),
+        closure_id=cast(str, raw_authority["closure_id"]),
+        verification_id=cast(str, raw_authority["verification_id"]),
+        source_class=MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH,
+        evidence_class=EvidenceClass.CONFIRMATORY,
+        semantic_inputs=verification._foundation_inputs(fixture_verified),
+        promotion_id=(
+            None
+            if raw_authority["promotion_id"] is None
+            else cast(str, raw_authority["promotion_id"])
+        ),
+        bundle_path=replay_foundation_path,
+        receipt_path=tmp_path / "research" / "foundation-receipt.json",
+        promotion_path=promotion_path,
+    )
+    monkeypatch.setattr(verification, "authenticate_ibkr_foundation_for_r2", lambda **_: authority)
+
+    parent_calls = {"semantic": 0, "folds": 0, "copies": 0}
+
+    def reject_parent_semantic(*args: Any, **kwargs: Any) -> Any:
+        parent_calls["semantic"] += 1
+        raise AssertionError("R2 replay invoked a parent semantic verifier")
+
+    def reject_parent_folds(*args: Any, **kwargs: Any) -> Any:
+        parent_calls["folds"] += 1
+        raise AssertionError("R2 replay rebuilt parent folds")
+
+    def reject_parent_copy(*args: Any, **kwargs: Any) -> Any:
+        parent_calls["copies"] += 1
+        raise AssertionError("R2 replay copied parent files")
+
+    with monkeypatch.context() as replay_patch:
+        for module, name in (
+            (foundation_runtime, "verify_foundation_bundle"),
+            (foundation_runtime, "_verify_foundation_bundle"),
+            (foundation_runtime, "verify_outcome_blind_foundation_bundle"),
+            (foundation_runtime, "build_asof_panel"),
+            (foundation_runtime, "build_frozen_targets"),
+            (ibkr_foundation_runtime, "verify_ibkr_foundation"),
+            (ibkr_foundation_runtime, "_verify_ibkr_foundation_v3"),
+            (ibkr_foundation_runtime, "build_ibkr_foundation"),
+        ):
+            replay_patch.setattr(module, name, reject_parent_semantic)
+        for module in (foundation_runtime, ibkr_foundation_runtime):
+            replay_patch.setattr(module, "build_expanding_folds", reject_parent_folds)
+        replay_patch.setattr(verification, "_copy_tree", reject_parent_copy)
+        replay_patch.setattr(verification, "_copy_file", reject_parent_copy)
+        asyncio.run(
+            verification._replay_authority_oof_async(
+                bundle_path, expected_run_kind=CONFIRMATORY_RUN_KIND
+            )
+        )
+
+    assert parent_calls == {"semantic": 0, "folds": 0, "copies": 0}
+    assert call_counts == {"feature_recompute": 8, "local_fit": 2, "pooled_fit": 2}
+    assert not (bundle_path.parent / "replay-inputs").exists()

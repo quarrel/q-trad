@@ -2725,6 +2725,18 @@ async def _load_r2_foundation_inputs(
     if experiment.source_adapter_identity is None:
         raise ValueError("IBKR experiment is missing its persisted IBKR adapter identity")
     adapter_identity = IBKRHistoricalAdapterIdentity.from_json(experiment.source_adapter_identity)
+    if (
+        experiment.evidence_class is EvidenceClass.CONFIRMATORY
+        and foundation_promotion_path is None
+    ):
+        raise ValueError(
+            "confirmatory IBKR historical work requires a Stage 8 promotion attestation"
+        )
+    if (
+        experiment.evidence_class is not EvidenceClass.CONFIRMATORY
+        and foundation_promotion_path is not None
+    ):
+        raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
     require_ibkr_adapter_runtime_identity(adapter_identity)
     target_source = None
     if outcome_blind:
