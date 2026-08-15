@@ -4076,17 +4076,16 @@ def selection_freeze(
     """Create a typed, holdout-free SelectionManifest from authenticated OOF evidence."""
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
-    bundle = verify_r2_oof_bundle(oof_bundle_path)
-    descriptor = _oof_child_payload(oof_bundle_path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    run_kind = descriptor.get("run_kind")
-    if receipt is not None:
-        bundle = authenticate_r2_oof(oof_bundle_path, receipt=receipt)
-    elif run_kind != "SYNTHETIC":
-        if run_kind in {"REPRESENTATIVE", CONFIRMATORY_RUN_KIND}:
-            raise ValueError("OOF selection freeze requires an OOF verification receipt")
-        raise ValueError("OOF descriptor has an unsupported run kind")
+    if receipt is None:
+        bundle, descriptor = _authenticate_oof_closure(oof_bundle_path)
+        run_kind = descriptor["run_kind"]
+        if run_kind != "SYNTHETIC":
+            if run_kind in {"REPRESENTATIVE", CONFIRMATORY_RUN_KIND}:
+                raise ValueError("OOF selection freeze requires an OOF verification receipt")
+            raise ValueError("OOF descriptor has an unsupported run kind")
+    else:
+        bundle, descriptor = _authenticate_r2_oof_with_descriptor(oof_bundle_path, receipt=receipt)
     register = _oof_child_payload(oof_bundle_path, bundle, R2_EVALUATION_REGISTER_CONTRACT)
-    descriptor = _oof_child_payload(oof_bundle_path, bundle, OOF_DESCRIPTOR_CONTRACT)
     raw_configurations = register.get("configurations")
     if not isinstance(raw_configurations, list) or not raw_configurations:
         raise ValueError("OOF evaluation register has no complete configuration set")
@@ -4662,11 +4661,19 @@ def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -
     return bundle
 
 
-def authenticate_r2_oof(path: Path, *, receipt: Path) -> R2OofBundle:
-    """Authenticate an R2 OOF closure and receipt without semantic replay."""
+def _authenticate_r2_oof_with_descriptor(
+    path: Path, *, receipt: Path
+) -> tuple[R2OofBundle, dict[str, object]]:
+    """Authenticate one OOF closure and return the consumed descriptor for its caller."""
     bundle, descriptor = _authenticate_oof_closure(path)
     parsed = _load_oof_verification_receipt(path, receipt)
     _validate_oof_verification_receipt(path, bundle, descriptor, parsed)
+    return bundle, descriptor
+
+
+def authenticate_r2_oof(path: Path, *, receipt: Path) -> R2OofBundle:
+    """Authenticate an R2 OOF closure and receipt without semantic replay."""
+    bundle, _ = _authenticate_r2_oof_with_descriptor(path, receipt=receipt)
     return bundle
 
 

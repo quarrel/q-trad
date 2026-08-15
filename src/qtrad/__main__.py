@@ -1176,6 +1176,11 @@ def build_parser() -> argparse.ArgumentParser:
         "selection-freeze", help="freeze disposable implementation selection mechanics"
     )
     baselines_selection_freeze.add_argument("--oof-bundle", type=Path, required=True)
+    baselines_selection_freeze.add_argument(
+        "--oof-receipt",
+        type=Path,
+        help="create-only semantic verification receipt for REPRESENTATIVE/CONFIRMATORY OOF",
+    )
     baselines_selection_freeze.add_argument("--frozen-by", required=True)
     baselines_selection_freeze.add_argument("--output", type=Path, required=True)
     baselines_holdout_selection = baselines_sub.add_parser(
@@ -2423,6 +2428,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     ):
         selection_freeze(
             oof_bundle_path=args.oof_bundle,
+            receipt=args.oof_receipt,
             frozen_by=args.frozen_by,
             output=args.output,
         )
