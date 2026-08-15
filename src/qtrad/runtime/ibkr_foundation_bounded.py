@@ -73,12 +73,6 @@ from qtrad.domain.research import ObservationDataset, ObservationRow
 
 _CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-checkpoint-v1"
 _REPLAY_CHECKPOINT_CONTRACT = "qtrad-stage8-foundation-replay-checkpoint-v1"
-_LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256 = (
-    "cc10c4ebdac5edef1880bbe9348d0220d5a715a3e21c5a26e6582154b42b35e8"
-)
-_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = (
-    "970b9b08a80d240f038c8fcc9d1ffd6b305e3c90583e3f3f2cc1f889f6ea0060"
-)
 _DERIVATION_CHUNK = timedelta(days=7)
 _DEFAULT_WORKERS = 4
 _MAX_WORKERS = 8
@@ -566,44 +560,10 @@ def _implementation_sha256() -> str:
     return hasher.hexdigest()
 
 
-def _legacy_checkpoint_compatibility_sha256() -> str:
-    source = Path(__file__).read_text(encoding="utf-8")
-    lines = source.splitlines()
-    start = next(
-        index
-        for index, line in enumerate(lines)
-        if line.startswith("_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 =")
-    )
-    end = start + 1
-    while not lines[end].endswith(")"):
-        end += 1
-    lines[start : end + 1] = ["_LEGACY_CHECKPOINT_COMPATIBILITY_SHA256 = <bound>"]
-    hasher = hashlib.sha256(("\n".join(lines) + "\n").encode("utf-8"))
-    for function in (
-        _adapt_observation,
-        _observation_from_row,
-        _panel_audit_disposition,
-        _provider_evidence,
-        _revision_key,
-        _source_key,
-        _hash_json,
-        membership_hash,
-    ):
-        hasher.update(inspect.getsource(function).encode("utf-8"))
-    return hasher.hexdigest()
-
-
 def _checkpoint_identity_matches(
     actual: Mapping[str, object], expected: Mapping[str, object]
 ) -> bool:
-    if actual == expected:
-        return True
-    legacy = dict(expected)
-    legacy["implementation_sha256"] = _LEGACY_CHECKPOINT_IMPLEMENTATION_SHA256
-    return (
-        actual == legacy
-        and _legacy_checkpoint_compatibility_sha256() == _LEGACY_CHECKPOINT_COMPATIBILITY_SHA256
-    )
+    return actual == expected
 
 
 def _checkpoint_file(path: Path) -> _CheckpointFile:

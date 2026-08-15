@@ -858,17 +858,15 @@ relevant defect or an explicit operator request.
 
 **Form:** research-input pull request.
 
-**Software status:** The normal Stage 7 construction path now publishes a direct v3 closure containing
-only its manifest and monthly/split observation parts. Build and deep verification authenticate the
-immediate Stage 6 manifest and receipt, consume each request-result child once, and write a create-only
-Stage 7 receipt outside the closure. Ordinary authentication reuses that receipt without Stage 6 replay
-and reads only selected Stage 7 parts. Stage 8 consumer cutover remains a separate handoff; existing v2
-and v1 closures remain retained migration evidence for the named foundation/promotion authorities, not
-normal writer, repacker, CLI or reader paths. PR-H4 deletes that temporary migration bridge after retained
-evidence migration.
-
-Historical v1 deep audit remains available through exact commit
-`f0e882bbcd19aabbefb1add2d87a03daae7670e8`.
+**Software status:** The normal Stage 7 construction path publishes a direct v3 closure containing only its
+manifest and monthly/split observation parts. Build and deep verification authenticate the immediate Stage 6
+receipt, consume each request-result child once, and write a create-only Stage 7 receipt outside the closure.
+Ordinary authentication reuses that receipt without Stage 6 replay and reads only selected Stage 7 parts.
+The retained v2/v1 compatibility readers and migration bridge were deleted after the approved immutable H4
+invalidation record (`3610c94...`); retained closures remain untouched and are no longer normal runtime inputs.
+No normal writer, reader or CLI path can mint or consume superseded v2 evidence. The historical v1 deep-audit
+route is retired with the temporary bridge; current v3 construction, verification and authentication are the
+sole normal Stage 7 contract.
 
 Current v3 construction, verification and authentication commands:
 
@@ -1186,6 +1184,23 @@ Confirmatory IBKR experiment, feature, readiness and OOF commands require both
 `--foundation-receipt` and `--foundation-promotion`. The staged OOF retains both so real F2 replay
 can authenticate promotion before any G2 authority is constructed.
 
+## 6.1 PR-H4 retained-file migration and invalidation (completed)
+
+The operator-authorised retained-file H4 operation is complete and remains fixture/retained-evidence-only.
+It performed no provider, Gateway, database, holdout or real-promotion operation. The immutable
+`migration-invalidation-record.json` (identity `3610c94...`) records that the Stage 8 attempt-3 scientific
+comparison diverged: target return dispositions changed from `VALID` to `UNAVAILABLE_BY_FREEZE` for all four
+horizons, chronological folds changed from nine to zero, and readiness changed from
+`QUALIFYING_HISTORY_READY` without causes to `INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION` with explicit
+insufficient-support, coverage, duration and confirmatory-target causes. The old confirmatory promotion is
+superseded and is not carried forward.
+
+The invalidation record independently authenticates the immutable failure checkpoint and current Stage 6/7/8
+closures without replay or row decoding, and grants no replacement promotion or downstream authority. The
+retained v2/v1 readers, migration bridge and packet-specific finalizer were deleted after independent review.
+Retained evidence and the abandoned attempt remain immutable and untouched; any future migration would
+require a separately authorised, freshly named operation and is not part of the normal CLI/current path.
+
 # 7. Explicitly deferred work
 
 The following remain outside this plan:
@@ -1223,4 +1238,23 @@ foundations regardless of readiness. No Stage 6 or Stage 7 immutable evidence wa
 
 This amendment makes receipts the immediate-parent authority, reserves cumulative semantic replay for
 exceptional deep audit, and makes confirmatory promotion an authentication and operator-authorisation
-step rather than another verifier run. The implementation migration remains active work.
+step rather than another verifier run. The implementation migration and retained-file invalidation are complete; temporary compatibility code has been deleted after the immutable record was authenticated.
+
+
+## 3.4 Retained v2 migration invalidation (attempt 3)
+
+The retained-file H4 attempt-3 destination is permanently abandoned after its Stage 8 equivalence check
+identified a scientific divergence. The immutable packet-specific `migration-invalidation-record.json`
+(identity `3610c94...`) records the reviewed disposition:
+
+* target return dispositions changed from `VALID` to `UNAVAILABLE_BY_FREEZE` for all four horizons;
+* chronological folds changed from nine to zero; and
+* readiness changed from `QUALIFYING_HISTORY_READY` with no causes to
+  `INSUFFICIENT_HISTORY_FOR_MODEL_CONCLUSION` with explicit insufficient-support, coverage, duration and
+  confirmatory-target causes.
+
+The old promotion is superseded and not carried forward. No replacement promotion, attempt-4 destination,
+Stage 6/7 replay or Stage 8 row decode is authorised by this record. The retained closures and abandoned
+attempt remain untouched. The temporary retained-v2 migration readers, compatibility bridge and
+packet-specific invalidation/finalizer code were deleted after independent authentication of the record;
+normal current CLI and writer paths are v3-only.
