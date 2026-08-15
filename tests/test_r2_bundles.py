@@ -441,6 +441,9 @@ def test_oof_semantic_receipt_is_replayed_once_and_authenticated_cheaply(
     verify_r2_oof_semantics(manifest_path, receipt_output=receipt_path)
     assert replay_calls == 1
     assert receipt_path.is_file()
+    with pytest.raises(FileExistsError):
+        verify_r2_oof_semantics(manifest_path, receipt_output=receipt_path)
+    assert replay_calls == 1
 
     def reject_replay(_: Path) -> None:
         raise AssertionError("ordinary OOF authentication replayed semantic work")
