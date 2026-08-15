@@ -1080,3 +1080,74 @@ def test_stage7_schedule_reconstruction_rejects_identity_multiplicity(
             cast(Any, old),
             cast(Any, _stage7_evidence(schedule_evidence={})),
         )
+
+
+def test_stage7_request_evidence_reordering_is_equivalent() -> None:
+    first = _stage7_evidence()
+    second_evidence = SimpleNamespace(
+        request_sha256="t" * 64,
+        result_sha256="u" * 64,
+        evidence_disposition="ACCEPTED",
+        accepted_row_count=0,
+        sessions=({"active": True},),
+    )
+    old = SimpleNamespace(
+        **{
+            **vars(first),
+            "observations": (replace(first.observations[0], gap_disposition="BAR_ACCEPTED"),),
+            "request_evidence": (first.request_evidence[0], second_evidence),
+        }
+    )
+    new = SimpleNamespace(
+        **{
+            **vars(first),
+            "observations": (replace(first.observations[0], schedule_evidence={}),),
+            "request_evidence": (second_evidence, first.request_evidence[0]),
+        }
+    )
+    result = migration._compare_stage7(cast(Any, old), cast(Any, new))
+    assert result["request_evidence_sha256"] == migration._evidence_digest(
+        (first.request_evidence[0], second_evidence)
+    )
+
+
+def test_stage7_request_evidence_duplicate_is_rejected() -> None:
+    evidence = _stage7_evidence().request_evidence[0]
+    with pytest.raises(ValueError, match="duplicate Stage 7 request evidence"):
+        migration._evidence_digest((evidence, evidence))
+
+
+@pytest.mark.parametrize("mutation", ["missing", "changed"])
+def test_stage7_request_evidence_missing_or_changed_entry_is_rejected(mutation: str) -> None:
+    first = _stage7_evidence()
+    second = SimpleNamespace(
+        request_sha256="t" * 64,
+        result_sha256="u" * 64,
+        evidence_disposition="ACCEPTED",
+        accepted_row_count=0,
+        sessions=({"active": True},),
+    )
+    retained_entries = (first.request_evidence[0], second)
+    if mutation == "missing":
+        current_entries = (first.request_evidence[0],)
+    else:
+        current_entries = (
+            first.request_evidence[0],
+            SimpleNamespace(**{**vars(second), "result_sha256": "v" * 64}),
+        )
+    old = SimpleNamespace(
+        **{
+            **vars(first),
+            "observations": (replace(first.observations[0], gap_disposition="BAR_ACCEPTED"),),
+            "request_evidence": retained_entries,
+        }
+    )
+    new = SimpleNamespace(
+        **{
+            **vars(first),
+            "observations": (replace(first.observations[0], schedule_evidence={}),),
+            "request_evidence": current_entries,
+        }
+    )
+    with pytest.raises(ValueError, match="request evidence"):
+        migration._compare_stage7(cast(Any, old), cast(Any, new))

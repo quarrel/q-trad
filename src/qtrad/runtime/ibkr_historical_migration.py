@@ -1013,19 +1013,23 @@ def _request_evidence_entry(item: object) -> dict[str, JsonValue]:
     }
 
 
-def _request_evidence_index(value: object) -> dict[str, dict[str, JsonValue]]:
-    index: dict[str, dict[str, JsonValue]] = {}
-    for item in cast(Iterable[object], value):
-        entry = _request_evidence_entry(item)
+def _request_evidence_entries(value: object) -> list[dict[str, JsonValue]]:
+    entries = [_request_evidence_entry(item) for item in cast(Iterable[object], value)]
+    seen: set[str] = set()
+    for entry in entries:
         request_sha256 = cast(str, entry["request_sha256"])
-        if request_sha256 in index:
+        if request_sha256 in seen:
             raise ValueError("duplicate Stage 7 request evidence identity")
-        index[request_sha256] = entry
-    return index
+        seen.add(request_sha256)
+    return sorted(entries, key=lambda entry: cast(str, entry["request_sha256"]))
+
+
+def _request_evidence_index(value: object) -> dict[str, dict[str, JsonValue]]:
+    return {cast(str, entry["request_sha256"]): entry for entry in _request_evidence_entries(value)}
 
 
 def _evidence_digest(value: object) -> str:
-    entries = [_request_evidence_entry(item) for item in cast(Iterable[object], value)]
+    entries = _request_evidence_entries(value)
     return _file_sha256_bytes(
         canonical_json_bytes(cast(dict[str, JsonValue], {"entries": entries}))
     )
