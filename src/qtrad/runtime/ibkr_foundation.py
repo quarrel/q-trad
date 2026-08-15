@@ -820,7 +820,7 @@ def _load_ibkr_foundation_outcome_blind(
     VerifiedG2FeatureSource | None,
     TargetDataset | None,
 ]:
-    """Load the IBKR foundation without decoding outcome-bearing children.
+    """Load authenticated IBKR children with explicit byte consumption.
 
     The normal loader above is intentionally complete and is used after the
     marker is opened. Representative OOF consumes only the persisted
