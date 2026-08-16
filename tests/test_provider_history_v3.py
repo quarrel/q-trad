@@ -1,12 +1,15 @@
 from __future__ import annotations
 
+import io
 import json
 import shutil
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import cast
 
+import polars as pl
 import pytest
 
 from qtrad.__main__ import build_parser
@@ -14,7 +17,7 @@ from qtrad.application.ibkr_foundation import build_ibkr_foundation
 from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
 from qtrad.application.provider_history import ProviderHistorySourceEvidence
 from qtrad.domain.foundation import FoundationConfig
-from qtrad.domain.ibkr_results import canonical_json_bytes
+from qtrad.domain.ibkr_results import canonical_json_bytes, sha256_bytes
 from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_DECLARED_DELAY,
     PROVIDER_HISTORY_POLICY,
@@ -29,6 +32,8 @@ from qtrad.runtime.ibkr_results import (
 )
 from qtrad.runtime.provider_history_v3 import (
     ProviderHistoryV3PartReference,
+    _read_manifest,
+    _read_part,
     authenticate_provider_history_v3,
     build_provider_history,
     verify_provider_history,
@@ -129,6 +134,55 @@ def test_v3_authentication_never_reads_stage6_or_unselected_parts(
     )
     assert selected.selection is not None
 
+
+
+def _rewrite_part_physical_schema(
+    manifest: Path, *, field_name: str, aggregate: object
+) -> tuple[Path, ProviderHistoryV3PartReference]:
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    reference = _read_manifest(manifest).parts[0]
+    part_path = manifest.parent / reference.path
+    frame = pl.read_parquet(part_path)
+    fields: list[str] = list(runtime.OBSERVATION_FIELDS)
+    fields.insert(fields.index("attempt_id"), field_name)
+    frame = frame.with_columns(pl.lit(aggregate).alias(field_name)).select(fields)
+    output = io.BytesIO()
+    frame.write_parquet(output, compression="zstd")
+    payload = output.getvalue()
+    part_path.write_bytes(payload)
+    return part_path, replace(reference, bytes_sha256=sha256_bytes(payload))
+
+
+def test_v3_reader_accepts_the_sole_retained_aggregate_column(tmp_path: Path) -> None:
+    manifest, _, _ = _stage7_closure(tmp_path)
+    part_path, reference = _rewrite_part_physical_schema(
+        manifest, field_name="aggregate_sha256", aggregate="a" * 64
+    )
+
+    rows = _read_part(part_path, reference)
+
+    assert rows
+
+
+def test_v3_reader_rejects_unknown_retained_physical_column(tmp_path: Path) -> None:
+    manifest, _, _ = _stage7_closure(tmp_path)
+    part_path, reference = _rewrite_part_physical_schema(
+        manifest, field_name="unknown_column", aggregate="a" * 64
+    )
+
+    with pytest.raises(ValueError, match="selected part shape changed"):
+        _read_part(part_path, reference)
+
+
+def test_v3_reader_rejects_invalid_retained_aggregate_value(tmp_path: Path) -> None:
+    manifest, _, _ = _stage7_closure(tmp_path)
+    part_path, reference = _rewrite_part_physical_schema(
+        manifest, field_name="aggregate_sha256", aggregate="not-a-sha256"
+    )
+
+    with pytest.raises(ValueError, match="retained aggregate_sha256"):
+        _read_part(part_path, reference)
 
 def test_v3_file_only_verifier_rejects_orphan_and_receipt_mutation(
     tmp_path: Path,
