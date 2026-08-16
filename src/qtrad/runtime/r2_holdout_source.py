@@ -328,7 +328,7 @@ def _bounded_source_closure_id(manifest: Mapping[str, object]) -> str:
                 or not isinstance(digest, str)
                 or len(digest) != 64
                 or any(character not in "0123456789abcdef" for character in digest)
-                or not isinstance(row_count, int)
+                or type(row_count) is not int
                 or row_count < 0
             ):
                 raise ValueError(f"holdout target source {field} reference is malformed")
@@ -460,7 +460,7 @@ def _part_rows(
         if (
             not isinstance(relative, str)
             or not isinstance(digest, str)
-            or not isinstance(row_count, int)
+            or type(row_count) is not int
         ):
             raise ValueError(f"holdout target source {kind} part reference is malformed")
         part_path = _safe_part_path(manifest_path.parent, relative)
@@ -544,6 +544,9 @@ def load_r2_holdout_target_source(
     closure_id = payload["closure_id"]
     if not isinstance(source_id, str) or not isinstance(closure_id, str):
         raise ValueError("holdout target source bounded manifest IDs are malformed")
+    count_fields = ("target_count", "pre_holdout_target_count", "opportunity_count")
+    if any(type(payload[field]) is not int for field in count_fields):
+        raise ValueError("holdout target source bounded manifest counts must be integers")
     if _part_paths is None:
         _part_paths = bounded_manifest_part_paths(path, payload=payload)
     if closure_id != bounded_source_closure_id(payload):

@@ -551,6 +551,26 @@ def test_bounded_source_rejects_noncanonical_part_path(tmp_path: Path) -> None:
         load_r2_holdout_target_source(output)
 
 
+def test_bounded_source_rejects_non_integer_counts(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    payload = cast(dict[str, object], json.loads(output.read_bytes()))
+    target_count = payload["target_count"]
+
+    payload["target_count"] = 2.0
+    output.write_bytes(canonical_bytes(payload))
+    with pytest.raises(ValueError, match="counts must be integers"):
+        load_r2_holdout_target_source(output)
+
+    payload["target_count"] = target_count
+    target_parts = cast(list[dict[str, object]], payload["target_parts"])
+    target_parts[0]["row_count"] = True
+    output.write_bytes(canonical_bytes(payload))
+    with pytest.raises(ValueError, match="reference is malformed"):
+        load_r2_holdout_target_source(output)
+
+
 def test_bounded_source_rejects_special_part_entry(tmp_path: Path) -> None:
     source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
     output = tmp_path / "target-source.json"
