@@ -564,7 +564,8 @@ def _adapt_observation(
         quality=DataQuality.HEALTHY,
         source_provider=provider_row.provider,
         source_environment=provider_row.environment,
-        source_external_id=provider_row.observation_sha256,
+        # Keep stream lineage stable; event_id already binds the row observation hash.
+        source_external_id=f"{provider_row.provider}-historical:{provider_row.instrument_id}",
     )
 
 

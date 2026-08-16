@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import polars as pl
 import pytest
@@ -15,6 +16,7 @@ import pytest
 from qtrad import __main__ as cli
 from qtrad.adapters.parquet import r2 as r2_parquet
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
+from qtrad.application.ibkr_foundation import _adapt_observation
 from qtrad.application.r2_features import (
     FeatureLineageError,
     R2FoundationInputs,
@@ -37,6 +39,16 @@ from qtrad.application.r2_readiness import _availability_dataset_id
 from qtrad.domain.foundation import AvailabilityBasis, PanelRow, PanelStatus
 from qtrad.domain.identifiers import ProviderListingId
 from qtrad.domain.market_data import PriceBasis
+from qtrad.domain.provider_history import (
+    PROVIDER_HISTORY_BAR_BASIS,
+    PROVIDER_HISTORY_CORRECTION_POLICY,
+    PROVIDER_HISTORY_DECLARED_DELAY,
+    PROVIDER_HISTORY_ENVIRONMENT,
+    PROVIDER_HISTORY_POLICY,
+    PROVIDER_HISTORY_PROVIDER,
+    PROVIDER_HISTORY_SOURCE_CLASS,
+    ProviderHistoricalObservation,
+)
 from qtrad.domain.r2_features import (
     FeatureDefinition,
     R2FeatureDataset,
@@ -87,6 +99,78 @@ def _minimal_foundation(
             source_active_intervals=intervals,
         ),
     )
+
+def _stage8_row(
+    interval_start: datetime,
+    *,
+    close: str,
+    position: int,
+    instrument: str = "fx:aud-usd",
+) -> ObservationRow:
+    interval_end = interval_start + timedelta(minutes=1)
+    provider_row = ProviderHistoricalObservation.create(
+        source_class=PROVIDER_HISTORY_SOURCE_CLASS,
+        provider=PROVIDER_HISTORY_PROVIDER,
+        environment=PROVIDER_HISTORY_ENVIRONMENT,
+        instrument_id=instrument,
+        contract_selection_identity="1" * 64,
+        plan_sha256="2" * 64,
+        interval_start=interval_start,
+        interval_end=interval_end,
+        basis=PROVIDER_HISTORY_BAR_BASIS,
+        open=Decimal(close),
+        high=Decimal(close) + Decimal("0.1"),
+        low=Decimal(close) - Decimal("0.1"),
+        close=Decimal(close),
+        request_sha256="3" * 64,
+        result_sha256="4" * 64,
+        attempt_id=UUID(int=position),
+        attempt_started_at=interval_start,
+        attempt_completed_at=interval_start + timedelta(seconds=30),
+        acquisition_started_at=interval_start,
+        acquisition_completed_at=interval_start + timedelta(seconds=30),
+        available_at=interval_end,
+        availability_selector=PROVIDER_HISTORY_DECLARED_DELAY,
+        availability_policy=PROVIDER_HISTORY_POLICY,
+        availability_delay="PT0S",
+        correction_policy=PROVIDER_HISTORY_CORRECTION_POLICY,
+        schedule_evidence={},
+        gap_disposition="SUCCESS",
+        count=1,
+        callback_sequence=1,
+    )
+    return _adapt_observation(provider_row, source_dataset_id="stage8-fixture", position=position)
+
+
+def test_ibkr_stage8_source_lineage_is_series_stable() -> None:
+    first = _stage8_row(START, close="100", position=1)
+    second = _stage8_row(START + timedelta(minutes=1), close="101", position=2)
+    assert first.source_external_id == second.source_external_id == "ibkr-historical:fx:aud-usd"
+
+    end = START + timedelta(minutes=2)
+    foundation = _minimal_foundation(START, END, active={"fx:aud-usd": ((START, END),)})
+    value, _ = _return(
+        "return_60s",
+        _index((first, second)),
+        "fx:aud-usd",
+        end,
+        end + timedelta(minutes=1),
+        foundation,
+        _RowCache(),
+    )
+    assert value == pytest.approx(log(101 / 100))
+
+    mismatched = replace(second, source_external_id="ibkr-historical:other")
+    with pytest.raises(FeatureLineageError, match="cross source lineage"):
+        _return(
+            "return_60s",
+            _index((first, mismatched)),
+            "fx:aud-usd",
+            end,
+            end + timedelta(minutes=1),
+            foundation,
+            _RowCache(),
+        )
 
 
 def _availability_evidence(
