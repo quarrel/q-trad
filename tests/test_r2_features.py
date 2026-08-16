@@ -29,6 +29,7 @@ from qtrad.application.r2_features import (
     _rolling,
     _RowCache,
     _source_active,
+    _source_active_index_for,
     _spread,
     feature_schema_for_set,
     materialise_r2_features,
@@ -207,6 +208,10 @@ def test_source_active_index_matches_scan_and_counts_bounded_work() -> None:
     assert index.indexed_interval_count == 2
     assert index.lookup_count == len(cases)
     assert index.interval_comparisons == len(cases) - 1
+    fixture_foundation = _minimal_foundation(start, start + timedelta(minutes=5), active=intervals)
+    cached_index = _source_active_index_for(fixture_foundation)
+    assert _source_active_index_for(fixture_foundation) is cached_index
+    assert cached_index.index_build_count == 1
 
     with pytest.raises(ValueError, match="not ordered"):
         _build_source_active_index(

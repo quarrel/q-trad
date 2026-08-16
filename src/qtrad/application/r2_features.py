@@ -154,6 +154,9 @@ def _build_source_active_index(intervals: SourceActiveIntervals) -> _SourceActiv
 def _source_active_index_for(foundation: object) -> _SourceActiveIndex:
     """Reuse the authenticated index, with a one-time fallback for test adapters."""
     index = getattr(foundation, "source_active_index", None)
+    if not isinstance(index, _SourceActiveIndex):
+        semantic_inputs = getattr(foundation, "semantic_inputs", None)
+        index = getattr(semantic_inputs, "source_active_index", None)
     if isinstance(index, _SourceActiveIndex):
         return index
     cached = getattr(foundation, "_qtrad_source_active_index", None)
