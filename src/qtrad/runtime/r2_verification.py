@@ -176,6 +176,7 @@ from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     _canonical_payload_identity,
     _reject_orphan_files,
+    _verify_r2_oof_bundle_with_source,
     atomic_create,
     canonical_bytes,
     reference_for_json,
@@ -191,9 +192,8 @@ from qtrad.runtime.r2_holdout import (
     write_holdout_preparation,
 )
 from qtrad.runtime.r2_holdout_source import (
-    bounded_manifest_payload,
-    bounded_source_closure_id,
-    load_r2_holdout_target_source,
+    R2HoldoutTargetSourceAuthority,
+    load_r2_holdout_target_source_authority,
 )
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
@@ -2113,6 +2113,7 @@ def build_oof_bundle(
     foundation_authority: AuthenticatedR2Foundation | None = None,
     representative_profile: str | None = None,
     holdout_target_source: R2HoldoutTargetSource | None = None,
+    holdout_target_source_authority: R2HoldoutTargetSourceAuthority | None = None,
     holdout_target_source_path: Path | None = None,
     experiment_path: Path | None = None,
     runtime_provenance: Mapping[str, str] | None = None,
@@ -2138,6 +2139,12 @@ def build_oof_bundle(
     if run_kind in {"REPRESENTATIVE", CONFIRMATORY_RUN_KIND}:
         if holdout_target_source is None:
             raise ValueError("OOF build requires an authenticated holdout target source")
+        if holdout_target_source_authority is None:
+            raise ValueError(
+                "canonical OOF build requires an authenticated target source authority"
+            )
+        if holdout_target_source is not holdout_target_source_authority.source:
+            raise ValueError("OOF target source must be the authority-owned source object")
         if foundation_authority is None:
             raise ValueError("canonical OOF build requires immediate foundation authority")
         if foundation_authority.foundation_id != verified.bundle.foundation_id:
@@ -2146,6 +2153,11 @@ def build_oof_bundle(
             raise ValueError("R2 authority source differs from the experiment")
         if foundation_authority.evidence_class is not experiment.evidence_class:
             raise ValueError("R2 authority evidence differs from the experiment")
+        if holdout_target_source_path is not None and (
+            holdout_target_source_path.absolute()
+            != holdout_target_source_authority.manifest_path
+        ):
+            raise ValueError("OOF target source path differs from its authenticated authority")
         if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
             if representative_profile != IBKR_HISTORICAL_PROFILE:
                 raise ValueError("IBKR historical OOF run requires IBKR_HISTORICAL_V1")
@@ -2536,26 +2548,17 @@ def build_oof_bundle(
             research_root=research_root,
         )
         if holdout_target_source is not None:
-            if holdout_target_source_path is None:
-                raise ValueError("canonical OOF build requires the persisted target source path")
-            persisted_source = load_r2_holdout_target_source(holdout_target_source_path)
-            if persisted_source != holdout_target_source:
-                raise ValueError("OOF target source differs from the persisted source closure")
-            holdout_target_source = persisted_source
-            source_manifest = bounded_manifest_payload(holdout_target_source_path)
-            if source_manifest is None:
-                raise ValueError("canonical OOF build requires bounded target source storage")
-            if source_manifest.get("source_id") != holdout_target_source.source_id:
-                raise ValueError("OOF target source differs from the persisted source manifest")
-            closure_id = source_manifest.get("closure_id")
-            if not isinstance(closure_id, str) or closure_id != bounded_source_closure_id(
-                source_manifest
-            ):
-                raise ValueError("OOF target source manifest closure is not authenticated")
+            if holdout_target_source_authority is None:
+                raise ValueError(
+                    "canonical OOF build requires an authenticated target source authority"
+                )
+            closure_id = holdout_target_source_authority.closure_id
             source_binding_payload = _holdout_source_binding_payload(
-                holdout_target_source.source_id, closure_id
+                holdout_target_source_authority.source_id, closure_id
             )
-            runtime_inputs["holdout_target_source"] = str(holdout_target_source_path.absolute())
+            runtime_inputs["holdout_target_source"] = str(
+                holdout_target_source_authority.manifest_path
+            )
         descriptor["runtime_inputs"] = runtime_inputs
     descriptor["descriptor_id"] = sha256(
         canonical_bytes(
@@ -2630,23 +2633,17 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
     return matches[0]
-def _oof_holdout_target_source(
-    bundle_path: Path, bundle: R2OofBundle, descriptor: Mapping[str, object]
-) -> R2HoldoutTargetSource:
+def _oof_holdout_source_authority(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    descriptor: Mapping[str, object],
+    *,
+    authenticated_authority: R2HoldoutTargetSourceAuthority | None = None,
+) -> R2HoldoutTargetSourceAuthority:
     reference = bundle.holdout_target_source
-    if reference is None:
-        raise ValueError("OOF bundle has no authenticated holdout target source")
-    if reference.contract == R2HoldoutTargetSource.CONTRACT:
-        payload = _load_selection(bundle_path.parent / reference.path)
-        source = R2HoldoutTargetSource.from_json(payload)
-        if source.source_id != reference.semantic_id:
-            raise ValueError("OOF holdout target source identity differs from its reference")
-        return source
-    if reference.contract != R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
-        raise ValueError("OOF holdout target source binding contract is unsupported")
-    binding = _oof_child_payload(
-        bundle_path, bundle, R2_HOLDOUT_SOURCE_BINDING_CONTRACT
-    )
+    if reference is None or reference.contract != R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        raise ValueError("OOF bundle does not bind a bounded holdout target source")
+    binding = _oof_child_payload(bundle_path, bundle, R2_HOLDOUT_SOURCE_BINDING_CONTRACT)
     required = {
         "contract",
         "schema_version",
@@ -2677,18 +2674,39 @@ def _oof_holdout_target_source(
     source_path = Path(raw_source_path)
     if not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
         raise ValueError("OOF persisted source locator is unavailable")
-    manifest = bounded_manifest_payload(source_path)
-    if manifest is None or manifest.get("source_id") != source_id:
-        raise ValueError("OOF persisted source manifest differs from its binding")
-    if (
-        manifest.get("closure_id") != closure_id
-        or bounded_source_closure_id(manifest) != closure_id
-    ):
+    if authenticated_authority is None:
+        authority = load_r2_holdout_target_source_authority(source_path)
+    else:
+        authority = authenticated_authority
+        if authority.manifest_path != source_path.absolute():
+            raise ValueError("OOF source authority locator differs from its descriptor")
+    if authority.source_id != source_id or authority.closure_id != closure_id:
         raise ValueError("OOF persisted source closure differs from its binding")
-    source = load_r2_holdout_target_source(source_path)
-    if source.source_id != source_id:
-        raise ValueError("OOF persisted source semantic identity differs from its binding")
-    return source
+    return authority
+
+
+def _oof_holdout_target_source(
+    bundle_path: Path,
+    bundle: R2OofBundle,
+    descriptor: Mapping[str, object],
+    *,
+    authenticated_authority: R2HoldoutTargetSourceAuthority | None = None,
+) -> R2HoldoutTargetSource:
+    reference = bundle.holdout_target_source
+    if reference is None:
+        raise ValueError("OOF bundle has no authenticated holdout target source")
+    if reference.contract == R2HoldoutTargetSource.CONTRACT:
+        payload = _load_selection(bundle_path.parent / reference.path)
+        source = R2HoldoutTargetSource.from_json(payload)
+        if source.source_id != reference.semantic_id:
+            raise ValueError("OOF holdout target source identity differs from its reference")
+        return source
+    return _oof_holdout_source_authority(
+        bundle_path,
+        bundle,
+        descriptor,
+        authenticated_authority=authenticated_authority,
+    ).source
 
 
 def _configuration_record_from_payload(value: object) -> ConfigurationRecord:
@@ -3032,7 +3050,12 @@ def _complete_confirmatory_readiness(
 
 def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     """Exceptional deep audit that replays a qualifying confirmatory F2 authority."""
-    bundle = verify_r2_oof_bundle(path)
+    bundle, source_authority_value = _verify_r2_oof_bundle_with_source(path)
+    source_authority = (
+        source_authority_value
+        if isinstance(source_authority_value, R2HoldoutTargetSourceAuthority)
+        else None
+    )
     if bundle.evidence_class is not EvidenceClass.CONFIRMATORY:
         raise ValueError("confirmatory F2 requires CONFIRMATORY evidence")
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
@@ -3044,7 +3067,17 @@ def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         raise ValueError("confirmatory F2 must exclude the locked holdout")
     if bundle.holdout_target_source is None:
         raise ValueError("confirmatory F2 has no authenticated target source")
-    source = _oof_holdout_target_source(path, bundle, descriptor)
+    if (
+        bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+        and source_authority is None
+    ):
+        source_authority = _oof_holdout_source_authority(path, bundle, descriptor)
+    source = _oof_holdout_target_source(
+        path,
+        bundle,
+        descriptor,
+        authenticated_authority=source_authority,
+    )
     expected_descriptor_values = {
         "foundation_bundle_id": bundle.foundation_bundle_id,
         "experiment_configuration_id": bundle.experiment_configuration_id,
@@ -3115,7 +3148,14 @@ def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         replayed_source_active_intervals,
         outcome_blind_foundation,
         g2_feature_source_authority,
-    ) = _replay_confirmatory_oof(path)
+    ) = asyncio.run(
+        _replay_authority_oof_async(
+            path,
+            expected_run_kind=CONFIRMATORY_RUN_KIND,
+            authenticated_bundle=bundle,
+            authenticated_source_authority=source_authority,
+        )
+    )
     if g2_feature_source_authority is None:
         raise ValueError("confirmatory F2 foundation has no authenticated G2 feature source")
     readiness_report = evaluate_outcome_blind_confirmatory_readiness(
@@ -5022,6 +5062,8 @@ async def _replay_authority_oof_async(
     path: Path,
     *,
     expected_run_kind: str = "REPRESENTATIVE",
+    authenticated_bundle: R2OofBundle | None = None,
+    authenticated_source_authority: R2HoldoutTargetSourceAuthority | None = None,
 ) -> tuple[
     FoldDataset,
     Mapping[str, tuple[tuple[datetime, datetime], ...]],
@@ -5029,11 +5071,29 @@ async def _replay_authority_oof_async(
     ConfirmatoryG2FeatureSourceAuthority | None,
 ]:
     """Replay R2 from the authenticated immediate parent and consumed feature bytes."""
-    bundle = verify_r2_oof_bundle(path)
+    if authenticated_bundle is None:
+        bundle, source_authority = _verify_r2_oof_bundle_with_source(path)
+    else:
+        bundle = authenticated_bundle
+        source_authority = authenticated_source_authority
     if bundle.holdout_target_source is None:
         raise ValueError("OOF bundle has no authenticated holdout target source")
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    holdout_target_source = _oof_holdout_target_source(path, bundle, descriptor)
+    if (
+        bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+        and not isinstance(source_authority, R2HoldoutTargetSourceAuthority)
+    ):
+        source_authority = _oof_holdout_source_authority(path, bundle, descriptor)
+    holdout_target_source = _oof_holdout_target_source(
+        path,
+        bundle,
+        descriptor,
+        authenticated_authority=(
+            source_authority
+            if isinstance(source_authority, R2HoldoutTargetSourceAuthority)
+            else None
+        ),
+    )
     if descriptor.get("run_kind") != expected_run_kind:
         raise ValueError(f"authority replay requires a {expected_run_kind} OOF run")
     raw_authority = descriptor.get("foundation_authority")
@@ -5181,6 +5241,11 @@ async def _replay_authority_oof_async(
             representative_profile=representative_profile,
             run_kind=expected_run_kind,
             holdout_target_source=holdout_target_source,
+            holdout_target_source_authority=(
+                source_authority
+                if isinstance(source_authority, R2HoldoutTargetSourceAuthority)
+                else None
+            ),
             holdout_target_source_path=holdout_target_source_path,
             experiment_path=experiment_path,
             runtime_provenance={
@@ -5485,20 +5550,64 @@ def _validate_oof_verification_receipt(
             raise ValueError(f"R2 OOF verification receipt binding is not accepted: {field}")
 
 
-def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -> R2OofBundle:
-    """Replay one R2 OOF transformation and optionally issue its create-only receipt."""
-    bundle = verify_r2_oof_bundle(path)
-    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    receipt_path = None if receipt_output is None else _oof_receipt_output(path, receipt_output)
+def _replay_verified_oof(
+    path: Path,
+    bundle: R2OofBundle,
+    descriptor: Mapping[str, object],
+    source_authority: R2HoldoutTargetSourceAuthority | None,
+    *,
+    allow_confirmatory: bool,
+) -> R2HoldoutTargetSourceAuthority | None:
     run_kind = descriptor.get("run_kind")
     if run_kind == "SYNTHETIC":
         _replay_synthetic_oof(path)
-    elif run_kind == "REPRESENTATIVE":
-        _replay_representative_oof(path)
+        return None
+    if run_kind == CONFIRMATORY_RUN_KIND and not allow_confirmatory:
+        raise ValueError("confirmatory OOF bundles require an authenticated F2 promotion")
+    if (
+        bundle.holdout_target_source is not None
+        and bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+        and source_authority is None
+    ):
+        source_authority = _oof_holdout_source_authority(path, bundle, descriptor)
+    if run_kind == "REPRESENTATIVE":
+        asyncio.run(
+            _replay_authority_oof_async(
+                path,
+                authenticated_bundle=bundle,
+                authenticated_source_authority=source_authority,
+            )
+        )
     elif run_kind == CONFIRMATORY_RUN_KIND:
-        _replay_confirmatory_oof(path)
+        asyncio.run(
+            _replay_authority_oof_async(
+                path,
+                expected_run_kind=CONFIRMATORY_RUN_KIND,
+                authenticated_bundle=bundle,
+                authenticated_source_authority=source_authority,
+            )
+        )
     else:
         raise ValueError("OOF descriptor has an unsupported run kind")
+    return source_authority
+
+def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -> R2OofBundle:
+    """Replay one R2 OOF transformation and optionally issue its create-only receipt."""
+    bundle, source_authority_value = _verify_r2_oof_bundle_with_source(path)
+    source_authority = (
+        source_authority_value
+        if isinstance(source_authority_value, R2HoldoutTargetSourceAuthority)
+        else None
+    )
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    receipt_path = None if receipt_output is None else _oof_receipt_output(path, receipt_output)
+    _replay_verified_oof(
+        path,
+        bundle,
+        descriptor,
+        source_authority,
+        allow_confirmatory=True,
+    )
     if receipt_path is not None:
         receipt = _build_oof_verification_receipt(path, bundle, descriptor)
         atomic_create(receipt_path, canonical_bytes(receipt.as_json()))
@@ -5528,19 +5637,30 @@ def authenticate_r2_oof(path: Path, *, receipt: Path) -> R2OofBundle:
     return bundle
 
 
+def verify_oof_bundle_with_source(
+    path: Path,
+) -> tuple[R2OofBundle, R2HoldoutTargetSourceAuthority | None]:
+    """Verify and replay an OOF bundle, retaining its consumed source authority."""
+    bundle, source_authority_value = _verify_r2_oof_bundle_with_source(path)
+    source_authority = (
+        source_authority_value
+        if isinstance(source_authority_value, R2HoldoutTargetSourceAuthority)
+        else None
+    )
+    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    retained_authority = _replay_verified_oof(
+        path,
+        bundle,
+        descriptor,
+        source_authority,
+        allow_confirmatory=False,
+    )
+    return bundle, retained_authority
+
+
 def verify_oof_bundle(path: Path) -> R2OofBundle:
     """Verify an OOF envelope and replay the run's authenticated computation."""
-    bundle = verify_r2_oof_bundle(path)
-    descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
-    run_kind = descriptor.get("run_kind")
-    if run_kind == "SYNTHETIC":
-        _replay_synthetic_oof(path)
-    elif run_kind == "REPRESENTATIVE":
-        _replay_representative_oof(path)
-    elif run_kind == CONFIRMATORY_RUN_KIND:
-        raise ValueError("confirmatory OOF bundles require an authenticated F2 promotion")
-    else:
-        raise ValueError("OOF descriptor has an unsupported run kind")
+    bundle, _source_authority = verify_oof_bundle_with_source(path)
     return bundle
 
 

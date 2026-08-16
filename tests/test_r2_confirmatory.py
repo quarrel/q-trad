@@ -69,6 +69,7 @@ from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import canonical_bytes
 from qtrad.runtime.r2_holdout_source import (
     load_r2_holdout_target_source,
+    load_r2_holdout_target_source_authority,
     write_r2_holdout_target_source,
 )
 from qtrad.runtime.r2_verification import (
@@ -625,6 +626,8 @@ def _build_confirmatory_fixture(
     )
     target_source_path = root / "target-source.json"
     write_r2_holdout_target_source(target_source_path, target_source)
+    target_source_authority = load_r2_holdout_target_source_authority(target_source_path)
+    target_source = target_source_authority.source
     fixture_verified.targets = R2OutcomeBlindTargetView.from_source(target_source)
     foundation_path_for_authority = replay_foundation_path or foundation_path
     receipt_payload = cast(
@@ -675,6 +678,7 @@ def _build_confirmatory_fixture(
             else None
         ),
         holdout_target_source=target_source,
+        holdout_target_source_authority=target_source_authority,
         holdout_target_source_path=target_source_path,
         experiment_path=experiment_path,
     )

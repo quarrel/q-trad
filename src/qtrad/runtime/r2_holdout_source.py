@@ -12,6 +12,7 @@ import hashlib
 import json
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from contextlib import suppress
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import cast
 
@@ -25,6 +26,36 @@ _PART_CONTRACT = "qtrad-r2-holdout-target-source-part-v1"
 _PART_SCHEMA_VERSION = 1
 _MAX_PART_BYTES = 64 * 1024 * 1024
 _MAX_MANIFEST_BYTES = _MAX_PART_BYTES
+_SOURCE_AUTHORITY_TOKEN = object()
+
+
+@dataclass(frozen=True, slots=True)
+class R2HoldoutTargetSourceAuthority:
+    """One authenticated, bounded source load for an outcome-blind stage."""
+
+    source: R2HoldoutTargetSource
+    manifest_path: Path
+    closure_id: str
+    part_paths: frozenset[str]
+    _token: object = field(repr=False, compare=False)
+
+    @classmethod
+    def _create(
+        cls,
+        token: object,
+        *,
+        source: R2HoldoutTargetSource,
+        manifest_path: Path,
+        closure_id: str,
+        part_paths: frozenset[str],
+    ) -> R2HoldoutTargetSourceAuthority:
+        if token is not _SOURCE_AUTHORITY_TOKEN:
+            raise TypeError("holdout target source authority construction is private")
+        return cls(source, manifest_path.absolute(), closure_id, part_paths, token)
+
+    @property
+    def source_id(self) -> str:
+        return self.source.source_id
 
 
 def _json_value(value: object) -> JsonValue:
@@ -197,6 +228,7 @@ def _part_relative_path(output: Path, kind: str, part_index: int) -> str:
 
 
 def _preflight_paths(output: Path, part_counts: Mapping[str, int]) -> None:
+    _reject_symlink_ancestors(output)
     if output.is_symlink() or output.exists():
         raise FileExistsError(f"create-only holdout target source already exists: {output}")
     parts_root = output.parent / f"{output.name}.parts"
@@ -286,7 +318,7 @@ def _manifest_payload(
 
 
 def _bounded_source_closure_id(manifest: Mapping[str, object]) -> str:
-    """Hash semantic source identity and ordered part bytes, excluding paths."""
+    """Hash semantic source identity and ordered declared part bytes/paths."""
 
     def parts(field: str) -> list[dict[str, object]]:
         raw_parts = manifest.get(field)
@@ -298,9 +330,14 @@ def _bounded_source_closure_id(manifest: Mapping[str, object]) -> str:
                 raise ValueError(f"holdout target source {field} reference is invalid")
             digest = raw_part.get("sha256")
             row_count = raw_part.get("row_count")
-            if not isinstance(digest, str) or not isinstance(row_count, int):
+            relative = raw_part.get("path")
+            if (
+                not isinstance(relative, str)
+                or not isinstance(digest, str)
+                or not isinstance(row_count, int)
+            ):
                 raise ValueError(f"holdout target source {field} reference is malformed")
-            result.append({"sha256": digest, "row_count": row_count})
+            result.append({"path": relative, "sha256": digest, "row_count": row_count})
         return result
 
     source_id = manifest.get("source_id")
@@ -461,9 +498,18 @@ def _part_rows(
     return rows
 
 
-def load_r2_holdout_target_source(path: Path) -> R2HoldoutTargetSource:
+def load_r2_holdout_target_source(
+    path: Path,
+    *,
+    _manifest_payload: Mapping[str, object] | None = None,
+    _part_paths: frozenset[str] | None = None,
+) -> R2HoldoutTargetSource:
     """Load a full or bounded-parts source and authenticate its semantic ID."""
-    payload = _json_object(path, limit=_MAX_MANIFEST_BYTES)
+    payload = (
+        dict(_manifest_payload)
+        if _manifest_payload is not None
+        else _json_object(path, limit=_MAX_MANIFEST_BYTES)
+    )
     if payload.get("storage") != _SOURCE_STORAGE:
         source = R2HoldoutTargetSource.from_json(payload)
         return source
@@ -501,11 +547,12 @@ def load_r2_holdout_target_source(path: Path) -> R2HoldoutTargetSource:
     closure_id = payload["closure_id"]
     if not isinstance(source_id, str) or not isinstance(closure_id, str):
         raise ValueError("holdout target source bounded manifest IDs are malformed")
+    if _part_paths is None:
+        _part_paths = bounded_manifest_part_paths(path, payload=payload)
     if closure_id != bounded_source_closure_id(payload):
         raise ValueError(
             "holdout target source bounded manifest closure ID differs from its content"
         )
-    bounded_manifest_part_paths(path, payload=payload)
     targets = _part_rows(
         path, source_id=source_id, kind="targets", references=payload["target_parts"]
     )
@@ -567,6 +614,34 @@ def bounded_manifest_payload(path: Path) -> dict[str, object] | None:
     return payload
 
 
+def load_r2_holdout_target_source_authority(
+    path: Path,
+) -> R2HoldoutTargetSourceAuthority:
+    """Authenticate and retain one bounded source load for a stage handoff."""
+    payload = bounded_manifest_payload(path)
+    if payload is None:
+        raise ValueError("holdout target source authority requires bounded source storage")
+    source_id = payload.get("source_id")
+    closure_id = payload.get("closure_id")
+    if not isinstance(source_id, str) or not isinstance(closure_id, str):
+        raise ValueError("holdout target source authority IDs are malformed")
+    if closure_id != bounded_source_closure_id(payload):
+        raise ValueError("holdout target source authority closure is not authenticated")
+    part_paths = bounded_manifest_part_paths(path, payload=payload)
+    source = load_r2_holdout_target_source(
+        path, _manifest_payload=payload, _part_paths=part_paths
+    )
+    if source.source_id != source_id:
+        raise ValueError("holdout target source authority semantic ID differs from its manifest")
+    return R2HoldoutTargetSourceAuthority._create(
+        _SOURCE_AUTHORITY_TOKEN,
+        source=source,
+        manifest_path=path,
+        closure_id=closure_id,
+        part_paths=part_paths,
+    )
+
+
 _BOUND_PART_FIELDS = (
     ("targets", "target_parts"),
     ("pre-holdout-target", "pre_holdout_target_parts"),
@@ -583,17 +658,17 @@ def bounded_manifest_part_paths(
     if payload is None:
         return frozenset()
     declared: set[str] = set()
-    for kind, field in _BOUND_PART_FIELDS:
-        references = payload.get(field)
+    for kind, field_name in _BOUND_PART_FIELDS:
+        references = payload.get(field_name)
         if not isinstance(references, list):
-            raise ValueError(f"holdout target source {field} must be an array")
+            raise ValueError(f"holdout target source {field_name} must be an array")
         for expected_index, raw_reference in enumerate(references):
             if not isinstance(raw_reference, Mapping):
-                raise ValueError(f"holdout target source {field} reference is invalid")
+                raise ValueError(f"holdout target source {field_name} reference is invalid")
             relative = raw_reference.get("path")
             expected_relative = f"{path.name}.parts/{kind}/part-{expected_index:06d}.json"
             if relative != expected_relative:
-                raise ValueError(f"holdout target source {field} path is not canonical")
+                raise ValueError(f"holdout target source {field_name} path is not canonical")
             _safe_part_path(path.parent, expected_relative)
             if expected_relative in declared:
                 raise ValueError("holdout target source manifest declares a duplicate part")

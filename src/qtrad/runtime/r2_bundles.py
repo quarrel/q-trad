@@ -239,7 +239,7 @@ def write_r2_oof_bundle(
     return path
 
 
-def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
+def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object | None]:
     payload = _load_object(path)
     if set(payload) != {
         "contract",
@@ -317,9 +317,9 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         bounded_source_closure_id,
         load_r2_holdout_target_source,
     )
-
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
     binding_payload: dict[str, object] | None = None
+    source_authority: object | None = None
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
@@ -529,12 +529,16 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
             or bounded_source_closure_id(manifest) != closure_id
         ):
             raise ValueError("OOF persisted source closure differs from its binding")
-        source = load_r2_holdout_target_source(source_path)
-        if source.source_id != binding_payload["source_id"]:
-            raise ValueError("OOF persisted source semantic identity differs from its binding")
+        bounded_manifest_part_paths(source_path, payload=manifest)
 
     _allow_bound_selection(path.parent, bundle)
     _reject_orphan_files(path.parent, allowed_paths)
+    return bundle, source_authority
+
+
+def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
+    """Verify an OOF bundle and discard any consumed external source authority."""
+    bundle, _source_authority = _verify_r2_oof_bundle_with_source(path)
     return bundle
 
 

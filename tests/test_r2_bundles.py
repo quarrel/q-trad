@@ -40,6 +40,7 @@ from qtrad.runtime.r2_holdout_source import (
     _split_part_rows,
     bounded_manifest_part_paths,
     load_r2_holdout_target_source,
+    load_r2_holdout_target_source_authority,
     write_r2_holdout_target_source,
 )
 from qtrad.runtime.r2_verification import (
@@ -592,6 +593,28 @@ def test_bounded_source_consumes_manifest_and_parts_once(
 
     monkeypatch.setattr(Path, "read_bytes", count_reads)
     assert load_r2_holdout_target_source(output).source_id == source.source_id
+    assert reads[output] == 1
+    assert all(reads[path] == 1 for path in part_paths)
+    assert set(reads) == {output, *part_paths}
+
+
+def test_bounded_source_authority_consumes_manifest_and_parts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    part_paths = tuple(output.parent / path for path in bounded_manifest_part_paths(output))
+    reads: dict[Path, int] = {}
+    original_read_bytes = Path.read_bytes
+
+    def count_reads(path: Path) -> bytes:
+        reads[path] = reads.get(path, 0) + 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", count_reads)
+    authority = load_r2_holdout_target_source_authority(output)
+    assert authority.source_id == source.source_id
     assert reads[output] == 1
     assert all(reads[path] == 1 for path in part_paths)
     assert set(reads) == {output, *part_paths}
