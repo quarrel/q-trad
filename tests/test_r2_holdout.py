@@ -1635,6 +1635,15 @@ def test_transfer_claim_crash_leaves_resumable_staging(
     assert json.loads((source / ".preparation-claim.json").read_text())["state"] == "TRANSFERRED"
     assert not source_usage.exists()
     assert tuple(tmp_path.glob(".destination.transfer-*"))
+    alternate = tmp_path / "alternate"
+    with pytest.raises(FileExistsError, match="another destination"):
+        prepare_holdout_from_files(
+            source,
+            alternate,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        )
+    assert not alternate.exists()
 
     monkeypatch.setattr(holdout_runtime, "_write_json", original_write)
     seal = prepare_holdout_from_files(
@@ -1646,7 +1655,111 @@ def test_transfer_claim_crash_leaves_resumable_staging(
     assert destination.is_dir()
     assert seal.seal_id
 
+def test_transfer_claim_publication_crash_resumes_exact_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _prepared(source)
+    original_replace = holdout_runtime.os.replace
+    claim_path = source / ".preparation-claim.json"
+    claim_next = source / "..preparation-claim.json.next"
 
+    def fail_claim_publication(source_path: Path, destination_path: Path) -> None:
+        if (
+            Path(destination_path) == claim_path
+            and Path(source_path).name == "..preparation-claim.json.next"
+        ):
+            raise RuntimeError("simulated claim publication crash")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(holdout_runtime.os, "replace", fail_claim_publication)
+    with pytest.raises(RuntimeError, match="claim publication crash"):
+        prepare_holdout_from_files(
+            source,
+            destination,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        )
+    assert json.loads(claim_path.read_text())["state"] == "OWNED_UNOPENED"
+    assert claim_next.is_file()
+    assert not destination.exists()
+
+    monkeypatch.setattr(holdout_runtime.os, "replace", original_replace)
+    seal = prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    assert destination.is_dir()
+    assert seal.seal_id
+    assert not claim_next.exists()
+
+
+
+def test_transferred_preparation_rejects_moved_destination_root(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    moved = tmp_path / "moved"
+    _prepared(source)
+    prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    destination.rename(moved)
+    with pytest.raises(ValueError, match="destination identity"):
+        verify_holdout_preparation(
+            moved,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        )
+
+
+def test_completed_output_requires_source_usage_authority(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _prepared(source)
+    prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    (source / ".preparation-source-claim.json").unlink()
+    (source / ".preparation-transfer-intent.json").unlink()
+    with pytest.raises(ValueError, match="authenticated transfer intent"):
+        prepare_holdout_from_files(
+            source,
+            destination,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        )
+    assert not (source / ".preparation-source-claim.json").exists()
+
+
+def test_completed_output_repairs_missing_source_usage_from_intent(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _prepared(source)
+    prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    source_usage = source / ".preparation-source-claim.json"
+    source_usage.unlink()
+    seal = prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    assert seal.seal_id
+    assert source_usage.is_file()
 
 
 def test_terminal_outcomes_round_trip_with_forced_part_bound(

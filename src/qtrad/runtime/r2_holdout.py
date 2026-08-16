@@ -1207,7 +1207,19 @@ def _replace_json(path: Path, payload: Mapping[str, object]) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"expected a regular claim file: {path}")
     temporary = path.with_name(f".{path.name}.next")
-    _write_json(temporary, payload)
+    encoded = canonical_bytes(payload)
+    if temporary.exists() or temporary.is_symlink():
+        if (
+            temporary.is_symlink()
+            or not temporary.is_file()
+            or temporary.read_bytes() != encoded
+        ):
+            raise ValueError(
+                "claim transition temporary differs from its intended bytes: "
+                f"{temporary}"
+            )
+    else:
+        atomic_create(temporary, encoded)
     os.replace(temporary, path)
 
 
@@ -1445,9 +1457,12 @@ _EVALUATION_FIELDS = {
 }
 
 _PREPARATION_CLAIM_FILE = ".preparation-claim.json"
+_PREPARATION_CLAIM_NEXT_FILE = "..preparation-claim.json.next"
 _PREPARATION_USAGE_FILE = ".preparation-source-claim.json"
+_PREPARATION_TRANSFER_INTENT_FILE = ".preparation-transfer-intent.json"
 _PREPARATION_CLAIM_CONTRACT = "qtrad-r2-holdout-preparation-claim-v1"
 _PREPARATION_USAGE_CONTRACT = "qtrad-r2-holdout-preparation-usage-v1"
+_PREPARATION_TRANSFER_INTENT_CONTRACT = "qtrad-r2-holdout-transfer-intent-v1"
 
 _PREPARATION_CLAIM_FIELDS = {
     "contract",
@@ -1469,6 +1484,16 @@ _PREPARATION_USAGE_FIELDS = {
     "destination_root_id",
     "transfer_id",
     "usage_id",
+}
+_PREPARATION_TRANSFER_INTENT_FIELDS = {
+    "contract",
+    "schema_version",
+    "selection_manifest_id",
+    "seal_id",
+    "source_claim_id",
+    "transfer_id",
+    "destination_root_id",
+    "intent_id",
 }
 _PREPARATION_AUTHORITY_FILE = "authority.json"
 _PREPARATION_AUTHORITY_CONTRACT = "qtrad-r2-holdout-preparation-authority-v1"
@@ -1545,6 +1570,30 @@ def _preparation_transfer_id(
         "source_claim_id": source_claim_id,
     }
     return _semantic_id(semantic, "transfer_id")
+
+
+def _preparation_transfer_intent(
+    selection_manifest_id: str,
+    seal_id: str,
+    source_claim_id: str,
+    transfer_id: str,
+    destination_root_id: str,
+) -> dict[str, object]:
+    semantic = {
+        "contract": "qtrad-r2-holdout-transfer-intent-v1",
+        "schema_version": 1,
+        "selection_manifest_id": selection_manifest_id,
+        "seal_id": seal_id,
+        "source_claim_id": source_claim_id,
+        "transfer_id": transfer_id,
+        "destination_root_id": destination_root_id,
+    }
+    return {
+        **semantic,
+        "intent_id": _semantic_id(semantic, "intent_id"),
+    }
+
+
 
 
 def _preparation_usage(
@@ -2422,6 +2471,7 @@ def verify_holdout_preparation(
     immediate_parent_authority: Mapping[str, object] | None = None,
     _payload_cache: _PayloadCache | None = None,
     _allow_incomplete_transfer: bool = False,
+    _expected_destination_root_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
     seal_payload = _verify_child(
         path,
@@ -2510,9 +2560,66 @@ def verify_holdout_preparation(
         _PREPARATION_CLAIM_FILE,
         _PREPARATION_AUTHORITY_FILE,
     }
+    intent_path = path / _PREPARATION_TRANSFER_INTENT_FILE
+    if intent_path.is_file():
+        if intent_path.is_symlink():
+            raise ValueError("transfer intent must be a regular file")
+        intent_payload = _verify_child(
+            path,
+            _PREPARATION_TRANSFER_INTENT_FILE,
+            contract=_PREPARATION_TRANSFER_INTENT_CONTRACT,
+            identity_key="intent_id",
+            expected_fields=_PREPARATION_TRANSFER_INTENT_FIELDS,
+        )
+        if claim_state not in {"AVAILABLE", "OWNED_UNOPENED", "TRANSFERRED"}:
+            raise ValueError("transfer intent cannot accompany an owned preparation")
+        if claim_state in {"AVAILABLE", "OWNED_UNOPENED"}:
+            source_claim_value = claim_payload.get("claim_id")
+            if not isinstance(source_claim_value, str) or not source_claim_value:
+                raise ValueError("transfer intent source claim is malformed")
+            intent_source_claim_id = source_claim_value
+            intent_transfer_id = _preparation_transfer_id(
+                selection.manifest_id,
+                seal.seal_id,
+                intent_source_claim_id,
+            )
+        else:
+            source_claim_value = claim_payload.get("source_claim_id")
+            transfer_value = claim_payload.get("transfer_id")
+            if (
+                not isinstance(source_claim_value, str)
+                or not source_claim_value
+                or not isinstance(transfer_value, str)
+                or not transfer_value
+            ):
+                raise ValueError("transfer intent source claim is malformed")
+            intent_source_claim_id = source_claim_value
+            intent_transfer_id = transfer_value
+        intent_destination_root_id = intent_payload.get("destination_root_id")
+        if (
+            not isinstance(intent_destination_root_id, str)
+            or len(intent_destination_root_id) != 64
+            or any(
+                character not in "0123456789abcdef"
+                for character in intent_destination_root_id
+            )
+        ):
+            raise ValueError("transfer intent destination identity is malformed")
+        expected_intent = _preparation_transfer_intent(
+            selection.manifest_id,
+            seal.seal_id,
+            intent_source_claim_id,
+            intent_transfer_id,
+            intent_destination_root_id,
+        )
+        if intent_payload != expected_intent:
+            raise ValueError("transfer intent does not authenticate its source claim")
+        allowed.add(_PREPARATION_TRANSFER_INTENT_FILE)
+    elif intent_path.exists() or intent_path.is_symlink():
+        raise ValueError("transfer intent must be a regular file")
+    usage_path = path / _PREPARATION_USAGE_FILE
     for _dataset_id, relative in _feature_dataset_paths(seal):
         allowed.update(_physical_child_paths(path, relative, identity_field="dataset_id"))
-    usage_path = path / _PREPARATION_USAGE_FILE
     has_transfer_lineage = isinstance(claim_payload.get("transfer_id"), str) and isinstance(
         claim_payload.get("source_claim_id"), str
     )
@@ -2555,6 +2662,14 @@ def verify_holdout_preparation(
             or usage_payload["destination_claim_id"] != expected_destination["claim_id"]
         ):
             raise ValueError("preparation usage does not bind the transferred owner")
+        if claim_state != "TRANSFERRED":
+            expected_root_id = _expected_destination_root_id
+            if expected_root_id is None:
+                expected_root_id = sha256(str(path.resolve()).encode()).hexdigest()
+            if destination_root_id != expected_root_id:
+                raise ValueError(
+                    "preparation usage destination identity differs from its actual root"
+                )
         allowed.add(_PREPARATION_USAGE_FILE)
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
@@ -2606,6 +2721,38 @@ def verify_holdout_preparation(
                 allowed.update(
                     _physical_child_paths(path, lifecycle_name, identity_field=identity_field)
                 )
+    claim_next_path = path / _PREPARATION_CLAIM_NEXT_FILE
+    if claim_next_path.is_symlink():
+        raise ValueError("claim transition temporary must be a regular file")
+    if claim_next_path.is_file():
+        if claim_state not in {"AVAILABLE", "OWNED_UNOPENED"}:
+            raise ValueError("claim transition temporary is only valid for an untransferred source")
+        next_payload = _verify_child(
+            path,
+            _PREPARATION_CLAIM_NEXT_FILE,
+            contract=_PREPARATION_CLAIM_CONTRACT,
+            identity_key="claim_id",
+            expected_fields=_PREPARATION_CLAIM_FIELDS,
+        )
+        source_claim_value = claim_payload.get("claim_id")
+        if not isinstance(source_claim_value, str) or not source_claim_value:
+            raise ValueError("available preparation claim is malformed")
+        expected_next = _preparation_claim(
+            selection.manifest_id,
+            seal.seal_id,
+            state="TRANSFERRED",
+            transfer_id=_preparation_transfer_id(
+                selection.manifest_id,
+                seal.seal_id,
+                source_claim_value,
+            ),
+            source_claim_id=source_claim_value,
+        )
+        if next_payload != expected_next:
+            raise ValueError("claim transition temporary is not authenticated")
+        allowed.add(_PREPARATION_CLAIM_NEXT_FILE)
+    elif claim_next_path.exists():
+        raise ValueError("claim transition temporary must be a regular file")
     _reject_orphans(path, allowed)
     _verify_prepare_children(
         path,
@@ -2724,6 +2871,27 @@ def prepare_holdout_from_files(
         destination_root_id,
     )
     source_usage_path = source / _PREPARATION_USAGE_FILE
+    transfer_intent = _preparation_transfer_intent(
+        source_selection.manifest_id,
+        source_seal.seal_id,
+        source_claim_id,
+        transfer_id,
+        destination_root_id,
+    )
+    intent_path = source / _PREPARATION_TRANSFER_INTENT_FILE
+    has_valid_transfer_intent = False
+    if intent_path.exists() or intent_path.is_symlink():
+        if intent_path.is_symlink() or not intent_path.is_file():
+            raise FileExistsError(
+                "source preparation has already been transferred to another destination"
+            )
+        if _load_object(intent_path) != transfer_intent:
+            raise FileExistsError(
+                "source preparation has already been transferred to another destination"
+            )
+        has_valid_transfer_intent = True
+    elif existing_claim == transferred:
+        raise ValueError("transferred source preparation lacks an authenticated transfer intent")
     if existing_claim == transferred and (
         source_usage_path.exists() or source_usage_path.is_symlink()
     ) and (
@@ -2739,12 +2907,19 @@ def prepare_holdout_from_files(
             raise FileExistsError("holdout preparation output already exists")
         if output.is_symlink() or not output.is_dir():
             raise ValueError("transferred holdout output is not a regular directory")
-        return verify_holdout_preparation(
+        verified = verify_holdout_preparation(
             output,
             holdout_target_source=holdout_target_source,
             training_feature_datasets=training_feature_datasets,
             immediate_parent_authority=immediate_parent_authority,
         )
+        if not source_usage_path.exists() and not source_usage_path.is_symlink():
+            if not has_valid_transfer_intent:
+                raise ValueError(
+                    "completed transfer output lacks an authenticated source usage claim"
+                )
+            _write_json(source_usage_path, usage)
+        return verified
     staging = output.with_name(f".{output.name}.transfer-{transfer_id}")
     if staging.is_symlink() or (staging.exists() and not staging.is_dir()):
         raise ValueError("holdout transfer staging path is not a regular directory")
@@ -2820,7 +2995,15 @@ def prepare_holdout_from_files(
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _expected_destination_root_id=destination_root_id,
     )
+    if intent_path.exists() or intent_path.is_symlink():
+        if intent_path.is_symlink() or not intent_path.is_file():
+            raise ValueError("transfer intent must be a regular file")
+        if _load_object(intent_path) != transfer_intent:
+            raise ValueError("transfer intent differs from its authenticated transfer")
+    else:
+        _write_json(intent_path, transfer_intent)
 
     # Source authority is consumed only after the complete staged destination is
     # authenticated.  The persistent staging root makes every later crash
