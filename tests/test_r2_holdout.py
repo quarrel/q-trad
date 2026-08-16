@@ -14,6 +14,7 @@ from uuid import UUID
 import pytest
 
 import qtrad.domain.r2_holdout as holdout_domain
+import qtrad.runtime.r2_holdout as holdout_runtime
 from qtrad.application.r2_holdout import (
     build_holdout_coverage,
     build_holdout_forecasts,
@@ -524,6 +525,13 @@ def _training_feature_dataset(*, include_noneligible: bool = False) -> R2Feature
     )
 
 
+def _training_feature_authority(
+    *, include_noneligible: bool = False
+) -> dict[str, R2FeatureDataset]:
+    dataset = _training_feature_dataset(include_noneligible=include_noneligible)
+    return {dataset.dataset_id: dataset}
+
+
 def _prepared(
     tmp_path: Path,
     *,
@@ -645,6 +653,7 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     assert (
         verify_holdout_preparation(
             tmp_path,
+            training_feature_datasets=_training_feature_authority(),
             holdout_target_source=_target_source(),
         ).seal_id
         == seal.seal_id
@@ -670,6 +679,7 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -679,6 +689,34 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     assert opened.seal_id == seal.seal_id
     assert replayed_consumed.marker_id == consumed.marker_id
     assert evaluation.questions[0].conclusion in tuple(HoldoutConclusion)
+
+
+def test_preparation_replay_reads_each_compact_child_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _selection, _opportunities, _fits, _forecasts, _coverage, _seal = _prepared(tmp_path)
+    calls: list[str] = []
+    original_loader = holdout_runtime.load_partitioned_rows
+
+    def count_loader(
+        root: Path,
+        relative: str,
+        payload: dict[str, object],
+        *,
+        identity_field: str,
+    ) -> tuple[dict[str, object], ...]:
+        calls.append(relative)
+        return original_loader(root, relative, payload, identity_field=identity_field)
+
+    monkeypatch.setattr(holdout_runtime, "load_partitioned_rows", count_loader)
+    verify_holdout_preparation(
+        tmp_path,
+        training_feature_datasets=_training_feature_authority(),
+        holdout_target_source=_target_source(),
+    )
+    assert calls
+    assert len(calls) == len(set(calls))
+    assert all(path.endswith(".json") for path in calls)
 
 
 def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
@@ -710,6 +748,7 @@ def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
         holdout_target_source=_target_source(include_noneligible=True),
+        training_feature_datasets=_training_feature_authority(include_noneligible=True),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -923,6 +962,7 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -932,12 +972,14 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         tmp_path,
         output,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
     )
     assert (
         bundle.bundle_id
         == verify_holdout_bundle(
             output,
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
         ).bundle_id
     )
     assert bundle.evaluation.semantic_id == evaluation.evaluation_id
@@ -963,18 +1005,21 @@ def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> Non
         tmp_path / "source",
         first,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
     )
     with pytest.raises(FileExistsError, match="transferred"):
         prepare_holdout_from_files(
             tmp_path / "source",
             second,
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
         )
     with pytest.raises(FileExistsError, match="transferred"):
         prepare_holdout_from_files(
             first,
             second,
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
         )
 
 
@@ -993,6 +1038,7 @@ def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path
             opened_at=NOW,
             consumed_at=NOW - timedelta(seconds=1),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: _target_dataset(),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("evaluator must not run"),
         )
@@ -1015,6 +1061,7 @@ def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path)
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: (_ for _ in ()).throw(RuntimeError("fixture outcome failure")),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("evaluator must not run"),
         )
@@ -1031,6 +1078,7 @@ def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path)
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=2),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: {},
             evaluator=lambda outcomes, opened: _unexpected_evaluator("second reveal must not load"),
         )
@@ -1045,6 +1093,7 @@ def test_preparation_replays_a_forced_failed_fit(tmp_path: Path) -> None:
     assert (
         verify_holdout_preparation(
             tmp_path,
+            training_feature_datasets=_training_feature_authority(),
             holdout_target_source=_target_source(),
         ).state.value
         == "PREPARED_UNOPENED"
@@ -1083,22 +1132,16 @@ def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path
         )
 
 
-def test_mutated_training_evidence_is_rejected(tmp_path: Path) -> None:
-    (
-        _selection_value,
-        _opportunities_value,
-        _fits,
-        _forecasts,
-        _coverage,
-        _seal,
-    ) = _prepared(tmp_path)
-    feature_path = next((tmp_path / "training/features").iterdir())
-    payload = json.loads(feature_path.read_text())
-    payload["rows"][0]["values"][0]["value"] = 99.0
-    feature_path.write_text(json.dumps(payload))
-    with pytest.raises(ValueError, match="dataset ID"):
+def test_mutated_holdout_part_is_rejected(tmp_path: Path) -> None:
+    _prepared(tmp_path)
+    part_path = next((tmp_path / "features.json.parts").iterdir())
+    payload = json.loads(part_path.read_text())
+    payload["rows"][0]["value"] = {"tampered": True}
+    part_path.write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="part digest mismatch"):
         verify_holdout_preparation(
             tmp_path,
+            training_feature_datasets=_training_feature_authority(),
             holdout_target_source=_target_source(),
         )
 
@@ -1112,6 +1155,7 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
         tmp_path / "source",
         first,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
     )
     with pytest.raises(RuntimeError, match="stop"):
         reveal_holdout(
@@ -1124,6 +1168,7 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: (_ for _ in ()).throw(RuntimeError("stop")),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("must not evaluate"),
         )
@@ -1149,6 +1194,7 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
             stripped,
             tmp_path / "reopened",
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
         )
 
 
@@ -1165,6 +1211,7 @@ def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: [
                 (opportunities[0].target_id, 0.1),
                 (opportunities[0].target_id, 0.2),
@@ -1182,6 +1229,7 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
         tmp_path / "source",
         destination,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
     )
 
     def evaluator(outcomes, opened):
@@ -1204,6 +1252,7 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -1222,24 +1271,24 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
             holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
             outcome_loader=lambda: target_dataset,
             evaluator=evaluator,
         )
     assert not (tmp_path / "source" / "opened.json").exists()
 
 
-def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> None:
+def test_preparation_persists_no_training_rows(tmp_path: Path) -> None:
     _prepared(tmp_path)
-    target_path = next((tmp_path / "training/targets").iterdir())
-    payload = json.loads(target_path.read_text())
-    assert payload["contract"] == "qtrad-r2-target-projection-v1"
-    assert payload["schema_version"] == 1
-    assert payload["source_target_dataset_id"] == _target_dataset().dataset_id
-    child = payload["target_dataset"]
-    assert isinstance(child, dict)
-    assert len(child["rows"]) == 8
-    assert child["dataset_id"] != payload["source_target_dataset_id"]
-    assert all(datetime.fromisoformat(row["decision_time"]) < NOW for row in child["rows"])
+    assert not (tmp_path / "training").exists()
+    authority = json.loads((tmp_path / "authority.json").read_text())
+    assert (
+        authority["target_source"]["pre_holdout_target_dataset_id"]
+        == _target_source().pre_holdout_target_dataset.dataset_id
+    )
+    assert "pre_holdout_target_dataset" not in authority
+    assert (tmp_path / "features.json.parts").is_dir()
+    assert not (tmp_path / "outcome-target.json").exists()
 
 
 def test_selection_source_artifact_is_outcome_blind() -> None:
@@ -1309,6 +1358,7 @@ def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Pa
         consumed_by="test",
         opened_at=NOW,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
         consumed_at=NOW + timedelta(seconds=1),
     )
     assert evaluation is not None
@@ -1320,6 +1370,7 @@ def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Pa
     with pytest.raises(ValueError, match="identity does not authenticate"):
         verify_holdout_evaluation(
             tmp_path,
+            training_feature_datasets=_training_feature_authority(),
             holdout_target_source=_target_source(),
         )
 
@@ -1355,6 +1406,7 @@ def test_zero_return_retains_shared_eligibility_when_model_features_are_missing(
     assert verify_holdout_preparation(
         tmp_path,
         holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
     ).seal_id
 
 

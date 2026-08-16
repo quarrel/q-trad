@@ -796,11 +796,18 @@ class VerifiedConfirmatoryG1:
 class VerifiedConfirmatoryG2Preparation:
     """Runtime-only authority proving a sealed, unopened confirmatory preparation."""
 
-    __slots__ = ("_path", "_seal", "_verified_g1", "_verifier_provenance")
+    __slots__ = (
+        "_path",
+        "_seal",
+        "_training_features",
+        "_verified_g1",
+        "_verifier_provenance",
+    )
 
     _path: Path
     _seal: R2HoldoutForecastSeal
     _verified_g1: VerifiedConfirmatoryG1
+    _training_features: Mapping[str, R2FeatureDataset]
     _verifier_provenance: object
 
     def __init__(self) -> None:
@@ -817,6 +824,7 @@ class VerifiedConfirmatoryG2Preparation:
         verified_g1: VerifiedConfirmatoryG1,
         seal: R2HoldoutForecastSeal,
         path: Path,
+        training_features: Mapping[str, R2FeatureDataset],
     ) -> VerifiedConfirmatoryG2Preparation:
         if token is not _VERIFIED_CONFIRMATORY_G2_PREPARATION_TOKEN:
             raise TypeError("VerifiedConfirmatoryG2Preparation is constructed only by its verifier")
@@ -824,6 +832,11 @@ class VerifiedConfirmatoryG2Preparation:
         object.__setattr__(instance, "_verified_g1", verified_g1)
         object.__setattr__(instance, "_seal", seal)
         object.__setattr__(instance, "_path", path.resolve(strict=True))
+        object.__setattr__(
+            instance,
+            "_training_features",
+            MappingProxyType(dict(training_features)),
+        )
         object.__setattr__(
             instance,
             "_verifier_provenance",
@@ -838,6 +851,10 @@ class VerifiedConfirmatoryG2Preparation:
     @property
     def verified_g1(self) -> VerifiedConfirmatoryG1:
         return self._verified_g1
+
+    @property
+    def training_feature_datasets(self) -> Mapping[str, R2FeatureDataset]:
+        return self._training_features
 
     @property
     def seal(self) -> R2HoldoutForecastSeal:
@@ -4447,6 +4464,53 @@ class _ConfirmatoryG2Build:
     seal: R2HoldoutForecastSeal
 
 
+def _confirmatory_g2_parent_authority(
+    verified_g1: VerifiedConfirmatoryG1,
+) -> dict[str, object]:
+    """Encode the authenticated F2/G2 immediate parents without copying their rows."""
+    verified_f2 = verified_g1.verified_f2
+    source = verified_f2.holdout_target_source
+    source_reference = verified_f2.bundle.holdout_target_source
+    source_parent: dict[str, object] = {
+        "semantic_id": source.source_id,
+        "source_target_dataset_id": source.source_target_dataset_id,
+        "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+        "oof_reference": None if source_reference is None else source_reference.as_json(),
+    }
+    feature = verified_f2._g2_feature_source_authority
+    if isinstance(feature, G2FeatureSourceAuthority):
+        feature_parent = {
+            "authority_id": feature.source_id,
+            "foundation_bundle_id": feature.foundation_bundle_id,
+            "foundation_configuration_id": feature.foundation_configuration_id,
+            "observation_dataset_id": feature.observation_dataset_id,
+            "panel_dataset_id": feature.panel_dataset_id,
+            "observation_reference": feature.observation_reference.as_json(),
+            "panel_reference": feature.panel_reference.as_json(),
+        }
+    elif isinstance(feature, IBKRG2FeatureSourceAuthority):
+        feature_parent = {
+            "authority_id": feature.source_id,
+            "foundation_bundle_id": feature.foundation_bundle_id,
+            "foundation_configuration_id": feature.foundation_configuration_id,
+            "observation_dataset_id": feature.observation_dataset_id,
+            "panel_dataset_id": feature.panel_dataset_id,
+            "child_closure_id": feature.child_references_sha256,
+            "target_child_closure_id": feature.target_child_references_sha256,
+        }
+    else:
+        raise TypeError("confirmatory G2 feature authority is unsupported")
+    return {
+        "f2": {
+            "oof_id": verified_f2.bundle.oof_id,
+            "evaluation_report_id": verified_f2.evaluation_report_id,
+            "foundation_bundle_id": verified_f2.foundation_bundle_id,
+        },
+        "target_source": source_parent,
+        "feature_source": feature_parent,
+    }
+
+
 def _build_confirmatory_g2(
     *,
     verified_g1: VerifiedConfirmatoryG1,
@@ -4628,6 +4692,7 @@ def prepare_confirmatory_g2(
             child.dataset_id: child for child in built.training_features.values()
         },
         training_target_datasets={pre_holdout_targets.dataset_id: pre_holdout_targets},
+        immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
     )
     return manifest_path
@@ -4642,10 +4707,24 @@ def verify_confirmatory_g2_preparation(
 
     if type(verified_g1) is not VerifiedConfirmatoryG1:
         raise TypeError("confirmatory preparation verification requires VerifiedConfirmatoryG1")
+    persisted_selection = R2HoldoutSelectionManifest.from_json(
+        _load_selection(path / "selection.json")
+    )
+    if persisted_selection.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory preparation contains a substituted G1 selection")
+    persisted_seal = R2HoldoutForecastSeal.from_json(
+        _load_selection(path / "manifest.json")
+    )
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=persisted_seal.prepared_by,
+    )
     seal = verify_holdout_preparation(
         path,
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
         holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+        training_feature_datasets=expected.training_features,
+        immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
     )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
@@ -4654,15 +4733,6 @@ def verify_confirmatory_g2_preparation(
         or seal.holdout_outcomes_accessed
     ):
         raise ValueError("confirmatory preparation differs from verified G1 authority")
-    persisted_selection = R2HoldoutSelectionManifest.from_json(
-        _load_selection(path / "selection.json")
-    )
-    if persisted_selection.as_json() != verified_g1.selection.as_json():
-        raise ValueError("confirmatory preparation contains a substituted G1 selection")
-    expected = _build_confirmatory_g2(
-        verified_g1=verified_g1,
-        prepared_by=seal.prepared_by,
-    )
     if seal.as_json() != expected.seal.as_json():
         raise ValueError(
             "confirmatory preparation differs from independently replayed "
@@ -4673,6 +4743,7 @@ def verify_confirmatory_g2_preparation(
         verified_g1=verified_g1,
         seal=seal,
         path=path,
+        training_features=expected.training_features,
     )
 
 
@@ -4697,10 +4768,33 @@ def _verify_confirmatory_g2_lifecycle(
         or verified_g1._verifier_provenance is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
     ):
         raise TypeError("confirmatory lifecycle verification requires verified G1 provenance")
-    seal = _verify_confirmatory_holdout_preparation(
-        path,
-        holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+    persisted_selection = R2HoldoutSelectionManifest.from_json(
+        _load_selection(path / "selection.json")
     )
+    if persisted_selection.as_json() != verified_g1.selection.as_json():
+        raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
+    persisted_seal = R2HoldoutForecastSeal.from_json(
+        _load_selection(path / "manifest.json")
+    )
+    expected = _build_confirmatory_g2(
+        verified_g1=verified_g1,
+        prepared_by=persisted_seal.prepared_by,
+    )
+    training_features = getattr(expected, "training_features", None)
+    if training_features is None:
+        training_feature_authority: Mapping[str, R2FeatureDataset] = {}
+        seal = _verify_confirmatory_holdout_preparation(
+            path,
+            holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+        )
+    else:
+        training_feature_authority = cast(Mapping[str, R2FeatureDataset], training_features)
+        seal = _verify_confirmatory_holdout_preparation(
+            path,
+            holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+            training_feature_datasets=training_feature_authority,
+            immediate_parent_authority=_confirmatory_g2_parent_authority(verified_g1),
+        )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
         or seal.holdout_scope is not HoldoutScope.CONFIRMATORY
@@ -4708,13 +4802,6 @@ def _verify_confirmatory_g2_lifecycle(
         or seal.holdout_outcomes_accessed
     ):
         raise ValueError("confirmatory lifecycle differs from verified G1 authority")
-    persisted = R2HoldoutSelectionManifest.from_json(_load_selection(path / "selection.json"))
-    if persisted.as_json() != verified_g1.selection.as_json():
-        raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
-    expected = _build_confirmatory_g2(
-        verified_g1=verified_g1,
-        prepared_by=seal.prepared_by,
-    )
     if seal.as_json() != expected.seal.as_json():
         raise ValueError("confirmatory lifecycle seal differs from independent G1 replay")
     return VerifiedConfirmatoryG2Preparation._create(
@@ -4722,6 +4809,7 @@ def _verify_confirmatory_g2_lifecycle(
         verified_g1=verified_g1,
         seal=seal,
         path=path,
+        training_features=training_feature_authority,
     )
 
 
@@ -4870,6 +4958,8 @@ def reveal_confirmatory_g2(
         consumed_at=clock.now,
         holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
         outcome_loader=load_outcomes,
+        training_feature_datasets=preparation.training_feature_datasets,
+        immediate_parent_authority=_confirmatory_g2_parent_authority(preparation.verified_g1),
     )
     evaluation, consumed = result
     if evaluation is None:
@@ -4948,6 +5038,8 @@ def verify_confirmatory_r2h(
         evaluation = _verify_confirmatory_holdout_evaluation(
             preparation.path,
             holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
+            training_feature_datasets=preparation.training_feature_datasets,
+            immediate_parent_authority=_confirmatory_g2_parent_authority(preparation.verified_g1),
         )
         if evaluation.selection_manifest_id != selection_id:
             raise ValueError("confirmatory evaluation differs from verified G1")

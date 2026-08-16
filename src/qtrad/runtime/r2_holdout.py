@@ -61,9 +61,16 @@ from qtrad.domain.r2_holdout import (
 from qtrad.domain.r2_readiness import FeatureFamily
 from qtrad.domain.time import require_utc
 from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
+from qtrad.runtime.r2_partitioned_rows import (
+    PARTITIONED_ROWS_STORAGE,
+    load_partitioned_rows,
+    partitioned_manifest_part_paths,
+    write_partitioned_rows,
+)
 
 _MAX_BYTES = 64 * 1024 * 1024
 _FAILURE_EVALUATION_ID = sha256(b"qtrad-r2-holdout-reveal-failed").hexdigest()
+_PARTITIONED_PART_CONTRACT = "qtrad-r2-partitioned-json-row-part-v1"
 _CONFIRMATORY_G2_LIFECYCLE_TOKEN = object()
 
 
@@ -78,6 +85,119 @@ def _load_object(path: Path) -> dict[str, object]:
         raise ValueError(f"holdout child must be a JSON object: {path}")
     return cast(dict[str, object], value)
 
+
+def _partitioned_payload(
+    root: Path,
+    relative: str,
+    payload: Mapping[str, object],
+    *,
+    identity_field: str,
+    row_field: str,
+    array_fields: Sequence[str] = (),
+) -> dict[str, object]:
+    """Reconstruct one compact physical child into its logical semantic payload."""
+    if payload.get("storage") != PARTITIONED_ROWS_STORAGE:
+        return dict(payload)
+    if payload.get("partition_row_field") != row_field:
+        raise ValueError("partitioned holdout child row field differs from its contract")
+    raw_fields = payload.get("partition_fields", [row_field])
+    if not isinstance(raw_fields, list) or any(not isinstance(item, str) for item in raw_fields):
+        raise ValueError("partitioned holdout child field register is invalid")
+    fields = tuple(str(item) for item in raw_fields)
+    expected_fields = tuple(array_fields or (row_field,))
+    if fields != expected_fields:
+        raise ValueError("partitioned holdout child field register differs from its contract")
+    rows = load_partitioned_rows(root, relative, payload, identity_field=identity_field)
+    logical = {
+        key: value
+        for key, value in payload.items()
+        if key
+        not in {
+            "storage",
+            "identity_field",
+            "row_count",
+            "parts",
+            "partition_row_field",
+            "partition_fields",
+        }
+    }
+    if array_fields:
+        grouped: dict[str, list[object]] = {field: [] for field in fields}
+        for row in rows:
+            if set(row) != {"field", "value"}:
+                raise ValueError("partitioned holdout field row is invalid")
+            field = row["field"]
+            if not isinstance(field, str) or field not in grouped:
+                raise ValueError("partitioned holdout field row names an unknown field")
+            grouped[field].append(row["value"])
+        logical.update(grouped)
+    else:
+        values: list[object] = []
+        for row in rows:
+            if set(row) != {"value"}:
+                raise ValueError("partitioned holdout row is invalid")
+            values.append(row["value"])
+        logical[row_field] = values
+    return logical
+
+
+def _partitioned_paths(
+    root: Path,
+    relative: str,
+    payload: Mapping[str, object],
+    *,
+    identity_field: str,
+) -> tuple[str, ...]:
+    if payload.get("storage") != PARTITIONED_ROWS_STORAGE:
+        return ()
+    return partitioned_manifest_part_paths(root, relative, payload, identity_field=identity_field)
+
+
+def _partitioned_header(
+    payload: Mapping[str, object],
+    *,
+    row_field: str,
+    array_fields: Sequence[str] = (),
+) -> dict[str, object]:
+    header = dict(payload)
+    header.pop(row_field, None)
+    for field in array_fields:
+        header.pop(field, None)
+    header["partition_row_field"] = row_field
+    header["partition_fields"] = list(array_fields or (row_field,))
+    return header
+
+
+def _write_partitioned_child(
+    output: Path,
+    relative: str,
+    payload: Mapping[str, object],
+    *,
+    identity_field: str,
+    row_field: str,
+    array_fields: Sequence[str] = (),
+) -> tuple[dict[str, object], tuple[str, ...]]:
+    """Write bounded physical parts while retaining the original logical identity."""
+    fields = tuple(array_fields or (row_field,))
+    if array_fields:
+        rows = (
+            {"field": field, "value": value}
+            for field in fields
+            for value in cast(Sequence[object], payload[field])
+        )
+        expected_count = sum(len(cast(Sequence[object], payload[field])) for field in fields)
+    else:
+        rows = ({"value": value} for value in cast(Sequence[object], payload[row_field]))
+        expected_count = len(cast(Sequence[object], payload[row_field]))
+    compact = write_partitioned_rows(
+        output,
+        relative,
+        header=_partitioned_header(payload, row_field=row_field, array_fields=fields),
+        identity_field=identity_field,
+        rows=rows,
+        expected_row_count=expected_count,
+    )
+    return compact, _partitioned_paths(output, relative, compact, identity_field=identity_field)
 
 def _semantic_id(payload: Mapping[str, object], identity_key: str) -> str:
     semantic = {key: value for key, value in payload.items() if key != identity_key}
@@ -121,9 +241,40 @@ def _verify_child(
     identity_key: str,
     expected_fields: set[str],
     expected_id: str | None = None,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
+    if _payload_cache is not None and relative in _payload_cache:
+        return _payload_cache[relative]
     path = _safe_child(root, relative)
-    payload = _load_object(path)
+    physical = _load_object(path)
+    payload = physical
+    if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
+        if contract == "qtrad-r2-final-fit-v1":
+            row_field = "fit_arrays"
+            array_fields = (
+                "training_target_ids",
+                "purged_target_ids",
+                "inner_fit_target_ids",
+                "inner_validation_target_ids",
+                "sample_weights",
+            )
+        elif contract in {
+            R2_HOLDOUT_FEATURES_CONTRACT,
+            R2_HOLDOUT_FORECAST_CONTRACT,
+            R2_HOLDOUT_COVERAGE_CONTRACT,
+        }:
+            row_field = "rows"
+            array_fields = ()
+        else:
+            raise ValueError(f"{contract} does not support partitioned persistence")
+        payload = _partitioned_payload(
+            root,
+            relative,
+            physical,
+            identity_field=identity_key,
+            row_field=row_field,
+            array_fields=array_fields,
+        )
     if set(payload) != expected_fields:
         raise ValueError(f"{contract} child has unknown or missing fields")
     if payload.get("contract") != contract or payload.get("schema_version") != 1:
@@ -133,6 +284,8 @@ def _verify_child(
         raise ValueError(f"{contract} child identity does not authenticate its content")
     if expected_id is not None and identity != expected_id:
         raise ValueError(f"{contract} child identity differs from its declared reference")
+    if _payload_cache is not None:
+        _payload_cache[relative] = payload
     return payload
 
 
@@ -574,6 +727,129 @@ def _write_json(path: Path, payload: Mapping[str, object]) -> None:
     atomic_create(path, canonical_bytes(payload))
 
 
+def _copy_create(source: Path, target: Path) -> None:
+    if source.is_symlink() or not source.is_file():
+        raise ValueError(f"holdout transfer source must be a regular file: {source}")
+    atomic_create(target, source.read_bytes())
+
+
+def _feature_set_id(value: object) -> str:
+    payload = value if isinstance(value, Mapping) else _as_json(value)
+    feature_set_id = payload.get("feature_set_id")
+    if not isinstance(feature_set_id, str):
+        raise ValueError("holdout feature child has no feature-set identity")
+    return feature_set_id
+
+def _preparation_authority_payload(
+    selection: R2HoldoutSelectionManifest,
+    seal: R2HoldoutForecastSeal,
+    source: R2HoldoutTargetSource,
+    feature_children: Mapping[str, object],
+    *,
+    parent_authority: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    policy = selection.evaluation_policy
+    target_source = {
+        "source_id": source.source_id,
+        "source_target_dataset_id": source.source_target_dataset_id,
+        "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+        "pre_holdout_projection_id": policy.get("pre_holdout_projection_id"),
+        "opportunity_registry_id": policy.get("holdout_opportunity_registry_id"),
+        "opportunity_count": policy.get("holdout_opportunity_count"),
+        "opportunity_digest": policy.get("holdout_opportunity_digest"),
+        "authority_ids": {
+            key: policy[key]
+            for key in (
+                "holdout_target_source_closure_id",
+                "holdout_target_source_verification_id",
+                "f2_promotion_id",
+            )
+            if isinstance(policy.get(key), str)
+        },
+    }
+    feature_bindings = [
+        {
+            "configuration_id": configuration_id,
+            "dataset_id": dataset_id,
+            "feature_set_id": next(
+                (
+                    feature_set_id
+                    for (
+                        registry_configuration,
+                        _family,
+                        feature_set_id,
+                        registry_dataset_id,
+                        _manifest_id,
+                    ) in selection.configuration_registry
+                    if registry_configuration == configuration_id
+                    and registry_dataset_id == dataset_id
+                    and feature_set_id is not None
+                ),
+                _feature_set_id(feature_children[dataset_id]),
+            ),
+            "manifest_id": next(
+                (
+                    manifest_id
+                    for (
+                        registry_configuration,
+                        _family,
+                        _feature_set_id_value,
+                        registry_dataset_id,
+                        manifest_id,
+                    ) in selection.configuration_registry
+                    if registry_configuration == configuration_id
+                    and registry_dataset_id == dataset_id
+                ),
+                None,
+            ),
+        }
+        for configuration_id, dataset_id in seal.configuration_feature_dataset_ids
+        if dataset_id is not None and dataset_id in feature_children
+    ]
+    semantic = {
+        "contract": _PREPARATION_AUTHORITY_CONTRACT,
+        "schema_version": 1,
+        "selection_manifest_id": selection.manifest_id,
+        "seal_id": seal.seal_id,
+        "target_source": target_source,
+        "feature_bindings": feature_bindings,
+        "parent_authority": dict(parent_authority or {}),
+    }
+    return {**semantic, "authority_id": _semantic_id(semantic, "authority_id")}
+
+
+def _verify_preparation_authority(
+    path: Path,
+    *,
+    selection: R2HoldoutSelectionManifest,
+    seal: R2HoldoutForecastSeal,
+    source: R2HoldoutTargetSource,
+    feature_children: Mapping[str, object],
+    parent_authority: Mapping[str, object] | None = None,
+) -> None:
+    payload = _load_object(path / _PREPARATION_AUTHORITY_FILE)
+    if set(payload) != _PREPARATION_AUTHORITY_FIELDS:
+        raise ValueError("preparation authority has unknown or missing fields")
+    if (
+        payload.get("contract") != _PREPARATION_AUTHORITY_CONTRACT
+        or payload.get("schema_version") != 1
+        or payload.get("selection_manifest_id") != selection.manifest_id
+        or payload.get("seal_id") != seal.seal_id
+        or payload.get("authority_id") != _semantic_id(
+            {key: payload[key] for key in payload if key != "authority_id"}, "authority_id"
+        )
+    ):
+        raise ValueError("preparation authority does not bind the exact selection and seal")
+    expected = _preparation_authority_payload(
+        selection,
+        seal,
+        source,
+        feature_children,
+        parent_authority=parent_authority,
+    )
+    if payload != expected:
+        raise ValueError("preparation authority differs from authenticated immediate parents")
+
 def _replace_json(path: Path, payload: Mapping[str, object]) -> None:
     if path.is_symlink() or not path.is_file():
         raise ValueError(f"expected a regular claim file: {path}")
@@ -839,6 +1115,18 @@ _PREPARATION_USAGE_FIELDS = {
     "destination_claim_id",
     "transfer_id",
     "usage_id",
+}
+_PREPARATION_AUTHORITY_FILE = "authority.json"
+_PREPARATION_AUTHORITY_CONTRACT = "qtrad-r2-holdout-preparation-authority-v1"
+_PREPARATION_AUTHORITY_FIELDS = {
+    "contract",
+    "schema_version",
+    "selection_manifest_id",
+    "seal_id",
+    "target_source",
+    "feature_bindings",
+    "parent_authority",
+    "authority_id",
 }
 
 
@@ -1137,9 +1425,16 @@ def _feature_dataset_paths(
     return tuple((dataset_id, f"features/{dataset_id}.json") for dataset_id in dataset_ids)
 
 
+def _physical_child_paths(root: Path, relative: str, *, identity_field: str) -> tuple[str, ...]:
+    """Return one exact top-level child and its declared bounded part files."""
+    physical = _load_object(_safe_child(root, relative))
+    return (relative, *_partitioned_paths(root, relative, physical, identity_field=identity_field))
+
 def _load_feature_payloads(
     root: Path,
     seal: R2HoldoutForecastSeal,
+    *,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, Mapping[str, object]]:
     payloads: dict[str, Mapping[str, object]] = {}
     for dataset_id, relative in _feature_dataset_paths(seal):
@@ -1150,6 +1445,7 @@ def _load_feature_payloads(
             identity_key="dataset_id",
             expected_fields=_FEATURE_FIELDS,
             expected_id=dataset_id,
+            _payload_cache=_payload_cache,
         )
     return payloads
 
@@ -1418,9 +1714,21 @@ def _verify_prepare_children(
     seal: R2HoldoutForecastSeal,
     selection: R2HoldoutSelectionManifest,
     source: R2HoldoutTargetSource,
+    *,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    parent_authority: Mapping[str, object] | None = None,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> None:
     opportunities = _opportunities_from_selection(selection, source)
-    feature_payloads = _load_feature_payloads(root, seal)
+    feature_payloads = _load_feature_payloads(root, seal, _payload_cache=_payload_cache)
+    _verify_preparation_authority(
+        root,
+        selection=selection,
+        seal=seal,
+        source=source,
+        feature_children=feature_payloads,
+        parent_authority=parent_authority,
+    )
     for payload in feature_payloads.values():
         if payload["selection_manifest_id"] != seal.selection_manifest_id:
             raise ValueError("holdout features are bound to a different selection")
@@ -1439,6 +1747,7 @@ def _verify_prepare_children(
             identity_key="fit_id",
             expected_fields=_FINAL_FIT_FIELDS,
             expected_id=fit_id,
+            _payload_cache=_payload_cache,
         )
         expected_fits.add(str(payload["fit_id"]))
         fit_payloads.append(payload)
@@ -1447,18 +1756,36 @@ def _verify_prepare_children(
             "feature_dataset_id"
         ] != feature_by_configuration.get(configuration_id):
             raise ValueError("final fit lineage differs from its seal")
-    training_features, training_targets, training_target_sources = _load_training_children(
-        root, fit_payloads, selection, source
-    )
-    for payload in fit_payloads:
-        feature_id, target_id = _training_child_ids_from_fit(payload)
-        _replay_final_fit(
-            selection,
-            payload,
-            training_feature_dataset=training_features[feature_id],
-            training_target_dataset=training_targets[target_id],
-            training_target_source_dataset_id=training_target_sources[target_id],
-        )
+    if fit_payloads:
+        if training_feature_datasets is None:
+            raise ValueError(
+                "final-fit verification requires authenticated training feature authority"
+            )
+        if any(
+            not isinstance(dataset, R2FeatureDataset)
+            for dataset in training_feature_datasets.values()
+        ):
+            raise TypeError("training feature authority must contain R2FeatureDataset values")
+        training_features = {
+            dataset.dataset_id: dataset for dataset in training_feature_datasets.values()
+        }
+        expected_training_ids = {
+            _training_child_ids_from_fit(payload)[0] for payload in fit_payloads
+        }
+        if set(training_features) != expected_training_ids:
+            raise ValueError("training feature authority does not match final-fit lineage")
+        frozen_target = source.pre_holdout_target_dataset
+        for payload in fit_payloads:
+            feature_id, target_id = _training_child_ids_from_fit(payload)
+            if target_id != frozen_target.dataset_id:
+                raise ValueError("final fit target differs from the frozen pre-holdout target")
+            _replay_final_fit(
+                selection,
+                payload,
+                training_feature_dataset=training_features[feature_id],
+                training_target_dataset=frozen_target,
+                training_target_source_dataset_id=source.source_target_dataset_id,
+            )
     for dataset_id in seal.forecast_dataset_ids:
         payload = _verify_child(
             root,
@@ -1467,6 +1794,7 @@ def _verify_prepare_children(
             identity_key="dataset_id",
             expected_fields=_FORECAST_FIELDS,
             expected_id=dataset_id,
+            _payload_cache=_payload_cache,
         )
         expected_forecasts.add(str(payload["dataset_id"]))
         forecast_payloads.append(payload)
@@ -1483,6 +1811,7 @@ def _verify_prepare_children(
             identity_key="coverage_id",
             expected_fields=_COVERAGE_FIELDS,
             expected_id=coverage_id,
+            _payload_cache=_payload_cache,
         )
         expected_coverage.add(str(payload["coverage_id"]))
         coverage_payloads.append(payload)
@@ -1529,6 +1858,7 @@ def write_holdout_preparation(
     seal: R2HoldoutForecastSeal,
     training_feature_datasets: Mapping[str, object] | None = None,
     training_target_datasets: Mapping[str, object] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
     _confirmatory_token: object | None = None,
 ) -> Path:
     """Persist all PR B children and the seal without overwriting any path."""
@@ -1537,6 +1867,8 @@ def write_holdout_preparation(
         and _confirmatory_token is not _CONFIRMATORY_G2_PREPARATION_TOKEN
     ):
         raise ValueError("G2 preparation is restricted to disposable fixtures")
+    if seal.holdout_scope is HoldoutScope.CONFIRMATORY and not immediate_parent_authority:
+        raise ValueError("confirmatory G2 preparation requires immediate-parent authority")
     if selection.manifest_id != seal.selection_manifest_id:
         raise ValueError("selection and seal lineage differs")
     feature_children: dict[str, R2HoldoutFeatureDataset] = {}
@@ -1574,31 +1906,18 @@ def write_holdout_preparation(
     if source.pre_holdout_target_dataset.dataset_id != expected_pre_holdout:
         raise ValueError("source evidence differs from the frozen pre-holdout target")
     _opportunities_from_selection(selection, source)
-    training_target_sources: dict[str, str] = {}
-    for payload in fit_payloads:
-        _feature_id, target_id = _training_child_ids_from_fit(payload)
-        preprocessing = _object_dict(payload["preprocessing"], "final fit preprocessing")
-        source_id = _text_value(
-            preprocessing.get("training_target_source_dataset_id"),
-            "final fit target source dataset ID",
-        )
-        if source_id != expected_source:
-            raise ValueError("final fit target source differs from the frozen target dataset")
-        previous = training_target_sources.setdefault(target_id, source_id)
-        if previous != source_id:
-            raise ValueError("training target child has inconsistent source lineage")
-    training_feature_children = {
+    training_feature_ids = {_training_child_ids_from_fit(payload)[0] for payload in fit_payloads}
+    training_target_ids = {_training_child_ids_from_fit(payload)[1] for payload in fit_payloads}
+    supplied_training_features = {
         child.dataset_id: child
         for child in (training_feature_datasets or {}).values()
         if isinstance(child, R2FeatureDataset)
     }
-    training_target_children: dict[str, TargetDataset] = {}
-    for child in (training_target_datasets or {}).values():
-        if not isinstance(child, TargetDataset):
-            raise TypeError("training_target_datasets must contain TargetDataset values")
-        if child.dataset_id != expected_pre_holdout:
-            raise ValueError("training target does not match the frozen pre-holdout target")
-        training_target_children[child.dataset_id] = child
+    supplied_training_targets = {
+        child.dataset_id: child
+        for child in (training_target_datasets or {}).values()
+        if isinstance(child, TargetDataset)
+    }
     if any(
         not isinstance(child, R2FeatureDataset)
         for child in (training_feature_datasets or {}).values()
@@ -1608,12 +1927,15 @@ def write_holdout_preparation(
         not isinstance(child, TargetDataset) for child in (training_target_datasets or {}).values()
     ):
         raise TypeError("training_target_datasets must contain TargetDataset values")
-    training_feature_ids = {_training_child_ids_from_fit(payload)[0] for payload in fit_payloads}
-    training_target_ids = {_training_child_ids_from_fit(payload)[1] for payload in fit_payloads}
-    if set(training_feature_children) != training_feature_ids:
-        raise ValueError("training feature arguments do not match final-fit lineage")
-    if set(training_target_children) != training_target_ids:
-        raise ValueError("training target arguments do not match final-fit lineage")
+    if set(supplied_training_features) != training_feature_ids:
+        raise ValueError("training feature authority does not match final-fit lineage")
+    if set(supplied_training_targets) != training_target_ids:
+        raise ValueError("training target authority does not match final-fit lineage")
+    if any(
+        dataset.dataset_id != expected_pre_holdout
+        for dataset in supplied_training_targets.values()
+    ):
+        raise ValueError("training target authority does not match the frozen pre-holdout target")
     _write_json(
         output / _PREPARATION_CLAIM_FILE,
         _preparation_claim(
@@ -1629,33 +1951,63 @@ def write_holdout_preparation(
             raise ValueError("existing selection child differs from preparation selection")
     else:
         _write_json(selection_path, selection.as_json())
+    _write_json(
+        output / _PREPARATION_AUTHORITY_FILE,
+        _preparation_authority_payload(
+            selection,
+            seal,
+            source,
+            feature_children,
+            parent_authority=immediate_parent_authority,
+        ),
+    )
     for dataset_id, relative in _feature_dataset_paths(seal):
-        _write_json(output / relative, feature_children[dataset_id].as_json())
-    for dataset_id, child in training_feature_children.items():
-        _write_json(
-            output / f"training/features/{dataset_id}.json",
-            _training_feature_payload(child),
+        payload = _as_json(feature_children[dataset_id])
+        compact, _part_paths = _write_partitioned_child(
+            output,
+            relative,
+            payload,
+            identity_field="dataset_id",
+            row_field="rows",
         )
-    for dataset_id, child in training_target_children.items():
-        _write_json(
-            output / f"training/targets/{dataset_id}.json",
-            _training_target_payload(
-                child,
-                source_target_dataset_id=training_target_sources[dataset_id],
+        _write_json(output / relative, compact)
+    for fit_id in seal.final_fit_ids:
+        payload = _as_json(final_fits[fit_id])
+        compact, _part_paths = _write_partitioned_child(
+            output,
+            f"fits/{fit_id}.json",
+            payload,
+            identity_field="fit_id",
+            row_field="fit_arrays",
+            array_fields=(
+                "training_target_ids",
+                "purged_target_ids",
+                "inner_fit_target_ids",
+                "inner_validation_target_ids",
+                "sample_weights",
             ),
         )
-    for fit_id in seal.final_fit_ids:
-        _write_json(output / "fits" / f"{fit_id}.json", _as_json(final_fits[fit_id]))
+        _write_json(output / f"fits/{fit_id}.json", compact)
     for dataset_id in seal.forecast_dataset_ids:
-        _write_json(
-            output / "forecasts" / f"{dataset_id}.json",
-            _as_json(forecasts[dataset_id]),
+        payload = _as_json(forecasts[dataset_id])
+        compact, _part_paths = _write_partitioned_child(
+            output,
+            f"forecasts/{dataset_id}.json",
+            payload,
+            identity_field="dataset_id",
+            row_field="rows",
         )
+        _write_json(output / f"forecasts/{dataset_id}.json", compact)
     for coverage_id in seal.coverage_ids:
-        _write_json(
-            output / "coverage" / f"{coverage_id}.json",
-            _as_json(coverage[coverage_id]),
+        payload = _as_json(coverage[coverage_id])
+        compact, _part_paths = _write_partitioned_child(
+            output,
+            f"coverage/{coverage_id}.json",
+            payload,
+            identity_field="coverage_id",
+            row_field="rows",
         )
+        _write_json(output / f"coverage/{coverage_id}.json", compact)
     _write_json(output / "manifest.json", seal.as_json())
     return output / "manifest.json"
 
@@ -1665,6 +2017,9 @@ def verify_holdout_preparation(
     *,
     _confirmatory_token: object | None = None,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> R2HoldoutForecastSeal:
     seal_payload = _verify_child(
         path,
@@ -1682,6 +2037,8 @@ def verify_holdout_preparation(
         raise ValueError(
             "confirmatory holdout preparation requires the unsupported source-child workflow"
         )
+    if selection.holdout_scope is HoldoutScope.CONFIRMATORY and not immediate_parent_authority:
+        raise ValueError("confirmatory preparation requires immediate-parent authority")
     claim_payload = _verify_child(
         path,
         _PREPARATION_CLAIM_FILE,
@@ -1748,8 +2105,10 @@ def verify_holdout_preparation(
         "manifest.json",
         "selection.json",
         _PREPARATION_CLAIM_FILE,
+        _PREPARATION_AUTHORITY_FILE,
     }
-    allowed.update(relative for _dataset_id, relative in _feature_dataset_paths(seal))
+    for _dataset_id, relative in _feature_dataset_paths(seal):
+        allowed.update(_physical_child_paths(path, relative, identity_field="dataset_id"))
     usage_path = path / _PREPARATION_USAGE_FILE
     has_transfer_lineage = isinstance(claim_payload.get("transfer_id"), str) and isinstance(
         claim_payload.get("source_claim_id"), str
@@ -1788,10 +2147,30 @@ def verify_holdout_preparation(
         raise ValueError("transferred preparation requires a usage claim")
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
-    allowed.update(_training_paths_for_seal(path, seal))
-    allowed.update(f"fits/{fit_id}.json" for fit_id in seal.final_fit_ids)
-    allowed.update(f"forecasts/{dataset_id}.json" for dataset_id in seal.forecast_dataset_ids)
-    allowed.update(f"coverage/{coverage_id}.json" for coverage_id in seal.coverage_ids)
+    for fit_id in seal.final_fit_ids:
+        allowed.update(
+            _physical_child_paths(
+                path,
+                f"fits/{fit_id}.json",
+                identity_field="fit_id",
+            )
+        )
+    for dataset_id in seal.forecast_dataset_ids:
+        allowed.update(
+            _physical_child_paths(
+                path,
+                f"forecasts/{dataset_id}.json",
+                identity_field="dataset_id",
+            )
+        )
+    for coverage_id in seal.coverage_ids:
+        allowed.update(
+            _physical_child_paths(
+                path,
+                f"coverage/{coverage_id}.json",
+                identity_field="coverage_id",
+            )
+        )
     for lifecycle_name in (
         "opened.json",
         "confirmatory-opened.json",
@@ -1803,7 +2182,15 @@ def verify_holdout_preparation(
         if (path / lifecycle_name).is_file():
             allowed.add(lifecycle_name)
     _reject_orphans(path, allowed)
-    _verify_prepare_children(path, seal, selection, holdout_target_source)
+    _verify_prepare_children(
+        path,
+        seal,
+        selection,
+        holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        parent_authority=immediate_parent_authority,
+        _payload_cache=_payload_cache,
+    )
     return seal
 
 
@@ -1812,12 +2199,16 @@ def prepare_holdout_from_files(
     output: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
     expected_selection_manifest_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
     """Copy one disposable preparation exactly once into a fresh root."""
     source_seal = verify_holdout_preparation(
         source,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
     source_selection = verify_holdout_selection(source / "selection.json")
     if (
@@ -1885,24 +2276,42 @@ def prepare_holdout_from_files(
     paths = [
         _PREPARATION_CLAIM_FILE,
         "selection.json",
+        "authority.json",
         "manifest.json",
-        *(_relative for _dataset_id, _relative in _feature_dataset_paths(source_seal)),
-        *_training_paths_for_seal(source, source_seal),
-        *(f"fits/{fit_id}.json" for fit_id in source_seal.final_fit_ids),
-        *(f"forecasts/{dataset_id}.json" for dataset_id in source_seal.forecast_dataset_ids),
-        *(f"coverage/{coverage_id}.json" for coverage_id in source_seal.coverage_ids),
     ]
-    for relative in paths:
-        _write_json(
-            output / relative,
-            destination_claim
-            if relative == _PREPARATION_CLAIM_FILE
-            else _load_object(source / relative),
+    for _dataset_id, relative in _feature_dataset_paths(source_seal):
+        paths.extend(_physical_child_paths(source, relative, identity_field="dataset_id"))
+    for fit_id in source_seal.final_fit_ids:
+        paths.extend(
+            _physical_child_paths(source, f"fits/{fit_id}.json", identity_field="fit_id")
         )
+    for dataset_id in source_seal.forecast_dataset_ids:
+        paths.extend(
+            _physical_child_paths(
+                source,
+                f"forecasts/{dataset_id}.json",
+                identity_field="dataset_id",
+            )
+        )
+    for coverage_id in source_seal.coverage_ids:
+        paths.extend(
+            _physical_child_paths(
+                source,
+                f"coverage/{coverage_id}.json",
+                identity_field="coverage_id",
+            )
+        )
+    for relative in paths:
+        if relative == _PREPARATION_CLAIM_FILE:
+            _write_json(output / relative, destination_claim)
+        else:
+            _copy_create(source / relative, output / relative)
     _write_json(output / _PREPARATION_USAGE_FILE, usage)
     return verify_holdout_preparation(
         output,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
 
 
@@ -1911,10 +2320,16 @@ def _reject_orphans(root: Path, allowed: set[str]) -> None:
         raise ValueError("holdout bundle root must be a regular directory")
     actual: set[str] = set()
     for candidate in root.rglob("*"):
+        relative = candidate.relative_to(root).as_posix()
         if candidate.is_symlink():
             raise ValueError(f"holdout bundle contains a symlink: {candidate}")
-        if candidate.is_file():
-            actual.add(candidate.relative_to(root).as_posix())
+        if candidate.is_dir():
+            if not any(path.startswith(f"{relative}/") for path in allowed):
+                raise ValueError(f"holdout bundle contains an unexpected directory: {relative}")
+        elif candidate.is_file():
+            actual.add(relative)
+        else:
+            raise ValueError(f"holdout bundle contains a special entry: {relative}")
     if actual != allowed:
         extra = sorted(actual - allowed)
         missing = sorted(allowed - actual)
@@ -2240,6 +2655,9 @@ def reveal_holdout(
     evaluator: Callable[[Mapping[str, float], R2HoldoutOpenedMarker], R2HoldoutEvaluation],
     _confirmatory_token: object | None = None,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
 
@@ -2247,10 +2665,14 @@ def reveal_holdout(
     outcomes.  Any callback exception is re-raised after the consumed marker is
     durably created.
     """
+    payload_cache = _payload_cache if _payload_cache is not None else {}
     seal = verify_holdout_preparation(
         root,
         _confirmatory_token=_confirmatory_token,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     if (
         seal.selection_manifest_id != expected_selection_manifest_id
@@ -2296,7 +2718,9 @@ def reveal_holdout(
             selection.manifest_id,
             seal.seal_id,
         )
-        feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
+        feature_payload = _primary_feature_payload(
+            _load_feature_payloads(root, seal, _payload_cache=payload_cache)
+        )
         binding = _outcome_binding_from_feature_payload(
             feature_payload,
             selection=selection,
@@ -2475,19 +2899,27 @@ def verify_holdout_evaluation(
     *,
     _confirmatory_token: object | None = None,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
+    _payload_cache: dict[str, dict[str, object]] | None = None,
 ) -> R2HoldoutEvaluation:
+    payload_cache = _payload_cache if _payload_cache is not None else {}
     payload = _verify_child(
         root,
         "evaluation.json",
         contract=R2_HOLDOUT_EVALUATION_CONTRACT,
         identity_key="evaluation_id",
         expected_fields=_EVALUATION_FIELDS,
+        _payload_cache=payload_cache,
     )
     selection = verify_holdout_selection(root / "selection.json")
     seal = verify_holdout_preparation(
         root,
         _confirmatory_token=_confirmatory_token,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     opened, consumed = verify_holdout_markers(root)
     outcome_payload = _verify_child(
@@ -2539,7 +2971,9 @@ def verify_holdout_evaluation(
         or outcome_evidence.experiment_configuration_id != selection.experiment_configuration_id
     ):
         raise ValueError("holdout outcome evidence does not bind the exact opened seal")
-    feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
+    feature_payload = _primary_feature_payload(
+        _load_feature_payloads(root, seal, _payload_cache=payload_cache)
+    )
     binding = _outcome_binding_from_feature_payload(
         feature_payload,
         selection=selection,
@@ -2564,11 +2998,31 @@ def verify_holdout_evaluation(
     ):
         raise ValueError("holdout outcome evidence does not bind the prepared target lineage")
     forecast_datasets = tuple(
-        _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
+        _forecast_dataset_from_payload(
+            _verify_child(
+                root,
+                f"forecasts/{dataset_id}.json",
+                contract=R2_HOLDOUT_FORECAST_CONTRACT,
+                identity_key="dataset_id",
+                expected_fields=_FORECAST_FIELDS,
+                expected_id=dataset_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for dataset_id in seal.forecast_dataset_ids
     )
     coverage_datasets = tuple(
-        _coverage_dataset_from_payload(_load_object(root / "coverage" / f"{coverage_id}.json"))
+        _coverage_dataset_from_payload(
+            _verify_child(
+                root,
+                f"coverage/{coverage_id}.json",
+                contract=R2_HOLDOUT_COVERAGE_CONTRACT,
+                identity_key="coverage_id",
+                expected_fields=_COVERAGE_FIELDS,
+                expected_id=coverage_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for coverage_id in seal.coverage_ids
     )
     question_values = _object_list(payload["questions"], "holdout evaluation questions")
@@ -2665,6 +3119,8 @@ def _verify_artifact_reference_payload(
         R2_HOLDOUT_COVERAGE_CONTRACT: "coverage_id",
         R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT: "outcome_evidence_id",
         _PREPARATION_CLAIM_CONTRACT: "claim_id",
+        _PREPARATION_AUTHORITY_CONTRACT: "authority_id",
+        _PARTITIONED_PART_CONTRACT: "parent_semantic_id",
     }
     identity_key = identity_key_by_contract.get(reference.contract)
     if identity_key is None:
@@ -2684,17 +3140,23 @@ def build_holdout_bundle(
     output: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
     seal = verify_holdout_preparation(
         root,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
     selection = verify_holdout_selection(root / "selection.json")
     opened, consumed = verify_holdout_markers(root)
     evaluation = verify_holdout_evaluation(
         root,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(
@@ -2749,6 +3211,22 @@ def build_holdout_bundle(
             "outcome-target.json": outcome_target_payload,
         }
     )
+    def child_replay_specs(
+        relative: str,
+        *,
+        contract: str,
+        identity_key: str,
+    ) -> tuple[tuple[str, str, str, str], ...]:
+        return tuple(
+            (
+                physical,
+                physical,
+                contract if physical == relative else _PARTITIONED_PART_CONTRACT,
+                identity_key if physical == relative else "parent_semantic_id",
+            )
+            for physical in _physical_child_paths(root, relative, identity_field=identity_key)
+        )
+
     replay_specs: list[tuple[str, str, str, str]] = [
         (
             _PREPARATION_CLAIM_FILE,
@@ -2756,41 +3234,43 @@ def build_holdout_bundle(
             _PREPARATION_CLAIM_CONTRACT,
             "claim_id",
         ),
+        (
+            _PREPARATION_AUTHORITY_FILE,
+            _PREPARATION_AUTHORITY_FILE,
+            _PREPARATION_AUTHORITY_CONTRACT,
+            "authority_id",
+        ),
         *[
-            (relative, relative, R2_HOLDOUT_FEATURES_CONTRACT, "dataset_id")
+            spec
             for _dataset_id, relative in _feature_dataset_paths(seal)
+            for spec in child_replay_specs(
+                relative, contract=R2_HOLDOUT_FEATURES_CONTRACT, identity_key="dataset_id"
+            )
         ],
         *[
-            (relative, relative, "qtrad-r2-features-v2", "dataset_id")
-            for relative in _training_paths_for_seal(root, seal)
-            if relative.startswith("training/features/")
-        ],
-        *[
-            (relative, relative, _TRAINING_TARGET_PROJECTION_CONTRACT, "dataset_id")
-            for relative in _training_paths_for_seal(root, seal)
-            if relative.startswith("training/targets/")
-        ],
-        *[
-            (f"fits/{fit_id}.json", f"fits/{fit_id}.json", "qtrad-r2-final-fit-v1", "fit_id")
+            spec
             for fit_id in seal.final_fit_ids
+            for spec in child_replay_specs(
+                f"fits/{fit_id}.json", contract="qtrad-r2-final-fit-v1", identity_key="fit_id"
+            )
         ],
         *[
-            (
-                f"forecasts/{dataset_id}.json",
-                f"forecasts/{dataset_id}.json",
-                R2_HOLDOUT_FORECAST_CONTRACT,
-                "dataset_id",
-            )
+            spec
             for dataset_id in seal.forecast_dataset_ids
+            for spec in child_replay_specs(
+                f"forecasts/{dataset_id}.json",
+                contract=R2_HOLDOUT_FORECAST_CONTRACT,
+                identity_key="dataset_id",
+            )
         ],
         *[
-            (
-                f"coverage/{coverage_id}.json",
-                f"coverage/{coverage_id}.json",
-                R2_HOLDOUT_COVERAGE_CONTRACT,
-                "coverage_id",
-            )
+            spec
             for coverage_id in seal.coverage_ids
+            for spec in child_replay_specs(
+                f"coverage/{coverage_id}.json",
+                contract=R2_HOLDOUT_COVERAGE_CONTRACT,
+                identity_key="coverage_id",
+            )
         ],
     ]
     if (root / "outcome-evidence.json").is_file():
@@ -2872,6 +3352,8 @@ def _verify_bundle_replay(
     refs: Sequence[ArtifactReference],
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> None:
     with TemporaryDirectory(prefix="qtrad-r2-holdout-bundle-") as temporary:
         replay_root = Path(temporary)
@@ -2884,6 +3366,8 @@ def _verify_bundle_replay(
         replayed = verify_holdout_evaluation(
             replay_root,
             holdout_target_source=holdout_target_source,
+            training_feature_datasets=training_feature_datasets,
+            immediate_parent_authority=immediate_parent_authority,
         )
         persisted = _load_object(replay_root / "evaluation.json")
         if replayed.as_json() != persisted:
@@ -2894,6 +3378,8 @@ def verify_holdout_bundle(
     path: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     payload = _load_object(path / "manifest.json")
     expected = {
@@ -2938,6 +3424,8 @@ def verify_holdout_bundle(
         path,
         tuple(refs),
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
     return R2HoldoutBundle(
         selection=refs[0],
@@ -2958,11 +3446,15 @@ def write_built_holdout_bundle(
     output: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     bundle = build_holdout_bundle(
         root,
         output,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
     children: dict[str, Mapping[str, object]] = {}
     refs = (
@@ -2980,6 +3472,8 @@ def write_built_holdout_bundle(
     return verify_holdout_bundle(
         output,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
 
 
@@ -3190,21 +3684,47 @@ def reveal_holdout_from_files(
     opened_at: datetime,
     consumed_at: datetime,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ):
     """Reveal persisted disposable children; outcome bytes are read after OPENED."""
     from qtrad.application.r2_holdout import evaluate_holdout
 
+    payload_cache: dict[str, dict[str, object]] = {}
     selection = verify_holdout_selection(root / "selection.json")
     seal = verify_holdout_preparation(
         root,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     forecast_datasets = tuple(
-        _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
+        _forecast_dataset_from_payload(
+            _verify_child(
+                root,
+                f"forecasts/{dataset_id}.json",
+                contract=R2_HOLDOUT_FORECAST_CONTRACT,
+                identity_key="dataset_id",
+                expected_fields=_FORECAST_FIELDS,
+                expected_id=dataset_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for dataset_id in seal.forecast_dataset_ids
     )
     coverage_datasets = tuple(
-        _coverage_dataset_from_payload(_load_object(root / "coverage" / f"{coverage_id}.json"))
+        _coverage_dataset_from_payload(
+            _verify_child(
+                root,
+                f"coverage/{coverage_id}.json",
+                contract=R2_HOLDOUT_COVERAGE_CONTRACT,
+                identity_key="coverage_id",
+                expected_fields=_COVERAGE_FIELDS,
+                expected_id=coverage_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for coverage_id in seal.coverage_ids
     )
     target_dataset: TargetDataset | None = None
@@ -3245,6 +3765,9 @@ def reveal_holdout_from_files(
         holdout_target_source=holdout_target_source,
         outcome_loader=load_outcomes,
         evaluator=evaluate,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
 
 
@@ -3260,25 +3783,51 @@ def _reveal_confirmatory_holdout(
     consumed_at: Callable[[], datetime],
     holdout_target_source: R2HoldoutTargetSource,
     outcome_loader: Callable[[], TargetDataset],
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Run frozen confirmatory evaluation after marker-first target decoding."""
 
     from qtrad.application.r2_holdout import evaluate_holdout
 
+    payload_cache: dict[str, dict[str, object]] = {}
     selection = verify_holdout_selection(root / "selection.json")
     seal = verify_holdout_preparation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     if selection.holdout_scope is not HoldoutScope.CONFIRMATORY:
         raise ValueError("confirmatory reveal requires a confirmatory selection")
     forecast_datasets = tuple(
-        _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
+        _forecast_dataset_from_payload(
+            _verify_child(
+                root,
+                f"forecasts/{dataset_id}.json",
+                contract=R2_HOLDOUT_FORECAST_CONTRACT,
+                identity_key="dataset_id",
+                expected_fields=_FORECAST_FIELDS,
+                expected_id=dataset_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for dataset_id in seal.forecast_dataset_ids
     )
     coverage_datasets = tuple(
-        _coverage_dataset_from_payload(_load_object(root / "coverage" / f"{coverage_id}.json"))
+        _coverage_dataset_from_payload(
+            _verify_child(
+                root,
+                f"coverage/{coverage_id}.json",
+                contract=R2_HOLDOUT_COVERAGE_CONTRACT,
+                identity_key="coverage_id",
+                expected_fields=_COVERAGE_FIELDS,
+                expected_id=coverage_id,
+                _payload_cache=payload_cache,
+            )
+        )
         for coverage_id in seal.coverage_ids
     )
     target_dataset: TargetDataset | None = None
@@ -3316,6 +3865,9 @@ def _reveal_confirmatory_holdout(
         evaluator=evaluate,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
 
 
@@ -3323,11 +3875,15 @@ def _verify_confirmatory_holdout_preparation(
     root: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutForecastSeal:
     return verify_holdout_preparation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )
 
 
@@ -3335,9 +3891,13 @@ def _verify_confirmatory_holdout_evaluation(
     root: Path,
     *,
     holdout_target_source: R2HoldoutTargetSource,
+    training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
+    immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutEvaluation:
     return verify_holdout_evaluation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
         holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
     )

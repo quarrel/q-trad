@@ -930,7 +930,9 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         if family is not ModelFamily.ZERO_RETURN
     }
     assert any(
-        payload["configuration_id"] in non_zero_ids and payload["rows"]
+        payload["configuration_id"] in non_zero_ids
+        and payload["storage"] == "qtrad-r2-partitioned-json-rows-v1"
+        and payload["parts"]
         for payload in persisted_forecasts
     )
     assert not {
@@ -959,7 +961,8 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
 
     missing_root = tmp_path / "missing-preparation"
     copytree(preparation_root, missing_root)
-    next((missing_root / "forecasts").iterdir()).unlink()
+    forecast_top = next(path for path in (missing_root / "forecasts").iterdir() if path.is_file())
+    forecast_top.unlink()
     with pytest.raises((FileNotFoundError, ValueError)):
         verify_confirmatory_g2_preparation(verified_g1=verified_g1, path=missing_root)
 
