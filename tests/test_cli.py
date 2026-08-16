@@ -2,7 +2,7 @@ import asyncio
 import json
 import signal
 from collections.abc import AsyncIterator, Callable, Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -14,6 +14,7 @@ import pytest
 from qtrad import __main__ as cli
 from qtrad.domain.identifiers import InstrumentId, ProviderListingId
 from qtrad.domain.instruments import AssetClass, Instrument, ProductType, ProviderListing
+from qtrad.domain.r2_ibkr_historical import IBKR_HISTORICAL_SOURCE
 from qtrad.ports.clock import Clock
 from qtrad.ports.market_data import InstrumentListingReview
 from qtrad.runtime.settings import Settings
@@ -1206,6 +1207,39 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
 
     assert oof.baselines_command == "oof-build"
     assert oof.feature_manifest == ["L0=l0.json", "L1=l1.json", "P0=p0.json", "P1=p1.json"]
+    oof_verify = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "oof-verify",
+            "--bundle",
+            "oof",
+            "--receipt-output",
+            "oof-receipt.json",
+        ]
+    )
+    assert oof_verify.receipt_output == Path("oof-receipt.json")
+    with pytest.raises(SystemExit):
+        parser.parse_args(["research", "baselines", "oof-verify", "--bundle", "oof"])
+    target_source = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "holdout-target-source",
+            "--foundation-bundle",
+            "foundation.json",
+            "--foundation-receipt",
+            "foundation-receipt.json",
+            "--foundation-promotion",
+            "foundation-promotion.json",
+            "--experiment",
+            "experiment.json",
+            "--output",
+            "target-source.json",
+        ]
+    )
+    assert target_source.baselines_command == "holdout-target-source"
+    assert target_source.foundation_promotion == Path("foundation-promotion.json")
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
@@ -1216,6 +1250,98 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
                 "software/manifest.json",
             ]
         )
+
+
+def test_oof_verify_dispatches_semantic_receipt_output(
+    monkeypatch: pytest.MonkeyPatch, cli_environment: Settings, cli_clock: Clock
+) -> None:
+    bundle = SimpleNamespace(as_json=lambda: {"contract": "oof"})
+    verify = Mock(return_value=bundle)
+    monkeypatch.setattr(cli, "verify_r2_oof_semantics", verify)
+
+    cli.main(
+        [
+            "research",
+            "baselines",
+            "oof-verify",
+            "--bundle",
+            "bundle",
+            "--receipt-output",
+            "receipt.json",
+        ]
+    )
+
+    verify.assert_called_once_with(Path("bundle"), receipt_output=Path("receipt.json"))
+
+
+def test_holdout_target_source_dispatches_create_only_output(
+    monkeypatch: pytest.MonkeyPatch, cli_environment: Settings, cli_clock: Clock
+) -> None:
+    holdout_range = ("start", "end")
+    target_instruments = ("fx:aud-usd",)
+    experiment = SimpleNamespace(
+        market_data_source_class=IBKR_HISTORICAL_SOURCE,
+        r1_bundle_id="foundation",
+        target_dataset_id="target",
+        observation_dataset_id="observations",
+        foundation_configuration_id="configuration",
+        holdout_range=holdout_range,
+        primary_horizon=timedelta(minutes=15),
+        target_instruments=target_instruments,
+    )
+    source_json = {"contract": "qtrad-r2-holdout-target-source-v1"}
+    source = SimpleNamespace(
+        CONTRACT=source_json["contract"],
+        source_target_dataset_id="target",
+        observation_dataset_id="observations",
+        foundation_configuration_id="configuration",
+        holdout_range=holdout_range,
+        primary_horizon_seconds=900,
+        target_instruments=target_instruments,
+        source_id="source",
+        targets=(object(),),
+        opportunities=(object(),),
+        pre_holdout_target_dataset=SimpleNamespace(rows=(object(),)),
+        as_json=Mock(return_value=source_json),
+    )
+    monkeypatch.setattr(cli, "load_r2_experiment", lambda _path: experiment)
+    monkeypatch.setattr(
+        cli,
+        "authenticate_ibkr_foundation_promotion",
+        Mock(return_value=SimpleNamespace(foundation_bundle_id="foundation")),
+    )
+    build = Mock(return_value=source)
+    monkeypatch.setattr(cli, "build_ibkr_holdout_target_source", build)
+    canonical = Mock(return_value=b"source-bytes")
+    publish = Mock()
+    monkeypatch.setattr(cli, "canonical_bytes", canonical)
+    monkeypatch.setattr(cli, "atomic_create", publish)
+
+    cli.main(
+        [
+            "research",
+            "baselines",
+            "holdout-target-source",
+            "--foundation-bundle",
+            "foundation.json",
+            "--foundation-receipt",
+            "receipt.json",
+            "--foundation-promotion",
+            "promotion.json",
+            "--experiment",
+            "experiment.json",
+            "--output",
+            "source.json",
+        ]
+    )
+
+    build.assert_called_once_with(
+        Path("foundation.json"),
+        receipt=Path("receipt.json"),
+        target_instruments=target_instruments,
+    )
+    canonical.assert_called_once_with(source_json)
+    publish.assert_called_once_with(Path("source.json"), b"source-bytes")
 
 
 @pytest.mark.asyncio

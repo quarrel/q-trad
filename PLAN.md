@@ -8,8 +8,7 @@ cross-asset forecasts can justify a cost- and risk-aware paper portfolio.
 **Safety boundary:** IG demo and IBKR paper market data with internal paper outcomes only; no external
 orders or production broker connectivity.
 
-`docs/TRADING_RESEARCH.md` defines the stable research programme. This file selects the current
-work and records only the milestone sequence needed to reach the next trustworthy decision.
+`docs/TRADING_RESEARCH.md` defines the stable research programme. `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md` is the active decision-grade execution authority. This file selects the current work and records only the milestone sequence needed to reach the next trustworthy decision.
 
 ## Current position
 
@@ -54,7 +53,7 @@ work and records only the milestone sequence needed to reach the next trustworth
   and independent R2.H classification. Injected post-open failures remain non-reusable `OPENED_INCOMPLETE`.
   No real holdout, research conclusion or effectiveness evidence exists.
 - Before the first real confirmatory R2 run, the active evidence-handoff simplification programme has converged the Stage 6 through R2 boundaries on immediate-parent receipt authentication. Each boundary transforms and independently verifies once; ordinary descendants authenticate that proof, and promotion grants authority without semantic replay.
-- PR-C1 is implementation-complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; a clean full gate and merge remain release checks.
+- PR-C1 is merged and complete for this convergence: obsolete readers, migration bridges, recursive replay-input discovery, redundant ancestor/whole-file verification and retired compatibility paths are deleted. The ordinary work-count matrix is covered by focused instrumentation; the clean full gate remains the release check.
 - ADR 0028 and ADR 0029 approve an independent, market-data-only IBKR paper source and its
   historical evidence boundaries. The normative staged path is `docs/IBKR-HISTORICAL-ACQUISITION.md`.
   Stage 1 contract/runtime artefacts, Stage 2 deterministic request-profile/plan artefacts,
@@ -63,7 +62,7 @@ work and records only the milestone sequence needed to reach the next trustworth
   adapter, callback normalization, immutable canary evidence and file-only canary/profile operations.
   Account-gated capability review, host deployment and the bounded Stage 5 canary are now complete:
   all 12 representative 1D/1W/2W/4W MIDPOINT/SCHEDULE cases passed with the frozen 300-second profile.
-- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward.
+- The full Stage 6 result closure and superseded Stage 7/8 evidence remain retained and immutable. The H4 migration produced a reviewed scientific invalidation record (`3610c94...`); its superseded promotion is not carried forward, and no replacement Stage 8 promotion exists yet.
 - Current Stage 7 and Stage 8 construction, verification, authentication and promotion are v3-only. They bind immediate-parent semantic, closure and verification identities, consume only selected children, and do not reopen superseded ancestry. No real holdout result or effectiveness claim exists, and IBKR evidence cannot substantiate an IG-native conclusion.
 
 ## Milestones

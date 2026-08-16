@@ -21,6 +21,7 @@ from qtrad.domain.ibkr_foundation import (
 )
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
+    build_ibkr_holdout_target_source,
     load_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
@@ -390,6 +391,18 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
             cast(Any, full_build.observations).dataset_id, availability
         ),
     )
+    original_bounded_bytes = foundation_runtime._bounded_bytes
+    parquet_reads: list[Path] = []
+
+    def guarded_bounded_bytes(path: Path, limit: int, field: str) -> bytes:
+        if path.suffix == ".parquet":
+            parquet_reads.append(path)
+        return original_bounded_bytes(path, limit, field)
+
+    monkeypatch.setattr(foundation_runtime, "_bounded_bytes", guarded_bounded_bytes)
+    authenticate_ibkr_foundation(foundation, receipt=receipt)
+    assert parquet_reads == []
+
     original_read_child_rows = foundation_runtime._read_child_rows
     child_reads: list[Path] = []
 
@@ -398,6 +411,12 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
     ) -> tuple[dict[str, Any], ...]:
         child_reads.append(path)
         assert not {"observations", "panel", "targets"}.intersection(path.parts)
+        return original_read_child_rows(path, expected_row_count=expected_row_count)
+
+    def recording_read_child_rows(
+        path: Path, *, expected_row_count: int
+    ) -> tuple[dict[str, Any], ...]:
+        child_reads.append(path)
         return original_read_child_rows(path, expected_row_count=expected_row_count)
 
     monkeypatch.setattr(foundation_runtime, "_read_child_rows", guarded_read_child_rows)
@@ -415,14 +434,75 @@ def test_stage8_outcome_blind_loader_spies_on_unconsumed_children(
             AssertionError("outcome-blind loading decoded Stage 7 provider rows")
         ),
     )
+    blind_source = build_ibkr_holdout_target_source(
+        foundation,
+        receipt=receipt,
+        target_instruments=tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS),
+    )
+    safe_kinds = {
+        "target-index",
+        "causal-metadata",
+        "blind-observations",
+        "blind-panel",
+        "pre-holdout-target",
+    }
+    all_child_kinds = set(foundation_runtime._CHILD_KINDS)
+
+    def assert_parquet_reads(expected: set[str]) -> None:
+        read_kinds = {
+            kind for path in parquet_reads for kind in all_child_kinds if kind in path.parts
+        }
+        assert read_kinds == expected
+        assert len(parquet_reads) == len(set(parquet_reads))
+        assert all(any(kind in path.parts for kind in all_child_kinds) for path in parquet_reads)
+
+    assert_parquet_reads(safe_kinds)
+    parquet_reads.clear()
+    child_reads.clear()
+    assert blind_source == holdout_source
     blind_build, build_id = load_ibkr_foundation_outcome_blind_with_identity(
         foundation,
         receipt=receipt,
-        holdout_target_source=holdout_source,
+        holdout_target_source=blind_source,
+    )
+    assert_parquet_reads(safe_kinds | {"folds"})
+    assert {kind for path in child_reads for kind in all_child_kinds if kind in path.parts} == (
+        safe_kinds | {"folds"}
     )
     assert build_id
     assert blind_build.targets.rows == holdout_source.pre_holdout_target_dataset.rows
-    assert child_reads
+
+    monkeypatch.setattr(foundation_runtime, "_read_child_rows", recording_read_child_rows)
+    for decode_g2, decode_target, expected_extra in (
+        (True, False, {"g2-observations", "g2-panel"}),
+        (False, True, {"targets"}),
+    ):
+        parquet_reads.clear()
+        child_reads.clear()
+        foundation_runtime._load_ibkr_foundation_outcome_blind(
+            foundation,
+            receipt=receipt,
+            holdout_target_source=blind_source,
+            decode_g2=decode_g2,
+            decode_target=decode_target,
+        )
+        expected = safe_kinds | {"folds"} | expected_extra
+        assert_parquet_reads(expected)
+        assert {
+            kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+        } == expected
+
+    parquet_reads.clear()
+    child_reads.clear()
+    load_ibkr_foundation(foundation, receipt=receipt)
+    complete_kinds = set(foundation_runtime._BASE_CHILD_KINDS) | {
+        "target-index",
+        "causal-metadata",
+    }
+    assert_parquet_reads(complete_kinds)
+    assert {
+        kind for path in child_reads for kind in all_child_kinds if kind in path.parts
+    } == complete_kinds
 
 
 def test_stage8_readiness_records_zero_fold_insufficiency_and_coverage() -> None:

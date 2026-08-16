@@ -42,10 +42,7 @@ R2.F1 core machinery are implemented. Source-specific IBKR historical representa
 confirmatory F2/G1 machinery and capability-gated G2 preparation/reveal mechanics exist as software,
 but no real confirmatory OOF, locked holdout result or effectiveness conclusion exists.
 
-The immediate engineering priority before the first expensive confirmatory R2 run is to simplify the
-Stage 6 → Stage 7 → Stage 8 → R1/R2 evidence handoffs so each transformation is proved once and that
-proof is reused cheaply. This work must reduce repeated hashing, decoding, model work and recursive
-semantic verification rather than adding another compatibility or abstraction layer.
+The Stage 6 → Stage 7 → Stage 8 → R1/R2 evidence-handoff simplification programme is complete: each transformation is proved once and that proof is reused cheaply. The immediate engineering priority is executing the first decision-grade R2 run under `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`; no real confirmatory OOF, locked holdout result or effectiveness conclusion exists.
 
 The reviewed `capture-v4` IG demo collector and the independent IBKR paper market-data collector are
 operational data sources. Historical IBKR evidence is provenance-distinct from native IG evidence and

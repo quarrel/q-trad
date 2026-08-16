@@ -231,7 +231,7 @@ def test_stage8_v3_cli_dispatch_requires_complete_stage7_parent(tmp_path: Path) 
             )
 
 
-def test_stage8_v3_authentication_rejects_mutated_child_bytes(tmp_path: Path) -> None:
+def test_stage8_v3_loader_rejects_mutated_child_bytes(tmp_path: Path) -> None:
     stage7_manifest, _source = _authenticated_v3_source(tmp_path)
     stage7_receipt = tmp_path / "stage7-receipt.json"
     output = tmp_path / "foundation.json"
@@ -255,7 +255,7 @@ def test_stage8_v3_authentication_rejects_mutated_child_bytes(tmp_path: Path) ->
     child_path = output.parent / child["file"]
     child_path.write_bytes(child_path.read_bytes() + b"tamper")
     with pytest.raises(ValueError, match=r"closure|child"):
-        authenticate_ibkr_foundation(output, receipt=foundation_receipt)
+        load_ibkr_foundation(output, receipt=foundation_receipt)
 
 
 def test_stage8_foundation_identity_classifies_selected_input_and_readiness() -> None:

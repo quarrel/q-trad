@@ -939,11 +939,7 @@ operator authorisation without semantic replay.
 
 **Form:** foundation integration pull request.
 
-**Software status:** The source-specific builder, corrected per-block coverage policy and readiness
-verifier are implemented on `main`. The retained foundation is `QUALIFYING_HISTORY_READY`; its
-authenticated ordinary receipt grants `IMPLEMENTATION_EVIDENCE_ONLY`, and its separately authenticated
-S8.4 promotion grants the confirmatory capability required before real IBKR F2. No real holdout result,
-effectiveness claim or downstream R2 result has been created.
+**Software status:** The source-specific builder, corrected per-block coverage policy and readiness verifier are implemented on `main`. The retained Stage 8 attempt was invalidated by H4; its old confirmatory promotion is superseded and no replacement Stage 8 promotion currently exists. No real holdout result, effectiveness claim or downstream R2 result has been created.
 
 Extend foundation build and verification with mutually exclusive inputs:
 

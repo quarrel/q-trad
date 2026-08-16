@@ -37,8 +37,7 @@ exists.
 
 ## Evidence handoff target
 
-Before the first real confirmatory R2 run, the active simplification programme is migrating the Stage
-6 through R2 evidence path to this architecture:
+The PR-C1 simplification programme has completed the Stage 6 through R2 evidence path on this architecture:
 
 ```text
 build boundary -> structural publication -> one independent verification -> create-only receipt
@@ -54,7 +53,7 @@ replay. Deep audit is exceptional after verifier revocation, a potentially relev
 explicit operator request. Compatibility exists only for named retained evidence and is deleted after
 migration; there are no dual writers or generic evidence framework.
 
-The Stage 6–8 implementation migrations for the retained IBKR packet are complete; this remains the target architecture for any future boundary migration.
+The Stage 6–8 implementation migrations for the retained IBKR packet are complete; PR-C1 merged this convergence, which is now the current architecture for future boundary migrations.
 
 ## Shape
 

@@ -12,6 +12,7 @@ from collections.abc import Callable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
+from types import SimpleNamespace
 from typing import cast
 
 import polars as pl
@@ -29,7 +30,7 @@ from qtrad.application.r2_ibkr_historical import (
 from qtrad.application.walk_forward import build_expanding_folds
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.folds import FoldDataset
-from qtrad.domain.foundation import FoundationConfig, PanelDataset, TargetDataset
+from qtrad.domain.foundation import FoundationConfig, InstrumentRole, PanelDataset, TargetDataset
 from qtrad.domain.ibkr_foundation import (
     IBKR_CONFIRMATORY_INSTRUMENTS,
     IBKRFoundationReadiness,
@@ -542,18 +543,24 @@ def _load_authenticated_ibkr_foundation_v3(
     *,
     receipt: Path,
 ) -> tuple[IBKRFoundationBuild, str]:
-    authenticated = _read_v3_manifest(path)
+    authenticated = _read_v3_manifest(path, child_byte_kinds=())
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     child_kinds = _supported_child_kinds(authenticated.children)
     child_ids = _child_reference_dataset_ids(authenticated.children, child_kinds=child_kinds)
+    decoded_child_kinds = tuple(
+        kind
+        for kind in (*_BASE_CHILD_KINDS, "target-index", "causal-metadata")
+        if kind in child_kinds
+    )
     decoded = _verify_children_blind(
         authenticated.path.parent,
         authenticated.children,
         child_ids,
         authenticated.lineage,
         decode_rows=False,
-        decode_base=True,
         child_kinds=child_kinds,
+        decode_kinds=decoded_child_kinds,
+        byte_kinds=decoded_child_kinds,
     )
     configuration = authenticated.configuration
     provider_dataset = authenticated.provider_dataset
@@ -667,6 +674,138 @@ def load_ibkr_foundation_with_identity(
     return _load_authenticated_ibkr_foundation(path, receipt=receipt)
 
 
+def build_ibkr_holdout_target_source(
+    path: Path,
+    *,
+    receipt: Path,
+    target_instruments: Sequence[str] | None = None,
+) -> R2HoldoutTargetSource:
+    """Build an outcome-blind holdout source from authenticated Stage 8 projections."""
+    if not _is_v3_foundation(path):
+        raise ValueError("current Stage 8 v3 outcome-blind loading is required")
+    authenticated_v3 = _read_v3_manifest(path, child_byte_kinds=())
+    _authenticate_ibkr_foundation_v3(path, receipt=receipt)
+    root = authenticated_v3.path.parent
+    provider_dataset = authenticated_v3.provider_dataset
+    payload = authenticated_v3.payload
+    configuration = authenticated_v3.configuration
+    children = authenticated_v3.children
+    expected_lineage = authenticated_v3.lineage
+    child_ids = _child_reference_dataset_ids(children)
+    decoded = _verify_children_blind(
+        root,
+        children,
+        child_ids,
+        expected_lineage,
+        decode_g2=False,
+        decode_target=False,
+        decode_rows=False,
+        decode_kinds=_FOUNDATION_EXTENSION_CHILD_KINDS,
+        byte_kinds=_FOUNDATION_EXTENSION_CHILD_KINDS,
+    )
+    if child_ids["observations"] != configuration.observation_dataset_id:
+        raise ValueError("IBKR foundation observation child differs from configuration")
+    if child_ids["blind-observations"] != _blind_observation_projection_id(
+        source_dataset_id=child_ids["observations"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-observations"],
+    ):
+        raise ValueError("IBKR blind observation projection identity is invalid")
+    if child_ids["blind-panel"] != _blind_panel_projection_id(
+        source_dataset_id=child_ids["panel"],
+        holdout_start=configuration.holdout_range[0],
+        rows=decoded["blind-panel"],
+    ):
+        raise ValueError("IBKR blind panel projection identity is invalid")
+    target_index = R2HoldoutTargetIndex.from_rows(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        rows=decoded["target-index"],
+    )
+    if target_index.dataset_id != child_ids["target-index"]:
+        raise ValueError("IBKR holdout target index identity is invalid")
+    causal_metadata = R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=child_ids["panel"],
+        rows=decoded["causal-metadata"],
+    )
+    if causal_metadata.dataset_id != child_ids["causal-metadata"]:
+        raise ValueError("IBKR holdout causal metadata identity is invalid")
+    pre_holdout_target = R2PreHoldoutTargetProjection.from_json(decoded["pre-holdout-target"][0])
+    primary_horizon_seconds = int(configuration.primary_vertical_horizon.total_seconds())
+    configured_target_instruments = tuple(
+        instrument_id
+        for instrument_id in configuration.ordered_instruments
+        if InstrumentRole(configuration.instrument_roles[instrument_id]) is InstrumentRole.TARGET
+    )
+    selected_target_instruments = (
+        configured_target_instruments if target_instruments is None else tuple(target_instruments)
+    )
+    if set(selected_target_instruments) != set(configured_target_instruments):
+        raise ValueError("holdout target source instruments differ from Stage 8 configuration")
+    target_instruments = selected_target_instruments
+    projection_mismatches: list[str] = []
+    if pre_holdout_target.source_target_dataset_id != child_ids["targets"]:
+        projection_mismatches.append("source target")
+    if pre_holdout_target.observation_dataset_id != child_ids["observations"]:
+        projection_mismatches.append("observation")
+    if pre_holdout_target.foundation_configuration_id != configuration.configuration_id:
+        projection_mismatches.append("configuration")
+    if pre_holdout_target.holdout_start != configuration.holdout_range[0]:
+        projection_mismatches.append("holdout start")
+    if pre_holdout_target.primary_horizon_seconds != primary_horizon_seconds:
+        projection_mismatches.append("horizon")
+    if pre_holdout_target.target_instruments != tuple(sorted(target_instruments)):
+        projection_mismatches.append("instruments")
+    if pre_holdout_target.projection_id != child_ids["pre-holdout-target"]:
+        projection_mismatches.append("projection ID")
+    if projection_mismatches:
+        raise ValueError(
+            "IBKR pre-holdout target projection is not source-authenticated: "
+            + ", ".join(projection_mismatches)
+        )
+    active_intervals = _decode_active_intervals(payload["active_intervals"])
+    provider_gaps = tuple(
+        cast(Mapping[str, JsonValue], _mapping(item, "IBKR provider gap"))
+        for item in _sequence(payload["provider_gaps"])
+    )
+    availability_build = cast(
+        IBKRFoundationBuild,
+        SimpleNamespace(
+            configuration=configuration,
+            active_intervals=active_intervals,
+            provider_gaps=provider_gaps,
+            provider_history=provider_dataset,
+        ),
+    )
+    availability = ibkr_availability_evidence(availability_build)
+    opportunities = R2HoldoutTargetSource._derive_opportunities_from_r1_evidence(
+        target_index.targets,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=primary_horizon_seconds,
+        target_instruments=target_instruments,
+        panel=None,
+        causal_metadata=causal_metadata,
+        source_active_intervals=active_intervals,
+        data_gaps=_data_gap_tuples(provider_gaps),
+    )
+    return R2HoldoutTargetSource.create(
+        source_target_dataset_id=child_ids["targets"],
+        observation_dataset_id=child_ids["observations"],
+        foundation_configuration_id=configuration.configuration_id,
+        holdout_range=configuration.holdout_range,
+        primary_horizon_seconds=primary_horizon_seconds,
+        target_instruments=target_instruments,
+        targets=target_index.targets,
+        pre_holdout_target_dataset=pre_holdout_target.projected_target_dataset,
+        opportunities=opportunities,
+        causal_panel_dataset_id=child_ids["panel"],
+        availability_evidence_id=_availability_dataset_id(child_ids["observations"], availability),
+        target_index_dataset_id=target_index.dataset_id,
+        causal_metadata_dataset_id=causal_metadata.dataset_id,
+    )
+
+
 def _load_ibkr_foundation_outcome_blind(
     path: Path,
     *,
@@ -681,17 +820,18 @@ def _load_ibkr_foundation_outcome_blind(
     VerifiedG2FeatureSource | None,
     TargetDataset | None,
 ]:
-    """Load the IBKR foundation without decoding outcome-bearing children.
+    """Load authenticated IBKR children with explicit byte consumption.
 
     The normal loader above is intentionally complete and is used after the
-    marker is opened.  Representative OOF must use this narrower path: target,
-    panel and observation children are authenticated by manifest/file bytes,
-    while only the persisted outcome-blind projections and folds are decoded.
+    marker is opened. Representative OOF consumes only the persisted
+    outcome-blind projections and folds; G2 and protected target Parquet bytes
+    are consumed only when their explicit flags request those rows. All other
+    children remain manifest/tree-authenticated without byte reads.
     """
 
     if not _is_v3_foundation(path):
         raise ValueError("current Stage 8 v3 outcome-blind loading is required")
-    authenticated_v3 = _read_v3_manifest(path)
+    authenticated_v3 = _read_v3_manifest(path, child_byte_kinds=())
     _authenticate_ibkr_foundation_v3(path, receipt=receipt)
     manifest_path = authenticated_v3.path
     receipt_path = receipt.resolve()
@@ -703,13 +843,20 @@ def _load_ibkr_foundation_outcome_blind(
     expected_lineage = authenticated_v3.lineage
     build_id = authenticated_v3.foundation_id
     child_ids = _child_reference_dataset_ids(children)
+    consumed_child_kinds = (
+        "folds",
+        *_FOUNDATION_EXTENSION_CHILD_KINDS,
+        *(_G2_EXTENSION_CHILD_KINDS if decode_g2 else ()),
+        *(("targets",) if decode_target else ()),
+    )
     decoded = _verify_children_blind(
         root,
         children,
         child_ids,
         expected_lineage,
-        decode_g2=decode_g2,
-        decode_target=decode_target,
+        decode_rows=False,
+        decode_kinds=consumed_child_kinds,
+        byte_kinds=consumed_child_kinds,
     )
     if child_ids["observations"] != configuration.observation_dataset_id:
         raise ValueError("IBKR foundation observation child differs from configuration")
@@ -1483,6 +1630,8 @@ def _verify_children_blind(
     decode_rows: bool = True,
     decode_base: bool = False,
     child_kinds: Sequence[str] | None = None,
+    byte_kinds: Sequence[str] | None = None,
+    decode_kinds: Sequence[str] | None = None,
 ) -> dict[str, tuple[dict[str, JsonValue], ...]]:
     """Verify child bytes while decoding only explicitly requested rows."""
 
@@ -1490,6 +1639,9 @@ def _verify_children_blind(
     if set(children) != set(kinds):
         raise ValueError("IBKR foundation child set is incomplete or duplicated")
     _preflight_child_tree(bundle_root, children, kinds)
+    byte_verified_kinds = set(kinds if byte_kinds is None else byte_kinds)
+    if not byte_verified_kinds.issubset(kinds):
+        raise ValueError("IBKR foundation byte-verification child set is unsupported")
     decoded_kinds = (
         {
             "folds",
@@ -1508,6 +1660,10 @@ def _verify_children_blind(
         decoded_kinds.update(_G2_EXTENSION_CHILD_KINDS)
     if decode_target:
         decoded_kinds.add("targets")
+    if decode_kinds is not None:
+        decoded_kinds = set(decode_kinds)
+    if not decoded_kinds.issubset(byte_verified_kinds):
+        raise ValueError("IBKR foundation decoded children require byte verification")
     decoded: dict[str, tuple[dict[str, JsonValue], ...]] = {}
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
@@ -1581,27 +1737,30 @@ def _verify_children_blind(
                 manifest_file,
                 "IBKR foundation child Parquet",
             )
-            parquet_bytes = _bounded_bytes(
-                file_path,
-                _MAX_CHILD_FILE_BYTES,
-                "IBKR foundation child Parquet",
-            )
-            if hashlib.sha256(parquet_bytes).hexdigest() != _text(
-                manifest["file_sha256"], "child Parquet hash"
-            ):
-                raise ValueError("IBKR foundation child Parquet bytes changed")
-            if pl.read_parquet_schema(file_path) != {"payload": pl.String}:
-                raise ValueError("IBKR foundation child Parquet schema is unsupported")
-            if kind in decoded_kinds:
-                rows = _read_child_rows(
+            if kind in byte_verified_kinds:
+                parquet_bytes = _bounded_bytes(
                     file_path,
-                    expected_row_count=manifest_row_count,
+                    _MAX_CHILD_FILE_BYTES,
+                    "IBKR foundation child Parquet",
                 )
-                if _sha([_canonical_row(row) for row in rows]) != _text(
-                    manifest["rows_sha256"], "child row hash"
+                if hashlib.sha256(parquet_bytes).hexdigest() != _text(
+                    manifest["file_sha256"], "child Parquet hash"
                 ):
-                    raise ValueError("IBKR foundation child row identity does not match")
-                observed_rows.extend(rows)
+                    raise ValueError("IBKR foundation child Parquet bytes changed")
+                if pl.read_parquet_schema(file_path) != {"payload": pl.String}:
+                    raise ValueError("IBKR foundation child Parquet schema is unsupported")
+                if kind in decoded_kinds:
+                    rows = _read_child_rows(
+                        file_path,
+                        expected_row_count=manifest_row_count,
+                    )
+                    if _sha([_canonical_row(row) for row in rows]) != _text(
+                        manifest["rows_sha256"], "child row hash"
+                    ):
+                        raise ValueError("IBKR foundation child row identity does not match")
+                    observed_rows.extend(rows)
+            elif kind in decoded_kinds:
+                raise ValueError("IBKR foundation decoded children require byte verification")
             expected_files.update({manifest_reference, manifest_file})
         if kind in decoded_kinds:
             decoded[kind] = tuple(observed_rows)
@@ -2268,7 +2427,12 @@ def _v3_receipt_output(path: Path, foundation: Path) -> Path:
     return output
 
 
-def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _AuthenticatedFoundationV3:
+def _read_v3_manifest(
+    path: Path,
+    *,
+    verify_children: bool = True,
+    child_byte_kinds: Sequence[str] | None = None,
+) -> _AuthenticatedFoundationV3:
     manifest_path = _regular_file(path, "IBKR foundation manifest")
     manifest_bytes = _bounded_bytes(manifest_path, _MAX_MANIFEST_BYTES, "IBKR foundation manifest")
     document = _mapping(_parse_json(manifest_bytes, "IBKR foundation manifest"))
@@ -2366,6 +2530,7 @@ def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _Authentic
             lineage,
             decode_rows=False,
             child_kinds=kinds,
+            byte_kinds=child_byte_kinds,
         )
     return _AuthenticatedFoundationV3(
         manifest_path,
@@ -2383,7 +2548,7 @@ def _read_v3_manifest(path: Path, *, verify_children: bool = True) -> _Authentic
 
 
 def _authenticate_ibkr_foundation_v3(path: Path, *, receipt: Path) -> dict[str, JsonValue]:
-    authenticated = _read_v3_manifest(path)
+    authenticated = _read_v3_manifest(path, child_byte_kinds=())
     receipt_path = _regular_file(receipt, "Stage 8 verification receipt")
     receipt_bytes = _bounded_bytes(
         receipt_path, _MAX_MANIFEST_BYTES, "Stage 8 verification receipt"

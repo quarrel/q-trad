@@ -2,7 +2,8 @@
 
 **Updated:** 2026-08-15
 **Current milestone:** R2 — local and pooled baselines (R2.F1 core, source-specific IBKR representative integration and R2.H verification paths implemented; qualifying execution pending)
-**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion after a reviewed scientific divergence, and temporary v1/v2 readers/bridges are deleted. Current normal Stage 7/8 runtime is v3-only.
+**Parallel track:** retained Stage 6–8 IBKR historical evidence is immutable; H4 invalidation record `3610c94...` supersedes the old promotion after a reviewed scientific divergence, and temporary v1/v2 readers/bridges are deleted. Current normal Stage 7/8 runtime is v3-only; no replacement Stage 8 promotion exists yet.
+**Decision-grade execution authority:** `docs/R2_SCIENTIFIC_EXECUTION_PLAN.md`
 **Native capture:** the full reviewed B5 universe deployment, qualification and paper-account Gateway restart lifecycle are complete
 **State:** R0 and R1 are complete; `capture-v4` is live with 23/23 channels ready, and paper research
 remains offline/replay.
@@ -191,7 +192,7 @@ remains offline/replay.
 
 ## Next actions
 
-1. PR-C1 convergence is implementation-complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate and merge remain release checks.
+1. PR-C1 convergence is merged and complete: ordinary Stage 6–8 and R1/R2 descendants use immediate-parent receipts, promotion is replay-free, and retired compatibility/replay paths are deleted. The clean full gate remains the release check.
 2. Use the source-specific file-only IBKR path for implementation-only R2.H work after Stage 8 receipt
    authentication. Real F2 additionally requires the retained confirmatory-promotion attestation; real
    holdout execution and effectiveness evidence remain separately authorised and pending.
