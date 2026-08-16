@@ -3144,11 +3144,13 @@ def build_holdout_bundle(
     immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
+    payload_cache: dict[str, dict[str, object]] = {}
     seal = verify_holdout_preparation(
         root,
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     selection = verify_holdout_selection(root / "selection.json")
     opened, consumed = verify_holdout_markers(root)
@@ -3157,6 +3159,7 @@ def build_holdout_bundle(
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(
