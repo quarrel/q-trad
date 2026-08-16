@@ -1258,6 +1258,26 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
         ]
     )
     assert readiness.holdout_target_source == Path("target-source.json")
+    features = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "features",
+            "--foundation-bundle",
+            "foundation.json",
+            "--foundation-receipt",
+            "foundation-receipt.json",
+            "--experiment",
+            "experiment.json",
+            "--holdout-target-source",
+            "target-source.json",
+            "--feature-set",
+            "L0",
+            "--output",
+            "features.json",
+        ]
+    )
+    assert features.holdout_target_source == Path("target-source.json")
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
