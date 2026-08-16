@@ -135,7 +135,6 @@ def test_v3_authentication_never_reads_stage6_or_unselected_parts(
     assert selected.selection is not None
 
 
-
 def _rewrite_part_physical_schema(
     manifest: Path, *, field_name: str, aggregate: object
 ) -> tuple[Path, ProviderHistoryV3PartReference]:
@@ -183,6 +182,7 @@ def test_v3_reader_rejects_invalid_retained_aggregate_value(tmp_path: Path) -> N
 
     with pytest.raises(ValueError, match="retained aggregate_sha256"):
         _read_part(part_path, reference)
+
 
 def test_v3_file_only_verifier_rejects_orphan_and_receipt_mutation(
     tmp_path: Path,
