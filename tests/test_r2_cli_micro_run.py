@@ -16,7 +16,6 @@ from qtrad import __main__ as cli
 from qtrad.application.ibkr_results import build_ibkr_historical_result_artifact
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import FoundationConfig
-from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.ibkr_execution import (
     IbkrAttemptStatus,
     IbkrHistoricalCallbackKind,
@@ -44,6 +43,7 @@ from qtrad.domain.ibkr_results import (
     IbkrHistoricalPlanSnapshot,
     IbkrHistoricalRequestSnapshot,
 )
+from qtrad.domain.identifiers import InstrumentId
 from qtrad.domain.provider_history import (
     PROVIDER_HISTORY_DECLARED_DELAY,
     PROVIDER_HISTORY_POLICY,

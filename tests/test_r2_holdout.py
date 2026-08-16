@@ -787,6 +787,54 @@ def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
     assert all(row.target_id != gap.target_id for forecast in forecasts for row in forecast.rows)
 
 
+def test_target_source_identity_streams_large_row_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _target_dataset()
+    original_semantic_id = holdout_domain._semantic_id
+
+    def bounded_semantic_id(value: object) -> str:
+        if isinstance(value, dict):
+            for field in ("rows", "targets"):
+                collection = value.get(field)
+                if isinstance(collection, list):
+                    assert len(collection) <= 1, (
+                        f"identity materialised full {field} collection"
+                    )
+        return original_semantic_id(value)
+
+    monkeypatch.setattr(holdout_domain, "_semantic_id", bounded_semantic_id)
+    target_source = R2HoldoutTargetSource.create_from_target_dataset(
+        source,
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+        opportunities=_opportunities(),
+    )
+
+    assert target_source.targets
+    assert target_source.pre_holdout_target_dataset.rows
+
+
+def test_target_identity_streaming_preserves_canonical_digests() -> None:
+    source = _target_dataset()
+    target_index = holdout_domain.R2HoldoutTargetIndex.create(source)
+    expected_index_id = holdout_domain._semantic_id(
+        {
+            "contract": target_index.CONTRACT,
+            "schema_version": target_index.SCHEMA_VERSION,
+            "source_target_dataset_id": source.dataset_id,
+            "observation_dataset_id": source.observation_dataset_id,
+            "foundation_configuration_id": source.foundation_configuration_id,
+            "targets": [item.as_json() for item in target_index.targets],
+        }
+    )
+    assert target_index.dataset_id == expected_index_id
+
+    target_source = _target_source()
+    assert target_source.source_id == holdout_domain._semantic_id(target_source.semantic_json())
+
+
 def test_target_projection_rejects_a_different_source_dataset() -> None:
     source = _target_dataset()
     target_source = R2HoldoutTargetSource.create_from_target_dataset(

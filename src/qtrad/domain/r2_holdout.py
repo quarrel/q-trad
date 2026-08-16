@@ -7,7 +7,8 @@ evaluation function in the application layer, after an opened marker exists.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping, Sequence
+import json
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
@@ -64,9 +65,159 @@ HOLDOUT_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_THIS_IRREVERSIBLY_CONSUMES_THE_FROZEN_H
 
 def _semantic_id(value: object) -> str:
     encoded = to_json_value(value)
-    return sha256(
-        __import__("json").dumps(encoded, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    return sha256(json.dumps(encoded, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _json_bytes(value: object) -> bytes:
+    return json.dumps(to_json_value(value), sort_keys=True, separators=(",", ":")).encode()
+
+
+def _single_json(value: object) -> tuple[bytes, ...]:
+    return (_json_bytes(value),)
+
+
+def _json_array_chunks(
+    values: Iterable[object],
+    encode: Callable[[object], bytes],
+) -> Iterator[bytes]:
+    yield b"["
+    for index, value in enumerate(values):
+        if index:
+            yield b","
+        yield encode(value)
+    yield b"]"
+
+
+def _json_object_chunks(
+    fields: Mapping[str, Callable[[], Iterable[bytes]]],
+) -> Iterator[bytes]:
+    yield b"{"
+    for index, key in enumerate(sorted(fields)):
+        if index:
+            yield b","
+        yield _json_bytes(key)
+        yield b":"
+        yield from fields[key]()
+    yield b"}"
+
+
+def _hash_chunks(chunks: Iterable[bytes]) -> str:
+    digest = sha256()
+    for chunk in chunks:
+        digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _target_identity_chunks(targets: Iterable[object]) -> Iterator[bytes]:
+    yield from _json_array_chunks(
+        targets,
+        lambda item: _json_bytes(cast(R2HoldoutTargetIdentity, item).as_json()),
+    )
+
+
+def _target_dataset_chunks(dataset: TargetDataset) -> Iterator[bytes]:
+    yield from _json_object_chunks(
+        {
+            "contract": lambda: _single_json(TARGET_DATASET_CONTRACT),
+            "dataset_id": lambda: _single_json(dataset.dataset_id),
+            "foundation_configuration_id": lambda: _single_json(
+                dataset.foundation_configuration_id
+            ),
+            "observation_dataset_id": lambda: _single_json(dataset.observation_dataset_id),
+            "rows": lambda: _json_array_chunks(
+                dataset.rows,
+                lambda item: _json_bytes(cast(TargetRow, item).as_json()),
+            ),
+            "schema_version": lambda: _single_json(1),
+        }
+    )
+
+
+def _target_index_identity(
+    *,
+    contract: str,
+    schema_version: int,
+    source_target_dataset_id: str | None,
+    observation_dataset_id: str | None,
+    foundation_configuration_id: str | None,
+    targets: Iterable[object],
+) -> str:
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "contract": lambda: _single_json(contract),
+                "foundation_configuration_id": lambda: _single_json(
+                    foundation_configuration_id
+                ),
+                "observation_dataset_id": lambda: _single_json(observation_dataset_id),
+                "schema_version": lambda: _single_json(schema_version),
+                "source_target_dataset_id": lambda: _single_json(source_target_dataset_id),
+                "targets": lambda: _target_identity_chunks(targets),
+            }
+        )
+    )
+
+
+def _target_source_identity(
+    *,
+    contract: str,
+    schema_version: int,
+    opportunity_policy: str,
+    values: Mapping[str, object],
+) -> str:
+    target_instruments = cast(Sequence[object], values["target_instruments"])
+    targets = cast(Sequence[object], values["targets"])
+    pre_holdout = cast(TargetDataset, values["pre_holdout_target_dataset"])
+    opportunities = cast(Sequence[object], values["opportunities"])
+    holdout_range = cast(Sequence[datetime], values["holdout_range"])
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "availability_evidence_id": lambda: _single_json(
+                    values["availability_evidence_id"]
+                ),
+                "causal_metadata_dataset_id": lambda: _single_json(
+                    values["causal_metadata_dataset_id"]
+                ),
+                "causal_panel_dataset_id": lambda: _single_json(
+                    values["causal_panel_dataset_id"]
+                ),
+                "contract": lambda: _single_json(contract),
+                "foundation_configuration_id": lambda: _single_json(
+                    values["foundation_configuration_id"]
+                ),
+                "holdout_range": lambda: _json_array_chunks(
+                    holdout_range,
+                    lambda item: _json_bytes(cast(datetime, item).isoformat()),
+                ),
+                "observation_dataset_id": lambda: _single_json(
+                    values["observation_dataset_id"]
+                ),
+                "opportunities": lambda: _json_array_chunks(
+                    opportunities,
+                    lambda item: _json_bytes(
+                        cast(HoldoutTargetOpportunity, item).as_json()
+                    ),
+                ),
+                "opportunity_derivation_policy": lambda: _single_json(opportunity_policy),
+                "pre_holdout_target_dataset": lambda: _target_dataset_chunks(pre_holdout),
+                "primary_horizon_seconds": lambda: _single_json(
+                    values["primary_horizon_seconds"]
+                ),
+                "schema_version": lambda: _single_json(schema_version),
+                "source_target_dataset_id": lambda: _single_json(
+                    values["source_target_dataset_id"]
+                ),
+                "target_index_dataset_id": lambda: _single_json(
+                    values["target_index_dataset_id"]
+                ),
+                "target_instruments": lambda: _json_array_chunks(
+                    target_instruments, _json_bytes
+                ),
+                "targets": lambda: _target_identity_chunks(targets),
+            }
+        )
+    )
 
 
 def _require_id(value: str, field: str) -> None:
@@ -1310,13 +1461,15 @@ class R2HoldoutTargetIndex:
         _require_id(self.dataset_id, "holdout target index ID")
         if tuple(sorted(self.targets, key=lambda item: item.target_id)) != self.targets:
             raise ValueError("holdout target index identities must be ordered")
-        if self.dataset_id != self._identity(
-            self.targets,
+        if self.dataset_id != _target_index_identity(
+            contract=self.CONTRACT,
+            schema_version=self.SCHEMA_VERSION,
+            targets=self.targets,
             source_target_dataset_id=self.source_target_dataset_id,
             observation_dataset_id=self.observation_dataset_id,
             foundation_configuration_id=self.foundation_configuration_id,
         ):
-            raise ValueError("holdout target index ID does not authenticate its identities")
+            raise ValueError("holdout target index ID does not authenticate its content")
 
     @classmethod
     def _identity(
@@ -1327,15 +1480,13 @@ class R2HoldoutTargetIndex:
         observation_dataset_id: str | None = None,
         foundation_configuration_id: str | None = None,
     ) -> str:
-        return _semantic_id(
-            {
-                "contract": cls.CONTRACT,
-                "schema_version": cls.SCHEMA_VERSION,
-                "source_target_dataset_id": source_target_dataset_id,
-                "observation_dataset_id": observation_dataset_id,
-                "foundation_configuration_id": foundation_configuration_id,
-                "targets": [item.as_json() for item in targets],
-            }
+        return _target_index_identity(
+            contract=cls.CONTRACT,
+            schema_version=cls.SCHEMA_VERSION,
+            targets=targets,
+            source_target_dataset_id=source_target_dataset_id,
+            observation_dataset_id=observation_dataset_id,
+            foundation_configuration_id=foundation_configuration_id,
         )
 
     @classmethod
@@ -1871,7 +2022,26 @@ class R2HoldoutTargetSource:
                 and identity.target_horizon_seconds == opportunity.target_horizon_seconds
             ):
                 raise ValueError("holdout opportunity is not derived from target source identity")
-        if self.source_id != _semantic_id(self.semantic_json()):
+        if self.source_id != _target_source_identity(
+            contract=self.CONTRACT,
+            schema_version=self.SCHEMA_VERSION,
+            opportunity_policy=self.OPPORTUNITY_DERIVATION_POLICY,
+            values={
+                "source_target_dataset_id": self.source_target_dataset_id,
+                "observation_dataset_id": self.observation_dataset_id,
+                "foundation_configuration_id": self.foundation_configuration_id,
+                "holdout_range": self.holdout_range,
+                "primary_horizon_seconds": self.primary_horizon_seconds,
+                "target_instruments": self.target_instruments,
+                "targets": self.targets,
+                "pre_holdout_target_dataset": self.pre_holdout_target_dataset,
+                "opportunities": self.opportunities,
+                "causal_panel_dataset_id": self.causal_panel_dataset_id,
+                "availability_evidence_id": self.availability_evidence_id,
+                "target_index_dataset_id": self.target_index_dataset_id,
+                "causal_metadata_dataset_id": self.causal_metadata_dataset_id,
+            },
+        ):
             raise ValueError("holdout target source ID does not authenticate its content")
 
     @classmethod
@@ -1888,13 +2058,8 @@ class R2HoldoutTargetSource:
         data_gaps: Sequence[tuple[str, datetime, datetime]] | None = None,
         availability_evidence_id: str | None = None,
     ) -> R2HoldoutTargetSource:
-        identities = tuple(
-            sorted(
-                (R2HoldoutTargetIdentity.from_row(row) for row in source_target_dataset.rows),
-                key=lambda item: item.target_id,
-            )
-        )
         target_index = R2HoldoutTargetIndex.create(source_target_dataset)
+        identities = target_index.targets
         pre_holdout = _project_pre_holdout_target(
             source_target_dataset,
             holdout_start=holdout_range[0],
@@ -2171,14 +2336,14 @@ class R2HoldoutTargetSource:
         raw.setdefault("availability_evidence_id", None)
         raw.setdefault("target_index_dataset_id", None)
         raw.setdefault("causal_metadata_dataset_id", None)
-        semantic = {
-            "contract": cls.CONTRACT,
-            "schema_version": cls.SCHEMA_VERSION,
-            "opportunity_derivation_policy": cls.OPPORTUNITY_DERIVATION_POLICY,
-            **{key: _contract_json(value) for key, value in raw.items()},
-        }
+        source_id = _target_source_identity(
+            contract=cls.CONTRACT,
+            schema_version=cls.SCHEMA_VERSION,
+            opportunity_policy=cls.OPPORTUNITY_DERIVATION_POLICY,
+            values=raw,
+        )
         constructor = cast(Callable[..., R2HoldoutTargetSource], cls)
-        return constructor(**raw, source_id=_semantic_id(semantic))
+        return constructor(**raw, source_id=source_id)
 
     def verify_target_dataset(self, target_dataset: TargetDataset) -> None:
         if (
