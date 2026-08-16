@@ -210,12 +210,20 @@ def write_r2_oof_bundle(
     output: Path,
     bundle: R2OofBundle,
     children: Mapping[str, Mapping[str, object]],
+    *,
+    prepublished_paths: set[str] | frozenset[str] = frozenset(),
 ) -> Path:
     """Persist named children and the OOF manifest without embedding child data."""
     refs = _all_oof_references(bundle)
-    if set(children) != {ref.path for ref in refs}:
+    declared_paths = {ref.path for ref in refs}
+    if set(children) != declared_paths:
         raise ValueError("OOF child payloads must exactly match declared references")
+    if not set(prepublished_paths) <= declared_paths:
+        raise ValueError("OOF prepublished paths must be declared references")
     for ref in refs:
+        if ref.path in prepublished_paths:
+            _verify_reference(output, ref)
+            continue
         encoded = canonical_bytes(children[ref.path])
         if len(encoded) > _MAX_BYTES:
             raise ValueError(f"OOF child exceeds the 64 MiB limit: {ref.path}")
@@ -294,14 +302,25 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     ]
     if canonical and (len(register_refs) != 1 or len(descriptor_refs) != 1):
         raise ValueError("canonical R2 OOF bundle must have exactly one register and descriptor")
+    from qtrad.runtime.r2_holdout_source import (
+        bounded_manifest_part_paths,
+        load_r2_holdout_target_source,
+    )
+
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
         if ref.contract == R2HoldoutTargetSource.CONTRACT:
-            source = R2HoldoutTargetSource.from_json(child)
+            source_path = path.parent / ref.path
+            source = load_r2_holdout_target_source(source_path)
             if source.source_id != ref.semantic_id:
                 raise ValueError("OOF holdout target source identity differs from its reference")
+            source_parent = source_path.parent.relative_to(path.parent).as_posix()
+            for part_path in bounded_manifest_part_paths(source_path):
+                allowed_paths.add(
+                    f"{source_parent}/{part_path}" if source_parent != "." else part_path
+                )
         _verify_lineage_payload(child, bundle)
         if child.get("contract") == "qtrad-r2-oof-run-descriptor-v1":
             descriptor_id = child.get("descriptor_id")

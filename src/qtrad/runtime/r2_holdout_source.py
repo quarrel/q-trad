@@ -1,0 +1,532 @@
+"""Bounded create-only persistence for the outcome-blind R2 target source.
+
+The source semantic contract remains qtrad-r2-holdout-target-source-v1. A
+large source is represented by a small manifest at the requested path and
+deterministically bounded JSON part files beside it. The loader reconstructs
+the domain contract and authenticates its semantic source ID before returning.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from collections.abc import Iterable, Iterator, Mapping, Sequence
+from pathlib import Path
+from typing import cast
+
+from qtrad.domain.events import JsonValue
+from qtrad.domain.foundation import TARGET_DATASET_CONTRACT
+from qtrad.domain.r2_holdout import R2HoldoutTargetSource
+from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
+
+_SOURCE_STORAGE = "qtrad-r2-holdout-target-source-bounded-parts-v1"
+_PART_CONTRACT = "qtrad-r2-holdout-target-source-part-v1"
+_PART_SCHEMA_VERSION = 1
+_MAX_PART_BYTES = 64 * 1024 * 1024
+
+
+def _json_value(value: object) -> JsonValue:
+    return cast(JsonValue, value)
+
+
+def _json_object(path: Path, *, limit: int = _MAX_PART_BYTES) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"holdout target source child must be a regular file: {path}")
+    content = path.read_bytes()
+    if not content:
+        raise ValueError(f"holdout target source child is empty: {path}")
+    if len(content) > limit:
+        raise ValueError(f"holdout target source child exceeds its byte bound: {path}")
+    value = json.loads(content)
+    if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
+        raise ValueError(f"holdout target source child must be a JSON object: {path}")
+    return cast(dict[str, object], value)
+
+
+def _safe_part_path(root: Path, relative: str) -> Path:
+    candidate = root / relative
+    resolved_root = root.resolve()
+    resolved_candidate = candidate.resolve()
+    try:
+        resolved_candidate.relative_to(resolved_root)
+    except ValueError as error:
+        raise ValueError("holdout target source part path escapes its manifest") from error
+    current = root
+    for part in relative.split("/"):
+        current /= part
+        if current.is_symlink():
+            raise ValueError("holdout target source part path traverses a symlink")
+    return candidate
+
+
+def _part_payload(
+    *,
+    source_id: str,
+    kind: str,
+    part_index: int,
+    rows: Sequence[JsonValue],
+) -> dict[str, JsonValue]:
+    return {
+        "contract": _PART_CONTRACT,
+        "schema_version": _PART_SCHEMA_VERSION,
+        "source_id": source_id,
+        "kind": kind,
+        "part_index": part_index,
+        "rows": list(rows),
+    }
+
+
+def _encoded_part(
+    *,
+    source_id: str,
+    kind: str,
+    part_index: int,
+    rows: Sequence[JsonValue],
+) -> tuple[dict[str, JsonValue], bytes]:
+    payload = _part_payload(
+        source_id=source_id, kind=kind, part_index=part_index, rows=rows
+    )
+    return payload, canonical_bytes(payload)
+
+
+def _part_envelope_size(
+    *, source_id: str, kind: str, part_index: int
+) -> tuple[int, bytes, bytes]:
+    empty = canonical_bytes(
+        _part_payload(source_id=source_id, kind=kind, part_index=part_index, rows=[])
+    )
+    marker = b'"rows":[]'
+    marker_start = empty.index(marker)
+    prefix = empty[:marker_start] + b'"rows":['
+    suffix = empty[marker_start + len(marker) - 1 :]
+    return len(prefix) + len(suffix), prefix, suffix
+
+
+def _row_bytes(row: JsonValue) -> bytes:
+    if not isinstance(row, Mapping):
+        raise ValueError("holdout target source rows must be JSON objects")
+    return canonical_bytes(cast(Mapping[str, object], row))[:-1]
+
+
+def _part_batches(
+    *,
+    source_id: str,
+    kind: str,
+    rows: Iterable[JsonValue],
+) -> Iterator[tuple[int, list[JsonValue], int]]:
+    current_rows: list[JsonValue] = []
+    current_size = 0
+    part_index = 0
+    for row in rows:
+        row_bytes = _row_bytes(row)
+        if not current_rows:
+            envelope_size, _prefix, _suffix = _part_envelope_size(
+                source_id=source_id, kind=kind, part_index=part_index
+            )
+            current_size = envelope_size
+        probe_size = current_size + len(row_bytes) + (1 if current_rows else 0)
+        if probe_size > _MAX_PART_BYTES:
+            if not current_rows:
+                raise ValueError(f"holdout target source {kind} row exceeds its 64 MiB part bound")
+            yield part_index, current_rows, current_size
+            part_index += 1
+            current_rows = []
+            envelope_size, _prefix, _suffix = _part_envelope_size(
+                source_id=source_id, kind=kind, part_index=part_index
+            )
+            current_size = envelope_size
+            probe_size = current_size + len(row_bytes)
+            if probe_size > _MAX_PART_BYTES:
+                raise ValueError(
+                    f"holdout target source {kind} row exceeds its 64 MiB part bound"
+                )
+        current_rows.append(row)
+        current_size = probe_size
+    if current_rows:
+        yield part_index, current_rows, current_size
+
+
+def _part_sizes(
+    *, source_id: str, kind: str, rows: Iterable[JsonValue]
+) -> tuple[int, ...]:
+    sizes: list[int] = []
+    for _part_index, _part_rows, size in _part_batches(
+        source_id=source_id, kind=kind, rows=rows
+    ):
+        sizes.append(size)
+    return tuple(sizes)
+
+
+def _split_part_rows(
+    *,
+    source_id: str,
+    kind: str,
+    rows: Sequence[JsonValue],
+) -> tuple[tuple[dict[str, JsonValue], bytes], ...]:
+    """Return encoded parts for focused deterministic partition tests."""
+    parts: list[tuple[dict[str, JsonValue], bytes]] = []
+    for part_index, part_rows, expected_size in _part_batches(
+        source_id=source_id, kind=kind, rows=rows
+    ):
+        payload, encoded = _encoded_part(
+            source_id=source_id, kind=kind, part_index=part_index, rows=part_rows
+        )
+        if len(encoded) != expected_size or len(encoded) > _MAX_PART_BYTES:
+            raise ValueError(f"holdout target source {kind} part exceeds its byte bound")
+        parts.append((payload, encoded))
+    return tuple(parts)
+
+
+def _part_relative_path(output: Path, kind: str, part_index: int) -> str:
+    return f"{output.name}.parts/{kind}/part-{part_index:06d}.json"
+
+
+def _preflight_paths(output: Path, part_counts: Mapping[str, int]) -> None:
+    if output.is_symlink() or output.exists():
+        raise FileExistsError(f"create-only holdout target source already exists: {output}")
+    parts_root = output.parent / f"{output.name}.parts"
+    if parts_root.is_symlink() or parts_root.exists():
+        raise FileExistsError(
+            f"create-only holdout target source parts already exist: {parts_root}"
+        )
+    for kind, count in part_counts.items():
+        for part_index in range(count):
+            _safe_part_path(output.parent, _part_relative_path(output, kind, part_index))
+
+
+def _write_parts(
+    *,
+    output: Path,
+    source_id: str,
+    kind: str,
+    rows: Iterable[JsonValue],
+    expected_sizes: Sequence[int],
+) -> list[dict[str, JsonValue]]:
+    references: list[dict[str, JsonValue]] = []
+    for part_index, part_rows, expected_size in _part_batches(
+        source_id=source_id, kind=kind, rows=rows
+    ):
+        _payload, encoded = _encoded_part(
+            source_id=source_id, kind=kind, part_index=part_index, rows=part_rows
+        )
+        if part_index >= len(expected_sizes) or len(encoded) != expected_size:
+            raise ValueError(f"holdout target source {kind} changed while partitioning")
+        if len(encoded) > _MAX_PART_BYTES:
+            raise ValueError(f"holdout target source {kind} part exceeds its byte bound")
+        relative = _part_relative_path(output, kind, part_index)
+        path = _safe_part_path(output.parent, relative)
+        atomic_create(path, encoded)
+        references.append(
+            {
+                "path": relative,
+                "sha256": hashlib.sha256(encoded).hexdigest(),
+                "row_count": len(part_rows),
+            }
+        )
+    if len(references) != len(expected_sizes):
+        raise ValueError(f"holdout target source {kind} changed while partitioning")
+    return references
+
+
+def _manifest_payload(
+    source: R2HoldoutTargetSource,
+    *,
+    target_parts: Sequence[Mapping[str, JsonValue]],
+    pre_holdout_target_parts: Sequence[Mapping[str, JsonValue]],
+    opportunity_parts: Sequence[Mapping[str, JsonValue]],
+) -> dict[str, JsonValue]:
+    return {
+        "contract": source.CONTRACT,
+        "schema_version": source.SCHEMA_VERSION,
+        "storage": _SOURCE_STORAGE,
+        "source_id": source.source_id,
+        "source_target_dataset_id": source.source_target_dataset_id,
+        "observation_dataset_id": source.observation_dataset_id,
+        "foundation_configuration_id": source.foundation_configuration_id,
+        "causal_panel_dataset_id": source.causal_panel_dataset_id,
+        "availability_evidence_id": source.availability_evidence_id,
+        "target_index_dataset_id": source.target_index_dataset_id,
+        "causal_metadata_dataset_id": source.causal_metadata_dataset_id,
+        "holdout_range": [item.isoformat() for item in source.holdout_range],
+        "primary_horizon_seconds": source.primary_horizon_seconds,
+        "target_instruments": list(source.target_instruments),
+        "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+        "pre_holdout_observation_dataset_id": (
+            source.pre_holdout_target_dataset.observation_dataset_id
+        ),
+        "pre_holdout_foundation_configuration_id": (
+            source.pre_holdout_target_dataset.foundation_configuration_id
+        ),
+        "target_parts": _json_value(list(target_parts)),
+        "pre_holdout_target_parts": _json_value(list(pre_holdout_target_parts)),
+        "opportunity_parts": _json_value(list(opportunity_parts)),
+        "target_count": len(source.targets),
+        "pre_holdout_target_count": len(source.pre_holdout_target_dataset.rows),
+        "opportunity_count": len(source.opportunities),
+    }
+
+
+def write_r2_holdout_target_source(
+    output: Path, source: R2HoldoutTargetSource
+) -> dict[str, JsonValue]:
+    """Persist one source manifest and bounded child parts, create-only."""
+    _preflight_paths(output, {})
+    target_sizes = _part_sizes(
+        source_id=source.source_id,
+        kind="targets",
+        rows=(item.as_json() for item in source.targets),
+    )
+    pre_holdout_sizes = _part_sizes(
+        source_id=source.source_id,
+        kind="pre-holdout-target",
+        rows=(item.as_json() for item in source.pre_holdout_target_dataset.rows),
+    )
+    opportunity_sizes = _part_sizes(
+        source_id=source.source_id,
+        kind="opportunities",
+        rows=(item.as_json() for item in source.opportunities),
+    )
+    _preflight_paths(
+        output,
+        {
+            "targets": len(target_sizes),
+            "pre-holdout-target": len(pre_holdout_sizes),
+            "opportunities": len(opportunity_sizes),
+        },
+    )
+    target_parts = _write_parts(
+        output=output,
+        source_id=source.source_id,
+        kind="targets",
+        rows=(item.as_json() for item in source.targets),
+        expected_sizes=target_sizes,
+    )
+    pre_holdout_target_parts = _write_parts(
+        output=output,
+        source_id=source.source_id,
+        kind="pre-holdout-target",
+        rows=(item.as_json() for item in source.pre_holdout_target_dataset.rows),
+        expected_sizes=pre_holdout_sizes,
+    )
+    opportunity_parts = _write_parts(
+        output=output,
+        source_id=source.source_id,
+        kind="opportunities",
+        rows=(item.as_json() for item in source.opportunities),
+        expected_sizes=opportunity_sizes,
+    )
+    manifest = _manifest_payload(
+        source,
+        target_parts=target_parts,
+        pre_holdout_target_parts=pre_holdout_target_parts,
+        opportunity_parts=opportunity_parts,
+    )
+    atomic_create(output, canonical_bytes(manifest))
+    return manifest
+
+
+def _part_rows(
+    manifest_path: Path,
+    *,
+    source_id: str,
+    kind: str,
+    references: object,
+) -> list[dict[str, JsonValue]]:
+    if not isinstance(references, list):
+        raise ValueError(f"holdout target source {kind} parts must be an array")
+    rows: list[dict[str, JsonValue]] = []
+    for expected_index, raw_reference in enumerate(references):
+        if not isinstance(raw_reference, Mapping):
+            raise ValueError(f"holdout target source {kind} part reference is invalid")
+        reference = cast(Mapping[str, object], raw_reference)
+        if set(reference) != {"path", "sha256", "row_count"}:
+            raise ValueError(f"holdout target source {kind} part reference has unknown fields")
+        relative = reference["path"]
+        digest = reference["sha256"]
+        row_count = reference["row_count"]
+        if not isinstance(relative, str) or not isinstance(digest, str) or not isinstance(
+            row_count, int
+        ):
+            raise ValueError(f"holdout target source {kind} part reference is malformed")
+        part_path = _safe_part_path(manifest_path.parent, relative)
+        if part_path.is_symlink() or not part_path.is_file():
+            raise ValueError(f"holdout target source {kind} part is unavailable")
+        encoded = part_path.read_bytes()
+        if len(encoded) > _MAX_PART_BYTES or hashlib.sha256(encoded).hexdigest() != digest:
+            raise ValueError(f"holdout target source {kind} part digest or size differs")
+        payload = _json_object(part_path)
+        expected = {
+            "contract",
+            "schema_version",
+            "source_id",
+            "kind",
+            "part_index",
+            "rows",
+        }
+        if set(payload) != expected or payload["contract"] != _PART_CONTRACT:
+            raise ValueError(f"holdout target source {kind} part contract is unsupported")
+        if (
+            payload["schema_version"] != _PART_SCHEMA_VERSION
+            or payload["source_id"] != source_id
+            or payload["kind"] != kind
+            or payload["part_index"] != expected_index
+        ):
+            raise ValueError(f"holdout target source {kind} part lineage differs")
+        raw_rows = payload["rows"]
+        if not isinstance(raw_rows, list) or len(raw_rows) != row_count:
+            raise ValueError(f"holdout target source {kind} part row count differs")
+        rows.extend(cast(list[dict[str, JsonValue]], raw_rows))
+    return rows
+
+
+def load_r2_holdout_target_source(path: Path) -> R2HoldoutTargetSource:
+    """Load a full or bounded-parts source and authenticate its semantic ID."""
+    payload = _json_object(path)
+    if payload.get("storage") != _SOURCE_STORAGE:
+        source = R2HoldoutTargetSource.from_json(payload)
+        return source
+    required = {
+        "contract",
+        "schema_version",
+        "storage",
+        "source_id",
+        "source_target_dataset_id",
+        "observation_dataset_id",
+        "foundation_configuration_id",
+        "causal_panel_dataset_id",
+        "availability_evidence_id",
+        "target_index_dataset_id",
+        "causal_metadata_dataset_id",
+        "holdout_range",
+        "primary_horizon_seconds",
+        "target_instruments",
+        "pre_holdout_target_dataset_id",
+        "pre_holdout_observation_dataset_id",
+        "pre_holdout_foundation_configuration_id",
+        "target_parts",
+        "pre_holdout_target_parts",
+        "opportunity_parts",
+        "target_count",
+        "pre_holdout_target_count",
+        "opportunity_count",
+    }
+    if set(payload) != required:
+        raise ValueError("holdout target source bounded manifest has unknown or missing fields")
+    if payload["contract"] != R2HoldoutTargetSource.CONTRACT or payload["schema_version"] != 1:
+        raise ValueError("holdout target source contract is unsupported")
+    source_id = payload["source_id"]
+    if not isinstance(source_id, str):
+        raise ValueError("holdout target source bounded manifest has no source ID")
+    bounded_manifest_part_paths(path)
+    targets = _part_rows(
+        path, source_id=source_id, kind="targets", references=payload["target_parts"]
+    )
+    pre_rows = _part_rows(
+        path,
+        source_id=source_id,
+        kind="pre-holdout-target",
+        references=payload["pre_holdout_target_parts"],
+    )
+    opportunities = _part_rows(
+        path, source_id=source_id, kind="opportunities", references=payload["opportunity_parts"]
+    )
+    if (
+        len(targets) != payload["target_count"]
+        or len(pre_rows) != payload["pre_holdout_target_count"]
+        or len(opportunities) != payload["opportunity_count"]
+    ):
+        raise ValueError("holdout target source bounded manifest row counts differ")
+    pre_dataset: dict[str, JsonValue] = {
+        "contract": TARGET_DATASET_CONTRACT,
+        "schema_version": 1,
+        "dataset_id": _json_value(payload["pre_holdout_target_dataset_id"]),
+        "observation_dataset_id": _json_value(payload["pre_holdout_observation_dataset_id"]),
+        "foundation_configuration_id": _json_value(
+            payload["pre_holdout_foundation_configuration_id"]
+        ),
+        "rows": _json_value(pre_rows),
+    }
+    reconstructed: dict[str, JsonValue] = {
+        "contract": _json_value(payload["contract"]),
+        "schema_version": _json_value(payload["schema_version"]),
+        "source_target_dataset_id": _json_value(payload["source_target_dataset_id"]),
+        "observation_dataset_id": _json_value(payload["observation_dataset_id"]),
+        "foundation_configuration_id": _json_value(payload["foundation_configuration_id"]),
+        "causal_panel_dataset_id": _json_value(payload["causal_panel_dataset_id"]),
+        "availability_evidence_id": _json_value(payload["availability_evidence_id"]),
+        "target_index_dataset_id": _json_value(payload["target_index_dataset_id"]),
+        "causal_metadata_dataset_id": _json_value(payload["causal_metadata_dataset_id"]),
+        "holdout_range": _json_value(payload["holdout_range"]),
+        "primary_horizon_seconds": _json_value(payload["primary_horizon_seconds"]),
+        "opportunity_derivation_policy": R2HoldoutTargetSource.OPPORTUNITY_DERIVATION_POLICY,
+        "target_instruments": _json_value(payload["target_instruments"]),
+        "targets": _json_value(targets),
+        "pre_holdout_target_dataset": _json_value(pre_dataset),
+        "opportunities": _json_value(opportunities),
+        "source_id": source_id,
+    }
+    source = R2HoldoutTargetSource.from_json(reconstructed)
+    if source.source_id != source_id:
+        raise ValueError("holdout target source bounded manifest ID differs from its content")
+    return source
+
+
+def bounded_manifest_payload(path: Path) -> dict[str, object] | None:
+    """Return the compact manifest when path uses bounded source storage."""
+    payload = _json_object(path)
+    if payload.get("storage") != _SOURCE_STORAGE:
+        return None
+    return payload
+
+
+_BOUND_PART_FIELDS = (
+    ("targets", "target_parts"),
+    ("pre-holdout-target", "pre_holdout_target_parts"),
+    ("opportunities", "opportunity_parts"),
+)
+
+
+def bounded_manifest_part_paths(path: Path) -> frozenset[str]:
+    """Validate the bounded source tree and return its declared child paths."""
+    payload = bounded_manifest_payload(path)
+    if payload is None:
+        return frozenset()
+    declared: set[str] = set()
+    for kind, field in _BOUND_PART_FIELDS:
+        references = payload.get(field)
+        if not isinstance(references, list):
+            raise ValueError(f"holdout target source {field} must be an array")
+        prefix = f"{path.name}.parts/{kind}/part-"
+        for raw_reference in references:
+            if not isinstance(raw_reference, Mapping):
+                raise ValueError(f"holdout target source {field} reference is invalid")
+            relative = raw_reference.get("path")
+            if (
+                not isinstance(relative, str)
+                or not relative.startswith(prefix)
+                or not relative.endswith(".json")
+            ):
+                raise ValueError(f"holdout target source {field} path is invalid")
+            _safe_part_path(path.parent, relative)
+            if relative in declared:
+                raise ValueError("holdout target source manifest declares a duplicate part")
+            declared.add(relative)
+    parts_root = path.parent / f"{path.name}.parts"
+    if declared and (parts_root.is_symlink() or not parts_root.is_dir()):
+        raise ValueError("holdout target source parts directory is missing")
+    if not declared and (parts_root.is_symlink() or parts_root.exists()):
+        raise ValueError("holdout target source has an unexpected parts directory")
+    if parts_root.is_dir():
+        for candidate in parts_root.rglob("*"):
+            if candidate.is_symlink():
+                raise ValueError("holdout target source parts tree contains a symlink")
+            relative = candidate.relative_to(path.parent).as_posix()
+            if candidate.is_file() and relative not in declared:
+                raise ValueError(f"holdout target source has an undeclared part: {relative}")
+            if candidate.is_dir() and not any(
+                item.startswith(relative + "/") for item in declared
+            ):
+                raise ValueError(
+                    f"holdout target source has an orphaned parts directory: {relative}"
+                )
+    return frozenset(declared)

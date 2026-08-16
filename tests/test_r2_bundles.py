@@ -12,6 +12,7 @@ from typing import cast
 import pytest
 
 import qtrad.runtime.r2_verification as verification
+from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import (
     ExcursionDisposition,
     ReturnDisposition,
@@ -32,6 +33,12 @@ from qtrad.runtime.r2_bundles import (
     verify_r2_oof_bundle,
     verify_r2_reference,
     write_r2_oof_bundle,
+)
+from qtrad.runtime.r2_holdout_source import (
+    _split_part_rows,
+    bounded_manifest_part_paths,
+    load_r2_holdout_target_source,
+    write_r2_holdout_target_source,
 )
 from qtrad.runtime.r2_verification import (
     _build_synthetic_oof,
@@ -489,3 +496,43 @@ def test_oof_rejects_empty_orphan_directories(tmp_path: Path) -> None:
     (root / "replay-inputs" / "research").mkdir(parents=True)
     with pytest.raises(ValueError, match="orphaned directory"):
         verify_r2_oof_bundle(manifest_path)
+
+
+
+def test_bounded_holdout_source_round_trip_is_create_only(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+
+    manifest = write_r2_holdout_target_source(output, source)
+
+    assert manifest["storage"] == "qtrad-r2-holdout-target-source-bounded-parts-v1"
+    assert load_r2_holdout_target_source(output).source_id == source.source_id
+    part_paths = bounded_manifest_part_paths(output)
+    assert part_paths
+    assert all(
+        (output.parent / path).stat().st_size <= 64 * 1024 * 1024 for path in part_paths
+    )
+    with pytest.raises(FileExistsError):
+        write_r2_holdout_target_source(output, source)
+
+
+def test_bounded_holdout_source_rejects_undeclared_part(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    orphan = output.parent / f"{output.name}.parts/targets/orphan.json"
+    orphan.write_bytes(canonical_bytes({"contract": "orphan"}))
+
+    with pytest.raises(ValueError, match="undeclared part"):
+        load_r2_holdout_target_source(output)
+
+
+
+def test_bounded_partitions_are_deterministic() -> None:
+    rows = cast(tuple[JsonValue, ...], tuple({"value": str(index)} for index in range(7)))
+
+    first = _split_part_rows(source_id="source", kind="targets", rows=rows)
+    second = _split_part_rows(source_id="source", kind="targets", rows=rows)
+
+    assert first == second
+    assert sum(len(cast(list[object], payload["rows"])) for payload, _ in first) == len(rows)

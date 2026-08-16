@@ -1240,6 +1240,24 @@ def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> N
     )
     assert target_source.baselines_command == "holdout-target-source"
     assert target_source.foundation_promotion == Path("foundation-promotion.json")
+    readiness = parser.parse_args(
+        [
+            "research",
+            "baselines",
+            "readiness",
+            "--foundation-bundle",
+            "foundation.json",
+            "--foundation-receipt",
+            "foundation-receipt.json",
+            "--experiment",
+            "experiment.json",
+            "--holdout-target-source",
+            "target-source.json",
+            "--output",
+            "readiness.json",
+        ]
+    )
+    assert readiness.holdout_target_source == Path("target-source.json")
     with pytest.raises(SystemExit):
         parser.parse_args(
             [
@@ -1312,10 +1330,8 @@ def test_holdout_target_source_dispatches_create_only_output(
     )
     build = Mock(return_value=source)
     monkeypatch.setattr(cli, "build_ibkr_holdout_target_source", build)
-    canonical = Mock(return_value=b"source-bytes")
     publish = Mock()
-    monkeypatch.setattr(cli, "canonical_bytes", canonical)
-    monkeypatch.setattr(cli, "atomic_create", publish)
+    monkeypatch.setattr(cli, "write_r2_holdout_target_source", publish)
 
     cli.main(
         [
@@ -1340,8 +1356,7 @@ def test_holdout_target_source_dispatches_create_only_output(
         receipt=Path("receipt.json"),
         target_instruments=target_instruments,
     )
-    canonical.assert_called_once_with(source_json)
-    publish.assert_called_once_with(Path("source.json"), b"source-bytes")
+    publish.assert_called_once_with(Path("source.json"), source)
 
 
 @pytest.mark.asyncio

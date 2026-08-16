@@ -107,7 +107,6 @@ from qtrad.domain.r2_features import (
     feature_set_id,
 )
 from qtrad.domain.r2_holdout import (
-    R2_HOLDOUT_TARGET_SOURCE_CONTRACT,
     HoldoutDirection,
     HoldoutScope,
     R2ConfirmatoryOpenedMarker,
@@ -189,6 +188,10 @@ from qtrad.runtime.r2_holdout import (
     verify_holdout_markers,
     verify_holdout_preparation,
     write_holdout_preparation,
+)
+from qtrad.runtime.r2_holdout_source import (
+    load_r2_holdout_target_source,
+    write_r2_holdout_target_source,
 )
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
@@ -2535,11 +2538,16 @@ def build_oof_bundle(
         _descriptor_reference(output=output, relative_path=descriptor_path, payload=descriptor)
     )
     holdout_source_ref: ArtifactReference | None = None
+    prepublished_paths: frozenset[str] = frozenset()
     if holdout_target_source is not None:
         source_path = "holdout/target-source.json"
-        source_payload = cast(dict[str, object], holdout_target_source.as_json())
+        source_manifest = write_r2_holdout_target_source(
+            output / source_path, holdout_target_source
+        )
+        source_payload = cast(dict[str, object], source_manifest)
         children[source_path] = source_payload
         holdout_source_ref = _child_reference(source_path, source_payload)
+        prepublished_paths = frozenset({source_path})
     bundle = R2OofBundle.create(
         foundation_bundle_id=verified.bundle.foundation_id,
         experiment_configuration_id=experiment.configuration_id,
@@ -2553,7 +2561,9 @@ def build_oof_bundle(
         evaluation_children=tuple(evaluation_refs),
         holdout_target_source=holdout_source_ref,
     )
-    return write_r2_oof_bundle(output, bundle, children)
+    return write_r2_oof_bundle(
+        output, bundle, children, prepublished_paths=prepublished_paths
+    )
 
 
 def _load_selection(path: Path) -> dict[str, object]:
@@ -2949,8 +2959,7 @@ def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
     if bundle.holdout_target_source is None:
         raise ValueError("confirmatory F2 has no authenticated target source")
     source_path = path.parent / bundle.holdout_target_source.path
-    source_payload = _load_selection(source_path)
-    source = R2HoldoutTargetSource.from_json(source_payload)
+    source = load_r2_holdout_target_source(source_path)
     if source.source_id != bundle.holdout_target_source.semantic_id:
         raise ValueError("confirmatory target source identity differs from its reference")
     expected_descriptor_values = {
@@ -3283,12 +3292,8 @@ def _confirmatory_descriptor_inputs(
         raise ValueError("F2 promotion requires a confirmatory outcome-blind OOF descriptor")
     if bundle.holdout_target_source is None:
         raise ValueError("F2 promotion requires an authenticated target source")
-    source_payload = _oof_child_payload(
-        bundle_path,
-        bundle,
-        R2_HOLDOUT_TARGET_SOURCE_CONTRACT,
-    )
-    source = R2HoldoutTargetSource.from_json(source_payload)
+    source_path = bundle_path.parent / bundle.holdout_target_source.path
+    source = load_r2_holdout_target_source(source_path)
     if source.source_id != bundle.holdout_target_source.semantic_id:
         raise ValueError("confirmatory target source identity differs from its reference")
     expected_values = {
@@ -4936,8 +4941,9 @@ async def _replay_authority_oof_async(
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
         raise ValueError("OOF bundle has no authenticated holdout target source")
-    source_payload = _load_selection(path.parent / bundle.holdout_target_source.path)
-    holdout_target_source = R2HoldoutTargetSource.from_json(source_payload)
+    holdout_target_source = load_r2_holdout_target_source(
+        path.parent / bundle.holdout_target_source.path
+    )
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
     if descriptor.get("run_kind") != expected_run_kind:
         raise ValueError(f"authority replay requires a {expected_run_kind} OOF run")
