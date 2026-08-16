@@ -1164,7 +1164,6 @@ def _failed_final_fit(
     disposition: FinalFitDisposition,
     reason: str,
     feature_count: int,
-    training_evidence: Sequence[FinalTrainingRow] = (),
     training_feature_dataset_id: str | None = None,
     training_target_dataset_id: str | None = None,
     target_instrument_id: str | None = None,
@@ -1187,9 +1186,6 @@ def _failed_final_fit(
     )
     fit_preprocessing = dict(
         preprocessing or {"feature_count": feature_count, "policy_id": policy.policy_id}
-    )
-    fit_preprocessing.setdefault(
-        "training_rows", [_training_row_json(row) for row in training_evidence]
     )
     if training_feature_dataset_id is None or training_target_dataset_id is None:
         raise ValueError("final fit is missing authenticated training child IDs")
@@ -1241,16 +1237,6 @@ def _failed_final_fit(
     )
 
 
-def _training_row_json(row: FinalTrainingRow) -> dict[str, JsonValue]:
-    return {
-        "target_id": row.target_id,
-        "instrument_id": row.instrument_id,
-        "decision_time": row.decision_time.isoformat(),
-        "target_end_time": (row.target_end_time or row.decision_time).isoformat(),
-        "target_available_at": row.target_available_at.isoformat(),
-        "features": list(row.features),
-        "target": row.target,
-    }
 
 
 def _final_disposition(value: object) -> FinalFitDisposition:
@@ -1285,7 +1271,6 @@ def _preprocessing_payload(
     schema: R2PreprocessingSchema,
     inner: PreprocessingFit | None,
     outer: PreprocessingFit | None,
-    rows: Sequence[FinalTrainingRow],
     identity_order: Sequence[str],
     solver: str,
     weighting_policy: str,
@@ -1301,7 +1286,6 @@ def _preprocessing_payload(
         "schema": schema.as_json(),
         "inner": inner.as_json() if inner is not None else None,
         "outer": outer.as_json() if outer is not None else None,
-        "training_rows": [_training_row_json(row) for row in rows],
         "training_feature_dataset_id": training_feature_dataset_id,
         "training_target_dataset_id": training_target_dataset_id,
         "training_target_source_dataset_id": training_target_source_dataset_id,
@@ -1480,7 +1464,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             forced_failure=True,
         )
     if not ordered:
@@ -1502,7 +1485,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
         )
     schema = derive_r2_preprocessing_schema(training_feature_dataset.feature_schema)
     r2_rows = tuple(_as_r2_training_row(row) for row in ordered)
@@ -1601,7 +1583,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
         )
     inner_fit_ids = tuple(selected.inner_fit_target_ids)
     inner_validation_ids = tuple(selected.inner_validation_target_ids)
@@ -1619,7 +1600,6 @@ def fit_final_ridge(
         schema=schema,
         inner=selected.inner_preprocessing,
         outer=selected.outer_preprocessing,
-        rows=ordered,
         identity_order=identity_order,
         solver=solver,
         weighting_policy=weighting_policy,
@@ -1662,7 +1642,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )
@@ -1688,7 +1667,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )
@@ -1735,7 +1713,6 @@ def fit_final_ridge(
             feature_count=feature_count,
             training_feature_dataset_id=training_feature_dataset.dataset_id,
             training_target_dataset_id=training_target_dataset.dataset_id,
-            training_evidence=ordered,
             candidate_scores=scores or None,
             preprocessing=preprocessing,
         )

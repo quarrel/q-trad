@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -72,6 +73,25 @@ _MAX_BYTES = 64 * 1024 * 1024
 _FAILURE_EVALUATION_ID = sha256(b"qtrad-r2-holdout-reveal-failed").hexdigest()
 _PARTITIONED_PART_CONTRACT = "qtrad-r2-partitioned-json-row-part-v1"
 _CONFIRMATORY_G2_LIFECYCLE_TOKEN = object()
+
+
+@dataclass(frozen=True)
+class _PayloadCacheEntry:
+    root: str
+    relative: str
+    contract: str
+    identity_key: str
+    expected_id: str | None
+    expected_fields: frozenset[str]
+    payload: dict[str, object]
+    payload_sha256: str
+    top_level_sha256: str
+    header_sha256: str | None
+    part_snapshot: tuple[tuple[str, str], ...]
+
+
+_PayloadCacheKey = tuple[str, str, str, str, str | None, frozenset[str]]
+_PayloadCache = dict[_PayloadCacheKey, _PayloadCacheEntry]
 
 
 def _load_object_bytes(encoded: bytes, path: Path) -> dict[str, object]:
@@ -349,12 +369,79 @@ def _safe_child(root: Path, relative: str) -> Path:
         or any(part in ("", ".", "..") for part in candidate.parts)
     ):
         raise ValueError(f"holdout child path is unsafe: {relative}")
+    candidate_path = root / candidate
+    if candidate_path.is_symlink():
+        raise ValueError(f"holdout child path must not be a symlink: {relative}")
     resolved_root = root.resolve()
-    resolved = (root / candidate).resolve()
+    resolved = candidate_path.resolve()
     if not resolved.is_relative_to(resolved_root):
         raise ValueError(f"holdout child path escapes its root: {relative}")
     return resolved
 
+
+def _payload_cache_key(
+    root: Path,
+    relative: str,
+    *,
+    contract: str,
+    identity_key: str,
+    expected_fields: set[str],
+    expected_id: str | None,
+) -> _PayloadCacheKey:
+    return (
+        str(root.resolve()),
+        relative,
+        contract,
+        identity_key,
+        expected_id,
+        frozenset(expected_fields),
+    )
+
+
+def _authenticate_cached_snapshot(root: Path, entry: _PayloadCacheEntry) -> None:
+    if str(root.resolve()) != entry.root:
+        raise ValueError("holdout payload cache root differs from its authenticated snapshot")
+    path = _safe_child(root, entry.relative)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"cached holdout child is not a regular file: {entry.relative}")
+    encoded = path.read_bytes()
+    if len(encoded) > _MAX_BYTES or sha256(encoded).hexdigest() != entry.top_level_sha256:
+        raise ValueError(
+            "cached holdout child bytes differ from its authenticated snapshot: "
+            f"{entry.relative}"
+        )
+    expected_parts = {relative for relative, _digest in entry.part_snapshot}
+    parts_root = _safe_child(root, f"{entry.relative}.parts")
+    if expected_parts:
+        if parts_root.is_symlink() or not parts_root.is_dir():
+            raise ValueError(
+                "cached holdout part root is not a regular directory: "
+                f"{entry.relative}"
+            )
+        actual_parts: set[str] = set()
+        for candidate in parts_root.rglob("*"):
+            relative = candidate.relative_to(root.resolve()).as_posix()
+            if candidate.is_symlink():
+                raise ValueError(f"cached holdout part is a symlink: {relative}")
+            if candidate.is_dir():
+                raise ValueError(f"cached holdout part tree contains a directory: {relative}")
+            if not candidate.is_file():
+                raise ValueError(f"cached holdout part is not a regular file: {relative}")
+            actual_parts.add(relative)
+        if actual_parts != expected_parts:
+            raise ValueError(f"cached holdout part closure differs: {entry.relative}")
+    elif parts_root.exists() or parts_root.is_symlink():
+        raise ValueError(f"cached holdout part closure differs: {entry.relative}")
+    for relative, expected_digest in entry.part_snapshot:
+        part = _safe_child(root, relative)
+        encoded_part = part.read_bytes()
+        if len(encoded_part) > _MAX_BYTES or sha256(encoded_part).hexdigest() != expected_digest:
+            raise ValueError(
+                "cached holdout part bytes differ from its authenticated snapshot: "
+                f"{relative}"
+            )
+    if sha256(canonical_bytes(entry.payload)).hexdigest() != entry.payload_sha256:
+        raise ValueError(f"cached holdout payload was mutated in memory: {entry.relative}")
 
 def _verify_child(
     root: Path,
@@ -364,17 +451,32 @@ def _verify_child(
     identity_key: str,
     expected_fields: set[str],
     expected_id: str | None = None,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
 ) -> dict[str, object]:
-    if _payload_cache is not None and relative in _payload_cache:
-        return _payload_cache[relative]
+    key = _payload_cache_key(
+        root,
+        relative,
+        contract=contract,
+        identity_key=identity_key,
+        expected_fields=expected_fields,
+        expected_id=expected_id,
+    )
+    if _payload_cache is not None and key in _payload_cache:
+        entry = _payload_cache[key]
+        _authenticate_cached_snapshot(root, entry)
+        return entry.payload
     path = _safe_child(root, relative)
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"holdout child must be a regular non-symlink file: {path}")
     encoded = path.read_bytes()
     physical = _load_object_bytes(encoded, path)
     payload = physical
+    part_snapshot: tuple[tuple[str, str], ...] = ()
+    header_sha256: str | None = None
     if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
         _verify_compact_header(physical, encoded=encoded)
-    if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
+        header_value = physical.get("header_sha256")
+        header_sha256 = header_value if isinstance(header_value, str) else None
         if contract == "qtrad-r2-final-fit-v1":
             row_field = "fit_arrays"
             array_fields = (
@@ -392,12 +494,31 @@ def _verify_child(
             R2_HOLDOUT_FEATURES_CONTRACT,
             R2_HOLDOUT_FORECAST_CONTRACT,
             R2_HOLDOUT_COVERAGE_CONTRACT,
+            TARGET_DATASET_CONTRACT,
         }:
             row_field = "rows"
             array_fields = ()
             mapping_fields = ()
+        elif contract == R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT:
+            row_field = "outcomes"
+            array_fields = ("expected_target_ids", "source_row_ids", "outcomes")
+            mapping_fields = ()
         else:
             raise ValueError(f"{contract} does not support partitioned persistence")
+        paths = _partitioned_paths(root, relative, physical, identity_field=identity_key)
+        references = physical.get("parts")
+        if not isinstance(references, list):
+            raise ValueError("partitioned holdout child part register is invalid")
+        part_snapshot = tuple(
+            (
+                part_path,
+                cast(
+                    str,
+                    _object_dict(reference, "partitioned holdout part reference")["sha256"],
+                ),
+            )
+            for part_path, reference in zip(paths, references, strict=True)
+        )
         payload = _partitioned_payload(
             root,
             relative,
@@ -417,7 +538,19 @@ def _verify_child(
     if expected_id is not None and identity != expected_id:
         raise ValueError(f"{contract} child identity differs from its declared reference")
     if _payload_cache is not None:
-        _payload_cache[relative] = payload
+        _payload_cache[key] = _PayloadCacheEntry(
+            root=str(root.resolve()),
+            relative=relative,
+            contract=contract,
+            identity_key=identity_key,
+            expected_id=expected_id,
+            expected_fields=frozenset(expected_fields),
+            payload=payload,
+            payload_sha256=sha256(canonical_bytes(payload)).hexdigest(),
+            top_level_sha256=sha256(encoded).hexdigest(),
+            header_sha256=header_sha256,
+            part_snapshot=part_snapshot,
+        )
     return payload
 
 
@@ -1333,6 +1466,7 @@ _PREPARATION_USAGE_FIELDS = {
     "seal_id",
     "source_claim_id",
     "destination_claim_id",
+    "destination_root_id",
     "transfer_id",
     "usage_id",
 }
@@ -1419,6 +1553,7 @@ def _preparation_usage(
     source_claim_id: str,
     destination_claim_id: str,
     transfer_id: str,
+    destination_root_id: str,
 ) -> dict[str, object]:
     semantic = {
         "contract": _PREPARATION_USAGE_CONTRACT,
@@ -1428,6 +1563,7 @@ def _preparation_usage(
         "source_claim_id": source_claim_id,
         "destination_claim_id": destination_claim_id,
         "transfer_id": transfer_id,
+        "destination_root_id": destination_root_id,
     }
     return {
         **semantic,
@@ -1658,7 +1794,7 @@ def _load_feature_payloads(
     root: Path,
     seal: R2HoldoutForecastSeal,
     *,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
 ) -> dict[str, Mapping[str, object]]:
     payloads: dict[str, Mapping[str, object]] = {}
     for dataset_id, relative in _feature_dataset_paths(seal):
@@ -1941,7 +2077,7 @@ def _verify_prepare_children(
     *,
     training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
     parent_authority: Mapping[str, object] | None = None,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
 ) -> None:
     opportunities = _opportunities_from_selection(selection, source)
     feature_payloads = _load_feature_payloads(root, seal, _payload_cache=_payload_cache)
@@ -2284,7 +2420,8 @@ def verify_holdout_preparation(
     holdout_target_source: R2HoldoutTargetSource,
     training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
     immediate_parent_authority: Mapping[str, object] | None = None,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
+    _allow_incomplete_transfer: bool = False,
 ) -> R2HoldoutForecastSeal:
     seal_payload = _verify_child(
         path,
@@ -2292,6 +2429,7 @@ def verify_holdout_preparation(
         contract=R2_HOLDOUT_FORECAST_SEAL_CONTRACT,
         identity_key="seal_id",
         expected_fields=_SEAL_FIELDS,
+        _payload_cache=_payload_cache,
     )
     seal = R2HoldoutForecastSeal.from_json(seal_payload)
     selection = verify_holdout_selection(path / "selection.json")
@@ -2388,12 +2526,22 @@ def verify_holdout_preparation(
         )
         if not has_transfer_lineage:
             raise ValueError("untransferred preparation cannot carry a usage claim")
+        destination_root_id = usage_payload.get("destination_root_id")
+        if (
+            not isinstance(destination_root_id, str)
+            or len(destination_root_id) != 64
+            or any(
+                character not in "0123456789abcdef" for character in destination_root_id
+            )
+        ):
+            raise ValueError("preparation usage destination identity is malformed")
         expected_usage = _preparation_usage(
             selection.manifest_id,
             seal.seal_id,
             str(claim_payload["source_claim_id"]),
             str(usage_payload["destination_claim_id"]),
             str(claim_payload["transfer_id"]),
+            destination_root_id,
         )
         expected_destination = _preparation_claim(
             selection.manifest_id,
@@ -2408,10 +2556,12 @@ def verify_holdout_preparation(
         ):
             raise ValueError("preparation usage does not bind the transferred owner")
         allowed.add(_PREPARATION_USAGE_FILE)
-    elif has_transfer_lineage:
-        raise ValueError("transferred preparation requires a usage claim")
     elif usage_path.exists() or usage_path.is_symlink():
         raise ValueError("preparation usage must be a regular file")
+    elif has_transfer_lineage and not (
+        _allow_incomplete_transfer and claim_state == "TRANSFERRED"
+    ):
+        raise ValueError("transferred preparation requires a usage claim")
     for fit_id in seal.final_fit_ids:
         allowed.update(
             _physical_child_paths(
@@ -2436,6 +2586,10 @@ def verify_holdout_preparation(
                 identity_field="coverage_id",
             )
         )
+    lifecycle_identity_fields = {
+        "outcome-evidence.json": "outcome_evidence_id",
+        "outcome-target.json": "dataset_id",
+    }
     for lifecycle_name in (
         "opened.json",
         "confirmatory-opened.json",
@@ -2445,7 +2599,13 @@ def verify_holdout_preparation(
         "evaluation.json",
     ):
         if (path / lifecycle_name).is_file():
-            allowed.add(lifecycle_name)
+            identity_field = lifecycle_identity_fields.get(lifecycle_name)
+            if identity_field is None:
+                allowed.add(lifecycle_name)
+            else:
+                allowed.update(
+                    _physical_child_paths(path, lifecycle_name, identity_field=identity_field)
+                )
     _reject_orphans(path, allowed)
     _verify_prepare_children(
         path,
@@ -2468,12 +2628,13 @@ def prepare_holdout_from_files(
     immediate_parent_authority: Mapping[str, object] | None = None,
     expected_selection_manifest_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
-    """Copy one disposable preparation transactionally into a fresh root."""
+    """Transfer one disposable preparation with a discoverable crash-safe handoff."""
     source_seal = verify_holdout_preparation(
         source,
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _allow_incomplete_transfer=True,
     )
     source_selection = verify_holdout_selection(source / "selection.json")
     if (
@@ -2493,8 +2654,6 @@ def prepare_holdout_from_files(
         lifecycle_path = source / lifecycle_name
         if lifecycle_path.exists() or lifecycle_path.is_symlink():
             raise ValueError("cannot prepare from a holdout with lifecycle evidence")
-    if output.exists() or output.is_symlink():
-        raise FileExistsError("holdout preparation output already exists")
     output.parent.mkdir(parents=True, exist_ok=True)
     claim_path = source / _PREPARATION_CLAIM_FILE
     existing_claim = _load_object(claim_path)
@@ -2508,9 +2667,34 @@ def prepare_holdout_from_files(
         source_seal.seal_id,
         state="OWNED_UNOPENED",
     )
-    if existing_claim != available and existing_claim != initial_unopened:
-        raise FileExistsError("source preparation has already been transferred")
-    source_claim_id = str(existing_claim["claim_id"])
+    source_claim_id: str
+    if existing_claim in (available, initial_unopened):
+        source_claim_id = str(existing_claim["claim_id"])
+    else:
+        transferred_claim_id = existing_claim.get("claim_id")
+        if existing_claim.get("state") != "TRANSFERRED":
+            raise FileExistsError("source preparation has already been transferred")
+        source_claim_id_value = existing_claim.get("source_claim_id")
+        if not isinstance(source_claim_id_value, str) or not source_claim_id_value:
+            raise ValueError("transferred source preparation lacks its original claim")
+        source_claim_id = source_claim_id_value
+        expected_transfer_id = _preparation_transfer_id(
+            source_selection.manifest_id,
+            source_seal.seal_id,
+            source_claim_id,
+        )
+        expected_transferred = _preparation_claim(
+            source_selection.manifest_id,
+            source_seal.seal_id,
+            state="TRANSFERRED",
+            transfer_id=expected_transfer_id,
+            source_claim_id=source_claim_id,
+        )
+        if (
+            existing_claim != expected_transferred
+            or transferred_claim_id != expected_transferred["claim_id"]
+        ):
+            raise ValueError("transferred source preparation claim is not authenticated")
     transfer_id = _preparation_transfer_id(
         source_selection.manifest_id,
         source_seal.seal_id,
@@ -2530,13 +2714,40 @@ def prepare_holdout_from_files(
         transfer_id=transfer_id,
         source_claim_id=source_claim_id,
     )
+    destination_root_id = sha256(str(output.resolve()).encode()).hexdigest()
     usage = _preparation_usage(
         source_selection.manifest_id,
         source_seal.seal_id,
         source_claim_id,
         str(destination_claim["claim_id"]),
         transfer_id,
+        destination_root_id,
     )
+    source_usage_path = source / _PREPARATION_USAGE_FILE
+    if existing_claim == transferred and (
+        source_usage_path.exists() or source_usage_path.is_symlink()
+    ) and (
+        source_usage_path.is_symlink()
+        or not source_usage_path.is_file()
+        or _load_object(source_usage_path).get("destination_root_id") != destination_root_id
+    ):
+        raise FileExistsError(
+            "source preparation has already been transferred to another destination"
+        )
+    if output.exists() or output.is_symlink():
+        if existing_claim != transferred:
+            raise FileExistsError("holdout preparation output already exists")
+        if output.is_symlink() or not output.is_dir():
+            raise ValueError("transferred holdout output is not a regular directory")
+        return verify_holdout_preparation(
+            output,
+            holdout_target_source=holdout_target_source,
+            training_feature_datasets=training_feature_datasets,
+            immediate_parent_authority=immediate_parent_authority,
+        )
+    staging = output.with_name(f".{output.name}.transfer-{transfer_id}")
+    if staging.is_symlink() or (staging.exists() and not staging.is_dir()):
+        raise ValueError("holdout transfer staging path is not a regular directory")
     paths = [
         "selection.json",
         "authority.json",
@@ -2563,48 +2774,77 @@ def prepare_holdout_from_files(
             )
         )
     source_usage_path = source / _PREPARATION_USAGE_FILE
-    original_usage = (
-        source_usage_path.read_bytes()
-        if source_usage_path.is_file()
-        else None
-    )
-    with TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as staged_name:
-        staged = Path(staged_name)
-        _write_json(staged / _PREPARATION_CLAIM_FILE, destination_claim)
-        for relative in paths:
-            _copy_create(source / relative, staged / relative)
-        _write_json(staged / _PREPARATION_USAGE_FILE, usage)
-        # Authenticate the complete destination while the source remains AVAILABLE.
-        verify_holdout_preparation(
-            staged,
-            holdout_target_source=holdout_target_source,
-            training_feature_datasets=training_feature_datasets,
-            immediate_parent_authority=immediate_parent_authority,
-        )
 
-        def rollback_source() -> None:
-            restore_claim = claim_path.with_name(f".{claim_path.name}.rollback")
-            atomic_create(restore_claim, canonical_bytes(existing_claim))
-            os.replace(restore_claim, claim_path)
-            if original_usage is None:
-                if source_usage_path.exists() or source_usage_path.is_symlink():
-                    source_usage_path.unlink()
-            else:
-                restore_usage = source_usage_path.with_name(
-                    f".{source_usage_path.name}.rollback"
+    def ensure_json(path: Path, payload: Mapping[str, object]) -> None:
+        if path.exists() or path.is_symlink():
+            if (
+                path.is_symlink()
+                or not path.is_file()
+                or _load_object(path) != dict(payload)
+            ):
+                raise ValueError(
+                    "transfer destination differs from its authenticated source: "
+                    f"{path}"
                 )
-                atomic_create(restore_usage, original_usage)
-                os.replace(restore_usage, source_usage_path)
+        else:
+            _write_json(path, payload)
 
-        try:
-            _replace_json(claim_path, transferred)
-            _write_json(source_usage_path, usage)
-            if output.exists() or output.is_symlink():
-                raise FileExistsError("holdout preparation output appeared during transfer")
-            os.replace(staged_name, output)
-        except BaseException:
-            rollback_source()
-            raise
+    def ensure_copy(relative: str) -> None:
+        source_path = source / relative
+        target_path = staging / relative
+        if source_path.is_symlink() or not source_path.is_file():
+            raise ValueError(f"holdout transfer source must be a regular file: {source_path}")
+        encoded = source_path.read_bytes()
+        if target_path.exists() or target_path.is_symlink():
+            if (
+                target_path.is_symlink()
+                or not target_path.is_file()
+                or target_path.read_bytes() != encoded
+            ):
+                raise ValueError(
+                    "transfer destination differs from its authenticated source: "
+                    f"{target_path}"
+                )
+        else:
+            atomic_create(target_path, encoded)
+
+    # The staging root is intentionally persistent and non-authoritative.  A crash
+    # before or after the source claim transition leaves this exact path resumable.
+    staging.mkdir(parents=True, exist_ok=True)
+    ensure_json(staging / _PREPARATION_CLAIM_FILE, destination_claim)
+    for relative in paths:
+        ensure_copy(relative)
+    ensure_json(staging / _PREPARATION_USAGE_FILE, usage)
+    verify_holdout_preparation(
+        staging,
+        holdout_target_source=holdout_target_source,
+        training_feature_datasets=training_feature_datasets,
+        immediate_parent_authority=immediate_parent_authority,
+    )
+
+    # Source authority is consumed only after the complete staged destination is
+    # authenticated.  The persistent staging root makes every later crash
+    # recoverable without rolling back an irreversible claim.
+    if existing_claim != transferred:
+        _replace_json(claim_path, transferred)
+    if source_usage_path.exists() or source_usage_path.is_symlink():
+        if (
+            source_usage_path.is_symlink()
+            or not source_usage_path.is_file()
+            or _load_object(source_usage_path) != usage
+        ):
+            raise ValueError(
+                "source preparation usage claim differs from the authenticated transfer"
+            )
+    else:
+        _write_json(source_usage_path, usage)
+    if _load_object(claim_path) != transferred:
+        raise ValueError("source preparation transfer claim was not durably published")
+    if output.exists() or output.is_symlink():
+        raise FileExistsError("holdout preparation output appeared during transfer")
+    # os.replace is the final authority publication.  If the process dies or the
+    # call fails, the source is TRANSFERRED and the staging root remains discoverable.
+    os.replace(staging, output)
     return verify_holdout_preparation(
         output,
         holdout_target_source=holdout_target_source,
@@ -2955,7 +3195,7 @@ def reveal_holdout(
     holdout_target_source: R2HoldoutTargetSource,
     training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
     immediate_parent_authority: Mapping[str, object] | None = None,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
 
@@ -3041,7 +3281,15 @@ def reveal_holdout(
             expected_target_ids,
             opportunities,
         )
-        _write_json(root / "outcome-target.json", _target_dataset_payload(raw_outcomes))
+        target_payload = _target_dataset_payload(raw_outcomes)
+        compact_target, _target_parts = _write_partitioned_child(
+            root,
+            "outcome-target.json",
+            target_payload,
+            identity_field="dataset_id",
+            row_field="rows",
+        )
+        _write_json(root / "outcome-target.json", compact_target)
         outcome_items = _outcome_items_from_source(
             raw_outcomes,
             expected_target_dataset_id=target_dataset_id,
@@ -3060,7 +3308,16 @@ def reveal_holdout(
             evidence_class=selection.evidence_class,
             holdout_scope=selection.holdout_scope,
         )
-        _write_json(root / "outcome-evidence.json", outcome_evidence.as_json())
+        evidence_payload = outcome_evidence.as_json()
+        compact_evidence, _evidence_parts = _write_partitioned_child(
+            root,
+            "outcome-evidence.json",
+            evidence_payload,
+            identity_field="outcome_evidence_id",
+            row_field="outcomes",
+            array_fields=("expected_target_ids", "source_row_ids", "outcomes"),
+        )
+        _write_json(root / "outcome-evidence.json", compact_evidence)
         evaluation = evaluator(outcome_mapping, marker)
         if (
             evaluation.selection_manifest_id != selection.manifest_id
@@ -3199,7 +3456,7 @@ def verify_holdout_evaluation(
     holdout_target_source: R2HoldoutTargetSource,
     training_feature_datasets: Mapping[str, R2FeatureDataset] | None = None,
     immediate_parent_authority: Mapping[str, object] | None = None,
-    _payload_cache: dict[str, dict[str, object]] | None = None,
+    _payload_cache: _PayloadCache | None = None,
 ) -> R2HoldoutEvaluation:
     payload_cache = _payload_cache if _payload_cache is not None else {}
     payload = _verify_child(
@@ -3226,6 +3483,7 @@ def verify_holdout_evaluation(
         contract=R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT,
         identity_key="outcome_evidence_id",
         expected_fields=_OUTCOME_EVIDENCE_FIELDS,
+        _payload_cache=payload_cache,
     )
     outcome_evidence = _outcome_evidence_from_payload(outcome_payload)
     target_payload = _verify_child(
@@ -3234,6 +3492,7 @@ def verify_holdout_evaluation(
         contract=TARGET_DATASET_CONTRACT,
         identity_key="dataset_id",
         expected_fields=_TARGET_DATASET_FIELDS,
+        _payload_cache=payload_cache,
     )
     target_dataset = _target_dataset_from_payload(target_payload, field="outcome target dataset")
     expected_source = selection.evaluation_policy.get("target_dataset_id")
@@ -3442,13 +3701,13 @@ def build_holdout_bundle(
     immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
-    # Each authentication phase gets a private cache.  Sharing payloads between
-    # preparation and evaluation could allow a mutation between phases to go unseen.
+    payload_cache: _PayloadCache = {}
     seal = verify_holdout_preparation(
         root,
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     selection = verify_holdout_selection(root / "selection.json")
     opened, consumed = verify_holdout_markers(root)
@@ -3457,6 +3716,7 @@ def build_holdout_bundle(
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
+        _payload_cache=payload_cache,
     )
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(
@@ -3574,20 +3834,18 @@ def build_holdout_bundle(
         ],
     ]
     if (root / "outcome-evidence.json").is_file():
-        replay_specs.append(
-            (
+        replay_specs.extend(
+            child_replay_specs(
                 "outcome-evidence.json",
-                "outcome-evidence.json",
-                R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT,
-                "outcome_evidence_id",
+                contract=R2_HOLDOUT_OUTCOME_EVIDENCE_CONTRACT,
+                identity_key="outcome_evidence_id",
             )
         )
-    replay_specs.append(
-        (
+    replay_specs.extend(
+        child_replay_specs(
             "outcome-target.json",
-            "outcome-target.json",
-            TARGET_DATASET_CONTRACT,
-            "dataset_id",
+            contract=TARGET_DATASET_CONTRACT,
+            identity_key="dataset_id",
         )
     )
     replay_refs: list[ArtifactReference] = []
@@ -3990,7 +4248,7 @@ def reveal_holdout_from_files(
     """Reveal persisted disposable children; outcome bytes are read after OPENED."""
     from qtrad.application.r2_holdout import evaluate_holdout
 
-    payload_cache: dict[str, dict[str, object]] = {}
+    payload_cache: _PayloadCache = {}
     selection = verify_holdout_selection(root / "selection.json")
     seal = verify_holdout_preparation(
         root,
@@ -4090,7 +4348,7 @@ def _reveal_confirmatory_holdout(
 
     from qtrad.application.r2_holdout import evaluate_holdout
 
-    payload_cache: dict[str, dict[str, object]] = {}
+    payload_cache: _PayloadCache = {}
     selection = verify_holdout_selection(root / "selection.json")
     seal = verify_holdout_preparation(
         root,
