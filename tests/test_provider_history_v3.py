@@ -24,6 +24,7 @@ from qtrad.domain.provider_history import (
     ProviderHistoricalAvailabilityPolicy,
     ProviderHistoricalDatasetV3,
     ProviderHistoricalObservation,
+    sha256_json,
 )
 from qtrad.domain.research import ObservationDataset
 from qtrad.runtime.ibkr_results import (
@@ -153,11 +154,81 @@ def _rewrite_part_physical_schema(
     return part_path, replace(reference, bytes_sha256=sha256_bytes(payload))
 
 
+def _rewrite_part_with_legacy_identity(
+    manifest: Path, *, aggregate: str = "a" * 64
+) -> tuple[Path, ProviderHistoryV3PartReference, tuple[str, ...]]:
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    reference = _read_manifest(manifest).parts[0]
+    part_path = manifest.parent / reference.path
+    frame = pl.read_parquet(part_path)
+    values: list[dict[str, object]] = []
+    legacy_hashes: list[str] = []
+    for raw in frame.to_dicts():
+        item = dict(raw)
+        legacy_payload = dict(item)
+        legacy_payload["aggregate_sha256"] = aggregate
+        schedule = legacy_payload["schedule_evidence"]
+        assert isinstance(schedule, str)
+        legacy_payload["schedule_evidence"] = json.loads(schedule)
+        del legacy_payload["observation_sha256"]
+        legacy_hash = sha256_json(legacy_payload)
+        item["aggregate_sha256"] = aggregate
+        item["observation_sha256"] = legacy_hash
+        values.append(item)
+        legacy_hashes.append(legacy_hash)
+    retained = pl.DataFrame(values).select(runtime._RETAINED_OBSERVATION_FIELDS)
+    output = io.BytesIO()
+    retained.write_parquet(output, compression="zstd")
+    payload = output.getvalue()
+    part_path.write_bytes(payload)
+    return (
+        part_path,
+        replace(
+            reference,
+            bytes_sha256=sha256_bytes(payload),
+            ordered_row_sha256=sha256_json({"observation_sha256": legacy_hashes}),
+        ),
+        tuple(legacy_hashes),
+    )
+
+
+def test_v3_reader_translates_retained_legacy_identity_and_preserves_order_reference(
+    tmp_path: Path,
+) -> None:
+    manifest, _, _ = _stage7_closure(tmp_path)
+    part_path, reference, legacy_hashes = _rewrite_part_with_legacy_identity(manifest)
+
+    rows = _read_part(part_path, reference)
+
+    assert rows
+    assert [row.observation_sha256 for row in rows] != list(legacy_hashes)
+    assert all(row.observation_sha256 == sha256_json(row.identity_payload()) for row in rows)
+    assert reference.ordered_row_sha256 == sha256_json({"observation_sha256": list(legacy_hashes)})
+
+
+def test_v3_reader_rejects_changed_retained_legacy_identity(tmp_path: Path) -> None:
+    import qtrad.runtime.provider_history_v3 as runtime
+
+    manifest, _, _ = _stage7_closure(tmp_path)
+    part_path, reference, _ = _rewrite_part_with_legacy_identity(manifest)
+    frame = pl.read_parquet(part_path)
+    values = frame.to_dicts()
+    values[0]["observation_sha256"] = "0" * 64
+    retained = pl.DataFrame(values).select(runtime._RETAINED_OBSERVATION_FIELDS)
+    output = io.BytesIO()
+    retained.write_parquet(output, compression="zstd")
+    payload = output.getvalue()
+    part_path.write_bytes(payload)
+    tampered_reference = replace(reference, bytes_sha256=sha256_bytes(payload))
+
+    with pytest.raises(ValueError, match="legacy observation identity"):
+        _read_part(part_path, tampered_reference)
+
+
 def test_v3_reader_accepts_the_sole_retained_aggregate_column(tmp_path: Path) -> None:
     manifest, _, _ = _stage7_closure(tmp_path)
-    part_path, reference = _rewrite_part_physical_schema(
-        manifest, field_name="aggregate_sha256", aggregate="a" * 64
-    )
+    part_path, reference, _ = _rewrite_part_with_legacy_identity(manifest)
 
     rows = _read_part(part_path, reference)
 
