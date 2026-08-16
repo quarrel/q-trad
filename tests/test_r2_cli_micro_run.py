@@ -117,9 +117,7 @@ def _request(
         "interval_end": utc_text(end),
         "end_date_time": ibkr_end_date_time(end),
         "duration": "28 D",
-        "bar_size": (
-            "1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"
-        ),
+        "bar_size": ("1 min" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "1 day"),
         "what_to_show": (
             "MIDPOINT" if kind is IbkrHistoricalRequestKind.MIDPOINT_BARS else "SCHEDULE"
         ),
@@ -226,7 +224,6 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
             )
         )
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-
             decisions = tuple(
                 _BASE
                 + timedelta(minutes=1)
@@ -713,9 +710,7 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     oof_document = json.loads(oof_manifest.read_bytes())
     assert "rows" not in oof_document
     assert all(
-        path.stat().st_size < 4 * 1024 * 1024
-        for path in oof_root.rglob("*")
-        if path.is_file()
+        path.stat().st_size < 4 * 1024 * 1024 for path in oof_root.rglob("*") if path.is_file()
     )
 
     preparation_document = json.loads((preparation_root / "manifest.json").read_bytes())

@@ -744,6 +744,7 @@ def test_cached_child_snapshot_rejects_added_part(tmp_path: Path) -> None:
             _payload_cache=cache,
         )
 
+
 def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
     tmp_path: Path,
 ) -> None:
@@ -798,9 +799,7 @@ def test_target_source_identity_streams_large_row_collections(
             for field in ("rows", "targets"):
                 collection = value.get(field)
                 if isinstance(collection, list):
-                    assert len(collection) <= 1, (
-                        f"identity materialised full {field} collection"
-                    )
+                    assert len(collection) <= 1, f"identity materialised full {field} collection"
         return original_semantic_id(value)
 
     monkeypatch.setattr(holdout_domain, "_semantic_id", bounded_semantic_id)
@@ -1188,6 +1187,7 @@ def test_holdout_transfer_auth_failure_leaves_source_available(
     assert not (source / ".preparation-source-claim.json").exists()
     assert not destination.exists()
 
+
 def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path) -> None:
     selection, _, _, _, _, seal = _prepared(tmp_path)
     claim_before = (tmp_path / ".preparation-claim.json").read_bytes()
@@ -1463,6 +1463,7 @@ def test_preparation_persists_no_training_rows(tmp_path: Path) -> None:
     assert (tmp_path / "features.json.parts").is_dir()
     assert not (tmp_path / "outcome-target.json").exists()
 
+
 def test_selection_source_artifact_is_outcome_blind() -> None:
     selection, _question, _configurations = _selection()
     policy = selection.evaluation_policy
@@ -1712,11 +1713,14 @@ def test_transfer_publish_crash_leaves_resumable_staging(
     assert seal.seal_id
     assert destination.is_dir()
     assert not staging[0].exists()
-    assert verify_holdout_preparation(
-        destination,
-        holdout_target_source=_target_source(),
-        training_feature_datasets=_training_feature_authority(),
-    ).seal_id == seal.seal_id
+    assert (
+        verify_holdout_preparation(
+            destination,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        ).seal_id
+        == seal.seal_id
+    )
 
 
 def test_transfer_claim_crash_leaves_resumable_staging(
@@ -1764,6 +1768,7 @@ def test_transfer_claim_crash_leaves_resumable_staging(
     assert destination.is_dir()
     assert seal.seal_id
 
+
 def test_transfer_claim_publication_crash_resumes_exact_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1804,7 +1809,6 @@ def test_transfer_claim_publication_crash_resumes_exact_temp(
     assert destination.is_dir()
     assert seal.seal_id
     assert not claim_next.exists()
-
 
 
 def test_transferred_preparation_rejects_moved_destination_root(tmp_path: Path) -> None:
@@ -1900,11 +1904,14 @@ def test_reveal_claim_publication_crash_resumes_exact_temp(
         holdout_runtime._claim_preparation(destination, selection.manifest_id, seal.seal_id)
     assert json.loads(claim_path.read_text())["state"] == "OWNED_UNOPENED"
     assert claim_next.is_file()
-    assert verify_holdout_preparation(
-        destination,
-        holdout_target_source=_target_source(),
-        training_feature_datasets=_training_feature_authority(),
-    ).seal_id == seal.seal_id
+    assert (
+        verify_holdout_preparation(
+            destination,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        ).seal_id
+        == seal.seal_id
+    )
 
     monkeypatch.setattr(holdout_runtime.os, "replace", original_replace)
     holdout_runtime._claim_preparation(destination, selection.manifest_id, seal.seal_id)
@@ -1920,9 +1927,7 @@ def test_terminal_outcomes_round_trip_with_forced_part_bound(
     original_bound = partitioned_rows_runtime._MAX_PART_BYTES
     original_verify = holdout_runtime.verify_holdout_preparation
 
-    def verify_then_lower(
-        path: Path, *args: object, **kwargs: object
-    ) -> object:
+    def verify_then_lower(path: Path, *args: object, **kwargs: object) -> object:
         result = original_verify(path, *args, **kwargs)
         monkeypatch.setattr(partitioned_rows_runtime, "_MAX_PART_BYTES", 900)
         return result

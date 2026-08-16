@@ -146,9 +146,7 @@ def _target_index_identity(
         _json_object_chunks(
             {
                 "contract": lambda: _single_json(contract),
-                "foundation_configuration_id": lambda: _single_json(
-                    foundation_configuration_id
-                ),
+                "foundation_configuration_id": lambda: _single_json(foundation_configuration_id),
                 "observation_dataset_id": lambda: _single_json(observation_dataset_id),
                 "schema_version": lambda: _single_json(schema_version),
                 "source_target_dataset_id": lambda: _single_json(source_target_dataset_id),
@@ -179,9 +177,7 @@ def _target_source_identity(
                 "causal_metadata_dataset_id": lambda: _single_json(
                     values["causal_metadata_dataset_id"]
                 ),
-                "causal_panel_dataset_id": lambda: _single_json(
-                    values["causal_panel_dataset_id"]
-                ),
+                "causal_panel_dataset_id": lambda: _single_json(values["causal_panel_dataset_id"]),
                 "contract": lambda: _single_json(contract),
                 "foundation_configuration_id": lambda: _single_json(
                     values["foundation_configuration_id"]
@@ -190,30 +186,20 @@ def _target_source_identity(
                     holdout_range,
                     lambda item: _json_bytes(cast(datetime, item).isoformat()),
                 ),
-                "observation_dataset_id": lambda: _single_json(
-                    values["observation_dataset_id"]
-                ),
+                "observation_dataset_id": lambda: _single_json(values["observation_dataset_id"]),
                 "opportunities": lambda: _json_array_chunks(
                     opportunities,
-                    lambda item: _json_bytes(
-                        cast(HoldoutTargetOpportunity, item).as_json()
-                    ),
+                    lambda item: _json_bytes(cast(HoldoutTargetOpportunity, item).as_json()),
                 ),
                 "opportunity_derivation_policy": lambda: _single_json(opportunity_policy),
                 "pre_holdout_target_dataset": lambda: _target_dataset_chunks(pre_holdout),
-                "primary_horizon_seconds": lambda: _single_json(
-                    values["primary_horizon_seconds"]
-                ),
+                "primary_horizon_seconds": lambda: _single_json(values["primary_horizon_seconds"]),
                 "schema_version": lambda: _single_json(schema_version),
                 "source_target_dataset_id": lambda: _single_json(
                     values["source_target_dataset_id"]
                 ),
-                "target_index_dataset_id": lambda: _single_json(
-                    values["target_index_dataset_id"]
-                ),
-                "target_instruments": lambda: _json_array_chunks(
-                    target_instruments, _json_bytes
-                ),
+                "target_index_dataset_id": lambda: _single_json(values["target_index_dataset_id"]),
+                "target_instruments": lambda: _json_array_chunks(target_instruments, _json_bytes),
                 "targets": lambda: _target_identity_chunks(targets),
             }
         )
@@ -233,9 +219,7 @@ def _causal_metadata_identity(
                 "contract": lambda: _single_json(contract),
                 "rows": lambda: _json_array_chunks(
                     rows,
-                    lambda item: _json_bytes(
-                        cast(R2HoldoutCausalMetadataRow, item).as_json()
-                    ),
+                    lambda item: _json_bytes(cast(R2HoldoutCausalMetadataRow, item).as_json()),
                 ),
                 "schema_version": lambda: _single_json(schema_version),
                 "source_panel_dataset_id": lambda: _single_json(source_panel_dataset_id),

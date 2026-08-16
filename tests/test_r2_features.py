@@ -20,6 +20,7 @@ from qtrad.application.ibkr_foundation import _adapt_observation
 from qtrad.application.r2_features import (
     FeatureLineageError,
     R2FoundationInputs,
+    _build_source_active_index,
     _calculate,
     _context,
     _index,
@@ -27,6 +28,7 @@ from qtrad.application.r2_features import (
     _return,
     _rolling,
     _RowCache,
+    _source_active,
     _spread,
     feature_schema_for_set,
     materialise_r2_features,
@@ -100,6 +102,7 @@ def _minimal_foundation(
         ),
     )
 
+
 def _stage8_row(
     interval_start: datetime,
     *,
@@ -170,6 +173,53 @@ def test_ibkr_stage8_source_lineage_is_series_stable() -> None:
             end + timedelta(minutes=1),
             foundation,
             _RowCache(),
+        )
+
+
+def test_source_active_index_matches_scan_and_counts_bounded_work() -> None:
+    start = datetime(2026, 2, 1, 12, tzinfo=UTC)
+    intervals = {
+        "fx:aud-usd": (
+            (start, start + timedelta(minutes=2)),
+            (start + timedelta(minutes=3), start + timedelta(minutes=5)),
+        )
+    }
+    index = _build_source_active_index(intervals)
+    cases = (
+        (start + timedelta(minutes=1), start + timedelta(minutes=1)),
+        (start + timedelta(minutes=2), start + timedelta(minutes=2)),
+        (start + timedelta(minutes=3), start + timedelta(minutes=3)),
+        (start + timedelta(minutes=4), start + timedelta(minutes=4)),
+        (start + timedelta(minutes=5), start + timedelta(minutes=5)),
+        (start + timedelta(minutes=3), start + timedelta(minutes=2)),
+    )
+    for interval_end, cutoff in cases:
+        expected_start = interval_end - timedelta(minutes=1)
+        expected = interval_end <= cutoff and any(
+            active_start <= expected_start and interval_end <= active_end
+            for active_start, active_end in intervals["fx:aud-usd"]
+        )
+        assert (
+            _source_active(index, "fx:aud-usd", interval_end, cutoff, timedelta(minutes=1))
+            is expected
+        )
+    assert index.index_build_count == 1
+    assert index.indexed_interval_count == 2
+    assert index.lookup_count == len(cases)
+    assert index.interval_comparisons == len(cases) - 1
+
+    with pytest.raises(ValueError, match="not ordered"):
+        _build_source_active_index(
+            {"fx:aud-usd": (intervals["fx:aud-usd"][1], intervals["fx:aud-usd"][0])}
+        )
+    with pytest.raises(ValueError, match="overlap"):
+        _build_source_active_index(
+            {
+                "fx:aud-usd": (
+                    (start, start + timedelta(minutes=2)),
+                    (start + timedelta(minutes=1), start + timedelta(minutes=3)),
+                )
+            }
         )
 
 

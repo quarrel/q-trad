@@ -1,13 +1,15 @@
 """Deterministic, current-cutoff R2 raw-feature materialisation."""
 
+from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Iterator, Mapping, Sequence
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from itertools import pairwise
 from math import cos, log, pi, sin, sqrt
 from types import MappingProxyType
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from qtrad.application.foundation import observation_availability_time
 from qtrad.application.r2_readiness import (
@@ -46,6 +48,7 @@ from qtrad.domain.research import ObservationDataset, ObservationRow
 
 type ObservationKey = tuple[str, PriceBasis, datetime, datetime]
 type ObservationIndex = Mapping[ObservationKey, tuple[ObservationRow, ...]]
+type SourceActiveIntervals = Mapping[str, tuple[tuple[datetime, datetime], ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,6 +91,83 @@ class _RowCache:
     )
 
 
+@dataclass(slots=True)
+class _SourceActiveIndex:
+    """Sorted source-activity intervals for bounded feature-time lookups."""
+
+    intervals: SourceActiveIntervals
+    starts: Mapping[str, tuple[datetime, ...]]
+    index_build_count: int
+    indexed_interval_count: int
+    lookup_count: int = 0
+    interval_comparisons: int = 0
+
+    def active(
+        self,
+        instrument_id: str,
+        interval_end: datetime,
+        feature_data_asof: datetime,
+        resolution: timedelta,
+    ) -> bool:
+        self.lookup_count += 1
+        if interval_end > feature_data_asof:
+            return False
+        expected_start = interval_end - resolution
+        instrument_intervals = self.intervals.get(instrument_id, ())
+        if not instrument_intervals:
+            return False
+        candidate = bisect_right(self.starts[instrument_id], expected_start) - 1
+        self.interval_comparisons += 1
+        if candidate < 0:
+            return False
+        active_start, active_end = instrument_intervals[candidate]
+        return active_start <= expected_start and interval_end <= active_end
+
+
+def _build_source_active_index(intervals: SourceActiveIntervals) -> _SourceActiveIndex:
+    """Build one fail-closed, non-overlapping interval index per instrument."""
+    normalised: dict[str, tuple[tuple[datetime, datetime], ...]] = {}
+    starts: dict[str, tuple[datetime, ...]] = {}
+    interval_count = 0
+    for instrument_id, instrument_intervals in intervals.items():
+        ordered = tuple(instrument_intervals)
+        if ordered != tuple(sorted(ordered)):
+            raise ValueError(f"source-active intervals are not ordered: {instrument_id}")
+        previous_end: datetime | None = None
+        for active_start, active_end in ordered:
+            if active_end <= active_start:
+                raise ValueError("source-active interval must be positive")
+            if previous_end is not None and active_start < previous_end:
+                raise ValueError(f"source-active intervals overlap: {instrument_id}")
+            previous_end = active_end
+        normalised[instrument_id] = ordered
+        starts[instrument_id] = tuple(active_start for active_start, _ in ordered)
+        interval_count += len(ordered)
+    return _SourceActiveIndex(
+        intervals=MappingProxyType(normalised),
+        starts=MappingProxyType(starts),
+        index_build_count=1,
+        indexed_interval_count=interval_count,
+    )
+
+
+def _source_active_index_for(foundation: object) -> _SourceActiveIndex:
+    """Reuse the authenticated index, with a one-time fallback for test adapters."""
+    index = getattr(foundation, "source_active_index", None)
+    if isinstance(index, _SourceActiveIndex):
+        return index
+    cached = getattr(foundation, "_qtrad_source_active_index", None)
+    if isinstance(cached, _SourceActiveIndex):
+        return cached
+    source_active_intervals = cast(
+        SourceActiveIntervals, cast(Any, foundation).source_active_intervals
+    )
+    index = _build_source_active_index(source_active_intervals)
+    with suppress(TypeError):
+        vars(foundation)["_qtrad_source_active_index"] = index
+    return index
+
+
 @dataclass(frozen=True, slots=True)
 class R2FoundationInputs:
     """Complete, independently verified R1 children consumed by R2.B."""
@@ -99,24 +179,30 @@ class R2FoundationInputs:
     targets: TargetDataset
     folds: FoldDataset
     availability_evidence: Mapping[str, JsonValue]
-    _authenticated_source_active_intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]] = (
-        field(init=False, repr=False)
-    )
+    _authenticated_source_active_intervals: SourceActiveIntervals = field(init=False, repr=False)
+    _authenticated_source_active_index: _SourceActiveIndex = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         intervals = source_active_intervals_from_evidence(self.availability_evidence)
+        authenticated_intervals = MappingProxyType(
+            {instrument: tuple(values) for instrument, values in intervals.items()}
+        )
+        object.__setattr__(self, "_authenticated_source_active_intervals", authenticated_intervals)
         object.__setattr__(
             self,
-            "_authenticated_source_active_intervals",
-            MappingProxyType(
-                {instrument: tuple(values) for instrument, values in intervals.items()}
-            ),
+            "_authenticated_source_active_index",
+            _build_source_active_index(authenticated_intervals),
         )
 
     @property
-    def source_active_intervals(self) -> Mapping[str, tuple[tuple[datetime, datetime], ...]]:
+    def source_active_intervals(self) -> SourceActiveIntervals:
         """Return the parsed activity evidence derived from the authenticated payload."""
         return self._authenticated_source_active_intervals
+
+    @property
+    def source_active_index(self) -> _SourceActiveIndex:
+        """Return the one-time sorted activity index for feature lookups."""
+        return self._authenticated_source_active_index
 
 
 class R2OutcomeBlindFeatureInputs(Protocol):
@@ -138,9 +224,10 @@ class R2OutcomeBlindFeatureInputs(Protocol):
     def folds(self) -> FoldDataset: ...
 
     @property
-    def source_active_intervals(
-        self,
-    ) -> Mapping[str, tuple[tuple[datetime, datetime], ...]]: ...
+    def source_active_intervals(self) -> SourceActiveIntervals: ...
+
+    @property
+    def source_active_index(self) -> _SourceActiveIndex: ...
 
 
 class FeatureLineageError(ValueError):
@@ -572,7 +659,7 @@ def _calculate(
             )
     if name == "source_active":
         active = _source_active(
-            foundation.source_active_intervals,
+            _source_active_index_for(foundation),
             panel.instrument_id,
             end,
             cutoff,
@@ -653,7 +740,7 @@ def _calculate(
             instrument
             for instrument in peers
             if _source_active(
-                foundation.source_active_intervals,
+                _source_active_index_for(foundation),
                 instrument,
                 end,
                 cutoff,
@@ -786,7 +873,7 @@ def _rolling_window(
     endpoint_ends = tuple(end - timedelta(minutes=offset) for offset in range(minutes, -1, -1))
     active_slots = tuple(
         _source_active(
-            foundation.source_active_intervals,
+            _source_active_index_for(foundation),
             instrument_id,
             interval_end,
             cutoff,
@@ -949,7 +1036,7 @@ def _spread(
         for offset in range(minutes - 1, -1, -1):
             interval_end = panel.latest_feature_bar_end - timedelta(minutes=offset)
             if not _source_active(
-                foundation.source_active_intervals,
+                _source_active_index_for(foundation),
                 panel.instrument_id,
                 interval_end,
                 panel.feature_data_asof,
@@ -1082,7 +1169,7 @@ def _at(
     resolution = foundation.configuration.grid_resolution
     interval_start = interval_end - resolution
     if not _source_active(
-        foundation.source_active_intervals,
+        _source_active_index_for(foundation),
         instrument_id,
         interval_end,
         cutoff,
@@ -1122,18 +1209,19 @@ def _ids(row: ObservationRow | None) -> tuple[str, ...]:
 
 
 def _source_active(
-    intervals: Mapping[str, tuple[tuple[datetime, datetime], ...]],
+    intervals: _SourceActiveIndex | SourceActiveIntervals,
     instrument_id: str,
     interval_end: datetime,
     feature_data_asof: datetime,
     resolution: timedelta,
 ) -> bool:
-    if interval_end > feature_data_asof:
-        return False
-    expected_start = interval_end - resolution
-    return any(
-        active_start <= expected_start and interval_end <= active_end
-        for active_start, active_end in intervals.get(instrument_id, ())
+    if isinstance(intervals, _SourceActiveIndex):
+        return intervals.active(instrument_id, interval_end, feature_data_asof, resolution)
+    return _build_source_active_index(intervals).active(
+        instrument_id,
+        interval_end,
+        feature_data_asof,
+        resolution,
     )
 
 
@@ -1155,7 +1243,7 @@ def _missing_fraction(
     for offset in range(minutes - 1, -1, -1):
         interval_end = panel.latest_feature_bar_end - timedelta(minutes=offset)
         if not _source_active(
-            foundation.source_active_intervals,
+            _source_active_index_for(foundation),
             panel.instrument_id,
             interval_end,
             panel.feature_data_asof,
