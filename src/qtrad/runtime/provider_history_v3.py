@@ -808,15 +808,44 @@ def _encode_rows(rows: Sequence[ProviderHistoricalObservation]) -> bytes:
     return output.getvalue()
 
 
+def _translate_retained_observation_identity(row: dict[str, object]) -> tuple[str, str]:
+    """Translate the retained ancestry-bearing identity into current semantics.
+
+    The retained H4 packet included aggregate_sha256 in each observation
+    identity. Validate that obsolete identity before deriving the current
+    identity after removing the ancestry field.
+    """
+    aggregate = row["aggregate_sha256"]
+    if not isinstance(aggregate, str):
+        raise ValueError("provider-history v3 retained aggregate_sha256 is not a lowercase SHA-256")
+    _require_digest(aggregate, "provider-history v3 retained aggregate_sha256")
+    legacy_observation_sha256 = row["observation_sha256"]
+    if not isinstance(legacy_observation_sha256, str):
+        raise ValueError(
+            "provider-history v3 retained observation_sha256 is not a lowercase SHA-256"
+        )
+    _require_digest(
+        legacy_observation_sha256,
+        "provider-history v3 retained observation_sha256",
+    )
+    legacy_payload = dict(row)
+    del legacy_payload["observation_sha256"]
+    if sha256_json(legacy_payload) != legacy_observation_sha256:
+        raise ValueError("provider-history v3 retained legacy observation identity changed")
+    current_payload = dict(legacy_payload)
+    del current_payload["aggregate_sha256"]
+    return legacy_observation_sha256, sha256_json(current_payload)
+
+
 def _read_part(
     path: Path, reference: ProviderHistoryV3PartReference
 ) -> tuple[ProviderHistoricalObservation, ...]:
     """Read one current or explicitly retained Stage 7 v3 physical part.
 
     The retained H4 attempt3 packet is the sole compatibility exception; its
-    obsolete ``aggregate_sha256`` field is validated and discarded before
-    current domain decoding. Remove this exception when that packet is
-    replaced or no longer used.
+    obsolete aggregate_sha256 field is translated from its ancestry-bearing
+    identity before current domain decoding. Remove this exception when that
+    packet is replaced or no longer used.
     """
     payload = _read_bounded(path, "provider-history v3 part")
     if sha256_bytes(payload) != reference.bytes_sha256:
@@ -829,22 +858,26 @@ def _read_part(
     if frame.height != reference.row_count:
         raise ValueError("provider-history v3 selected part shape changed")
     observed: list[ProviderHistoricalObservation] = []
+    ordered_observation_sha256: list[str] = []
     for raw in frame.to_dicts():
         row = dict(raw)
         if retained_schema:
-            aggregate = row.pop("aggregate_sha256")
-            if (
-                not isinstance(aggregate, str)
-                or len(aggregate) != 64
-                or any(character not in "0123456789abcdef" for character in aggregate)
-            ):
-                raise ValueError(
-                    "provider-history v3 retained aggregate_sha256 is not a lowercase SHA-256"
-                )
-        schedule = row["schedule_evidence"]
-        if not isinstance(schedule, str):
-            raise ValueError("provider-history v3 schedule evidence is not canonical JSON")
-        row["schedule_evidence"] = json.loads(schedule)
+            schedule = row["schedule_evidence"]
+            if not isinstance(schedule, str):
+                raise ValueError("provider-history v3 schedule evidence is not canonical JSON")
+            row["schedule_evidence"] = json.loads(schedule)
+            original_observation_sha256, current_observation_sha256 = (
+                _translate_retained_observation_identity(row)
+            )
+            del row["aggregate_sha256"]
+            row["observation_sha256"] = current_observation_sha256
+        else:
+            original_observation_sha256 = str(row["observation_sha256"])
+            schedule = row["schedule_evidence"]
+            if not isinstance(schedule, str):
+                raise ValueError("provider-history v3 schedule evidence is not canonical JSON")
+            row["schedule_evidence"] = json.loads(schedule)
+        ordered_observation_sha256.append(original_observation_sha256)
         observed.append(ProviderHistoricalObservation.from_json_value(row))
     rows = tuple(observed)
     if any(row.instrument_id != reference.instrument_id for row in rows):
@@ -859,7 +892,7 @@ def _read_part(
         not rows
         or rows[0].interval_start != reference.minimum_interval_start
         or rows[-1].interval_end != reference.maximum_interval_end
-        or sha256_json({"observation_sha256": [row.observation_sha256 for row in rows]})
+        or sha256_json({"observation_sha256": ordered_observation_sha256})
         != reference.ordered_row_sha256
     ):
         raise ValueError("provider-history v3 selected part semantics changed")
