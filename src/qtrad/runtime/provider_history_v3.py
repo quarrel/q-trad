@@ -102,6 +102,48 @@ OBSERVATION_FIELDS = (
     "gap_disposition",
     "observation_sha256",
 )
+
+
+# Sole retained compatibility: the H4 attempt3 Stage 7 v3 packet required by
+# the active R2 run has this obsolete physical field. Remove this branch when
+# that packet is replaced or no longer used.
+_RETAINED_OBSERVATION_FIELDS = (
+    "contract",
+    "schema_version",
+    "source_class",
+    "provider",
+    "environment",
+    "instrument_id",
+    "contract_selection_identity",
+    "plan_sha256",
+    "interval_start",
+    "interval_end",
+    "basis",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "wap",
+    "count",
+    "callback_sequence",
+    "request_sha256",
+    "result_sha256",
+    "aggregate_sha256",
+    "attempt_id",
+    "attempt_started_at",
+    "attempt_completed_at",
+    "acquisition_started_at",
+    "acquisition_completed_at",
+    "available_at",
+    "availability_selector",
+    "availability_policy",
+    "availability_delay",
+    "correction_policy",
+    "schedule_evidence",
+    "gap_disposition",
+    "observation_sha256",
+)
 PART_FIELDS = {
     "instrument_id",
     "minimum_interval_start",
@@ -757,15 +799,36 @@ def _encode_rows(rows: Sequence[ProviderHistoricalObservation]) -> bytes:
 def _read_part(
     path: Path, reference: ProviderHistoryV3PartReference
 ) -> tuple[ProviderHistoricalObservation, ...]:
+    """Read one current or explicitly retained Stage 7 v3 physical part.
+
+    The retained H4 attempt3 packet is the sole compatibility exception; its
+    obsolete ``aggregate_sha256`` field is validated and discarded before
+    current domain decoding. Remove this exception when that packet is
+    replaced or no longer used.
+    """
     payload = _read_bounded(path, "provider-history v3 part")
     if sha256_bytes(payload) != reference.bytes_sha256:
         raise ValueError("provider-history v3 selected part bytes changed")
     frame = pl.read_parquet(io.BytesIO(payload))
-    if tuple(frame.columns) != OBSERVATION_FIELDS or frame.height != reference.row_count:
+    fields = tuple(frame.columns)
+    retained_schema = fields == _RETAINED_OBSERVATION_FIELDS
+    if fields != OBSERVATION_FIELDS and not retained_schema:
+        raise ValueError("provider-history v3 selected part shape changed")
+    if frame.height != reference.row_count:
         raise ValueError("provider-history v3 selected part shape changed")
     observed: list[ProviderHistoricalObservation] = []
     for raw in frame.to_dicts():
         row = dict(raw)
+        if retained_schema:
+            aggregate = row.pop("aggregate_sha256")
+            if (
+                not isinstance(aggregate, str)
+                or len(aggregate) != 64
+                or any(character not in "0123456789abcdef" for character in aggregate)
+            ):
+                raise ValueError(
+                    "provider-history v3 retained aggregate_sha256 is not a lowercase SHA-256"
+                )
         schedule = row["schedule_evidence"]
         if not isinstance(schedule, str):
             raise ValueError("provider-history v3 schedule evidence is not canonical JSON")
