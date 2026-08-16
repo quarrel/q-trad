@@ -109,6 +109,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
+from qtrad.domain.r2_bundles import R2_HOLDOUT_SOURCE_BINDING_CONTRACT
 from qtrad.domain.r2_features import feature_set_id
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_PROFILE,
@@ -262,7 +263,9 @@ from qtrad.runtime.r2_readiness import (
 )
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
+    OOF_DESCRIPTOR_CONTRACT,
     AuthenticatedR2Foundation,
+    _oof_holdout_target_source,
     audit_confirmatory_f2,
     authenticate_confirmatory_f2_promotion,
     authenticate_ibkr_foundation_for_r2,
@@ -455,12 +458,28 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     frozen_metadata = (
         {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
     )
-    if verified_oof.holdout_target_source is None:
+    source_reference = verified_oof.holdout_target_source
+    if source_reference is None:
         raise ValueError("verified OOF bundle has no authenticated holdout target source")
-    source_path = args.oof_bundle.parent / verified_oof.holdout_target_source.path
-    holdout_target_source = load_r2_holdout_target_source(source_path)
-    if holdout_target_source.source_id != verified_oof.holdout_target_source.semantic_id:
-        raise ValueError("OOF holdout target source identity differs from its reference")
+    if source_reference.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        descriptor_references = [
+            reference
+            for reference in verified_oof.evaluation_children
+            if reference.contract == OOF_DESCRIPTOR_CONTRACT
+        ]
+        if len(descriptor_references) != 1:
+            raise ValueError("verified OOF bundle has no unique authenticated descriptor")
+        descriptor = _load_holdout_cli_object(
+            args.oof_bundle.parent / descriptor_references[0].path
+        )
+        holdout_target_source = _oof_holdout_target_source(
+            args.oof_bundle, verified_oof, descriptor
+        )
+    else:
+        source_path = args.oof_bundle.parent / source_reference.path
+        holdout_target_source = load_r2_holdout_target_source(source_path)
+        if holdout_target_source.source_id != source_reference.semantic_id:
+            raise ValueError("OOF holdout target source identity differs from its reference")
     pre_holdout_projection = R2HoldoutTargetProjection.from_json(
         _load_holdout_cli_object(args.pre_holdout_projection)
     )
@@ -2909,6 +2928,7 @@ async def _build_r2_oof(
             else None
         ),
         holdout_target_source=holdout_target_source,
+        holdout_target_source_path=holdout_target_source_path,
         experiment_path=experiment_path,
     )
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))

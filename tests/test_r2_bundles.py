@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,6 +12,7 @@ from typing import cast
 
 import pytest
 
+import qtrad.runtime.r2_holdout_source as holdout_source_runtime
 import qtrad.runtime.r2_verification as verification
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import (
@@ -536,3 +538,121 @@ def test_bounded_partitions_are_deterministic() -> None:
 
     assert first == second
     assert sum(len(cast(list[object], payload["rows"])) for payload, _ in first) == len(rows)
+
+
+def test_bounded_source_rejects_noncanonical_part_path(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+
+    payload = cast(dict[str, object], json.loads(output.read_bytes()))
+    target_parts = cast(list[dict[str, object]], payload["target_parts"])
+    target_parts[0]["path"] = f"{output.name}.parts/targets/part-weird.json"
+    output.write_bytes(canonical_bytes(payload))
+
+    with pytest.raises(ValueError, match="canonical"):
+        load_r2_holdout_target_source(output)
+
+
+def test_bounded_source_rejects_special_part_entry(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    fifo = output.parent / f"{output.name}.parts/targets/fifo"
+    os.mkfifo(fifo)
+
+    with pytest.raises(ValueError, match="non-regular"):
+        load_r2_holdout_target_source(output)
+
+
+def test_bounded_source_rejects_symlinked_ancestor(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    alias = tmp_path / "alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="symlink"):
+        load_r2_holdout_target_source(alias / output.name)
+
+
+def test_bounded_source_consumes_manifest_and_parts_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    part_paths = tuple(output.parent / path for path in bounded_manifest_part_paths(output))
+    reads: dict[Path, int] = {}
+    original_read_bytes = Path.read_bytes
+
+    def count_reads(path: Path) -> bytes:
+        reads[path] = reads.get(path, 0) + 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", count_reads)
+    assert load_r2_holdout_target_source(output).source_id == source.source_id
+    assert reads[output] == 1
+    assert all(reads[path] == 1 for path in part_paths)
+    assert set(reads) == {output, *part_paths}
+
+
+def test_bounded_source_splits_with_test_scaled_part_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    monkeypatch.setattr(holdout_source_runtime, "_MAX_PART_BYTES", 900)
+    output = tmp_path / "target-source.json"
+
+    manifest = write_r2_holdout_target_source(output, source)
+    target_parts = cast(list[object], manifest["target_parts"])
+    assert len(target_parts) == 2
+    assert load_r2_holdout_target_source(output).source_id == source.source_id
+
+
+def test_bounded_source_rejects_oversized_singleton_with_test_scaled_part_bound(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    monkeypatch.setattr(holdout_source_runtime, "_MAX_PART_BYTES", 700)
+
+    with pytest.raises(ValueError, match="row exceeds"):
+        write_r2_holdout_target_source(tmp_path / "target-source.json", source)
+
+
+def test_bounded_source_rejects_tampered_or_missing_part(tmp_path: Path) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    write_r2_holdout_target_source(output, source)
+    part_path = output.parent / next(iter(bounded_manifest_part_paths(output)))
+    original = part_path.read_bytes()
+    part_path.write_bytes(original + b"\n")
+
+    with pytest.raises(ValueError, match="digest or size"):
+        load_r2_holdout_target_source(output)
+
+    part_path.unlink()
+    with pytest.raises(ValueError, match="unavailable"):
+        load_r2_holdout_target_source(output)
+
+
+def test_bounded_source_cleans_partial_parts_on_write_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
+    output = tmp_path / "target-source.json"
+    original_atomic_create = holdout_source_runtime.atomic_create
+    calls = 0
+
+    def fail_after_first(path: Path, content: bytes) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("fixture write failure")
+        original_atomic_create(path, content)
+
+    monkeypatch.setattr(holdout_source_runtime, "atomic_create", fail_after_first)
+    with pytest.raises(RuntimeError, match="fixture write failure"):
+        write_r2_holdout_target_source(output, source)
+    assert not output.exists()
+    assert not (tmp_path / "target-source.json.parts").exists()

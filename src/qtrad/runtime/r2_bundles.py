@@ -16,6 +16,7 @@ from qtrad.domain.r2_baselines import (
     R2_FORECAST_COVERAGE_CONTRACT,
 )
 from qtrad.domain.r2_bundles import (
+    R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
     ArtifactReference,
     R2ForecastManifest,
     R2OofBundle,
@@ -65,6 +66,7 @@ _IDENTITY_FIELDS = frozenset(
         "scenario_id",
         "ablation_id",
         "source_id",
+        "binding_id",
         "seal_id",
         "marker_id",
         "outcome_evidence_id",
@@ -89,6 +91,7 @@ _IDENTITY_FIELD_BY_CONTRACT: dict[str, str] = {
     "qtrad-r2-oof-run-descriptor-v1": "descriptor_id",
     "qtrad-r2-pooled-ablation-v1": "ablation_id",
     R2HoldoutTargetSource.CONTRACT: "source_id",
+    R2_HOLDOUT_SOURCE_BINDING_CONTRACT: "binding_id",
     R2_HOLDOUT_SELECTION_CONTRACT: "manifest_id",
     R2_HOLDOUT_FEATURES_CONTRACT: "dataset_id",
     R2_FINAL_FIT_CONTRACT: "fit_id",
@@ -131,9 +134,11 @@ def _canonical_payload_identity(contract: str, payload: Mapping[str, object]) ->
     value = payload.get(field)
     if not isinstance(value, str):
         raise ValueError(f"R2 child contract {contract} requires canonical {field}")
-    unexpected = sorted(_IDENTITY_FIELDS.intersection(payload) - {field})
+    unexpected = _IDENTITY_FIELDS.intersection(payload) - {field}
+    if contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        unexpected -= {"source_id"}
     if unexpected:
-        fields = ", ".join(unexpected)
+        fields = ", ".join(sorted(unexpected))
         raise ValueError(
             f"R2 child contract {contract} has non-canonical identity field(s): {fields}"
         )
@@ -287,7 +292,11 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
     all_refs = _all_oof_references(bundle)
     canonical = any(
         reference.contract.startswith("qtrad-r2-")
-        and reference.contract != "qtrad-r2-holdout-target-source-v1"
+        and reference.contract
+        not in {
+            "qtrad-r2-holdout-target-source-v1",
+            R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
+        }
         for reference in all_refs
     )
     register_refs = [
@@ -304,10 +313,13 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
         raise ValueError("canonical R2 OOF bundle must have exactly one register and descriptor")
     from qtrad.runtime.r2_holdout_source import (
         bounded_manifest_part_paths,
+        bounded_manifest_payload,
+        bounded_source_closure_id,
         load_r2_holdout_target_source,
     )
 
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
+    binding_payload: dict[str, object] | None = None
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
@@ -321,6 +333,8 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 allowed_paths.add(
                     f"{source_parent}/{part_path}" if source_parent != "." else part_path
                 )
+        elif ref.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+            binding_payload = child
         _verify_lineage_payload(child, bundle)
         if child.get("contract") == "qtrad-r2-oof-run-descriptor-v1":
             descriptor_id = child.get("descriptor_id")
@@ -410,14 +424,21 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                 ):
                     raise ValueError("native OOF descriptor cannot bind promotion authority")
                 runtime = child.get("runtime_inputs")
-                if not isinstance(runtime, dict) or set(runtime) != {
+                expected_runtime_keys = {
                     "foundation",
                     "foundation_receipt",
                     "foundation_promotion",
                     "experiment",
                     "research_root",
                     "feature_manifests",
-                }:
+                }
+                if (
+                    bundle.holdout_target_source is not None
+                    and bundle.holdout_target_source.contract
+                    == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+                ):
+                    expected_runtime_keys.add("holdout_target_source")
+                if not isinstance(runtime, dict) or set(runtime) != expected_runtime_keys:
                     raise ValueError("canonical OOF descriptor runtime locators are incomplete")
                 feature_manifests = runtime.get("feature_manifests")
                 if not isinstance(feature_manifests, dict) or set(feature_manifests) != {
@@ -453,10 +474,65 @@ def verify_r2_oof_bundle(path: Path) -> R2OofBundle:
                     "R2 evaluation register report ID does not authenticate its content"
                 )
             _verify_evaluation_register(child, bundle, path.parent)
+    descriptor: dict[str, object] | None = None
     if len(descriptor_refs) == 1:
         descriptor = _load_object(path.parent / descriptor_refs[0].path)
         if descriptor.get("run_kind") == "REPRESENTATIVE" and bundle.holdout_target_source is None:
             raise ValueError("representative OOF bundle must bind an authenticated holdout source")
+    if bundle.holdout_target_source is not None and bundle.holdout_target_source.contract == (
+        R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+    ):
+        if binding_payload is None:
+            raise ValueError("OOF holdout source binding child is missing")
+        required_binding = {
+            "contract",
+            "schema_version",
+            "source_id",
+            "source_closure_id",
+            "binding_id",
+        }
+        if (
+            set(binding_payload) != required_binding
+            or binding_payload.get("schema_version") != 1
+            or not isinstance(binding_payload.get("source_id"), str)
+            or not isinstance(binding_payload.get("source_closure_id"), str)
+            or not isinstance(binding_payload.get("binding_id"), str)
+        ):
+            raise ValueError("OOF holdout source binding is malformed")
+        binding_semantic = {
+            key: binding_payload[key]
+            for key in ("contract", "schema_version", "source_id", "source_closure_id")
+        }
+        binding_id = sha256(canonical_bytes(binding_semantic)).hexdigest()
+        if (
+            binding_payload["binding_id"] != binding_id
+            or bundle.holdout_target_source.semantic_id != binding_id
+        ):
+            raise ValueError("OOF holdout source binding identity differs from its reference")
+        if not isinstance(descriptor, dict):
+            raise ValueError("OOF holdout source binding has no descriptor")
+        raw_runtime = descriptor.get("runtime_inputs")
+        if not isinstance(raw_runtime, dict):
+            raise ValueError("OOF holdout source binding has no runtime locators")
+        raw_source_path = raw_runtime.get("holdout_target_source")
+        if not isinstance(raw_source_path, str):
+            raise ValueError("OOF holdout source binding has no persisted source locator")
+        source_path = Path(raw_source_path)
+        if not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
+            raise ValueError("OOF persisted source locator is unavailable")
+        manifest = bounded_manifest_payload(source_path)
+        if manifest is None or manifest.get("source_id") != binding_payload["source_id"]:
+            raise ValueError("OOF persisted source manifest differs from its binding")
+        closure_id = binding_payload["source_closure_id"]
+        if (
+            manifest.get("closure_id") != closure_id
+            or bounded_source_closure_id(manifest) != closure_id
+        ):
+            raise ValueError("OOF persisted source closure differs from its binding")
+        source = load_r2_holdout_target_source(source_path)
+        if source.source_id != binding_payload["source_id"]:
+            raise ValueError("OOF persisted source semantic identity differs from its binding")
+
     _allow_bound_selection(path.parent, bundle)
     _reject_orphan_files(path.parent, allowed_paths)
     return bundle
@@ -572,7 +648,11 @@ def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> 
         if (
             isinstance(contract, str)
             and contract.startswith("qtrad-r2-")
-            and contract != "qtrad-r2-holdout-target-source-v1"
+            and contract
+            not in {
+                "qtrad-r2-holdout-target-source-v1",
+                R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
+            }
             and (source is None or evidence is None)
         ):
             raise ValueError("R2 child must declare source and evidence class")

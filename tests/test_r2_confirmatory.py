@@ -67,6 +67,10 @@ from qtrad.domain.research import (
 )
 from qtrad.ports.clock import Clock
 from qtrad.runtime.r2_bundles import canonical_bytes
+from qtrad.runtime.r2_holdout_source import (
+    load_r2_holdout_target_source,
+    write_r2_holdout_target_source,
+)
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
     AuthenticatedR2Foundation,
@@ -118,16 +122,7 @@ def _fixture_blind_foundation(
         )
     oof_bundle = verification.verify_r2_oof_bundle(bundle_path)
     assert oof_bundle.holdout_target_source is not None
-    target_source = R2HoldoutTargetSource.from_json(
-        cast(
-            dict[str, object],
-            json.loads(
-                (bundle_path.parent / oof_bundle.holdout_target_source.path).read_text(
-                    encoding="utf-8"
-                )
-            ),
-        )
-    )
+    target_source = load_r2_holdout_target_source(root / "target-source.json")
     blind_foundation = asyncio.run(
         foundation_runtime.verify_outcome_blind_foundation_bundle(
             root=root / "research",
@@ -628,6 +623,8 @@ def _build_confirmatory_fixture(
         source_active_intervals=active_intervals,
         availability_evidence_id=fixture_verified.bundle.availability.dataset_id,
     )
+    target_source_path = root / "target-source.json"
+    write_r2_holdout_target_source(target_source_path, target_source)
     fixture_verified.targets = R2OutcomeBlindTargetView.from_source(target_source)
     foundation_path_for_authority = replay_foundation_path or foundation_path
     receipt_payload = cast(
@@ -678,8 +675,11 @@ def _build_confirmatory_fixture(
             else None
         ),
         holdout_target_source=target_source,
+        holdout_target_source_path=target_source_path,
         experiment_path=experiment_path,
     )
+    assert target_source_path.is_file()
+    assert not (root / "oof" / "holdout" / "target-source.json").exists()
     return (
         bundle_path,
         fixture_verified,
@@ -1333,16 +1333,7 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
     )
     oof_bundle = verification.verify_r2_oof_bundle(bundle_path)
     assert oof_bundle.holdout_target_source is not None
-    target_source = R2HoldoutTargetSource.from_json(
-        cast(
-            dict[str, object],
-            json.loads(
-                (bundle_path.parent / oof_bundle.holdout_target_source.path).read_text(
-                    encoding="utf-8"
-                )
-            ),
-        )
-    )
+    target_source = load_r2_holdout_target_source(tmp_path / "target-source.json")
     blind_foundation = asyncio.run(
         foundation_runtime.verify_outcome_blind_foundation_bundle(
             root=tmp_path / "research",

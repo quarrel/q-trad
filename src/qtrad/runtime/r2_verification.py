@@ -83,6 +83,7 @@ from qtrad.domain.foundation import (
 from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
 from qtrad.domain.r2_bundles import (
+    R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
     ArtifactReference,
     R2ForecastManifest,
     R2OofBundle,
@@ -190,8 +191,9 @@ from qtrad.runtime.r2_holdout import (
     write_holdout_preparation,
 )
 from qtrad.runtime.r2_holdout_source import (
+    bounded_manifest_payload,
+    bounded_source_closure_id,
     load_r2_holdout_target_source,
-    write_r2_holdout_target_source,
 )
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
@@ -1579,6 +1581,15 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
         semantic_id=_payload_identity(payload),
         content=payload,
     )
+def _holdout_source_binding_payload(source_id: str, closure_id: str) -> dict[str, JsonValue]:
+    semantic: dict[str, JsonValue] = {
+        "contract": R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
+        "schema_version": 1,
+        "source_id": source_id,
+        "source_closure_id": closure_id,
+    }
+    semantic["binding_id"] = sha256(canonical_bytes(semantic)).hexdigest()
+    return semantic
 
 
 def _configuration_record(
@@ -2102,6 +2113,7 @@ def build_oof_bundle(
     foundation_authority: AuthenticatedR2Foundation | None = None,
     representative_profile: str | None = None,
     holdout_target_source: R2HoldoutTargetSource | None = None,
+    holdout_target_source_path: Path | None = None,
     experiment_path: Path | None = None,
     runtime_provenance: Mapping[str, str] | None = None,
 ) -> Path:
@@ -2514,14 +2526,37 @@ def build_oof_bundle(
             "evaluation_report_id": evaluation.report_id,
         }
     )
+    source_binding_payload: dict[str, JsonValue] | None = None
     if foundation_authority is not None:
         if experiment_path is None:
             raise ValueError("canonical OOF build requires an experiment runtime locator")
-        descriptor["runtime_inputs"] = foundation_authority.runtime_json(
+        runtime_inputs = foundation_authority.runtime_json(
             feature_manifest_paths=feature_manifest_paths,
             experiment_path=experiment_path,
             research_root=research_root,
         )
+        if holdout_target_source is not None:
+            if holdout_target_source_path is None:
+                raise ValueError("canonical OOF build requires the persisted target source path")
+            persisted_source = load_r2_holdout_target_source(holdout_target_source_path)
+            if persisted_source != holdout_target_source:
+                raise ValueError("OOF target source differs from the persisted source closure")
+            holdout_target_source = persisted_source
+            source_manifest = bounded_manifest_payload(holdout_target_source_path)
+            if source_manifest is None:
+                raise ValueError("canonical OOF build requires bounded target source storage")
+            if source_manifest.get("source_id") != holdout_target_source.source_id:
+                raise ValueError("OOF target source differs from the persisted source manifest")
+            closure_id = source_manifest.get("closure_id")
+            if not isinstance(closure_id, str) or closure_id != bounded_source_closure_id(
+                source_manifest
+            ):
+                raise ValueError("OOF target source manifest closure is not authenticated")
+            source_binding_payload = _holdout_source_binding_payload(
+                holdout_target_source.source_id, closure_id
+            )
+            runtime_inputs["holdout_target_source"] = str(holdout_target_source_path.absolute())
+        descriptor["runtime_inputs"] = runtime_inputs
     descriptor["descriptor_id"] = sha256(
         canonical_bytes(
             {
@@ -2538,16 +2573,10 @@ def build_oof_bundle(
         _descriptor_reference(output=output, relative_path=descriptor_path, payload=descriptor)
     )
     holdout_source_ref: ArtifactReference | None = None
-    prepublished_paths: frozenset[str] = frozenset()
-    if holdout_target_source is not None:
-        source_path = "holdout/target-source.json"
-        source_manifest = write_r2_holdout_target_source(
-            output / source_path, holdout_target_source
-        )
-        source_payload = cast(dict[str, object], source_manifest)
-        children[source_path] = source_payload
-        holdout_source_ref = _child_reference(source_path, source_payload)
-        prepublished_paths = frozenset({source_path})
+    if source_binding_payload is not None:
+        source_path = "holdout/target-source-binding.json"
+        children[source_path] = cast(dict[str, object], source_binding_payload)
+        holdout_source_ref = _child_reference(source_path, source_binding_payload)
     bundle = R2OofBundle.create(
         foundation_bundle_id=verified.bundle.foundation_id,
         experiment_configuration_id=experiment.configuration_id,
@@ -2561,9 +2590,7 @@ def build_oof_bundle(
         evaluation_children=tuple(evaluation_refs),
         holdout_target_source=holdout_source_ref,
     )
-    return write_r2_oof_bundle(
-        output, bundle, children, prepublished_paths=prepublished_paths
-    )
+    return write_r2_oof_bundle(output, bundle, children)
 
 
 def _load_selection(path: Path) -> dict[str, object]:
@@ -2603,6 +2630,65 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
     return matches[0]
+def _oof_holdout_target_source(
+    bundle_path: Path, bundle: R2OofBundle, descriptor: Mapping[str, object]
+) -> R2HoldoutTargetSource:
+    reference = bundle.holdout_target_source
+    if reference is None:
+        raise ValueError("OOF bundle has no authenticated holdout target source")
+    if reference.contract == R2HoldoutTargetSource.CONTRACT:
+        payload = _load_selection(bundle_path.parent / reference.path)
+        source = R2HoldoutTargetSource.from_json(payload)
+        if source.source_id != reference.semantic_id:
+            raise ValueError("OOF holdout target source identity differs from its reference")
+        return source
+    if reference.contract != R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        raise ValueError("OOF holdout target source binding contract is unsupported")
+    binding = _oof_child_payload(
+        bundle_path, bundle, R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+    )
+    required = {
+        "contract",
+        "schema_version",
+        "source_id",
+        "source_closure_id",
+        "binding_id",
+    }
+    if set(binding) != required or binding.get("schema_version") != 1:
+        raise ValueError("OOF holdout source binding fields are incomplete")
+    source_id = binding["source_id"]
+    closure_id = binding["source_closure_id"]
+    binding_id = binding["binding_id"]
+    if (
+        not isinstance(source_id, str)
+        or not isinstance(closure_id, str)
+        or not isinstance(binding_id, str)
+    ):
+        raise ValueError("OOF holdout source binding IDs are malformed")
+    expected_binding = _holdout_source_binding_payload(source_id, closure_id)
+    if expected_binding != binding or binding_id != reference.semantic_id:
+        raise ValueError("OOF holdout source binding identity differs from its reference")
+    raw_runtime = descriptor.get("runtime_inputs")
+    if not isinstance(raw_runtime, dict):
+        raise ValueError("OOF descriptor has no runtime source locator")
+    raw_source_path = raw_runtime.get("holdout_target_source")
+    if not isinstance(raw_source_path, str):
+        raise ValueError("OOF descriptor has no persisted source locator")
+    source_path = Path(raw_source_path)
+    if not source_path.is_absolute() or source_path.is_symlink() or not source_path.is_file():
+        raise ValueError("OOF persisted source locator is unavailable")
+    manifest = bounded_manifest_payload(source_path)
+    if manifest is None or manifest.get("source_id") != source_id:
+        raise ValueError("OOF persisted source manifest differs from its binding")
+    if (
+        manifest.get("closure_id") != closure_id
+        or bounded_source_closure_id(manifest) != closure_id
+    ):
+        raise ValueError("OOF persisted source closure differs from its binding")
+    source = load_r2_holdout_target_source(source_path)
+    if source.source_id != source_id:
+        raise ValueError("OOF persisted source semantic identity differs from its binding")
+    return source
 
 
 def _configuration_record_from_payload(value: object) -> ConfigurationRecord:
@@ -2958,10 +3044,7 @@ def audit_confirmatory_f2(path: Path) -> VerifiedConfirmatoryF2:
         raise ValueError("confirmatory F2 must exclude the locked holdout")
     if bundle.holdout_target_source is None:
         raise ValueError("confirmatory F2 has no authenticated target source")
-    source_path = path.parent / bundle.holdout_target_source.path
-    source = load_r2_holdout_target_source(source_path)
-    if source.source_id != bundle.holdout_target_source.semantic_id:
-        raise ValueError("confirmatory target source identity differs from its reference")
+    source = _oof_holdout_target_source(path, bundle, descriptor)
     expected_descriptor_values = {
         "foundation_bundle_id": bundle.foundation_bundle_id,
         "experiment_configuration_id": bundle.experiment_configuration_id,
@@ -3256,6 +3339,8 @@ def _promotion_parent_boundaries(descriptor: Mapping[str, object]) -> tuple[Path
         "research_root",
         "feature_manifests",
     }
+    if "holdout_target_source" in runtime:
+        expected_keys.add("holdout_target_source")
     if set(runtime) != expected_keys:
         raise ValueError("F2 runtime locators are incomplete or contain unknown fields")
     locators: dict[str, str] = {}
@@ -3269,6 +3354,13 @@ def _promotion_parent_boundaries(descriptor: Mapping[str, object]) -> tuple[Path
         for key in ("foundation", "foundation_receipt")
     ]
     boundaries.append(_promotion_runtime_path(locators, "research_root", directory=True))
+    raw_source = runtime.get("holdout_target_source")
+    if raw_source is not None:
+        if not isinstance(raw_source, str):
+            raise ValueError("F2 holdout source locator is malformed")
+        locators["holdout_target_source"] = raw_source
+        source_path = _promotion_runtime_path(locators, "holdout_target_source")
+        boundaries.append(source_path.parent / f"{source_path.name}.parts")
     raw_promotion = runtime["foundation_promotion"]
     if raw_promotion is not None:
         if not isinstance(raw_promotion, str):
@@ -3292,10 +3384,7 @@ def _confirmatory_descriptor_inputs(
         raise ValueError("F2 promotion requires a confirmatory outcome-blind OOF descriptor")
     if bundle.holdout_target_source is None:
         raise ValueError("F2 promotion requires an authenticated target source")
-    source_path = bundle_path.parent / bundle.holdout_target_source.path
-    source = load_r2_holdout_target_source(source_path)
-    if source.source_id != bundle.holdout_target_source.semantic_id:
-        raise ValueError("confirmatory target source identity differs from its reference")
+    source = _oof_holdout_target_source(bundle_path, bundle, descriptor)
     expected_values = {
         "foundation_bundle_id": bundle.foundation_bundle_id,
         "experiment_configuration_id": bundle.experiment_configuration_id,
@@ -3380,6 +3469,8 @@ async def _authenticate_confirmatory_parent(
         "research_root",
         "feature_manifests",
     }
+    if "holdout_target_source" in runtime:
+        expected_keys.add("holdout_target_source")
     if set(runtime) != expected_keys:
         raise ValueError("F2 runtime locators are incomplete or contain unknown fields")
     locators: dict[str, str] = {}
@@ -4941,10 +5032,8 @@ async def _replay_authority_oof_async(
     bundle = verify_r2_oof_bundle(path)
     if bundle.holdout_target_source is None:
         raise ValueError("OOF bundle has no authenticated holdout target source")
-    holdout_target_source = load_r2_holdout_target_source(
-        path.parent / bundle.holdout_target_source.path
-    )
     descriptor = _oof_child_payload(path, bundle, OOF_DESCRIPTOR_CONTRACT)
+    holdout_target_source = _oof_holdout_target_source(path, bundle, descriptor)
     if descriptor.get("run_kind") != expected_run_kind:
         raise ValueError(f"authority replay requires a {expected_run_kind} OOF run")
     raw_authority = descriptor.get("foundation_authority")
@@ -4961,6 +5050,8 @@ async def _replay_authority_oof_async(
         "research_root",
         "feature_manifests",
     }
+    if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        expected_runtime_keys.add("holdout_target_source")
     if set(raw_runtime) != expected_runtime_keys:
         raise ValueError("OOF runtime locators are incomplete or contain unknown fields")
     runtime = cast(dict[str, object], raw_runtime)
@@ -5003,6 +5094,11 @@ async def _replay_authority_oof_async(
             or not feature_path.is_file()
         ):
             raise ValueError(f"OOF runtime feature manifest is unavailable: {name}")
+    holdout_target_source_path = (
+        runtime_file("holdout_target_source")
+        if bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+        else None
+    )
     raw_promotion_path = runtime["foundation_promotion"]
     promotion_path: Path | None
     if raw_promotion_path is None:
@@ -5085,6 +5181,7 @@ async def _replay_authority_oof_async(
             representative_profile=representative_profile,
             run_kind=expected_run_kind,
             holdout_target_source=holdout_target_source,
+            holdout_target_source_path=holdout_target_source_path,
             experiment_path=experiment_path,
             runtime_provenance={
                 field: cast(str, descriptor[field]) for field in _OOF_DESCRIPTOR_PROVENANCE_FIELDS
