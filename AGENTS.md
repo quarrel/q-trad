@@ -366,6 +366,16 @@ For evidence/identity work, begin by writing down:
 Do not solve an efficiency problem by adding a cache in front of unnecessary work. First remove the
 unnecessary work.
 
+Before the first retained-scale execution of a new computationally significant pathway, run a
+representative micro-sample through the exact production CLI and persistence path. Use a very small
+slice of correctly shaped input, such as the first few bars, while preserving the real contracts,
+source class, lineage, authority handoffs, schemas, boundary conditions and output verification. The
+micro-run must exercise every planned deliverable and state transition; a shortcut fixture that skips
+the code under test does not satisfy this gate. Treat the result as implementation evidence only, not
+scientific evidence. Do not start a multi-hour or 10+ minute retained-data run until this micro-run
+succeeds end to end; any failure blocks the larger run until the owning mechanism and regression are
+fixed.
+
 When performance is part of the change, prefer deterministic work-count evidence over fragile wall
 clock assertions. Useful counts include:
 
