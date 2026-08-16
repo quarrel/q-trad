@@ -113,10 +113,12 @@ def partitioned_manifest_part_paths(
     root: Path,
     manifest_relative_path: str,
     payload: Mapping[str, object],
+    *,
+    identity_field: str,
 ) -> tuple[str, ...]:
     """Validate a compact parent manifest and its exact canonical declared part paths."""
 
-    contract, semantic_id, references = _manifest_values(payload)
+    contract, semantic_id, references = _manifest_values(payload, identity_field)
     expected_root = f"{manifest_relative_path}.parts"
     result: list[str] = []
     total_rows = 0
@@ -157,11 +159,18 @@ def load_partitioned_rows(
     root: Path,
     manifest_relative_path: str,
     payload: Mapping[str, object],
+    *,
+    identity_field: str,
 ) -> tuple[dict[str, object], ...]:
     """Consume each declared part exactly once and return its canonical ordered rows."""
 
-    contract, semantic_id, references = _manifest_values(payload)
-    paths = partitioned_manifest_part_paths(root, manifest_relative_path, payload)
+    contract, semantic_id, references = _manifest_values(payload, identity_field)
+    paths = partitioned_manifest_part_paths(
+        root,
+        manifest_relative_path,
+        payload,
+        identity_field=identity_field,
+    )
     rows: list[dict[str, object]] = []
     for expected_index, (relative, raw_reference) in enumerate(zip(paths, references, strict=True)):
         reference = _object(raw_reference, "partitioned R2 part reference")
@@ -268,15 +277,15 @@ def _part_bytes(
 
 def _manifest_values(
     payload: Mapping[str, object],
+    identity_field: str,
 ) -> tuple[str, str, list[object]]:
     if payload.get("storage") != PARTITIONED_ROWS_STORAGE:
         raise ValueError("R2 row manifest has an unsupported storage contract")
     contract = payload.get("contract")
     if not isinstance(contract, str) or not contract:
         raise ValueError("partitioned R2 manifest has no parent contract")
-    identity_field = payload.get("identity_field")
-    if not isinstance(identity_field, str) or not identity_field.endswith("_id"):
-        raise ValueError("partitioned R2 manifest identity field is invalid")
+    if payload.get("identity_field") != identity_field:
+        raise ValueError("partitioned R2 manifest identity field differs from its parent contract")
     semantic_id = payload.get(identity_field)
     _sha256_text(semantic_id, "partitioned R2 manifest semantic identity")
     parts = payload.get("parts")

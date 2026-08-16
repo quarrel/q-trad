@@ -241,7 +241,12 @@ def write_r2_oof_bundle(
         payload = children[ref.path]
         if payload.get("storage") == PARTITIONED_ROWS_STORAGE:
             partition_paths.extend(
-                partitioned_manifest_part_paths(output, ref.path, payload)
+                partitioned_manifest_part_paths(
+                    output,
+                    ref.path,
+                    payload,
+                    identity_field=_identity_field_for_contract(ref.contract),
+                )
             )
 
     created: list[Path] = []
@@ -371,7 +376,12 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
         child = _load_object(path.parent / ref.path)
         if child.get("storage") == PARTITIONED_ROWS_STORAGE:
             allowed_paths.update(
-                partitioned_manifest_part_paths(path.parent, ref.path, child)
+                partitioned_manifest_part_paths(
+                    path.parent,
+                    ref.path,
+                    child,
+                    identity_field=_identity_field_for_contract(ref.contract),
+                )
             )
         if (
             ref.contract == R2_FEATURE_DATASET_CONTRACT
@@ -522,7 +532,12 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
             nested_payload = _load_object(path.parent / nested.path)
             if nested_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
                 allowed_paths.update(
-                    partitioned_manifest_part_paths(path.parent, nested.path, nested_payload)
+                    partitioned_manifest_part_paths(
+                        path.parent,
+                        nested.path,
+                        nested_payload,
+                        identity_field=_identity_field_for_contract(nested.contract),
+                    )
                 )
         if child.get("contract") == R2_EVALUATION_REGISTER_CONTRACT:
             report_id = child.get("report_id")
@@ -697,7 +712,12 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
     if payload.get("storage") == "qtrad-r2-partitioned-json-rows-v1":
         from qtrad.runtime.r2_partitioned_rows import partitioned_manifest_part_paths
 
-        partitioned_manifest_part_paths(root, reference.path, payload)
+        partitioned_manifest_part_paths(
+            root,
+            reference.path,
+            payload,
+            identity_field=_identity_field_for_contract(reference.contract),
+        )
 
 def _verify_feature_manifest_binding(
     _root: Path,

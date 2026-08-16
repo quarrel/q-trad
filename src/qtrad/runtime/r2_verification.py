@@ -177,6 +177,7 @@ from qtrad.runtime.ibkr_foundation_promotion import authenticate_ibkr_foundation
 from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     _canonical_payload_identity,
+    _identity_field_for_contract,
     _reject_orphan_files,
     _verify_feature_manifest_binding,
     _verify_r2_oof_bundle_with_source,
@@ -5635,7 +5636,12 @@ def _authenticate_oof_closure(
             nested_payload = _read_oof_consumed_json(root, nested)
             if nested_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
                 allowed_paths.update(
-                    partitioned_manifest_part_paths(root, nested.path, nested_payload)
+                    partitioned_manifest_part_paths(
+                        root,
+                        nested.path,
+                        nested_payload,
+                        identity_field=_identity_field_for_contract(nested.contract),
+                    )
                 )
         else:
             _safe_oof_child(root, reference)
@@ -5650,7 +5656,12 @@ def _authenticate_oof_closure(
                 child_payload = _read_oof_consumed_json(root, reference)
                 if child_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
                     allowed_paths.update(
-                        partitioned_manifest_part_paths(root, reference.path, child_payload)
+                        partitioned_manifest_part_paths(
+                            root,
+                            reference.path,
+                            child_payload,
+                            identity_field=_identity_field_for_contract(reference.contract),
+                        )
                     )
     _reject_orphan_files(root, allowed_paths)
     if descriptor_count != 1 or descriptor is None:

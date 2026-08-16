@@ -54,8 +54,12 @@ def test_partitioned_rows_round_trip_is_deterministic_and_reads_each_part_once(
     second_payload, _second_path = _write(tmp_path / "second", rows)
 
     assert first_payload == second_payload
-    first_paths = partitioned_manifest_part_paths(tmp_path / "first", "rows.json", first_payload)
-    second_paths = partitioned_manifest_part_paths(tmp_path / "second", "rows.json", second_payload)
+    first_paths = partitioned_manifest_part_paths(
+        tmp_path / "first", "rows.json", first_payload, identity_field="dataset_id"
+    )
+    second_paths = partitioned_manifest_part_paths(
+        tmp_path / "second", "rows.json", second_payload, identity_field="dataset_id"
+    )
     assert [
         (tmp_path / "first" / path).read_bytes() for path in first_paths
     ] == [(tmp_path / "second" / path).read_bytes() for path in second_paths]
@@ -68,7 +72,12 @@ def test_partitioned_rows_round_trip_is_deterministic_and_reads_each_part_once(
         return original_read_bytes(path)
 
     monkeypatch.setattr(Path, "read_bytes", count_reads)
-    assert load_partitioned_rows(tmp_path / "first", "rows.json", first_payload) == rows
+    assert (
+        load_partitioned_rows(
+            tmp_path / "first", "rows.json", first_payload, identity_field="dataset_id"
+        )
+        == rows
+    )
     expected_paths = {tmp_path / "first" / path for path in first_paths}
     assert set(reads) == expected_paths
     assert all(count == 1 for count in reads.values())
@@ -88,7 +97,12 @@ def test_partitioned_rows_split_at_encoded_bound_and_reject_oversized_singleton(
         (tmp_path / "split" / cast(str, reference["path"])).stat().st_size <= 900
         for reference in references
     )
-    assert load_partitioned_rows(tmp_path / "split", "rows.json", payload) == rows
+    assert (
+        load_partitioned_rows(
+            tmp_path / "split", "rows.json", payload, identity_field="dataset_id"
+        )
+        == rows
+    )
 
     monkeypatch.setattr(partitioned_runtime, "_MAX_PART_BYTES", 250)
     with pytest.raises(ValueError, match="single-row part exceeds"):
@@ -100,30 +114,53 @@ def test_partitioned_rows_reject_tamper_missing_noncanonical_and_orphan(
 ) -> None:
     rows = ({"index": 0}, {"index": 1})
     payload, _path = _write(tmp_path / "valid", rows)
+    wrong_identity = dict(payload)
+    wrong_identity["identity_field"] = "fake_id"
+    wrong_identity["fake_id"] = payload["dataset_id"]
+    with pytest.raises(ValueError, match="differs from its parent contract"):
+        partitioned_manifest_part_paths(
+            tmp_path / "valid",
+            "rows.json",
+            wrong_identity,
+            identity_field="dataset_id",
+        )
+
     references = cast(list[dict[str, object]], payload["parts"])
     first_path = tmp_path / "valid" / cast(str, references[0]["path"])
     encoded = first_path.read_bytes()
     first_path.write_bytes(encoded + b"\n")
     with pytest.raises(ValueError, match="digest mismatch"):
-        load_partitioned_rows(tmp_path / "valid", "rows.json", payload)
+        load_partitioned_rows(
+            tmp_path / "valid", "rows.json", payload, identity_field="dataset_id"
+        )
 
     first_path.unlink()
     with pytest.raises(ValueError, match="missing or not regular"):
-        partitioned_manifest_part_paths(tmp_path / "valid", "rows.json", payload)
+        partitioned_manifest_part_paths(
+            tmp_path / "valid", "rows.json", payload, identity_field="dataset_id"
+        )
 
     noncanonical_payload, _path = _write(tmp_path / "noncanonical", rows)
     noncanonical_refs = cast(list[dict[str, object]], noncanonical_payload["parts"])
     noncanonical_refs[0]["path"] = "rows.json.parts/part-weird.json"
     with pytest.raises(ValueError, match="not canonical"):
         partitioned_manifest_part_paths(
-            tmp_path / "noncanonical", "rows.json", noncanonical_payload
+            tmp_path / "noncanonical",
+            "rows.json",
+            noncanonical_payload,
+            identity_field="dataset_id",
         )
 
     orphan_payload, _path = _write(tmp_path / "orphan", rows)
     orphan = tmp_path / "orphan/rows.json.parts/orphan.json"
     orphan.write_bytes(canonical_bytes({"orphan": True}))
     with pytest.raises(ValueError, match="orphan"):
-        partitioned_manifest_part_paths(tmp_path / "orphan", "rows.json", orphan_payload)
+        partitioned_manifest_part_paths(
+            tmp_path / "orphan",
+            "rows.json",
+            orphan_payload,
+            identity_field="dataset_id",
+        )
 
 
 def test_partitioned_rows_reject_symlink_and_special_entries(tmp_path: Path) -> None:
@@ -132,7 +169,9 @@ def test_partitioned_rows_reject_symlink_and_special_entries(tmp_path: Path) -> 
     fifo = tmp_path / "valid/rows.json.parts/fifo"
     os.mkfifo(fifo)
     with pytest.raises(ValueError, match="special entry"):
-        partitioned_manifest_part_paths(tmp_path / "valid", "rows.json", payload)
+        partitioned_manifest_part_paths(
+            tmp_path / "valid", "rows.json", payload, identity_field="dataset_id"
+        )
 
     alias = tmp_path / "alias"
     alias.symlink_to(tmp_path / "target", target_is_directory=True)
