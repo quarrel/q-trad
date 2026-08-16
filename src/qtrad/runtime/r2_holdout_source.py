@@ -653,6 +653,35 @@ _BOUND_PART_FIELDS = (
     ("opportunities", "opportunity_parts"),
 )
 
+_BOUNDED_MANIFEST_FIELDS = frozenset(
+    {
+        "contract",
+        "schema_version",
+        "storage",
+        "source_id",
+        "source_target_dataset_id",
+        "observation_dataset_id",
+        "foundation_configuration_id",
+        "causal_panel_dataset_id",
+        "availability_evidence_id",
+        "target_index_dataset_id",
+        "causal_metadata_dataset_id",
+        "holdout_range",
+        "primary_horizon_seconds",
+        "target_instruments",
+        "pre_holdout_target_dataset_id",
+        "pre_holdout_observation_dataset_id",
+        "pre_holdout_foundation_configuration_id",
+        "target_parts",
+        "pre_holdout_target_parts",
+        "opportunity_parts",
+        "target_count",
+        "pre_holdout_target_count",
+        "opportunity_count",
+        "closure_id",
+    }
+)
+
 
 def bounded_manifest_part_paths(
     path: Path, *, payload: Mapping[str, object] | None = None
@@ -662,6 +691,13 @@ def bounded_manifest_part_paths(
         payload = bounded_manifest_payload(path)
     if payload is None:
         return frozenset()
+    if (
+        set(payload) != _BOUNDED_MANIFEST_FIELDS
+        or payload.get("contract") != R2HoldoutTargetSource.CONTRACT
+        or payload.get("schema_version") != 1
+        or payload.get("storage") != _SOURCE_STORAGE
+    ):
+        raise ValueError("holdout target source bounded manifest fields are unsupported")
     declared: set[str] = set()
     for kind, field_name in _BOUND_PART_FIELDS:
         references = payload.get(field_name)
