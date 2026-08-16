@@ -201,16 +201,23 @@ class ProviderHistorySelection:
 
 @dataclass(frozen=True, slots=True)
 class ProviderHistorySourceEvidence:
-    """Verified Stage 6 closure and Stage 7 rows used by foundation readiness."""
+    """Verified Stage 6 closure and Stage 7 rows with receipt identity."""
 
     dataset: ProviderHistoricalDatasetV3
     observations: ProviderHistoryObservationRows
     source_artifact: ProviderHistorySource
+    stage7_verification_id: str
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...] = ()
     observation_summary: ProviderHistoryObservationSummary | None = None
     selection: ProviderHistorySelection | None = None
 
     def __post_init__(self) -> None:
+        if len(self.stage7_verification_id) != 64 or any(
+            character not in "0123456789abcdef" for character in self.stage7_verification_id
+        ):
+            raise ValueError(
+                "provider-history v3 Stage 7 verification identity is not a lowercase SHA-256"
+            )
         source_result = getattr(self.source_artifact, "source_result", None)
         if source_result is None:
             raise ValueError("provider-history v3 source result summary is missing")

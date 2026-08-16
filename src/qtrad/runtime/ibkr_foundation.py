@@ -164,9 +164,10 @@ _V3_STAGE7_FIELDS = frozenset(
         "dataset_sha256",
         "row_count",
         "manifest_sha256",
-        "result_id",
-        "closure_id",
-        "verification_id",
+        "stage6_result_id",
+        "stage6_closure_id",
+        "stage6_verification_id",
+        "stage7_verification_id",
         "plan_sha256",
         "runtime_sha256",
         "selected_input_sha256",
@@ -325,8 +326,9 @@ _V3_LINEAGE_FIELDS = frozenset(
     {
         "stage7_manifest_sha256",
         "stage7_dataset_sha256",
-        "stage7_result_id",
-        "stage7_closure_id",
+        "stage6_result_id",
+        "stage6_closure_id",
+        "stage6_verification_id",
         "stage7_verification_id",
         "stage7_selected_input_sha256",
         "stage7_selected_input_semantic_id",
@@ -2120,6 +2122,9 @@ def _stage7_metadata_v3(
     summary = provider_history_stage6_summary(source)
     if None in (summary.result_id, summary.closure_id, summary.verification_id):
         raise ValueError("Stage 7 source-result identity is incomplete")
+    stage7_verification_id = source.stage7_verification_id
+    if not stage7_verification_id:
+        raise ValueError("Stage 7 verification identity is incomplete")
     selection = source.selection
     if selection is None:
         raise ValueError("Stage 8 current path requires an authenticated Stage 7 selection")
@@ -2128,9 +2133,10 @@ def _stage7_metadata_v3(
         "dataset_sha256": dataset.dataset_sha256,
         "row_count": dataset.row_count,
         "manifest_sha256": hashlib.sha256(manifest.read_bytes()).hexdigest(),
-        "result_id": summary.result_id,
-        "closure_id": summary.closure_id,
-        "verification_id": summary.verification_id,
+        "stage6_result_id": summary.result_id,
+        "stage6_closure_id": summary.closure_id,
+        "stage6_verification_id": summary.verification_id,
+        "stage7_verification_id": stage7_verification_id,
         "plan_sha256": dataset.stage6_plan_sha256,
         "runtime_sha256": dataset.stage6_runtime_sha256,
         "selected_input_sha256": selection.selection_sha256,
@@ -2152,9 +2158,10 @@ def _v3_lineage(
     return {
         "stage7_manifest_sha256": cast(str, metadata["manifest_sha256"]),
         "stage7_dataset_sha256": source.dataset.dataset_sha256,
-        "stage7_result_id": cast(str, metadata["result_id"]),
-        "stage7_closure_id": cast(str, metadata["closure_id"]),
-        "stage7_verification_id": cast(str, metadata["verification_id"]),
+        "stage6_result_id": cast(str, metadata["stage6_result_id"]),
+        "stage6_closure_id": cast(str, metadata["stage6_closure_id"]),
+        "stage6_verification_id": cast(str, metadata["stage6_verification_id"]),
+        "stage7_verification_id": cast(str, metadata["stage7_verification_id"]),
         "stage7_selected_input_sha256": cast(str, metadata["selected_input_sha256"]),
         "stage7_selected_input_semantic_id": cast(str, metadata["selected_input_semantic_id"]),
     }
@@ -2333,7 +2340,7 @@ def _v3_foundation_id(payload: Mapping[str, object]) -> str:
             "contract": _FOUNDATION_V3_CONTRACT,
             "source_class": "IBKR_HISTORICAL_RESEARCH",
             "stage7_dataset_sha256": stage7["dataset_sha256"],
-            "stage7_result_id": stage7["result_id"],
+            "stage6_result_id": stage7["stage6_result_id"],
             "stage7_contract_selection_sha256": dataset["contract_selection_sha256"],
             "stage7_selected_input_semantic_id": selected_input["semantic_id"],
             "configuration_id": config["configuration_id"],
@@ -2391,10 +2398,13 @@ def _v3_receipt(authenticated: _AuthenticatedFoundationV3) -> dict[str, JsonValu
         "closure_id": authenticated.closure_id,
         "foundation_manifest_sha256": hashlib.sha256(authenticated.manifest_bytes).hexdigest(),
         "stage7_dataset_sha256": _text(authenticated.stage7["dataset_sha256"], "Stage 7 dataset"),
-        "stage7_result_id": _text(authenticated.stage7["result_id"], "Stage 7 result"),
-        "stage7_closure_id": _text(authenticated.stage7["closure_id"], "Stage 7 closure"),
+        "stage6_result_id": _text(authenticated.stage7["stage6_result_id"], "Stage 6 result"),
+        "stage6_closure_id": _text(authenticated.stage7["stage6_closure_id"], "Stage 6 closure"),
+        "stage6_verification_id": _text(
+            authenticated.stage7["stage6_verification_id"], "Stage 6 verification"
+        ),
         "stage7_verification_id": _text(
-            authenticated.stage7["verification_id"], "Stage 7 verification"
+            authenticated.stage7["stage7_verification_id"], "Stage 7 verification"
         ),
         "stage7_selected_input_sha256": _text(
             authenticated.stage7["selected_input_sha256"], "Stage 7 selection"
@@ -2485,8 +2495,8 @@ def _read_v3_manifest(
         availability_policy=policy,
         stage6_plan_sha256=_text(stage7["plan_sha256"], "Stage 7 plan"),
         stage6_runtime_sha256=_text(stage7["runtime_sha256"], "Stage 7 runtime"),
-        stage6_closure_id=_text(stage7["closure_id"], "Stage 7 closure"),
-        stage6_verification_id=_text(stage7["verification_id"], "Stage 7 verification"),
+        stage6_closure_id=_text(stage7["stage6_closure_id"], "Stage 6 closure"),
+        stage6_verification_id=_text(stage7["stage6_verification_id"], "Stage 6 verification"),
         stage6_manifest_sha256=_text(stage7["manifest_sha256"], "Stage 7 manifest"),
     )
     readiness = _mapping(payload["readiness"], "Stage 8 readiness")
@@ -2667,7 +2677,7 @@ def _preflight_ibkr_foundation_v3(
         "source_class": "IBKR_HISTORICAL_RESEARCH",
         "output": str(_output_path(output)),
         "stage7_dataset_sha256": metadata["dataset_sha256"],
-        "stage7_verification_id": metadata["verification_id"],
+        "stage7_verification_id": metadata["stage7_verification_id"],
         "configuration_id": configuration.configuration_id,
         "selected_input_sha256": metadata["selected_input_sha256"],
     }

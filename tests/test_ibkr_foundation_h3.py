@@ -13,6 +13,7 @@ from qtrad import __main__ as cli
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
     load_ibkr_foundation,
+    preflight_ibkr_foundation,
     verify_ibkr_foundation,
     write_ibkr_foundation,
 )
@@ -26,8 +27,19 @@ from tests.test_provider_history_v3 import _authenticated_v3_source, _stage8_con
 def test_stage8_v3_build_verify_and_authentication_are_parent_receipt_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    stage7_manifest, _source = _authenticated_v3_source(tmp_path)
+    stage7_manifest, source = _authenticated_v3_source(tmp_path)
     stage7_receipt = tmp_path / "stage7-receipt.json"
+    stage7_verification_id = json.loads(stage7_receipt.read_bytes())["verification_id"]
+    assert source.stage7_verification_id == stage7_verification_id
+    assert source.stage7_verification_id != source.dataset.stage6_verification_id
+
+    preflight = preflight_ibkr_foundation(
+        tmp_path / "preflight-foundation.json",
+        stage7_manifest=stage7_manifest,
+        stage7_receipt=stage7_receipt,
+        configuration=_stage8_configuration(),
+    )
+    assert preflight["stage7_verification_id"] == stage7_verification_id
     output = tmp_path / "foundation.json"
     build = write_ibkr_foundation(
         output,
@@ -48,6 +60,11 @@ def test_stage8_v3_build_verify_and_authentication_are_parent_receipt_bound(
         "manifest_sha256",
     }
     assert "provider_history_manifest" not in document
+    stage7 = document["payload"]["provider_history"]["stage7"]
+    assert stage7["stage7_verification_id"] == stage7_verification_id
+    assert stage7["stage6_verification_id"] == source.dataset.stage6_verification_id
+    assert stage7["stage7_verification_id"] != stage7["stage6_verification_id"]
+    assert document["payload"]["child_lineage"]["stage7_verification_id"] == stage7_verification_id
     assert build.provider_history.dataset_sha256
     import qtrad.runtime.provider_history_v3 as stage7_runtime
 
@@ -69,6 +86,9 @@ def test_stage8_v3_build_verify_and_authentication_are_parent_receipt_bound(
     )
     assert replay.readiness.as_json() == build.readiness.as_json()
     assert receipt.is_file()
+    foundation_receipt = json.loads(receipt.read_bytes())
+    assert foundation_receipt["stage7_verification_id"] == stage7_verification_id
+    assert foundation_receipt["stage6_verification_id"] == source.dataset.stage6_verification_id
 
     import qtrad.runtime.ibkr_foundation as runtime
 
@@ -267,7 +287,7 @@ def test_stage8_foundation_identity_classifies_selected_input_and_readiness() ->
         "provider_history": {
             "stage7": {
                 "dataset_sha256": "d" * 64,
-                "result_id": "r" * 64,
+                "stage6_result_id": "r" * 64,
                 "contract_selection_sha256": "s" * 64,
                 "selected_input": {
                     "contract": "qtrad-stage7-selected-input-semantic-v1",
@@ -310,8 +330,8 @@ def test_stage8_foundation_identity_classifies_selected_input_and_readiness() ->
 
     physical_change = deepcopy(payload)
     physical_stage7 = physical_change["provider_history"]["stage7"]
-    physical_stage7["closure_id"] = "c" * 64
-    physical_stage7["verification_id"] = "v" * 64
+    physical_stage7["stage6_closure_id"] = "c" * 64
+    physical_stage7["stage6_verification_id"] = "v" * 64
     physical_stage7["manifest_sha256"] = "m" * 64
     assert foundation_runtime._v3_foundation_id(physical_change) == original_id
 

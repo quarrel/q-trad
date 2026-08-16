@@ -469,8 +469,14 @@ def verify_provider_history(
                 "provider-history v3 part bytes differ from independent reconstruction"
             )
     observation_summary = _observation_summary_from_document(summary["observation_summary"])
-    result = _source_evidence(manifest, rows, evidence, observation_summary)
     receipt = _receipt_document(manifest)
+    result = _source_evidence(
+        manifest,
+        rows,
+        evidence,
+        observation_summary,
+        stage7_verification_id=_string(receipt["verification_id"], "Stage 7 verification"),
+    )
     _write_create_only(receipt_path, canonical_json_bytes(receipt))
     return result
 
@@ -503,7 +509,13 @@ def authenticate_provider_history_v3(
     )
     evidence = _request_evidence_from_stage6(manifest.stage6)
     summary = _observation_summary_from_document(manifest.stage6.get("observation_summary"))
-    return _source_evidence(manifest, rows, evidence, summary)
+    return _source_evidence(
+        manifest,
+        rows,
+        evidence,
+        summary,
+        stage7_verification_id=_string(receipt_document["verification_id"], "Stage 7 verification"),
+    )
 
 
 def provider_history_v3_rows(
@@ -1001,6 +1013,8 @@ def _source_evidence(
     rows: ProviderHistoryObservationRows,
     request_evidence: tuple[ProviderHistoryRequestEvidence, ...],
     observation_summary: ProviderHistoryObservationSummary | None,
+    *,
+    stage7_verification_id: str,
 ) -> ProviderHistorySourceEvidence:
     stage6 = manifest.stage6
     raw_requests = stage6["requests"]
@@ -1042,6 +1056,7 @@ def _source_evidence(
         dataset=manifest.dataset,
         observations=rows,
         source_artifact=cast(Any, source),
+        stage7_verification_id=stage7_verification_id,
         request_evidence=request_evidence,
         observation_summary=observation_summary,
         selection=getattr(rows, "selection", None),
