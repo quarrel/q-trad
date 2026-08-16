@@ -82,6 +82,7 @@ from qtrad.domain.foundation import (
 )
 from qtrad.domain.foundation_bundle import FoundationBundle
 from qtrad.domain.market_data import MarketDataSourceClass, PriceBasis
+from qtrad.domain.r2_baselines import ForecastCoverageDataset
 from qtrad.domain.r2_bundles import (
     R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
     ArtifactReference,
@@ -101,6 +102,7 @@ from qtrad.domain.r2_evaluation import (
     SelectionManifest,
 )
 from qtrad.domain.r2_features import (
+    R2_FEATURE_DATASET_CONTRACT,
     FeatureDefinition,
     R2FeatureDataset,
     RawFeatureRow,
@@ -176,6 +178,7 @@ from qtrad.runtime.r2_bundles import (
     R2_EVALUATION_REGISTER_CONTRACT,
     _canonical_payload_identity,
     _reject_orphan_files,
+    _verify_feature_manifest_binding,
     _verify_r2_oof_bundle_with_source,
     atomic_create,
     canonical_bytes,
@@ -195,11 +198,13 @@ from qtrad.runtime.r2_holdout_source import (
     R2HoldoutTargetSourceAuthority,
     load_r2_holdout_target_source_authority,
 )
+from qtrad.runtime.r2_partitioned_rows import write_partitioned_rows
 from qtrad.runtime.r2_preprocessing_selection import decode_r2_preprocessing_selection
 from qtrad.runtime.r2_readiness import load_r2_experiment
 
 OOF_DESCRIPTOR_CONTRACT = "qtrad-r2-oof-run-descriptor-v1"
 CONFIRMATORY_RUN_KIND = "CONFIRMATORY"
+R2_POOLED_ABLATION_CONTRACT = "qtrad-r2-pooled-ablation-v2"
 R2_OOF_VERIFIER_CONTRACT = "qtrad-r2-oof-semantic-verifier-v1"
 R2_OOF_VERIFIER_VERSION = "1"
 R2_OOF_COMPLETED_CHECKS = (
@@ -1525,12 +1530,28 @@ def _load_feature_datasets(
 
 
 def _dataset_payload(
-    dataset: R2FeatureDataset, manifest: R2FeatureManifest | Mapping[str, object]
+    dataset: R2FeatureDataset,
+    manifest: R2FeatureManifest | Mapping[str, object],
+    *,
+    compact: bool = False,
 ) -> dict[str, object]:
     manifest_payload = (
         manifest.as_json() if isinstance(manifest, R2FeatureManifest) else dict(manifest)
     )
-    return {
+    if compact:
+        manifest_payload = {
+            key: manifest_payload[key]
+            for key in (
+                "contract",
+                "schema_version",
+                "manifest_id",
+                "manifest_sha256",
+                "semantic_dataset_id",
+                "feature_set_name",
+                "feature_set_id",
+            )
+        }
+    payload: dict[str, object] = {
         "contract": dataset.CONTRACT,
         "schema_version": dataset.SCHEMA_VERSION,
         "dataset_id": dataset.dataset_id,
@@ -1540,8 +1561,12 @@ def _dataset_payload(
             for key, value in dataset.manifest_json().items()
             if key not in {"contract", "schema_version", "dataset_id"}
         },
-        "rows": [row.as_json() for row in dataset.rows],
     }
+    if compact:
+        payload["storage"] = "qtrad-r2-feature-manifest-binding-v1"
+    else:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
 
 
 def _forecast_payload(
@@ -1549,8 +1574,9 @@ def _forecast_payload(
     *,
     source_class: MarketDataSourceClass,
     evidence_class: EvidenceClass,
+    include_rows: bool = True,
 ) -> dict[str, object]:
-    return {
+    payload: dict[str, object] = {
         "contract": dataset.CONTRACT,
         "schema_version": 1,
         "dataset_id": dataset.dataset_id,
@@ -1560,7 +1586,41 @@ def _forecast_payload(
         "fold_dataset_id": dataset.fold_dataset_id,
         "source_class": source_class.value,
         "evidence_class": evidence_class.value,
-        "rows": [row.as_json() for row in dataset.rows],
+    }
+    if include_rows:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
+
+
+def _coverage_payload(
+    dataset: ForecastCoverageDataset,
+    *,
+    source_class: MarketDataSourceClass,
+    evidence_class: EvidenceClass,
+    include_rows: bool = True,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "contract": dataset.CONTRACT,
+        "schema_version": 1,
+        "experiment_configuration_id": dataset.experiment_configuration_id,
+        "target_dataset_id": dataset.target_dataset_id,
+        "fold_dataset_id": dataset.fold_dataset_id,
+        "r2_feature_dataset_id": dataset.r2_feature_dataset_id,
+        "dataset_id": dataset.dataset_id,
+        "market_data_source_class": source_class.value,
+        "source_class": source_class.value,
+        "evidence_class": evidence_class.value,
+    }
+    if include_rows:
+        payload["rows"] = [row.as_json() for row in dataset.rows]
+    return payload
+
+
+def _ordered_id_summary(values: Sequence[str]) -> dict[str, object]:
+    ordered = tuple(values)
+    return {
+        "count": len(ordered),
+        "sha256": sha256(canonical_bytes({"ids": list(ordered)})).hexdigest(),
     }
 
 
@@ -2103,7 +2163,7 @@ def _build_synthetic_oof(
         )
 
 
-def build_oof_bundle(
+def _build_oof_bundle(
     *,
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
@@ -2334,8 +2394,13 @@ def build_oof_bundle(
 
     children: dict[str, dict[str, object]] = {}
     feature_refs: list[ArtifactReference] = []
+    compact_external_features = foundation_authority is not None
     for name in sorted(datasets):
-        payload = _dataset_payload(datasets[name], manifests[name])
+        payload = _dataset_payload(
+            datasets[name],
+            manifests[name],
+            compact=compact_external_features,
+        )
         path = f"features/{name}.json"
         children[path] = payload
         feature_refs.append(_child_reference(path, payload))
@@ -2360,30 +2425,49 @@ def build_oof_bundle(
         fit_path = f"fits/{index:04d}.json"
         children[fit_path] = fit_payload
         fit_refs.append(_child_reference(fit_path, fit_payload))
-        coverage_payload = cast(
-            dict[str, object],
-            {
-                **result.coverage.as_json(),
-                "source_class": experiment.market_data_source_class.value,
-                "evidence_class": experiment.evidence_class.value,
-            },
+        coverage_payload = _coverage_payload(
+            result.coverage,
+            source_class=experiment.market_data_source_class,
+            evidence_class=experiment.evidence_class,
+            include_rows=not compact_external_features,
         )
         coverage_path = f"coverage/{index:04d}.json"
+        if compact_external_features:
+            coverage_header = coverage_payload
+            coverage_payload = write_partitioned_rows(
+                output,
+                coverage_path,
+                header=coverage_header,
+                identity_field="dataset_id",
+                rows=(row.as_json() for row in result.coverage.rows),
+                expected_row_count=len(result.coverage.rows),
+            )
         children[coverage_path] = coverage_payload
         coverage_refs.append(_child_reference(coverage_path, coverage_payload))
-        forecast_payload = _forecast_payload(
+        forecast_header = _forecast_payload(
             result.forecasts,
             source_class=experiment.market_data_source_class,
             evidence_class=experiment.evidence_class,
+            include_rows=not compact_external_features,
         )
-        forecast_child_path = f"forecasts/{index:04d}.data.json"
-        forecast_child_ref = _child_reference(forecast_child_path, forecast_payload)
         forecast_identity = (
-            forecast_child_ref.contract,
-            forecast_child_ref.semantic_id,
+            str(forecast_header["contract"]),
+            str(forecast_header["dataset_id"]),
         )
         existing_forecast_ref = forecast_child_by_identity.get(forecast_identity)
         if existing_forecast_ref is None:
+            forecast_child_path = f"forecasts/{index:04d}.data.json"
+            forecast_payload = forecast_header
+            if compact_external_features:
+                forecast_payload = write_partitioned_rows(
+                    output,
+                    forecast_child_path,
+                    header=forecast_header,
+                    identity_field="dataset_id",
+                    rows=(row.as_json() for row in result.forecasts.rows),
+                    expected_row_count=len(result.forecasts.rows),
+                )
+            forecast_child_ref = _child_reference(forecast_child_path, forecast_payload)
             children[forecast_child_path] = forecast_payload
             forecast_child_refs.append(forecast_child_ref)
             forecast_child_by_identity[forecast_identity] = forecast_child_ref
@@ -2466,17 +2550,17 @@ def build_oof_bundle(
 
     ablation = pooled_result.ablation
     ablation_payload: dict[str, object] = {
-        "contract": "qtrad-r2-pooled-ablation-v1",
-        "schema_version": 1,
+        "contract": R2_POOLED_ABLATION_CONTRACT,
+        "schema_version": 2,
         "source_class": experiment.market_data_source_class.value,
         "evidence_class": experiment.evidence_class.value,
         "local_fold_fit_ids": list(ablation.local_fold_fit_ids),
         "pooled_local_fold_fit_ids": list(ablation.pooled_local_fold_fit_ids),
         "pooled_context_fold_fit_ids": list(ablation.pooled_context_fold_fit_ids),
-        "local_target_ids": list(ablation.local_target_ids),
-        "pooled_local_target_ids": list(ablation.pooled_local_target_ids),
-        "pooled_context_target_ids": list(ablation.pooled_context_target_ids),
-        "common_target_ids": list(ablation.common_target_ids),
+        "local_target_ids": _ordered_id_summary(ablation.local_target_ids),
+        "pooled_local_target_ids": _ordered_id_summary(ablation.pooled_local_target_ids),
+        "pooled_context_target_ids": _ordered_id_summary(ablation.pooled_context_target_ids),
+        "common_target_ids": _ordered_id_summary(ablation.common_target_ids),
         "holdout_excluded": True,
     }
     ablation_payload["ablation_id"] = sha256(
@@ -2595,6 +2679,63 @@ def build_oof_bundle(
         holdout_target_source=holdout_source_ref,
     )
     return write_r2_oof_bundle(output, bundle, children)
+
+
+def _reject_oof_output_symlink_ancestors(path: Path) -> None:
+    current = path.parent
+    while True:
+        if current.is_symlink():
+            raise ValueError(f"OOF output traverses a symlink: {current}")
+        if current == current.parent:
+            return
+        current = current.parent
+
+
+def build_oof_bundle(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    feature_manifest_paths: dict[str, Path],
+    research_root: Path,
+    clock: Clock,
+    output: Path,
+    run_kind: str = "REPRESENTATIVE",
+    foundation_authority: AuthenticatedR2Foundation | None = None,
+    representative_profile: str | None = None,
+    holdout_target_source: R2HoldoutTargetSource | None = None,
+    holdout_target_source_authority: R2HoldoutTargetSourceAuthority | None = None,
+    holdout_target_source_path: Path | None = None,
+    experiment_path: Path | None = None,
+    runtime_provenance: Mapping[str, str] | None = None,
+) -> Path:
+    """Build an OOF bundle in a private staging tree before final publication."""
+    output = output.absolute()
+    _reject_oof_output_symlink_ancestors(output)
+    if output.exists() or output.is_symlink():
+        raise FileExistsError(output)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(
+        prefix=f".{output.name or 'oof'}.staging-", dir=output.parent
+    ) as staging:
+        staged_output = Path(staging)
+        _build_oof_bundle(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_manifest_paths,
+            research_root=research_root,
+            clock=clock,
+            output=staged_output,
+            run_kind=run_kind,
+            foundation_authority=foundation_authority,
+            representative_profile=representative_profile,
+            holdout_target_source=holdout_target_source,
+            holdout_target_source_authority=holdout_target_source_authority,
+            holdout_target_source_path=holdout_target_source_path,
+            experiment_path=experiment_path,
+            runtime_provenance=runtime_provenance,
+        )
+        staged_output.rename(output)
+    return output / "manifest.json"
 
 
 def _load_selection(path: Path) -> dict[str, object]:
@@ -5472,9 +5613,15 @@ def _authenticate_oof_closure(
     if manifest_bytes != canonical_bytes(manifest_payload):
         raise ValueError("R2 OOF manifest is not canonical")
     bundle = R2OofBundle.from_json(manifest_payload)
+    from qtrad.runtime.r2_partitioned_rows import (
+        PARTITIONED_ROWS_STORAGE,
+        partitioned_manifest_part_paths,
+    )
+
     allowed_paths = {"manifest.json"}
     descriptor: dict[str, object] | None = None
     descriptor_count = 0
+    feature_bindings: list[tuple[ArtifactReference, dict[str, object]]] = []
     for reference in _oof_declared_references(bundle):
         allowed_paths.add(reference.path)
         if reference.contract == OOF_DESCRIPTOR_CONTRACT:
@@ -5485,12 +5632,31 @@ def _authenticate_oof_closure(
             forecast_manifest = R2ForecastManifest.from_json(forecast_payload)
             nested = forecast_manifest.forecast_child
             allowed_paths.add(nested.path)
-            _safe_oof_child(root, nested)
+            nested_payload = _read_oof_consumed_json(root, nested)
+            if nested_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+                allowed_paths.update(
+                    partitioned_manifest_part_paths(root, nested.path, nested_payload)
+                )
         else:
             _safe_oof_child(root, reference)
+            if reference.contract == R2_FEATURE_DATASET_CONTRACT:
+                feature_payload = _read_oof_consumed_json(root, reference)
+                if feature_payload.get("storage") == "qtrad-r2-feature-manifest-binding-v1":
+                    feature_bindings.append((reference, feature_payload))
+            if reference.contract in {
+                "qtrad-research-forecasts-v1",
+                "qtrad-r2-forecast-coverage-v2",
+            }:
+                child_payload = _read_oof_consumed_json(root, reference)
+                if child_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+                    allowed_paths.update(
+                        partitioned_manifest_part_paths(root, reference.path, child_payload)
+                    )
     _reject_orphan_files(root, allowed_paths)
     if descriptor_count != 1 or descriptor is None:
         raise ValueError("R2 OOF closure must contain exactly one run descriptor")
+    for reference, payload in feature_bindings:
+        _verify_feature_manifest_binding(root, reference, payload, descriptor)
     return bundle, descriptor
 
 

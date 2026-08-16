@@ -5,10 +5,11 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
+from contextlib import suppress
 from hashlib import sha256
 from pathlib import Path
 from tempfile import NamedTemporaryFile
-from typing import cast
+from typing import Any, cast
 
 from qtrad.domain.r2_baselines import (
     R2_COEFFICIENT_STABILITY_CONTRACT,
@@ -90,6 +91,7 @@ _IDENTITY_FIELD_BY_CONTRACT: dict[str, str] = {
     R2_EVALUATION_REGISTER_CONTRACT: "report_id",
     "qtrad-r2-oof-run-descriptor-v1": "descriptor_id",
     "qtrad-r2-pooled-ablation-v1": "ablation_id",
+    "qtrad-r2-pooled-ablation-v2": "ablation_id",
     R2HoldoutTargetSource.CONTRACT: "source_id",
     R2_HOLDOUT_SOURCE_BINDING_CONTRACT: "binding_id",
     R2_HOLDOUT_SELECTION_CONTRACT: "manifest_id",
@@ -211,6 +213,7 @@ def load_forecast_manifest(path: Path) -> R2ForecastManifest:
     return R2ForecastManifest.from_json(payload)
 
 
+
 def write_r2_oof_bundle(
     output: Path,
     bundle: R2OofBundle,
@@ -219,24 +222,62 @@ def write_r2_oof_bundle(
     prepublished_paths: set[str] | frozenset[str] = frozenset(),
 ) -> Path:
     """Persist named children and the OOF manifest without embedding child data."""
+    from qtrad.runtime.r2_partitioned_rows import (
+        PARTITIONED_ROWS_STORAGE,
+        partitioned_manifest_part_paths,
+    )
+
     refs = _all_oof_references(bundle)
     declared_paths = {ref.path for ref in refs}
     if set(children) != declared_paths:
         raise ValueError("OOF child payloads must exactly match declared references")
     if not set(prepublished_paths) <= declared_paths:
         raise ValueError("OOF prepublished paths must be declared references")
+
+    partition_paths: list[str] = []
     for ref in refs:
         if ref.path in prepublished_paths:
-            _verify_reference(output, ref)
             continue
-        encoded = canonical_bytes(children[ref.path])
-        if len(encoded) > _MAX_BYTES:
-            raise ValueError(f"OOF child exceeds the 64 MiB limit: {ref.path}")
-        atomic_create(output / ref.path, encoded)
-        _verify_reference(output, ref)
-    path = output / "manifest.json"
-    atomic_create(path, canonical_bytes(bundle.as_json()))
-    return path
+        payload = children[ref.path]
+        if payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+            partition_paths.extend(
+                partitioned_manifest_part_paths(output, ref.path, payload)
+            )
+
+    created: list[Path] = []
+    manifest_path = output / "manifest.json"
+    try:
+        for ref in refs:
+            child_path = output / ref.path
+            if ref.path in prepublished_paths:
+                _verify_reference(output, ref)
+                continue
+            encoded = canonical_bytes(children[ref.path])
+            if len(encoded) > _MAX_BYTES:
+                raise ValueError(f"OOF child exceeds the 64 MiB limit: {ref.path}")
+            atomic_create(child_path, encoded)
+            created.append(child_path)
+            _verify_reference(output, ref)
+        atomic_create(manifest_path, canonical_bytes(bundle.as_json()))
+        created.append(manifest_path)
+        return manifest_path
+    except BaseException:
+        for path in reversed(created):
+            path.unlink(missing_ok=True)
+        for relative in partition_paths:
+            (output / relative).unlink(missing_ok=True)
+        directories = sorted(
+            {
+                (output / relative).parent
+                for relative in partition_paths
+            },
+            key=lambda item: len(item.parts),
+            reverse=True,
+        )
+        for directory in directories:
+            with suppress(OSError):
+                directory.rmdir()
+        raise
 
 
 def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object | None]:
@@ -317,13 +358,26 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
         bounded_source_closure_id,
         load_r2_holdout_target_source,
     )
-
+    from qtrad.runtime.r2_partitioned_rows import (
+        PARTITIONED_ROWS_STORAGE,
+        partitioned_manifest_part_paths,
+    )
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
     binding_payload: dict[str, object] | None = None
+    feature_bindings: list[tuple[ArtifactReference, dict[str, object]]] = []
     source_authority: object | None = None
     for ref in all_refs:
         _verify_reference(path.parent, ref)
         child = _load_object(path.parent / ref.path)
+        if child.get("storage") == PARTITIONED_ROWS_STORAGE:
+            allowed_paths.update(
+                partitioned_manifest_part_paths(path.parent, ref.path, child)
+            )
+        if (
+            ref.contract == R2_FEATURE_DATASET_CONTRACT
+            and child.get("storage") == "qtrad-r2-feature-manifest-binding-v1"
+        ):
+            feature_bindings.append((ref, child))
         if ref.contract == R2HoldoutTargetSource.CONTRACT:
             source_path = path.parent / ref.path
             source = load_r2_holdout_target_source(source_path)
@@ -462,8 +516,14 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
             raise ValueError("R2 preprocessing-selection child is not v2")
         if child.get("contract") == R2ForecastManifest.CONTRACT:
             forecast_manifest = R2ForecastManifest.from_json(child)
-            _verify_reference(path.parent, forecast_manifest.forecast_child)
-            allowed_paths.add(forecast_manifest.forecast_child.path)
+            nested = forecast_manifest.forecast_child
+            _verify_reference(path.parent, nested)
+            allowed_paths.add(nested.path)
+            nested_payload = _load_object(path.parent / nested.path)
+            if nested_payload.get("storage") == PARTITIONED_ROWS_STORAGE:
+                allowed_paths.update(
+                    partitioned_manifest_part_paths(path.parent, nested.path, nested_payload)
+                )
         if child.get("contract") == R2_EVALUATION_REGISTER_CONTRACT:
             report_id = child.get("report_id")
             if not isinstance(report_id, str):
@@ -479,6 +539,11 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
         descriptor = _load_object(path.parent / descriptor_refs[0].path)
         if descriptor.get("run_kind") == "REPRESENTATIVE" and bundle.holdout_target_source is None:
             raise ValueError("representative OOF bundle must bind an authenticated holdout source")
+    if feature_bindings:
+        if descriptor is None:
+            raise ValueError("compact feature bindings require an OOF runtime descriptor")
+        for reference, child in feature_bindings:
+            _verify_feature_manifest_binding(path.parent, reference, child, descriptor)
     if bundle.holdout_target_source is not None and bundle.holdout_target_source.contract == (
         R2_HOLDOUT_SOURCE_BINDING_CONTRACT
     ):
@@ -629,11 +694,86 @@ def _verify_reference(root: Path, reference: ArtifactReference) -> None:
         raise ValueError(f"R2 bundle child identity is invalid: {reference.path}: {exc}") from exc
     if identity != reference.semantic_id:
         raise ValueError(f"R2 bundle child semantic identity mismatch: {reference.path}")
+    if payload.get("storage") == "qtrad-r2-partitioned-json-rows-v1":
+        from qtrad.runtime.r2_partitioned_rows import partitioned_manifest_part_paths
+
+        partitioned_manifest_part_paths(root, reference.path, payload)
+
+def _verify_feature_manifest_binding(
+    _root: Path,
+    reference: ArtifactReference,
+    payload: Mapping[str, object],
+    descriptor: Mapping[str, object],
+) -> None:
+    if payload.get("storage") != "qtrad-r2-feature-manifest-binding-v1":
+        raise ValueError(f"R2 feature binding has unsupported storage: {reference.path}")
+    feature_set_name = payload.get("feature_set_name")
+    if not isinstance(feature_set_name, str) or not feature_set_name:
+        raise ValueError("R2 feature binding has no feature-set name")
+    raw_runtime = descriptor.get("runtime_inputs")
+    if not isinstance(raw_runtime, Mapping):
+        raise ValueError("R2 feature binding has no runtime inputs")
+    raw_manifests = raw_runtime.get("feature_manifests")
+    if not isinstance(raw_manifests, Mapping):
+        raise ValueError("R2 feature binding has no feature manifest locators")
+    raw_path = raw_manifests.get(feature_set_name)
+    if not isinstance(raw_path, str):
+        raise ValueError(f"R2 feature binding has no locator for {feature_set_name}")
+    manifest_path = Path(raw_path)
+    if (
+        not manifest_path.is_absolute()
+        or manifest_path.is_symlink()
+        or not manifest_path.is_file()
+    ):
+        raise ValueError(f"R2 feature binding locator is unavailable: {feature_set_name}")
+    from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
+
+    manifest = ParquetR2FeatureStore(manifest_path.parent, cast(Any, None)).read_manifest(
+        manifest_path
+    )
+    declared_manifest = payload.get("manifest")
+    if not isinstance(declared_manifest, Mapping):
+        raise ValueError(f"R2 feature binding has no manifest payload: {reference.path}")
+    manifest_payload = manifest.as_json()
+    expected_manifest_fields = {
+        "contract",
+        "schema_version",
+        "manifest_id",
+        "manifest_sha256",
+        "semantic_dataset_id",
+        "feature_set_name",
+        "feature_set_id",
+    }
+    if set(declared_manifest) != expected_manifest_fields:
+        raise ValueError(f"R2 feature binding manifest fields are not compact: {reference.path}")
+    for field in expected_manifest_fields:
+        if declared_manifest[field] != manifest_payload[field]:
+            raise ValueError(
+                "R2 feature binding manifest differs from its runtime locator: "
+                f"{reference.path} ({field})"
+            )
+    if payload.get("dataset_id") != manifest.semantic_dataset_id:
+        raise ValueError(f"R2 feature binding dataset identity differs: {reference.path}")
+    for field in (
+        "feature_set_name",
+        "feature_set_id",
+        "raw_feature_schema_id",
+        "observation_dataset_id",
+        "panel_dataset_id",
+        "target_dataset_id",
+        "fold_dataset_id",
+        "experiment_configuration_id",
+        "evidence_class",
+        "market_data_source_class",
+        "holdout_excluded",
+        "row_count",
+    ):
+        if payload.get(field) != manifest_payload.get(field):
+            raise ValueError(f"R2 feature binding field differs from its manifest: {field}")
 
 
 def verify_r2_reference(root: Path, reference: ArtifactReference) -> None:
     """Verify one R2 child using its complete path, byte, contract and identity boundary."""
-
     _verify_reference(root, reference)
 
 
@@ -656,6 +796,7 @@ def _verify_lineage_payload(payload: dict[str, object], bundle: R2OofBundle) -> 
             not in {
                 "qtrad-r2-holdout-target-source-v1",
                 R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
+                "qtrad-r2-feature-parquet-v2",
             }
             and (source is None or evidence is None)
         ):
