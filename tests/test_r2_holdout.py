@@ -1023,6 +1023,37 @@ def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> Non
         )
 
 
+def test_holdout_transfer_auth_failure_leaves_source_available(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    _prepared(source)
+    claim_path = source / ".preparation-claim.json"
+    claim_before = claim_path.read_bytes()
+    original_verify = holdout_runtime.verify_holdout_preparation
+    calls = 0
+
+    def fail_destination(path: Path, *args: object, **kwargs: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise RuntimeError("destination authentication failed")
+        return original_verify(path, *args, **kwargs)
+
+    monkeypatch.setattr(holdout_runtime, "verify_holdout_preparation", fail_destination)
+    with pytest.raises(RuntimeError, match="destination authentication"):
+        prepare_holdout_from_files(
+            source,
+            destination,
+            holdout_target_source=_target_source(),
+            training_feature_datasets=_training_feature_authority(),
+        )
+    assert calls == 2
+    assert claim_path.read_bytes() == claim_before
+    assert not (source / ".preparation-source-claim.json").exists()
+    assert not destination.exists()
+
 def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path) -> None:
     selection, _, _, _, _, seal = _prepared(tmp_path)
     claim_before = (tmp_path / ".preparation-claim.json").read_bytes()

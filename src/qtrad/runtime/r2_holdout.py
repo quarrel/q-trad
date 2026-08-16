@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from datetime import datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -74,16 +74,19 @@ _PARTITIONED_PART_CONTRACT = "qtrad-r2-partitioned-json-row-part-v1"
 _CONFIRMATORY_G2_LIFECYCLE_TOKEN = object()
 
 
-def _load_object(path: Path) -> dict[str, object]:
-    if path.is_symlink() or not path.is_file():
-        raise ValueError(f"holdout child must be a regular non-symlink file: {path}")
-    encoded = path.read_bytes()
+def _load_object_bytes(encoded: bytes, path: Path) -> dict[str, object]:
     if len(encoded) > _MAX_BYTES:
         raise ValueError(f"holdout child exceeds the {_MAX_BYTES} byte limit: {path}")
     value = json.loads(encoded)
     if not isinstance(value, dict) or any(not isinstance(key, str) for key in value):
         raise ValueError(f"holdout child must be a JSON object: {path}")
     return cast(dict[str, object], value)
+
+
+def _load_object(path: Path) -> dict[str, object]:
+    if path.is_symlink() or not path.is_file():
+        raise ValueError(f"holdout child must be a regular non-symlink file: {path}")
+    return _load_object_bytes(path.read_bytes(), path)
 
 
 def _partitioned_payload(
@@ -94,10 +97,12 @@ def _partitioned_payload(
     identity_field: str,
     row_field: str,
     array_fields: Sequence[str] = (),
+    mapping_fields: Sequence[str] = (),
 ) -> dict[str, object]:
     """Reconstruct one compact physical child into its logical semantic payload."""
     if payload.get("storage") != PARTITIONED_ROWS_STORAGE:
         return dict(payload)
+    _verify_compact_header(payload)
     if payload.get("partition_row_field") != row_field:
         raise ValueError("partitioned holdout child row field differs from its contract")
     raw_fields = payload.get("partition_fields", [row_field])
@@ -107,6 +112,13 @@ def _partitioned_payload(
     expected_fields = tuple(array_fields or (row_field,))
     if fields != expected_fields:
         raise ValueError("partitioned holdout child field register differs from its contract")
+    raw_mapping_fields = payload.get("partition_mapping_fields", [])
+    if not isinstance(raw_mapping_fields, list) or any(
+        not isinstance(item, str) for item in raw_mapping_fields
+    ):
+        raise ValueError("partitioned holdout mapping field register is invalid")
+    if tuple(raw_mapping_fields) != tuple(mapping_fields):
+        raise ValueError("partitioned holdout mapping field register differs from its contract")
     rows = load_partitioned_rows(root, relative, payload, identity_field=identity_field)
     logical = {
         key: value
@@ -119,18 +131,51 @@ def _partitioned_payload(
             "parts",
             "partition_row_field",
             "partition_fields",
+            "partition_mapping_fields",
+            "header_sha256",
         }
     }
     if array_fields:
-        grouped: dict[str, list[object]] = {field: [] for field in fields}
+        grouped: dict[str, list[object]] = {
+            field: [] for field in fields if field not in mapping_fields
+        }
+        grouped_mappings: dict[str, object] = {field: {} for field in mapping_fields}
+        nullable_fields: set[str] = set()
         for row in rows:
-            if set(row) != {"field", "value"}:
-                raise ValueError("partitioned holdout field row is invalid")
-            field = row["field"]
-            if not isinstance(field, str) or field not in grouped:
+            field = row.get("field")
+            if not isinstance(field, str) or field not in fields:
                 raise ValueError("partitioned holdout field row names an unknown field")
-            grouped[field].append(row["value"])
+            if field in grouped_mappings:
+                if set(row) == {"field", "value"} and row["value"] is None:
+                    if grouped_mappings[field] != {}:
+                        raise ValueError("partitioned holdout mapping row is invalid")
+                    grouped_mappings[field] = None
+                elif set(row) == {"field", "key", "value"} and isinstance(row["key"], str):
+                    mapping = grouped_mappings[field]
+                    if not isinstance(mapping, dict):
+                        raise ValueError("partitioned holdout mapping row is invalid")
+                    mapping[row["key"]] = row["value"]
+                else:
+                    raise ValueError("partitioned holdout mapping row is invalid")
+            else:
+                if set(row) == {"field", "value", "is_null"} and row["is_null"] is True:
+                    if (
+                        row["value"] is not None
+                        or field in nullable_fields
+                        or grouped[field]
+                    ):
+                        raise ValueError("partitioned holdout null field row is invalid")
+                    nullable_fields.add(field)
+                elif set(row) == {"field", "value"}:
+                    if field in nullable_fields:
+                        raise ValueError("partitioned holdout field row is invalid")
+                    grouped[field].append(row["value"])
+                else:
+                    raise ValueError("partitioned holdout field row is invalid")
         logical.update(grouped)
+        logical.update(grouped_mappings)
+        for field in nullable_fields:
+            logical[field] = None
     else:
         values: list[object] = []
         for row in rows:
@@ -150,7 +195,37 @@ def _partitioned_paths(
 ) -> tuple[str, ...]:
     if payload.get("storage") != PARTITIONED_ROWS_STORAGE:
         return ()
+    _verify_compact_header(payload)
     return partitioned_manifest_part_paths(root, relative, payload, identity_field=identity_field)
+
+
+def _compact_header_digest(payload: Mapping[str, object]) -> str:
+    physical_fields = {
+        "storage",
+        "identity_field",
+        "row_count",
+        "parts",
+        "header_sha256",
+    }
+    return sha256(
+        canonical_bytes(
+            {key: value for key, value in payload.items() if key not in physical_fields}
+        )
+    ).hexdigest()
+
+
+def _verify_compact_header(payload: Mapping[str, object], *, encoded: bytes | None = None) -> None:
+    digest = payload.get("header_sha256")
+    if not isinstance(digest, str) or len(digest) != 64 or any(
+        character not in "0123456789abcdef" for character in digest
+    ):
+        raise ValueError("partitioned holdout child header digest is malformed")
+    if digest != _compact_header_digest(payload):
+        raise ValueError(
+            "partitioned holdout child header digest differs from its canonical header"
+        )
+    if encoded is not None and encoded != canonical_bytes(payload):
+        raise ValueError("partitioned holdout child header is not canonical")
 
 
 def _partitioned_header(
@@ -158,6 +233,7 @@ def _partitioned_header(
     *,
     row_field: str,
     array_fields: Sequence[str] = (),
+    mapping_fields: Sequence[str] = (),
 ) -> dict[str, object]:
     header = dict(payload)
     header.pop(row_field, None)
@@ -165,6 +241,7 @@ def _partitioned_header(
         header.pop(field, None)
     header["partition_row_field"] = row_field
     header["partition_fields"] = list(array_fields or (row_field,))
+    header["partition_mapping_fields"] = list(mapping_fields)
     return header
 
 
@@ -176,23 +253,69 @@ def _write_partitioned_child(
     identity_field: str,
     row_field: str,
     array_fields: Sequence[str] = (),
+    mapping_fields: Sequence[str] = (),
 ) -> tuple[dict[str, object], tuple[str, ...]]:
     """Write bounded physical parts while retaining the original logical identity."""
     fields = tuple(array_fields or (row_field,))
+    mapping_names = tuple(mapping_fields)
+    if any(field not in fields for field in mapping_names):
+        raise ValueError("partitioned mapping fields must be registered array fields")
     if array_fields:
-        rows = (
-            {"field": field, "value": value}
+        def encoded_rows() -> Iterator[Mapping[str, object]]:
+            for field in fields:
+                if field in mapping_names:
+                    mapping = payload[field]
+                    if mapping is None:
+                        yield {"field": field, "value": None}
+                    elif isinstance(mapping, Mapping):
+                        yield from (
+                            {"field": field, "key": key, "value": value}
+                            for key, value in mapping.items()
+                        )
+                    else:
+                        raise TypeError(f"partitioned mapping field is not an object: {field}")
+                else:
+                    values = payload[field]
+                    if values is None:
+                        yield {"field": field, "value": None, "is_null": True}
+                    elif isinstance(values, Sequence) and not isinstance(
+                        values, (str, bytes, bytearray)
+                    ):
+                        yield from ({"field": field, "value": value} for value in values)
+                    else:
+                        raise TypeError(
+                            f"partitioned array field is not a sequence: {field}"
+                        )
+        rows = encoded_rows()
+        def mapping_count(value: object, field: str) -> int:
+            if isinstance(value, Mapping):
+                return len(value)
+            if value is None:
+                return 1
+            raise TypeError(f"partitioned mapping field is not an object: {field}")
+
+        expected_count = sum(
+            mapping_count(payload[field], field)
+            if field in mapping_names
+            else 1
+            if payload[field] is None
+            else len(cast(Sequence[object], payload[field]))
             for field in fields
-            for value in cast(Sequence[object], payload[field])
         )
-        expected_count = sum(len(cast(Sequence[object], payload[field])) for field in fields)
     else:
         rows = ({"value": value} for value in cast(Sequence[object], payload[row_field]))
         expected_count = len(cast(Sequence[object], payload[row_field]))
+    header = _partitioned_header(
+        payload,
+        row_field=row_field,
+        array_fields=fields,
+        mapping_fields=mapping_names,
+    )
+    header["header_sha256"] = _compact_header_digest(header)
     compact = write_partitioned_rows(
         output,
         relative,
-        header=_partitioned_header(payload, row_field=row_field, array_fields=fields),
+        header=header,
         identity_field=identity_field,
         rows=rows,
         expected_row_count=expected_count,
@@ -246,8 +369,11 @@ def _verify_child(
     if _payload_cache is not None and relative in _payload_cache:
         return _payload_cache[relative]
     path = _safe_child(root, relative)
-    physical = _load_object(path)
+    encoded = path.read_bytes()
+    physical = _load_object_bytes(encoded, path)
     payload = physical
+    if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
+        _verify_compact_header(physical, encoded=encoded)
     if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
         if contract == "qtrad-r2-final-fit-v1":
             row_field = "fit_arrays"
@@ -256,8 +382,12 @@ def _verify_child(
                 "purged_target_ids",
                 "inner_fit_target_ids",
                 "inner_validation_target_ids",
+                "alpha_candidate_scores",
                 "sample_weights",
+                "coefficients",
+                "diagnostics",
             )
+            mapping_fields = ("diagnostics",)
         elif contract in {
             R2_HOLDOUT_FEATURES_CONTRACT,
             R2_HOLDOUT_FORECAST_CONTRACT,
@@ -265,6 +395,7 @@ def _verify_child(
         }:
             row_field = "rows"
             array_fields = ()
+            mapping_fields = ()
         else:
             raise ValueError(f"{contract} does not support partitioned persistence")
         payload = _partitioned_payload(
@@ -274,6 +405,7 @@ def _verify_child(
             identity_field=identity_key,
             row_field=row_field,
             array_fields=array_fields,
+            mapping_fields=mapping_fields,
         )
     if set(payload) != expected_fields:
         raise ValueError(f"{contract} child has unknown or missing fields")
@@ -749,6 +881,99 @@ def _preparation_authority_payload(
     parent_authority: Mapping[str, object] | None = None,
 ) -> dict[str, object]:
     policy = selection.evaluation_policy
+    parent = dict(parent_authority or {})
+    if seal.holdout_scope is HoldoutScope.CONFIRMATORY:
+        f2_parent = parent.get("f2")
+        oof_parent = parent.get("oof")
+        foundation_parent = parent.get("foundation")
+        target_parent = parent.get("target_source")
+        feature_parent = parent.get("feature_source")
+        selection_parent = parent.get("selection")
+        if not all(
+            isinstance(value, Mapping)
+            for value in (
+                f2_parent,
+                oof_parent,
+                foundation_parent,
+                target_parent,
+                feature_parent,
+                selection_parent,
+            )
+        ):
+            raise ValueError("confirmatory preparation authority is incomplete")
+        f2_parent = cast(Mapping[str, object], f2_parent)
+        oof_parent = cast(Mapping[str, object], oof_parent)
+        foundation_parent = cast(Mapping[str, object], foundation_parent)
+        target_parent = cast(Mapping[str, object], target_parent)
+        feature_parent = cast(Mapping[str, object], feature_parent)
+        selection_parent = cast(Mapping[str, object], selection_parent)
+        feature_required_ids = [
+            (feature_parent, "authority_id"),
+            *(
+                (feature_parent, key)
+                for key in (
+                    "foundation_bundle_id",
+                    "foundation_configuration_id",
+                    "observation_dataset_id",
+                    "panel_dataset_id",
+                    "child_closure_id",
+                    "target_child_closure_id",
+                )
+                if key in feature_parent
+            ),
+        ]
+        required_ids = (
+            (f2_parent, "promotion_id"),
+            (oof_parent, "semantic_id"),
+            (oof_parent, "closure_id"),
+            (oof_parent, "verification_id"),
+            (foundation_parent, "semantic_id"),
+            (foundation_parent, "verification_id"),
+            (foundation_parent, "promotion_id"),
+            (target_parent, "semantic_id"),
+            (target_parent, "closure_id"),
+            (target_parent, "verification_id"),
+            *feature_required_ids,
+            (selection_parent, "manifest_id"),
+            (selection_parent, "authority_id"),
+        )
+        if any(
+            not isinstance(mapping.get(key), str) or not mapping[key]
+            for mapping, key in required_ids
+        ):
+            raise ValueError("confirmatory preparation authority contains an empty identity")
+        if any(
+            not isinstance(feature_parent.get(key), Mapping) or not feature_parent[key]
+            for key in ("observation_reference", "panel_reference")
+            if key in feature_parent
+        ):
+            raise ValueError("confirmatory feature authority contains an empty child reference")
+        authority_ids = {
+            "f2_promotion_id": f2_parent["promotion_id"],
+            "oof_semantic_id": oof_parent["semantic_id"],
+            "oof_closure_id": oof_parent["closure_id"],
+            "oof_verification_id": oof_parent["verification_id"],
+            "foundation_semantic_id": foundation_parent["semantic_id"],
+            "foundation_verification_id": foundation_parent["verification_id"],
+            "foundation_promotion_id": foundation_parent["promotion_id"],
+            "target_source_semantic_id": target_parent["semantic_id"],
+            "target_source_closure_id": target_parent["closure_id"],
+            "target_source_verification_id": target_parent["verification_id"],
+            "feature_source_authority_id": feature_parent["authority_id"],
+            "selection_manifest_id": selection_parent["manifest_id"],
+            "selection_authority_id": selection_parent["authority_id"],
+        }
+    else:
+        feature_parent = parent.get("feature_source")
+        authority_ids = {
+            key: policy[key]
+            for key in (
+                "holdout_target_source_closure_id",
+                "holdout_target_source_verification_id",
+                "f2_promotion_id",
+            )
+            if isinstance(policy.get(key), str) and policy[key]
+        }
     target_source = {
         "source_id": source.source_id,
         "source_target_dataset_id": source.source_target_dataset_id,
@@ -757,15 +982,7 @@ def _preparation_authority_payload(
         "opportunity_registry_id": policy.get("holdout_opportunity_registry_id"),
         "opportunity_count": policy.get("holdout_opportunity_count"),
         "opportunity_digest": policy.get("holdout_opportunity_digest"),
-        "authority_ids": {
-            key: policy[key]
-            for key in (
-                "holdout_target_source_closure_id",
-                "holdout_target_source_verification_id",
-                "f2_promotion_id",
-            )
-            if isinstance(policy.get(key), str)
-        },
+        "authority_ids": authority_ids,
     }
     feature_bindings = [
         {
@@ -802,6 +1019,9 @@ def _preparation_authority_payload(
                 ),
                 None,
             ),
+            "parent_authority": (
+                dict(feature_parent) if isinstance(feature_parent, Mapping) else None
+            ),
         }
         for configuration_id, dataset_id in seal.configuration_feature_dataset_ids
         if dataset_id is not None and dataset_id in feature_children
@@ -813,7 +1033,7 @@ def _preparation_authority_payload(
         "seal_id": seal.seal_id,
         "target_source": target_source,
         "feature_bindings": feature_bindings,
-        "parent_authority": dict(parent_authority or {}),
+        "parent_authority": dict(parent),
     }
     return {**semantic, "authority_id": _semantic_id(semantic, "authority_id")}
 
@@ -1427,7 +1647,11 @@ def _feature_dataset_paths(
 
 def _physical_child_paths(root: Path, relative: str, *, identity_field: str) -> tuple[str, ...]:
     """Return one exact top-level child and its declared bounded part files."""
-    physical = _load_object(_safe_child(root, relative))
+    path = _safe_child(root, relative)
+    encoded = path.read_bytes()
+    physical = _load_object_bytes(encoded, path)
+    if physical.get("storage") == PARTITIONED_ROWS_STORAGE:
+        _verify_compact_header(physical, encoded=encoded)
     return (relative, *_partitioned_paths(root, relative, physical, identity_field=identity_field))
 
 def _load_feature_payloads(
@@ -1860,7 +2084,44 @@ def write_holdout_preparation(
     training_target_datasets: Mapping[str, object] | None = None,
     immediate_parent_authority: Mapping[str, object] | None = None,
     _confirmatory_token: object | None = None,
+    _staging: bool = False,
 ) -> Path:
+    """Persist all PR B children transactionally without overwriting any path."""
+    if not _staging:
+        existing_empty_dir = (
+            output.is_dir() and not output.is_symlink() and not any(output.iterdir())
+        )
+        if (output.exists() or output.is_symlink()) and not existing_empty_dir:
+            raise FileExistsError("holdout preparation output already exists")
+        output.parent.mkdir(parents=True, exist_ok=True)
+        with TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as staged_name:
+            write_holdout_preparation(
+                Path(staged_name),
+                selection=selection,
+                holdout_target_source=holdout_target_source,
+                feature_dataset=feature_dataset,
+                feature_datasets=feature_datasets,
+                final_fits=final_fits,
+                forecasts=forecasts,
+                coverage=coverage,
+                seal=seal,
+                training_feature_datasets=training_feature_datasets,
+                training_target_datasets=training_target_datasets,
+                immediate_parent_authority=immediate_parent_authority,
+                _confirmatory_token=_confirmatory_token,
+                _staging=True,
+            )
+            if (output.exists() and not existing_empty_dir) or output.is_symlink():
+                raise FileExistsError("holdout preparation output appeared during staging")
+            try:
+                if existing_empty_dir:
+                    output.rmdir()
+                os.replace(staged_name, output)
+            except BaseException:
+                if existing_empty_dir and not output.exists():
+                    output.mkdir()
+                raise
+        return output / "manifest.json"
     """Persist all PR B children and the seal without overwriting any path."""
     if (
         seal.holdout_scope is HoldoutScope.CONFIRMATORY
@@ -1984,8 +2245,12 @@ def write_holdout_preparation(
                 "purged_target_ids",
                 "inner_fit_target_ids",
                 "inner_validation_target_ids",
+                "alpha_candidate_scores",
                 "sample_weights",
+                "coefficients",
+                "diagnostics",
             ),
+            mapping_fields=("diagnostics",),
         )
         _write_json(output / f"fits/{fit_id}.json", compact)
     for dataset_id in seal.forecast_dataset_ids:
@@ -2203,7 +2468,7 @@ def prepare_holdout_from_files(
     immediate_parent_authority: Mapping[str, object] | None = None,
     expected_selection_manifest_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
-    """Copy one disposable preparation exactly once into a fresh root."""
+    """Copy one disposable preparation transactionally into a fresh root."""
     source_seal = verify_holdout_preparation(
         source,
         holdout_target_source=holdout_target_source,
@@ -2230,6 +2495,7 @@ def prepare_holdout_from_files(
             raise ValueError("cannot prepare from a holdout with lifecycle evidence")
     if output.exists() or output.is_symlink():
         raise FileExistsError("holdout preparation output already exists")
+    output.parent.mkdir(parents=True, exist_ok=True)
     claim_path = source / _PREPARATION_CLAIM_FILE
     existing_claim = _load_object(claim_path)
     available = _preparation_claim(
@@ -2271,10 +2537,7 @@ def prepare_holdout_from_files(
         str(destination_claim["claim_id"]),
         transfer_id,
     )
-    _replace_json(claim_path, transferred)
-    _write_json(source / _PREPARATION_USAGE_FILE, usage)
     paths = [
-        _PREPARATION_CLAIM_FILE,
         "selection.json",
         "authority.json",
         "manifest.json",
@@ -2282,9 +2545,7 @@ def prepare_holdout_from_files(
     for _dataset_id, relative in _feature_dataset_paths(source_seal):
         paths.extend(_physical_child_paths(source, relative, identity_field="dataset_id"))
     for fit_id in source_seal.final_fit_ids:
-        paths.extend(
-            _physical_child_paths(source, f"fits/{fit_id}.json", identity_field="fit_id")
-        )
+        paths.extend(_physical_child_paths(source, f"fits/{fit_id}.json", identity_field="fit_id"))
     for dataset_id in source_seal.forecast_dataset_ids:
         paths.extend(
             _physical_child_paths(
@@ -2301,12 +2562,49 @@ def prepare_holdout_from_files(
                 identity_field="coverage_id",
             )
         )
-    for relative in paths:
-        if relative == _PREPARATION_CLAIM_FILE:
-            _write_json(output / relative, destination_claim)
-        else:
-            _copy_create(source / relative, output / relative)
-    _write_json(output / _PREPARATION_USAGE_FILE, usage)
+    source_usage_path = source / _PREPARATION_USAGE_FILE
+    original_usage = (
+        source_usage_path.read_bytes()
+        if source_usage_path.is_file()
+        else None
+    )
+    with TemporaryDirectory(dir=output.parent, prefix=f".{output.name}.") as staged_name:
+        staged = Path(staged_name)
+        _write_json(staged / _PREPARATION_CLAIM_FILE, destination_claim)
+        for relative in paths:
+            _copy_create(source / relative, staged / relative)
+        _write_json(staged / _PREPARATION_USAGE_FILE, usage)
+        # Authenticate the complete destination while the source remains AVAILABLE.
+        verify_holdout_preparation(
+            staged,
+            holdout_target_source=holdout_target_source,
+            training_feature_datasets=training_feature_datasets,
+            immediate_parent_authority=immediate_parent_authority,
+        )
+
+        def rollback_source() -> None:
+            restore_claim = claim_path.with_name(f".{claim_path.name}.rollback")
+            atomic_create(restore_claim, canonical_bytes(existing_claim))
+            os.replace(restore_claim, claim_path)
+            if original_usage is None:
+                if source_usage_path.exists() or source_usage_path.is_symlink():
+                    source_usage_path.unlink()
+            else:
+                restore_usage = source_usage_path.with_name(
+                    f".{source_usage_path.name}.rollback"
+                )
+                atomic_create(restore_usage, original_usage)
+                os.replace(restore_usage, source_usage_path)
+
+        try:
+            _replace_json(claim_path, transferred)
+            _write_json(source_usage_path, usage)
+            if output.exists() or output.is_symlink():
+                raise FileExistsError("holdout preparation output appeared during transfer")
+            os.replace(staged_name, output)
+        except BaseException:
+            rollback_source()
+            raise
     return verify_holdout_preparation(
         output,
         holdout_target_source=holdout_target_source,
@@ -3144,13 +3442,13 @@ def build_holdout_bundle(
     immediate_parent_authority: Mapping[str, object] | None = None,
 ) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
-    payload_cache: dict[str, dict[str, object]] = {}
+    # Each authentication phase gets a private cache.  Sharing payloads between
+    # preparation and evaluation could allow a mutation between phases to go unseen.
     seal = verify_holdout_preparation(
         root,
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
-        _payload_cache=payload_cache,
     )
     selection = verify_holdout_selection(root / "selection.json")
     opened, consumed = verify_holdout_markers(root)
@@ -3159,7 +3457,6 @@ def build_holdout_bundle(
         holdout_target_source=holdout_target_source,
         training_feature_datasets=training_feature_datasets,
         immediate_parent_authority=immediate_parent_authority,
-        _payload_cache=payload_cache,
     )
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(

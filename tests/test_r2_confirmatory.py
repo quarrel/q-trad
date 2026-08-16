@@ -968,7 +968,11 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
 
     altered_root = tmp_path / "altered-preparation"
     copytree(preparation_root, altered_root)
-    fit_path = next((altered_root / "fits").iterdir())
+    fit_path = next(
+        path
+        for path in (altered_root / "fits").iterdir()
+        if path.is_file() and path.suffix == ".json"
+    )
     fit_payload = cast(dict[str, object], json.loads(fit_path.read_text(encoding="utf-8")))
     fit_payload["fit_id"] = "0" * 64
     fit_path.write_text(json.dumps(fit_payload), encoding="utf-8")

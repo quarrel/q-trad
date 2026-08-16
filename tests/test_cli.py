@@ -1177,6 +1177,19 @@ def test_parser_rejects_non_demo_ingestion_environment() -> None:
     with pytest.raises(SystemExit):
         cli.build_parser().parse_args(["ingest", "--environment", "live"])
 
+@pytest.mark.parametrize(
+    "subcommand", (
+        "holdout-prepare",
+        "holdout-recover",
+        "holdout-bundle",
+        "holdout-reveal",
+        "holdout-verify",
+    )
+)
+def test_parser_rejects_unauthorised_generic_holdout_commands(subcommand: str) -> None:
+    with pytest.raises(SystemExit):
+        cli.build_parser().parse_args(["research", "baselines", subcommand])
+
 
 def test_parser_accepts_r2_replay_and_rejects_retired_software_operations() -> None:
     parser = cli.build_parser()

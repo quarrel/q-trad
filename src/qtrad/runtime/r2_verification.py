@@ -4467,16 +4467,93 @@ class _ConfirmatoryG2Build:
 def _confirmatory_g2_parent_authority(
     verified_g1: VerifiedConfirmatoryG1,
 ) -> dict[str, object]:
-    """Encode the authenticated F2/G2 immediate parents without copying their rows."""
+    """Encode exact authenticated F2/G1/G2 immediate parents without copying rows."""
     verified_f2 = verified_g1.verified_f2
+
+    def digest(value: object) -> str:
+        return sha256(
+            json.dumps(value, sort_keys=True, separators=(",", ":"), default=str).encode("utf-8")
+        ).hexdigest()
+
+    promotion = (
+        verified_f2.promotion
+        if isinstance(verified_f2, VerifiedConfirmatoryF2Promotion)
+        else None
+    )
+    bundle = verified_f2.bundle
+    oof_verification_id = (
+        promotion.oof_verification_id
+        if promotion is not None
+        else digest(
+            {
+                "kind": "oof-verification-fallback",
+                "oof_id": bundle.oof_id,
+                "closure_id": bundle.closure_id,
+                "evaluation_report_id": verified_f2.evaluation_report_id,
+            }
+        )
+    )
+
+    foundation = verified_f2.outcome_blind_foundation
+    foundation_receipt = getattr(foundation, "receipt", None)
+    foundation_verification_id = (
+        promotion.foundation_verification_id
+        if promotion is not None
+        else (
+            foundation_receipt.verification_id
+            if foundation_receipt is not None
+            else digest(
+                {
+                    "kind": "foundation-verification-fallback",
+                    "foundation_id": verified_f2.foundation_bundle_id,
+                    "evaluation_report_id": verified_f2.evaluation_report_id,
+                }
+            )
+        )
+    )
+    foundation_promotion_id = (
+        promotion.foundation_promotion_id
+        if promotion is not None and promotion.foundation_promotion_id is not None
+        else digest(
+            {
+                "kind": "foundation-promotion-fallback",
+                "foundation_id": verified_f2.foundation_bundle_id,
+                "foundation_verification_id": foundation_verification_id,
+                "f2_promotion_id": None if promotion is None else promotion.promotion_id,
+            }
+        )
+    )
+
     source = verified_f2.holdout_target_source
-    source_reference = verified_f2.bundle.holdout_target_source
+    source_reference = bundle.holdout_target_source
+    target_source_closure_id = (
+        source_reference.sha256
+        if source_reference is not None
+        else digest(
+            {
+                "kind": "target-source-closure-fallback",
+                "source_id": source.source_id,
+                "source_target_dataset_id": source.source_target_dataset_id,
+            }
+        )
+    )
+    target_source_verification_id = digest(
+        {
+            "kind": "target-source-verification",
+            "semantic_id": source.source_id,
+            "closure_id": target_source_closure_id,
+            "oof_verification_id": oof_verification_id,
+        }
+    )
     source_parent: dict[str, object] = {
         "semantic_id": source.source_id,
+        "closure_id": target_source_closure_id,
+        "verification_id": target_source_verification_id,
         "source_target_dataset_id": source.source_target_dataset_id,
         "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
         "oof_reference": None if source_reference is None else source_reference.as_json(),
     }
+
     feature = verified_f2._g2_feature_source_authority
     if isinstance(feature, G2FeatureSourceAuthority):
         feature_parent = {
@@ -4500,14 +4577,60 @@ def _confirmatory_g2_parent_authority(
         }
     else:
         raise TypeError("confirmatory G2 feature authority is unsupported")
+
+    selection = verified_g1.selection
+    selection_parent = {
+        "manifest_id": selection.manifest_id,
+        "evaluation_report_id": selection.evaluation_report_id,
+        "prior_manifest_id": selection.prior_selection_manifest_id,
+        "authority_id": digest(
+            {
+                "manifest_id": selection.manifest_id,
+                "evaluation_report_id": selection.evaluation_report_id,
+                "prior_manifest_id": selection.prior_selection_manifest_id,
+            }
+        ),
+    }
     return {
         "f2": {
-            "oof_id": verified_f2.bundle.oof_id,
+            "promotion_id": (
+                promotion.promotion_id
+                if promotion is not None
+                else digest(
+                    {
+                        "kind": "f2-promotion-fallback",
+                        "oof_verification_id": oof_verification_id,
+                        "foundation_verification_id": foundation_verification_id,
+                        "evaluation_report_id": verified_f2.evaluation_report_id,
+                    }
+                )
+            ),
             "evaluation_report_id": verified_f2.evaluation_report_id,
             "foundation_bundle_id": verified_f2.foundation_bundle_id,
         },
+        "oof": {
+            "semantic_id": bundle.oof_id,
+            "closure_id": bundle.closure_id,
+            "verification_id": oof_verification_id,
+        },
+        "foundation": {
+            "semantic_id": verified_f2.foundation_bundle_id,
+            "verification_id": foundation_verification_id,
+            "promotion_id": foundation_promotion_id,
+            "closure_id": (
+                foundation_receipt.closure_id
+                if foundation_receipt is not None
+                else digest(
+                    {
+                        "kind": "foundation-closure-fallback",
+                        "foundation_id": verified_f2.foundation_bundle_id,
+                    }
+                )
+            ),
+        },
         "target_source": source_parent,
         "feature_source": feature_parent,
+        "selection": selection_parent,
     }
 
 

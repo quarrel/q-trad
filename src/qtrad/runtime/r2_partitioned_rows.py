@@ -97,8 +97,13 @@ def write_partitioned_rows(
                 "partitioned R2 row count differs from its declared dataset: "
                 f"{row_count} != {expected_row_count}"
             )
+        header_payload = dict(header)
+        if "header_sha256" not in header_payload:
+            header_payload["header_sha256"] = sha256(
+                canonical_bytes(header_payload)
+            ).hexdigest()
         return {
-            **dict(header),
+            **header_payload,
             "storage": PARTITIONED_ROWS_STORAGE,
             "identity_field": identity_field,
             "row_count": row_count,
