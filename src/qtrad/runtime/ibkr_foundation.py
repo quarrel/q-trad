@@ -1351,6 +1351,28 @@ def _child_payload_chunks(
         yield tuple(payloads)
 
 
+def _bounded_parquet_chunks(
+    payloads: Sequence[str],
+) -> Iterator[tuple[tuple[str, ...], bytes]]:
+    """Encode stable row ranges, bisecting any range over the file-byte bound."""
+
+    candidate = tuple(payloads)
+    parquet_bytes = _parquet_bytes(candidate)
+    if not parquet_bytes:
+        raise ValueError("IBKR foundation Parquet child encoding is empty")
+    if len(parquet_bytes) <= _MAX_CHILD_FILE_BYTES:
+        yield candidate, parquet_bytes
+        return
+    if len(candidate) <= 1:
+        raise ValueError(
+            "IBKR foundation Parquet child single row exceeds its byte bound: "
+            f"{len(parquet_bytes)} > {_MAX_CHILD_FILE_BYTES} bytes"
+        )
+    midpoint = len(candidate) // 2
+    yield from _bounded_parquet_chunks(candidate[:midpoint])
+    yield from _bounded_parquet_chunks(candidate[midpoint:])
+
+
 def _write_child_parts(
     child_root: Path,
     bundle_root: Path,
@@ -1362,53 +1384,59 @@ def _write_child_parts(
     if kind not in _CHILD_KINDS:
         raise ValueError(f"unsupported IBKR foundation child kind: {kind}")
     parts: list[JsonValue] = []
-    for part_index, payloads in enumerate(_child_payload_chunks(rows)):
-        parquet_bytes = _parquet_bytes(payloads)
-        if not parquet_bytes or len(parquet_bytes) > _MAX_CHILD_FILE_BYTES:
-            raise ValueError("IBKR foundation Parquet child exceeds its byte bound")
-        relative_file = (
-            f"{child_root.name}/parquet/{kind}/"
-            f"part-{part_index:06d}-{hashlib.sha256(parquet_bytes).hexdigest()[:24]}.parquet"
-        )
-        file_path = bundle_root / PurePosixPath(relative_file)
-        _write_create_only(file_path, parquet_bytes)
-        identity: dict[str, JsonValue] = {
-            "contract": _FOUNDATION_CHILD_CONTRACT,
-            "schema_version": _FOUNDATION_CHILD_SCHEMA_VERSION,
-            "kind": kind,
-            "dataset_id": dataset_id,
-            "part_index": part_index,
-            "row_count": len(payloads),
-            "file": relative_file,
-            "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
-            "rows_sha256": _sha(list(payloads)),
-            "lineage": dict(lineage),
-        }
-        manifest_sha256 = _sha(identity)
-        manifest: dict[str, JsonValue] = {
-            **identity,
-            "manifest_sha256": manifest_sha256,
-        }
-        relative_manifest = (
-            f"{child_root.name}/manifests/{kind}/part-{part_index:06d}-{manifest_sha256[:24]}.json"
-        )
-        manifest_path = bundle_root / PurePosixPath(relative_manifest)
-        encoded_manifest = _json_bytes(manifest) + b"\n"
-        if len(encoded_manifest) > _MAX_CHILD_MANIFEST_BYTES:
-            raise ValueError("IBKR foundation child manifest exceeds the 4 MiB limit")
-        _write_create_only(manifest_path, encoded_manifest)
-        parts.append(
-            {
+    part_index = 0
+    for candidate in _child_payload_chunks(rows):
+        for payloads, parquet_bytes in _bounded_parquet_chunks(candidate):
+            if len(parquet_bytes) > _MAX_CHILD_FILE_BYTES:
+                raise ValueError(
+                    "IBKR foundation Parquet child exceeds its byte bound: "
+                    f"{len(parquet_bytes)} > {_MAX_CHILD_FILE_BYTES} bytes"
+                )
+            relative_file = (
+                f"{child_root.name}/parquet/{kind}/"
+                f"part-{part_index:06d}-{hashlib.sha256(parquet_bytes).hexdigest()[:24]}.parquet"
+            )
+            file_path = bundle_root / PurePosixPath(relative_file)
+            _write_create_only(file_path, parquet_bytes)
+            identity: dict[str, JsonValue] = {
+                "contract": _FOUNDATION_CHILD_CONTRACT,
+                "schema_version": _FOUNDATION_CHILD_SCHEMA_VERSION,
                 "kind": kind,
                 "dataset_id": dataset_id,
-                "manifest_id": manifest_sha256[:24],
-                "manifest_path": relative_manifest,
-                "manifest_sha256": manifest_sha256,
+                "part_index": part_index,
                 "row_count": len(payloads),
                 "file": relative_file,
                 "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
+                "rows_sha256": _sha(list(payloads)),
+                "lineage": dict(lineage),
             }
-        )
+            manifest_sha256 = _sha(identity)
+            manifest: dict[str, JsonValue] = {
+                **identity,
+                "manifest_sha256": manifest_sha256,
+            }
+            relative_manifest = (
+                f"{child_root.name}/manifests/{kind}/"
+                f"part-{part_index:06d}-{manifest_sha256[:24]}.json"
+            )
+            manifest_path = bundle_root / PurePosixPath(relative_manifest)
+            encoded_manifest = _json_bytes(manifest) + b"\n"
+            if len(encoded_manifest) > _MAX_CHILD_MANIFEST_BYTES:
+                raise ValueError("IBKR foundation child manifest exceeds the 4 MiB limit")
+            _write_create_only(manifest_path, encoded_manifest)
+            parts.append(
+                {
+                    "kind": kind,
+                    "dataset_id": dataset_id,
+                    "manifest_id": manifest_sha256[:24],
+                    "manifest_path": relative_manifest,
+                    "manifest_sha256": manifest_sha256,
+                    "row_count": len(payloads),
+                    "file": relative_file,
+                    "file_sha256": hashlib.sha256(parquet_bytes).hexdigest(),
+                }
+            )
+            part_index += 1
     if len(parts) > _MAX_CHILD_PARTS:
         raise ValueError("IBKR foundation child part count exceeds its bound")
     return parts

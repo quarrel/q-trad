@@ -11,6 +11,7 @@ import pytest
 import qtrad.runtime.ibkr_foundation as foundation_runtime
 from qtrad import __main__ as cli
 from qtrad.application.ibkr_foundation import _ibkr_opportunity_coverage
+from qtrad.domain.events import JsonValue
 from qtrad.domain.folds import Fold, membership_hash
 from qtrad.domain.foundation import ReturnDisposition
 from qtrad.domain.ibkr_foundation import (
@@ -561,3 +562,79 @@ def test_stage8_cli_build_and_verify_round_trip(
     )
     assert json.loads(foundation.read_bytes())["contract"] == "qtrad-ibkr-historical-foundation-v2"
     assert receipt.is_file()
+
+
+def test_stage8_child_partition_bisects_adverse_encoding_expansion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    payloads = tuple(f"row-{index}" for index in range(8))
+    original_parquet_bytes = foundation_runtime._parquet_bytes
+
+    def expanded(candidate: tuple[str, ...]) -> bytes:
+        return original_parquet_bytes(candidate) + b"x" * (100_000 * len(candidate))
+
+    pair_candidates = tuple(payloads[index : index + 2] for index in range(0, 8, 2))
+    pair_bound = max(len(expanded(candidate)) for candidate in pair_candidates)
+    assert len(expanded(payloads[:4])) > pair_bound
+
+    monkeypatch.setattr(foundation_runtime, "_parquet_bytes", expanded)
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", pair_bound)
+
+    chunks = list(foundation_runtime._bounded_parquet_chunks(payloads))
+
+    assert [chunk for chunk, _encoded in chunks] == list(pair_candidates)
+    assert all(len(encoded) <= pair_bound for _chunk, encoded in chunks)
+
+
+def test_stage8_child_partition_rejects_single_row_over_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", 8)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_parquet_bytes",
+        lambda _payloads: b"x" * 9,
+    )
+
+    with pytest.raises(ValueError, match=r"single row.*9 > 8 bytes"):
+        list(foundation_runtime._bounded_parquet_chunks(("oversized",)))
+
+
+def test_stage8_child_parts_round_trip_order_and_part_indexes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    rows = tuple(cast(dict[str, JsonValue], {"row": index}) for index in range(8))
+    payloads = tuple(foundation_runtime._canonical_row(row) for row in rows)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_CHILD_PAYLOAD_BYTES",
+        len(payloads[0]) + len(payloads[1]),
+    )
+
+    parts = foundation_runtime._write_child_parts(
+        tmp_path / "foundation.json.children",
+        tmp_path,
+        "observations",
+        rows,
+        "dataset-id",
+        {"source": "fixture"},
+    )
+    references = cast(list[dict[str, Any]], parts)
+
+    assert len(references) == 4
+    assert [
+        int(json.loads((tmp_path / str(reference["manifest_path"])).read_bytes())["part_index"])
+        for reference in references
+    ] == list(range(4))
+    decoded: list[dict[str, Any]] = []
+    for reference in references:
+        decoded.extend(
+            foundation_runtime._read_child_rows(
+                tmp_path / str(reference["file"]),
+                expected_row_count=int(reference["row_count"]),
+            )
+        )
+        assert (tmp_path / str(reference["file"])).stat().st_size <= (
+            foundation_runtime._MAX_CHILD_FILE_BYTES
+        )
+    assert tuple(decoded) == rows
