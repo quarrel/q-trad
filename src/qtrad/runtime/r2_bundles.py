@@ -317,6 +317,7 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
         bounded_source_closure_id,
         load_r2_holdout_target_source,
     )
+
     allowed_paths = {"manifest.json"} | {ref.path for ref in all_refs}
     binding_payload: dict[str, object] | None = None
     source_authority: object | None = None
@@ -434,8 +435,7 @@ def _verify_r2_oof_bundle_with_source(path: Path) -> tuple[R2OofBundle, object |
                 }
                 if (
                     bundle.holdout_target_source is not None
-                    and bundle.holdout_target_source.contract
-                    == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
+                    and bundle.holdout_target_source.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT
                 ):
                     expected_runtime_keys.add("holdout_target_source")
                 if not isinstance(runtime, dict) or set(runtime) != expected_runtime_keys:

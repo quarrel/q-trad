@@ -1581,6 +1581,8 @@ def _child_reference(path: str, payload: Mapping[str, object]) -> ArtifactRefere
         semantic_id=_payload_identity(payload),
         content=payload,
     )
+
+
 def _holdout_source_binding_payload(source_id: str, closure_id: str) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
@@ -2154,8 +2156,7 @@ def build_oof_bundle(
         if foundation_authority.evidence_class is not experiment.evidence_class:
             raise ValueError("R2 authority evidence differs from the experiment")
         if holdout_target_source_path is not None and (
-            holdout_target_source_path.absolute()
-            != holdout_target_source_authority.manifest_path
+            holdout_target_source_path.absolute() != holdout_target_source_authority.manifest_path
         ):
             raise ValueError("OOF target source path differs from its authenticated authority")
         if experiment.market_data_source_class is MarketDataSourceClass.IBKR_HISTORICAL_RESEARCH:
@@ -2633,6 +2634,8 @@ def _oof_child_payload(bundle_path: Path, bundle: R2OofBundle, contract: str) ->
     if len(matches) != 1:
         raise ValueError(f"OOF bundle must contain exactly one required {contract} child")
     return matches[0]
+
+
 def _oof_holdout_source_authority(
     bundle_path: Path,
     bundle: R2OofBundle,
@@ -5590,6 +5593,7 @@ def _replay_verified_oof(
     else:
         raise ValueError("OOF descriptor has an unsupported run kind")
     return source_authority
+
 
 def verify_r2_oof_semantics(path: Path, *, receipt_output: Path | None = None) -> R2OofBundle:
     """Replay one R2 OOF transformation and optionally issue its create-only receipt."""

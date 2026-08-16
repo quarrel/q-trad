@@ -129,15 +129,11 @@ def _encoded_part(
     part_index: int,
     rows: Sequence[JsonValue],
 ) -> tuple[dict[str, JsonValue], bytes]:
-    payload = _part_payload(
-        source_id=source_id, kind=kind, part_index=part_index, rows=rows
-    )
+    payload = _part_payload(source_id=source_id, kind=kind, part_index=part_index, rows=rows)
     return payload, canonical_bytes(payload)
 
 
-def _part_envelope_size(
-    *, source_id: str, kind: str, part_index: int
-) -> tuple[int, bytes, bytes]:
+def _part_envelope_size(*, source_id: str, kind: str, part_index: int) -> tuple[int, bytes, bytes]:
     empty = canonical_bytes(
         _part_payload(source_id=source_id, kind=kind, part_index=part_index, rows=[])
     )
@@ -183,22 +179,16 @@ def _part_batches(
             current_size = envelope_size
             probe_size = current_size + len(row_bytes)
             if probe_size > _MAX_PART_BYTES:
-                raise ValueError(
-                    f"holdout target source {kind} row exceeds its 64 MiB part bound"
-                )
+                raise ValueError(f"holdout target source {kind} row exceeds its 64 MiB part bound")
         current_rows.append(row)
         current_size = probe_size
     if current_rows:
         yield part_index, current_rows, current_size
 
 
-def _part_sizes(
-    *, source_id: str, kind: str, rows: Iterable[JsonValue]
-) -> tuple[int, ...]:
+def _part_sizes(*, source_id: str, kind: str, rows: Iterable[JsonValue]) -> tuple[int, ...]:
     sizes: list[int] = []
-    for _part_index, _part_rows, size in _part_batches(
-        source_id=source_id, kind=kind, rows=rows
-    ):
+    for _part_index, _part_rows, size in _part_batches(source_id=source_id, kind=kind, rows=rows):
         sizes.append(size)
     return tuple(sizes)
 
@@ -467,8 +457,10 @@ def _part_rows(
         relative = reference["path"]
         digest = reference["sha256"]
         row_count = reference["row_count"]
-        if not isinstance(relative, str) or not isinstance(digest, str) or not isinstance(
-            row_count, int
+        if (
+            not isinstance(relative, str)
+            or not isinstance(digest, str)
+            or not isinstance(row_count, int)
         ):
             raise ValueError(f"holdout target source {kind} part reference is malformed")
         part_path = _safe_part_path(manifest_path.parent, relative)
@@ -633,9 +625,7 @@ def load_r2_holdout_target_source_authority(
     part_paths = bounded_manifest_part_paths(path, payload=payload)
     if closure_id != bounded_source_closure_id(payload):
         raise ValueError("holdout target source authority closure is not authenticated")
-    source = load_r2_holdout_target_source(
-        path, _manifest_payload=payload, _part_paths=part_paths
-    )
+    source = load_r2_holdout_target_source(path, _manifest_payload=payload, _part_paths=part_paths)
     if source.source_id != source_id:
         raise ValueError("holdout target source authority semantic ID differs from its manifest")
     return R2HoldoutTargetSourceAuthority._create(

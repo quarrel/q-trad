@@ -2766,9 +2766,7 @@ async def _report_r2_readiness(
     )
     if outcome_blind_confirmatory:
         if holdout_target_source_path is None:
-            raise ValueError(
-                "confirmatory IBKR readiness requires --holdout-target-source"
-            )
+            raise ValueError("confirmatory IBKR readiness requires --holdout-target-source")
         holdout_source_authority = load_r2_holdout_target_source_authority(
             holdout_target_source_path
         )
@@ -2901,9 +2899,7 @@ async def _build_r2_oof(
         raise ValueError("a Stage 8 promotion is only valid for IBKR historical OOF work")
     if holdout_target_source_path is None:
         raise ValueError("OOF build requires an authenticated holdout target source")
-    holdout_source_authority = load_r2_holdout_target_source_authority(
-        holdout_target_source_path
-    )
+    holdout_source_authority = load_r2_holdout_target_source_authority(holdout_target_source_path)
     holdout_target_source = holdout_source_authority.source
     foundation_authority = await _load_r2_foundation_inputs(
         settings,

@@ -501,7 +501,6 @@ def test_oof_rejects_empty_orphan_directories(tmp_path: Path) -> None:
         verify_r2_oof_bundle(manifest_path)
 
 
-
 def test_bounded_holdout_source_round_trip_is_create_only(tmp_path: Path) -> None:
     source = R2HoldoutTargetSource.from_json(_holdout_source_payload())
     output = tmp_path / "target-source.json"
@@ -512,9 +511,7 @@ def test_bounded_holdout_source_round_trip_is_create_only(tmp_path: Path) -> Non
     assert load_r2_holdout_target_source(output).source_id == source.source_id
     part_paths = bounded_manifest_part_paths(output)
     assert part_paths
-    assert all(
-        (output.parent / path).stat().st_size <= 64 * 1024 * 1024 for path in part_paths
-    )
+    assert all((output.parent / path).stat().st_size <= 64 * 1024 * 1024 for path in part_paths)
     with pytest.raises(FileExistsError):
         write_r2_holdout_target_source(output, source)
 
@@ -528,7 +525,6 @@ def test_bounded_holdout_source_rejects_undeclared_part(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="undeclared part"):
         load_r2_holdout_target_source(output)
-
 
 
 def test_bounded_partitions_are_deterministic() -> None:
