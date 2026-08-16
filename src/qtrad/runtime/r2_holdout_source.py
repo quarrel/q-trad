@@ -328,13 +328,18 @@ def _bounded_source_closure_id(manifest: Mapping[str, object]) -> str:
         for raw_part in raw_parts:
             if not isinstance(raw_part, Mapping):
                 raise ValueError(f"holdout target source {field} reference is invalid")
+            if set(raw_part) != {"path", "sha256", "row_count"}:
+                raise ValueError(f"holdout target source {field} reference has unknown fields")
             digest = raw_part.get("sha256")
             row_count = raw_part.get("row_count")
             relative = raw_part.get("path")
             if (
                 not isinstance(relative, str)
                 or not isinstance(digest, str)
+                or len(digest) != 64
+                or any(character not in "0123456789abcdef" for character in digest)
                 or not isinstance(row_count, int)
+                or row_count < 0
             ):
                 raise ValueError(f"holdout target source {field} reference is malformed")
             result.append({"path": relative, "sha256": digest, "row_count": row_count})
@@ -625,9 +630,9 @@ def load_r2_holdout_target_source_authority(
     closure_id = payload.get("closure_id")
     if not isinstance(source_id, str) or not isinstance(closure_id, str):
         raise ValueError("holdout target source authority IDs are malformed")
+    part_paths = bounded_manifest_part_paths(path, payload=payload)
     if closure_id != bounded_source_closure_id(payload):
         raise ValueError("holdout target source authority closure is not authenticated")
-    part_paths = bounded_manifest_part_paths(path, payload=payload)
     source = load_r2_holdout_target_source(
         path, _manifest_payload=payload, _part_paths=part_paths
     )
@@ -665,6 +670,8 @@ def bounded_manifest_part_paths(
         for expected_index, raw_reference in enumerate(references):
             if not isinstance(raw_reference, Mapping):
                 raise ValueError(f"holdout target source {field_name} reference is invalid")
+            if set(raw_reference) != {"path", "sha256", "row_count"}:
+                raise ValueError(f"holdout target source {field_name} reference has unknown fields")
             relative = raw_reference.get("path")
             expected_relative = f"{path.name}.parts/{kind}/part-{expected_index:06d}.json"
             if relative != expected_relative:
