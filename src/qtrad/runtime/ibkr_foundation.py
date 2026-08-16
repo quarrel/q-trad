@@ -567,7 +567,7 @@ def _load_authenticated_ibkr_foundation_v3(
     )
     configuration = authenticated.configuration
     provider_dataset = authenticated.provider_dataset
-    observation_rows = tuple(_observation_from_row(row) for row in decoded["observations"])
+    observation_rows = tuple(_observation_from_row(row) for row in decoded.pop("observations"))
     source_start = (
         min(row.interval_start for row in observation_rows)
         if observation_rows
@@ -603,13 +603,13 @@ def _load_authenticated_ibkr_foundation_v3(
         dataset_id=child_ids["observations"],
     )
     panel = PanelDataset(
-        rows=tuple(_panel_row(row) for row in decoded["panel"]),
+        rows=tuple(_panel_row(row) for row in decoded.pop("panel")),
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
         dataset_id=child_ids["panel"],
     )
     targets = TargetDataset(
-        rows=tuple(_target(row) for row in decoded["targets"]),
+        rows=tuple(_target(row) for row in decoded.pop("targets")),
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
         dataset_id=child_ids["targets"],
@@ -618,11 +618,11 @@ def _load_authenticated_ibkr_foundation_v3(
         source_target_dataset_id=targets.dataset_id,
         observation_dataset_id=observations.dataset_id,
         foundation_configuration_id=configuration.configuration_id,
-        rows=decoded["target-index"],
+        rows=decoded.pop("target-index"),
     )
     causal_metadata = R2HoldoutCausalMetadata.from_rows(
         source_panel_dataset_id=panel.dataset_id,
-        rows=decoded["causal-metadata"],
+        rows=decoded.pop("causal-metadata"),
     )
     build = IBKRFoundationBuild(
         configuration=configuration,
@@ -630,7 +630,7 @@ def _load_authenticated_ibkr_foundation_v3(
         panel=panel,
         targets=targets,
         folds=FoldDataset(
-            folds=tuple(_fold(row) for row in decoded["folds"]),
+            folds=tuple(_fold(row) for row in decoded.pop("folds")),
             target_dataset_id=targets.dataset_id,
             foundation_configuration_id=configuration.configuration_id,
             dataset_id=child_ids["folds"],

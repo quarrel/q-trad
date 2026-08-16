@@ -220,6 +220,30 @@ def _target_source_identity(
     )
 
 
+def _causal_metadata_identity(
+    *,
+    contract: str,
+    schema_version: int,
+    source_panel_dataset_id: str | None,
+    rows: Iterable[object],
+) -> str:
+    return _hash_chunks(
+        _json_object_chunks(
+            {
+                "contract": lambda: _single_json(contract),
+                "rows": lambda: _json_array_chunks(
+                    rows,
+                    lambda item: _json_bytes(
+                        cast(R2HoldoutCausalMetadataRow, item).as_json()
+                    ),
+                ),
+                "schema_version": lambda: _single_json(schema_version),
+                "source_panel_dataset_id": lambda: _single_json(source_panel_dataset_id),
+            }
+        )
+    )
+
+
 def _require_id(value: str, field: str) -> None:
     if len(value) not in (24, 64) or any(char not in "0123456789abcdef" for char in value):
         raise ValueError(f"{field} must be a lowercase SHA-256 identifier")
@@ -1678,13 +1702,11 @@ class R2HoldoutCausalMetadata:
         *,
         source_panel_dataset_id: str | None = None,
     ) -> str:
-        return _semantic_id(
-            {
-                "contract": cls.CONTRACT,
-                "schema_version": cls.SCHEMA_VERSION,
-                "source_panel_dataset_id": source_panel_dataset_id,
-                "rows": [row.as_json() for row in rows],
-            }
+        return _causal_metadata_identity(
+            contract=cls.CONTRACT,
+            schema_version=cls.SCHEMA_VERSION,
+            source_panel_dataset_id=source_panel_dataset_id,
+            rows=rows,
         )
 
     @classmethod

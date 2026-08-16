@@ -835,6 +835,67 @@ def test_target_identity_streaming_preserves_canonical_digests() -> None:
     assert target_source.source_id == holdout_domain._semantic_id(target_source.semantic_json())
 
 
+def test_causal_metadata_identity_streams_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    panel_rows = tuple(
+        PanelRow(
+            decision_time=NOW + timedelta(minutes=index),
+            instrument_id="INSTRUMENT_0",
+            basis=PriceBasis.MID,
+            feature_data_asof=NOW + timedelta(minutes=index + 1),
+            latest_feature_bar_end=NOW + timedelta(minutes=index),
+            status=PanelStatus.OBSERVED,
+            audit_disposition=None,
+            selected_event_id=UUID(int=index + 1),
+            selected_stream_version=1,
+            selected_global_position=index + 1,
+            selected_availability_time=NOW + timedelta(minutes=index) - timedelta(minutes=1),
+            selected_revision=1,
+            interval_start=NOW + timedelta(minutes=index) - timedelta(minutes=1),
+            interval_end=NOW + timedelta(minutes=index),
+            open=Decimal("1"),
+            high=Decimal("1"),
+            low=Decimal("1"),
+            close=Decimal("1"),
+            sample_count=1,
+            quality=None,
+        )
+        for index in range(2)
+    )
+    panel = PanelDataset.create(
+        panel_rows,
+        observation_dataset_id=_id("observations"),
+        foundation_configuration_id=_id("foundation"),
+    )
+    original_semantic_id = holdout_domain._semantic_id
+
+    def bounded_semantic_id(value: object) -> str:
+        if isinstance(value, dict):
+            collection = value.get("rows")
+            if isinstance(collection, list):
+                assert len(collection) <= 1, "causal metadata identity copied all rows"
+        return original_semantic_id(value)
+
+    monkeypatch.setattr(holdout_domain, "_semantic_id", bounded_semantic_id)
+    metadata = holdout_domain.R2HoldoutCausalMetadata.create(panel)
+    restored = holdout_domain.R2HoldoutCausalMetadata.from_rows(
+        source_panel_dataset_id=panel.dataset_id,
+        rows=[row.as_json() for row in metadata.rows],
+    )
+    assert restored == metadata
+    assert restored.dataset_id == metadata.dataset_id
+    expected_id = original_semantic_id(
+        {
+            "contract": metadata.CONTRACT,
+            "schema_version": metadata.SCHEMA_VERSION,
+            "source_panel_dataset_id": panel.dataset_id,
+            "rows": [row.as_json() for row in metadata.rows],
+        }
+    )
+    assert metadata.dataset_id == expected_id
+
+
 def test_target_projection_rejects_a_different_source_dataset() -> None:
     source = _target_dataset()
     target_source = R2HoldoutTargetSource.create_from_target_dataset(
