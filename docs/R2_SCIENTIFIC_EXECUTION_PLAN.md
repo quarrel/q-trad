@@ -639,18 +639,19 @@ The registry is frozen before feature/model output is inspected.
 
 ## D3. Pre-OOF readiness
 
-Run the current readiness command with the promotion:
+For confirmatory IBKR, the outcome-blind source does not exist until Phase E. Record the registry first, then run the readiness command immediately after Phase E with the promotion and authenticated source:
 
 ```text
 qtrad research baselines readiness \
   --foundation-bundle <stage8> \
   --foundation-receipt <stage8-receipt> \
   --foundation-promotion <stage8-promotion> \
+  --holdout-target-source <holdout-target-source> \
   --experiment <experiment> \
   --output <readiness.json>
 ```
 
-At this point foundation/contract readiness must be ready. Inner-validation/OOF states may remain incomplete until the OOF artefact exists; do not treat that as a reason to change the experiment.
+At that point foundation/contract/data readiness must be ready. Inner-validation/OOF states may remain incomplete until the feature and OOF artefacts exist; do not treat that as a reason to change the experiment.
 
 ---
 
@@ -666,7 +667,7 @@ The source must:
 - authenticate the pre-holdout projection/opportunity registry lineage needed later; and
 - be create-only.
 
-Validate it by reloading the contract and checking its `source_id`.
+Validate it by reloading the contract, checking its `source_id`, and running the deferred outcome-blind D3 readiness command.
 
 Do not print or inspect the protected target child.
 
@@ -691,11 +692,12 @@ qtrad research baselines features \
   --foundation-receipt <stage8-receipt> \
   --foundation-promotion <stage8-promotion> \
   --experiment <experiment> \
+  --holdout-target-source <holdout-target-source> \
   --feature-set <NAME> \
   --output <feature-output>
 ```
 
-Then independently verify each persisted feature manifest with the corresponding `features-verify` command and the same foundation authorities.
+Then independently verify each persisted feature manifest with the corresponding `features-verify` command, the same foundation authorities and the same `--holdout-target-source`. Each command authenticates the source once and uses the outcome-blind Stage 8 loader.
 
 Record for each set:
 

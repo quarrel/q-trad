@@ -1312,6 +1312,53 @@ async def test_cli_feature_build_and_verify_use_verified_foundation_bundle(
     assert verify_bundle.await_count == 0
 
 
+@pytest.mark.asyncio
+async def test_confirmatory_feature_loading_uses_one_outcome_blind_source_authority(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = cast(
+        R2ExperimentConfig,
+        SimpleNamespace(
+            market_data_source_class=cli.IBKR_HISTORICAL_SOURCE,
+            evidence_class=EvidenceClass.CONFIRMATORY,
+        ),
+    )
+    authority = SimpleNamespace(source=object())
+    authenticated = SimpleNamespace()
+    load_foundation = AsyncMock(return_value=authenticated)
+    monkeypatch.setattr(cli, "load_r2_holdout_target_source_authority", lambda _: authority)
+    monkeypatch.setattr(cli, "_load_r2_foundation_inputs", load_foundation)
+    source_path = tmp_path / "target-source.json"
+
+    result = await cli._load_r2_feature_foundation(
+        Settings(research_root=tmp_path, image="test-image"),
+        FixedClock(),
+        foundation_bundle_path=Path("foundation.json"),
+        foundation_receipt_path=Path("foundation-receipt.json"),
+        foundation_promotion_path=Path("foundation-promotion.json"),
+        holdout_target_source_path=source_path,
+        experiment=config,
+    )
+
+    assert result is authenticated
+    load_foundation.assert_awaited_once()
+    assert load_foundation.await_args is not None
+    assert load_foundation.await_args.kwargs["outcome_blind"] is True
+    assert load_foundation.await_args.kwargs["holdout_target_source"] is authority
+
+    with pytest.raises(ValueError, match="requires --holdout-target-source"):
+        await cli._load_r2_feature_foundation(
+            Settings(research_root=tmp_path, image="test-image"),
+            FixedClock(),
+            foundation_bundle_path=Path("foundation.json"),
+            foundation_receipt_path=Path("foundation-receipt.json"),
+            foundation_promotion_path=Path("foundation-promotion.json"),
+            holdout_target_source_path=None,
+            experiment=config,
+        )
+
+
 def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(
     tmp_path: Path,
 ) -> None:

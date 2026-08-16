@@ -1111,12 +1111,14 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_features_verify.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features_verify.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_features_verify.add_argument("--foundation-promotion", type=Path)
+    baselines_features_verify.add_argument("--holdout-target-source", type=Path)
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
     baselines_features_verify.add_argument("--feature-set", required=True)
     baselines_features_verify.add_argument("--manifest", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_features.add_argument("--foundation-promotion", type=Path)
+    baselines_features.add_argument("--holdout-target-source", type=Path)
     baselines_features.add_argument("--experiment", type=Path, required=True)
     baselines_features.add_argument("--feature-set", required=True)
     baselines_features.add_argument("--output", type=Path, required=True)
@@ -2576,6 +2578,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 foundation_receipt_path=args.foundation_receipt,
                 foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
+                holdout_target_source_path=args.holdout_target_source,
                 feature_set_name=args.feature_set,
                 output_path=args.output,
             )
@@ -2593,6 +2596,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 foundation_receipt_path=args.foundation_receipt,
                 foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
+                holdout_target_source_path=args.holdout_target_source,
                 feature_set_name=args.feature_set,
                 manifest_path=args.manifest,
             )
@@ -2937,6 +2941,48 @@ async def _build_r2_oof(
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))
 
 
+async def _load_r2_feature_foundation(
+    settings: Settings,
+    clock: Clock,
+    *,
+    foundation_bundle_path: Path,
+    foundation_receipt_path: Path | None,
+    foundation_promotion_path: Path | None,
+    holdout_target_source_path: Path | None,
+    experiment: R2ExperimentConfig,
+) -> AuthenticatedR2Foundation:
+    outcome_blind_confirmatory = (
+        experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
+        and experiment.evidence_class is EvidenceClass.CONFIRMATORY
+    )
+    if outcome_blind_confirmatory:
+        if holdout_target_source_path is None:
+            raise ValueError("confirmatory IBKR feature work requires --holdout-target-source")
+        holdout_source_authority = load_r2_holdout_target_source_authority(
+            holdout_target_source_path
+        )
+        return await _load_r2_foundation_inputs(
+            settings,
+            clock,
+            foundation_bundle_path=foundation_bundle_path,
+            foundation_receipt_path=foundation_receipt_path,
+            foundation_promotion_path=foundation_promotion_path,
+            experiment=experiment,
+            outcome_blind=True,
+            holdout_target_source=holdout_source_authority,
+        )
+    if holdout_target_source_path is not None:
+        raise ValueError("--holdout-target-source is only valid for confirmatory IBKR feature work")
+    return await _load_r2_foundation_inputs(
+        settings,
+        clock,
+        foundation_bundle_path=foundation_bundle_path,
+        foundation_receipt_path=foundation_receipt_path,
+        foundation_promotion_path=foundation_promotion_path,
+        experiment=experiment,
+    )
+
+
 async def _materialise_r2_features(
     settings: Settings,
     clock: Clock,
@@ -2947,14 +2993,16 @@ async def _materialise_r2_features(
     output_path: Path,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
+    holdout_target_source_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
-    verified = await _load_r2_foundation_inputs(
+    verified = await _load_r2_feature_foundation(
         settings,
         clock,
         foundation_bundle_path=foundation_bundle_path,
         foundation_receipt_path=foundation_receipt_path,
         foundation_promotion_path=foundation_promotion_path,
+        holdout_target_source_path=holdout_target_source_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
@@ -3013,14 +3061,16 @@ async def _verify_persisted_r2_features(
     manifest_path: Path,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
+    holdout_target_source_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
-    verified = await _load_r2_foundation_inputs(
+    verified = await _load_r2_feature_foundation(
         settings,
         clock,
         foundation_bundle_path=foundation_bundle_path,
         foundation_receipt_path=foundation_receipt_path,
         foundation_promotion_path=foundation_promotion_path,
+        holdout_target_source_path=holdout_target_source_path,
         experiment=experiment,
     )
     foundation = cast(R2FoundationInputs, verified)
