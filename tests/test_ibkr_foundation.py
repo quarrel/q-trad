@@ -580,7 +580,7 @@ def test_stage8_child_partition_bisects_adverse_encoding_expansion(
     monkeypatch.setattr(foundation_runtime, "_parquet_bytes", expanded)
     monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", pair_bound)
 
-    chunks = list(foundation_runtime._bounded_parquet_chunks(payloads))
+    chunks = list(foundation_runtime._bounded_parquet_chunks(payloads, kind="observations"))
 
     assert [chunk for chunk, _encoded in chunks] == list(pair_candidates)
     assert all(len(encoded) <= pair_bound for _chunk, encoded in chunks)
@@ -596,8 +596,8 @@ def test_stage8_child_partition_rejects_single_row_over_bound(
         lambda _payloads: b"x" * 9,
     )
 
-    with pytest.raises(ValueError, match=r"single row.*9 > 8 bytes"):
-        list(foundation_runtime._bounded_parquet_chunks(("oversized",)))
+    with pytest.raises(ValueError, match=r"observations.*single row.*9 > 8 bytes"):
+        list(foundation_runtime._bounded_parquet_chunks(("oversized",), kind="observations"))
 
 
 def test_stage8_child_parts_round_trip_order_and_part_indexes(
@@ -638,3 +638,130 @@ def test_stage8_child_parts_round_trip_order_and_part_indexes(
             foundation_runtime._MAX_CHILD_FILE_BYTES
         )
     assert tuple(decoded) == rows
+
+
+def test_stage8_child_file_limits_are_kind_specific() -> None:
+    assert foundation_runtime._MAX_CHILD_FILE_BYTES == 64 * 1024 * 1024
+    assert foundation_runtime._MAX_PRE_HOLDOUT_TARGET_FILE_BYTES == 128 * 1024 * 1024
+    assert foundation_runtime._child_file_byte_limit("observations") == (
+        foundation_runtime._MAX_CHILD_FILE_BYTES
+    )
+    assert foundation_runtime._child_file_byte_limit("pre-holdout-target") == (
+        foundation_runtime._MAX_PRE_HOLDOUT_TARGET_FILE_BYTES
+    )
+
+
+def test_stage8_pre_holdout_target_singleton_uses_extended_bound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", 8)
+    monkeypatch.setattr(foundation_runtime, "_MAX_PRE_HOLDOUT_TARGET_FILE_BYTES", 16)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_parquet_bytes",
+        lambda _payloads: b"x" * 12,
+    )
+
+    projection = list(
+        foundation_runtime._bounded_parquet_chunks(
+            ("projection",),
+            kind="pre-holdout-target",
+        )
+    )
+    assert projection == [(("projection",), b"x" * 12)]
+
+    with pytest.raises(ValueError, match=r"observations.*12 > 8 bytes"):
+        list(
+            foundation_runtime._bounded_parquet_chunks(
+                ("ordinary",),
+                kind="observations",
+            )
+        )
+
+    monkeypatch.setattr(foundation_runtime, "_MAX_PRE_HOLDOUT_TARGET_FILE_BYTES", 11)
+    with pytest.raises(ValueError, match=r"pre-holdout-target.*12 > 11 bytes"):
+        list(
+            foundation_runtime._bounded_parquet_chunks(
+                ("projection",),
+                kind="pre-holdout-target",
+            )
+        )
+
+
+def test_stage8_writer_and_consuming_verifiers_share_kind_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    rows = (cast(dict[str, JsonValue], {"row": 0}),)
+    payloads = (foundation_runtime._canonical_row(rows[0]),)
+    encoded_size = len(foundation_runtime._parquet_bytes(payloads))
+    dataset_id = "d" * 64
+    ordinary_root = tmp_path / "ordinary"
+    projection_root = tmp_path / "projection"
+    ordinary_root.mkdir()
+    projection_root.mkdir()
+
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", encoded_size + 1)
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_PRE_HOLDOUT_TARGET_FILE_BYTES",
+        encoded_size + 1,
+    )
+    ordinary_parts = foundation_runtime._write_child_parts(
+        ordinary_root / "bundle.json.children",
+        ordinary_root,
+        "observations",
+        rows,
+        dataset_id,
+        {"source": "fixture"},
+    )
+    projection_parts = foundation_runtime._write_child_parts(
+        projection_root / "bundle.json.children",
+        projection_root,
+        "pre-holdout-target",
+        rows,
+        dataset_id,
+        {"source": "fixture"},
+    )
+
+    monkeypatch.setattr(foundation_runtime, "_MAX_CHILD_FILE_BYTES", encoded_size - 1)
+    with pytest.raises(
+        ValueError, match=rf"observations.*{encoded_size} > {encoded_size - 1} bytes"
+    ):
+        foundation_runtime._verify_children(
+            ordinary_root,
+            {"observations": ordinary_parts},
+            {"observations": rows},
+            {"observations": dataset_id},
+            {"source": "fixture"},
+            child_kinds=("observations",),
+        )
+
+    expected_rows = {"pre-holdout-target": rows}
+    expected_dataset_ids = {"pre-holdout-target": dataset_id}
+    expected_lineage = {"source": "fixture"}
+    monkeypatch.setattr(
+        foundation_runtime,
+        "_MAX_PRE_HOLDOUT_TARGET_FILE_BYTES",
+        encoded_size + 1,
+    )
+    foundation_runtime._verify_children(
+        projection_root,
+        {"pre-holdout-target": projection_parts},
+        expected_rows,
+        expected_dataset_ids,
+        expected_lineage,
+        child_kinds=("pre-holdout-target",),
+    )
+    assert (
+        foundation_runtime._verify_children_blind(
+            projection_root,
+            {"pre-holdout-target": projection_parts},
+            expected_dataset_ids,
+            expected_lineage,
+            child_kinds=("pre-holdout-target",),
+            byte_kinds=("pre-holdout-target",),
+            decode_kinds=("pre-holdout-target",),
+        )
+        == expected_rows
+    )

@@ -68,6 +68,7 @@ _FOUNDATION_CHILD_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_MANIFEST_BYTES = 4 * 1024 * 1024
 _MAX_CHILD_FILE_BYTES = 64 * 1024 * 1024
+_MAX_PRE_HOLDOUT_TARGET_FILE_BYTES = 128 * 1024 * 1024
 _MAX_CHILD_PAYLOAD_BYTES = 32 * 1024 * 1024
 _MAX_CHILD_ROWS = 100_000
 _MAX_CHILD_PARTS = 20_000
@@ -1351,26 +1352,37 @@ def _child_payload_chunks(
         yield tuple(payloads)
 
 
+def _child_file_byte_limit(kind: str) -> int:
+    return (
+        _MAX_PRE_HOLDOUT_TARGET_FILE_BYTES
+        if kind == "pre-holdout-target"
+        else _MAX_CHILD_FILE_BYTES
+    )
+
+
 def _bounded_parquet_chunks(
     payloads: Sequence[str],
+    *,
+    kind: str,
 ) -> Iterator[tuple[tuple[str, ...], bytes]]:
-    """Encode stable row ranges, bisecting any range over the file-byte bound."""
+    """Encode stable row ranges, bisecting any range over its kind bound."""
 
+    limit = _child_file_byte_limit(kind)
     candidate = tuple(payloads)
     parquet_bytes = _parquet_bytes(candidate)
     if not parquet_bytes:
-        raise ValueError("IBKR foundation Parquet child encoding is empty")
-    if len(parquet_bytes) <= _MAX_CHILD_FILE_BYTES:
+        raise ValueError(f"IBKR foundation {kind} Parquet child encoding is empty")
+    if len(parquet_bytes) <= limit:
         yield candidate, parquet_bytes
         return
     if len(candidate) <= 1:
         raise ValueError(
-            "IBKR foundation Parquet child single row exceeds its byte bound: "
-            f"{len(parquet_bytes)} > {_MAX_CHILD_FILE_BYTES} bytes"
+            f"IBKR foundation {kind} Parquet child single row exceeds its byte bound: "
+            f"{len(parquet_bytes)} > {limit} bytes"
         )
     midpoint = len(candidate) // 2
-    yield from _bounded_parquet_chunks(candidate[:midpoint])
-    yield from _bounded_parquet_chunks(candidate[midpoint:])
+    yield from _bounded_parquet_chunks(candidate[:midpoint], kind=kind)
+    yield from _bounded_parquet_chunks(candidate[midpoint:], kind=kind)
 
 
 def _write_child_parts(
@@ -1385,12 +1397,13 @@ def _write_child_parts(
         raise ValueError(f"unsupported IBKR foundation child kind: {kind}")
     parts: list[JsonValue] = []
     part_index = 0
+    limit = _child_file_byte_limit(kind)
     for candidate in _child_payload_chunks(rows):
-        for payloads, parquet_bytes in _bounded_parquet_chunks(candidate):
-            if len(parquet_bytes) > _MAX_CHILD_FILE_BYTES:
+        for payloads, parquet_bytes in _bounded_parquet_chunks(candidate, kind=kind):
+            if len(parquet_bytes) > limit:
                 raise ValueError(
-                    "IBKR foundation Parquet child exceeds its byte bound: "
-                    f"{len(parquet_bytes)} > {_MAX_CHILD_FILE_BYTES} bytes"
+                    f"IBKR foundation {kind} Parquet child exceeds its byte bound: "
+                    f"{len(parquet_bytes)} > {limit} bytes"
                 )
             relative_file = (
                 f"{child_root.name}/parquet/{kind}/"
@@ -1535,6 +1548,7 @@ def _verify_children(
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
     for kind in kinds:
+        parquet_limit = _child_file_byte_limit(kind)
         raw_parts = children[kind]
         if not isinstance(raw_parts, list) or not raw_parts:
             raise ValueError("IBKR foundation child parts are invalid")
@@ -1614,8 +1628,8 @@ def _verify_children(
             )
             parquet_bytes = _bounded_bytes(
                 file_path,
-                _MAX_CHILD_FILE_BYTES,
-                "IBKR foundation child Parquet",
+                parquet_limit,
+                f"IBKR foundation {kind} child Parquet",
             )
             file_hash = hashlib.sha256(parquet_bytes).hexdigest()
             if file_hash != manifest_file_sha256:
@@ -1698,6 +1712,7 @@ def _verify_children_blind(
     expected_files: set[str] = set()
     child_root_names: set[str] = set()
     for kind in kinds:
+        parquet_limit = _child_file_byte_limit(kind)
         raw_parts = children[kind]
         if not isinstance(raw_parts, list) or not raw_parts:
             raise ValueError("IBKR foundation child parts are invalid")
@@ -1770,8 +1785,8 @@ def _verify_children_blind(
             if kind in byte_verified_kinds:
                 parquet_bytes = _bounded_bytes(
                     file_path,
-                    _MAX_CHILD_FILE_BYTES,
-                    "IBKR foundation child Parquet",
+                    parquet_limit,
+                    f"IBKR foundation {kind} child Parquet",
                 )
                 if hashlib.sha256(parquet_bytes).hexdigest() != _text(
                     manifest["file_sha256"], "child Parquet hash"
@@ -2011,8 +2026,10 @@ def _write_create_only(path: Path, payload: bytes) -> None:
 
 def _bounded_bytes(path: Path, limit: int, field: str) -> bytes:
     data = path.read_bytes()
-    if not data or len(data) > limit:
-        raise ValueError(f"{field} exceeds its byte bound")
+    if not data:
+        raise ValueError(f"{field} is empty")
+    if len(data) > limit:
+        raise ValueError(f"{field} exceeds its byte bound: {len(data)} > {limit} bytes")
     return data
 
 
