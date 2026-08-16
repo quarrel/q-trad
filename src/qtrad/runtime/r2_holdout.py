@@ -57,6 +57,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    holdout_opportunity_digest,
 )
 from qtrad.domain.r2_readiness import FeatureFamily
 from qtrad.domain.time import require_utc
@@ -370,74 +371,49 @@ def _target_dataset_from_payload(
 
 def _target_projection_from_selection(
     selection: R2HoldoutSelectionManifest,
+    source: R2HoldoutTargetSource,
 ) -> R2HoldoutTargetProjection:
-    raw = _object_dict(
-        selection.evaluation_policy.get("pre_holdout_projection"),
-        "selection pre-holdout target projection",
-    )
-    try:
-        projection = R2HoldoutTargetProjection.from_json(raw)
-    except (TypeError, KeyError, ValueError) as error:
-        raise ValueError("selection pre-holdout target projection is invalid") from error
+    if not isinstance(source, R2HoldoutTargetSource):
+        raise TypeError("holdout target projection requires authenticated source authority")
+    projection = R2HoldoutTargetProjection.create_from_source(source)
     expected_id = selection.evaluation_policy.get("pre_holdout_projection_id")
     if projection.projection_id != expected_id:
-        raise ValueError("selection pre-holdout target projection ID differs")
+        raise ValueError("derived pre-holdout target projection ID differs")
     if projection.projected_target_dataset_id != selection.evaluation_policy.get(
         "pre_holdout_target_dataset_id"
     ):
-        raise ValueError("selection pre-holdout target projection child differs")
-    projection.verify_source(_target_source_from_selection(selection))
+        raise ValueError("derived pre-holdout target projection child differs")
+    if projection.source_target_dataset_id != selection.evaluation_policy.get("target_dataset_id"):
+        raise ValueError("derived target projection source differs from the frozen target")
+    projection.verify_source(source)
     return projection
-
-
-def _target_source_from_selection(
-    selection: R2HoldoutSelectionManifest,
-) -> R2HoldoutTargetSource:
-    raw = _object_dict(
-        selection.evaluation_policy.get("holdout_target_source_artifact"),
-        "selection outcome-blind target source",
-    )
-    try:
-        source = R2HoldoutTargetSource.from_json(raw)
-    except (TypeError, KeyError, ValueError) as error:
-        raise ValueError("selection outcome-blind target source is invalid") from error
-    expected_id = selection.evaluation_policy.get("holdout_target_source_id")
-    if source.source_id != expected_id:
-        raise ValueError("selection outcome-blind target source ID differs")
-    if source.source_target_dataset_id != selection.evaluation_policy.get("target_dataset_id"):
-        raise ValueError("selection outcome-blind target source target ID differs")
-    if source.pre_holdout_target_dataset.dataset_id != selection.evaluation_policy.get(
-        "pre_holdout_target_dataset_id"
-    ):
-        raise ValueError("selection outcome-blind target source pre-holdout child differs")
-    return source
 
 
 def _opportunity_registry_from_selection(
     selection: R2HoldoutSelectionManifest,
+    source: R2HoldoutTargetSource,
 ) -> R2HoldoutOpportunityRegistry:
-    raw = _object_dict(
-        selection.evaluation_policy.get("holdout_opportunity_registry_artifact"),
-        "selection holdout opportunity registry",
-    )
-    registry = R2HoldoutOpportunityRegistry.from_json(raw)
+    if not isinstance(source, R2HoldoutTargetSource):
+        raise TypeError("holdout opportunity registry requires authenticated source authority")
+    registry = R2HoldoutOpportunityRegistry.create_from_source(source)
     expected_id = selection.evaluation_policy.get("holdout_opportunity_registry_id")
     if registry.registry_id != expected_id:
-        raise ValueError("selection opportunity registry ID differs")
-    expected = tuple(
-        (
-            item.opportunity_id,
-            item.target_id,
-            item.instrument_id,
-            item.decision_time,
-            item.target_horizon_seconds,
-            item.disposition,
-        )
-        for item in registry.opportunities
-    )
-    if expected != selection.holdout_opportunity_registry:
-        raise ValueError("selection opportunity registry artifact differs")
-    registry.verify_source(_target_source_from_selection(selection))
+        raise ValueError("derived opportunity registry ID differs")
+    expected_count = selection.evaluation_policy.get("holdout_opportunity_count")
+    expected_digest = selection.evaluation_policy.get("holdout_opportunity_digest")
+    if (
+        isinstance(expected_count, bool)
+        or not isinstance(expected_count, int)
+        or expected_count <= 0
+        or not isinstance(expected_digest, str)
+    ):
+        raise ValueError("selection is missing its compact opportunity summary")
+    if (
+        len(registry.opportunities) != expected_count
+        or holdout_opportunity_digest(registry.opportunities) != expected_digest
+    ):
+        raise ValueError("derived opportunity registry differs from the frozen summary")
+    registry.verify_source(source)
     return registry
 
 
@@ -530,6 +506,7 @@ def _load_training_children(
     root: Path,
     fit_payloads: Sequence[Mapping[str, object]],
     selection: R2HoldoutSelectionManifest,
+    source: R2HoldoutTargetSource,
 ) -> tuple[
     dict[str, R2FeatureDataset],
     dict[str, TargetDataset],
@@ -554,7 +531,7 @@ def _load_training_children(
     expected_pre_holdout = selection.evaluation_policy.get("pre_holdout_target_dataset_id")
     if not isinstance(expected_pre_holdout, str):
         raise ValueError("selection is missing the authenticated pre-holdout target")
-    projection = _target_projection_from_selection(selection)
+    projection = _target_projection_from_selection(selection, source)
     if projection.source_target_dataset_id != expected_source:
         raise ValueError("selection target projection source differs from the frozen target")
     frozen_pre = projection.projected_target_dataset
@@ -660,7 +637,6 @@ _SELECTION_FIELDS = {
     "control_configuration_ids",
     "holdout_configuration_ids",
     "comparator_families",
-    "holdout_opportunity_registry",
     "configuration_registry",
     "metric_policy",
     "threshold_policy",
@@ -1197,6 +1173,7 @@ def _replay_holdout_outputs(
     fit_payloads: Sequence[Mapping[str, object]],
     forecast_payloads: Sequence[Mapping[str, object]],
     coverage_payloads: Sequence[Mapping[str, object]],
+    opportunity_registry: R2HoldoutOpportunityRegistry,
 ) -> None:
     from types import SimpleNamespace
 
@@ -1250,10 +1227,10 @@ def _replay_holdout_outputs(
         for item in fit_payloads
     )
     expected_opportunities = tuple(
-        sorted(item[0] for item in selection.holdout_opportunity_registry)
+        sorted(item.opportunity_id for item in opportunity_registry.opportunities)
     )
     expected_pairs = tuple(
-        sorted((item[0], item[1]) for item in selection.holdout_opportunity_registry)
+        sorted((item.opportunity_id, item.target_id) for item in opportunity_registry.opportunities)
     )
     for dataset in feature_datasets_by_configuration.values():
         if dataset is None:
@@ -1283,7 +1260,6 @@ def _replay_holdout_outputs(
         )
         if payload_expected != expected_opportunities:
             raise ValueError("holdout coverage replay differs from the shared opportunity registry")
-    opportunity_registry = _opportunity_registry_from_selection(selection)
     opportunities = opportunity_registry.opportunities
     actual_forecasts = build_holdout_forecasts(
         selection=selection,
@@ -1450,7 +1426,9 @@ def _verify_prepare_children(
     root: Path,
     seal: R2HoldoutForecastSeal,
     selection: R2HoldoutSelectionManifest,
+    source: R2HoldoutTargetSource,
 ) -> None:
+    opportunity_registry = _opportunity_registry_from_selection(selection, source)
     feature_payloads = _load_feature_payloads(root, seal)
     for payload in feature_payloads.values():
         if payload["selection_manifest_id"] != seal.selection_manifest_id:
@@ -1479,7 +1457,7 @@ def _verify_prepare_children(
         ] != feature_by_configuration.get(configuration_id):
             raise ValueError("final fit lineage differs from its seal")
     training_features, training_targets, training_target_sources = _load_training_children(
-        root, fit_payloads, selection
+        root, fit_payloads, selection, source
     )
     for payload in fit_payloads:
         feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1537,6 +1515,7 @@ def _verify_prepare_children(
         fit_payloads,
         forecast_payloads,
         coverage_payloads,
+        opportunity_registry,
     )
     if expected_fits != set(seal.final_fit_ids):
         raise ValueError("holdout final-fit children do not reconcile to the seal")
@@ -1550,6 +1529,7 @@ def write_holdout_preparation(
     output: Path,
     *,
     selection: R2HoldoutSelectionManifest,
+    holdout_target_source: R2HoldoutTargetSource,
     feature_dataset: object | None = None,
     feature_datasets: Mapping[str, object] | None = None,
     final_fits: Mapping[str, object],
@@ -1597,11 +1577,13 @@ def write_holdout_preparation(
     expected_pre_holdout = selection.evaluation_policy.get("pre_holdout_target_dataset_id")
     if not isinstance(expected_pre_holdout, str):
         raise ValueError("selection is missing the authenticated pre-holdout target")
-    source = _target_source_from_selection(selection)
+    if not isinstance(holdout_target_source, R2HoldoutTargetSource):
+        raise TypeError("holdout preparation requires authenticated source authority")
+    source = holdout_target_source
     if source.pre_holdout_target_dataset.dataset_id != expected_pre_holdout:
-        raise ValueError("selection source evidence differs from the frozen pre-holdout target")
-    _target_projection_from_selection(selection)
-    _opportunity_registry_from_selection(selection)
+        raise ValueError("source evidence differs from the frozen pre-holdout target")
+    _target_projection_from_selection(selection, source)
+    _opportunity_registry_from_selection(selection, source)
     training_target_sources: dict[str, str] = {}
     for payload in fit_payloads:
         _feature_id, target_id = _training_child_ids_from_fit(payload)
@@ -1692,6 +1674,7 @@ def verify_holdout_preparation(
     path: Path,
     *,
     _confirmatory_token: object | None = None,
+    holdout_target_source: R2HoldoutTargetSource,
 ) -> R2HoldoutForecastSeal:
     seal_payload = _verify_child(
         path,
@@ -1830,7 +1813,7 @@ def verify_holdout_preparation(
         if (path / lifecycle_name).is_file():
             allowed.add(lifecycle_name)
     _reject_orphans(path, allowed)
-    _verify_prepare_children(path, seal, selection)
+    _verify_prepare_children(path, seal, selection, holdout_target_source)
     return seal
 
 
@@ -1838,10 +1821,14 @@ def prepare_holdout_from_files(
     source: Path,
     output: Path,
     *,
+    holdout_target_source: R2HoldoutTargetSource,
     expected_selection_manifest_id: str | None = None,
 ) -> R2HoldoutForecastSeal:
     """Copy one disposable preparation exactly once into a fresh root."""
-    source_seal = verify_holdout_preparation(source)
+    source_seal = verify_holdout_preparation(
+        source,
+        holdout_target_source=holdout_target_source,
+    )
     source_selection = verify_holdout_selection(source / "selection.json")
     if (
         expected_selection_manifest_id is not None
@@ -1923,7 +1910,10 @@ def prepare_holdout_from_files(
             else _load_object(source / relative),
         )
     _write_json(output / _PREPARATION_USAGE_FILE, usage)
-    return verify_holdout_preparation(output)
+    return verify_holdout_preparation(
+        output,
+        holdout_target_source=holdout_target_source,
+    )
 
 
 def _reject_orphans(root: Path, allowed: set[str]) -> None:
@@ -1945,6 +1935,7 @@ def _outcome_binding_from_feature_payload(
     feature_payload: Mapping[str, object],
     *,
     selection: R2HoldoutSelectionManifest,
+    opportunity_registry: R2HoldoutOpportunityRegistry,
 ) -> dict[str, object]:
     raw_range = _object_list(feature_payload["holdout_range"], "feature holdout range")
     if len(raw_range) != 2:
@@ -1975,15 +1966,8 @@ def _outcome_binding_from_feature_payload(
         bindings.append((str(item[0]), str(item[1])))
     registry = tuple(
         sorted(
-            (opportunity_id, target_id, disposition)
-            for (
-                opportunity_id,
-                target_id,
-                _instrument_id,
-                _decision_time,
-                _horizon_seconds,
-                disposition,
-            ) in selection.holdout_opportunity_registry
+            (item.opportunity_id, item.target_id, item.disposition)
+            for item in opportunity_registry.opportunities
         )
     )
     expected_bindings = tuple(
@@ -2116,17 +2100,16 @@ def _validate_target_rows_against_selection(
     selection: R2HoldoutSelectionManifest,
     target_dataset: TargetDataset,
     expected_target_ids: Sequence[str],
+    opportunity_registry: R2HoldoutOpportunityRegistry,
 ) -> None:
     registry = {
-        target_id: (instrument_id, decision_time, horizon_seconds, disposition)
-        for (
-            _opportunity_id,
-            target_id,
-            instrument_id,
-            decision_time,
-            horizon_seconds,
-            disposition,
-        ) in selection.holdout_opportunity_registry
+        item.target_id: (
+            item.instrument_id,
+            item.decision_time,
+            item.target_horizon_seconds,
+            item.disposition,
+        )
+        for item in opportunity_registry.opportunities
     }
     primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
     if not isinstance(primary_horizon, int) or primary_horizon <= 0:
@@ -2269,6 +2252,7 @@ def reveal_holdout(
     ],
     evaluator: Callable[[Mapping[str, float], R2HoldoutOpenedMarker], R2HoldoutEvaluation],
     _confirmatory_token: object | None = None,
+    holdout_target_source: R2HoldoutTargetSource,
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Atomically record OPENED, then load/evaluate, and always record CONSUMED.
 
@@ -2276,7 +2260,11 @@ def reveal_holdout(
     outcomes.  Any callback exception is re-raised after the consumed marker is
     durably created.
     """
-    seal = verify_holdout_preparation(root, _confirmatory_token=_confirmatory_token)
+    seal = verify_holdout_preparation(
+        root,
+        _confirmatory_token=_confirmatory_token,
+        holdout_target_source=holdout_target_source,
+    )
     if (
         seal.selection_manifest_id != expected_selection_manifest_id
         or seal.seal_id != expected_seal_id
@@ -2289,6 +2277,9 @@ def reveal_holdout(
             raise ValueError("selection child differs from expected reveal selection")
     else:
         raise FileNotFoundError("prepared holdout root must contain selection.json")
+    target_source = holdout_target_source
+    opportunity_registry = _opportunity_registry_from_selection(selection, target_source)
+    _target_projection_from_selection(selection, target_source)
     if (
         selection.holdout_scope is HoldoutScope.CONFIRMATORY
         and _confirmatory_token is not _CONFIRMATORY_G2_LIFECYCLE_TOKEN
@@ -2320,7 +2311,11 @@ def reveal_holdout(
             seal.seal_id,
         )
         feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
-        binding = _outcome_binding_from_feature_payload(feature_payload, selection=selection)
+        binding = _outcome_binding_from_feature_payload(
+            feature_payload,
+            selection=selection,
+            opportunity_registry=opportunity_registry,
+        )
         expected_target_ids = cast(tuple[str, ...], binding["expected_target_ids"])
         target_dataset_id = cast(str | None, binding["target_dataset_id"])
         raw_outcomes = outcome_loader()
@@ -2331,11 +2326,13 @@ def reveal_holdout(
         expected_source = selection.evaluation_policy.get("target_dataset_id")
         if raw_outcomes.dataset_id != expected_source:
             raise ValueError("revealed target dataset differs from the frozen target source")
-        target_source = _target_source_from_selection(selection)
         target_source.verify_target_dataset(raw_outcomes)
-        _target_projection_from_selection(selection).verify_source(target_source)
-        _opportunity_registry_from_selection(selection).verify_source(target_source)
-        _validate_target_rows_against_selection(selection, raw_outcomes, expected_target_ids)
+        _validate_target_rows_against_selection(
+            selection,
+            raw_outcomes,
+            expected_target_ids,
+            opportunity_registry,
+        )
         _write_json(root / "outcome-target.json", _target_dataset_payload(raw_outcomes))
         outcome_items = _outcome_items_from_source(
             raw_outcomes,
@@ -2395,10 +2392,14 @@ def recover_holdout_consumption(
     expected_seal_id: str,
     consumed_by: str,
     consumed_at: object,
+    holdout_target_source: R2HoldoutTargetSource,
     evaluation_id: str = _FAILURE_EVALUATION_ID,
 ) -> R2HoldoutConsumedMarker:
     """Recover only the missing consumed marker; never reloads or refits."""
-    seal = verify_holdout_preparation(root)
+    seal = verify_holdout_preparation(
+        root,
+        holdout_target_source=holdout_target_source,
+    )
     if (
         seal.selection_manifest_id != expected_selection_manifest_id
         or seal.seal_id != expected_seal_id
@@ -2487,6 +2488,7 @@ def verify_holdout_evaluation(
     root: Path,
     *,
     _confirmatory_token: object | None = None,
+    holdout_target_source: R2HoldoutTargetSource,
 ) -> R2HoldoutEvaluation:
     payload = _verify_child(
         root,
@@ -2496,7 +2498,11 @@ def verify_holdout_evaluation(
         expected_fields=_EVALUATION_FIELDS,
     )
     selection = verify_holdout_selection(root / "selection.json")
-    seal = verify_holdout_preparation(root, _confirmatory_token=_confirmatory_token)
+    seal = verify_holdout_preparation(
+        root,
+        _confirmatory_token=_confirmatory_token,
+        holdout_target_source=holdout_target_source,
+    )
     opened, consumed = verify_holdout_markers(root)
     outcome_payload = _verify_child(
         root,
@@ -2518,14 +2524,15 @@ def verify_holdout_evaluation(
     primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
     if target_dataset.dataset_id != expected_source or not isinstance(primary_horizon, int):
         raise ValueError("outcome target dataset is not bound to the frozen target policy")
-    target_source = _target_source_from_selection(selection)
+    target_source = holdout_target_source
+    opportunity_registry = _opportunity_registry_from_selection(selection, target_source)
+    _target_projection_from_selection(selection, target_source)
     target_source.verify_target_dataset(target_dataset)
-    _target_projection_from_selection(selection).verify_source(target_source)
-    _opportunity_registry_from_selection(selection).verify_source(target_source)
     _validate_target_rows_against_selection(
         selection,
         target_dataset,
         outcome_evidence.expected_target_ids,
+        opportunity_registry,
     )
     target_rows_by_id: dict[str, TargetRow] = {}
     for row in target_dataset.rows:
@@ -2548,7 +2555,11 @@ def verify_holdout_evaluation(
     ):
         raise ValueError("holdout outcome evidence does not bind the exact opened seal")
     feature_payload = _primary_feature_payload(_load_feature_payloads(root, seal))
-    binding = _outcome_binding_from_feature_payload(feature_payload, selection=selection)
+    binding = _outcome_binding_from_feature_payload(
+        feature_payload,
+        selection=selection,
+        opportunity_registry=opportunity_registry,
+    )
     expected_target_dataset_id = selection.evaluation_policy.get("target_dataset_id")
     if (
         expected_target_dataset_id is not None
@@ -2683,12 +2694,23 @@ def _verify_artifact_reference_payload(
         raise ValueError(f"holdout bundle child identity differs: {reference.path}")
 
 
-def build_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
+def build_holdout_bundle(
+    root: Path,
+    output: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> R2HoldoutBundle:
     """Build a thin, hash-referenced bundle only after full replay verification."""
-    seal = verify_holdout_preparation(root)
+    seal = verify_holdout_preparation(
+        root,
+        holdout_target_source=holdout_target_source,
+    )
     selection = verify_holdout_selection(root / "selection.json")
     opened, consumed = verify_holdout_markers(root)
-    evaluation = verify_holdout_evaluation(root)
+    evaluation = verify_holdout_evaluation(
+        root,
+        holdout_target_source=holdout_target_source,
+    )
     children: dict[str, Mapping[str, object]] = {}
     selection_ref, selection_payload = _artifact_reference(
         root,
@@ -2860,7 +2882,12 @@ def write_holdout_bundle(
     return output / "manifest.json"
 
 
-def _verify_bundle_replay(path: Path, refs: Sequence[ArtifactReference]) -> None:
+def _verify_bundle_replay(
+    path: Path,
+    refs: Sequence[ArtifactReference],
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> None:
     with TemporaryDirectory(prefix="qtrad-r2-holdout-bundle-") as temporary:
         replay_root = Path(temporary)
         for reference in refs:
@@ -2869,13 +2896,20 @@ def _verify_bundle_replay(path: Path, refs: Sequence[ArtifactReference]) -> None
             target = replay_root / relative
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(source.read_bytes())
-        replayed = verify_holdout_evaluation(replay_root)
+        replayed = verify_holdout_evaluation(
+            replay_root,
+            holdout_target_source=holdout_target_source,
+        )
         persisted = _load_object(replay_root / "evaluation.json")
         if replayed.as_json() != persisted:
             raise ValueError("holdout bundle evidence does not replay independently")
 
 
-def verify_holdout_bundle(path: Path) -> R2HoldoutBundle:
+def verify_holdout_bundle(
+    path: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> R2HoldoutBundle:
     payload = _load_object(path / "manifest.json")
     expected = {
         "contract",
@@ -2915,7 +2949,11 @@ def verify_holdout_bundle(path: Path) -> R2HoldoutBundle:
     ).hexdigest()
     if payload["bundle_id"] != expected_id:
         raise ValueError("holdout bundle ID does not authenticate its content")
-    _verify_bundle_replay(path, tuple(refs))
+    _verify_bundle_replay(
+        path,
+        tuple(refs),
+        holdout_target_source=holdout_target_source,
+    )
     return R2HoldoutBundle(
         selection=refs[0],
         forecast_seal=refs[1],
@@ -2930,8 +2968,17 @@ def verify_holdout_bundle(path: Path) -> R2HoldoutBundle:
     )
 
 
-def write_built_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
-    bundle = build_holdout_bundle(root, output)
+def write_built_holdout_bundle(
+    root: Path,
+    output: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> R2HoldoutBundle:
+    bundle = build_holdout_bundle(
+        root,
+        output,
+        holdout_target_source=holdout_target_source,
+    )
     children: dict[str, Mapping[str, object]] = {}
     refs = (
         bundle.selection,
@@ -2945,7 +2992,10 @@ def write_built_holdout_bundle(root: Path, output: Path) -> R2HoldoutBundle:
         source_name = "manifest.json" if reference.path == "forecast-seal.json" else reference.path
         children[reference.path] = _load_object(root / source_name)
     write_holdout_bundle(output, bundle, children)
-    return verify_holdout_bundle(output)
+    return verify_holdout_bundle(
+        output,
+        holdout_target_source=holdout_target_source,
+    )
 
 
 def load_prior_selection_manifest(path: Path) -> object:
@@ -3154,12 +3204,16 @@ def reveal_holdout_from_files(
     consumed_by: str,
     opened_at: datetime,
     consumed_at: datetime,
+    holdout_target_source: R2HoldoutTargetSource,
 ):
     """Reveal persisted disposable children; outcome bytes are read after OPENED."""
     from qtrad.application.r2_holdout import evaluate_holdout
 
     selection = verify_holdout_selection(root / "selection.json")
-    seal = verify_holdout_preparation(root)
+    seal = verify_holdout_preparation(
+        root,
+        holdout_target_source=holdout_target_source,
+    )
     forecast_datasets = tuple(
         _forecast_dataset_from_payload(_load_object(root / "forecasts" / f"{dataset_id}.json"))
         for dataset_id in seal.forecast_dataset_ids
@@ -3203,6 +3257,7 @@ def reveal_holdout_from_files(
         consumed_by=consumed_by,
         opened_at=opened_at,
         consumed_at=consumed_at,
+        holdout_target_source=holdout_target_source,
         outcome_loader=load_outcomes,
         evaluator=evaluate,
     )
@@ -3218,6 +3273,7 @@ def _reveal_confirmatory_holdout(
     consumed_by: str,
     opened_at: datetime,
     consumed_at: Callable[[], datetime],
+    holdout_target_source: R2HoldoutTargetSource,
     outcome_loader: Callable[[], TargetDataset],
 ) -> tuple[R2HoldoutEvaluation | None, R2HoldoutConsumedMarker]:
     """Run frozen confirmatory evaluation after marker-first target decoding."""
@@ -3228,6 +3284,7 @@ def _reveal_confirmatory_holdout(
     seal = verify_holdout_preparation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+        holdout_target_source=holdout_target_source,
     )
     if selection.holdout_scope is not HoldoutScope.CONFIRMATORY:
         raise ValueError("confirmatory reveal requires a confirmatory selection")
@@ -3273,18 +3330,29 @@ def _reveal_confirmatory_holdout(
         outcome_loader=load_outcomes,
         evaluator=evaluate,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+        holdout_target_source=holdout_target_source,
     )
 
 
-def _verify_confirmatory_holdout_preparation(root: Path) -> R2HoldoutForecastSeal:
+def _verify_confirmatory_holdout_preparation(
+    root: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> R2HoldoutForecastSeal:
     return verify_holdout_preparation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+        holdout_target_source=holdout_target_source,
     )
 
 
-def _verify_confirmatory_holdout_evaluation(root: Path) -> R2HoldoutEvaluation:
+def _verify_confirmatory_holdout_evaluation(
+    root: Path,
+    *,
+    holdout_target_source: R2HoldoutTargetSource,
+) -> R2HoldoutEvaluation:
     return verify_holdout_evaluation(
         root,
         _confirmatory_token=_CONFIRMATORY_G2_LIFECYCLE_TOKEN,
+        holdout_target_source=holdout_target_source,
     )

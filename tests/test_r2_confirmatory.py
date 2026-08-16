@@ -907,7 +907,10 @@ def test_qualifying_confirmatory_f2_runs_real_oof_replay_and_readiness(
         path=preparation_root,
     )
     with pytest.raises(ValueError, match="unsupported source-child workflow"):
-        holdout_runtime.verify_holdout_preparation(preparation_root)
+        holdout_runtime.verify_holdout_preparation(
+            preparation_root,
+            holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+        )
     assert manifest_path == preparation_root / "manifest.json"
     assert type(verified_preparation) is VerifiedConfirmatoryG2Preparation
     assert verified_preparation.seal.holdout_outcomes_accessed is False

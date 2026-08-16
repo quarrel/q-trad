@@ -432,11 +432,7 @@ def _load_holdout_cli_object(path: Path) -> dict[str, JsonValue]:
 
 def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     from qtrad.domain.r2_evaluation import SelectionManifest
-    from qtrad.domain.r2_holdout import (
-        HoldoutScope,
-        R2HoldoutOpportunityRegistry,
-        R2HoldoutTargetProjection,
-    )
+    from qtrad.domain.r2_holdout import HoldoutScope
 
     if args.oof_bundle is None:
         raise ValueError(
@@ -480,12 +476,6 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         holdout_target_source = load_r2_holdout_target_source(source_path)
         if holdout_target_source.source_id != source_reference.semantic_id:
             raise ValueError("OOF holdout target source identity differs from its reference")
-    pre_holdout_projection = R2HoldoutTargetProjection.from_json(
-        _load_holdout_cli_object(args.pre_holdout_projection)
-    )
-    opportunity_registry = R2HoldoutOpportunityRegistry.from_json(
-        _load_holdout_cli_object(args.holdout_opportunity_registry)
-    )
     manifest = freeze_holdout_selection(
         prior_selection=prior,
         foundation_bundle_id=verified_oof.foundation_bundle_id,
@@ -517,8 +507,6 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
             expected_evaluation_report_id=prior.evaluation_report_id,
         ),
         holdout_target_source=holdout_target_source,
-        holdout_opportunity_registry=opportunity_registry,
-        pre_holdout_projection=pre_holdout_projection,
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))
@@ -531,9 +519,11 @@ def _holdout_prepare_cli(args: argparse.Namespace) -> None:
     expected_selection_id = None
     if args.holdout_selection is not None:
         expected_selection_id = verify_holdout_selection(args.holdout_selection).manifest_id
+    holdout_target_source = load_r2_holdout_target_source(args.holdout_target_source)
     seal = prepare_holdout_from_files(
         source,
         args.output,
+        holdout_target_source=holdout_target_source,
         expected_selection_manifest_id=expected_selection_id,
     )
     print(json.dumps({"seal": seal.seal_id, "root": str(args.output)}, sort_keys=True))
@@ -548,12 +538,21 @@ def _holdout_recover_cli(args: argparse.Namespace) -> None:
     }
     if args.evaluation_id is not None:
         recovery_kwargs["evaluation_id"] = str(args.evaluation_id)
-    marker = recover_holdout_consumption(args.root, **recovery_kwargs)
+    holdout_target_source = load_r2_holdout_target_source(args.holdout_target_source)
+    marker = recover_holdout_consumption(
+        args.root,
+        holdout_target_source=holdout_target_source,
+        **recovery_kwargs,
+    )
     print(json.dumps({"consumed": marker.marker_id}, sort_keys=True))
 
 
 def _holdout_bundle_cli(args: argparse.Namespace) -> None:
-    bundle = write_built_holdout_bundle(args.root, args.output)
+    bundle = write_built_holdout_bundle(
+        args.root,
+        args.output,
+        holdout_target_source=load_r2_holdout_target_source(args.holdout_target_source),
+    )
     print(
         json.dumps(
             {"bundle": bundle.bundle_id, "manifest": str(args.output / "manifest.json")},
@@ -575,6 +574,7 @@ def _holdout_reveal_cli(args: argparse.Namespace) -> None:
         consumed_by=args.consumed_by,
         opened_at=args.opened_at,
         consumed_at=args.consumed_at,
+        holdout_target_source=load_r2_holdout_target_source(args.holdout_target_source),
     )
     if evaluation is None:
         raise RuntimeError("holdout reveal did not produce an evaluation")
@@ -591,7 +591,11 @@ def _holdout_reveal_cli(args: argparse.Namespace) -> None:
 
 
 def _holdout_verify_cli(args: argparse.Namespace) -> None:
-    seal = verify_holdout_preparation(args.root)
+    holdout_target_source = load_r2_holdout_target_source(args.holdout_target_source)
+    seal = verify_holdout_preparation(
+        args.root,
+        holdout_target_source=holdout_target_source,
+    )
     result: dict[str, object] = {"seal": seal.as_json()}
     if (args.root / "selection.json").exists():
         result["selection"] = verify_holdout_selection(args.root / "selection.json").as_json()
@@ -600,7 +604,10 @@ def _holdout_verify_cli(args: argparse.Namespace) -> None:
         result["opened"] = opened.as_json()
         result["consumed"] = consumed.as_json()
     if (args.root / "evaluation.json").exists():
-        result["evaluation"] = verify_holdout_evaluation(args.root).as_json()
+        result["evaluation"] = verify_holdout_evaluation(
+            args.root,
+            holdout_target_source=holdout_target_source,
+        )
     print(json.dumps(result, sort_keys=True))
 
 
@@ -1278,22 +1285,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_selection.add_argument("--final-fitting-policy", type=Path, required=True)
     baselines_holdout_selection.add_argument("--questions", type=Path, required=True)
-    baselines_holdout_selection.add_argument(
-        "--holdout-opportunity-registry",
-        "--holdout-opportunities",
-        dest="holdout_opportunity_registry",
-        type=Path,
-        required=True,
-        help="authenticated source-derived outcome-blind opportunity registry JSON",
-    )
-    baselines_holdout_selection.add_argument(
-        "--pre-holdout-projection",
-        "--pre-holdout-target",
-        dest="pre_holdout_projection",
-        type=Path,
-        required=True,
-        help="authenticated source-to-pre-holdout target projection JSON",
-    )
     baselines_holdout_selection.add_argument("--metric-policy", type=Path)
     baselines_holdout_selection.add_argument("--threshold-policy", type=Path)
     baselines_holdout_selection.add_argument("--runtime-identities", type=Path)
@@ -1314,6 +1305,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_holdout_prepare_source.add_argument("--source", type=Path)
     baselines_holdout_prepare_source.add_argument("--foundation", type=Path, dest="source")
     baselines_holdout_prepare.add_argument("--holdout-selection", type=Path)
+    baselines_holdout_prepare.add_argument("--holdout-target-source", type=Path, required=True)
     baselines_holdout_prepare.add_argument("--output", type=Path, required=True)
 
     baselines_holdout_recover = baselines_sub.add_parser(
@@ -1321,6 +1313,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="recover a missing irreversible consumed marker without reopening outcomes",
     )
     baselines_holdout_recover.add_argument("--root", type=Path, required=True)
+    baselines_holdout_recover.add_argument("--holdout-target-source", type=Path, required=True)
     baselines_holdout_recover.add_argument("--expected-selection-id", required=True)
     baselines_holdout_recover.add_argument("--expected-seal-id", required=True)
     baselines_holdout_recover.add_argument("--consumed-by", required=True)
@@ -1333,6 +1326,7 @@ def build_parser() -> argparse.ArgumentParser:
         "holdout-bundle", help="build and independently verify the disposable holdout bundle"
     )
     baselines_holdout_bundle.add_argument("--root", type=Path, required=True)
+    baselines_holdout_bundle.add_argument("--holdout-target-source", type=Path, required=True)
     baselines_holdout_bundle.add_argument("--output", type=Path, required=True)
 
     baselines_holdout_reveal = baselines_sub.add_parser(
@@ -1340,6 +1334,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_reveal.add_argument("--root", type=Path, required=True)
     baselines_holdout_reveal.add_argument("--outcomes", type=Path, required=True)
+    baselines_holdout_reveal.add_argument("--holdout-target-source", type=Path, required=True)
     baselines_holdout_reveal.add_argument("--expected-selection-id", required=True)
     baselines_holdout_reveal.add_argument("--expected-seal-id", required=True)
     baselines_holdout_reveal.add_argument("--acknowledgement", required=True)
@@ -1356,6 +1351,7 @@ def build_parser() -> argparse.ArgumentParser:
         "holdout-verify", help="independently replay a prepared or consumed disposable holdout"
     )
     baselines_holdout_verify.add_argument("--root", type=Path, required=True)
+    baselines_holdout_verify.add_argument("--holdout-target-source", type=Path, required=True)
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)

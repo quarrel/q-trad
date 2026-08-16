@@ -7,7 +7,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from typing import NoReturn, cast
+from typing import NoReturn
 from uuid import UUID
 
 import pytest
@@ -61,6 +61,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    holdout_opportunity_digest,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_bundles import canonical_bytes
@@ -181,20 +182,7 @@ def _selection(
     )
     from qtrad.application.r2_holdout import freeze_holdout_selection
 
-    source_target_dataset = _target_dataset(include_noneligible=include_noneligible)
-    holdout_target_source = R2HoldoutTargetSource.create_from_target_dataset(
-        source_target_dataset,
-        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
-        primary_horizon_seconds=900,
-        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
-        opportunities=_opportunities(include_noneligible=include_noneligible),
-    )
-    pre_holdout_projection = R2HoldoutTargetProjection.create_from_source(
-        holdout_target_source,
-    )
-    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(
-        holdout_target_source,
-    )
+    holdout_target_source = _target_source(include_noneligible=include_noneligible)
     selection = freeze_holdout_selection(
         prior_selection=prior,
         foundation_bundle_id=_id("foundation"),
@@ -211,8 +199,6 @@ def _selection(
         frozen_at=NOW,
         frozen_by="test",
         holdout_target_source=holdout_target_source,
-        holdout_opportunity_registry=opportunity_registry,
-        pre_holdout_projection=pre_holdout_projection,
         configuration_registry=tuple(
             sorted(
                 (
@@ -232,11 +218,11 @@ def _selection(
         ),
         evaluation_policy={
             "target_dataset_id": (
-                source_target_dataset.dataset_id if bind_target_dataset else None
+                holdout_target_source.source_target_dataset_id if bind_target_dataset else None
             ),
             "primary_horizon_seconds": 900,
             "pre_holdout_target_dataset_id": (
-                pre_holdout_projection.projected_target_dataset.dataset_id
+                holdout_target_source.pre_holdout_target_dataset.dataset_id
             ),
             "observation_dataset_id": _id("observations"),
             "panel_dataset_id": _id("panel"),
@@ -299,6 +285,16 @@ def _opportunities(*, include_noneligible: bool = False) -> tuple[HoldoutTargetO
             )
         )
     return tuple(result)
+
+
+def _target_source(*, include_noneligible: bool = False) -> R2HoldoutTargetSource:
+    return R2HoldoutTargetSource.create_from_target_dataset(
+        _target_dataset(include_noneligible=include_noneligible),
+        holdout_range=(NOW + timedelta(days=1), NOW + timedelta(days=2)),
+        primary_horizon_seconds=900,
+        target_instruments=("INSTRUMENT_0", "INSTRUMENT_1"),
+        opportunities=_opportunities(include_noneligible=include_noneligible),
+    )
 
 
 def _target_dataset(*, include_noneligible: bool = False) -> TargetDataset:
@@ -567,9 +563,7 @@ def _prepared(
         ),
     )
     training_features = _training_feature_dataset(include_noneligible=include_noneligible)
-    target_source = R2HoldoutTargetSource.from_json(
-        selection.evaluation_policy["holdout_target_source_artifact"]
-    )
+    target_source = _target_source(include_noneligible=include_noneligible)
     training_targets = target_source.pre_holdout_target_dataset
     fits = tuple(
         fit_final_ridge(
@@ -631,6 +625,7 @@ def _prepared(
     write_holdout_preparation(
         tmp_path,
         selection=selection,
+        holdout_target_source=target_source,
         feature_dataset=features,
         final_fits={item.fit_id: item for item in fits},
         forecasts={item.dataset_id: item for item in forecasts},
@@ -645,7 +640,10 @@ def _prepared(
 def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     selection, _opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
     target_dataset = _target_dataset()
-    assert verify_holdout_preparation(tmp_path).seal_id == seal.seal_id
+    assert verify_holdout_preparation(
+        tmp_path,
+        holdout_target_source=_target_source(),
+    ).seal_id == seal.seal_id
 
     def evaluator(outcomes, opened):
         return evaluate_holdout(
@@ -666,6 +664,7 @@ def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
+        holdout_target_source=_target_source(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -705,6 +704,7 @@ def test_noneligible_gap_with_null_return_does_not_block_first_reveal(
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
+        holdout_target_source=_target_source(include_noneligible=True),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -917,13 +917,21 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
+        holdout_target_source=_target_source(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
     assert evaluation is not None
     output = tmp_path / "bundle"
-    bundle = write_built_holdout_bundle(tmp_path, output)
-    assert bundle.bundle_id == verify_holdout_bundle(output).bundle_id
+    bundle = write_built_holdout_bundle(
+        tmp_path,
+        output,
+        holdout_target_source=_target_source(),
+    )
+    assert bundle.bundle_id == verify_holdout_bundle(
+        output,
+        holdout_target_source=_target_source(),
+    ).bundle_id
     assert bundle.evaluation.semantic_id == evaluation.evaluation_id
     assert consumed.evaluation_id == evaluation.evaluation_id
     impossible_consumed = R2HoldoutConsumedMarker.create(
@@ -943,11 +951,23 @@ def test_holdout_preparation_cannot_be_cloned_after_claim(tmp_path: Path) -> Non
     _prepared(tmp_path / "source")
     first = tmp_path / "first"
     second = tmp_path / "second"
-    prepare_holdout_from_files(tmp_path / "source", first)
+    prepare_holdout_from_files(
+        tmp_path / "source",
+        first,
+        holdout_target_source=_target_source(),
+    )
     with pytest.raises(FileExistsError, match="transferred"):
-        prepare_holdout_from_files(tmp_path / "source", second)
+        prepare_holdout_from_files(
+            tmp_path / "source",
+            second,
+            holdout_target_source=_target_source(),
+        )
     with pytest.raises(FileExistsError, match="transferred"):
-        prepare_holdout_from_files(first, second)
+        prepare_holdout_from_files(
+            first,
+            second,
+            holdout_target_source=_target_source(),
+        )
 
 
 def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path) -> None:
@@ -964,6 +984,7 @@ def test_impossible_consumption_chronology_does_not_open_or_claim(tmp_path: Path
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW - timedelta(seconds=1),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: _target_dataset(),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("evaluator must not run"),
         )
@@ -985,6 +1006,7 @@ def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path)
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: (_ for _ in ()).throw(RuntimeError("fixture outcome failure")),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("evaluator must not run"),
         )
@@ -1000,6 +1022,7 @@ def test_failed_reveal_is_consumed_and_second_reveal_is_rejected(tmp_path: Path)
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=2),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: {},
             evaluator=lambda outcomes, opened: _unexpected_evaluator("second reveal must not load"),
         )
@@ -1011,7 +1034,10 @@ def test_preparation_replays_a_forced_failed_fit(tmp_path: Path) -> None:
         forced_failure_configuration=_id("local"),
     )
     assert any(item.disposition is FinalFitDisposition.NUMERICAL_FAILURE for item in fits)
-    assert verify_holdout_preparation(tmp_path).state.value == "PREPARED_UNOPENED"
+    assert verify_holdout_preparation(
+        tmp_path,
+        holdout_target_source=_target_source(),
+    ).state.value == "PREPARED_UNOPENED"
 
 
 def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path) -> None:
@@ -1060,7 +1086,10 @@ def test_mutated_training_evidence_is_rejected(tmp_path: Path) -> None:
     payload["rows"][0]["values"][0]["value"] = 99.0
     feature_path.write_text(json.dumps(payload))
     with pytest.raises(ValueError, match="dataset ID"):
-        verify_holdout_preparation(tmp_path)
+        verify_holdout_preparation(
+            tmp_path,
+            holdout_target_source=_target_source(),
+        )
 
 
 def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
@@ -1068,7 +1097,11 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
 ) -> None:
     selection, _opportunities, _fits, _forecasts, _coverage, seal = _prepared(tmp_path / "source")
     first = tmp_path / "first"
-    prepare_holdout_from_files(tmp_path / "source", first)
+    prepare_holdout_from_files(
+        tmp_path / "source",
+        first,
+        holdout_target_source=_target_source(),
+    )
     with pytest.raises(RuntimeError, match="stop"):
         reveal_holdout(
             first,
@@ -1079,6 +1112,7 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: (_ for _ in ()).throw(RuntimeError("stop")),
             evaluator=lambda outcomes, opened: _unexpected_evaluator("must not evaluate"),
         )
@@ -1100,7 +1134,11 @@ def test_claimed_consumed_preparation_cannot_be_reopened_from_core_files(
         else:
             shutil.copy2(child, target)
     with pytest.raises(ValueError, match="usage"):
-        prepare_holdout_from_files(stripped, tmp_path / "reopened")
+        prepare_holdout_from_files(
+            stripped,
+            tmp_path / "reopened",
+            holdout_target_source=_target_source(),
+        )
 
 
 def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None:
@@ -1115,6 +1153,7 @@ def test_duplicate_outcome_ids_are_rejected_and_consumed(tmp_path: Path) -> None
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: [
                 (opportunities[0].target_id, 0.1),
                 (opportunities[0].target_id, 0.2),
@@ -1128,7 +1167,11 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
     selection, _opportunities, _fits, forecasts, coverage, seal = _prepared(tmp_path / "source")
     target_dataset = _target_dataset()
     destination = tmp_path / "destination"
-    prepare_holdout_from_files(tmp_path / "source", destination)
+    prepare_holdout_from_files(
+        tmp_path / "source",
+        destination,
+        holdout_target_source=_target_source(),
+    )
 
     def evaluator(outcomes, opened):
         return evaluate_holdout(
@@ -1149,6 +1192,7 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
         consumed_by="test",
         opened_at=NOW,
         consumed_at=NOW + timedelta(seconds=1),
+        holdout_target_source=_target_source(),
         outcome_loader=lambda: target_dataset,
         evaluator=evaluator,
     )
@@ -1166,6 +1210,7 @@ def test_preparation_transfer_has_one_reveal_owner(tmp_path: Path) -> None:
             consumed_by="test",
             opened_at=NOW,
             consumed_at=NOW + timedelta(seconds=1),
+            holdout_target_source=_target_source(),
             outcome_loader=lambda: target_dataset,
             evaluator=evaluator,
         )
@@ -1188,23 +1233,26 @@ def test_preparation_persists_only_pre_holdout_target_rows(tmp_path: Path) -> No
 
 def test_selection_source_artifact_is_outcome_blind() -> None:
     selection, _question, _configurations = _selection()
-    source = selection.evaluation_policy["holdout_target_source_artifact"]
-    assert isinstance(source, dict)
-    targets = source["targets"]
-    assert isinstance(targets, list)
-    assert targets
-    target_objects = cast(list[dict[str, object]], targets)
-    assert all("log_return" not in target for target in target_objects)
-    opportunities = source["opportunities"]
-    assert isinstance(opportunities, list)
-    opportunity_objects = cast(list[dict[str, object]], opportunities)
-    assert all("log_return" not in opportunity for opportunity in opportunity_objects)
-    pre_holdout = source["pre_holdout_target_dataset"]
-    assert isinstance(pre_holdout, dict)
-    rows = pre_holdout["rows"]
-    assert isinstance(rows, list)
-    row_objects = cast(list[dict[str, object]], rows)
-    assert all(datetime.fromisoformat(str(row["decision_time"])) < NOW for row in row_objects)
+    policy = selection.evaluation_policy
+    forbidden = (
+        "holdout_target_source_artifact",
+        "pre_holdout_target_dataset",
+        "pre_holdout_projection",
+        "holdout_opportunity_registry_artifact",
+        "holdout_opportunity_registry",
+    )
+    assert all(field not in policy for field in forbidden)
+    source = _target_source()
+    projection = R2HoldoutTargetProjection.create_from_source(source)
+    registry = R2HoldoutOpportunityRegistry.create_from_source(source)
+    assert policy["holdout_target_source_id"] == source.source_id
+    assert policy["pre_holdout_target_dataset_id"] == source.pre_holdout_target_dataset.dataset_id
+    assert policy["pre_holdout_projection_id"] == projection.projection_id
+    assert policy["holdout_opportunity_registry_id"] == registry.registry_id
+    assert policy["holdout_opportunity_count"] == len(registry.opportunities)
+    assert policy["holdout_opportunity_digest"] == holdout_opportunity_digest(
+        registry.opportunities
+    )
 
 
 def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:
@@ -1220,6 +1268,7 @@ def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Pa
         opened_by="test",
         consumed_by="test",
         opened_at=NOW,
+        holdout_target_source=_target_source(),
         consumed_at=NOW + timedelta(seconds=1),
     )
     assert evaluation is not None
@@ -1229,7 +1278,10 @@ def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Pa
     target_payload["rows"][0]["log_return"] = 999.0
     (tmp_path / "outcome-target.json").write_text(json.dumps(target_payload))
     with pytest.raises(ValueError, match="identity does not authenticate"):
-        verify_holdout_evaluation(tmp_path)
+        verify_holdout_evaluation(
+            tmp_path,
+            holdout_target_source=_target_source(),
+        )
 
 
 def test_zero_return_retains_shared_eligibility_when_model_features_are_missing(
@@ -1260,7 +1312,10 @@ def test_zero_return_retains_shared_eligibility_when_model_features_are_missing(
     local_coverage = next(item for item in coverage if item.configuration_id == local_configuration)
     assert any(row.opportunity_id == unavailable for row in zero_coverage.rows)
     assert any(row.opportunity_id == unavailable for row in local_coverage.rows)
-    assert verify_holdout_preparation(tmp_path).seal_id
+    assert verify_holdout_preparation(
+        tmp_path,
+        holdout_target_source=_target_source(),
+    ).seal_id
 
 
 def test_holdout_semantic_identity_excludes_runtime_provenance() -> None:

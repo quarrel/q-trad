@@ -127,6 +127,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
+    holdout_opportunity_digest,
 )
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
@@ -4237,13 +4238,13 @@ def _build_confirmatory_selection(
             "target_dataset_id": source.source_target_dataset_id,
             "target_instruments": list(source.target_instruments),
             "holdout_target_source_id": source.source_id,
-            "holdout_target_source_artifact": source.as_json(),
             "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
-            "pre_holdout_target_dataset": source.pre_holdout_target_dataset.as_json(),
             "pre_holdout_projection_id": projection.projection_id,
-            "pre_holdout_projection": projection.as_json(),
             "holdout_opportunity_registry_id": opportunity_registry.registry_id,
-            "holdout_opportunity_registry_artifact": opportunity_registry.as_json(),
+            "holdout_opportunity_count": len(opportunity_registry.opportunities),
+            "holdout_opportunity_digest": holdout_opportunity_digest(
+                opportunity_registry.opportunities
+            ),
             "model_selection_policy": experiment.model_selection_policy,
             "loss_policy": experiment.model_selection_policy,
             "minimum_training_rows": experiment.minimum_training_rows,
@@ -4315,8 +4316,6 @@ def _build_confirmatory_selection(
         evaluation_policy=evaluation_policy,
         confirmatory_authority=verified_f2.confirmatory_holdout_authority,
         holdout_target_source=source,
-        holdout_opportunity_registry=opportunity_registry,
-        pre_holdout_projection=projection,
     )
     return selection
 
@@ -4621,6 +4620,7 @@ def prepare_confirmatory_g2(
     write_holdout_preparation(
         output,
         selection=verified_g1.selection,
+        holdout_target_source=target_source,
         feature_datasets={child.dataset_id: child for child in built.holdout_features.values()},
         final_fits={fit.fit_id: fit for fit in built.fits},
         forecasts={forecast.dataset_id: forecast for forecast in built.forecasts},
@@ -4647,6 +4647,7 @@ def verify_confirmatory_g2_preparation(
     seal = verify_holdout_preparation(
         path,
         _confirmatory_token=_CONFIRMATORY_G2_PREPARATION_TOKEN,
+        holdout_target_source=verified_g1.verified_f2.holdout_target_source,
     )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
@@ -4698,7 +4699,10 @@ def _verify_confirmatory_g2_lifecycle(
         or verified_g1._verifier_provenance is not _VERIFIED_CONFIRMATORY_G1_PROVENANCE
     ):
         raise TypeError("confirmatory lifecycle verification requires verified G1 provenance")
-    seal = _verify_confirmatory_holdout_preparation(path)
+    seal = _verify_confirmatory_holdout_preparation(
+        path,
+        holdout_target_source=verified_g1.verified_f2.holdout_target_source,
+    )
     if (
         seal.selection_manifest_id != verified_g1.selection.manifest_id
         or seal.holdout_scope is not HoldoutScope.CONFIRMATORY
@@ -4866,6 +4870,7 @@ def reveal_confirmatory_g2(
         consumed_by=consumed_by,
         opened_at=opened_at,
         consumed_at=clock.now,
+        holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
         outcome_loader=load_outcomes,
     )
     evaluation, consumed = result
@@ -4942,7 +4947,10 @@ def verify_confirmatory_r2h(
                 consumed.evaluation_id,
                 "post-OPENED execution failed before a valid evaluation",
             )
-        evaluation = _verify_confirmatory_holdout_evaluation(preparation.path)
+        evaluation = _verify_confirmatory_holdout_evaluation(
+            preparation.path,
+            holdout_target_source=preparation.verified_g1.verified_f2.holdout_target_source,
+        )
         if evaluation.selection_manifest_id != selection_id:
             raise ValueError("confirmatory evaluation differs from verified G1")
         return ConfirmatoryR2HReport(
