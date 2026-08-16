@@ -2726,7 +2726,10 @@ def verify_holdout_preparation(
         raise ValueError("claim transition temporary must be a regular file")
     if claim_next_path.is_file():
         if claim_state not in {"AVAILABLE", "OWNED_UNOPENED"}:
-            raise ValueError("claim transition temporary is only valid for an untransferred source")
+            raise ValueError(
+                "claim transition temporary is only valid for an untransferred source "
+                "or an unopened owned preparation"
+            )
         next_payload = _verify_child(
             path,
             _PREPARATION_CLAIM_NEXT_FILE,
@@ -2734,20 +2737,38 @@ def verify_holdout_preparation(
             identity_key="claim_id",
             expected_fields=_PREPARATION_CLAIM_FIELDS,
         )
-        source_claim_value = claim_payload.get("claim_id")
-        if not isinstance(source_claim_value, str) or not source_claim_value:
-            raise ValueError("available preparation claim is malformed")
-        expected_next = _preparation_claim(
-            selection.manifest_id,
-            seal.seal_id,
-            state="TRANSFERRED",
-            transfer_id=_preparation_transfer_id(
+        claim_id_value = claim_payload.get("claim_id")
+        if not isinstance(claim_id_value, str) or not claim_id_value:
+            raise ValueError("claim transition source claim is malformed")
+        if claim_state == "OWNED_UNOPENED" and has_transfer_lineage:
+            transfer_value = claim_payload.get("transfer_id")
+            source_claim_value = claim_payload.get("source_claim_id")
+            if (
+                not isinstance(transfer_value, str)
+                or not transfer_value
+                or not isinstance(source_claim_value, str)
+                or not source_claim_value
+            ):
+                raise ValueError("claim transition owned lineage is malformed")
+            expected_next = _preparation_claim(
                 selection.manifest_id,
                 seal.seal_id,
-                source_claim_value,
-            ),
-            source_claim_id=source_claim_value,
-        )
+                state="OWNED_OPENED",
+                transfer_id=transfer_value,
+                source_claim_id=source_claim_value,
+            )
+        else:
+            expected_next = _preparation_claim(
+                selection.manifest_id,
+                seal.seal_id,
+                state="TRANSFERRED",
+                transfer_id=_preparation_transfer_id(
+                    selection.manifest_id,
+                    seal.seal_id,
+                    claim_id_value,
+                ),
+                source_claim_id=claim_id_value,
+            )
         if next_payload != expected_next:
             raise ValueError("claim transition temporary is not authenticated")
         allowed.add(_PREPARATION_CLAIM_NEXT_FILE)

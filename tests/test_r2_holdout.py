@@ -1762,6 +1762,47 @@ def test_completed_output_repairs_missing_source_usage_from_intent(tmp_path: Pat
     assert source_usage.is_file()
 
 
+def test_reveal_claim_publication_crash_resumes_exact_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    source = tmp_path / "source"
+    destination = tmp_path / "destination"
+    selection, _opportunities, _fits, _forecasts, _coverage, _source_seal = _prepared(source)
+    seal = prepare_holdout_from_files(
+        source,
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    )
+    claim_path = destination / ".preparation-claim.json"
+    claim_next = destination / "..preparation-claim.json.next"
+    original_replace = holdout_runtime.os.replace
+
+    def fail_claim_publication(source_path: Path, destination_path: Path) -> None:
+        if (
+            Path(destination_path) == claim_path
+            and Path(source_path).name == "..preparation-claim.json.next"
+        ):
+            raise RuntimeError("simulated reveal claim publication crash")
+        original_replace(source_path, destination_path)
+
+    monkeypatch.setattr(holdout_runtime.os, "replace", fail_claim_publication)
+    with pytest.raises(RuntimeError, match="reveal claim publication crash"):
+        holdout_runtime._claim_preparation(destination, selection.manifest_id, seal.seal_id)
+    assert json.loads(claim_path.read_text())["state"] == "OWNED_UNOPENED"
+    assert claim_next.is_file()
+    assert verify_holdout_preparation(
+        destination,
+        holdout_target_source=_target_source(),
+        training_feature_datasets=_training_feature_authority(),
+    ).seal_id == seal.seal_id
+
+    monkeypatch.setattr(holdout_runtime.os, "replace", original_replace)
+    holdout_runtime._claim_preparation(destination, selection.manifest_id, seal.seal_id)
+    assert json.loads(claim_path.read_text())["state"] == "OWNED_OPENED"
+    assert not claim_next.exists()
+
+
 def test_terminal_outcomes_round_trip_with_forced_part_bound(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
