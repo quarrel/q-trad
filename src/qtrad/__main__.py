@@ -3030,6 +3030,7 @@ async def _materialise_r2_features(
         fold_dataset_id=verified.folds.dataset_id,
         experiment_configuration_id=experiment.configuration_id,
         evidence_class=experiment.evidence_class,
+        market_data_source_class=experiment.market_data_source_class,
         holdout_excluded=True,
         application_version=__version__,
         image_identity=settings.image,

@@ -13,6 +13,7 @@ import polars as pl
 import pytest
 
 from qtrad import __main__ as cli
+from qtrad.adapters.parquet import r2 as r2_parquet
 from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore
 from qtrad.application.r2_features import (
     FeatureLineageError,
@@ -1070,6 +1071,30 @@ def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(
     assert physical.manifest_sha256 != manifest.manifest_sha256
 
 
+def test_parquet_chunks_bisect_on_encoded_bytes_and_fail_for_oversized_single_row(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    real_size = r2_parquet._parquet_encoded_size
+
+    def adverse_size(frame: pl.DataFrame) -> int:
+        if "target_instrument_id" in frame.columns and frame.height > 1:
+            return r2_parquet._MAX_CHUNK_BYTES + 1
+        return real_size(frame)
+
+    monkeypatch.setattr(r2_parquet, "_parquet_encoded_size", adverse_size)
+    store, manifest, rows = _write_store(tmp_path / "split", count=4, chunk_rows=4)
+    assert tuple(chunk.row_count for chunk in manifest.chunks) == (1, 1, 1, 1)
+    assert tuple(store.iter_rows(Path("features.json"))) == rows
+
+    monkeypatch.setattr(
+        r2_parquet,
+        "_parquet_encoded_size",
+        lambda _frame: r2_parquet._MAX_CHUNK_BYTES + 1,
+    )
+    with pytest.raises(ValueError, match="single-row chunk exceeds"):
+        _write_store(tmp_path / "oversized", count=1, chunk_rows=1)
+
+
 def test_parquet_manifest_chunk_value_lineage_and_schema_tampering_fail_closed(
     tmp_path: Path,
 ) -> None:
@@ -1357,6 +1382,41 @@ async def test_confirmatory_feature_loading_uses_one_outcome_blind_source_author
             holdout_target_source_path=None,
             experiment=config,
         )
+
+
+@pytest.mark.asyncio
+async def test_cli_feature_build_persists_ibkr_source_class(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    config = replace(
+        experiment(),
+        market_data_source_class=cli.IBKR_HISTORICAL_SOURCE,
+        evidence_class=EvidenceClass.CONFIRMATORY,
+    )
+    foundation = _replay_foundation(config)
+    monkeypatch.setattr(cli, "load_r2_experiment", lambda _: config)
+    monkeypatch.setattr(cli, "_load_r2_feature_foundation", AsyncMock(return_value=foundation))
+    settings = Settings(research_root=tmp_path, image="test-image")
+
+    await cli._materialise_r2_features(
+        settings,
+        FixedClock(),
+        foundation_bundle_path=Path("foundation.json"),
+        foundation_receipt_path=Path("foundation-receipt.json"),
+        foundation_promotion_path=Path("foundation-promotion.json"),
+        holdout_target_source_path=Path("target-source.json"),
+        experiment_path=Path("experiment.json"),
+        feature_set_name="L0",
+        output_path=Path("ibkr-features.json"),
+    )
+
+    assert json.loads(capsys.readouterr().out)["rows"] == 1
+    manifest = ParquetR2FeatureStore(tmp_path, FixedClock()).read_manifest(
+        Path("ibkr-features.json")
+    )
+    assert manifest.market_data_source_class is cli.IBKR_HISTORICAL_SOURCE
 
 
 def test_parquet_feature_datasets_share_content_store_without_invalidating_evidence(

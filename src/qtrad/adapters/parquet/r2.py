@@ -35,6 +35,7 @@ from qtrad.ports.clock import Clock
 R2_PARQUET_MANIFEST_CONTRACT = "qtrad-r2-feature-parquet-v2"
 R2_PARQUET_MANIFEST_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 4 * 1024 * 1024
+_MAX_CHUNK_BYTES = 64 * 1024 * 1024
 _DEFAULT_CHUNK_ROWS = 8192
 _DATA_ROOT = "chunks"
 _LINEAGE_ROOT = "lineage"
@@ -206,12 +207,14 @@ class ParquetR2FeatureStore:
                 buffer.append(row)
                 row_count += 1
                 if len(buffer) == self._chunk_rows:
-                    chunk_refs.append(
-                        self._publish_chunk(path, len(chunk_refs), tuple(buffer), schema)
-                    )
+                    for bounded in _bounded_parquet_chunks(tuple(buffer), schema):
+                        chunk_refs.append(
+                            self._publish_chunk(path, len(chunk_refs), bounded, schema)
+                        )
                     buffer.clear()
             if buffer:
-                chunk_refs.append(self._publish_chunk(path, len(chunk_refs), tuple(buffer), schema))
+                for bounded in _bounded_parquet_chunks(tuple(buffer), schema):
+                    chunk_refs.append(self._publish_chunk(path, len(chunk_refs), bounded, schema))
             semantic_dataset_id = semantic_hasher.hexdigest()
             manifest = _build_manifest(
                 path=path,
@@ -257,6 +260,8 @@ class ParquetR2FeatureStore:
         for chunk in manifest.chunks:
             data_path = _safe_child(path.parent, chunk.data_file, _DATA_ROOT)
             lineage_path = _safe_child(path.parent, chunk.lineage_file, _LINEAGE_ROOT)
+            _validate_parquet_chunk_size(data_path, chunk.data_file)
+            _validate_parquet_chunk_size(lineage_path, chunk.lineage_file)
             if _sha256_file(data_path) != chunk.data_sha256:
                 raise ValueError(f"R2 feature data chunk hash mismatch: {chunk.data_file}")
             if _sha256_file(lineage_path) != chunk.lineage_sha256:
@@ -344,6 +349,8 @@ class ParquetR2FeatureStore:
         data_frame, lineage_frame = _chunk_frames(rows, schema)
         _publish_parquet(data_path, data_frame)
         _publish_parquet(lineage_path, lineage_frame)
+        _validate_parquet_chunk_size(data_path, data_file)
+        _validate_parquet_chunk_size(lineage_path, lineage_file)
         return R2FeatureChunkReference(
             index=index,
             data_file=data_file,
@@ -767,6 +774,43 @@ def _chunk_semantic_hash(rows: Sequence[RawFeatureRow]) -> str:
         digest.update(len(encoded).to_bytes(8, "big"))
         digest.update(encoded)
     return digest.hexdigest()
+
+
+def _bounded_parquet_chunks(
+    rows: tuple[RawFeatureRow, ...],
+    schema: tuple[FeatureDefinition, ...],
+) -> tuple[tuple[RawFeatureRow, ...], ...]:
+    data_frame, lineage_frame = _chunk_frames(rows, schema)
+    data_bytes = _parquet_encoded_size(data_frame)
+    lineage_bytes = _parquet_encoded_size(lineage_frame)
+    if data_bytes <= _MAX_CHUNK_BYTES and lineage_bytes <= _MAX_CHUNK_BYTES:
+        return (rows,)
+    if len(rows) == 1:
+        raise ValueError(
+            "R2 feature Parquet single-row chunk exceeds the 64 MiB limit: "
+            f"data={data_bytes}, lineage={lineage_bytes}, limit={_MAX_CHUNK_BYTES}"
+        )
+    midpoint = len(rows) // 2
+    return (
+        *_bounded_parquet_chunks(rows[:midpoint], schema),
+        *_bounded_parquet_chunks(rows[midpoint:], schema),
+    )
+
+
+def _parquet_encoded_size(frame: pl.DataFrame) -> int:
+    with tempfile.NamedTemporaryFile(suffix=".parquet", delete=True) as output:
+        temporary = Path(output.name)
+        frame.write_parquet(temporary)
+        return temporary.stat().st_size
+
+
+def _validate_parquet_chunk_size(path: Path, relative: str) -> None:
+    size = path.stat().st_size
+    if size > _MAX_CHUNK_BYTES:
+        raise ValueError(
+            f"R2 feature Parquet chunk exceeds the 64 MiB limit: {relative} "
+            f"({size} > {_MAX_CHUNK_BYTES})"
+        )
 
 
 def _row_order_key(row: RawFeatureRow) -> tuple[datetime, str, datetime, datetime, str]:
