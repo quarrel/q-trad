@@ -47,13 +47,12 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutForecastRow,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
-    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutQuestionResult,
     R2HoldoutSelectionManifest,
-    R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
     holdout_opportunity_digest,
+    holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_models import (
     PreprocessingFit,
@@ -364,8 +363,6 @@ class FinalTrainingRow:
             raise ValueError("final-training target must be finite")
 
 
-
-
 def _require_shared_opportunities(
     selection: R2HoldoutSelectionManifest,
     opportunities: Sequence[HoldoutTargetOpportunity],
@@ -373,9 +370,7 @@ def _require_shared_opportunities(
     primary_horizon = selection.evaluation_policy.get("primary_horizon_seconds")
     if not isinstance(primary_horizon, int) or primary_horizon <= 0:
         raise ValueError("selection is missing its primary target horizon")
-    ordered = tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
-    if len({item.opportunity_id for item in ordered}) != len(ordered):
-        raise ValueError("holdout opportunities must be unique")
+    ordered = tuple(opportunities)
     expected_count = selection.evaluation_policy.get("holdout_opportunity_count")
     expected_digest = selection.evaluation_policy.get("holdout_opportunity_digest")
     if (
@@ -820,36 +815,25 @@ def freeze_holdout_selection(
         or holdout_target_source.target_instruments != tuple(verified_experiment.target_instruments)
     ):
         raise ValueError("outcome-blind target source differs from the verified experiment")
-    pre_holdout_projection = R2HoldoutTargetProjection.create_from_source(holdout_target_source)
-    holdout_opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(
-        holdout_target_source
-    )
-    if pre_holdout_projection.primary_horizon_seconds != primary_horizon:
-        raise ValueError("target projection differs from the frozen primary horizon")
-    if pre_holdout_projection.holdout_start != prior_selection.holdout_range[0]:
-        raise ValueError("target projection differs from the frozen holdout boundary")
-    pre_holdout_projection.verify_source(holdout_target_source)
-    if (
-        holdout_opportunity_registry.primary_horizon_seconds != primary_horizon
-        or holdout_opportunity_registry.holdout_range != prior_selection.holdout_range
-    ):
-        raise ValueError("opportunity registry differs from the frozen holdout policy")
-    holdout_opportunity_registry.verify_source(holdout_target_source)
+    if holdout_target_source.primary_horizon_seconds != primary_horizon:
+        raise ValueError("target source differs from the frozen primary horizon")
+    if holdout_target_source.holdout_range != prior_selection.holdout_range:
+        raise ValueError("target source differs from the frozen holdout boundary")
+    (
+        pre_holdout_projection_id,
+        opportunity_registry_id,
+        opportunity_count,
+        opportunity_digest,
+    ) = holdout_selection_compact_bindings(holdout_target_source)
     frozen_evaluation_policy["target_dataset_id"] = holdout_target_source.source_target_dataset_id
     frozen_evaluation_policy["holdout_target_source_id"] = holdout_target_source.source_id
     frozen_evaluation_policy["pre_holdout_target_dataset_id"] = (
-        pre_holdout_projection.projected_target_dataset.dataset_id
+        holdout_target_source.pre_holdout_target_dataset.dataset_id
     )
-    frozen_evaluation_policy["pre_holdout_projection_id"] = pre_holdout_projection.projection_id
-    frozen_evaluation_policy["holdout_opportunity_registry_id"] = (
-        holdout_opportunity_registry.registry_id
-    )
-    frozen_evaluation_policy["holdout_opportunity_count"] = len(
-        holdout_opportunity_registry.opportunities
-    )
-    frozen_evaluation_policy["holdout_opportunity_digest"] = holdout_opportunity_digest(
-        holdout_opportunity_registry.opportunities
-    )
+    frozen_evaluation_policy["pre_holdout_projection_id"] = pre_holdout_projection_id
+    frozen_evaluation_policy["holdout_opportunity_registry_id"] = opportunity_registry_id
+    frozen_evaluation_policy["holdout_opportunity_count"] = opportunity_count
+    frozen_evaluation_policy["holdout_opportunity_digest"] = opportunity_digest
 
     if tuple(sorted(set(controls))) != controls:
         raise ValueError("G2 control configuration IDs must be unique and ordered")

@@ -122,12 +122,10 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutForecastDataset,
     R2HoldoutForecastSeal,
     R2HoldoutOpenedMarker,
-    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
-    R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
-    holdout_opportunity_digest,
+    holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_GROUPS,
@@ -4120,10 +4118,12 @@ def _build_confirmatory_selection(
     if not frozen_by.strip():
         raise ValueError("frozen-by must be non-empty")
     source = verified_f2.holdout_target_source
-    projection = R2HoldoutTargetProjection.create_from_source(source)
-    projection.verify_source(source)
-    opportunity_registry = R2HoldoutOpportunityRegistry.create_from_source(source)
-    opportunity_registry.verify_source(source)
+    (
+        pre_holdout_projection_id,
+        opportunity_registry_id,
+        opportunity_count,
+        opportunity_digest,
+    ) = holdout_selection_compact_bindings(source)
     experiment = verified_f2.experiment
     holdout_range = source.holdout_range
     selected = verified_f2.selected_configuration_ids
@@ -4239,12 +4239,10 @@ def _build_confirmatory_selection(
             "target_instruments": list(source.target_instruments),
             "holdout_target_source_id": source.source_id,
             "pre_holdout_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
-            "pre_holdout_projection_id": projection.projection_id,
-            "holdout_opportunity_registry_id": opportunity_registry.registry_id,
-            "holdout_opportunity_count": len(opportunity_registry.opportunities),
-            "holdout_opportunity_digest": holdout_opportunity_digest(
-                opportunity_registry.opportunities
-            ),
+            "pre_holdout_projection_id": pre_holdout_projection_id,
+            "holdout_opportunity_registry_id": opportunity_registry_id,
+            "holdout_opportunity_count": opportunity_count,
+            "holdout_opportunity_digest": opportunity_digest,
             "model_selection_policy": experiment.model_selection_policy,
             "loss_policy": experiment.model_selection_policy,
             "minimum_training_rows": experiment.minimum_training_rows,

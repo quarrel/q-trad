@@ -53,6 +53,11 @@ R2_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-holdout-target-projection-v2"
 R2_PRE_HOLDOUT_TARGET_PROJECTION_CONTRACT = "qtrad-r2-pre-holdout-target-projection-v1"
 R2_HOLDOUT_OPPORTUNITY_REGISTRY_CONTRACT = "qtrad-r2-holdout-opportunity-registry-v2"
 R2_HOLDOUT_TARGET_SOURCE_CONTRACT = "qtrad-r2-holdout-target-source-v1"
+R2_HOLDOUT_OPPORTUNITY_DIGEST_CONTRACT = "qtrad-r2-holdout-opportunity-summary-v2"
+R2_HOLDOUT_SELECTION_PROJECTION_BINDING_CONTRACT = (
+    "qtrad-r2-selection-pre-holdout-projection-binding-v1"
+)
+R2_HOLDOUT_SELECTION_OPPORTUNITY_BINDING_CONTRACT = "qtrad-r2-selection-opportunity-binding-v1"
 
 HOLDOUT_ACKNOWLEDGEMENT = "I_ACKNOWLEDGE_THIS_IRREVERSIBLY_CONSUMES_THE_FROZEN_HOLDOUT"
 
@@ -1018,23 +1023,30 @@ class HoldoutTargetOpportunity:
         )
 
 
+def holdout_opportunity_summary(
+    opportunities: Sequence[HoldoutTargetOpportunity],
+) -> tuple[int, str]:
+    """Stream the authenticated ordered opportunity IDs into a compact digest."""
+    digest = sha256()
+    digest.update(R2_HOLDOUT_OPPORTUNITY_DIGEST_CONTRACT.encode("ascii"))
+    count = 0
+    for opportunity in opportunities:
+        opportunity_id = opportunity.opportunity_id
+        _require_id(opportunity_id, "holdout opportunity ID")
+        encoded = opportunity_id.encode("ascii")
+        digest.update(len(encoded).to_bytes(8, "big"))
+        digest.update(encoded)
+        count += 1
+    digest.update(count.to_bytes(8, "big"))
+    return count, digest.hexdigest()
+
 
 def holdout_opportunity_digest(
     opportunities: Sequence[HoldoutTargetOpportunity],
 ) -> str:
-    """Return the compact semantic digest for an ordered opportunity registry."""
-    ordered = tuple(sorted(opportunities, key=lambda item: item.opportunity_id))
-    if len({item.opportunity_id for item in ordered}) != len(ordered):
-        raise ValueError("holdout opportunity digest input must be unique")
-    return _semantic_id(
-        {
-            "contract": "qtrad-r2-holdout-opportunity-summary-v1",
-            "schema_version": 1,
-            "opportunity_ids": [item.opportunity_id for item in ordered],
-        }
+    """Return the compact digest for an authenticated ordered opportunity registry."""
+    return holdout_opportunity_summary(opportunities)[1]
 
-
-    )
 
 def _project_pre_holdout_target(
     source: TargetDataset,
@@ -2316,6 +2328,67 @@ class R2HoldoutTargetSource:
             ),
             source_id=str(raw["source_id"]),
         )
+
+
+def holdout_selection_projection_id(source: R2HoldoutTargetSource) -> str:
+    """Bind projection policy and child identity without materialising projection rows."""
+    return _semantic_id(
+        {
+            "contract": R2_HOLDOUT_SELECTION_PROJECTION_BINDING_CONTRACT,
+            "schema_version": 1,
+            "source_semantic_id": source.source_id,
+            "source_target_dataset_id": source.source_target_dataset_id,
+            "observation_dataset_id": source.observation_dataset_id,
+            "foundation_configuration_id": source.foundation_configuration_id,
+            "holdout_range": [item.isoformat() for item in source.holdout_range],
+            "primary_horizon_seconds": source.primary_horizon_seconds,
+            "target_instruments": list(source.target_instruments),
+            "projection_policy": R2PreHoldoutTargetProjection.POLICY,
+            "projected_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+        }
+    )
+
+
+def holdout_selection_opportunity_registry_id(
+    source: R2HoldoutTargetSource,
+    *,
+    opportunity_count: int,
+    opportunity_digest: str,
+) -> str:
+    """Bind the compact opportunity summary to authenticated source policy."""
+    return _semantic_id(
+        {
+            "contract": R2_HOLDOUT_SELECTION_OPPORTUNITY_BINDING_CONTRACT,
+            "schema_version": 1,
+            "source_semantic_id": source.source_id,
+            "source_target_dataset_id": source.source_target_dataset_id,
+            "observation_dataset_id": source.observation_dataset_id,
+            "foundation_configuration_id": source.foundation_configuration_id,
+            "projected_target_dataset_id": source.pre_holdout_target_dataset.dataset_id,
+            "holdout_range": [item.isoformat() for item in source.holdout_range],
+            "primary_horizon_seconds": source.primary_horizon_seconds,
+            "opportunity_derivation_policy": source.OPPORTUNITY_DERIVATION_POLICY,
+            "opportunity_count": opportunity_count,
+            "opportunity_digest": opportunity_digest,
+        }
+    )
+
+
+def holdout_selection_compact_bindings(
+    source: R2HoldoutTargetSource,
+) -> tuple[str, str, int, str]:
+    """Return projection ID, registry ID, count and ordered digest without row materialisation."""
+    count, digest = holdout_opportunity_summary(source.opportunities)
+    return (
+        holdout_selection_projection_id(source),
+        holdout_selection_opportunity_registry_id(
+            source,
+            opportunity_count=count,
+            opportunity_digest=digest,
+        ),
+        count,
+        digest,
+    )
 
 
 @dataclass(frozen=True, slots=True)

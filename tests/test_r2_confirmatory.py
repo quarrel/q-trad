@@ -45,8 +45,10 @@ from qtrad.domain.r2_features import R2FeatureDataset, feature_set_id
 from qtrad.domain.r2_holdout import (
     HOLDOUT_ACKNOWLEDGEMENT,
     HoldoutScope,
+    R2HoldoutOpportunityRegistry,
     R2HoldoutQuestion,
     R2HoldoutSelectionManifest,
+    R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
     R2OutcomeBlindTargetView,
 )
@@ -1422,6 +1424,16 @@ def test_confirmatory_f2_is_constructed_by_verifier_and_freezes_without_full_tar
         raise AssertionError("confirmatory G1 decoded a holdout-bearing child")
 
     monkeypatch.setattr(verification, "_load_selection", reject_full_target_decoder)
+
+    def reject_full_child_materialisation(*_: object, **__: object) -> None:
+        raise AssertionError("confirmatory selection must not materialise full child artifacts")
+
+    monkeypatch.setattr(
+        R2HoldoutTargetProjection, "create_from_source", reject_full_child_materialisation
+    )
+    monkeypatch.setattr(
+        R2HoldoutOpportunityRegistry, "create_from_source", reject_full_child_materialisation
+    )
     selection_path = tmp_path / "selection.json"
     captured_freeze: dict[str, Any] = {}
     shared_freeze = verification.freeze_holdout_selection

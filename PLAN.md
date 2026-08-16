@@ -46,7 +46,8 @@ orders or production broker connectivity.
   representative path now binds a fixed profile to a verified Stage 8 foundation and provides an independently
   replayable R2.H verifier; no fresh representative execution or qualifying R2.H bundle exists yet. R2.F2
   and the real locked holdout remain gated on a frozen qualifying foundation. Disposable R2.G2 mechanics
-  (selection-v3, outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
+  (selection-v4 compact authority with source/projection/opportunity binding IDs, ordered opportunity digest and count,
+  outcome-blind preparation, sealed forecasts, marker-first reveal and consumption) are
   implemented and tested with implementation-only fixtures. The fixture-confirmatory C2a F2/G1 authority
   path and both C2b phases are implemented: verified G1 exclusively authorises unopened G2 preparation,
   create-only marker-first reveal, authenticated target decoding, frozen evaluation, terminal consumption

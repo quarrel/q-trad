@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import builtins
 import json
 import shutil
 from dataclasses import replace
@@ -12,6 +13,7 @@ from uuid import UUID
 
 import pytest
 
+import qtrad.domain.r2_holdout as holdout_domain
 from qtrad.application.r2_holdout import (
     build_holdout_coverage,
     build_holdout_forecasts,
@@ -61,7 +63,7 @@ from qtrad.domain.r2_holdout import (
     R2HoldoutSelectionManifest,
     R2HoldoutTargetProjection,
     R2HoldoutTargetSource,
-    holdout_opportunity_digest,
+    holdout_selection_compact_bindings,
 )
 from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, ModelFamily
 from qtrad.runtime.r2_bundles import canonical_bytes
@@ -534,7 +536,8 @@ def _prepared(
         bind_target_dataset=bind_target_dataset,
         include_noneligible=include_noneligible,
     )
-    opportunities = _opportunities(include_noneligible=include_noneligible)
+    target_source = _target_source(include_noneligible=include_noneligible)
+    opportunities = target_source.opportunities
     feature_schema_id = _training_feature_dataset(
         include_noneligible=include_noneligible
     ).raw_feature_schema_id
@@ -563,7 +566,6 @@ def _prepared(
         ),
     )
     training_features = _training_feature_dataset(include_noneligible=include_noneligible)
-    target_source = _target_source(include_noneligible=include_noneligible)
     training_targets = target_source.pre_holdout_target_dataset
     fits = tuple(
         fit_final_ridge(
@@ -640,10 +642,13 @@ def _prepared(
 def test_disposable_holdout_round_trip_and_reveal(tmp_path: Path) -> None:
     selection, _opportunities, _, forecasts, coverage, seal = _prepared(tmp_path)
     target_dataset = _target_dataset()
-    assert verify_holdout_preparation(
-        tmp_path,
-        holdout_target_source=_target_source(),
-    ).seal_id == seal.seal_id
+    assert (
+        verify_holdout_preparation(
+            tmp_path,
+            holdout_target_source=_target_source(),
+        ).seal_id
+        == seal.seal_id
+    )
 
     def evaluator(outcomes, opened):
         return evaluate_holdout(
@@ -928,10 +933,13 @@ def test_file_bundle_builder_replays_the_consumed_evidence(tmp_path: Path) -> No
         output,
         holdout_target_source=_target_source(),
     )
-    assert bundle.bundle_id == verify_holdout_bundle(
-        output,
-        holdout_target_source=_target_source(),
-    ).bundle_id
+    assert (
+        bundle.bundle_id
+        == verify_holdout_bundle(
+            output,
+            holdout_target_source=_target_source(),
+        ).bundle_id
+    )
     assert bundle.evaluation.semantic_id == evaluation.evaluation_id
     assert consumed.evaluation_id == evaluation.evaluation_id
     impossible_consumed = R2HoldoutConsumedMarker.create(
@@ -1034,10 +1042,13 @@ def test_preparation_replays_a_forced_failed_fit(tmp_path: Path) -> None:
         forced_failure_configuration=_id("local"),
     )
     assert any(item.disposition is FinalFitDisposition.NUMERICAL_FAILURE for item in fits)
-    assert verify_holdout_preparation(
-        tmp_path,
-        holdout_target_source=_target_source(),
-    ).state.value == "PREPARED_UNOPENED"
+    assert (
+        verify_holdout_preparation(
+            tmp_path,
+            holdout_target_source=_target_source(),
+        ).state.value
+        == "PREPARED_UNOPENED"
+    )
 
 
 def test_seal_rejects_an_incomplete_frozen_configuration_registry(tmp_path: Path) -> None:
@@ -1243,16 +1254,45 @@ def test_selection_source_artifact_is_outcome_blind() -> None:
     )
     assert all(field not in policy for field in forbidden)
     source = _target_source()
-    projection = R2HoldoutTargetProjection.create_from_source(source)
-    registry = R2HoldoutOpportunityRegistry.create_from_source(source)
+    projection_id, registry_id, opportunity_count, opportunity_digest = (
+        holdout_selection_compact_bindings(source)
+    )
     assert policy["holdout_target_source_id"] == source.source_id
     assert policy["pre_holdout_target_dataset_id"] == source.pre_holdout_target_dataset.dataset_id
-    assert policy["pre_holdout_projection_id"] == projection.projection_id
-    assert policy["holdout_opportunity_registry_id"] == registry.registry_id
-    assert policy["holdout_opportunity_count"] == len(registry.opportunities)
-    assert policy["holdout_opportunity_digest"] == holdout_opportunity_digest(
-        registry.opportunities
-    )
+    assert policy["pre_holdout_projection_id"] == projection_id
+    assert policy["holdout_opportunity_registry_id"] == registry_id
+    assert policy["holdout_opportunity_count"] == opportunity_count
+    assert policy["holdout_opportunity_digest"] == opportunity_digest
+
+
+def test_compact_opportunity_digest_streams_ordered_ids(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = _target_source()
+
+    def forbidden(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("compact digest must not sort or materialise semantic JSON")
+
+    monkeypatch.setattr(builtins, "sorted", forbidden)
+    monkeypatch.setattr(holdout_domain, "_semantic_id", forbidden)
+    count, digest = holdout_domain.holdout_opportunity_summary(source.opportunities)
+
+    assert count == len(source.opportunities)
+    assert digest == holdout_domain.holdout_opportunity_digest(source.opportunities)
+
+
+def test_compact_selection_path_does_not_materialise_full_children(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    def forbidden(*_args: object, **_kwargs: object) -> NoReturn:
+        raise AssertionError("compact selection path must not construct full child artifacts")
+
+    monkeypatch.setattr(R2HoldoutTargetProjection, "create_from_source", forbidden)
+    monkeypatch.setattr(R2HoldoutOpportunityRegistry, "create_from_source", forbidden)
+    selection, *_ = _prepared(tmp_path)
+
+    assert selection.evaluation_policy["pre_holdout_projection_id"]
+    assert selection.evaluation_policy["holdout_opportunity_registry_id"]
 
 
 def test_file_reveal_loads_an_authenticated_target_child_after_open(tmp_path: Path) -> None:
