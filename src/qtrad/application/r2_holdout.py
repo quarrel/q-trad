@@ -20,7 +20,7 @@ import numpy as np
 from qtrad.domain.events import JsonValue
 from qtrad.domain.foundation import TARGET_DATASET_CONTRACT, TargetDataset, TargetRow
 from qtrad.domain.market_data import MarketDataSourceClass
-from qtrad.domain.r2_bundles import R2OofBundle
+from qtrad.domain.r2_bundles import R2_HOLDOUT_SOURCE_BINDING_CONTRACT, R2OofBundle
 from qtrad.domain.r2_evaluation import SelectionDecision, SelectionManifest
 from qtrad.domain.r2_features import (
     FeatureDefinition,
@@ -657,8 +657,12 @@ def freeze_holdout_selection(
         source_reference = verified_oof_bundle.holdout_target_source
         if (
             source_reference is None
-            or source_reference.contract != R2HoldoutTargetSource.CONTRACT
-            or source_reference.semantic_id != holdout_target_source.source_id
+            or source_reference.contract
+            not in (R2HoldoutTargetSource.CONTRACT, R2_HOLDOUT_SOURCE_BINDING_CONTRACT)
+            or (
+                source_reference.contract == R2HoldoutTargetSource.CONTRACT
+                and source_reference.semantic_id != holdout_target_source.source_id
+            )
         ):
             raise ValueError(
                 "holdout target source is not the independently authenticated OOF child"

@@ -13,6 +13,7 @@ from qtrad.domain.r2_readiness import EvidenceClass
 
 R2_FORECAST_MANIFEST_CONTRACT = "qtrad-r2-forecast-manifest-v1"
 R2_OOF_BUNDLE_CONTRACT = "qtrad-r2-oof-bundle-v2"
+R2_HOLDOUT_SOURCE_BINDING_CONTRACT = "qtrad-r2-holdout-target-source-binding-v1"
 
 
 def _semantic_id(value: object) -> str:
@@ -245,8 +246,9 @@ class R2OofBundle:
             raise ValueError("OOF bundle children must not contain duplicate identities")
         if len({item.path for item in references}) != len(references):
             raise ValueError("OOF bundle children must not contain duplicate paths")
-        if self.holdout_target_source is not None and self.holdout_target_source.contract != (
-            "qtrad-r2-holdout-target-source-v1"
+        if self.holdout_target_source is not None and self.holdout_target_source.contract not in (
+            "qtrad-r2-holdout-target-source-v1",
+            R2_HOLDOUT_SOURCE_BINDING_CONTRACT,
         ):
             raise ValueError("OOF holdout target source has an unexpected contract")
         if self.oof_id != _semantic_id(self.semantic_json()):

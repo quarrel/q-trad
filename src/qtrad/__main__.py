@@ -79,6 +79,7 @@ from qtrad.application.r2_ibkr_historical import (
 )
 from qtrad.application.r2_readiness import (
     VerifiedFoundation,
+    evaluate_outcome_blind_confirmatory_readiness,
     evaluate_r2_readiness,
 )
 from qtrad.application.replay import semantic_bar_hash
@@ -108,6 +109,7 @@ from qtrad.domain.market_data import (
     PriceBasis,
 )
 from qtrad.domain.modes import BrokerEnvironment, RunKind
+from qtrad.domain.r2_bundles import R2_HOLDOUT_SOURCE_BINDING_CONTRACT
 from qtrad.domain.r2_features import feature_set_id
 from qtrad.domain.r2_ibkr_historical import (
     IBKR_HISTORICAL_PROFILE,
@@ -236,7 +238,6 @@ from qtrad.runtime.qualification_gap_plan_set import (
     load_qualification_gap_plan_set,
     write_qualification_gap_plan_set,
 )
-from qtrad.runtime.r2_bundles import atomic_create, canonical_bytes
 from qtrad.runtime.r2_holdout import (
     load_holdout_policy,
     load_holdout_questions,
@@ -251,6 +252,12 @@ from qtrad.runtime.r2_holdout import (
     write_built_holdout_bundle,
     write_holdout_selection,
 )
+from qtrad.runtime.r2_holdout_source import (
+    R2HoldoutTargetSourceAuthority,
+    load_r2_holdout_target_source,
+    load_r2_holdout_target_source_authority,
+    write_r2_holdout_target_source,
+)
 from qtrad.runtime.r2_readiness import (
     load_r2_experiment,
     write_r2_experiment,
@@ -258,6 +265,7 @@ from qtrad.runtime.r2_readiness import (
 )
 from qtrad.runtime.r2_verification import (
     CONFIRMATORY_RUN_KIND,
+    OOF_DESCRIPTOR_CONTRACT,
     AuthenticatedR2Foundation,
     audit_confirmatory_f2,
     authenticate_confirmatory_f2_promotion,
@@ -276,7 +284,7 @@ from qtrad.runtime.r2_verification import (
     verify_confirmatory_g1,
     verify_confirmatory_g2_preparation,
     verify_confirmatory_r2h,
-    verify_oof_bundle,
+    verify_oof_bundle_with_source,
     verify_r2_oof_semantics,
 )
 from qtrad.runtime.research_export import research_export_metadata
@@ -428,7 +436,6 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
         HoldoutScope,
         R2HoldoutOpportunityRegistry,
         R2HoldoutTargetProjection,
-        R2HoldoutTargetSource,
     )
 
     if args.oof_bundle is None:
@@ -436,7 +443,7 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
             "--oof-bundle is required so selection freeze can replay verified OOF evidence"
         )
     prior = cast(SelectionManifest, load_prior_selection_manifest(args.prior_selection))
-    verified_oof = verify_oof_bundle(args.oof_bundle)
+    verified_oof, holdout_source_authority = verify_oof_bundle_with_source(args.oof_bundle)
     verified_experiment = load_r2_experiment(args.experiment)
     policy = load_holdout_policy(args.final_fitting_policy)
     questions = load_holdout_questions(args.questions)
@@ -452,12 +459,27 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     frozen_metadata = (
         {} if args.frozen_metadata is None else _load_holdout_cli_object(args.frozen_metadata)
     )
-    if verified_oof.holdout_target_source is None:
+    source_reference = verified_oof.holdout_target_source
+    if source_reference is None:
         raise ValueError("verified OOF bundle has no authenticated holdout target source")
-    source_path = args.oof_bundle.parent / verified_oof.holdout_target_source.path
-    holdout_target_source = R2HoldoutTargetSource.from_json(_load_holdout_cli_object(source_path))
-    if holdout_target_source.source_id != verified_oof.holdout_target_source.semantic_id:
-        raise ValueError("OOF holdout target source identity differs from its reference")
+    if source_reference.contract == R2_HOLDOUT_SOURCE_BINDING_CONTRACT:
+        descriptor_references = [
+            reference
+            for reference in verified_oof.evaluation_children
+            if reference.contract == OOF_DESCRIPTOR_CONTRACT
+        ]
+        if len(descriptor_references) != 1:
+            raise ValueError("verified OOF bundle has no unique authenticated descriptor")
+        if holdout_source_authority is None:
+            raise ValueError(
+                "verified OOF bundle did not retain its authenticated source authority"
+            )
+        holdout_target_source = holdout_source_authority.source
+    else:
+        source_path = args.oof_bundle.parent / source_reference.path
+        holdout_target_source = load_r2_holdout_target_source(source_path)
+        if holdout_target_source.source_id != source_reference.semantic_id:
+            raise ValueError("OOF holdout target source identity differs from its reference")
     pre_holdout_projection = R2HoldoutTargetProjection.from_json(
         _load_holdout_cli_object(args.pre_holdout_projection)
     )
@@ -1077,6 +1099,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_readiness.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_readiness.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_readiness.add_argument("--foundation-promotion", type=Path)
+    baselines_readiness.add_argument("--holdout-target-source", type=Path)
     baselines_readiness.add_argument("--experiment", type=Path, required=True)
     baselines_readiness.add_argument("--output", type=Path, required=True)
     baselines_features = baselines_sub.add_parser(
@@ -2314,6 +2337,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 output_path=args.output,
+                holdout_target_source_path=args.holdout_target_source,
             )
         )
     elif (
@@ -2708,7 +2732,7 @@ def _build_holdout_target_source_cli(
     for actual, expected, label in bindings:
         if actual != expected:
             raise ValueError(f"holdout target source differs from experiment: {label}")
-    atomic_create(output_path, canonical_bytes(source.as_json()))
+    write_r2_holdout_target_source(output_path, source)
     print(
         json.dumps(
             {
@@ -2733,20 +2757,53 @@ async def _report_r2_readiness(
     output_path: Path,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
+    holdout_target_source_path: Path | None = None,
 ) -> None:
     experiment = load_r2_experiment(experiment_path)
-    verified = await _load_r2_foundation_inputs(
-        settings,
-        clock,
-        foundation_bundle_path=foundation_bundle_path,
-        foundation_receipt_path=foundation_receipt_path,
-        foundation_promotion_path=foundation_promotion_path,
-        experiment=experiment,
+    outcome_blind_confirmatory = (
+        experiment.market_data_source_class is IBKR_HISTORICAL_SOURCE
+        and experiment.evidence_class is EvidenceClass.CONFIRMATORY
     )
-    software_verified = False
-    report = evaluate_r2_readiness(
-        cast(VerifiedFoundation, verified), experiment, software_verified=software_verified
-    )
+    if outcome_blind_confirmatory:
+        if holdout_target_source_path is None:
+            raise ValueError("confirmatory IBKR readiness requires --holdout-target-source")
+        holdout_source_authority = load_r2_holdout_target_source_authority(
+            holdout_target_source_path
+        )
+        holdout_target_source = holdout_source_authority.source
+        verified = await _load_r2_foundation_inputs(
+            settings,
+            clock,
+            foundation_bundle_path=foundation_bundle_path,
+            foundation_receipt_path=foundation_receipt_path,
+            foundation_promotion_path=foundation_promotion_path,
+            experiment=experiment,
+            outcome_blind=True,
+            holdout_target_source=holdout_source_authority,
+        )
+        report = evaluate_outcome_blind_confirmatory_readiness(
+            experiment=experiment,
+            target_source=holdout_target_source,
+            folds=verified.semantic_inputs.folds,
+            source_active=verified.semantic_inputs.source_active_intervals,
+            r1_bundle_id=verified.foundation_id,
+        )
+    else:
+        if holdout_target_source_path is not None:
+            raise ValueError(
+                "--holdout-target-source is only valid for confirmatory IBKR readiness"
+            )
+        verified = await _load_r2_foundation_inputs(
+            settings,
+            clock,
+            foundation_bundle_path=foundation_bundle_path,
+            foundation_receipt_path=foundation_receipt_path,
+            foundation_promotion_path=foundation_promotion_path,
+            experiment=experiment,
+        )
+        report = evaluate_r2_readiness(
+            cast(VerifiedFoundation, verified), experiment, software_verified=False
+        )
     write_r2_readiness(output_path, report)
     print(json.dumps(report.as_json(), sort_keys=True))
 
@@ -2758,7 +2815,7 @@ async def _load_r2_foundation_inputs(
     foundation_bundle_path: Path,
     experiment: R2ExperimentConfig,
     outcome_blind: bool = False,
-    holdout_target_source: object | None = None,
+    holdout_target_source: R2HoldoutTargetSourceAuthority | None = None,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
 ) -> AuthenticatedR2Foundation:
@@ -2769,11 +2826,11 @@ async def _load_r2_foundation_inputs(
             raise ValueError("R1 foundations do not accept a promotion attestation")
         target_source = None
         if outcome_blind:
-            from qtrad.domain.r2_holdout import R2HoldoutTargetSource
-
-            if not isinstance(holdout_target_source, R2HoldoutTargetSource):
-                raise ValueError("blind R1 foundation loading requires a holdout target source")
-            target_source = holdout_target_source
+            if not isinstance(holdout_target_source, R2HoldoutTargetSourceAuthority):
+                raise ValueError(
+                    "blind R1 foundation loading requires an authenticated target source authority"
+                )
+            target_source = holdout_target_source.source
         return await authenticate_r1_foundation_for_r2(
             root=settings.research_root,
             bundle_path=foundation_bundle_path,
@@ -2801,11 +2858,11 @@ async def _load_r2_foundation_inputs(
         raise ValueError("Stage 8 promotion is valid only for confirmatory IBKR work")
     target_source = None
     if outcome_blind:
-        from qtrad.domain.r2_holdout import R2HoldoutTargetSource
-
-        if not isinstance(holdout_target_source, R2HoldoutTargetSource):
-            raise ValueError("blind IBKR foundation loading requires a holdout target source")
-        target_source = holdout_target_source
+        if not isinstance(holdout_target_source, R2HoldoutTargetSourceAuthority):
+            raise ValueError(
+                "blind IBKR foundation loading requires an authenticated target source authority"
+            )
+        target_source = holdout_target_source.source
     return authenticate_ibkr_foundation_for_r2(
         foundation_path=foundation_bundle_path,
         receipt_path=foundation_receipt_path,
@@ -2828,7 +2885,6 @@ async def _build_r2_oof(
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
 ) -> None:
-    from qtrad.domain.r2_holdout import R2HoldoutTargetSource
 
     experiment, feature_paths = load_experiment_and_feature_paths(
         experiment_path=experiment_path,
@@ -2843,9 +2899,8 @@ async def _build_r2_oof(
         raise ValueError("a Stage 8 promotion is only valid for IBKR historical OOF work")
     if holdout_target_source_path is None:
         raise ValueError("OOF build requires an authenticated holdout target source")
-    holdout_target_source = R2HoldoutTargetSource.from_json(
-        _load_holdout_cli_object(holdout_target_source_path)
-    )
+    holdout_source_authority = load_r2_holdout_target_source_authority(holdout_target_source_path)
+    holdout_target_source = holdout_source_authority.source
     foundation_authority = await _load_r2_foundation_inputs(
         settings,
         clock,
@@ -2854,7 +2909,7 @@ async def _build_r2_oof(
         foundation_promotion_path=foundation_promotion_path,
         experiment=experiment,
         outcome_blind=True,
-        holdout_target_source=holdout_target_source,
+        holdout_target_source=holdout_source_authority,
     )
     manifest = build_oof_bundle(
         verified=foundation_authority.semantic_inputs,
@@ -2875,6 +2930,8 @@ async def _build_r2_oof(
             else None
         ),
         holdout_target_source=holdout_target_source,
+        holdout_target_source_authority=holdout_source_authority,
+        holdout_target_source_path=holdout_target_source_path,
         experiment_path=experiment_path,
     )
     print(json.dumps({"oof_bundle": str(manifest)}, sort_keys=True))

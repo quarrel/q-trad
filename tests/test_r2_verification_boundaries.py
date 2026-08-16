@@ -185,16 +185,21 @@ def test_oof_verification_dispatches_representative_replay(
 ) -> None:
     replayed = False
 
-    def replay(_: Path) -> None:
+    async def replay(_: Path, **__: object) -> None:
         nonlocal replayed
         replayed = True
 
-    monkeypatch.setattr(verification, "verify_r2_oof_bundle", lambda _: object())
+    bundle = SimpleNamespace(holdout_target_source=None)
+    monkeypatch.setattr(
+        verification,
+        "_verify_r2_oof_bundle_with_source",
+        lambda _: (bundle, None),
+    )
     monkeypatch.setattr(
         verification,
         "_oof_child_payload",
         lambda *_: {"run_kind": "REPRESENTATIVE"},
     )
-    monkeypatch.setattr(verification, "_replay_representative_oof", replay)
+    monkeypatch.setattr(verification, "_replay_authority_oof_async", replay)
     assert verify_oof_bundle(Path("manifest.json")) is not None
     assert replayed
