@@ -68,9 +68,31 @@ from tests.test_r1_foundation import _config
 _BASE = datetime(2026, 1, 1, tzinfo=UTC)
 _GRID = timedelta(minutes=1)
 _HORIZON = timedelta(minutes=15)
-_SOURCE_END = _BASE + timedelta(days=30, minutes=30)
-_SPLIT = _BASE + timedelta(days=15)
+_FIXTURE_WEEKS = 20
+_DECISIONS_PER_WEEK = 60
+_SOURCE_END = _BASE + timedelta(weeks=_FIXTURE_WEEKS, minutes=30)
+_SPLIT = _BASE + timedelta(weeks=10)
 _CANDIDATES = tuple(str(item) for item in IBKR_CONFIRMATORY_INSTRUMENTS)
+
+
+def _fixture_decisions() -> tuple[datetime, ...]:
+    return tuple(
+        _BASE + timedelta(weeks=week, days=1, minutes=minute)
+        for week in range(_FIXTURE_WEEKS)
+        for minute in range(_DECISIONS_PER_WEEK)
+    )
+
+
+def _fixture_intervals() -> tuple[tuple[datetime, datetime], ...]:
+    return tuple(
+        (
+            _BASE - timedelta(minutes=1) if week == 0 else _BASE + timedelta(weeks=week),
+            _SOURCE_END if week == _FIXTURE_WEEKS - 1 else _BASE + timedelta(weeks=week + 1),
+        )
+        for week in range(_FIXTURE_WEEKS)
+    )
+
+
 _FIXTURE_POLICY = ProviderHistoricalAvailabilityPolicy(
     selector=PROVIDER_HISTORY_DECLARED_DELAY,
     policy=PROVIDER_HISTORY_POLICY,
@@ -224,12 +246,7 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
             )
         )
         if request.kind is IbkrHistoricalRequestKind.MIDPOINT_BARS:
-            decisions = tuple(
-                _BASE
-                + timedelta(minutes=1)
-                + timedelta(minutes=round((30 * 24 * 60) * index / 999))
-                for index in range(1_000)
-            )
+            decisions = _fixture_decisions()
             bars = []
             for decision in decisions:
                 if request.interval_start <= decision < request.interval_end:
@@ -237,15 +254,18 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
             # The two contiguous requests own disjoint intervals; guard their seam explicitly.
             unique_bars = tuple(dict.fromkeys(bars))
             sequence = 1
+            instrument_index = _CANDIDATES.index(str(request.instrument_id))
             for bar_time in unique_bars:
+                minute_index = int((bar_time - _BASE) // _GRID)
+                price_cents = 10_000 + instrument_index * 37 + (minute_index * 7 % 1_000)
                 payload: dict[str, JsonValue] = {
                     "date": int(bar_time.timestamp()),
-                    "open": "100.0",
-                    "high": "100.1",
-                    "low": "99.9",
-                    "close": "100.0",
+                    "open": f"{price_cents / 100:.2f}",
+                    "high": f"{(price_cents + 1) / 100:.2f}",
+                    "low": f"{(price_cents - 1) / 100:.2f}",
+                    "close": f"{price_cents / 100:.2f}",
                     "volume": 1,
-                    "wap": "100.0",
+                    "wap": f"{price_cents / 100:.2f}",
                     "count": 1,
                 }
                 callbacks.append(
@@ -299,23 +319,16 @@ def _snapshot(plan: IbkrHistoricalPlan) -> IbkrHistoricalExecutionSnapshot:
 
         else:
             decisions = tuple(
-                _BASE
-                + timedelta(minutes=1)
-                + timedelta(minutes=round((30 * 24 * 60) * index / 999))
-                for index in range(1_000)
-                if request.interval_start
-                <= _BASE
-                + timedelta(minutes=1)
-                + timedelta(minutes=round((30 * 24 * 60) * index / 999))
-                < request.interval_end
+                decision
+                for decision in _fixture_decisions()
+                if request.interval_start <= decision < request.interval_end
             )
             sessions: list[dict[str, JsonValue]] = [
                 {
-                    "start": utc_text(decision - timedelta(minutes=1)),
-                    "end": utc_text(decision + _HORIZON),
+                    "start": utc_text(decisions[0] - timedelta(minutes=1)),
+                    "end": utc_text(decisions[-1] + _HORIZON),
                     "active": True,
                 }
-                for decision in decisions
             ]
             callbacks.extend(
                 (
@@ -404,8 +417,8 @@ def _foundation_config() -> FoundationConfig:
         config,
         grid_resolution=_GRID,
         holdout_range=(_BASE + (_SOURCE_END - _BASE) * 0.8, _SOURCE_END),
-        minimum_training_duration=timedelta(days=13),
-        minimum_validation_duration=timedelta(days=3),
+        minimum_training_duration=timedelta(weeks=10),
+        minimum_validation_duration=timedelta(weeks=2),
         selected_feature_lag=timedelta(minutes=1),
     )
 
@@ -415,10 +428,10 @@ def _stage8_fixture(root: Path) -> tuple[Path, Path, Path, Path, Path]:
     for index, instrument in enumerate(_CANDIDATES, start=1):
         fingerprint = _fingerprint(instrument, index)
         for kind in (IbkrHistoricalRequestKind.MIDPOINT_BARS, IbkrHistoricalRequestKind.SCHEDULE):
-            requests.append(
-                _request(instrument, fingerprint, kind, _BASE - timedelta(minutes=1), _SPLIT)
-            )
-            requests.append(_request(instrument, fingerprint, kind, _SPLIT, _SOURCE_END))
+            for interval_start, interval_end in _fixture_intervals():
+                requests.append(
+                    _request(instrument, fingerprint, kind, interval_start, interval_end)
+                )
     plan = _plan(tuple(requests))
     artifact = build_ibkr_historical_result_artifact(plan, _snapshot(plan))
     stage6 = root / "stage6"
@@ -480,10 +493,37 @@ def test_stage8_micro_fixture_builds_and_qualifies(tmp_path: Path) -> None:
     document = json.loads(foundation.read_bytes())
     assert document["contract"] == "qtrad-ibkr-historical-foundation-v2"
     assert document["source_class"] == "IBKR_HISTORICAL_RESEARCH"
-    assert document["payload"]["readiness"]["state"] == "QUALIFYING_HISTORY_READY"
-    assert document["payload"]["readiness"]["causes"] == []
+    readiness = document["payload"]["readiness"]
+    assert readiness["state"] == "QUALIFYING_HISTORY_READY"
+    assert readiness["causes"] == []
     assert all(
-        value >= 1_000 for value in document["payload"]["readiness"]["rows_by_candidate"].values()
+        1_000 <= value <= _DECISIONS_PER_WEEK * _FIXTURE_WEEKS * 17
+        for value in readiness["rows_by_candidate"].values()
+    )
+    configuration = document["payload"]["configuration"]
+    child_references = document["payload"]["children"]
+    target_rows = sum(int(part["row_count"]) for part in child_references["targets"])
+    panel_rows = sum(int(part["row_count"]) for part in child_references["panel"])
+    active_minutes_upper_bound = _FIXTURE_WEEKS * (_DECISIONS_PER_WEEK + int(_HORIZON / _GRID))
+    assert target_rows <= active_minutes_upper_bound * len(_CANDIDATES)
+    assert panel_rows <= active_minutes_upper_bound * len(configuration["ordered_instruments"])
+    assert document["payload"]["target_opportunity_policy_id"]
+    assert configuration["minimum_training_duration_seconds"] == timedelta(weeks=10).total_seconds()
+    assert (
+        configuration["minimum_validation_duration_seconds"] == timedelta(weeks=2).total_seconds()
+    )
+    holdout_start, holdout_end = (
+        datetime.fromisoformat(value) for value in configuration["holdout_range"]
+    )
+    assert holdout_end - holdout_start >= timedelta(weeks=4)
+    coverage_cells = readiness["evidence"]["coverage_cells"]
+    assert len(coverage_cells) == len(_CANDIDATES) * 5
+    assert all(cell["passed"] for cell in coverage_cells)
+    assert all(cell["opportunity_counts"]["ELIGIBLE"] >= 20 for cell in coverage_cells)
+    assert foundation.stat().st_size < 4 * 1024 * 1024
+    assert (
+        sum(path.stat().st_size for path in tmp_path.rglob("*") if path.is_file())
+        < 256 * 1024 * 1024
     )
     assert receipt.is_file() and promotion.is_file()
 
@@ -639,7 +679,9 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
         ]
     )
 
-    f2_promotion = tmp_path / "f2-promotion.json"
+    promotion_root = tmp_path.parent / f"{tmp_path.name}-confirmatory"
+    promotion_root.mkdir()
+    f2_promotion = promotion_root / "f2-promotion.json"
     cli.main(
         [
             "research",

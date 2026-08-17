@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
@@ -159,6 +160,7 @@ def build_ibkr_foundation(
         observations,
         adapted_configuration,
         horizons=adapted_configuration.target_horizons,
+        source_active_intervals=active_intervals,
     )
     try:
         folds = build_expanding_folds(targets, adapted_configuration)
@@ -451,16 +453,27 @@ def _ibkr_opportunity_coverage(
     blocking: list[str] = []
     totals = {name: 0 for name in ("ELIGIBLE", "GAP", "INACTIVE", "OTHER_INELIGIBLE")}
     for instrument in candidates:
-        intervals = tuple(sorted(active_intervals.get(instrument, ())))
+        ordered_intervals = tuple(sorted(active_intervals.get(instrument, ())))
+        merged_intervals: list[tuple[datetime, datetime]] = []
+        for start, end in ordered_intervals:
+            if merged_intervals and start <= merged_intervals[-1][1]:
+                previous_start, previous_end = merged_intervals[-1]
+                merged_intervals[-1] = (previous_start, max(previous_end, end))
+            else:
+                merged_intervals.append((start, end))
+        intervals = tuple(merged_intervals)
+        interval_starts = tuple(start for start, _ in intervals)
         gaps = tuple(sorted(gaps_by_instrument[instrument]))
         for block, block_start, block_end in blocks:
             counts = dict.fromkeys(totals, 0)
             for row in rows_by_instrument[instrument]:
                 if not block_start <= row.decision_time < block_end:
                     continue
-                is_active = any(
-                    start <= row.target_start_time and row.target_end_time <= end
-                    for start, end in intervals
+                interval_index = bisect_right(interval_starts, row.target_start_time) - 1
+                is_active = (
+                    interval_index >= 0
+                    and intervals[interval_index][0] <= row.target_start_time
+                    and row.target_end_time <= intervals[interval_index][1]
                 )
                 if not is_active:
                     disposition = "INACTIVE"
