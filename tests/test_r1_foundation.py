@@ -441,3 +441,66 @@ def test_target_builder_active_intervals_bound_work_to_active_minutes(
     assert len(targets.rows) < int((end - start).total_seconds() // 60)
     assert targets.rows[0].return_disposition is ReturnDisposition.VALID
     assert targets.rows[-1].return_disposition is ReturnDisposition.MISSING_END
+
+
+def test_heterogeneous_active_intervals_bound_panel_and_target_opportunities() -> None:
+    start = datetime(2026, 7, 1, tzinfo=UTC)
+    end = start + timedelta(minutes=10)
+    first_rows = tuple(
+        _row(
+            start + timedelta(minutes=index),
+            close=str(100 + index),
+            global_position=index + 1,
+        )
+        for index in range(8)
+    )
+    second_rows = tuple(
+        replace(
+            row,
+            instrument_id="fx:eur-usd",
+            stream_id="market-bar:fx:eur-usd:MID",
+            source_external_id="EURUSD",
+            global_position=row.global_position + 100,
+            stream_version=row.stream_version + 100,
+        )
+        for row in first_rows
+    )
+    dataset = ObservationDataset.create(
+        (*first_rows, *second_rows),
+        configuration={
+            "fixture": "r1-heterogeneous-active-intervals",
+            "ordered_instruments": ["fx:aud-usd", "fx:eur-usd"],
+            "interval_start": (start - timedelta(hours=1)).isoformat(),
+            "interval_end": (end + timedelta(hours=1)).isoformat(),
+        },
+    )
+    config = replace(
+        _config(dataset, start=start, end=end),
+        ordered_instruments=("fx:aud-usd", "fx:eur-usd"),
+        instrument_roles={
+            "fx:aud-usd": InstrumentRole.TARGET,
+            "fx:eur-usd": InstrumentRole.TARGET,
+        },
+    )
+    active_intervals = {
+        "fx:aud-usd": ((start, start + timedelta(minutes=3)),),
+        "fx:eur-usd": ((start + timedelta(minutes=5), start + timedelta(minutes=8)),),
+    }
+    panel = build_asof_panel(dataset, config, source_active_intervals=active_intervals)
+    targets = build_frozen_targets(
+        dataset,
+        config,
+        source_active_intervals=active_intervals,
+    )
+
+    expected_first = tuple(start + timedelta(minutes=index) for index in range(3))
+    expected_second = tuple(start + timedelta(minutes=index) for index in range(5, 8))
+    assert tuple(
+        row.decision_time for row in targets.rows if row.instrument_id == "fx:aud-usd"
+    ) == (expected_first)
+    assert tuple(
+        row.decision_time for row in targets.rows if row.instrument_id == "fx:eur-usd"
+    ) == (expected_second)
+    assert len(targets.rows) == 6
+    assert set(row.decision_time for row in panel.rows) == {*expected_first, *expected_second}
+    assert len(panel.rows) == 12

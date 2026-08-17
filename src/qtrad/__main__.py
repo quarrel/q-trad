@@ -3235,6 +3235,7 @@ async def _build_foundation_bundle(
         observations,
         configuration,
         horizons=configuration.target_horizons,
+        source_active_intervals=evidence.source_active_intervals,
     )
     folds = build_expanding_folds(targets, configuration)
     forecasts = build_zero_return_forecasts(panel, targets, folds, configuration)
