@@ -12,6 +12,7 @@ import pytest
 from qtrad import __main__ as cli
 from qtrad.runtime.ibkr_foundation import (
     authenticate_ibkr_foundation,
+    ibkr_foundation_target_opportunity_policy_id,
     load_ibkr_foundation,
     preflight_ibkr_foundation,
     verify_ibkr_foundation,
@@ -308,6 +309,7 @@ def test_stage8_foundation_identity_classifies_selected_input_and_readiness() ->
             "state": "READY",
             "causes": [],
         },
+        "target_opportunity_policy_id": ibkr_foundation_target_opportunity_policy_id(),
     }
     payload["provider_history"]["stage7"]["selected_input"]["semantic_id"] = (
         foundation_runtime._sha(
