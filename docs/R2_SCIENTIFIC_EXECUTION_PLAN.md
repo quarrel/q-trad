@@ -267,7 +267,7 @@ PR-S0 made no provider call, Stage 8 build, model run or holdout access. PR #144
 
 # 4. Run root, code freeze and provenance
 
-After PR #144 merges:
+With PR #144 merged:
 
 1. update to exact `main`;
 2. require a clean worktree;
