@@ -70,6 +70,7 @@ from qtrad.domain.r2_readiness import (
     R2ExperimentConfig,
 )
 from qtrad.domain.research import ObservationRow
+from qtrad.runtime import r2_verification
 from qtrad.runtime.settings import Settings
 from tests.test_r1_observations import _bar, _candidate, _dataset
 from tests.test_r2_readiness import END, START, TARGETS, experiment
@@ -1212,6 +1213,92 @@ def _write_store(
         image_identity=image,
     )
     return store, manifest, rows
+
+
+def _feature_receipt_fixture(
+    root: Path,
+) -> tuple[Any, Any, Any, Any, Any, Path]:
+    store, manifest, rows = _write_store(root)
+    config = cast(
+        Any,
+        SimpleNamespace(
+            configuration_id=manifest.experiment_configuration_id,
+            market_data_source_class=manifest.market_data_source_class,
+            evidence_class=manifest.evidence_class,
+        ),
+    )
+    foundation = cast(
+        Any,
+        SimpleNamespace(
+            foundation_id="f" * 64,
+            closure_id="e" * 64,
+            verification_id="d" * 64,
+            promotion_id=None,
+        ),
+    )
+    receipt = r2_verification.build_r2_feature_verification_receipt(manifest, foundation, config)
+    receipt_path = root / "receipt.json"
+    r2_verification.write_r2_feature_verification_receipt(receipt_path, receipt)
+    return store, manifest, rows, config, foundation, receipt_path
+
+
+def test_feature_receipt_auth_rejects_missing_mismatched_and_tampered_inputs(
+    tmp_path: Path,
+) -> None:
+    _store, manifest, _rows, config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+
+    with pytest.raises(ValueError, match="regular non-symlink"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            tmp_path / "missing.json", manifest, foundation, config
+        )
+
+    mismatched = replace(manifest, semantic_dataset_id="0" * 64)
+    with pytest.raises(ValueError, match="semantic_dataset_id"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            receipt_path, mismatched, foundation, config
+        )
+
+    tampered = json.loads(receipt_path.read_text(encoding="utf-8"))
+    tampered["manifest_sha256"] = "0" * 64
+    receipt_path.write_text(json.dumps(tampered), encoding="utf-8")
+    with pytest.raises(ValueError, match="verification ID"):
+        r2_verification.authenticate_r2_feature_verification_receipt(
+            receipt_path, manifest, foundation, config
+        )
+
+
+def test_feature_receipt_loading_skips_parent_row_replay(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _store, manifest, rows, config, foundation, receipt_path = _feature_receipt_fixture(tmp_path)
+    monkeypatch.setattr(
+        r2_verification,
+        "_foundation_inputs",
+        lambda _verified: cast(Any, SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        r2_verification,
+        "verify_raw_feature_manifest_bindings",
+        lambda *_args, **_kwargs: None,
+    )
+
+    def unexpected_parent_replay(*_args: Any, **_kwargs: Any) -> int:
+        raise AssertionError("feature receipt path replayed the parent transformation")
+
+    monkeypatch.setattr(r2_verification, "verify_raw_feature_rows", unexpected_parent_replay)
+    datasets, manifests, receipts = r2_verification._load_feature_datasets(
+        verified=cast(Any, object()),
+        experiment=config,
+        feature_manifest_paths={"fixture": tmp_path / "features.json"},
+        feature_receipt_paths={"fixture": receipt_path},
+        root=tmp_path,
+        clock=FixedClock(),
+        foundation_authority=foundation,
+    )
+
+    assert tuple(datasets["fixture"].rows) == rows
+    assert manifests["fixture"].semantic_dataset_id == manifest.semantic_dataset_id
+    assert receipts["fixture"].verification_id
 
 
 def test_chunked_parquet_round_trip_zero_rows_and_physical_semantic_identity(

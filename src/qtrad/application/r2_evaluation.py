@@ -3,7 +3,7 @@
 from bisect import bisect_right
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from itertools import pairwise
 from math import sqrt
@@ -62,6 +62,8 @@ _REQUIRED_SELECTION_THRESHOLDS = (
 )
 
 _PRIMARY_SELECTION_METRIC = "INSTRUMENT_BALANCED_COMMON_SUPPORT_MSE"
+
+_FEATURE_DATASET_BINDING_CAPABILITY = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,10 +131,49 @@ class TrainingPredictions:
 
 
 @dataclass(frozen=True, slots=True)
+class _VerifiedFeatureDatasetBinding:
+    """Compact row-authenticated feature identity retained after replay."""
+
+    dataset_id: str
+    feature_set_id: str
+    feature_set_name: str
+    market_data_source_class: MarketDataSourceClass
+    verification_id: str
+    row_authentication_id: str
+    _capability: InitVar[object | None] = None
+
+    def __post_init__(self, _capability: object) -> None:
+        if _capability is not _FEATURE_DATASET_BINDING_CAPABILITY:
+            raise ValueError("feature dataset bindings require an internal capability")
+        if not self.dataset_id or not self.feature_set_id or not self.verification_id:
+            raise ValueError("feature dataset binding identities are required")
+        if not self.row_authentication_id:
+            raise ValueError("feature dataset binding requires row authentication")
+
+    @classmethod
+    def from_dataset(
+        cls,
+        dataset: R2FeatureDataset,
+        *,
+        verification_id: str,
+        row_authentication_id: str,
+    ) -> "_VerifiedFeatureDatasetBinding":
+        return cls(
+            dataset.dataset_id,
+            dataset.feature_set_id,
+            dataset.feature_set_name,
+            dataset.market_data_source_class,
+            verification_id,
+            row_authentication_id,
+            _capability=_FEATURE_DATASET_BINDING_CAPABILITY,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationModel:
     model_family: ModelFamily
     feature_set_id: str
-    feature_dataset: R2FeatureDataset
+    feature_dataset: R2FeatureDataset | _VerifiedFeatureDatasetBinding
     forecasts: ForecastDataset
     fold_results: tuple[RidgeFoldResult, ...]
 
@@ -345,6 +386,9 @@ def build_r2_evaluation(
     local_feature_datasets: Sequence[R2FeatureDataset],
     minimum_correlation_rows: int = 3,
     forecast_bucket_count: int = 5,
+    training_predictions_by_model: Mapping[tuple[ModelFamily, str], Sequence[TrainingPredictions]]
+    | None = None,
+    local_ladder_verified: bool = False,
 ) -> tuple[LocalComparatorManifest, EvaluationReport]:
     local_manifest, report = _build_evaluation_core(
         verified,
@@ -356,6 +400,8 @@ def build_r2_evaluation(
         local_feature_datasets=local_feature_datasets,
         minimum_correlation_rows=minimum_correlation_rows,
         forecast_bucket_count=forecast_bucket_count,
+        training_predictions_by_model=training_predictions_by_model,
+        local_ladder_verified=local_ladder_verified,
     )
     verify_r2_evaluation(
         report,
@@ -367,6 +413,8 @@ def build_r2_evaluation(
         configurations,
         local_feature_set_id=local_feature_set_id,
         local_feature_datasets=local_feature_datasets,
+        training_predictions_by_model=training_predictions_by_model,
+        local_ladder_verified=local_ladder_verified,
     )
     return local_manifest, report
 
@@ -382,6 +430,9 @@ def verify_r2_evaluation(
     *,
     local_feature_set_id: str,
     local_feature_datasets: Sequence[R2FeatureDataset],
+    training_predictions_by_model: Mapping[tuple[ModelFamily, str], Sequence[TrainingPredictions]]
+    | None = None,
+    local_ladder_verified: bool = False,
 ) -> None:
     """Independently reauthenticate every child and replay all evaluation tables."""
 
@@ -406,6 +457,8 @@ def verify_r2_evaluation(
         local_feature_datasets=local_feature_datasets,
         minimum_correlation_rows=report.minimum_correlation_rows,
         forecast_bucket_count=report.forecast_bucket_count,
+        training_predictions_by_model=training_predictions_by_model,
+        local_ladder_verified=local_ladder_verified,
     )
     if rebuilt_manifest != local_manifest or rebuilt != report:
         raise ValueError("R2 evaluation does not match independently recomputed evidence")
@@ -422,9 +475,13 @@ def _build_evaluation_core(
     local_feature_datasets: Sequence[R2FeatureDataset],
     minimum_correlation_rows: int,
     forecast_bucket_count: int,
+    training_predictions_by_model: Mapping[tuple[ModelFamily, str], Sequence[TrainingPredictions]]
+    | None,
+    local_ladder_verified: bool,
 ) -> tuple[LocalComparatorManifest, EvaluationReport]:
     verify_exact_r1_bindings(verified, experiment)
-    _verify_complete_local_ladder(verified, experiment, local_result, local_feature_datasets)
+    if not local_ladder_verified:
+        _verify_complete_local_ladder(verified, experiment, local_result, local_feature_datasets)
     local_feature_dataset = _selected_local_feature_dataset(
         local_feature_datasets, local_feature_set_id
     )
@@ -524,12 +581,20 @@ def _build_evaluation_core(
                 )
             )
 
-    training_by_model = {
-        (model.model_family, model.feature_set_id): _derive_training_predictions(
-            verified, experiment, model
-        )
-        for model in all_models
-    }
+    if training_predictions_by_model is None:
+        training_by_model = {
+            (model.model_family, model.feature_set_id): _derive_training_predictions(
+                verified, experiment, model
+            )
+            for model in all_models
+        }
+    else:
+        expected_model_keys = {(model.model_family, model.feature_set_id) for model in all_models}
+        if set(training_predictions_by_model) != expected_model_keys:
+            raise ValueError("training predictions do not exactly cover the evaluation models")
+        training_by_model = {
+            key: tuple(training_predictions_by_model[key]) for key in expected_model_keys
+        }
     training_by_family = {
         model.model_family: training_by_model[(model.model_family, model.feature_set_id)]
         for model in hierarchy
@@ -1097,6 +1162,8 @@ def _derive_training_predictions(
     experiment: R2ExperimentConfig,
     model: EvaluationModel,
 ) -> tuple[TrainingPredictions, ...]:
+    if not isinstance(model.feature_dataset, R2FeatureDataset):
+        raise ValueError("training-prediction replay requires retained feature rows")
     fold_by_id = {fold.fold_id: fold for fold in verified.folds.folds}
     grouped_values: dict[str, list[tuple[str, float]]] = defaultdict(list)
     grouped_fit_ids: dict[str, list[str]] = defaultdict(list)
@@ -1429,18 +1496,21 @@ def _verify_evaluation_model(
             or result.fit.r2_feature_dataset_id != model.feature_dataset.dataset_id
         ):
             raise ValueError("evaluated fold child differs from its exact feature evidence")
-        if model.model_family is ModelFamily.LOCAL_RIDGE:
-            verify_local_ridge_forecast_coverage(
-                verified, model.feature_dataset, experiment, result
-            )
-        else:
-            verify_ridge_forecast_coverage(
-                verified,
-                model.feature_dataset,
-                experiment,
-                result,
-                target_instruments=experiment.target_instruments,
-            )
+        if isinstance(model.feature_dataset, R2FeatureDataset):
+            if model.model_family is ModelFamily.LOCAL_RIDGE:
+                verify_local_ridge_forecast_coverage(
+                    verified, model.feature_dataset, experiment, result
+                )
+            else:
+                verify_ridge_forecast_coverage(
+                    verified,
+                    model.feature_dataset,
+                    experiment,
+                    result,
+                    target_instruments=experiment.target_instruments,
+                )
+        elif not model.feature_dataset.row_authentication_id:
+            raise ValueError("compact feature binding lacks row authentication")
 
 
 def _selected_local_feature_dataset(
@@ -1504,6 +1574,51 @@ def _verify_complete_local_ladder(
             experiment,
             result,
         )
+
+
+def verify_local_ridge_ladder(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    local_result: LocalRidgeOofResult,
+    feature_datasets: Sequence[R2FeatureDataset],
+) -> None:
+    """Replay local feature coverage before source rows are released."""
+    _verify_complete_local_ladder(verified, experiment, local_result, feature_datasets)
+
+
+def bind_verified_evaluation_model(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    model: EvaluationModel,
+    *,
+    feature_verification_id: str,
+) -> tuple[EvaluationModel, tuple[TrainingPredictions, ...]]:
+    """Replay one model's rows, then retain only its compact identity binding."""
+    if not isinstance(model.feature_dataset, R2FeatureDataset):
+        raise ValueError("evaluation model binding requires feature rows")
+    _verify_evaluation_model(verified, experiment, model)
+    training_predictions = _derive_training_predictions(verified, experiment, model)
+    row_authentication_id = semantic_id(
+        {
+            "feature_dataset_id": model.feature_dataset.dataset_id,
+            "fold_fit_ids": sorted(result.fit.artifact_id for result in model.fold_results),
+        }
+    )
+    binding = _VerifiedFeatureDatasetBinding.from_dataset(
+        model.feature_dataset,
+        verification_id=feature_verification_id,
+        row_authentication_id=row_authentication_id,
+    )
+    return (
+        EvaluationModel(
+            model.model_family,
+            model.feature_set_id,
+            binding,
+            model.forecasts,
+            model.fold_results,
+        ),
+        training_predictions,
+    )
 
 
 def _expected_support(

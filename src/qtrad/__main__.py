@@ -264,11 +264,13 @@ from qtrad.runtime.r2_verification import (
     authenticate_ibkr_foundation_for_r2,
     authenticate_r1_foundation_for_r2,
     build_oof_bundle,
+    build_r2_feature_verification_receipt,
     create_confirmatory_f2_promotion,
     freeze_confirmatory_selection,
     holdout_configuration_registry,
     holdout_evaluation_policy,
     load_experiment_and_feature_paths,
+    parse_feature_receipt_arguments,
     prepare_confirmatory_g2,
     reveal_confirmatory_g2,
     runtime_identities,
@@ -278,6 +280,7 @@ from qtrad.runtime.r2_verification import (
     verify_confirmatory_r2h,
     verify_oof_bundle_with_source,
     verify_r2_oof_semantics,
+    write_r2_feature_verification_receipt,
 )
 from qtrad.runtime.research_export import research_export_metadata
 from qtrad.runtime.research_snapshot import (
@@ -502,8 +505,6 @@ def _holdout_selection_freeze_cli(args: argparse.Namespace) -> None:
     )
     write_holdout_selection(args.output, manifest)
     print(json.dumps({"selection": str(args.output)}, sort_keys=True))
-
-
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1017,6 +1018,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_features_verify.add_argument("--experiment", type=Path, required=True)
     baselines_features_verify.add_argument("--feature-set", required=True)
     baselines_features_verify.add_argument("--manifest", type=Path, required=True)
+    baselines_features_verify.add_argument("--receipt-output", type=Path, required=True)
     baselines_features.add_argument("--foundation-bundle", type=Path, required=True)
     baselines_features.add_argument("--foundation-receipt", type=Path, required=True)
     baselines_features.add_argument("--foundation-promotion", type=Path)
@@ -1033,6 +1035,7 @@ def build_parser() -> argparse.ArgumentParser:
     baselines_oof_build.add_argument("--foundation-promotion", type=Path)
     baselines_oof_build.add_argument("--experiment", type=Path, required=True)
     baselines_oof_build.add_argument("--feature-manifest", action="append", required=True)
+    baselines_oof_build.add_argument("--feature-receipt", action="append", required=True)
     baselines_oof_build.add_argument(
         "--holdout-target-source",
         type=Path,
@@ -1190,7 +1193,6 @@ def build_parser() -> argparse.ArgumentParser:
     )
     baselines_holdout_selection.add_argument("--frozen-by", required=True)
     baselines_holdout_selection.add_argument("--output", type=Path, required=True)
-
 
     replay = subparsers.add_parser("replay", help="verify a research manifest")
     replay.add_argument("--manifest", type=Path, required=True)
@@ -2191,6 +2193,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 foundation_promotion_path=args.foundation_promotion,
                 experiment_path=args.experiment,
                 feature_arguments=args.feature_manifest,
+                feature_receipt_arguments=args.feature_receipt,
                 output_path=args.output,
                 holdout_target_source_path=args.holdout_target_source,
             )
@@ -2404,6 +2407,7 @@ def main(argv: Sequence[str] | None = None) -> None:
                 holdout_target_source_path=args.holdout_target_source,
                 feature_set_name=args.feature_set,
                 manifest_path=args.manifest,
+                receipt_output_path=args.receipt_output,
             )
         )
     elif args.command == "replay":
@@ -2689,6 +2693,7 @@ async def _build_r2_oof(
     foundation_bundle_path: Path,
     experiment_path: Path,
     feature_arguments: list[str],
+    feature_receipt_arguments: list[str],
     output_path: Path,
     holdout_target_source_path: Path | None,
     foundation_receipt_path: Path | None = None,
@@ -2699,6 +2704,7 @@ async def _build_r2_oof(
         experiment_path=experiment_path,
         feature_arguments=feature_arguments,
     )
+    feature_receipt_paths = parse_feature_receipt_arguments(feature_receipt_arguments)
     if foundation_receipt_path is None:
         raise ValueError("R2 OOF build requires a foundation verification receipt")
     if (
@@ -2725,6 +2731,7 @@ async def _build_r2_oof(
         foundation_authority=foundation_authority,
         experiment=experiment,
         feature_manifest_paths=feature_paths,
+        feature_receipt_paths=feature_receipt_paths,
         research_root=settings.research_root,
         clock=clock,
         output=output_path,
@@ -2865,6 +2872,7 @@ async def _verify_persisted_r2_features(
     experiment_path: Path,
     feature_set_name: str,
     manifest_path: Path,
+    receipt_output_path: Path | None = None,
     foundation_receipt_path: Path | None = None,
     foundation_promotion_path: Path | None = None,
     holdout_target_source_path: Path | None = None,
@@ -2896,6 +2904,9 @@ async def _verify_persisted_r2_features(
     )
     if row_count != manifest.row_count:
         raise ValueError("verified R2 feature row count differs from its manifest")
+    if receipt_output_path is not None:
+        receipt = build_r2_feature_verification_receipt(manifest, verified, experiment)
+        write_r2_feature_verification_receipt(receipt_output_path, receipt)
     print(json.dumps(_r2_feature_manifest_summary(manifest), sort_keys=True))
 
 

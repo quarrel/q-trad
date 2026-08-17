@@ -1,6 +1,6 @@
 """Authenticated R2.E pooled non-graph Ridge controls and ablation support."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 
 from qtrad.application.r2_baselines import (
@@ -181,6 +181,105 @@ def build_pooled_ridge_oof(
             results,
             local_comparator_id,
         ),
+    )
+
+
+def build_pooled_ridge_oof_sequential(
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    selections: Sequence[R2PreprocessingSelection] | None,
+    local_result: LocalRidgeOofResult,
+    local_comparator_feature_dataset: R2FeatureDataset,
+    *,
+    feature_dataset_loader: Callable[[str], R2FeatureDataset],
+    selection_loader: Callable[[str, R2FeatureDataset], Sequence[R2PreprocessingSelection]]
+    | None = None,
+    on_dataset_complete: Callable[[str, R2FeatureDataset, Sequence[RidgeFoldResult]], None]
+    | None = None,
+    application_image_identity: str,
+    numpy_library_identity: str,
+    sklearn_library_identity: str,
+) -> PooledRidgeOofResult:
+    """Build P0 then P1 while retaining only the local comparator and one pooled set."""
+    verify_exact_r1_bindings(verified, experiment)
+    local_comparator_name = _ablation_definition(experiment)
+    local_comparator_id = feature_set_id(
+        experiment.configuration_id,
+        local_comparator_name,
+        feature_schema_for_set(experiment, local_comparator_name),
+        experiment.market_data_source_class,
+    )
+    local_children = _verify_local_comparator(
+        verified,
+        local_result,
+        local_comparator_feature_dataset,
+        experiment,
+        local_comparator_id,
+    )
+    family_by_name = {
+        "P0": ModelFamily.POOLED_LOCAL_RIDGE,
+        "P1": ModelFamily.POOLED_CROSS_ASSET_RIDGE,
+    }
+    expected_keys = {
+        (family, fold.fold_id)
+        for family in family_by_name.values()
+        for fold in verified.folds.folds
+    }
+    selection_by_key = (
+        {(selection.model_family, selection.outer_fold_id): selection for selection in selections}
+        if selections is not None
+        else {}
+    )
+    if selections is not None and (
+        len(selection_by_key) != len(selections) or set(selection_by_key) != expected_keys
+    ):
+        raise ValueError("pooled selections do not exactly cover P0/P1 outer-fold scope")
+    results_by_key: dict[tuple[ModelFamily, str], RidgeFoldResult] = {}
+    for name, family in family_by_name.items():
+        dataset = feature_dataset_loader(name)
+        if dataset.feature_set_name != name:
+            raise ValueError("pooled feature loader returned the wrong feature set")
+        if selection_loader is not None:
+            selection_by_key.update(
+                ((selection.model_family, selection.outer_fold_id), selection)
+                for selection in selection_loader(name, dataset)
+            )
+        for fold in verified.folds.folds:
+            key = (family, fold.fold_id)
+            results_by_key[key] = build_pooled_ridge_fold(
+                verified,
+                dataset,
+                experiment,
+                selection_by_key[key],
+                application_image_identity=application_image_identity,
+                numpy_library_identity=numpy_library_identity,
+                sklearn_library_identity=sklearn_library_identity,
+            )
+        if on_dataset_complete is not None:
+            on_dataset_complete(
+                name,
+                dataset,
+                tuple(results_by_key[(family, fold.fold_id)] for fold in verified.folds.folds),
+            )
+        del dataset
+    if set(selection_by_key) != expected_keys:
+        raise ValueError("pooled selections do not exactly cover P0/P1 outer-fold scope")
+    results = tuple(
+        results_by_key[key]
+        for key in sorted(expected_keys, key=lambda item: (item[0].value, item[1]))
+    )
+    forecasts = ForecastDataset.create(
+        tuple(row for result in results for row in result.forecasts.rows),
+        observation_dataset_id=verified.observations.dataset_id,
+        panel_dataset_id=verified.panel.dataset_id,
+        target_dataset_id=verified.targets.dataset_id,
+        fold_dataset_id=verified.folds.dataset_id,
+    )
+    return PooledRidgeOofResult(
+        results,
+        forecasts,
+        build_coefficient_stability_summary(tuple(result.fit for result in results)),
+        _build_ablation_report(local_children, results, local_comparator_id),
     )
 
 

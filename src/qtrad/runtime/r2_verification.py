@@ -10,7 +10,7 @@ import asyncio
 import json
 import subprocess
 import sys
-from collections.abc import Mapping, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -30,8 +30,10 @@ from qtrad.adapters.parquet.r2 import ParquetR2FeatureStore, R2FeatureManifest
 from qtrad.application.r2_baselines import build_local_ridge_oof
 from qtrad.application.r2_evaluation import (
     EvaluationModel,
+    bind_verified_evaluation_model,
     build_r2_evaluation,
     build_selection_manifest,
+    verify_local_ridge_ladder,
 )
 from qtrad.application.r2_features import (
     R2FoundationInputs,
@@ -56,7 +58,7 @@ from qtrad.application.r2_holdout import (
 from qtrad.application.r2_ibkr_historical import (
     build_ibkr_r2_foundation_inputs,
 )
-from qtrad.application.r2_pooled import build_pooled_ridge_oof
+from qtrad.application.r2_pooled import build_pooled_ridge_oof, build_pooled_ridge_oof_sequential
 from qtrad.application.r2_preprocessing import (
     build_pooled_preprocessing_selection,
     build_r2_preprocessing_selection,
@@ -102,9 +104,11 @@ from qtrad.domain.r2_evaluation import (
     SelectionManifest,
 )
 from qtrad.domain.r2_features import (
+    _VERIFIED_FEATURE_DATASET_TOKEN,
     R2_FEATURE_DATASET_CONTRACT,
     FeatureDefinition,
     R2FeatureDataset,
+    R2FeatureVerificationReceipt,
     RawFeatureRow,
     RawFeatureValue,
     feature_set_id,
@@ -1043,6 +1047,30 @@ def parse_feature_manifest_arguments(arguments: list[str]) -> dict[str, Path]:
     return parsed
 
 
+def parse_feature_receipt_arguments(arguments: list[str]) -> dict[str, Path]:
+    """Parse the four required stage-specific feature verification receipt paths."""
+    parsed: dict[str, Path] = {}
+    for argument in arguments:
+        name, separator, raw_path = argument.partition("=")
+        if not separator or not name or not raw_path:
+            raise ValueError("feature receipt must use NAME=PATH")
+        if name in parsed:
+            raise ValueError(f"duplicate feature receipt: {name}")
+        parsed[name] = Path(raw_path)
+    if set(parsed) != _REQUIRED_FEATURE_SETS:
+        missing = sorted(_REQUIRED_FEATURE_SETS - set(parsed))
+        extra = sorted(set(parsed) - _REQUIRED_FEATURE_SETS)
+        detail = []
+        if missing:
+            detail.append("missing " + ", ".join(missing))
+        if extra:
+            detail.append("undeclared " + ", ".join(extra))
+        raise ValueError(
+            "feature receipts must cover exactly L0/L1/P0/P1 (" + "; ".join(detail) + ")"
+        )
+    return parsed
+
+
 def _foundation_inputs(verified: R1FoundationBindings) -> R2FoundationInputs:
     return R2FoundationInputs(
         bundle=verified.bundle,
@@ -1231,6 +1259,7 @@ def _descriptor_payload(
     identities: dict[str, str],
     representative_profile: str | None = None,
     foundation_authority: AuthenticatedR2Foundation | None = None,
+    feature_receipts: Mapping[str, R2FeatureVerificationReceipt] | None = None,
 ) -> dict[str, JsonValue]:
     semantic: dict[str, JsonValue] = {
         "contract": OOF_DESCRIPTOR_CONTRACT,
@@ -1275,6 +1304,19 @@ def _descriptor_payload(
         "primary_horizon_seconds": experiment.primary_horizon.total_seconds(),
         "holdout_excluded": True,
     }
+    if feature_receipts is not None:
+        semantic["feature_verification_receipts"] = {
+            name: {
+                "contract": receipt.CONTRACT,
+                "verification_id": receipt.verification_id,
+                "manifest_id": receipt.manifest_id,
+                "manifest_sha256": receipt.manifest_sha256,
+                "semantic_dataset_id": receipt.semantic_dataset_id,
+                "foundation_verification_id": receipt.foundation_verification_id,
+                "completed_checks": list(receipt.completed_checks),
+            }
+            for name, receipt in sorted(feature_receipts.items())
+        }
     if foundation_authority is not None:
         semantic["foundation_authority"] = foundation_authority.identity_json()
     if representative_profile is not None:
@@ -1503,53 +1545,257 @@ def _descriptor_reference(
     )
 
 
+R2_FEATURE_VERIFIER_CONTRACT = "qtrad-r2-feature-verifier-v1"
+R2_FEATURE_VERIFIER_VERSION = "1"
+R2_FEATURE_VERIFICATION_CHECKS = (
+    "foundation-authority",
+    "manifest-bindings",
+    "manifest-tree",
+    "feature-row-hashes",
+    "feature-semantic-dataset",
+    "causal-feature-replay",
+    "holdout-exclusion",
+)
+
+
+def build_r2_feature_verification_receipt(
+    manifest: R2FeatureManifest,
+    foundation: AuthenticatedR2Foundation,
+    experiment: R2ExperimentConfig,
+) -> R2FeatureVerificationReceipt:
+    """Create the stage-specific receipt after the complete feature verifier succeeds."""
+    if manifest.experiment_configuration_id != experiment.configuration_id:
+        raise ValueError("feature manifest experiment differs from the receipt experiment")
+    return R2FeatureVerificationReceipt.create(
+        manifest_contract=manifest.CONTRACT,
+        manifest_schema_version=manifest.SCHEMA_VERSION,
+        manifest_id=manifest.manifest_id,
+        manifest_sha256=manifest.manifest_sha256,
+        semantic_dataset_id=manifest.semantic_dataset_id,
+        feature_set_name=manifest.feature_set_name,
+        feature_set_id=manifest.feature_set_id,
+        raw_feature_schema_id=manifest.raw_feature_schema_id,
+        feature_schema=manifest.feature_schema,
+        observation_dataset_id=manifest.observation_dataset_id,
+        panel_dataset_id=manifest.panel_dataset_id,
+        target_dataset_id=manifest.target_dataset_id,
+        fold_dataset_id=manifest.fold_dataset_id,
+        experiment_configuration_id=manifest.experiment_configuration_id,
+        source_class=manifest.market_data_source_class,
+        evidence_class=manifest.evidence_class,
+        holdout_excluded=manifest.holdout_excluded,
+        foundation_semantic_id=foundation.foundation_id,
+        foundation_closure_id=foundation.closure_id,
+        foundation_verification_id=foundation.verification_id,
+        foundation_promotion_id=foundation.promotion_id,
+        verifier_contract=R2_FEATURE_VERIFIER_CONTRACT,
+        verifier_version=R2_FEATURE_VERIFIER_VERSION,
+        completed_checks=R2_FEATURE_VERIFICATION_CHECKS,
+    )
+
+
+def authenticate_r2_feature_verification_receipt(
+    path: Path,
+    manifest: R2FeatureManifest,
+    foundation: AuthenticatedR2Foundation,
+    experiment: R2ExperimentConfig,
+) -> R2FeatureVerificationReceipt:
+    """Authenticate one feature receipt and its immediate parent without replaying features."""
+    if path.is_symlink() or not path.is_file():
+        raise ValueError("feature verification receipt must be a regular non-symlink file")
+    receipt = R2FeatureVerificationReceipt.from_json(json.loads(path.read_text(encoding="utf-8")))
+    expected = {
+        "manifest_contract": manifest.CONTRACT,
+        "manifest_schema_version": manifest.SCHEMA_VERSION,
+        "manifest_id": manifest.manifest_id,
+        "manifest_sha256": manifest.manifest_sha256,
+        "semantic_dataset_id": manifest.semantic_dataset_id,
+        "feature_set_name": manifest.feature_set_name,
+        "feature_set_id": manifest.feature_set_id,
+        "raw_feature_schema_id": manifest.raw_feature_schema_id,
+        "feature_schema": manifest.feature_schema,
+        "observation_dataset_id": manifest.observation_dataset_id,
+        "panel_dataset_id": manifest.panel_dataset_id,
+        "target_dataset_id": manifest.target_dataset_id,
+        "fold_dataset_id": manifest.fold_dataset_id,
+        "experiment_configuration_id": manifest.experiment_configuration_id,
+        "source_class": manifest.market_data_source_class,
+        "evidence_class": manifest.evidence_class,
+        "holdout_excluded": manifest.holdout_excluded,
+        "foundation_semantic_id": foundation.foundation_id,
+        "foundation_closure_id": foundation.closure_id,
+        "foundation_verification_id": foundation.verification_id,
+        "foundation_promotion_id": foundation.promotion_id,
+        "verifier_contract": R2_FEATURE_VERIFIER_CONTRACT,
+        "verifier_version": R2_FEATURE_VERIFIER_VERSION,
+        "completed_checks": R2_FEATURE_VERIFICATION_CHECKS,
+    }
+    for field, expected_value in expected.items():
+        if getattr(receipt, field) != expected_value:
+            raise ValueError(
+                f"feature verification receipt {field} differs from its manifest authority"
+            )
+    if receipt.source_class is not experiment.market_data_source_class:
+        raise ValueError("feature verification receipt source differs from the experiment")
+    if receipt.evidence_class is not experiment.evidence_class:
+        raise ValueError("feature verification receipt evidence differs from the experiment")
+    if receipt.experiment_configuration_id != experiment.configuration_id:
+        raise ValueError("feature verification receipt experiment differs from the run")
+    return receipt
+
+
+def write_r2_feature_verification_receipt(
+    path: Path,
+    receipt: R2FeatureVerificationReceipt,
+) -> None:
+    """Publish a feature receipt create-only, without replacing retained evidence."""
+    if path.exists() or path.is_symlink():
+        raise RuntimeError(f"feature verification receipt already exists: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    encoded = (json.dumps(receipt.as_json(), indent=2, sort_keys=True) + "\n").encode("utf-8")
+    with path.open("xb") as output:
+        output.write(encoded)
+
+
+def _load_feature_manifest_and_receipt(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    name: str,
+    manifest_path: Path,
+    receipt_path: Path,
+    root: Path,
+    clock: Clock,
+    foundation_authority: AuthenticatedR2Foundation,
+) -> tuple[R2FeatureManifest, R2FeatureVerificationReceipt]:
+    foundation = _foundation_inputs(verified)
+    manifest = ParquetR2FeatureStore(root, clock).read_manifest(manifest_path)
+    verify_raw_feature_manifest_bindings(manifest, foundation, experiment, feature_set_name=name)
+    receipt = authenticate_r2_feature_verification_receipt(
+        receipt_path, manifest, foundation_authority, experiment
+    )
+    return manifest, receipt
+
+
+def _load_feature_dataset(
+    *,
+    verified: R1FoundationBindings,
+    experiment: R2ExperimentConfig,
+    name: str,
+    manifest_path: Path,
+    manifest: R2FeatureManifest,
+    receipt: R2FeatureVerificationReceipt,
+    root: Path,
+    clock: Clock,
+) -> R2FeatureDataset:
+    del verified, experiment, name, receipt
+    rows = tuple(ParquetR2FeatureStore(root, clock).iter_rows(manifest_path))
+    dataset = R2FeatureDataset._from_verified_rows(
+        rows,
+        feature_schema=manifest.feature_schema,
+        feature_set_name=manifest.feature_set_name,
+        feature_set_id=manifest.feature_set_id,
+        observation_dataset_id=manifest.observation_dataset_id,
+        panel_dataset_id=manifest.panel_dataset_id,
+        target_dataset_id=manifest.target_dataset_id,
+        fold_dataset_id=manifest.fold_dataset_id,
+        experiment_configuration_id=manifest.experiment_configuration_id,
+        evidence_class=manifest.evidence_class,
+        market_data_source_class=manifest.market_data_source_class,
+        dataset_id=manifest.semantic_dataset_id,
+        _capability=_VERIFIED_FEATURE_DATASET_TOKEN,
+    )
+    if dataset.dataset_id != manifest.semantic_dataset_id:
+        raise ValueError(
+            "feature manifest semantic dataset identity differs from its verified rows"
+        )
+    return dataset
+
+
 def _load_feature_datasets(
     *,
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     feature_manifest_paths: dict[str, Path],
+    feature_receipt_paths: dict[str, Path] | None,
     root: Path,
     clock: Clock,
+    foundation_authority: AuthenticatedR2Foundation | None,
     recompute_rows: bool = True,
-) -> tuple[dict[str, R2FeatureDataset], dict[str, R2FeatureManifest]]:
+) -> tuple[
+    dict[str, R2FeatureDataset],
+    dict[str, R2FeatureManifest],
+    dict[str, R2FeatureVerificationReceipt],
+]:
     foundation = _foundation_inputs(verified)
     store = ParquetR2FeatureStore(root, clock)
     datasets: dict[str, R2FeatureDataset] = {}
     manifests: dict[str, R2FeatureManifest] = {}
+    receipts: dict[str, R2FeatureVerificationReceipt] = {}
+    if feature_receipt_paths is not None:
+        if foundation_authority is None:
+            raise ValueError("feature verification receipts require immediate foundation authority")
+        if set(feature_receipt_paths) != set(feature_manifest_paths):
+            raise ValueError("feature receipts must cover exactly the declared feature manifests")
     for name in sorted(feature_manifest_paths):
-        manifest = store.read_manifest(feature_manifest_paths[name])
+        manifest_path = feature_manifest_paths[name]
+        manifest = store.read_manifest(manifest_path)
         verify_raw_feature_manifest_bindings(
             manifest, foundation, experiment, feature_set_name=name
         )
-        rows = tuple(store.iter_rows(feature_manifest_paths[name]))
-        if recompute_rows:
+        if feature_receipt_paths is not None:
+            assert foundation_authority is not None
+            receipt = authenticate_r2_feature_verification_receipt(
+                feature_receipt_paths[name], manifest, foundation_authority, experiment
+            )
+            receipts[name] = receipt
+        rows = tuple(store.iter_rows(manifest_path))
+        if feature_receipt_paths is None and recompute_rows:
             verify_raw_feature_rows(iter(rows), foundation, experiment, feature_set_name=name)
-        dataset = R2FeatureDataset.create(
-            rows,
-            feature_schema=manifest.feature_schema,
-            feature_set_name=name,
-            feature_set_id=manifest.feature_set_id,
-            observation_dataset_id=manifest.observation_dataset_id,
-            panel_dataset_id=manifest.panel_dataset_id,
-            target_dataset_id=manifest.target_dataset_id,
-            fold_dataset_id=manifest.fold_dataset_id,
-            experiment_configuration_id=manifest.experiment_configuration_id,
-            evidence_class=manifest.evidence_class,
-            market_data_source_class=experiment.market_data_source_class,
-        )
+        if feature_receipt_paths is None:
+            dataset = R2FeatureDataset.create(
+                rows,
+                feature_schema=manifest.feature_schema,
+                feature_set_name=name,
+                feature_set_id=manifest.feature_set_id,
+                observation_dataset_id=manifest.observation_dataset_id,
+                panel_dataset_id=manifest.panel_dataset_id,
+                target_dataset_id=manifest.target_dataset_id,
+                fold_dataset_id=manifest.fold_dataset_id,
+                experiment_configuration_id=manifest.experiment_configuration_id,
+                evidence_class=manifest.evidence_class,
+                market_data_source_class=experiment.market_data_source_class,
+            )
+        else:
+            dataset = R2FeatureDataset._from_verified_rows(
+                rows,
+                feature_schema=manifest.feature_schema,
+                feature_set_name=name,
+                feature_set_id=manifest.feature_set_id,
+                observation_dataset_id=manifest.observation_dataset_id,
+                panel_dataset_id=manifest.panel_dataset_id,
+                target_dataset_id=manifest.target_dataset_id,
+                fold_dataset_id=manifest.fold_dataset_id,
+                experiment_configuration_id=manifest.experiment_configuration_id,
+                evidence_class=manifest.evidence_class,
+                market_data_source_class=experiment.market_data_source_class,
+                dataset_id=manifest.semantic_dataset_id,
+                _capability=_VERIFIED_FEATURE_DATASET_TOKEN,
+            )
         if dataset.dataset_id != manifest.semantic_dataset_id:
             raise ValueError(
-                "feature manifest semantic dataset identity differs from replayed rows"
+                "feature manifest semantic dataset identity differs from its verified rows"
             )
         datasets[name] = dataset
         manifests[name] = manifest
-    return datasets, manifests
+    return datasets, manifests, receipts
 
 
 def _dataset_payload(
     dataset: R2FeatureDataset,
     manifest: R2FeatureManifest | Mapping[str, object],
     *,
+    receipt: R2FeatureVerificationReceipt | None = None,
     compact: bool = False,
 ) -> dict[str, object]:
     manifest_payload = (
@@ -1579,6 +1825,15 @@ def _dataset_payload(
             if key not in {"contract", "schema_version", "dataset_id"}
         },
     }
+    if receipt is not None:
+        payload["verification"] = {
+            "contract": receipt.CONTRACT,
+            "verification_id": receipt.verification_id,
+            "manifest_sha256": receipt.manifest_sha256,
+            "semantic_dataset_id": receipt.semantic_dataset_id,
+            "foundation_verification_id": receipt.foundation_verification_id,
+            "completed_checks": list(receipt.completed_checks),
+        }
     if compact:
         payload["storage"] = "qtrad-r2-feature-manifest-binding-v1"
     else:
@@ -2185,6 +2440,7 @@ def _build_oof_bundle(
     verified: R1FoundationBindings,
     experiment: R2ExperimentConfig,
     feature_manifest_paths: dict[str, Path],
+    feature_receipt_paths: dict[str, Path] | None,
     research_root: Path,
     clock: Clock,
     output: Path,
@@ -2244,14 +2500,66 @@ def _build_oof_bundle(
     foundation_source = getattr(verified.bundle, "market_data_source_class", None)
     if foundation_source is not experiment.market_data_source_class:
         raise ValueError("R2 experiment source class differs from the R1 foundation")
-    datasets, manifests = _load_feature_datasets(
-        verified=verified,
-        experiment=experiment,
-        feature_manifest_paths=feature_manifest_paths,
-        root=research_root,
-        clock=clock,
-        recompute_rows=run_kind != "SYNTHETIC",
+    if run_kind != "SYNTHETIC" and feature_receipt_paths is None:
+        raise ValueError("canonical OOF build requires four feature verification receipts")
+    datasets: dict[str, R2FeatureDataset]
+    manifests: dict[str, R2FeatureManifest]
+    feature_receipts: dict[str, R2FeatureVerificationReceipt]
+    load_canonical_dataset: Callable[[str], R2FeatureDataset] = cast(
+        Callable[[str], R2FeatureDataset], None
     )
+    feature_payloads: dict[str, dict[str, object]] = {}
+    if run_kind == "SYNTHETIC":
+        datasets, manifests, feature_receipts = _load_feature_datasets(
+            verified=verified,
+            experiment=experiment,
+            feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
+            root=research_root,
+            clock=clock,
+            foundation_authority=foundation_authority,
+            recompute_rows=False,
+        )
+    else:
+        assert foundation_authority is not None
+        assert feature_receipt_paths is not None
+        if set(feature_manifest_paths) != _REQUIRED_FEATURE_SETS:
+            raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
+        manifests = {}
+        feature_receipts = {}
+        for name in sorted(feature_manifest_paths):
+            manifest, receipt = _load_feature_manifest_and_receipt(
+                verified=verified,
+                experiment=experiment,
+                name=name,
+                manifest_path=feature_manifest_paths[name],
+                receipt_path=feature_receipt_paths[name],
+                root=research_root,
+                clock=clock,
+                foundation_authority=foundation_authority,
+            )
+            manifests[name] = manifest
+            feature_receipts[name] = receipt
+        datasets = {}
+
+        def canonical_loader(name: str) -> R2FeatureDataset:
+            dataset = _load_feature_dataset(
+                verified=verified,
+                experiment=experiment,
+                name=name,
+                manifest_path=feature_manifest_paths[name],
+                manifest=manifests[name],
+                receipt=feature_receipts[name],
+                root=research_root,
+                clock=clock,
+            )
+            feature_payloads[name] = _dataset_payload(
+                dataset, manifests[name], receipt=feature_receipts[name], compact=True
+            )
+            return dataset
+
+        load_canonical_dataset = canonical_loader
+
     if holdout_target_source is not None:
         if verified.targets.dataset_id != holdout_target_source.source_target_dataset_id:
             raise ValueError("OOF target view differs from the authenticated holdout source")
@@ -2259,8 +2567,6 @@ def _build_oof_bundle(
             raise ValueError(
                 "OOF target rows are not the authenticated pre-holdout target projection"
             )
-    if set(datasets) != _REQUIRED_FEATURE_SETS:
-        raise ValueError("OOF build requires exactly L0/L1/P0/P1 feature datasets")
     if runtime_provenance is not None and (
         set(runtime_provenance) != _OOF_DESCRIPTOR_PROVENANCE_FIELDS
         or any(not value for value in runtime_provenance.values())
@@ -2269,86 +2575,237 @@ def _build_oof_bundle(
     identities = (
         dict(runtime_provenance) if runtime_provenance is not None else runtime_identities()
     )
-    local_datasets = tuple(datasets[name] for name in ("L0", "L1"))
-    pooled_datasets = (datasets["P0"], datasets["P1"])
-    selections_local = tuple(
-        build_r2_preprocessing_selection(
+
+    if run_kind == "SYNTHETIC":
+        local_datasets = tuple(datasets[name] for name in ("L0", "L1"))
+        pooled_datasets = (datasets["P0"], datasets["P1"])
+        evaluation_local_datasets = local_datasets
+        local_feature_descriptors = tuple(
+            (dataset.feature_set_id, dataset.feature_set_name) for dataset in local_datasets
+        )
+        selections_local = tuple(
+            build_r2_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=ModelFamily.LOCAL_RIDGE,
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=(instrument,),
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("L0", "L1")
+            for instrument in experiment.target_instruments
+            for fold in verified.folds.folds
+        )
+        selections_pooled = tuple(
+            build_pooled_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=(
+                    ModelFamily.POOLED_LOCAL_RIDGE
+                    if name == "P0"
+                    else ModelFamily.POOLED_CROSS_ASSET_RIDGE
+                ),
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=experiment.target_instruments,
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("P0", "P1")
+            for fold in verified.folds.folds
+        )
+        local_result = build_local_ridge_oof(
             verified,
-            datasets[name],
+            local_datasets,
             experiment,
-            model_family=ModelFamily.LOCAL_RIDGE,
-            horizon=experiment.primary_horizon,
-            outer_fold_id=fold.fold_id,
-            target_instruments=(instrument,),
+            selections_local,
             application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
             sklearn_library_identity=identities["sklearn_identity"],
         )
-        for name in ("L0", "L1")
-        for instrument in experiment.target_instruments
-        for fold in verified.folds.folds
-    )
-    selections_pooled = tuple(
-        build_pooled_preprocessing_selection(
+        pooled_result = build_pooled_ridge_oof(
             verified,
-            datasets[name],
+            pooled_datasets,
             experiment,
-            model_family=(
+            selections_pooled,
+            local_result,
+            datasets["L1"],
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
+        )
+        models: list[EvaluationModel] = []
+        training_predictions_by_model = None
+        local_ladder_verified = False
+    else:
+        assert callable(load_canonical_dataset)
+        datasets["L0"] = load_canonical_dataset("L0")
+        datasets["L1"] = load_canonical_dataset("L1")
+        local_datasets = (datasets["L0"], datasets["L1"])
+        evaluation_local_datasets = (datasets["L1"],)
+        local_feature_descriptors = tuple(
+            (dataset.feature_set_id, dataset.feature_set_name) for dataset in local_datasets
+        )
+        selections_local = tuple(
+            build_r2_preprocessing_selection(
+                verified,
+                datasets[name],
+                experiment,
+                model_family=ModelFamily.LOCAL_RIDGE,
+                horizon=experiment.primary_horizon,
+                outer_fold_id=fold.fold_id,
+                target_instruments=(instrument,),
+                application_image_identity=identities["application_identity"],
+                sklearn_library_identity=identities["sklearn_identity"],
+            )
+            for name in ("L0", "L1")
+            for instrument in experiment.target_instruments
+            for fold in verified.folds.folds
+        )
+        local_result = build_local_ridge_oof(
+            verified,
+            local_datasets,
+            experiment,
+            selections_local,
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
+        )
+        verify_local_ridge_ladder(verified, experiment, local_result, local_datasets)
+        training_predictions_by_model = {}
+        local_model = EvaluationModel(
+            ModelFamily.LOCAL_RIDGE,
+            datasets["L1"].feature_set_id,
+            datasets["L1"],
+            _model_forecasts(
+                tuple(
+                    result
+                    for result in local_result.fold_results
+                    if result.fit.feature_set_id == datasets["L1"].feature_set_id
+                ),
+                observation_dataset_id=verified.observations.dataset_id,
+                panel_dataset_id=verified.panel.dataset_id,
+                target_dataset_id=verified.targets.dataset_id,
+                fold_dataset_id=verified.folds.dataset_id,
+            ),
+            tuple(
+                result
+                for result in local_result.fold_results
+                if result.fit.feature_set_id == datasets["L1"].feature_set_id
+            ),
+        )
+        _, local_training = bind_verified_evaluation_model(
+            verified,
+            experiment,
+            local_model,
+            feature_verification_id=feature_receipts["L1"].verification_id,
+        )
+        training_predictions_by_model[(ModelFamily.LOCAL_RIDGE, datasets["L1"].feature_set_id)] = (
+            local_training
+        )
+        del local_datasets
+        del datasets["L0"]
+        models = []
+        pooled_selections: list[R2PreprocessingSelection] = []
+
+        def selection_loader(
+            name: str, dataset: R2FeatureDataset
+        ) -> Sequence[R2PreprocessingSelection]:
+            selections = tuple(
+                build_pooled_preprocessing_selection(
+                    verified,
+                    dataset,
+                    experiment,
+                    model_family=(
+                        ModelFamily.POOLED_LOCAL_RIDGE
+                        if name == "P0"
+                        else ModelFamily.POOLED_CROSS_ASSET_RIDGE
+                    ),
+                    horizon=experiment.primary_horizon,
+                    outer_fold_id=fold.fold_id,
+                    target_instruments=experiment.target_instruments,
+                    application_image_identity=identities["application_identity"],
+                    sklearn_library_identity=identities["sklearn_identity"],
+                )
+                for fold in verified.folds.folds
+            )
+            pooled_selections.extend(selections)
+            return selections
+
+        def on_dataset_complete(
+            name: str, dataset: R2FeatureDataset, fold_results: Sequence[Any]
+        ) -> None:
+            family = (
                 ModelFamily.POOLED_LOCAL_RIDGE
                 if name == "P0"
                 else ModelFamily.POOLED_CROSS_ASSET_RIDGE
-            ),
-            horizon=experiment.primary_horizon,
-            outer_fold_id=fold.fold_id,
-            target_instruments=experiment.target_instruments,
-            application_image_identity=identities["application_identity"],
-            sklearn_library_identity=identities["sklearn_identity"],
-        )
-        for name in ("P0", "P1")
-        for fold in verified.folds.folds
-    )
-    local_result = build_local_ridge_oof(
-        verified,
-        local_datasets,
-        experiment,
-        selections_local,
-        application_image_identity=identities["application_identity"],
-        numpy_library_identity=identities["numpy_identity"],
-        sklearn_library_identity=identities["sklearn_identity"],
-    )
-    pooled_result = build_pooled_ridge_oof(
-        verified,
-        pooled_datasets,
-        experiment,
-        selections_pooled,
-        local_result,
-        datasets["L1"],
-        application_image_identity=identities["application_identity"],
-        numpy_library_identity=identities["numpy_identity"],
-        sklearn_library_identity=identities["sklearn_identity"],
-    )
-    models: list[EvaluationModel] = []
-    for family, name in (
-        (ModelFamily.POOLED_LOCAL_RIDGE, "P0"),
-        (ModelFamily.POOLED_CROSS_ASSET_RIDGE, "P1"),
-    ):
-        fold_results = tuple(
-            result for result in pooled_result.fold_results if result.fit.model_family is family
-        )
-        models.append(
-            EvaluationModel(
+            )
+            fold_results_for_model = tuple(fold_results)
+            model = EvaluationModel(
                 family,
-                datasets[name].feature_set_id,
-                datasets[name],
+                dataset.feature_set_id,
+                dataset,
                 _model_forecasts(
-                    fold_results,
+                    fold_results_for_model,
                     observation_dataset_id=verified.observations.dataset_id,
                     panel_dataset_id=verified.panel.dataset_id,
                     target_dataset_id=verified.targets.dataset_id,
                     fold_dataset_id=verified.folds.dataset_id,
                 ),
-                fold_results,
+                fold_results_for_model,
             )
+            compact_model, training = bind_verified_evaluation_model(
+                verified,
+                experiment,
+                model,
+                feature_verification_id=feature_receipts[name].verification_id,
+            )
+            models.append(compact_model)
+            training_predictions_by_model[(family, dataset.feature_set_id)] = training
+
+        pooled_result = build_pooled_ridge_oof_sequential(
+            verified,
+            experiment,
+            None,
+            local_result,
+            datasets["L1"],
+            feature_dataset_loader=load_canonical_dataset,
+            selection_loader=selection_loader,
+            on_dataset_complete=on_dataset_complete,
+            application_image_identity=identities["application_identity"],
+            numpy_library_identity=identities["numpy_identity"],
+            sklearn_library_identity=identities["sklearn_identity"],
         )
+        selections_pooled = tuple(pooled_selections)
+        local_ladder_verified = True
+    if run_kind == "SYNTHETIC":
+        models = []
+        for family, name in (
+            (ModelFamily.POOLED_LOCAL_RIDGE, "P0"),
+            (ModelFamily.POOLED_CROSS_ASSET_RIDGE, "P1"),
+        ):
+            fold_results = tuple(
+                result for result in pooled_result.fold_results if result.fit.model_family is family
+            )
+            models.append(
+                EvaluationModel(
+                    family,
+                    datasets[name].feature_set_id,
+                    datasets[name],
+                    _model_forecasts(
+                        fold_results,
+                        observation_dataset_id=verified.observations.dataset_id,
+                        panel_dataset_id=verified.panel.dataset_id,
+                        target_dataset_id=verified.targets.dataset_id,
+                        fold_dataset_id=verified.folds.dataset_id,
+                    ),
+                    fold_results,
+                )
+            )
     configurations = (
         _configuration_record(
             family=ModelFamily.ZERO_RETURN,
@@ -2360,22 +2817,22 @@ def _build_oof_bundle(
         *(
             _configuration_record(
                 family=ModelFamily.LOCAL_RIDGE,
-                feature_set_id=dataset.feature_set_id,
+                feature_set_id=feature_id,
                 forecast_dataset_id=_model_forecasts(
                     tuple(
                         result
                         for result in local_result.fold_results
-                        if result.fit.feature_set_id == dataset.feature_set_id
+                        if result.fit.feature_set_id == feature_id
                     ),
                     observation_dataset_id=verified.observations.dataset_id,
                     panel_dataset_id=verified.panel.dataset_id,
                     target_dataset_id=verified.targets.dataset_id,
                     fold_dataset_id=verified.folds.dataset_id,
                 ).dataset_id,
-                reason=f"local {dataset.feature_set_name} Ridge",
+                reason=f"local {feature_name} Ridge",
                 market_data_source_class=experiment.market_data_source_class,
             )
-            for dataset in local_datasets
+            for feature_id, feature_name in local_feature_descriptors
         ),
         *(
             _configuration_record(
@@ -2395,7 +2852,9 @@ def _build_oof_bundle(
         models,
         configurations,
         local_feature_set_id=datasets["L1"].feature_set_id,
-        local_feature_datasets=local_datasets,
+        local_feature_datasets=evaluation_local_datasets,
+        training_predictions_by_model=training_predictions_by_model,
+        local_ladder_verified=local_ladder_verified,
     )
     selection_preview = build_selection_manifest(
         evaluation,
@@ -2412,12 +2871,16 @@ def _build_oof_bundle(
     children: dict[str, dict[str, object]] = {}
     feature_refs: list[ArtifactReference] = []
     compact_external_features = foundation_authority is not None
-    for name in sorted(datasets):
-        payload = _dataset_payload(
-            datasets[name],
-            manifests[name],
-            compact=compact_external_features,
-        )
+    for name in sorted(feature_manifest_paths):
+        if name in feature_payloads:
+            payload = feature_payloads[name]
+        else:
+            payload = _dataset_payload(
+                datasets[name],
+                manifests[name],
+                receipt=feature_receipts.get(name),
+                compact=compact_external_features,
+            )
         path = f"features/{name}.json"
         children[path] = payload
         feature_refs.append(_child_reference(path, payload))
@@ -2631,6 +3094,7 @@ def _build_oof_bundle(
         identities=identities,
         representative_profile=representative_profile,
         foundation_authority=foundation_authority,
+        feature_receipts=feature_receipts or None,
     )
     descriptor.update(
         {
@@ -2716,6 +3180,7 @@ def build_oof_bundle(
     research_root: Path,
     clock: Clock,
     output: Path,
+    feature_receipt_paths: dict[str, Path] | None = None,
     run_kind: str = "REPRESENTATIVE",
     foundation_authority: AuthenticatedR2Foundation | None = None,
     representative_profile: str | None = None,
@@ -2739,6 +3204,7 @@ def build_oof_bundle(
             verified=verified,
             experiment=experiment,
             feature_manifest_paths=feature_manifest_paths,
+            feature_receipt_paths=feature_receipt_paths,
             research_root=research_root,
             clock=clock,
             output=staged_output,
@@ -4476,9 +4942,7 @@ def _confirmatory_g2_parent_authority(
         ).hexdigest()
 
     promotion = (
-        verified_f2.promotion
-        if isinstance(verified_f2, VerifiedConfirmatoryF2Promotion)
-        else None
+        verified_f2.promotion if isinstance(verified_f2, VerifiedConfirmatoryF2Promotion) else None
     )
     bundle = verified_f2.bundle
     oof_verification_id = (
@@ -4835,9 +5299,7 @@ def verify_confirmatory_g2_preparation(
     )
     if persisted_selection.as_json() != verified_g1.selection.as_json():
         raise ValueError("confirmatory preparation contains a substituted G1 selection")
-    persisted_seal = R2HoldoutForecastSeal.from_json(
-        _load_selection(path / "manifest.json")
-    )
+    persisted_seal = R2HoldoutForecastSeal.from_json(_load_selection(path / "manifest.json"))
     expected = _build_confirmatory_g2(
         verified_g1=verified_g1,
         prepared_by=persisted_seal.prepared_by,
@@ -4896,9 +5358,7 @@ def _verify_confirmatory_g2_lifecycle(
     )
     if persisted_selection.as_json() != verified_g1.selection.as_json():
         raise ValueError("confirmatory lifecycle contains a substituted G1 selection")
-    persisted_seal = R2HoldoutForecastSeal.from_json(
-        _load_selection(path / "manifest.json")
-    )
+    persisted_seal = R2HoldoutForecastSeal.from_json(_load_selection(path / "manifest.json"))
     expected = _build_confirmatory_g2(
         verified_g1=verified_g1,
         prepared_by=persisted_seal.prepared_by,

@@ -542,8 +542,10 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
     feature_dir = research_root / "features"
     feature_dir.mkdir(parents=True)
     feature_paths: dict[str, Path] = {}
+    feature_receipt_paths: dict[str, Path] = {}
     for feature_set in ("L0", "L1", "P0", "P1"):
         manifest = feature_dir / f"{feature_set}.json"
+        receipt = feature_dir / f"{feature_set}-receipt.json"
         cli.main(
             [
                 "research",
@@ -584,15 +586,23 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
                 feature_set,
                 "--manifest",
                 str(manifest),
+                "--receipt-output",
+                str(receipt),
             ]
         )
         feature_paths[feature_set] = manifest
+        feature_receipt_paths[feature_set] = receipt
 
     oof_root = research_root / "oof"
     feature_arguments = [
         value
         for name, path in feature_paths.items()
         for value in ("--feature-manifest", f"{name}={path}")
+    ]
+    feature_receipt_arguments = [
+        value
+        for name, path in feature_receipt_paths.items()
+        for value in ("--feature-receipt", f"{name}={path}")
     ]
     cli.main(
         [
@@ -608,6 +618,7 @@ def test_confirmatory_exact_cli_micro_run(tmp_path: Path, monkeypatch: pytest.Mo
             "--experiment",
             str(experiment),
             *feature_arguments,
+            *feature_receipt_arguments,
             "--holdout-target-source",
             str(holdout_source),
             "--output",

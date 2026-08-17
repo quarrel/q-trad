@@ -2,12 +2,12 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from hashlib import sha256
 from itertools import pairwise
 from math import isfinite
-from typing import ClassVar
+from typing import Any, ClassVar, cast
 
 from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.market_data import MarketDataSourceClass
@@ -15,6 +15,8 @@ from qtrad.domain.r2_readiness import EvidenceClass, FeatureFamily, R2Experiment
 from qtrad.domain.time import require_utc
 
 R2_FEATURE_DATASET_CONTRACT = "qtrad-r2-features-v2"
+R2_FEATURE_VERIFICATION_RECEIPT_CONTRACT = "qtrad-r2-feature-verification-receipt-v1"
+_VERIFIED_FEATURE_DATASET_TOKEN = object()
 
 
 @dataclass(frozen=True, slots=True)
@@ -123,11 +125,12 @@ class R2FeatureDataset:
     holdout_excluded: bool
     dataset_id: str
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
+    _identity_capability: InitVar[object | None] = None
 
     CONTRACT: ClassVar[str] = R2_FEATURE_DATASET_CONTRACT
     SCHEMA_VERSION: ClassVar[int] = 2
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _identity_capability: object) -> None:
         if not self.feature_set_name or not self.feature_set_id:
             raise ValueError("feature dataset requires explicit feature-set identity")
         if not self.holdout_excluded:
@@ -153,6 +156,8 @@ class R2FeatureDataset:
                 raise ValueError("feature row order differs from its raw-feature schema")
         if self.raw_feature_schema_id != feature_schema_id(self.feature_schema):
             raise ValueError("raw-feature schema ID does not match its definitions")
+        if _identity_capability is _VERIFIED_FEATURE_DATASET_TOKEN:
+            return
         expected = feature_dataset_id(
             rows=self.rows,
             feature_schema=self.feature_schema,
@@ -226,6 +231,46 @@ class R2FeatureDataset:
             market_data_source_class=market_data_source_class,
             holdout_excluded=True,
             dataset_id=dataset_id,
+        )
+
+    @classmethod
+    def _from_verified_rows(
+        cls,
+        rows: Sequence[RawFeatureRow],
+        *,
+        feature_schema: Sequence[FeatureDefinition],
+        feature_set_name: str,
+        feature_set_id: str,
+        observation_dataset_id: str,
+        panel_dataset_id: str,
+        target_dataset_id: str,
+        fold_dataset_id: str,
+        experiment_configuration_id: str,
+        evidence_class: EvidenceClass,
+        dataset_id: str,
+        market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE,
+        _capability: object | None = None,
+    ) -> "R2FeatureDataset":
+        if _capability is not _VERIFIED_FEATURE_DATASET_TOKEN:
+            raise ValueError(
+                "verified feature dataset construction requires an internal capability"
+            )
+        return cls(
+            rows=tuple(rows),
+            feature_schema=tuple(feature_schema),
+            feature_set_name=feature_set_name,
+            feature_set_id=feature_set_id,
+            raw_feature_schema_id=feature_schema_id(feature_schema),
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            target_dataset_id=target_dataset_id,
+            fold_dataset_id=fold_dataset_id,
+            experiment_configuration_id=experiment_configuration_id,
+            evidence_class=evidence_class,
+            market_data_source_class=market_data_source_class,
+            holdout_excluded=True,
+            dataset_id=dataset_id,
+            _identity_capability=_VERIFIED_FEATURE_DATASET_TOKEN,
         )
 
     def manifest_json(self) -> dict[str, JsonValue]:
@@ -390,6 +435,292 @@ def feature_set_id(
 
 
 _canonical_feature_set_id = feature_set_id
+
+
+@dataclass(frozen=True, slots=True)
+class R2FeatureVerificationReceipt:
+    """Create-only proof that one persisted R2 feature child was independently verified."""
+
+    manifest_contract: str
+    manifest_schema_version: int
+    manifest_id: str
+    manifest_sha256: str
+    semantic_dataset_id: str
+    feature_set_name: str
+    feature_set_id: str
+    raw_feature_schema_id: str
+    feature_schema: tuple[FeatureDefinition, ...]
+    observation_dataset_id: str
+    panel_dataset_id: str
+    target_dataset_id: str
+    fold_dataset_id: str
+    experiment_configuration_id: str
+    source_class: MarketDataSourceClass
+    evidence_class: EvidenceClass
+    holdout_excluded: bool
+    foundation_semantic_id: str
+    foundation_closure_id: str
+    foundation_verification_id: str
+    foundation_promotion_id: str | None
+    verifier_contract: str
+    verifier_version: str
+    completed_checks: tuple[str, ...]
+    verification_id: str
+
+    CONTRACT: ClassVar[str] = R2_FEATURE_VERIFICATION_RECEIPT_CONTRACT
+    SCHEMA_VERSION: ClassVar[int] = 1
+
+    def __post_init__(self) -> None:
+        identity_fields: tuple[tuple[object, str, int], ...] = (
+            (self.manifest_id, "manifest ID", 24),
+            (self.manifest_sha256, "manifest hash", 64),
+            (self.semantic_dataset_id, "semantic dataset ID", 64),
+            (self.feature_set_id, "feature set ID", 64),
+            (self.raw_feature_schema_id, "raw feature schema ID", 64),
+            (self.observation_dataset_id, "observation dataset ID", 64),
+            (self.panel_dataset_id, "panel dataset ID", 64),
+            (self.target_dataset_id, "target dataset ID", 64),
+            (self.fold_dataset_id, "fold dataset ID", 64),
+            (self.experiment_configuration_id, "experiment configuration ID", 64),
+            (self.foundation_semantic_id, "foundation semantic ID", 64),
+            (self.foundation_closure_id, "foundation closure ID", 64),
+            (self.foundation_verification_id, "foundation verification ID", 64),
+            (self.verification_id, "feature verification ID", 64),
+        )
+        for value, field, length in identity_fields:
+            if (
+                type(value) is not str
+                or len(value) != length
+                or any(character not in "0123456789abcdef" for character in value)
+            ):
+                raise ValueError(f"{field} must be a lowercase hexadecimal SHA-256 identity")
+        if self.foundation_promotion_id is not None and (
+            len(self.foundation_promotion_id) != 64
+            or any(
+                character not in "0123456789abcdef" for character in self.foundation_promotion_id
+            )
+        ):
+            raise ValueError(
+                "foundation promotion ID must be a lowercase hexadecimal SHA-256 identity"
+            )
+        if not self.manifest_contract or self.manifest_schema_version <= 0:
+            raise ValueError("feature receipt must bind a supported manifest contract")
+        if not self.feature_set_name or not self.verifier_contract or not self.verifier_version:
+            raise ValueError("feature receipt has incomplete textual bindings")
+        if not self.feature_schema:
+            raise ValueError("feature receipt must bind a non-empty feature schema")
+        if self.raw_feature_schema_id != feature_schema_id(self.feature_schema):
+            raise ValueError("feature receipt raw schema identity is invalid")
+        if not self.holdout_excluded:
+            raise ValueError("feature receipt must bind holdout exclusion")
+        if not self.completed_checks or any(not item for item in self.completed_checks):
+            raise ValueError("feature receipt completed checks must be non-empty strings")
+        if tuple(self.completed_checks) != tuple(dict.fromkeys(self.completed_checks)):
+            raise ValueError("feature receipt completed checks must be unique")
+        if self.verification_id != _hash_json(self.semantic_json()):
+            raise ValueError("feature verification ID does not authenticate its content")
+
+    @classmethod
+    def create(cls, **values: Any) -> "R2FeatureVerificationReceipt":
+        expected = {
+            "manifest_contract",
+            "manifest_schema_version",
+            "manifest_id",
+            "manifest_sha256",
+            "semantic_dataset_id",
+            "feature_set_name",
+            "feature_set_id",
+            "raw_feature_schema_id",
+            "feature_schema",
+            "observation_dataset_id",
+            "panel_dataset_id",
+            "target_dataset_id",
+            "fold_dataset_id",
+            "experiment_configuration_id",
+            "source_class",
+            "evidence_class",
+            "holdout_excluded",
+            "foundation_semantic_id",
+            "foundation_closure_id",
+            "foundation_verification_id",
+            "foundation_promotion_id",
+            "verifier_contract",
+            "verifier_version",
+            "completed_checks",
+        }
+        if set(values) != expected:
+            raise ValueError("feature receipt create arguments are incomplete or unexpected")
+        semantic = {
+            "contract": cls.CONTRACT,
+            "schema_version": cls.SCHEMA_VERSION,
+            **{
+                key: (
+                    value.value
+                    if isinstance(value, (MarketDataSourceClass, EvidenceClass))
+                    else [item.as_json() for item in value]
+                    if key == "feature_schema"
+                    else list(value)
+                    if key == "completed_checks"
+                    else value
+                )
+                for key, value in values.items()
+            },
+        }
+        return cls(**values, verification_id=_hash_json(semantic))
+
+    @classmethod
+    def from_json(cls, value: object) -> "R2FeatureVerificationReceipt":
+        if not isinstance(value, dict):
+            raise ValueError("R2 feature verification receipt must be an object")
+        raw = cast(dict[str, object], value)
+        expected = {
+            "contract",
+            "schema_version",
+            "manifest_contract",
+            "manifest_schema_version",
+            "manifest_id",
+            "manifest_sha256",
+            "semantic_dataset_id",
+            "feature_set_name",
+            "feature_set_id",
+            "raw_feature_schema_id",
+            "feature_schema",
+            "observation_dataset_id",
+            "panel_dataset_id",
+            "target_dataset_id",
+            "fold_dataset_id",
+            "experiment_configuration_id",
+            "source_class",
+            "evidence_class",
+            "holdout_excluded",
+            "foundation_semantic_id",
+            "foundation_closure_id",
+            "foundation_verification_id",
+            "foundation_promotion_id",
+            "verifier_contract",
+            "verifier_version",
+            "completed_checks",
+            "verification_id",
+        }
+        if set(raw) != expected:
+            raise ValueError("R2 feature verification receipt has unknown or missing fields")
+        if raw["contract"] != cls.CONTRACT or raw["schema_version"] != cls.SCHEMA_VERSION:
+            raise ValueError("R2 feature verification receipt contract is unsupported")
+        schema_raw = raw["feature_schema"]
+        if not isinstance(schema_raw, list):
+            raise ValueError("R2 feature verification receipt schema is invalid")
+        schema_items: list[FeatureDefinition] = []
+        for raw_item in cast(list[object], schema_raw):
+            if not isinstance(raw_item, dict):
+                raise ValueError("R2 feature verification receipt schema is invalid")
+            item = cast(dict[str, object], raw_item)
+            if set(item) != {
+                "name",
+                "family",
+                "availability_indicator",
+            }:
+                raise ValueError("R2 feature verification receipt schema is invalid")
+            schema_items.append(
+                FeatureDefinition(
+                    name=_receipt_string(item["name"]),
+                    family=FeatureFamily(_receipt_string(item["family"])),
+                    availability_indicator=_receipt_bool(item["availability_indicator"]),
+                )
+            )
+        checks_value = raw["completed_checks"]
+        if not isinstance(checks_value, list):
+            raise ValueError("R2 feature verification receipt checks are invalid")
+        checks_raw = cast(list[object], checks_value)
+        if not all(isinstance(item, str) for item in checks_raw):
+            raise ValueError("R2 feature verification receipt checks are invalid")
+        check_strings = cast(list[str], checks_raw)
+        receipt = cls(
+            manifest_contract=_receipt_string(raw["manifest_contract"]),
+            manifest_schema_version=_receipt_int(raw["manifest_schema_version"]),
+            manifest_id=_receipt_string(raw["manifest_id"]),
+            manifest_sha256=_receipt_string(raw["manifest_sha256"]),
+            semantic_dataset_id=_receipt_string(raw["semantic_dataset_id"]),
+            feature_set_name=_receipt_string(raw["feature_set_name"]),
+            feature_set_id=_receipt_string(raw["feature_set_id"]),
+            raw_feature_schema_id=_receipt_string(raw["raw_feature_schema_id"]),
+            feature_schema=tuple(schema_items),
+            observation_dataset_id=_receipt_string(raw["observation_dataset_id"]),
+            panel_dataset_id=_receipt_string(raw["panel_dataset_id"]),
+            target_dataset_id=_receipt_string(raw["target_dataset_id"]),
+            fold_dataset_id=_receipt_string(raw["fold_dataset_id"]),
+            experiment_configuration_id=_receipt_string(raw["experiment_configuration_id"]),
+            source_class=MarketDataSourceClass(_receipt_string(raw["source_class"])),
+            evidence_class=EvidenceClass(_receipt_string(raw["evidence_class"])),
+            holdout_excluded=_receipt_bool(raw["holdout_excluded"]),
+            foundation_semantic_id=_receipt_string(raw["foundation_semantic_id"]),
+            foundation_closure_id=_receipt_string(raw["foundation_closure_id"]),
+            foundation_verification_id=_receipt_string(raw["foundation_verification_id"]),
+            foundation_promotion_id=_receipt_nullable_string(raw["foundation_promotion_id"]),
+            verifier_contract=_receipt_string(raw["verifier_contract"]),
+            verifier_version=_receipt_string(raw["verifier_version"]),
+            completed_checks=tuple(check_strings),
+            verification_id=_receipt_string(raw["verification_id"]),
+        )
+        if receipt.as_json() != raw:
+            raise ValueError("R2 feature verification receipt is not canonical")
+        return receipt
+
+    def semantic_json(self) -> dict[str, JsonValue]:
+        return {
+            "contract": self.CONTRACT,
+            "schema_version": self.SCHEMA_VERSION,
+            "manifest_contract": self.manifest_contract,
+            "manifest_schema_version": self.manifest_schema_version,
+            "manifest_id": self.manifest_id,
+            "manifest_sha256": self.manifest_sha256,
+            "semantic_dataset_id": self.semantic_dataset_id,
+            "feature_set_name": self.feature_set_name,
+            "feature_set_id": self.feature_set_id,
+            "raw_feature_schema_id": self.raw_feature_schema_id,
+            "feature_schema": [item.as_json() for item in self.feature_schema],
+            "observation_dataset_id": self.observation_dataset_id,
+            "panel_dataset_id": self.panel_dataset_id,
+            "target_dataset_id": self.target_dataset_id,
+            "fold_dataset_id": self.fold_dataset_id,
+            "experiment_configuration_id": self.experiment_configuration_id,
+            "source_class": self.source_class.value,
+            "evidence_class": self.evidence_class.value,
+            "holdout_excluded": self.holdout_excluded,
+            "foundation_semantic_id": self.foundation_semantic_id,
+            "foundation_closure_id": self.foundation_closure_id,
+            "foundation_verification_id": self.foundation_verification_id,
+            "foundation_promotion_id": self.foundation_promotion_id,
+            "verifier_contract": self.verifier_contract,
+            "verifier_version": self.verifier_version,
+            "completed_checks": list(self.completed_checks),
+        }
+
+    def as_json(self) -> dict[str, JsonValue]:
+        return {**self.semantic_json(), "verification_id": self.verification_id}
+
+
+def _receipt_string(value: object) -> str:
+    if not isinstance(value, str):
+        raise TypeError("feature receipt value must be a string")
+    return value
+
+
+def _receipt_nullable_string(value: object) -> str | None:
+    if value is None:
+        return None
+    return _receipt_string(value)
+
+
+def _receipt_int(value: object) -> int:
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise TypeError("feature receipt integer is invalid")
+    return value
+
+
+def _receipt_bool(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise TypeError("feature receipt boolean is invalid")
+    return value
 
 
 class FeatureDatasetSemanticHasher:
