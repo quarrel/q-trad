@@ -2,10 +2,11 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from json.encoder import encode_basestring_ascii
 from math import isfinite
 from typing import ClassVar, TypedDict, cast
 
@@ -18,6 +19,7 @@ from qtrad.domain.time import require_utc
 R2_FOLD_FIT_CONTRACT = "qtrad-r2-fold-fit-v2"
 R2_FORECAST_COVERAGE_CONTRACT = "qtrad-r2-forecast-coverage-v2"
 R2_COEFFICIENT_STABILITY_CONTRACT = "qtrad-r2-coefficient-stability-v2"
+_IDENTITY_PREVALIDATED_TOKEN = object()
 
 
 class ForecastCoverageDisposition(StrEnum):
@@ -328,8 +330,9 @@ class ForecastCoverageRow:
     reason: str | None
     coverage_id: str
     market_data_source_class: MarketDataSourceClass = MarketDataSourceClass.IG_NATIVE_CAPTURE
+    _identity_prevalidated: InitVar[object | None] = None
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _identity_prevalidated: object | None) -> None:
         require_utc(self.decision_time, "forecast-coverage decision time")
         if self.feature_data_asof is not None:
             require_utc(self.feature_data_asof, "forecast-coverage feature cutoff")
@@ -351,14 +354,20 @@ class ForecastCoverageRow:
             _require_sha256(self.forecast_id, "coverage forecast ID")
         elif self.forecast_id is not None or not self.reason:
             raise ValueError("unforecasted coverage requires an explicit reason and no forecast")
-        if self.coverage_id != forecast_coverage_row_id(self.semantic_json()):
+        if (
+            _identity_prevalidated is not _IDENTITY_PREVALIDATED_TOKEN
+            and self.coverage_id != forecast_coverage_row_id(self.semantic_json())
+        ):
             raise ValueError("forecast-coverage row ID does not match its semantic content")
 
     @classmethod
     def create(cls, **values: object) -> "ForecastCoverageRow":
         arguments = cast(_ForecastCoverageArguments, values)
-        payload = _coverage_row_json(arguments)
-        return cls(**arguments, coverage_id=forecast_coverage_row_id(payload))
+        return cls(
+            **arguments,
+            coverage_id=_coverage_row_id_from_values(arguments),
+            _identity_prevalidated=_IDENTITY_PREVALIDATED_TOKEN,
+        )
 
     def semantic_json(self) -> dict[str, JsonValue]:
         return _coverage_row_json(
@@ -741,6 +750,56 @@ def _semantic_id(payload: object) -> str:
     return sha256(
         json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode("utf-8")
     ).hexdigest()
+
+
+def _json_scalar(value: object) -> bytes:
+    if isinstance(value, str):
+        return encode_basestring_ascii(value).encode("ascii")
+    if value is None:
+        return b"null"
+    if isinstance(value, bool):
+        return b"true" if value else b"false"
+    if isinstance(value, (int, float)):
+        return repr(value).encode("ascii")
+    raise TypeError(f"unsupported forecast-coverage identity scalar: {type(value).__name__}")
+
+
+def _coverage_row_id_from_values(values: _ForecastCoverageArguments) -> str:
+    feature_data_asof = values["feature_data_asof"]
+    market_data_source_class = values.get(
+        "market_data_source_class", MarketDataSourceClass.IG_NATIVE_CAPTURE
+    )
+    digest = sha256()
+    digest.update(b'{"contract":')
+    digest.update(_json_scalar(R2_FORECAST_COVERAGE_CONTRACT))
+    digest.update(b',"decision_time":')
+    digest.update(_json_scalar(values["decision_time"].isoformat()))
+    digest.update(b',"disposition":')
+    digest.update(_json_scalar(values["disposition"].value))
+    digest.update(b',"feature_data_asof":')
+    digest.update(
+        _json_scalar(feature_data_asof.isoformat())
+        if isinstance(feature_data_asof, datetime)
+        else b"null"
+    )
+    digest.update(b',"fold_fit_id":')
+    digest.update(_json_scalar(values["fold_fit_id"]))
+    digest.update(b',"forecast_id":')
+    digest.update(_json_scalar(values["forecast_id"]))
+    digest.update(b',"horizon_seconds":')
+    digest.update(_json_scalar(values["horizon"].total_seconds()))
+    digest.update(b',"market_data_source_class":')
+    digest.update(_json_scalar(market_data_source_class.value))
+    digest.update(b',"outer_fold_id":')
+    digest.update(_json_scalar(values["outer_fold_id"]))
+    digest.update(b',"reason":')
+    digest.update(_json_scalar(values["reason"]))
+    digest.update(b',"schema_version":1,"target_id":')
+    digest.update(_json_scalar(values["target_id"]))
+    digest.update(b',"target_instrument_id":')
+    digest.update(_json_scalar(values["target_instrument_id"]))
+    digest.update(b"}")
+    return digest.hexdigest()
 
 
 def _require_sha256(value: str, field: str) -> None:

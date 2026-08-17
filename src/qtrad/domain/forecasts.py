@@ -2,10 +2,11 @@
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass
+from dataclasses import InitVar, dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
 from hashlib import sha256
+from json.encoder import encode_basestring_ascii
 from math import isfinite
 from typing import ClassVar
 
@@ -13,6 +14,7 @@ from qtrad.domain.events import JsonValue, to_json_value
 from qtrad.domain.time import require_utc
 
 FORECAST_DATASET_CONTRACT = "qtrad-research-forecasts-v1"
+_IDENTITY_PREVALIDATED_TOKEN = object()
 
 
 class ReturnUnit(StrEnum):
@@ -42,10 +44,11 @@ class ForecastRow:
     fold_id: str
     model_id: str
     model_contract: str
+    _identity_prevalidated: InitVar[object | None] = None
 
     CONTRACT: ClassVar[str] = FORECAST_DATASET_CONTRACT
 
-    def __post_init__(self) -> None:
+    def __post_init__(self, _identity_prevalidated: object | None) -> None:
         for value, field in (
             (self.decision_time, "forecast decision_time"),
             (self.feature_data_asof, "forecast feature_data_asof"),
@@ -73,7 +76,10 @@ class ForecastRow:
         ):
             if not value:
                 raise ValueError(f"{field} must be non-empty")
-        if self.forecast_id != _hash_json(_forecast_semantic(self)):
+        if (
+            _identity_prevalidated is not _IDENTITY_PREVALIDATED_TOKEN
+            and self.forecast_id != _hash_json(_forecast_semantic(self))
+        ):
             raise ValueError("forecast ID does not match its semantic content")
 
     @classmethod
@@ -97,27 +103,24 @@ class ForecastRow:
         model_id: str,
         model_contract: str,
     ) -> "ForecastRow":
-        semantic = {
-            "contract": FORECAST_DATASET_CONTRACT,
-            "schema_version": 1,
-            "instrument_id": instrument_id,
-            "decision_time": decision_time,
-            "horizon_seconds": horizon.total_seconds(),
-            "expected_return": expected_return,
-            "return_unit": return_unit,
-            "feature_data_asof": feature_data_asof,
-            "training_cutoff": training_cutoff,
-            "observation_dataset_id": observation_dataset_id,
-            "panel_dataset_id": panel_dataset_id,
-            "target_dataset_id": target_dataset_id,
-            "target_id": target_id,
-            "fold_dataset_id": fold_dataset_id,
-            "experiment_id": experiment_id,
-            "fold_id": fold_id,
-            "model_id": model_id,
-            "model_contract": model_contract,
-        }
-        forecast_id = _hash_json(semantic)
+        forecast_id = _forecast_id_from_values(
+            instrument_id=instrument_id,
+            decision_time=decision_time,
+            horizon=horizon,
+            expected_return=expected_return,
+            return_unit=return_unit,
+            feature_data_asof=feature_data_asof,
+            training_cutoff=training_cutoff,
+            observation_dataset_id=observation_dataset_id,
+            panel_dataset_id=panel_dataset_id,
+            target_dataset_id=target_dataset_id,
+            target_id=target_id,
+            fold_dataset_id=fold_dataset_id,
+            experiment_id=experiment_id,
+            fold_id=fold_id,
+            model_id=model_id,
+            model_contract=model_contract,
+        )
         return cls(
             forecast_id=forecast_id,
             instrument_id=instrument_id,
@@ -136,6 +139,7 @@ class ForecastRow:
             fold_id=fold_id,
             model_id=model_id,
             model_contract=model_contract,
+            _identity_prevalidated=_IDENTITY_PREVALIDATED_TOKEN,
         )
 
     def as_json(self) -> dict[str, JsonValue]:
@@ -281,3 +285,73 @@ def _forecast_semantic(row: ForecastRow) -> dict[str, object]:
 def _hash_json(value: object) -> str:
     canonical = to_json_value(value)
     return sha256(json.dumps(canonical, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _json_scalar(value: object) -> bytes:
+    if isinstance(value, str):
+        return encode_basestring_ascii(value).encode("ascii")
+    if value is None:
+        return b"null"
+    if isinstance(value, bool):
+        return b"true" if value else b"false"
+    if isinstance(value, (int, float)):
+        return repr(value).encode("ascii")
+    raise TypeError(f"unsupported forecast identity scalar: {type(value).__name__}")
+
+
+def _forecast_id_from_values(
+    *,
+    instrument_id: str,
+    decision_time: datetime,
+    horizon: timedelta,
+    expected_return: float,
+    return_unit: ReturnUnit,
+    feature_data_asof: datetime,
+    training_cutoff: datetime,
+    observation_dataset_id: str,
+    panel_dataset_id: str,
+    target_dataset_id: str,
+    target_id: str,
+    fold_dataset_id: str,
+    experiment_id: str,
+    fold_id: str,
+    model_id: str,
+    model_contract: str,
+) -> str:
+    digest = sha256()
+    digest.update(b'{"contract":')
+    digest.update(_json_scalar(FORECAST_DATASET_CONTRACT))
+    digest.update(b',"decision_time":')
+    digest.update(_json_scalar(decision_time.isoformat().replace("+00:00", "Z")))
+    digest.update(b',"expected_return":')
+    digest.update(_json_scalar(expected_return))
+    digest.update(b',"experiment_id":')
+    digest.update(_json_scalar(experiment_id))
+    digest.update(b',"feature_data_asof":')
+    digest.update(_json_scalar(feature_data_asof.isoformat().replace("+00:00", "Z")))
+    digest.update(b',"fold_dataset_id":')
+    digest.update(_json_scalar(fold_dataset_id))
+    digest.update(b',"fold_id":')
+    digest.update(_json_scalar(fold_id))
+    digest.update(b',"horizon_seconds":')
+    digest.update(_json_scalar(horizon.total_seconds()))
+    digest.update(b',"instrument_id":')
+    digest.update(_json_scalar(instrument_id))
+    digest.update(b',"model_contract":')
+    digest.update(_json_scalar(model_contract))
+    digest.update(b',"model_id":')
+    digest.update(_json_scalar(model_id))
+    digest.update(b',"observation_dataset_id":')
+    digest.update(_json_scalar(observation_dataset_id))
+    digest.update(b',"panel_dataset_id":')
+    digest.update(_json_scalar(panel_dataset_id))
+    digest.update(b',"return_unit":')
+    digest.update(_json_scalar(return_unit.value))
+    digest.update(b',"schema_version":1,"target_dataset_id":')
+    digest.update(_json_scalar(target_dataset_id))
+    digest.update(b',"target_id":')
+    digest.update(_json_scalar(target_id))
+    digest.update(b',"training_cutoff":')
+    digest.update(_json_scalar(training_cutoff.isoformat().replace("+00:00", "Z")))
+    digest.update(b"}")
+    return digest.hexdigest()
